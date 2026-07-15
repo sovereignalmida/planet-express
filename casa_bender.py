@@ -64,7 +64,11 @@ SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
 
 # Anything other than `sudo systemctl <action> <unit>` was never a legitimate use of
 # the sudo grant this project asks for (docker needs no sudo — direct socket access).
-_SUDO_SYSTEMCTL_RE = re.compile(r"^sudo\s+systemctl\s+(start|stop|restart)\s+(\S+)$", re.IGNORECASE)
+# Tolerates an absolute-path invocation (e.g. /usr/bin/sudo) as equivalent to bare
+# `sudo` -- same command, just spelled differently.
+_SUDO_SYSTEMCTL_RE = re.compile(
+    r"^(?:\S*/)?sudo\s+systemctl\s+(start|stop|restart)\s+(\S+)$", re.IGNORECASE
+)
 
 
 # ── Safety checks ─────────────────────────────────────────────────────────────
@@ -75,8 +79,10 @@ class SafetyError(Exception):
 def _split_command_segments(command: str) -> list[str]:
     """Split a compound shell command on control operators so each piece can be
     checked independently — otherwise a legitimate `sudo systemctl start x.mount &&
-    sudo rm -rf /` could smuggle a forbidden second command past a whole-string check."""
-    return [seg.strip() for seg in re.split(r"&&|\|\||;|\|", command) if seg.strip()]
+    sudo rm -rf /` could smuggle a forbidden second command past a whole-string check.
+    Newlines split too: `_run_command()` runs everything with shell=True, and bash
+    treats a newline as a statement separator exactly like `;`."""
+    return [seg.strip() for seg in re.split(r"&&|\|\||;|\||\n", command) if seg.strip()]
 
 
 def _sudo_action_allowed(unit: str, action: str) -> bool:
@@ -91,12 +97,18 @@ def _sudo_action_allowed(unit: str, action: str) -> bool:
 
 
 def _check_sudo_allowlist(command: str) -> None:
-    """Raise SafetyError for any `sudo`-prefixed segment that isn't an explicitly
-    declared (unit-or-glob, action) grant in config.yaml's sudo_allowlist — fail
-    closed on anything not declared, rather than trying to blocklist every bad sudo
-    invocation individually."""
+    """Raise SafetyError for any segment that invokes `sudo` anywhere and isn't an
+    explicitly declared (unit-or-glob, action) grant in config.yaml's sudo_allowlist
+    -- fail closed on anything not declared, rather than trying to blocklist every bad
+    sudo invocation individually.
+
+    Deliberately checks for the word `sudo` *anywhere* in the segment, not just at the
+    start -- a shell wrapper like `env sudo mount -a` or `sh -c 'sudo mount -a'` still
+    invokes real sudo (subprocess.run uses shell=True), and would silently bypass a
+    prefix-only check by never technically "starting with sudo" (a real gap an
+    independent Codex review caught before this shipped)."""
     for segment in _split_command_segments(command):
-        if not segment.lower().startswith("sudo"):
+        if not re.search(r"\bsudo\b", segment, re.IGNORECASE):
             continue
         m = _SUDO_SYSTEMCTL_RE.match(segment)
         if not m:

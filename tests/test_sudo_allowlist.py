@@ -79,3 +79,28 @@ def test_empty_allowlist_denies_everything(monkeypatch):
     monkeypatch.setattr(bender, "SUDO_ALLOWLIST", SudoAllowlist())
     with pytest.raises(bender.SafetyError, match="not declared"):
         bender._safety_check("sudo systemctl restart casa-startup.service", plan={})
+
+
+# ── Bypass cases an independent Codex review caught before this shipped: a
+# prefix-only ("does the segment start with sudo") check missed sudo invoked via a
+# shell wrapper or on a later line of a multi-line command. ────────────────────────
+
+def test_denies_sudo_wrapped_in_env(allowlist):
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._safety_check("env sudo mount -a", plan={})
+
+
+def test_denies_sudo_wrapped_in_sh_c(allowlist):
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._safety_check("sh -c 'sudo mount -a'", plan={})
+
+
+def test_denies_sudo_on_later_line(allowlist):
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._safety_check("echo hi\nsudo mount -a", plan={})
+
+
+def test_allows_sudo_via_absolute_path(allowlist):
+    # /usr/bin/sudo is the same command as bare `sudo`, just spelled differently --
+    # must not become a NEW false-positive rejection of an otherwise-allowed action.
+    bender._safety_check("/usr/bin/sudo systemctl restart casa-startup.service", plan={})
