@@ -64,10 +64,16 @@ SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
 
 # Anything other than `sudo systemctl <action> <unit>` was never a legitimate use of
 # the sudo grant this project asks for (docker needs no sudo — direct socket access).
-# Tolerates an absolute-path invocation (e.g. /usr/bin/sudo) as equivalent to bare
-# `sudo` -- same command, just spelled differently.
+# Deliberately requires a literal, bare `sudo` -- an earlier version of this regex
+# tolerated an arbitrary-path prefix (`\S*/`) to allow /usr/bin/sudo, but `\S` also
+# matches shell metacharacters: `$(sudo mount -a)/sudo systemctl restart
+# casa-startup.service` satisfied that prefix, letting the whole string through
+# _check_sudo_allowlist while the shell (shell=True) still executed the embedded
+# `sudo mount -a` via command substitution -- an independent Codex review caught
+# this before it shipped. Real plans only ever generate bare `sudo`; there is no
+# real need to tolerate a path-prefixed spelling, so it's simply not supported.
 _SUDO_SYSTEMCTL_RE = re.compile(
-    r"^(?:\S*/)?sudo\s+systemctl\s+(start|stop|restart)\s+(\S+)$", re.IGNORECASE
+    r"^sudo\s+systemctl\s+(start|stop|restart)\s+(\S+)$", re.IGNORECASE
 )
 
 

@@ -100,7 +100,14 @@ def test_denies_sudo_on_later_line(allowlist):
         bender._safety_check("echo hi\nsudo mount -a", plan={})
 
 
-def test_allows_sudo_via_absolute_path(allowlist):
-    # /usr/bin/sudo is the same command as bare `sudo`, just spelled differently --
-    # must not become a NEW false-positive rejection of an otherwise-allowed action.
-    bender._safety_check("/usr/bin/sudo systemctl restart casa-startup.service", plan={})
+def test_denies_command_substitution_disguised_as_path_prefix(allowlist):
+    # A real PoC an independent Codex review used to break an earlier version of this
+    # check: an absolute-path allowance (`\S*/`) let `\S` match shell metacharacters
+    # too, so a command substitution dressed up as a "path prefix" satisfied the
+    # regex while the shell (shell=True) would still execute the embedded sudo call.
+    # No path-prefix tolerance exists anymore -- this must be flatly rejected.
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._safety_check(
+            "$(sudo${IFS}mount${IFS}-a)/sudo systemctl restart casa-startup.service",
+            plan={},
+        )
