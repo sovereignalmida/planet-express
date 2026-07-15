@@ -18,7 +18,7 @@ WorkingDirectory=/home/casaroot/apps/planetexpress
 # File should contain: ANTHROPIC_API_KEY=sk-ant-...
 EnvironmentFile=/etc/planetexpress.env
 
-Environment=CASA_CONTEXT=/home/casaroot/casa-sysadmin-context.yaml
+Environment=CASA_CONFIG=/home/casaroot/apps/planetexpress/config.yaml
 Environment=CASA_STATE_DIR=/home/casaroot/apps/planetexpress/state
 Environment=CASA_LOG_DIR=/home/casaroot/apps/planetexpress/logs
 Environment=PYTHONUNBUFFERED=1

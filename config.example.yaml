@@ -1,0 +1,33 @@
+# Planet Express topology config.
+#
+# Copy this file to /etc/planetexpress/config.yaml (or set CASA_CONFIG to point
+# somewhere else) and edit the values below for your own environment. Secrets
+# (Telegram bot token, LLM API keys) do NOT go here — they live in
+# /etc/planetexpress.env, loaded as systemd environment variables. This file is
+# topology only: what stacks/mounts/containers exist and how to treat them.
+
+# Absolute path to the directory containing your stacks, one subdirectory per
+# stack with its own docker-compose.yml (e.g. <stacks_root>/media/docker-compose.yml).
+stacks_root: /home/youruser/stacks
+
+# Stack directory names Planet Express must never start, monitor, auto-update,
+# or auto-prune around. Leave empty if you don't have any.
+forbidden_stacks: []
+
+# Container names that are intentionally stopped right now (maintenance, a
+# pending decision, etc.) — Planet Express won't flag these as "not running."
+paused_containers: []
+
+# systemd mount-unit name -> the path it mounts. Only the mounts you want Planet
+# Express to actively verify (e.g. NAS shares your stacks depend on) — not
+# necessarily every mount on the host.
+mounts: {}
+
+# (stack, service) pairs to exclude from Zoidberg's canary auto-update pass —
+# typically your own actively-developed images that shouldn't be silently
+# auto-pulled and restarted.
+exclude_services: []
+# Example:
+# exclude_services:
+#   - stack: services
+#     service: my-custom-app

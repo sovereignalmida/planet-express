@@ -6,6 +6,12 @@ __pycache__/
 state/*.json
 logs/*.log
 
+# Real topology config is host-specific (real stack names, mounts) — never commit it.
+# Shipped default location is /etc/planetexpress/config.yaml (outside the repo entirely);
+# this host overrides via CASA_CONFIG to keep it under the app directory instead, so it
+# needs an explicit ignore here. config.example.yaml (generic placeholders) stays tracked.
+/config.yaml
+
 # Never commit secrets — production config lives in /etc/planetexpress.env
 .env
 *.env

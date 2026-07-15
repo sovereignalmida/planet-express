@@ -1,17 +1,17 @@
 """
-config.py — CasaHefe shared configuration
-Loads casa-sysadmin-context.yaml and provides typed helpers.
-All agents import from here — keeps paths and credentials in one place.
+config.py — Planet Express shared configuration
+Loads and validates /etc/planetexpress/config.yaml (or $CASA_CONFIG) and provides typed
+helpers. All agents import from here — keeps topology config, paths, and credentials in
+one place.
 """
 
 import os
-import yaml
 from pathlib import Path
 
+import yaml
+from pydantic import BaseModel, ValidationError
+
 # ── Directory paths (override via env vars for testing) ──────────────────────
-CONTEXT_FILE = Path(os.environ.get(
-    "CASA_CONTEXT", "/home/casaroot/casa-sysadmin-context.yaml"
-))
 STATE_DIR = Path(os.environ.get(
     "CASA_STATE_DIR", "/home/casaroot/apps/sysadmin-agent/state"
 ))
@@ -25,36 +25,51 @@ STATE_FINDINGS  = STATE_DIR / "latest_findings.json"
 STATE_PLAN      = STATE_DIR / "pending_plan.json"
 STATE_STATUS    = STATE_DIR / "run_status.json"
 
-# ── Stack discovery — single source of truth ─────────────────────────────────
-# Every agent that needs "which stacks exist / which are off-limits" imports this,
-# rather than keeping its own copy of the exclusion list. Drifting copies of this
-# list across files is exactly how a stack could end up monitored in one place but
-# not another.
-STACKS_ROOT = Path("/home/casaroot/stacks")
-FORBIDDEN_STACKS = ["clawbot", "ai"]  # never start, monitor, auto-update, or auto-prune around
+# ── Topology config — single source of truth for per-install values ──────────
+# Every agent that needs "which stacks exist / which are off-limits / which mounts and
+# containers to track" imports the module-level constants below, rather than keeping a
+# local copy. Drifting copies of this data across files is exactly how a stack could end
+# up monitored in one place but not another (this already happened once — EXCLUDE_SERVICES
+# used to live only in casa_zoidberg.py, see CHANGELOG).
+CONFIG_FILE = Path(os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml"))
 
-# ── NAS mount inventory — single source of truth ──────────────────────────────
-# Both casa_stackctl.check_mounts() (the /mounts command) and casa_leela.check_mounts()
-# (the periodic monitor) test these the same way -- actually listing the path, not
-# trusting systemd unit state, since a persistent CIFS mount can stay "active (mounted)"
-# even after its session goes stale (e.g. surviving an Unraid reboot).
-MOUNT_UNITS = {
-    "casamedia.mount": "/casamedia",
-    # casamediafast1tb decommissioned 2026-07-08 -- Unraid no longer exports fastmedia1tb
-    # ("special device does not exist"), nothing referenced it (already commented out in
-    # media/docker-compose.yml), same treatment as casamediafast2tb on 2026-07-07.
-    "erugo.mount": "/erugo",
-    "immichPhotos.mount": "/immichPhotos",
-    "urphotos.mount": "/urphotos",
-    "mnt-casabu.mount": "/mnt/casabu",
-}
 
-# Containers intentionally stopped by the user, pending a decision — don't flag as "not
-# running" in Leela's monitor while paused. Remove an entry once its decision is made
-# (either torn down for good or brought back up).
-# - CASA_ADGUARD: stopped 2026-07-04, undecided between decommissioning it or wiring it into
-#   OPNsense's Kea DHCPv4 as the LAN's DNS server. See project_casaserver_reip_plan memory.
-PAUSED_CONTAINERS = ["CASA_ADGUARD"]
+class ExcludedService(BaseModel):
+    stack: str
+    service: str
+
+
+class PlanetExpressConfig(BaseModel):
+    stacks_root: Path
+    forbidden_stacks: list[str] = []
+    paused_containers: list[str] = []
+    mounts: dict[str, str] = {}
+    exclude_services: list[ExcludedService] = []
+
+
+def _load_config() -> PlanetExpressConfig:
+    if not CONFIG_FILE.exists():
+        raise SystemExit(
+            f"Config file not found: {CONFIG_FILE}\n"
+            f"Copy config.example.yaml to {CONFIG_FILE} and edit it for your environment "
+            f"(or set CASA_CONFIG to point somewhere else). If you're upgrading an install "
+            f"that predates this file, see scripts/migrate_config.py."
+        )
+    with open(CONFIG_FILE) as f:
+        raw = yaml.safe_load(f) or {}
+    try:
+        return PlanetExpressConfig(**raw)
+    except ValidationError as e:
+        raise SystemExit(f"Invalid config at {CONFIG_FILE}:\n{e}")
+
+
+_cfg = _load_config()
+
+STACKS_ROOT = _cfg.stacks_root
+FORBIDDEN_STACKS = _cfg.forbidden_stacks
+PAUSED_CONTAINERS = _cfg.paused_containers
+MOUNT_UNITS = _cfg.mounts
+EXCLUDE_SERVICES: set[tuple[str, str]] = {(s.stack, s.service) for s in _cfg.exclude_services}
 
 
 def active_stack_dirs() -> list[Path]:
@@ -64,25 +79,11 @@ def active_stack_dirs() -> list[Path]:
         if p.parent.name not in FORBIDDEN_STACKS
     ]
 
-# ── Context loader ────────────────────────────────────────────────────────────
-_ctx: dict | None = None
-
-def ctx() -> dict:
-    global _ctx
-    if _ctx is None:
-        if not CONTEXT_FILE.exists():
-            raise FileNotFoundError(f"Context file not found: {CONTEXT_FILE}")
-        with open(CONTEXT_FILE) as f:
-            _ctx = yaml.safe_load(f)
-    return _ctx
-
 # ── Credential helpers ────────────────────────────────────────────────────────
 def telegram_credentials() -> tuple[str, str]:
-    """Return (TG_BOT_TOKEN, TG_CHAT_ID) for Planet Express's own dedicated bot
-    (@casafarnsworthbot / "Casa Almida Planet Express" group), loaded from
-    /etc/planetexpress.env via systemd's EnvironmentFile — same mechanism as
-    ANTHROPIC_API_KEY below. Deliberately not shared with billarr's bot or
-    ~/stacks/services/.env, which airbnb-notify also depends on."""
+    """Return (TG_BOT_TOKEN, TG_CHAT_ID) for Planet Express's own Telegram bot, loaded
+    from /etc/planetexpress.env via systemd's EnvironmentFile — same mechanism as
+    ANTHROPIC_API_KEY/OPENAI_API_KEY below."""
     token = os.environ.get("TG_BOT_TOKEN", "")
     chat_id = os.environ.get("TG_CHAT_ID", "")
     if not token or not chat_id:
@@ -108,10 +109,8 @@ def openai_api_key() -> str:
     return key
 
 # ── LLM provider switch ────────────────────────────────────────────────────────
-# Set LLM_PROVIDER=anthropic in /etc/planetexpress.env to switch back once Anthropic
-# credits are available again — every call site (Hermes, Farnsworth, Amy) reads this,
-# there's no per-file copy to forget. Defaults to "openai" (2026-07-13: Anthropic
-# credit balance ran out, see project_casaserver_sysadmin_agents memory).
+# Set LLM_PROVIDER=anthropic in /etc/planetexpress.env to switch providers — every call
+# site (Hermes, Farnsworth, Amy) reads this, there's no per-file copy to forget.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
 
 # tier "small" = fast/cheap deterministic classification (Hermes' findings analysis,

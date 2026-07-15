@@ -42,16 +42,13 @@ NETWORK_GUARD_SERVICE_SUBSTRINGS = ["traefik", "adguard"]
 # (e.g. if you want to hand-manage updates for something). Empty by default.
 EXCLUDE_STACKS: set[str] = set()
 
-# User-configurable: (stack_name, service_key) pairs to skip auto-update for
-# individually -- for one service inside an otherwise-normal shared stack that
-# shouldn't be auto-canaried.
-# - ("services", "backend") / ("services", "frontend"): Billarr
-#   (ghcr.io/sovereignalmida/billarr-*) -- the user's own actively-developed app, migrated
-#   into the services stack 2026-07-07 from its former standalone location
-#   (~/apps/services/billarr, orphaned from ~/stacks/ before that). Auto-canary-pulling
-#   someone's own :latest build on a schedule is not the same risk profile as a public
-#   app's routine security patch -- leave its deploy cadence to the user.
-EXCLUDE_SERVICES: set[tuple[str, str]] = {("services", "backend"), ("services", "frontend")}
+# (stack_name, service_key) pairs to skip auto-update for individually -- for one service
+# inside an otherwise-normal shared stack that shouldn't be auto-canaried (e.g. your own
+# actively-developed :latest build, where auto-pulling on a schedule isn't the same risk
+# profile as a public app's routine security patch). Declared in config.yaml, not here --
+# this used to be a local constant, which is exactly the kind of drifting copy
+# config.FORBIDDEN_STACKS was already consolidated to avoid.
+EXCLUDE_SERVICES = config.EXCLUDE_SERVICES
 
 PULL_TIMEOUT_SECONDS = 300
 CANARY_WATCH_SECONDS = 90
