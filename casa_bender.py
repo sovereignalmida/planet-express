@@ -72,8 +72,17 @@ SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
 # `sudo mount -a` via command substitution -- an independent Codex review caught
 # this before it shipped. Real plans only ever generate bare `sudo`; there is no
 # real need to tolerate a path-prefixed spelling, so it's simply not supported.
+#
+# The unit-name group is deliberately a strict systemd-unit-name character class
+# (letters, digits, `_.@:-`), NOT `\S+` -- a second Codex-caught bug: `\S+` has no
+# literal whitespace but still matches e.g. `$(sudo${IFS}mount${IFS}-a)data.mount`,
+# which both satisfies this regex AND passes fnmatch("*.mount") since it happens to
+# end in ".mount" -- while the shell still executes the embedded command
+# substitution. A strict character class rejects `$`, `(`, `)`, `{`, `}`, backticks,
+# etc. outright, so no disguised-as-a-unit-name payload can ever reach fnmatch/the
+# exact-match check at all.
 _SUDO_SYSTEMCTL_RE = re.compile(
-    r"^sudo\s+systemctl\s+(start|stop|restart)\s+(\S+)$", re.IGNORECASE
+    r"^sudo\s+systemctl\s+(start|stop|restart)\s+([A-Za-z0-9_.@:-]+)$", re.IGNORECASE
 )
 
 

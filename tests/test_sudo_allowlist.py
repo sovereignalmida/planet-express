@@ -111,3 +111,19 @@ def test_denies_command_substitution_disguised_as_path_prefix(allowlist):
             "$(sudo${IFS}mount${IFS}-a)/sudo systemctl restart casa-startup.service",
             plan={},
         )
+
+
+def test_denies_command_substitution_disguised_as_unit_name(allowlist):
+    # A second, distinct PoC an independent Codex review caught: `\S+` for the unit
+    # name has no literal whitespace, so `$(sudo${IFS}mount${IFS}-a)data.mount`
+    # matched the regex AND passed fnmatch("*.mount") since it happens to end in
+    # ".mount" -- while the shell still executes the embedded substitution. The
+    # strict systemd-unit-name character class must reject this outright.
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._safety_check(
+            "sudo systemctl start $(sudo${IFS}mount${IFS}-a)data.mount", plan={}
+        )
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._safety_check(
+            "sudo systemctl start `sudo${IFS}mount${IFS}-a`data.mount", plan={}
+        )
