@@ -8,6 +8,8 @@ one place.
 import os
 from pathlib import Path
 
+from typing import Literal
+
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
@@ -45,6 +47,26 @@ class ExcludedService(BaseModel):
     service: str
 
 
+class SudoUnitGrant(BaseModel):
+    """Permission for a specific systemd unit name (e.g. 'casa-startup.service')."""
+    model_config = ConfigDict(extra="forbid")
+    unit: str
+    actions: list[Literal["start", "stop", "restart"]] = ["start", "stop", "restart"]
+
+
+class SudoGlobGrant(BaseModel):
+    """Permission for a glob pattern of unit names (e.g. '*.mount')."""
+    model_config = ConfigDict(extra="forbid")
+    glob: str
+    actions: list[Literal["start", "stop", "restart"]] = ["start", "stop"]
+
+
+class SudoAllowlist(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    units: list[SudoUnitGrant] = []
+    globs: list[SudoGlobGrant] = []
+
+
 class PlanetExpressConfig(BaseModel):
     # extra="forbid": a misspelled key (e.g. "forbidden_stack") must be a hard error, not
     # silently ignored — pydantic's default would otherwise drop it and fall back to the
@@ -57,6 +79,10 @@ class PlanetExpressConfig(BaseModel):
     paused_containers: list[str] = []
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
+    # Empty by default -- a fresh install grants zero sudo actions until the operator
+    # explicitly declares them here. Enforced in casa_bender.py's _safety_check(),
+    # independent of whatever a plan's LLM-generated commands claim to need.
+    sudo_allowlist: SudoAllowlist = SudoAllowlist()
 
     @field_validator("stacks_root")
     @classmethod
@@ -89,6 +115,7 @@ FORBIDDEN_STACKS = _cfg.forbidden_stacks
 PAUSED_CONTAINERS = _cfg.paused_containers
 MOUNT_UNITS = _cfg.mounts
 EXCLUDE_SERVICES: set[tuple[str, str]] = {(s.stack, s.service) for s in _cfg.exclude_services}
+SUDO_ALLOWLIST = _cfg.sudo_allowlist
 
 
 def active_stack_dirs() -> list[Path]:

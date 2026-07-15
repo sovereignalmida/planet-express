@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import difflib
+import fnmatch
 import json
 import logging
 import re
@@ -55,10 +56,60 @@ FORBIDDEN_COMMANDS = [
 
 COMMAND_TIMEOUT_SECONDS = 120
 
+# Config-declared allowlist of sudo-scoped systemctl actions — single source of truth
+# in config.py, same pattern as FORBIDDEN_STACKS above. Empty by default; a fresh
+# install grants nothing until the operator declares it (and grants it at the OS
+# level via sudoers.d) explicitly.
+SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
+
+# Anything other than `sudo systemctl <action> <unit>` was never a legitimate use of
+# the sudo grant this project asks for (docker needs no sudo — direct socket access).
+_SUDO_SYSTEMCTL_RE = re.compile(r"^sudo\s+systemctl\s+(start|stop|restart)\s+(\S+)$", re.IGNORECASE)
+
 
 # ── Safety checks ─────────────────────────────────────────────────────────────
 class SafetyError(Exception):
     pass
+
+
+def _split_command_segments(command: str) -> list[str]:
+    """Split a compound shell command on control operators so each piece can be
+    checked independently — otherwise a legitimate `sudo systemctl start x.mount &&
+    sudo rm -rf /` could smuggle a forbidden second command past a whole-string check."""
+    return [seg.strip() for seg in re.split(r"&&|\|\||;|\|", command) if seg.strip()]
+
+
+def _sudo_action_allowed(unit: str, action: str) -> bool:
+    action = action.lower()
+    for grant in SUDO_ALLOWLIST.units:
+        if grant.unit == unit and action in grant.actions:
+            return True
+    for grant in SUDO_ALLOWLIST.globs:
+        if fnmatch.fnmatch(unit, grant.glob) and action in grant.actions:
+            return True
+    return False
+
+
+def _check_sudo_allowlist(command: str) -> None:
+    """Raise SafetyError for any `sudo`-prefixed segment that isn't an explicitly
+    declared (unit-or-glob, action) grant in config.yaml's sudo_allowlist — fail
+    closed on anything not declared, rather than trying to blocklist every bad sudo
+    invocation individually."""
+    for segment in _split_command_segments(command):
+        if not segment.lower().startswith("sudo"):
+            continue
+        m = _SUDO_SYSTEMCTL_RE.match(segment)
+        if not m:
+            raise SafetyError(
+                f"Sudo command not in the declared allowlist (only 'sudo systemctl "
+                f"start|stop|restart <unit>' can ever be permitted): '{segment}'"
+            )
+        action, unit = m.group(1), m.group(2)
+        if not _sudo_action_allowed(unit, action):
+            raise SafetyError(
+                f"Sudo action '{action}' on '{unit}' is not declared in "
+                f"config.yaml's sudo_allowlist: '{segment}'"
+            )
 
 
 def _safety_check(command: str, plan: dict) -> None:
@@ -75,6 +126,10 @@ def _safety_check(command: str, plan: dict) -> None:
     for stack in FORBIDDEN_STACKS:
         if re.search(rf"\b{re.escape(stack)}\b", command, re.IGNORECASE):
             raise SafetyError(f"Forbidden stack referenced: '{stack}'")
+
+    # Sudo scope — code-enforced, independent of whatever the plan's LLM-generated
+    # command claims to need.
+    _check_sudo_allowlist(command)
 
     # Network stack guard
     needs_net_confirm = any(tok in command for tok in NETWORK_GUARD_TOKENS)

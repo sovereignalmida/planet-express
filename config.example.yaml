@@ -31,3 +31,25 @@ exclude_services: []
 # exclude_services:
 #   - stack: services
 #     service: my-custom-app
+
+# Sudo actions Bender is allowed to run, enforced in code (casa_bender.py's
+# _safety_check()) independent of whatever a plan's LLM-generated commands claim to
+# need -- a plan proposing sudo for anything not declared here is rejected outright,
+# before it ever reaches the shell. Empty by default: a fresh install grants NO sudo
+# actions until you explicitly declare them here AND grant them at the OS level (see
+# INSTALL docs / the setup wizard) -- these two must match, declaring one without the
+# other either does nothing (no OS grant) or leaves an OS grant this allowlist never
+# uses (harmless, but pointless).
+sudo_allowlist:
+  units: []
+  # Example: allow this project's own boot-time restart unit, matching a systemd
+  # NOPASSWD sudoers.d grant for exactly this unit and these actions.
+  # units:
+  #   - unit: my-planetexpress-boot.service
+  #     actions: [start, stop, restart]
+  globs: []
+  # Example: allow starting/stopping (not restarting) any *.mount unit -- useful if
+  # Bender needs to remediate a stuck NAS/network mount as part of a plan.
+  # globs:
+  #   - glob: "*.mount"
+  #     actions: [start, stop]
