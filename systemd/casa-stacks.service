@@ -10,6 +10,7 @@ Type=oneshot
 RemainAfterExit=yes
 User=casaroot
 WorkingDirectory=/home/casaroot/apps/planetexpress
+Environment=CASA_CONFIG=/home/casaroot/apps/planetexpress/config.yaml
 ExecStart=/home/casaroot/apps/planetexpress/venv/bin/python casa_boot.py
 TimeoutStartSec=300
 

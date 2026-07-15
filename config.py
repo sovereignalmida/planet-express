@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 # ── Directory paths (override via env vars for testing) ──────────────────────
 STATE_DIR = Path(os.environ.get(
@@ -35,16 +35,30 @@ CONFIG_FILE = Path(os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml
 
 
 class ExcludedService(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     stack: str
     service: str
 
 
 class PlanetExpressConfig(BaseModel):
+    # extra="forbid": a misspelled key (e.g. "forbidden_stack") must be a hard error, not
+    # silently ignored — pydantic's default would otherwise drop it and fall back to the
+    # field's default (an empty list, for forbidden_stacks), silently disabling a safety
+    # list the operator thought they'd set.
+    model_config = ConfigDict(extra="forbid")
+
     stacks_root: Path
     forbidden_stacks: list[str] = []
     paused_containers: list[str] = []
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
+
+    @field_validator("stacks_root")
+    @classmethod
+    def _stacks_root_must_be_absolute(cls, v: Path) -> Path:
+        if not v.is_absolute():
+            raise ValueError(f"stacks_root must be an absolute path, got {v!r}")
+        return v
 
 
 def _load_config() -> PlanetExpressConfig:
