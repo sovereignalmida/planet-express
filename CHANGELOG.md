@@ -38,5 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own step-status/rollback notifications — deferred rather than tripling this spec's size. Verified
   live against the real bot: a real approve tap ran a real (harmless, read-only) plan through Bender
   end to end, and a real cancel tap was exercised twice, including on one genuine organic finding.
+- **Spec 3: state schema stabilization.** The 6 state files (`latest_monitor.json`,
+  `latest_findings.json`, `pending_plan.json`, `run_status.json`, `rollback_candidates.json`,
+  `update_history.json`) now carry a `schema_version` and are validated at the write boundary via
+  new `state_models.py`, instead of each producer writing an ad hoc dict literal — so a future shape
+  change trips a version check instead of a silent `KeyError` in a consumer (the planned read-only
+  dashboard). Internally-produced files are strict; `Findings`/`PlanSet` (LLM-produced) tolerate
+  extra fields rather than crash the pipeline over unexpected LLM output shape. Consolidated a
+  duplicated `ROLLBACK_CANDIDATES_FILE` definition (independently defined in both
+  `casa_farnsworth.py` and `casa_zoidberg.py`) into `config.py`, and fixed `casa_leela.run_full()`
+  never setting a `mode` key unlike `run_status()`/`run_updates()`. `update_history.json`'s on-disk
+  shape changes from a bare list to an enveloped `{"schema_version":1,"entries":[...]}` — not
+  migrated, since that history is low-stakes. An independent Codex review caught that
+  `UpdateHistoryEntry.old_id`/`new_id` were required strings when the real code legitimately
+  produces `None` for a stopped service — fixed to `Optional[str]`.
 
 ---
