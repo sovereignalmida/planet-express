@@ -90,8 +90,10 @@ class UpdateHistoryEntry(BaseModel):
     ts: str
     stack: str
     service: str
-    old_id: str
-    new_id: str
+    # service_image_id() legitimately returns None (e.g. a stopped service with no
+    # container to inspect) -- these must stay optional, not required strings.
+    old_id: Optional[str] = None
+    new_id: Optional[str] = None
     status: str
     reason: Optional[str] = None
 
