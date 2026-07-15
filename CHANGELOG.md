@@ -28,5 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before the real pipeline existed — confirmed via grep that nothing had called its loader in
   months, and its content had gone materially stale with nothing to catch it) is retired, not
   migrated.
+- **Spec 2: Notifier interface abstraction.** `casa_farnsworth.py`'s 57 direct `TelegramClient`
+  call sites are now split behind a `Notifier` interface (`notify`, `request_approval`,
+  `interpret_decision`, `resolve`) — outbound notifications and the plan/diff approve-or-cancel
+  flow are channel-agnostic in shape now, backed by `TelegramNotifier` for v1 and a `FakeNotifier`
+  for tests. Deliberately does not cover the `/stacks`/`/up`/`/down`/`/mounts`/`/help` remote-control
+  command parsing — a genuinely different interaction model, left on `TelegramClient` directly.
+  Known gap: `casa_bender.py`/`casa_zoidberg.py` still talk to `TelegramClient` directly for their
+  own step-status/rollback notifications — deferred rather than tripling this spec's size. Verified
+  live against the real bot: a real approve tap ran a real (harmless, read-only) plan through Bender
+  end to end, and a real cancel tap was exercised twice, including on one genuine organic finding.
 
 ---
