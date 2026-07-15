@@ -52,5 +52,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migrated, since that history is low-stakes. An independent Codex review caught that
   `UpdateHistoryEntry.old_id`/`new_id` were required strings when the real code legitimately
   produces `None` for a stopped service — fixed to `Optional[str]`.
+- **Spec 4: sudo/execution allowlist enforcement.** `casa_bender.py`'s `_safety_check()` was a pure
+  blocklist with **no allowlist check at all** for sudo-scoped commands — the only things stopping
+  an out-of-scope `sudo` were Farnsworth's planning-prompt text (soft) and the OS-level sudoers.d
+  grant itself (hard, but only blocks actual escalation, not the attempt). Now a config-declared
+  allowlist (`config.yaml`'s `sudo_allowlist`, empty by default) is enforced in code, independent of
+  whatever a plan's LLM-generated commands claim to need — anything other than
+  `sudo systemctl start|stop|restart <unit>` matching a declared unit or glob grant is rejected
+  outright, before ever reaching a shell. An independent Codex review found and this fixed **three**
+  real bypasses in sequence: (1) the check only looked at segments starting with literal `sudo`, so
+  a shell wrapper (`env sudo ...`, `sh -c '...'`) or a later line in a multi-line command skipped the
+  check entirely; (2) a since-reverted attempt to tolerate an absolute-path `sudo` invocation used a
+  regex permissive enough (`\S*/`) to let a command substitution disguised as a "path prefix" through
+  while the shell still executed the embedded sudo call; (3) the unit-name capture itself (`\S+`)
+  admitted a command substitution disguised as a unit name, which also happened to satisfy the
+  `*.mount` glob's suffix match — fixed by constraining it to a strict systemd-unit-name character
+  class. This host's real `config.yaml` now declares its actual existing grant so nothing that
+  worked before stops working. Verified live: a real allowed action executes through Bender exactly
+  as before; every bypass variant found, plus the exact historical near-miss command
+  (`sudo mount -a`, once actually proposed by a real Farnsworth plan), is rejected with a clear
+  `SafetyError` before `subprocess.run` is ever called.
 
 ---
