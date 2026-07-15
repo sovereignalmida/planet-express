@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+
+# Runtime state and logs are host-specific, not part of the shipped project
+state/*.json
+logs/*.log
+
+# Never commit secrets — production config lives in /etc/planetexpress.env
+.env
+*.env

@@ -1,0 +1,38 @@
+[Unit]
+Description=Planet Express — CasaMediaServer Sysadmin Agent (Farnsworth)
+Documentation=https://github.com/sovereignalmida/planet-express
+After=network-online.target docker.service
+Wants=network-online.target
+# Don't start until Docker is up
+Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=casaroot
+Group=casaroot
+WorkingDirectory=/home/casaroot/apps/planetexpress
+
+# Load ANTHROPIC_API_KEY from a separate secrets file (create this manually)
+# File should contain: ANTHROPIC_API_KEY=sk-ant-...
+EnvironmentFile=/etc/planetexpress.env
+
+Environment=CASA_CONTEXT=/home/casaroot/casa-sysadmin-context.yaml
+Environment=CASA_STATE_DIR=/home/casaroot/apps/planetexpress/state
+Environment=CASA_LOG_DIR=/home/casaroot/apps/planetexpress/logs
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/home/casaroot/apps/planetexpress/venv/bin/python casa_farnsworth.py
+
+# Restart on failure with backoff
+Restart=on-failure
+RestartSec=15s
+
+# Logging — journald picks this up via stdout
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=casa-planetexpress
+
+[Install]
+WantedBy=multi-user.target

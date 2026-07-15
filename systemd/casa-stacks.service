@@ -1,0 +1,17 @@
+[Unit]
+Description=Casa stack startup — bring up all active docker compose stacks
+# Hard gate: this will not even attempt to run unless casa-mounts.service
+# actually succeeded. No container starts until mounts are verified.
+Requires=casa-mounts.service docker.service
+After=casa-mounts.service docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=casaroot
+WorkingDirectory=/home/casaroot/apps/planetexpress
+ExecStart=/home/casaroot/apps/planetexpress/venv/bin/python casa_boot.py
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
