@@ -33,6 +33,7 @@ import casa_zoidberg as zoidberg
 import casa_amy as amy
 import casa_stackctl as stackctl
 from telegram_client import TelegramClient
+from notifier import Notifier, TelegramNotifier
 
 log = logging.getLogger("planetexpress.farnsworth")
 
@@ -327,7 +328,7 @@ def _has_active_rollback_candidates() -> bool:
         return False
 
 
-def maybe_run_safe_prune(snapshot: dict, tg: TelegramClient) -> None:
+def maybe_run_safe_prune(snapshot: dict, notifier: Notifier) -> None:
     """Prune Docker images/networks when root disk pressure is real AND every container
     is in a known-safe state. Skips entirely (logs why, no Telegram noise) if disk is
     fine, if anything is unhealthy/crash-looping/unrecognized, if a whole stack is
@@ -352,7 +353,7 @@ def maybe_run_safe_prune(snapshot: dict, tg: TelegramClient) -> None:
         f"Root disk at {disk_alert['used_pct']}% and all containers healthy — running safe prune"
     )
     result = bender.run_safe_prune()
-    tg.send(
+    notifier.notify(
         f"🧹 *Safe prune ran automatically*\n"
         f"Root disk was at {disk_alert['used_pct']}% ({disk_alert.get('alert', '')}). "
         f"Every container was running cleanly or a known one-shot job, so this only "
@@ -362,19 +363,19 @@ def maybe_run_safe_prune(snapshot: dict, tg: TelegramClient) -> None:
 
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
-def run_pipeline(tg: TelegramClient, state: PipelineState, mode: str = "full") -> None:
+def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -> None:
     """
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
     mode: 'full' | 'status' | 'updates'
     """
     if state.state not in (PipelineState.IDLE,):
-        tg.send("⚠️ Pipeline already running or awaiting approval. Please wait.")
+        notifier.notify("⚠️ Pipeline already running or awaiting approval. Please wait.")
         return
 
     state.transition(PipelineState.RUNNING)
     try:
         # ── Step 1: Leela scans ──────────────────────────────────────────────
-        tg.send("👁️ *Leela scanning...*")
+        notifier.notify("👁️ *Leela scanning...*")
         if mode == "status":
             snapshot = leela.run_status()
         elif mode == "updates":
@@ -386,48 +387,48 @@ def run_pipeline(tg: TelegramClient, state: PipelineState, mode: str = "full") -
 
         if mode == "full":
             try:
-                maybe_run_safe_prune(snapshot, tg)
+                maybe_run_safe_prune(snapshot, notifier)
             except Exception as e:
                 log.exception(f"Safe-prune check failed (non-fatal): {e}")
 
         if mode in ("status", "updates"):
             # Short-circuit — just report, no planning needed
-            _send_status_report(tg, snapshot, mode)
+            _send_status_report(notifier, snapshot, mode)
             state.transition(PipelineState.IDLE)
             return
 
         # ── Step 2: Hermes analyzes ──────────────────────────────────────────
-        tg.send("📋 *Hermes filing the report...*")
+        notifier.notify("📋 *Hermes filing the report...*")
         findings = hermes.analyze(snapshot)
         hermes.save_findings(findings)
 
         date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         report_msg = TelegramClient.fmt_report(date_str, findings.get("findings", []))
-        tg.send(report_msg)
+        notifier.notify(report_msg)
 
         if not findings.get("findings"):
-            tg.send("_No findings. Nothing to plan. Go team!_")
+            notifier.notify("_No findings. Nothing to plan. Go team!_")
             state.transition(PipelineState.IDLE)
             return
 
         # ── Step 3: Farnsworth plans ─────────────────────────────────────────
-        tg.send("🧠 *Good news, everyone! Devising plans...*")
+        notifier.notify("🧠 *Good news, everyone! Devising plans...*")
         plans_data = plan(findings)
         save_plans(plans_data)
 
         if not plans_data.get("plans"):
-            tg.send("_No actionable plans generated._")
+            notifier.notify("_No actionable plans generated._")
             state.transition(PipelineState.IDLE)
             return
 
         # ── Step 4: Send plans to Telegram for approval ──────────────────────
         for p in plans_data["plans"]:
             plan_msg = TelegramClient.fmt_plan(p)
-            sent = tg.send(plan_msg, reply_markup=TelegramClient.approve_keyboard(p["id"]))
+            msg_id = notifier.request_approval(plan_msg, p["id"], "plan")
             state.transition(
                 PipelineState.AWAITING_APPROVAL,
                 plan_id=p["id"],
-                msg_id=sent.get("message_id"),
+                msg_id=msg_id,
             )
             # One plan at a time — pause after first, handle others after execution
             break
@@ -435,10 +436,10 @@ def run_pipeline(tg: TelegramClient, state: PipelineState, mode: str = "full") -
     except Exception as e:
         log.exception(f"Pipeline error: {e}")
         state.transition(PipelineState.IDLE)
-        tg.send(f"🛑 *Pipeline error:* `{str(e)[:200]}`")
+        notifier.notify(f"🛑 *Pipeline error:* `{str(e)[:200]}`")
 
 
-def _send_status_report(tg: TelegramClient, snapshot: dict, mode: str) -> None:
+def _send_status_report(notifier: Notifier, snapshot: dict, mode: str) -> None:
     if mode == "status":
         containers = snapshot.get("containers", [])
         issues = [c for c in containers if c.get("issue")]
@@ -456,23 +457,23 @@ def _send_status_report(tg: TelegramClient, snapshot: dict, mode: str) -> None:
             lines.append(f"  {d['alert']} `{d['mount']}` {d['used_pct']}%")
         if down_svcs:
             lines.append(f"Services down: {s(', '.join(down_svcs))}")
-        tg.send("\n".join(lines))
+        notifier.notify("\n".join(lines))
 
     elif mode == "updates":
         candidates = snapshot.get("image_candidates", [])
         if not candidates:
-            tg.send("🔵 No stale `:latest` images found.")
+            notifier.notify("🔵 No stale `:latest` images found.")
         else:
             lines = [f"🔵 *{len(candidates)} stale image(s) found:*"]
             for img in candidates:
                 lines.append(
                     f"  `{img['repo']}:{img['tag']}` — {img.get('stale_days', '?')}d old"
                 )
-            tg.send("\n".join(lines))
+            notifier.notify("\n".join(lines))
 
 
 # ── Telegram command handlers ─────────────────────────────────────────────────
-def handle_message(update: dict, tg: TelegramClient, state: PipelineState) -> None:
+def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: PipelineState) -> None:
     msg = update.get("message", {})
     text = msg.get("text", "").strip()
     chat_id = str(msg.get("chat", {}).get("id", ""))
@@ -485,73 +486,73 @@ def handle_message(update: dict, tg: TelegramClient, state: PipelineState) -> No
 
     if cmd == "/check":
         threading.Thread(
-            target=run_pipeline, args=(tg, state, "full"), daemon=True
+            target=run_pipeline, args=(notifier, state, "full"), daemon=True
         ).start()
 
     elif cmd == "/status":
         threading.Thread(
-            target=run_pipeline, args=(tg, state, "status"), daemon=True
+            target=run_pipeline, args=(notifier, state, "status"), daemon=True
         ).start()
 
     elif cmd == "/updates":
         threading.Thread(
-            target=run_pipeline, args=(tg, state, "updates"), daemon=True
+            target=run_pipeline, args=(notifier, state, "updates"), daemon=True
         ).start()
 
     elif cmd == "/rollback":
         parts = text.split()
         plan_id = parts[1] if len(parts) > 1 else None
         if plan_id:
-            _do_rollback(tg, state, plan_id)
+            _do_rollback(tg, notifier, state, plan_id)
         else:
-            tg.send("Usage: `/rollback <plan_id>`")
+            notifier.notify("Usage: `/rollback <plan_id>`")
 
     elif cmd == "/skip":
         parts = text.split()
         plan_id = parts[1] if len(parts) > 1 else None
-        tg.send(f"⏭️ Skip noted for plan `{plan_id or '?'}`. Manual follow-up required.")
+        notifier.notify(f"⏭️ Skip noted for plan `{plan_id or '?'}`. Manual follow-up required.")
         state.transition(PipelineState.IDLE)
 
     elif cmd == "/state":
-        tg.send(f"Current state: `{state.state}`")
+        notifier.notify(f"Current state: `{state.state}`")
 
     elif cmd == "/patchnow":
         if state.state != PipelineState.IDLE:
-            tg.send("⚠️ Pipeline busy right now. Please wait and try again.")
+            notifier.notify("⚠️ Pipeline busy right now. Please wait and try again.")
         else:
-            tg.send(
+            notifier.notify(
                 "🩺 *Zoidberg starting a canary update pass now...*\n"
                 "Silent per-service unless something needs a rollback — that'll page you."
             )
-            threading.Thread(target=_run_update_pass, args=(tg,), daemon=True).start()
+            threading.Thread(target=_run_update_pass, args=(tg, notifier), daemon=True).start()
 
     elif cmd == "/stacks":
-        threading.Thread(target=_run_stacks_list, args=(tg,), daemon=True).start()
+        threading.Thread(target=_run_stacks_list, args=(notifier,), daemon=True).start()
 
     elif cmd == "/mounts":
-        threading.Thread(target=_run_mounts_check, args=(tg,), daemon=True).start()
+        threading.Thread(target=_run_mounts_check, args=(notifier,), daemon=True).start()
 
     elif cmd == "/backups":
-        threading.Thread(target=_run_backups_check, args=(tg,), daemon=True).start()
+        threading.Thread(target=_run_backups_check, args=(notifier,), daemon=True).start()
 
     elif cmd == "/up":
         parts = text.split()
         target = parts[1].lower() if len(parts) > 1 else None
         if not target:
-            tg.send("Usage: `/up <stack>` or `/up all`")
+            notifier.notify("Usage: `/up <stack>` or `/up all`")
         else:
-            threading.Thread(target=_run_stack_op, args=(tg, "up", target), daemon=True).start()
+            threading.Thread(target=_run_stack_op, args=(notifier, "up", target), daemon=True).start()
 
     elif cmd == "/down":
         parts = text.split()
         target = parts[1].lower() if len(parts) > 1 else None
         if not target:
-            tg.send("Usage: `/down <stack>` or `/down all`")
+            notifier.notify("Usage: `/down <stack>` or `/down all`")
         else:
-            threading.Thread(target=_run_stack_op, args=(tg, "down", target), daemon=True).start()
+            threading.Thread(target=_run_stack_op, args=(notifier, "down", target), daemon=True).start()
 
     elif cmd == "/help":
-        tg.send(
+        notifier.notify(
             "*Planet Express — Available Commands*\n"
             "/check — Full scan + plan (no execution)\n"
             "/status — Quick health snapshot\n"
@@ -568,94 +569,75 @@ def handle_message(update: dict, tg: TelegramClient, state: PipelineState) -> No
         )
 
 
-def handle_callback(update: dict, tg: TelegramClient, state: PipelineState) -> None:
-    cb = update.get("callback_query", {})
-    data = cb.get("data", "")
-    cb_id = cb.get("id", "")
-    chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
-    msg_id  = cb.get("message", {}).get("message_id")
-
-    if chat_id != tg.chat_id:
-        tg.answer_callback(cb_id, "Not your bot.")
+def handle_callback(update: dict, tg: TelegramClient, notifier: Notifier, state: PipelineState) -> None:
+    decision = notifier.interpret_decision(update)
+    if decision is None:
         return
 
-    if not data:
-        tg.answer_callback(cb_id)
-        return
-
-    action, _, plan_id = data.partition(":")
-
-    if action == "approve":
-        tg.answer_callback(cb_id, "Good news, everyone! Executing...")
-        # Remove inline keyboard from the approval message
-        try:
-            tg.edit(msg_id, f"✅ Plan #{plan_id} *approved*. Bender is on it.")
-        except Exception:
-            pass
-        p = load_pending_plan(plan_id)
+    if decision.kind == "plan" and decision.approved:
+        notifier.resolve(
+            decision, "Good news, everyone! Executing...",
+            f"✅ Plan #{decision.request_id} *approved*. Bender is on it.",
+        )
+        p = load_pending_plan(decision.request_id)
         if not p:
-            tg.send(f"⚠️ Plan `{plan_id}` not found or expired.")
+            notifier.notify(f"⚠️ Plan `{decision.request_id}` not found or expired.")
             state.transition(PipelineState.IDLE)
             return
-        state.transition(PipelineState.EXECUTING, plan_id=plan_id)
+        state.transition(PipelineState.EXECUTING, plan_id=decision.request_id)
         threading.Thread(
-            target=_execute_plan, args=(tg, state, p), daemon=True
+            target=_execute_plan, args=(tg, notifier, state, p), daemon=True
         ).start()
 
-    elif action == "cancel":
-        tg.answer_callback(cb_id, "Plan cancelled.")
-        try:
-            tg.edit(msg_id, f"❌ Plan #{plan_id} *cancelled*.")
-        except Exception:
-            pass
+    elif decision.kind == "plan" and not decision.approved:
+        notifier.resolve(
+            decision, "Plan cancelled.",
+            f"❌ Plan #{decision.request_id} *cancelled*.",
+        )
         state.transition(PipelineState.IDLE)
-        log.info(f"Plan {plan_id} cancelled by user")
+        log.info(f"Plan {decision.request_id} cancelled by user")
 
-    elif action == "approve_diff":
-        diff_id = plan_id  # partition() reused the same variable name
-        tg.answer_callback(cb_id, "Applying diff...")
+    elif decision.kind == "diff" and decision.approved:
+        notifier.resolve(
+            decision, "Applying diff...",
+            f"✅ Diff `{decision.request_id}` <b>applied</b>.",
+        )
         try:
-            tg.edit(msg_id, f"✅ Diff `{diff_id}` <b>applied</b>.")
-        except Exception:
-            pass
-        try:
-            result = bender.apply_pending_diff(diff_id)
-            tg.send(
+            result = bender.apply_pending_diff(decision.request_id)
+            notifier.notify(
                 f"📝 Applied. Backup saved at <code>{TelegramClient.s(result['backup_path'])}</code>.\n"
                 f"This only wrote the file — nothing has restarted. Run the normal update/restart "
                 f"plan (or /check) to pick up the change."
             )
         except bender.SafetyError as e:
-            tg.send(f"⚠️ Could not apply diff `{diff_id}`: {TelegramClient.s(str(e))}")
+            notifier.notify(f"⚠️ Could not apply diff `{decision.request_id}`: {TelegramClient.s(str(e))}")
 
-    elif action == "cancel_diff":
-        diff_id = plan_id
-        tg.answer_callback(cb_id, "Diff discarded.")
-        try:
-            tg.edit(msg_id, f"❌ Diff `{diff_id}` <b>discarded</b>.")
-        except Exception:
-            pass
-        bender.discard_pending_diff(diff_id)
-        log.info(f"Diff {diff_id} discarded by user")
+    elif decision.kind == "diff" and not decision.approved:
+        notifier.resolve(
+            decision, "Diff discarded.",
+            f"❌ Diff `{decision.request_id}` <b>discarded</b>.",
+        )
+        bender.discard_pending_diff(decision.request_id)
+        log.info(f"Diff {decision.request_id} discarded by user")
 
 
-def _run_stacks_list(tg: TelegramClient) -> None:
+def _run_stacks_list(notifier: Notifier) -> None:
     forbidden = set(config.FORBIDDEN_STACKS)
     lines = []
     for stack_dir in stackctl.all_stack_dirs():
         tag = " (forbidden)" if stack_dir.name in forbidden else ""
         lines.append(f"{TelegramClient.s(stack_dir.name)}{tag}")
-    tg.send("*Stacks:*\n" + "\n".join(lines))
+    notifier.notify("*Stacks:*\n" + "\n".join(lines))
 
 
-def _run_mounts_check(tg: TelegramClient) -> None:
+def _run_mounts_check(notifier: Notifier) -> None:
     results = stackctl.check_mounts()
     lines = [
         f"{'✅' if ok else '❌'} {TelegramClient.s(unit)} → {TelegramClient.s(path)}"
         for unit, path, ok in results
     ]
     header = "✅ All mounts reachable." if all(ok for _, _, ok in results) else "⚠️ Some mounts unreachable."
-    tg.send(f"{header}\n" + "\n".join(lines))
+    notifier.notify(f"{header}\n" + "\n".join(lines))
 
 
 def _fmt_backups_message(results: list[dict]) -> str:
@@ -673,21 +655,21 @@ def _fmt_backups_message(results: list[dict]) -> str:
     return f"{header}\n" + "\n".join(lines)
 
 
-def _run_backups_check(tg: TelegramClient) -> None:
+def _run_backups_check(notifier: Notifier) -> None:
     results = stackctl.check_backups()
-    tg.send(_fmt_backups_message(results))
+    notifier.notify(_fmt_backups_message(results))
 
 
-def _run_stack_op(tg: TelegramClient, verb: str, target: str) -> None:
-    tg.send(f"⏳ `{verb}` `{TelegramClient.s(target)}`...")
+def _run_stack_op(notifier: Notifier, verb: str, target: str) -> None:
+    notifier.notify(f"⏳ `{verb}` `{TelegramClient.s(target)}`...")
     fn = stackctl.stack_up if verb == "up" else stackctl.stack_down
     result = fn(target)
 
     if result.get("refused"):
-        tg.send(f"🚫 `{TelegramClient.s(target)}` is in FORBIDDEN_STACKS — refusing to start it.")
+        notifier.notify(f"🚫 `{TelegramClient.s(target)}` is in FORBIDDEN_STACKS — refusing to start it.")
         return
     if result.get("not_found"):
-        tg.send(f"⚠️ No stack named `{TelegramClient.s(target)}` found.")
+        notifier.notify(f"⚠️ No stack named `{TelegramClient.s(target)}` found.")
         return
 
     lines = []
@@ -697,10 +679,10 @@ def _run_stack_op(tg: TelegramClient, verb: str, target: str) -> None:
         if not ok and tail:
             lines.append(f"<code>{TelegramClient.s(tail[:300])}</code>")
     header = "✅ Done." if result["ok"] else "⚠️ One or more stacks failed."
-    tg.send(f"{header}\n" + "\n".join(lines))
+    notifier.notify(f"{header}\n" + "\n".join(lines))
 
 
-def _investigate_failure(tg: TelegramClient, container: str, reason: str) -> None:
+def _investigate_failure(notifier: Notifier, container: str, reason: str) -> None:
     """Escalate to Amy after a plan step or Zoidberg update has already failed once.
     Never executes anything — sends a diagnosis, and a separate diff proposal with
     its own approval if a compose-file edit looks necessary."""
@@ -730,10 +712,10 @@ def _investigate_failure(tg: TelegramClient, container: str, reason: str) -> Non
         )
     except Exception as e:
         log.exception(f"Amy investigation crashed for {container}: {e}")
-        tg.send(f"🛑 Amy's investigation of {container} crashed: `{str(e)[:200]}`")
+        notifier.notify(f"🛑 Amy's investigation of {container} crashed: `{str(e)[:200]}`")
         return
 
-    tg.send(TelegramClient.fmt_diagnosis(stack_guess, container, diagnosis))
+    notifier.notify(TelegramClient.fmt_diagnosis(stack_guess, container, diagnosis))
 
     remediation = diagnosis.get("proposed_remediation", {})
     if not remediation.get("requires_compose_edit"):
@@ -748,16 +730,16 @@ def _investigate_failure(tg: TelegramClient, container: str, reason: str) -> Non
                 stack_guess, new_content,
                 reason=f"Amy's diagnosis for {container}: {remediation.get('summary', '')}",
             )
-            tg.send(
+            notifier.request_approval(
                 TelegramClient.fmt_diff(stack_guess, remediation.get("summary", ""), diff["diff_text"]),
-                reply_markup=TelegramClient.diff_approve_keyboard(diff["diff_id"]),
+                diff["diff_id"], "diff",
             )
         except bender.SafetyError as e:
-            tg.send(f"⚠️ Amy proposed a compose edit but it couldn't be turned into a diff: {TelegramClient.s(str(e))}")
+            notifier.notify(f"⚠️ Amy proposed a compose edit but it couldn't be turned into a diff: {TelegramClient.s(str(e))}")
     else:
         # No concrete YAML (Amy wasn't given the block, or chose not to propose one) —
         # fall back to the human-readable description only.
-        tg.send(
+        notifier.notify(
             f"📝 Amy says this needs a compose-file edit: "
             f"{TelegramClient.s(remediation.get('compose_edit_description', '(no description given)'))}\n\n"
             f"She didn't have enough to propose an exact diff — that edit still needs to be made "
@@ -765,41 +747,41 @@ def _investigate_failure(tg: TelegramClient, container: str, reason: str) -> Non
         )
 
 
-def _execute_plan(tg: TelegramClient, state: PipelineState, plan_data: dict) -> None:
+def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, plan_data: dict) -> None:
     try:
         result = bender.execute(plan_data, tg)
         if result["final_status"] == "success":
-            tg.send(TelegramClient.fmt_complete(
+            notifier.notify(TelegramClient.fmt_complete(
                 plan_data["id"],
                 result["steps_completed"],
                 result.get("errors", []),
             ))
         else:
-            tg.send(
+            notifier.notify(
                 f"⚠️ Plan #{plan_data['id']} finished with status: `{result['final_status']}`"
             )
             container = plan_data.get("container")
             if container:
                 threading.Thread(
                     target=_investigate_failure,
-                    args=(tg, container, f"plan {plan_data['id']} failed: {result.get('errors')}"),
+                    args=(notifier, container, f"plan {plan_data['id']} failed: {result.get('errors')}"),
                     daemon=True,
                 ).start()
     except Exception as e:
         log.exception(f"Bender execution error: {e}")
-        tg.send(f"🛑 Bender crashed: `{str(e)[:200]}`")
+        notifier.notify(f"🛑 Bender crashed: `{str(e)[:200]}`")
     finally:
         state.transition(PipelineState.IDLE)
 
 
-def _do_rollback(tg: TelegramClient, state: PipelineState, plan_id: str) -> None:
+def _do_rollback(tg: TelegramClient, notifier: Notifier, state: PipelineState, plan_id: str) -> None:
     p = load_pending_plan(plan_id)
     if not p or not p.get("rollback"):
-        tg.send(f"⚠️ No rollback steps found for plan `{plan_id}`.")
+        notifier.notify(f"⚠️ No rollback steps found for plan `{plan_id}`.")
         return
-    tg.send(f"↩️ *Rolling back plan #{plan_id}...*")
+    notifier.notify(f"↩️ *Rolling back plan #{plan_id}...*")
     result = bender.execute_rollback(p, tg)
-    tg.send(
+    notifier.notify(
         f"Rollback complete. Steps executed: {result['steps_completed']}. "
         f"Errors: {result.get('errors', [])}"
     )
@@ -807,20 +789,20 @@ def _do_rollback(tg: TelegramClient, state: PipelineState, plan_id: str) -> None
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
-def scheduler_loop(tg: TelegramClient, state: PipelineState) -> None:
+def scheduler_loop(notifier: Notifier, state: PipelineState) -> None:
     """Background thread — runs full pipeline every PIPELINE_INTERVAL_HOURS hours."""
     log.info(f"Scheduler started — pipeline runs every {PIPELINE_INTERVAL_HOURS}h")
     time.sleep(60)  # brief delay on startup before first scheduled run
     while True:
         try:
             log.info("Scheduled pipeline run starting")
-            run_pipeline(tg, state, mode="full")
+            run_pipeline(notifier, state, mode="full")
         except Exception as e:
             log.exception(f"Scheduled pipeline error: {e}")
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)
 
 
-def _run_update_pass(tg: TelegramClient) -> None:
+def _run_update_pass(tg: TelegramClient, notifier: Notifier) -> None:
     """Zoidberg's canary update pass. Deliberately doesn't touch PipelineState's own
     machinery — it's silent-on-success by design, Telegram only speaks up on rollback,
     so there's no "plan awaiting approval" step for the routine case."""
@@ -828,7 +810,7 @@ def _run_update_pass(tg: TelegramClient) -> None:
         zoidberg.run_update_pass(tg=tg)
     except Exception as e:
         log.exception(f"Zoidberg update pass crashed: {e}")
-        tg.send(f"🛑 *Zoidberg update pass crashed:* `{str(e)[:200]}`")
+        notifier.notify(f"🛑 *Zoidberg update pass crashed:* `{str(e)[:200]}`")
 
 
 def _seconds_until_next_update_window() -> float:
@@ -873,7 +855,7 @@ def _seconds_until_next_digest() -> float:
     return (target - now).total_seconds()
 
 
-def digest_scheduler_loop(tg: TelegramClient) -> None:
+def digest_scheduler_loop(notifier: Notifier) -> None:
     """Background thread — sends a daily backup-status digest every morning at
     DIGEST_HOUR. Pure reporting, no approval gate and no PipelineState interaction: same
     read-only status /backups returns on demand, just delivered proactively so a failed
@@ -885,7 +867,7 @@ def digest_scheduler_loop(tg: TelegramClient) -> None:
         time.sleep(delay)
         try:
             results = stackctl.check_backups()
-            tg.send("*Morning backup report*\n" + _fmt_backups_message(results))
+            notifier.notify("*Morning backup report*\n" + _fmt_backups_message(results))
         except Exception as e:
             log.exception(f"Digest error: {e}")
         time.sleep(60)  # clear the target minute before recomputing next day's delay
@@ -896,14 +878,15 @@ def run_bot() -> None:
     config.ensure_dirs()
     token, chat_id = config.telegram_credentials()
     tg = TelegramClient(token, chat_id)
+    notifier: Notifier = TelegramNotifier(tg)
     state = PipelineState()
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
-    tg.send("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")
+    notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")
 
     # Start background schedulers
     sched = threading.Thread(
-        target=scheduler_loop, args=(tg, state), daemon=True, name="scheduler"
+        target=scheduler_loop, args=(notifier, state), daemon=True, name="scheduler"
     )
     sched.start()
 
@@ -913,7 +896,7 @@ def run_bot() -> None:
     update_sched.start()
 
     digest_sched = threading.Thread(
-        target=digest_scheduler_loop, args=(tg,), daemon=True, name="digest-scheduler"
+        target=digest_scheduler_loop, args=(notifier,), daemon=True, name="digest-scheduler"
     )
     digest_sched.start()
 
@@ -925,14 +908,14 @@ def run_bot() -> None:
             for update in updates:
                 try:
                     if "message" in update:
-                        handle_message(update, tg, state)
+                        handle_message(update, tg, notifier, state)
                     elif "callback_query" in update:
-                        handle_callback(update, tg, state)
+                        handle_callback(update, tg, notifier, state)
                 except Exception as e:
                     log.exception(f"Update handler error: {e}")
         except KeyboardInterrupt:
             log.info("Farnsworth shutting down. Goodbye!")
-            tg.send("🛑 <b>Planet Express going offline.</b>")
+            notifier.notify("🛑 <b>Planet Express going offline.</b>")
             break
         except Exception as e:
             log.exception(f"Poll loop error: {e}")
