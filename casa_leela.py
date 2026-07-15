@@ -419,6 +419,7 @@ def run_full() -> dict:
     snapshot = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "agent": "casa_leela",
+        "mode": "full",
         "containers": check_containers(),
         "stack_completeness": check_stack_completeness(),
         "disk": check_disk(),

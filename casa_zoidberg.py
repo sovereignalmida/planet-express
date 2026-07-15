@@ -31,6 +31,7 @@ import config
 import casa_bender as bender
 import casa_amy as amy
 from telegram_client import TelegramClient
+from state_models import RollbackCandidates, UpdateHistory
 
 log = logging.getLogger("planetexpress.zoidberg")
 
@@ -57,8 +58,8 @@ ROLLBACK_WATCH_SECONDS = 30
 ROLLBACK_CANDIDATE_GRACE_MINUTES = 15
 INTER_SERVICE_DELAY_SECONDS = 20
 
-ROLLBACK_CANDIDATES_FILE = config.STATE_DIR / "rollback_candidates.json"
-UPDATE_HISTORY_FILE = config.STATE_DIR / "update_history.json"
+ROLLBACK_CANDIDATES_FILE = config.ROLLBACK_CANDIDATES_FILE
+UPDATE_HISTORY_FILE = config.UPDATE_HISTORY_FILE
 
 
 def _run(cmd: str, timeout: int = 120) -> tuple[int, str, str]:
@@ -149,7 +150,7 @@ def _load_rollback_candidates() -> dict:
 
 def _save_rollback_candidates(data: dict) -> None:
     config.ensure_dirs()
-    ROLLBACK_CANDIDATES_FILE.write_text(json.dumps(data, indent=2))
+    ROLLBACK_CANDIDATES_FILE.write_text(RollbackCandidates(**data).model_dump_json(indent=2))
 
 
 def _add_rollback_candidate(stack: str, service: str, old_image_id: str) -> None:
@@ -179,14 +180,21 @@ def _clear_rollback_candidate(stack: str, service: str) -> None:
 
 def _log_update_history(entry: dict) -> None:
     config.ensure_dirs()
-    history = []
+    entries = []
     if UPDATE_HISTORY_FILE.exists():
         try:
-            history = json.loads(UPDATE_HISTORY_FILE.read_text())
+            raw = json.loads(UPDATE_HISTORY_FILE.read_text())
+            # Pre-Spec-3 format was a bare top-level list with no envelope. That history
+            # is low-stakes (past canary-update outcomes only, nothing operationally
+            # load-bearing) and isn't migrated -- an old bare list on disk here just
+            # means "nothing to carry forward," not an error.
+            if isinstance(raw, dict):
+                entries = raw.get("entries", [])
         except Exception:
-            history = []
-    history.append(entry)
-    UPDATE_HISTORY_FILE.write_text(json.dumps(history[-200:], indent=2))  # cap growth
+            entries = []
+    entries.append(entry)
+    history = UpdateHistory(entries=entries[-200:])  # cap growth
+    UPDATE_HISTORY_FILE.write_text(history.model_dump_json(indent=2))
 
 
 # ── Canary health check (mirrors Leela's crash-loop signal) ─────────────────────

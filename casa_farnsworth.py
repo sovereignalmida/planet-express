@@ -34,6 +34,7 @@ import casa_amy as amy
 import casa_stackctl as stackctl
 from telegram_client import TelegramClient
 from notifier import Notifier, TelegramNotifier
+from state_models import MonitorSnapshot, PlanSet, RunStatus
 
 log = logging.getLogger("planetexpress.farnsworth")
 
@@ -176,12 +177,13 @@ class PipelineState:
     def _persist(self):
         try:
             config.ensure_dirs()
-            config.STATE_STATUS.write_text(json.dumps({
-                "state": self._state,
-                "pending_plan_id": self._pending_plan_id,
-                "pending_msg_id": self._pending_msg_id,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }, indent=2))
+            status = RunStatus(
+                state=self._state,
+                pending_plan_id=self._pending_plan_id,
+                pending_msg_id=self._pending_msg_id,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            config.STATE_STATUS.write_text(status.model_dump_json(indent=2))
         except Exception as e:
             log.warning(f"State persist failed: {e}")
 
@@ -229,7 +231,7 @@ def save_plans(plans: dict) -> None:
     plans["expires_at"] = (
         datetime.now(timezone.utc) + timedelta(hours=PLAN_EXPIRY_HOURS)
     ).isoformat()
-    config.STATE_PLAN.write_text(json.dumps(plans, indent=2))
+    config.STATE_PLAN.write_text(PlanSet(**plans).model_dump_json(indent=2))
 
 
 def load_pending_plan(plan_id: str) -> dict | None:
@@ -258,7 +260,7 @@ def load_pending_plan(plan_id: str) -> dict | None:
 # construction it only removes images/networks Docker itself considers unused by any
 # container, running or stopped, so nothing currently in service is ever at risk.
 DISK_PRUNE_THRESHOLD_PCT = 80
-ROLLBACK_CANDIDATES_FILE = config.STATE_DIR / "rollback_candidates.json"
+ROLLBACK_CANDIDATES_FILE = config.ROLLBACK_CANDIDATES_FILE
 
 
 def _root_disk_alert(snapshot: dict) -> dict | None:
@@ -383,7 +385,7 @@ def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -
         else:
             snapshot = leela.run_full()
         config.ensure_dirs()
-        config.STATE_MONITOR.write_text(json.dumps(snapshot, indent=2))
+        config.STATE_MONITOR.write_text(MonitorSnapshot(**snapshot).model_dump_json(indent=2))
 
         if mode == "full":
             try:

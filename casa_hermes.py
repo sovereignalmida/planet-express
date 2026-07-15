@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 import config
 import casa_llm as llm
+from state_models import Findings
 
 log = logging.getLogger("planetexpress.hermes")
 
@@ -201,7 +202,7 @@ def load_snapshot(source: str = "state") -> dict:
 
 def save_findings(findings: dict) -> None:
     config.ensure_dirs()
-    config.STATE_FINDINGS.write_text(json.dumps(findings, indent=2))
+    config.STATE_FINDINGS.write_text(Findings(**findings).model_dump_json(indent=2))
     log.info(f"Findings saved to {config.STATE_FINDINGS}")
 
 
