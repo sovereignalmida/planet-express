@@ -20,8 +20,11 @@ import sys
 
 # These directives are written unquoted in the .service.template files (WorkingDirectory=,
 # ExecStart=, Environment=CASA_CONFIG=...) -- systemd word-splits on whitespace there, and
-# none of these characters are otherwise meaningful in a real install path.
-UNSAFE_CHARS = set(" \t\n\"'$`\\")
+# none of these characters are otherwise meaningful in a real install path. '%' is also
+# rejected: systemd treats %-sequences in unit directive values as specifiers (%h, %n,
+# etc.) -- an independent Codex review found a literal '%' in a path could either be
+# rejected as an unknown specifier or silently substituted for something unintended.
+UNSAFE_CHARS = set(" \t\n\"'$`\\%")
 
 
 def render(template_text: str, **values: str) -> str:

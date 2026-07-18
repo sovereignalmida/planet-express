@@ -45,7 +45,7 @@ def test_render_rejects_path_with_space():
         render("$INSTALL_DIR", INSTALL_DIR="/home/me/Planet Express", RUN_USER="", RUN_GROUP="", CONFIG_FILE="")
 
 
-@pytest.mark.parametrize("bad_char", ["\t", "\n", '"', "'", "$", "`", "\\"])
+@pytest.mark.parametrize("bad_char", ["\t", "\n", '"', "'", "$", "`", "\\", "%"])
 def test_render_rejects_other_unsafe_characters(bad_char):
     with pytest.raises(ValueError):
         render("$CONFIG_FILE", INSTALL_DIR="", RUN_USER="", RUN_GROUP="", CONFIG_FILE=f"/etc/pe{bad_char}x.yaml")

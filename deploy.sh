@@ -36,6 +36,17 @@ section() { echo -e "\n${GREEN}══ $* ══${NC}"; }
 # ── Preflight ──────────────────────────────────────────────────────────────────
 section "Preflight checks"
 
+# An independent Codex review caught a real gap here: if this is run as root (directly
+# or via `sudo bash deploy.sh`), RUN_USER becomes "root" and the generated service runs
+# Bender as root -- at which point bare (no-sudo-prefix) commands already have full
+# root access, completely bypassing casa_bender.py's _check_sudo_allowlist(), which
+# only ever inspects segments containing the literal word "sudo". The whole Spec 4
+# security model assumes Bender runs as an unprivileged user that needs sudo for
+# anything privileged; running as root silently voids that assumption.
+[[ "$RUN_USER" != "root" ]] || error "Don't run this as root (or via sudo) -- run it as the " \
+    "unprivileged user Planet Express should run as. It calls sudo itself for the specific " \
+    "privileged steps that need it."
+
 command -v docker > /dev/null              || error "docker not found"
 docker compose version > /dev/null 2>&1    || error "docker compose plugin not found (need 'docker compose', not just 'docker-compose')"
 command -v $PYTHON_BIN > /dev/null         || error "python3 not found"
@@ -91,15 +102,19 @@ if [[ ! -f "$ENV_FILE" ]]; then
             warn "Must be exactly 'openai' or 'anthropic' (config.py rejects anything else at runtime)."
         fi
     done
+    # -s (silent): these are credentials, don't echo them to the terminal/scrollback.
     if [[ "$llm_provider" == "anthropic" ]]; then
-        read -rp "  Enter your ANTHROPIC_API_KEY (or press Enter to set it manually later): " api_key
+        read -rsp "  Enter your ANTHROPIC_API_KEY (or press Enter to set it manually later): " api_key
+        echo ""
         api_key_line="ANTHROPIC_API_KEY=$api_key"
     else
-        read -rp "  Enter your OPENAI_API_KEY (or press Enter to set it manually later): " api_key
+        read -rsp "  Enter your OPENAI_API_KEY (or press Enter to set it manually later): " api_key
+        echo ""
         api_key_line="OPENAI_API_KEY=$api_key"
     fi
 
-    read -rp "  Telegram bot token (from @BotFather, see INSTALL.md): " tg_token
+    read -rsp "  Telegram bot token (from @BotFather, see INSTALL.md): " tg_token
+    echo ""
     read -rp "  Telegram chat id (see INSTALL.md for how to find it): " tg_chat_id
 
     {
@@ -124,17 +139,41 @@ section "Installing systemd units"
 
 render_unit() {
     # $1 = template path, $2 = destination path
-    # Uses scripts/render_template.py (string.Template), not sed -- sed substitution
-    # corrupts values containing '&'/'\'/the delimiter itself, and an independent Codex
-    # review also flagged that unquoted systemd directives would silently break on a
-    # path containing a space. render_template.py rejects both cases with a clear error
-    # instead of producing a unit file that fails to start.
+    # Renders to a local tmp file *before* touching $2 -- an independent Codex review
+    # found that piping straight into `sudo tee "$2"` lets tee truncate the existing
+    # (working) unit file immediately on open, before the renderer has produced any
+    # output; if rendering then fails (e.g. a rejected character), pipefail aborts the
+    # script but the previously-good unit file is already empty. Rendering to a local
+    # file first means a failure here never touches the installed unit at all.
+    local rendered_tmp
+    rendered_tmp="$(mktemp)"
     venv/bin/python scripts/render_template.py "$1" "$INSTALL_DIR" "$RUN_USER" "$RUN_GROUP" "$CASA_CONFIG" \
-        | sudo tee "$2" > /dev/null
+        > "$rendered_tmp"
+    sudo install -m 644 "$rendered_tmp" "$2"
+    rm -f "$rendered_tmp"
 }
 
 render_unit "$INSTALL_DIR/systemd/casa-planetexpress.service.template" "$SERVICE_FILE"
-render_unit "$INSTALL_DIR/systemd/casa-stacks.service.template" "$STACKS_SERVICE_FILE"
+
+# casa-stacks.service is handled separately: an independent Codex review found that
+# unconditionally overwriting it on a redeploy silently destroys any custom
+# Requires=/After= mount-readiness gate an operator added (see
+# systemd/examples/casa-mounts.service.example) -- stacks would then start at the next
+# boot before NAS/network mounts are ready, potentially writing to local fallback
+# paths instead of the real mount. Ask before clobbering an existing one.
+if [[ -f "$STACKS_SERVICE_FILE" ]]; then
+    warn "$STACKS_SERVICE_FILE already exists. If you (or a previous install) added a custom"
+    warn "mount-readiness gate (Requires=/After=) to it, overwriting will silently remove that."
+    read -rp "  Overwrite it with the generic template? [y/N]: " overwrite_stacks
+    if [[ "${overwrite_stacks,,}" == "y" ]]; then
+        render_unit "$INSTALL_DIR/systemd/casa-stacks.service.template" "$STACKS_SERVICE_FILE"
+    else
+        info "Left $STACKS_SERVICE_FILE untouched."
+    fi
+else
+    render_unit "$INSTALL_DIR/systemd/casa-stacks.service.template" "$STACKS_SERVICE_FILE"
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable casa-stacks > /dev/null
 info "Systemd units installed and casa-stacks enabled for boot (casa-planetexpress, casa-stacks)"
