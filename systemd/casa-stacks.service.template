@@ -4,8 +4,17 @@ Description=Planet Express stack startup — bring up all active docker compose 
 # before `docker compose up` runs, add your own mount-readiness unit and gate this
 # one on it here (Requires=/After=) — see systemd/examples/casa-mounts.service.example
 # for the pattern this project's own reference deployment uses.
+#
+# network-online.target: an independent Codex review caught that this generic
+# template dropped network readiness entirely -- the reference deployment's own
+# casa-mounts.service (see the example above) happened to provide it transitively via
+# its own After=/Wants=network-online.target, but a fresh install with no custom mount
+# gate would have docker.service alone as the only ordering constraint, so `docker
+# compose up` could run before the network is actually online and fail pulling images
+# on a stack that needs one, with no retry (Type=oneshot, one shot only).
 Requires=docker.service
-After=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
