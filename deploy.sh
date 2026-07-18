@@ -50,6 +50,8 @@ section "Preflight checks"
 command -v docker > /dev/null              || error "docker not found"
 docker compose version > /dev/null 2>&1    || error "docker compose plugin not found (need 'docker compose', not just 'docker-compose')"
 command -v $PYTHON_BIN > /dev/null         || error "python3 not found"
+$PYTHON_BIN -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
+    || error "python3 is $($PYTHON_BIN --version 2>&1), need 3.11+ (repo code uses newer syntax that older Python can't even parse)"
 
 info "Preflight OK"
 
