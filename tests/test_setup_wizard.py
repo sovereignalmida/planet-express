@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from setup_wizard import (
     build_config, generate_sudoers_snippet, _path_completer, _prompt_list,
-    _prompt_actions, _prompt_unit_name,
+    _prompt_actions, _prompt_unit_name, _collect_mounts,
 )
 from config_schema import SudoAllowlist, SudoGlobGrant, SudoUnitGrant
 
@@ -215,3 +215,20 @@ def test_sudoers_snippet_with_colon_passes_visudo(tmp_path):
     snippet_file.write_text(snippet)
     result = subprocess.run(["visudo", "-c", "-f", str(snippet_file)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_collect_mounts_expands_tilde_and_rejects_relative(monkeypatch):
+    # A real gap: a mount path typed as "~/nas" was stored literally in config.yaml.
+    # casa_leela.py's mount check calls os.listdir() directly on that string, and
+    # unlike a shell, os.listdir() never expands '~' -- a real, working mount would be
+    # reported unreachable. Also verifies a genuinely relative path (no '~' involved)
+    # is rejected and re-prompted rather than silently stored.
+    import os
+    import setup_wizard
+    monkeypatch.setattr(setup_wizard, "_discover_mount_units", lambda: ["data.mount"])
+    monkeypatch.setattr(setup_wizard, "_mount_where", lambda unit: "")
+    responses = iter(["data.mount", "relative/path", "~/nas"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    mounts = _collect_mounts()
+    assert mounts == {"data.mount": os.path.expanduser("~/nas")}
+    assert os.path.isabs(mounts["data.mount"])

@@ -89,8 +89,19 @@ info "Python environment ready"
 # ── Topology configuration (config.yaml + sudoers.d) ───────────────────────────
 section "Configuration wizard"
 
-read -rp "  Path for config.yaml [/etc/planetexpress/config.yaml]: " config_path
-export CASA_CONFIG="${config_path:-/etc/planetexpress/config.yaml}"
+# An independent Codex review found that bash only expands a literal '~' at specific
+# syntax positions parsed from the script itself -- never on the *value* of a variable
+# read at runtime, so a user typing "~/planetexpress/config.yaml" here would get a
+# literal '~' in CASA_CONFIG, silently creating a "~" directory under the repo (the
+# wizard's mkdir -p would run relative to $INSTALL_DIR) instead of expanding to $HOME.
+while true; do
+    read -rp "  Path for config.yaml [/etc/planetexpress/config.yaml]: " config_path
+    config_path="${config_path/#\~/$HOME}"
+    config_path="${config_path:-/etc/planetexpress/config.yaml}"
+    [[ "$config_path" == /* ]] && break
+    warn "Must be an absolute path (or blank for the default)."
+done
+export CASA_CONFIG="$config_path"
 
 if [[ -f "$CASA_CONFIG" ]]; then
     info "Config already exists at $CASA_CONFIG — skipping wizard. Delete it first if you want to reconfigure."

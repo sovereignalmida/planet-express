@@ -261,7 +261,20 @@ def _collect_mounts() -> dict:
     mounts = {}
     for unit in picks:
         guess = _mount_where(unit) if unit in discovered else ""
-        path = _prompt(f"  Path for {unit}", guess)
+        while True:
+            path = _prompt(f"  Path for {unit}", guess)
+            if not path:
+                break
+            # An independent Codex review found this stored '~/...' input literally:
+            # casa_leela.py's mount check calls os.listdir() directly on this string,
+            # and unlike a shell, os.listdir() never expands '~' -- a real, working
+            # mount typed as "~/nas" would be reported unreachable (false positive).
+            expanded = os.path.expanduser(path)
+            if not os.path.isabs(expanded):
+                print(f"  '{path}' isn't an absolute path (after expanding '~'). Try again.")
+                continue
+            path = expanded
+            break
         if path:
             mounts[unit] = path
     return mounts
