@@ -21,6 +21,7 @@ import os
 import pwd
 import re
 import readline
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,13 @@ def _path_completer(text: str, state: int):
 
 DEFAULT_CONFIG_TARGET = "/etc/planetexpress/config.yaml"
 DEFAULT_SUDOERS_TARGET = "/etc/sudoers.d/planetexpress"
+# shutil.which() rather than a bare "visudo" argv[0]: an independent Codex review found
+# that on hosts where an unprivileged login PATH excludes /usr/sbin (common on some
+# distros for non-login/minimal shells), subprocess.run(["visudo", ...]) raises
+# FileNotFoundError -- after config.yaml has already been written, aborting an
+# otherwise-supported install. Falls back to the FHS-standard location if not found on
+# PATH at all (still fails loudly there, just with a clearer "visudo not found").
+VISUDO_BIN = shutil.which("visudo") or "/usr/sbin/visudo"
 
 
 def build_config(answers: dict) -> PlanetExpressConfig:
@@ -57,6 +65,16 @@ def build_config(answers: dict) -> PlanetExpressConfig:
     by construction — there is no separate hand-rolled validation path to drift out of
     sync with the real schema."""
     return PlanetExpressConfig(**answers)
+
+
+def _sudoers_escape(text: str) -> str:
+    """Escape sudoers command-argument metacharacters (',', ':', '=', '\\') per
+    sudoers(5). An independent Codex review found that a systemd unit name containing
+    ':' -- valid per _UNIT_NAME_RE and real systemd unit-name syntax (template/instance
+    units), just not previously handled here -- broke the generated file: sudoers
+    itself treats an unescaped colon as a delimiter, so visudo would reject it *after*
+    config.yaml had already been written, leaving a partial install."""
+    return re.sub(r"([,:=\\])", r"\\\1", text)
 
 
 def generate_sudoers_snippet(
@@ -82,12 +100,14 @@ def generate_sudoers_snippet(
     Empty allowlist (or a glob matching nothing discovered) -> empty string."""
     lines = []
     for grant in allowlist.units:
-        cmds = ", ".join(f"/usr/bin/systemctl {action} {grant.unit}" for action in grant.actions)
+        unit = _sudoers_escape(grant.unit)
+        cmds = ", ".join(f"/usr/bin/systemctl {action} {unit}" for action in grant.actions)
         lines.append(f"{run_user} ALL=(root) NOPASSWD: {cmds}")
     for grant in allowlist.globs:
         matched = sorted(u for u in discovered_units if fnmatch.fnmatch(u, grant.glob))
         for unit in matched:
-            cmds = ", ".join(f"/usr/bin/systemctl {action} {unit}" for action in grant.actions)
+            escaped_unit = _sudoers_escape(unit)
+            cmds = ", ".join(f"/usr/bin/systemctl {action} {escaped_unit}" for action in grant.actions)
             lines.append(f"{run_user} ALL=(root) NOPASSWD: {cmds}  # matched glob '{grant.glob}'")
     if not lines:
         return ""
@@ -341,7 +361,7 @@ def main() -> None:
             tmp_sudoers = Path(tmp_sudoers_name)
             with os.fdopen(sudo_fd, "w") as f:
                 f.write(snippet)
-            check = subprocess.run(["visudo", "-c", "-f", str(tmp_sudoers)], capture_output=True, text=True)
+            check = subprocess.run([VISUDO_BIN, "-c", "-f", str(tmp_sudoers)], capture_output=True, text=True)
             if check.returncode != 0:
                 print(f"visudo rejected the generated snippet, not installing:\n{check.stderr}")
                 tmp_sudoers.unlink()

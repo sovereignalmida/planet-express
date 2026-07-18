@@ -194,3 +194,24 @@ def test_prompt_actions_rejects_empty_and_reprompts(monkeypatch):
     responses = iter([",", ",,", "start,stop"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
     assert _prompt_actions("Actions", ["start"]) == ["start", "stop"]
+
+
+def test_sudoers_snippet_escapes_colon_in_unit_name():
+    # A real gap: ':' is valid per _UNIT_NAME_RE and real systemd unit-name syntax
+    # (template/instance units), but sudoers(5) treats an unescaped ':' as a command
+    # delimiter -- an independent Codex review found this broke the generated file
+    # (visudo would reject it) *after* config.yaml had already been written.
+    allowlist = SudoAllowlist(units=[SudoUnitGrant(unit="getty@:1.service", actions=["start"])])
+    snippet = generate_sudoers_snippet("casaroot", allowlist)
+    assert "getty@\\:1.service" in snippet
+    assert "getty@:1.service" not in _rule_portions(snippet)[0]  # unescaped form absent
+
+
+def test_sudoers_snippet_with_colon_passes_visudo(tmp_path):
+    import subprocess
+    allowlist = SudoAllowlist(units=[SudoUnitGrant(unit="getty@:1.service", actions=["start", "stop"])])
+    snippet = generate_sudoers_snippet("casaroot", allowlist)
+    snippet_file = tmp_path / "sudoers-snippet"
+    snippet_file.write_text(snippet)
+    result = subprocess.run(["visudo", "-c", "-f", str(snippet_file)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
