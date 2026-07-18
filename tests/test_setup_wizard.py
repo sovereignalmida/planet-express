@@ -63,17 +63,58 @@ def test_sudoers_snippet_empty_allowlist():
     assert generate_sudoers_snippet("casaroot", SudoAllowlist()) == ""
 
 
-def test_sudoers_snippet_matches_declared_grants():
+def test_sudoers_snippet_unit_grant():
     allowlist = SudoAllowlist(
         units=[SudoUnitGrant(unit="casa-startup.service", actions=["start", "stop", "restart"])],
-        globs=[SudoGlobGrant(glob="*.mount", actions=["start", "stop"])],
     )
     snippet = generate_sudoers_snippet("casaroot", allowlist)
     assert "casaroot ALL=(root) NOPASSWD: /usr/bin/systemctl start casa-startup.service, " \
         "/usr/bin/systemctl stop casa-startup.service, /usr/bin/systemctl restart casa-startup.service" \
         in snippet
-    assert "casaroot ALL=(root) NOPASSWD: /usr/bin/systemctl start *.mount, " \
-        "/usr/bin/systemctl stop *.mount" in snippet
+
+
+def _rule_portions(snippet: str) -> list[str]:
+    """The sudoers-meaningful part of each rule line, with the (inert, comment-only)
+    trailing '# matched glob ...' annotation stripped off."""
+    return [
+        line.split("  #", 1)[0]
+        for line in snippet.splitlines()
+        if line.startswith("casaroot ")
+    ]
+
+
+def test_sudoers_snippet_expands_glob_to_discovered_exact_units():
+    allowlist = SudoAllowlist(globs=[SudoGlobGrant(glob="*.mount", actions=["start", "stop"])])
+    snippet = generate_sudoers_snippet(
+        "casaroot", allowlist, discovered_units=["data.mount", "backup.mount", "not-a-mount.service"]
+    )
+    assert "casaroot ALL=(root) NOPASSWD: /usr/bin/systemctl start data.mount, " \
+        "/usr/bin/systemctl stop data.mount" in snippet
+    assert "casaroot ALL=(root) NOPASSWD: /usr/bin/systemctl start backup.mount, " \
+        "/usr/bin/systemctl stop backup.mount" in snippet
+    assert "not-a-mount.service" not in snippet
+    # No raw wildcard ever reaches a sudoers-meaningful rule (the actual command list
+    # sudo matches against) -- only an inert trailing comment may mention the glob text.
+    assert all("*" not in rule for rule in _rule_portions(snippet))
+
+
+def test_sudoers_snippet_glob_matching_nothing_produces_no_rule():
+    allowlist = SudoAllowlist(globs=[SudoGlobGrant(glob="*.mount", actions=["start", "stop"])])
+    assert generate_sudoers_snippet("casaroot", allowlist, discovered_units=[]) == ""
+    assert generate_sudoers_snippet("casaroot", allowlist, discovered_units=["other.service"]) == ""
+
+
+def test_sudoers_snippet_never_contains_a_bare_wildcard_rule():
+    # Regression test for a real bypass an independent Codex review found: sudoers
+    # matches '*' via fnmatch() against the *entire* remaining command-line string,
+    # crossing whitespace -- a literal "/usr/bin/systemctl stop *.mount" rule would
+    # also match "systemctl stop ssh.service data.mount", since the tail still
+    # satisfies "*.mount". Glob grants must always be expanded to exact unit names,
+    # never written as a literal wildcard into the sudoers file.
+    allowlist = SudoAllowlist(globs=[SudoGlobGrant(glob="*.mount", actions=["stop"])])
+    snippet = generate_sudoers_snippet("casaroot", allowlist, discovered_units=["data.mount"])
+    assert all("*" not in rule for rule in _rule_portions(snippet))
+    assert "stop data.mount" in snippet
 
 
 # ── Regression tests for bugs found during this spec's own live verification: an

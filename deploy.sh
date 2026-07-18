@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # deploy.sh — Planet Express deployment script
 #
+#   git clone https://github.com/sovereignalmida/planet-express.git
 #   cd planet-express
 #   bash deploy.sh
 #
-# Or push from another machine and run remotely:
-#   ssh youruser@yourhost 'bash -s' < deploy.sh
+# Must be run from inside the cloned repo (it resolves its own install path from its
+# location on disk) -- piping this script over stdin (e.g. `ssh host 'bash -s' <
+# deploy.sh`) won't work, since a piped script has no real path to resolve. SSH in and
+# clone it there instead.
 #
 # See INSTALL.md for the full walkthrough (prerequisites, what each step does, how to
 # get a Telegram bot token/chat id).
@@ -14,6 +17,7 @@ set -euo pipefail
 
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_USER="$(whoami)"
+RUN_GROUP="$(id -gn "$RUN_USER")"
 ENV_FILE="/etc/planetexpress.env"
 SERVICE_FILE="/etc/systemd/system/casa-planetexpress.service"
 STACKS_SERVICE_FILE="/etc/systemd/system/casa-stacks.service"
@@ -79,8 +83,14 @@ if [[ ! -f "$ENV_FILE" ]]; then
     warn "Environment file not found at $ENV_FILE"
     echo ""
 
-    read -rp "  LLM provider, 'openai' or 'anthropic' [openai]: " llm_provider
-    llm_provider="${llm_provider:-openai}"
+    llm_provider=""
+    while [[ "$llm_provider" != "openai" && "$llm_provider" != "anthropic" ]]; do
+        read -rp "  LLM provider, 'openai' or 'anthropic' [openai]: " llm_provider
+        llm_provider="${llm_provider:-openai}"
+        if [[ "$llm_provider" != "openai" && "$llm_provider" != "anthropic" ]]; then
+            warn "Must be exactly 'openai' or 'anthropic' (config.py rejects anything else at runtime)."
+        fi
+    done
     if [[ "$llm_provider" == "anthropic" ]]; then
         read -rp "  Enter your ANTHROPIC_API_KEY (or press Enter to set it manually later): " api_key
         api_key_line="ANTHROPIC_API_KEY=$api_key"
@@ -117,6 +127,7 @@ render_unit() {
     sed \
         -e "s|\$INSTALL_DIR|$INSTALL_DIR|g" \
         -e "s|\$RUN_USER|$RUN_USER|g" \
+        -e "s|\$RUN_GROUP|$RUN_GROUP|g" \
         -e "s|\$CONFIG_FILE|$CASA_CONFIG|g" \
         "$1" | sudo tee "$2" > /dev/null
 }
@@ -124,7 +135,8 @@ render_unit() {
 render_unit "$INSTALL_DIR/systemd/casa-planetexpress.service.template" "$SERVICE_FILE"
 render_unit "$INSTALL_DIR/systemd/casa-stacks.service.template" "$STACKS_SERVICE_FILE"
 sudo systemctl daemon-reload
-info "Systemd units installed (casa-planetexpress, casa-stacks)"
+sudo systemctl enable casa-stacks > /dev/null
+info "Systemd units installed and casa-stacks enabled for boot (casa-planetexpress, casa-stacks)"
 info "casa-stacks.service brings up your compose stacks at boot; casa-planetexpress.service"
 info "is the always-on agent. If your stacks need network mounts ready first, see"
 info "systemd/examples/casa-mounts.service.example."

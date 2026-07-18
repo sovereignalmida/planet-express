@@ -11,7 +11,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=$RUN_USER
-Group=$RUN_USER
+Group=$RUN_GROUP
 WorkingDirectory=$INSTALL_DIR
 
 # Load secrets (Telegram bot token, LLM API key) from a separate file
