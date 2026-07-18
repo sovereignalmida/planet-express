@@ -72,5 +72,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as before; every bypass variant found, plus the exact historical near-miss command
   (`sudo mount -a`, once actually proposed by a real Farnsworth plan), is rejected with a clear
   `SafetyError` before `subprocess.run` is ever called.
+- **Spec 5: setup wizard, install docs, sudoers.d generation.** `scripts/setup_wizard.py` is an
+  interactive topology wizard built directly on `PlanetExpressConfig` (split out into a new
+  `config_schema.py` so it can be imported before a config file exists) — stacks/forbidden
+  stacks/paused containers/mounts/sudo scope, with Tab-completion on path prompts. It also
+  generates and installs the matching `/etc/sudoers.d/planetexpress` grant from the same
+  `sudo_allowlist` data, single source of truth with what `casa_bender.py` enforces in code.
+  `deploy.sh` is generalized off this host (dynamic `INSTALL_DIR`/`RUN_USER`, no more hardcoded
+  `casaroot`), drops the dead `CONTEXT_FILE` reference, gains real preflight checks (Docker daemon
+  reachability, `docker compose` plugin, Python 3.11+), and now actually prompts for
+  `LLM_PROVIDER`/API key/Telegram bot token+chat id (previously only `ANTHROPIC_API_KEY` was ever
+  asked for, despite `TG_BOT_TOKEN`/`TG_CHAT_ID` being required for the bot to start at all).
+  Systemd units become `$INSTALL_DIR`/`$RUN_USER`/`$RUN_GROUP`/`$CONFIG_FILE` templates rendered by
+  a new `scripts/render_template.py`, rather than hardcoded to one host. New `INSTALL.md` walks a
+  from-scratch install end to end. `config.py`'s `STATE_DIR`/`LOG_DIR` defaults drop their last
+  hardcoded absolute path.
+
+  This is the spec that most stress-tested the standing Codex-review gate: **9 review rounds, each
+  finding real, previously-unfound issues**, not diminishing returns on a clean diff. Roughly in
+  order of severity: (1) a sudoers wildcard bypass — a `*.mount`-style glob grant was written into
+  sudoers as a literal wildcard, but sudoers matches `*` via `fnmatch()` against the *entire*
+  remaining command-line string, crossing whitespace, so the rule also matched
+  `systemctl stop ssh.service data.mount` — fixed by expanding globs to exact discovered unit names
+  at generation time, never a raw wildcard; (2) the unit-name prompt in the sudo-allowlist flow had
+  *zero* input validation, so a value like `"foo.service, /bin/bash"` (comma starts a second Cmnd in
+  sudoers syntax) flowed straight into a NOPASSWD rule — fixed by validating against the same
+  character class `casa_bender.py`'s own regex enforces; (3) running `deploy.sh` as root (or via
+  `sudo bash deploy.sh`) would make the generated service run Bender as root, at which point bare
+  commands already have full root access, completely bypassing Spec 4's entire sudo-allowlist model
+  (which only ever inspects segments containing the literal word `sudo`) — now a hard preflight
+  error; (4) a predictable-`/tmp`-path TOCTOU race on the generated sudoers/config candidate files —
+  fixed with `tempfile.mkstemp`; (5) redeploying unconditionally overwrote `casa-stacks.service`,
+  silently destroying a custom mount-readiness gate (`Requires=`/`After=`) an operator had added —
+  now asks before overwriting; (6) `sed`-based template rendering corrupted values containing
+  `&`/`\`/the delimiter, and separately could silently produce a broken (unquoted) unit file on a
+  path containing a space — replaced with `scripts/render_template.py` (`string.Template`, no
+  metacharacter risk), which also validates against space/quote/backslash/dollar/backtick/`%`
+  up front; (7) a systemd unit name containing `:` (valid syntax, e.g. template/instance units) broke
+  the generated sudoers file, since sudoers treats an unescaped `:` as a delimiter — fixed with a
+  `_sudoers_escape()` helper, verified with a real `visudo -c` round-trip in the test suite; (8) two
+  separate `~` (tilde) expansion bugs — bash never expands a literal `~` typed into a variable read
+  at runtime, and `os.listdir()` never expands it either, so a config path or mount path typed with
+  a leading `~` was silently stored/used wrong; (9) `deploy.sh` skipped the wizard *entirely* when
+  `config.yaml` already existed (e.g. an upgrade), which also skipped the only code path that
+  reconciles `/etc/sudoers.d/planetexpress` with `sudo_allowlist` — split into a
+  `reconcile_sudoers()` that now always runs regardless of whether the config was just collected or
+  reused. Also fixed along the way: a missing `network-online.target` dependency on
+  `casa-stacks.service.template` (a real regression from generalizing away the reference
+  deployment's host-specific mount-readiness unit, which had provided that transitively), a
+  `getpass.getuser()`/`whoami` mismatch that could generate a sudoers grant for the wrong account, an
+  unvalidated `LLM_PROVIDER` value that would pass install but fail every LLM call at runtime, an
+  unresolved `visudo` `PATH` lookup, credentials echoed to the terminal during setup, and an empty
+  actions list silently accepted mid-wizard. Two real usability bugs (not security issues) were also
+  found via this session's own live dogfooding on a real terminal, before Codex was ever involved: an
+  unregistered Tab key silently leaking a literal tab character into a path prompt, and typing
+  "none" instead of pressing Enter producing garbage config entries — both fixed with readline path
+  completion and blank-sentinel handling. **How to apply:** for an installer/wizard spec
+  specifically — which touches far more real-world variation (paths, usernames, PATH environments,
+  re-run/upgrade states) than a single pipeline's own code — budget for several review rounds as the
+  default expectation, not the exception; this spec's fixes came in nine passes, each surfacing a
+  genuinely distinct issue, not the same one restated.
 
 ---
