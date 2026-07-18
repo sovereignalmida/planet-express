@@ -8,17 +8,28 @@ one place.
 import os
 from pathlib import Path
 
-from typing import Literal
-
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import ValidationError
 
-# ── Directory paths (override via env vars for testing) ──────────────────────
+from config_schema import (
+    ExcludedService,
+    PlanetExpressConfig,
+    SudoAllowlist,
+    SudoGlobGrant,
+    SudoUnitGrant,
+)
+
+# ── Directory paths (override via env vars for testing, or per-install via the
+# systemd unit's CASA_STATE_DIR/CASA_LOG_DIR) ─────────────────────────────────
+# Defaults are repo-relative, not a hardcoded absolute path to one host's home
+# directory — every real install (including this one) sets these explicitly via
+# its systemd unit, so this default only matters as a fallback for someone
+# running a script by hand without the env override.
 STATE_DIR = Path(os.environ.get(
-    "CASA_STATE_DIR", "/home/casaroot/apps/sysadmin-agent/state"
+    "CASA_STATE_DIR", str(Path(__file__).parent / "state")
 ))
 LOG_DIR = Path(os.environ.get(
-    "CASA_LOG_DIR", "/home/casaroot/apps/sysadmin-agent/logs"
+    "CASA_LOG_DIR", str(Path(__file__).parent / "logs")
 ))
 
 # State file names
@@ -39,57 +50,6 @@ UPDATE_HISTORY_FILE      = STATE_DIR / "update_history.json"
 # up monitored in one place but not another (this already happened once — EXCLUDE_SERVICES
 # used to live only in casa_zoidberg.py, see CHANGELOG).
 CONFIG_FILE = Path(os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml"))
-
-
-class ExcludedService(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    stack: str
-    service: str
-
-
-class SudoUnitGrant(BaseModel):
-    """Permission for a specific systemd unit name (e.g. 'casa-startup.service')."""
-    model_config = ConfigDict(extra="forbid")
-    unit: str
-    actions: list[Literal["start", "stop", "restart"]] = ["start", "stop", "restart"]
-
-
-class SudoGlobGrant(BaseModel):
-    """Permission for a glob pattern of unit names (e.g. '*.mount')."""
-    model_config = ConfigDict(extra="forbid")
-    glob: str
-    actions: list[Literal["start", "stop", "restart"]] = ["start", "stop"]
-
-
-class SudoAllowlist(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    units: list[SudoUnitGrant] = []
-    globs: list[SudoGlobGrant] = []
-
-
-class PlanetExpressConfig(BaseModel):
-    # extra="forbid": a misspelled key (e.g. "forbidden_stack") must be a hard error, not
-    # silently ignored — pydantic's default would otherwise drop it and fall back to the
-    # field's default (an empty list, for forbidden_stacks), silently disabling a safety
-    # list the operator thought they'd set.
-    model_config = ConfigDict(extra="forbid")
-
-    stacks_root: Path
-    forbidden_stacks: list[str] = []
-    paused_containers: list[str] = []
-    mounts: dict[str, str] = {}
-    exclude_services: list[ExcludedService] = []
-    # Empty by default -- a fresh install grants zero sudo actions until the operator
-    # explicitly declares them here. Enforced in casa_bender.py's _safety_check(),
-    # independent of whatever a plan's LLM-generated commands claim to need.
-    sudo_allowlist: SudoAllowlist = SudoAllowlist()
-
-    @field_validator("stacks_root")
-    @classmethod
-    def _stacks_root_must_be_absolute(cls, v: Path) -> Path:
-        if not v.is_absolute():
-            raise ValueError(f"stacks_root must be an absolute path, got {v!r}")
-        return v
 
 
 def _load_config() -> PlanetExpressConfig:

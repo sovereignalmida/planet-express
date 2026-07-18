@@ -1,5 +1,5 @@
 [Unit]
-Description=Planet Express — CasaMediaServer Sysadmin Agent (Farnsworth)
+Description=Planet Express — Docker Compose Homelab Sysadmin Agent (Farnsworth)
 Documentation=https://github.com/sovereignalmida/planet-express
 After=network-online.target docker.service
 Wants=network-online.target
@@ -10,20 +10,19 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=casaroot
-Group=casaroot
-WorkingDirectory=/home/casaroot/apps/planetexpress
+User=$RUN_USER
+Group=$RUN_USER
+WorkingDirectory=$INSTALL_DIR
 
-# Load ANTHROPIC_API_KEY from a separate secrets file (create this manually)
-# File should contain: ANTHROPIC_API_KEY=sk-ant-...
+# Load secrets (Telegram bot token, LLM API key) from a separate file
 EnvironmentFile=/etc/planetexpress.env
 
-Environment=CASA_CONFIG=/home/casaroot/apps/planetexpress/config.yaml
-Environment=CASA_STATE_DIR=/home/casaroot/apps/planetexpress/state
-Environment=CASA_LOG_DIR=/home/casaroot/apps/planetexpress/logs
+Environment=CASA_CONFIG=$CONFIG_FILE
+Environment=CASA_STATE_DIR=$INSTALL_DIR/state
+Environment=CASA_LOG_DIR=$INSTALL_DIR/logs
 Environment=PYTHONUNBUFFERED=1
 
-ExecStart=/home/casaroot/apps/planetexpress/venv/bin/python casa_farnsworth.py
+ExecStart=$INSTALL_DIR/venv/bin/python casa_farnsworth.py
 
 # Restart on failure with backoff
 Restart=on-failure

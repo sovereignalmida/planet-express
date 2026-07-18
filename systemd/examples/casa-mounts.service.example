@@ -1,0 +1,26 @@
+# Example: mount-readiness gate before stack bring-up.
+#
+# This is the reference deployment's own unit, kept here as an illustrative pattern —
+# it is NOT rendered or installed by deploy.sh/setup_wizard.py, and won't work as-is on
+# another host: mounts_ready.sh is a NAS-specific script (pings an Unraid box, mounts
+# SMB shares, verifies them) that isn't part of this repo and has no generic equivalent.
+#
+# If your own stacks depend on network mounts being ready before `docker compose up`
+# runs, write your own readiness script/unit along these lines, then add
+# `Requires=casa-mounts.service` / `After=casa-mounts.service` to your
+# casa-stacks.service (see systemd/casa-stacks.service.template).
+
+[Unit]
+Description=Casa NAS mount readiness — ping Unraid, mount SMB shares, verify
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=casaroot
+ExecStart=/home/casaroot/apps/mounts_ready.sh
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 # deploy.sh — Planet Express deployment script
-# Run this ON CasaMediaServer as casaroot:
 #
-#   cd /home/casaroot/apps/planetexpress
+#   cd planet-express
 #   bash deploy.sh
 #
-# Or push from your Mac and run remotely:
-#   ssh casaroot@192.168.1.94 'bash -s' < deploy.sh
+# Or push from another machine and run remotely:
+#   ssh youruser@yourhost 'bash -s' < deploy.sh
+#
+# See INSTALL.md for the full walkthrough (prerequisites, what each step does, how to
+# get a Telegram bot token/chat id).
 
 set -euo pipefail
 
-INSTALL_DIR="/home/casaroot/apps/planetexpress"
-CONTEXT_FILE="/home/casaroot/casa-sysadmin-context.yaml"
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_USER="$(whoami)"
 ENV_FILE="/etc/planetexpress.env"
 SERVICE_FILE="/etc/systemd/system/casa-planetexpress.service"
+STACKS_SERVICE_FILE="/etc/systemd/system/casa-stacks.service"
 PYTHON_BIN="python3"
 
 GREEN='\033[0;32m'
@@ -29,12 +32,9 @@ section() { echo -e "\n${GREEN}══ $* ══${NC}"; }
 # ── Preflight ──────────────────────────────────────────────────────────────────
 section "Preflight checks"
 
-[[ "$(whoami)" == "casaroot" ]] || error "Run as casaroot"
-[[ -d "$INSTALL_DIR" ]]         || error "Install directory not found: $INSTALL_DIR. Copy files here first."
-[[ -f "$CONTEXT_FILE" ]]        || warn "Context file not found at $CONTEXT_FILE — create it before starting the service"
-
-command -v docker > /dev/null   || error "docker not found"
-command -v $PYTHON_BIN > /dev/null || error "python3 not found"
+command -v docker > /dev/null              || error "docker not found"
+docker compose version > /dev/null 2>&1    || error "docker compose plugin not found (need 'docker compose', not just 'docker-compose')"
+command -v $PYTHON_BIN > /dev/null         || error "python3 not found"
 
 info "Preflight OK"
 
@@ -60,38 +60,80 @@ venv/bin/pip install --quiet --upgrade pip
 venv/bin/pip install --quiet -r requirements.txt
 info "Python environment ready"
 
-# ── API key setup ──────────────────────────────────────────────────────────────
-section "API key setup"
+# ── Topology configuration (config.yaml + sudoers.d) ───────────────────────────
+section "Configuration wizard"
+
+read -rp "  Path for config.yaml [/etc/planetexpress/config.yaml]: " config_path
+export CASA_CONFIG="${config_path:-/etc/planetexpress/config.yaml}"
+
+if [[ -f "$CASA_CONFIG" ]]; then
+    info "Config already exists at $CASA_CONFIG — skipping wizard. Delete it first if you want to reconfigure."
+else
+    venv/bin/python scripts/setup_wizard.py
+fi
+
+# ── Secrets (LLM provider/key + Telegram bot) ───────────────────────────────────
+section "Secrets setup"
 
 if [[ ! -f "$ENV_FILE" ]]; then
     warn "Environment file not found at $ENV_FILE"
     echo ""
-    read -rp "  Enter your ANTHROPIC_API_KEY (or press Enter to skip and set it manually): " api_key
-    if [[ -n "$api_key" ]]; then
-        echo "ANTHROPIC_API_KEY=$api_key" | sudo tee "$ENV_FILE" > /dev/null
-        sudo chmod 600 "$ENV_FILE"
-        info "API key saved to $ENV_FILE"
+
+    read -rp "  LLM provider, 'openai' or 'anthropic' [openai]: " llm_provider
+    llm_provider="${llm_provider:-openai}"
+    if [[ "$llm_provider" == "anthropic" ]]; then
+        read -rp "  Enter your ANTHROPIC_API_KEY (or press Enter to set it manually later): " api_key
+        api_key_line="ANTHROPIC_API_KEY=$api_key"
     else
-        warn "Skipped. Create $ENV_FILE manually before starting the service:"
-        warn "  echo 'ANTHROPIC_API_KEY=sk-ant-...' | sudo tee $ENV_FILE"
-        warn "  sudo chmod 600 $ENV_FILE"
+        read -rp "  Enter your OPENAI_API_KEY (or press Enter to set it manually later): " api_key
+        api_key_line="OPENAI_API_KEY=$api_key"
+    fi
+
+    read -rp "  Telegram bot token (from @BotFather, see INSTALL.md): " tg_token
+    read -rp "  Telegram chat id (see INSTALL.md for how to find it): " tg_chat_id
+
+    {
+        echo "LLM_PROVIDER=$llm_provider"
+        [[ -n "$api_key" ]] && echo "$api_key_line"
+        [[ -n "$tg_token" ]] && echo "TG_BOT_TOKEN=$tg_token"
+        [[ -n "$tg_chat_id" ]] && echo "TG_CHAT_ID=$tg_chat_id"
+    } | sudo tee "$ENV_FILE" > /dev/null
+    sudo chmod 600 "$ENV_FILE"
+    info "Secrets saved to $ENV_FILE"
+
+    if [[ -z "$api_key" || -z "$tg_token" || -z "$tg_chat_id" ]]; then
+        warn "One or more values were left blank. Planet Express will fail to start until"
+        warn "all of LLM_PROVIDER, ${api_key_line%%=*}, TG_BOT_TOKEN, TG_CHAT_ID are set in $ENV_FILE."
     fi
 else
     info "Environment file already exists at $ENV_FILE"
 fi
 
-# ── Systemd service ────────────────────────────────────────────────────────────
-section "Installing systemd service"
+# ── Systemd units ────────────────────────────────────────────────────────────────
+section "Installing systemd units"
 
-sudo cp "$INSTALL_DIR/systemd/casa-planetexpress.service" "$SERVICE_FILE"
+render_unit() {
+    # $1 = template path, $2 = destination path
+    sed \
+        -e "s|\$INSTALL_DIR|$INSTALL_DIR|g" \
+        -e "s|\$RUN_USER|$RUN_USER|g" \
+        -e "s|\$CONFIG_FILE|$CASA_CONFIG|g" \
+        "$1" | sudo tee "$2" > /dev/null
+}
+
+render_unit "$INSTALL_DIR/systemd/casa-planetexpress.service.template" "$SERVICE_FILE"
+render_unit "$INSTALL_DIR/systemd/casa-stacks.service.template" "$STACKS_SERVICE_FILE"
 sudo systemctl daemon-reload
-info "Service file installed"
+info "Systemd units installed (casa-planetexpress, casa-stacks)"
+info "casa-stacks.service brings up your compose stacks at boot; casa-planetexpress.service"
+info "is the always-on agent. If your stacks need network mounts ready first, see"
+info "systemd/examples/casa-mounts.service.example."
 
 # ── Smoke test ─────────────────────────────────────────────────────────────────
 section "Smoke test"
 
 info "Running Leela (monitor) in status mode..."
-if venv/bin/python casa_leela.py --status > /tmp/leela-test.json 2>&1; then
+if CASA_CONFIG="$CASA_CONFIG" venv/bin/python casa_leela.py --status > /tmp/leela-test.json 2>&1; then
     CONTAINER_COUNT=$(python3 -c "import json; d=json.load(open('/tmp/leela-test.json')); print(len(d.get('containers', [])))" 2>/dev/null || echo "?")
     info "Leela OK — saw $CONTAINER_COUNT container(s)"
 else
@@ -124,9 +166,10 @@ section "Deploy complete"
 
 echo ""
 echo "  Install dir:   $INSTALL_DIR"
-echo "  Context file:  $CONTEXT_FILE"
-echo "  API key file:  $ENV_FILE"
-echo "  Systemd unit:  $SERVICE_FILE"
+echo "  Config file:   $CASA_CONFIG"
+echo "  Secrets file:  $ENV_FILE"
+echo "  Systemd units: $SERVICE_FILE"
+echo "                 $STACKS_SERVICE_FILE"
 echo "  Logs:          $INSTALL_DIR/logs/"
 echo "  State:         $INSTALL_DIR/state/"
 echo ""

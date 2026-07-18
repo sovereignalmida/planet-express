@@ -42,8 +42,9 @@ for, not just a joke.
 
 This repo is being built out in small, independent specs rather than one big rewrite — see
 `CLAUDE.md` for the standing engineering process (including an independent second-review gate) and
-the project's planning history for the current roadmap. Until the setup wizard (one of the
-in-progress specs) lands, this is not yet a "clone and go" install for a new host.
+the project's planning history for the current roadmap. Still pre-release, but `git clone` +
+`bash deploy.sh` is now a real install path — see [INSTALL.md](INSTALL.md) for the full
+walkthrough, including how to get a Telegram bot token and what the optional sudo grant is for.
 
 ## License
 

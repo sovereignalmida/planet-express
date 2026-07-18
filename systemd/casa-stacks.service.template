@@ -1,0 +1,20 @@
+[Unit]
+Description=Planet Express stack startup — bring up all active docker compose stacks
+# If your stacks depend on network mounts (NAS shares, etc.) that need to be ready
+# before `docker compose up` runs, add your own mount-readiness unit and gate this
+# one on it here (Requires=/After=) — see systemd/examples/casa-mounts.service.example
+# for the pattern this project's own reference deployment uses.
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=$RUN_USER
+WorkingDirectory=$INSTALL_DIR
+Environment=CASA_CONFIG=$CONFIG_FILE
+ExecStart=$INSTALL_DIR/venv/bin/python casa_boot.py
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
