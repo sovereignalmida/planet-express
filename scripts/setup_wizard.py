@@ -298,6 +298,7 @@ def main() -> None:
                   f"now -- no sudoers rule generated for it. Re-run the wizard once the unit "
                   f"exists if you need it covered.")
     snippet = generate_sudoers_snippet(getpass.getuser(), cfg.sudo_allowlist, discovered_units)
+    installed_new_grant = False
     if snippet:
         print(f"\nGenerated sudoers.d grant:\n{snippet}")
         if _prompt_yes_no(f"Install this to {DEFAULT_SUDOERS_TARGET}?", default=True):
@@ -313,22 +314,26 @@ def main() -> None:
             subprocess.run(["sudo", "install", "-m", "440", str(tmp_sudoers), DEFAULT_SUDOERS_TARGET], check=True)
             tmp_sudoers.unlink()
             print(f"Sudoers grant installed to {DEFAULT_SUDOERS_TARGET}")
+            installed_new_grant = True
         else:
             print("Skipped -- Bender's sudo_allowlist actions will be rejected by the OS "
                   "until you grant them at the OS level yourself.")
     else:
         print("\nNo sudo_allowlist declared -- Bender won't run any sudo-scoped commands.")
-        # A previous wizard run may have installed a grant that this run's (now empty,
-        # or all-globs-matched-nothing) allowlist no longer declares -- an independent
-        # Codex review pointed out that leaving it in place would silently keep the old
-        # OS-level privileges alive despite the wizard reporting nothing was granted.
-        if Path(DEFAULT_SUDOERS_TARGET).exists():
-            if _prompt_yes_no(
-                f"A sudoers grant already exists at {DEFAULT_SUDOERS_TARGET} from a previous "
-                f"run, but nothing is declared now. Remove it?", default=True
-            ):
-                subprocess.run(["sudo", "rm", "-f", DEFAULT_SUDOERS_TARGET], check=True)
-                print(f"Removed {DEFAULT_SUDOERS_TARGET}")
+
+    # Any time we *don't* end up with a freshly installed grant matching what was just
+    # declared -- an empty allowlist, a glob matching nothing, or the operator declining
+    # the install prompt above -- a stale grant from a previous wizard run may still be
+    # sitting at the OS level, granting privileges this run's config no longer declares.
+    # An independent Codex review caught both the empty-allowlist and the declined-install
+    # variant of this as separate gaps; handled here in one place so neither can reopen.
+    if not installed_new_grant and Path(DEFAULT_SUDOERS_TARGET).exists():
+        if _prompt_yes_no(
+            f"A sudoers grant already exists at {DEFAULT_SUDOERS_TARGET} from a previous "
+            f"run that doesn't match what's declared now. Remove it?", default=True
+        ):
+            subprocess.run(["sudo", "rm", "-f", DEFAULT_SUDOERS_TARGET], check=True)
+            print(f"Removed {DEFAULT_SUDOERS_TARGET}")
 
     print(f"\nDone. config.yaml -> {config_target}")
 

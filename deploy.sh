@@ -124,12 +124,13 @@ section "Installing systemd units"
 
 render_unit() {
     # $1 = template path, $2 = destination path
-    sed \
-        -e "s|\$INSTALL_DIR|$INSTALL_DIR|g" \
-        -e "s|\$RUN_USER|$RUN_USER|g" \
-        -e "s|\$RUN_GROUP|$RUN_GROUP|g" \
-        -e "s|\$CONFIG_FILE|$CASA_CONFIG|g" \
-        "$1" | sudo tee "$2" > /dev/null
+    # Uses scripts/render_template.py (string.Template), not sed -- sed substitution
+    # corrupts values containing '&'/'\'/the delimiter itself, and an independent Codex
+    # review also flagged that unquoted systemd directives would silently break on a
+    # path containing a space. render_template.py rejects both cases with a clear error
+    # instead of producing a unit file that fails to start.
+    venv/bin/python scripts/render_template.py "$1" "$INSTALL_DIR" "$RUN_USER" "$RUN_GROUP" "$CASA_CONFIG" \
+        | sudo tee "$2" > /dev/null
 }
 
 render_unit "$INSTALL_DIR/systemd/casa-planetexpress.service.template" "$SERVICE_FILE"
