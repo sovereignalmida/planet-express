@@ -103,11 +103,14 @@ while true; do
 done
 export CASA_CONFIG="$config_path"
 
-if [[ -f "$CASA_CONFIG" ]]; then
-    info "Config already exists at $CASA_CONFIG — skipping wizard. Delete it first if you want to reconfigure."
-else
-    venv/bin/python scripts/setup_wizard.py
-fi
+# Always run the wizard, even if $CASA_CONFIG already exists -- it detects that itself
+# and reuses the existing topology config unchanged rather than re-prompting, but an
+# independent Codex review found that skipping it here entirely (the previous
+# behavior) also skipped sudoers reconciliation, the only code path that keeps
+# /etc/sudoers.d/planetexpress in sync with sudo_allowlist. That mattered for a real
+# case: an upgrade, or a config hand-edited after the fact, previously left the OS-level
+# grant stale or missing with no indication anything was out of sync.
+venv/bin/python scripts/setup_wizard.py
 
 # ── Secrets (LLM provider/key + Telegram bot) ───────────────────────────────────
 section "Secrets setup"

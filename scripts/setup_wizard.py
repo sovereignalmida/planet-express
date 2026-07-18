@@ -304,54 +304,16 @@ def _collect_stacks_root_and_forbidden() -> tuple[Path, list[str]]:
     return stacks_root, forbidden
 
 
-def main() -> None:
-    readline.set_completer_delims(" \t\n")
-    readline.parse_and_bind("tab: complete")
-    readline.set_completer(_path_completer)
+def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
+    """Generate/install/remove /etc/sudoers.d/planetexpress to match cfg.sudo_allowlist.
 
-    print("Planet Express setup wizard — topology config\n")
-
-    stacks_root, forbidden_stacks = _collect_stacks_root_and_forbidden()
-    paused_containers = _prompt_list(
-        "Any containers that are intentionally stopped right now"
-    )
-    mounts = _collect_mounts()
-    sudo_allowlist = _collect_sudo_allowlist()
-
-    answers = {
-        "stacks_root": str(stacks_root),
-        "forbidden_stacks": forbidden_stacks,
-        "paused_containers": paused_containers,
-        "mounts": mounts,
-        "exclude_services": [],
-        "sudo_allowlist": sudo_allowlist,
-    }
-
-    try:
-        cfg = build_config(answers)
-    except ValidationError as e:
-        print(f"\nConfig failed validation:\n{e}\n")
-        print("Re-run the wizard to try again.")
-        sys.exit(1)
-
-    # deploy.sh decides and exports the target path (same CASA_CONFIG convention
-    # config.py itself reads) so this and the systemd units it renders always agree.
-    config_target = Path(os.environ.get("CASA_CONFIG", DEFAULT_CONFIG_TARGET))
-    # tempfile.mkstemp (not a fixed /tmp path) -- an independent Codex review found a
-    # predictable-path TOCTOU race here: another user on a multi-user host could
-    # pre-create a fixed filename and swap its content between the visudo check below
-    # and the privileged install. mkstemp creates the file exclusively (O_EXCL) with a
-    # random name and mode 0600, closing that race.
-    tmp_fd, tmp_config_name = tempfile.mkstemp(prefix="planetexpress-config-", suffix=".yaml")
-    tmp_config = Path(tmp_config_name)
-    with os.fdopen(tmp_fd, "w") as f:
-        f.write(yaml.safe_dump(cfg.model_dump(mode="json"), sort_keys=False))
-    print(f"\nWriting {config_target} (requires sudo)...")
-    subprocess.run(["sudo", "mkdir", "-p", str(config_target.parent)], check=True)
-    subprocess.run(["sudo", "install", "-m", "644", str(tmp_config), str(config_target)], check=True)
-    tmp_config.unlink()
-    print(f"config.yaml written to {config_target}")
-
+    Split out of main() so it always runs, whether cfg was just collected interactively
+    or loaded from an existing config.yaml -- an independent Codex review found that
+    deploy.sh skipping the whole wizard when config.yaml already exists (e.g. an
+    upgrade, or after hand-editing sudo_allowlist) meant this reconciliation never ran
+    at all in that case, letting the OS-level grant and the code-level allowlist drift
+    out of sync despite this being the exact guarantee INSTALL.md/config.example.yaml
+    both document."""
     discovered_units = _discover_mount_units()
     for grant in cfg.sudo_allowlist.globs:
         if not any(fnmatch.fnmatch(u, grant.glob) for u in discovered_units):
@@ -403,6 +365,72 @@ def main() -> None:
             subprocess.run(["sudo", "rm", "-f", DEFAULT_SUDOERS_TARGET], check=True)
             print(f"Removed {DEFAULT_SUDOERS_TARGET}")
 
+
+def main() -> None:
+    # deploy.sh decides and exports the target path (same CASA_CONFIG convention
+    # config.py itself reads) so this and the systemd units it renders always agree.
+    config_target = Path(os.environ.get("CASA_CONFIG", DEFAULT_CONFIG_TARGET))
+
+    if config_target.exists():
+        # Reuse the existing config unchanged (an upgrade, or a re-run after
+        # hand-editing it) rather than re-collecting topology answers -- but still
+        # reconcile sudoers below, unconditionally, so a hand-edited sudo_allowlist (or
+        # a config carried over from before Spec 4) doesn't silently go un-granted.
+        print(f"{config_target} already exists -- reusing it, not re-running the topology wizard.")
+        with open(config_target) as f:
+            raw = yaml.safe_load(f) or {}
+        try:
+            cfg = build_config(raw)
+        except ValidationError as e:
+            print(f"\nExisting config at {config_target} failed validation:\n{e}\n")
+            print(f"Fix {config_target} by hand, or remove it and re-run this to rebuild it.")
+            sys.exit(1)
+    else:
+        readline.set_completer_delims(" \t\n")
+        readline.parse_and_bind("tab: complete")
+        readline.set_completer(_path_completer)
+
+        print("Planet Express setup wizard — topology config\n")
+
+        stacks_root, forbidden_stacks = _collect_stacks_root_and_forbidden()
+        paused_containers = _prompt_list(
+            "Any containers that are intentionally stopped right now"
+        )
+        mounts = _collect_mounts()
+        sudo_allowlist = _collect_sudo_allowlist()
+
+        answers = {
+            "stacks_root": str(stacks_root),
+            "forbidden_stacks": forbidden_stacks,
+            "paused_containers": paused_containers,
+            "mounts": mounts,
+            "exclude_services": [],
+            "sudo_allowlist": sudo_allowlist,
+        }
+
+        try:
+            cfg = build_config(answers)
+        except ValidationError as e:
+            print(f"\nConfig failed validation:\n{e}\n")
+            print("Re-run the wizard to try again.")
+            sys.exit(1)
+
+        # tempfile.mkstemp (not a fixed /tmp path) -- an independent Codex review found
+        # a predictable-path TOCTOU race here: another user on a multi-user host could
+        # pre-create a fixed filename and swap its content between the visudo check
+        # below and the privileged install. mkstemp creates the file exclusively
+        # (O_EXCL) with a random name and mode 0600, closing that race.
+        tmp_fd, tmp_config_name = tempfile.mkstemp(prefix="planetexpress-config-", suffix=".yaml")
+        tmp_config = Path(tmp_config_name)
+        with os.fdopen(tmp_fd, "w") as f:
+            f.write(yaml.safe_dump(cfg.model_dump(mode="json"), sort_keys=False))
+        print(f"\nWriting {config_target} (requires sudo)...")
+        subprocess.run(["sudo", "mkdir", "-p", str(config_target.parent)], check=True)
+        subprocess.run(["sudo", "install", "-m", "644", str(tmp_config), str(config_target)], check=True)
+        tmp_config.unlink()
+        print(f"config.yaml written to {config_target}")
+
+    reconcile_sudoers(cfg)
     print(f"\nDone. config.yaml -> {config_target}")
 
 
