@@ -11,7 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import pytest
 from pydantic import ValidationError
 
-from setup_wizard import build_config, generate_sudoers_snippet, _path_completer, _prompt_list
+from setup_wizard import (
+    build_config, generate_sudoers_snippet, _path_completer, _prompt_list,
+    _prompt_actions, _prompt_unit_name,
+)
 from config_schema import SudoAllowlist, SudoGlobGrant, SudoUnitGrant
 
 
@@ -153,3 +156,41 @@ def test_path_completer_completes_directory_entries(tmp_path):
         state += 1
     assert str(tmp_path / "stacks") + "/" in matches
     assert str(tmp_path / "stacksfile.txt") in matches
+
+
+# ── Regression tests for real issues an independent Codex review found in the
+# unit/glob-grant collection flow itself, not just the pure generate_sudoers_snippet()
+# logic already covered above. ──────────────────────────────────────────────────────
+
+def test_prompt_unit_name_rejects_sudoers_metacharacters(monkeypatch):
+    # A real bypass: the unit-name prompt had no validation at all, so a value like
+    # "foo.service, /bin/bash" (comma starts a second Cmnd in sudoers syntax) or
+    # "*.service" (an actual wildcard) would flow straight into a NOPASSWD rule --
+    # granting far more than intended, and invisibly to visudo -c since it's
+    # syntactically valid sudoers either way.
+    responses = iter(["foo.service, /bin/bash", "*.service", "casa-startup.service"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    assert _prompt_unit_name("Unit name") == "casa-startup.service"
+
+
+def test_prompt_unit_name_accepts_blank_to_stop():
+    import builtins
+    orig_input = builtins.input
+    try:
+        builtins.input = lambda _: ""
+        assert _prompt_unit_name("Unit name") == ""
+    finally:
+        builtins.input = orig_input
+
+
+def test_prompt_actions_rejects_empty_and_reprompts(monkeypatch):
+    # A real gap: answering with only separators (e.g. ",") produced an empty actions
+    # list that passed config validation (no min_length constraint) but then produced
+    # an empty sudoers command list, which visudo rejects -- *after* config.yaml had
+    # already been written, leaving a partial install. Note a bare Enter (blank raw)
+    # isn't the case being tested here -- _prompt()'s own default-substitution already
+    # turns that into the (non-empty) default before _prompt_actions ever sees it;
+    # "," and ",," are non-blank raw input that still parse to zero real actions.
+    responses = iter([",", ",,", "start,stop"])
+    monkeypatch.setattr("builtins.input", lambda _: next(responses))
+    assert _prompt_actions("Actions", ["start"]) == ["start", "stop"]

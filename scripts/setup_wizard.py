@@ -16,9 +16,10 @@ does the actual (privileged) file writes.
 """
 
 import fnmatch
-import getpass
 import glob
 import os
+import pwd
+import re
 import readline
 import subprocess
 import sys
@@ -166,15 +167,42 @@ def _mount_where(unit: str) -> str:
 
 VALID_ACTIONS = ("start", "stop", "restart")
 
+# Same character class casa_bender.py's _SUDO_SYSTEMCTL_RE enforces for a unit name --
+# single source of truth for "what's a safe unit name to interpolate into a sudo
+# command." An independent Codex review found the unit-name prompt had *no* validation
+# at all: the raw string went straight into a sudoers NOPASSWD rule, so entering
+# something like "foo.service, /bin/bash" (comma starts a second Cmnd in sudoers
+# syntax) or "*.service" (an actual wildcard, bypassing the glob-expansion-to-exact-
+# units safety path entirely) would grant far more than Bender's own allowlist permits
+# -- and visudo -c has no opinion on this, since it's syntactically valid sudoers.
+_UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
+
 
 def _prompt_actions(text: str, default: list[str]) -> list[str]:
     while True:
         raw = _prompt(text, ",".join(default))
         actions = [a.strip() for a in raw.split(",") if a.strip()]
+        if not actions:
+            # An independent Codex review found this was silently accepted: an
+            # empty-actions grant passes config validation (no min_length constraint)
+            # but produces an empty sudoers command list, which visudo then rejects --
+            # *after* config.yaml has already been written, leaving a partial install.
+            print("  Need at least one action. Try again.")
+            continue
         bad = [a for a in actions if a not in VALID_ACTIONS]
         if not bad:
             return actions
         print(f"  Invalid action(s) {bad} -- must be from {VALID_ACTIONS}. Try again.")
+
+
+def _prompt_unit_name(text: str) -> str:
+    while True:
+        unit = _prompt(text)
+        if not unit or _UNIT_NAME_RE.match(unit):
+            return unit
+        print(f"  Invalid unit name {unit!r} -- must match {_UNIT_NAME_RE.pattern} "
+              f"(same character set casa_bender.py itself enforces for a sudo target). "
+              f"Try again.")
 
 
 def _collect_sudo_allowlist() -> dict:
@@ -187,7 +215,7 @@ def _collect_sudo_allowlist() -> dict:
     units = []
     print("Add unit grants one at a time (exact systemd unit name). Blank to stop.")
     while True:
-        unit = _prompt("  Unit name")
+        unit = _prompt_unit_name("  Unit name")
         if not unit:
             break
         actions = _prompt_actions("  Allowed actions for this unit", ["start", "stop", "restart"])
@@ -297,7 +325,14 @@ def main() -> None:
             print(f"  Note: glob '{grant.glob}' matched no systemd units on this host right "
                   f"now -- no sudoers rule generated for it. Re-run the wizard once the unit "
                   f"exists if you need it covered.")
-    snippet = generate_sudoers_snippet(getpass.getuser(), cfg.sudo_allowlist, discovered_units)
+    # pwd.getpwuid(os.getuid()) rather than getpass.getuser(): an independent Codex
+    # review found getpass.getuser() checks LOGNAME/USER/etc. env vars *before* falling
+    # back to the effective UID, so a stale env var (e.g. from an su without resetting
+    # the environment) could name a different account than deploy.sh's RUN_USER (which
+    # uses `whoami`, i.e. the effective UID) -- generating a sudoers grant for the wrong
+    # user, silently breaking every real sudo action Bender later tries to run.
+    run_user = pwd.getpwuid(os.getuid()).pw_name
+    snippet = generate_sudoers_snippet(run_user, cfg.sudo_allowlist, discovered_units)
     installed_new_grant = False
     if snippet:
         print(f"\nGenerated sudoers.d grant:\n{snippet}")
