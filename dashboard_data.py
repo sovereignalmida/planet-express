@@ -73,7 +73,15 @@ def _severity_rank(finding: dict) -> int:
 def summarize_health() -> dict:
     """Shaped to already match Spec 7's future Homepage-widget contract (status,
     last scan time, open findings count) -- Spec 7 becomes jsonify(summarize_health())
-    behind one new route, no change needed here."""
+    behind one new route, no change needed here.
+
+    Status blends BOTH signals, not just Hermes' findings -- an independent Codex
+    review caught that the original version only looked at findings.has_critical/
+    has_high, so a monitor snapshot showing real crash loops/disk-critical/incomplete
+    stacks stayed "ok" for the entire window between Leela writing STATE_MONITOR and
+    Hermes finishing analysis (every pipeline run has one), and indefinitely if Hermes
+    ever failed outright. Monitor-derived severity is now a first-class input, not an
+    afterthought only surfaced as raw counts."""
     monitor = load_monitor()
     findings = load_findings()
 
@@ -81,25 +89,35 @@ def summarize_health() -> dict:
     has_critical = findings.has_critical if findings else False
     has_high = findings.has_high if findings else False
 
+    containers = monitor.containers if monitor else []
+    disk = monitor.disk if monitor else []
+    stacks = monitor.stack_completeness if monitor else []
+
+    crash_looping_count = sum(1 for c in containers if c.get("crash_looping"))
+    unhealthy_count = sum(1 for c in containers if c.get("issue"))
+    disk_critical = any(d.get("alert") == "CRITICAL" for d in disk)
+    disk_high = any(d.get("alert") == "HIGH" for d in disk)
+    stack_critical_or_high = any(s.get("alert") in ("CRITICAL", "HIGH") for s in stacks)
+    stack_low = any(s.get("alert") == "LOW" for s in stacks)
+
     if not monitor and not findings:
         status = "unknown"
-    elif has_critical:
+    elif has_critical or crash_looping_count > 0 or disk_critical or stack_critical_or_high:
         status = "critical"
-    elif has_high:
+    elif has_high or unhealthy_count > 0 or disk_high or stack_low:
         status = "warning"
     else:
         status = "ok"
 
     return {
         "status": status,
-        "container_count": len(monitor.containers) if monitor else 0,
-        "unhealthy_count": sum(1 for c in (monitor.containers if monitor else []) if c.get("issue")),
-        "crash_looping_count": sum(
-            1 for c in (monitor.containers if monitor else []) if c.get("crash_looping")
-        ),
-        "disk_alerts": sum(1 for d in (monitor.disk if monitor else []) if d.get("alert")),
+        "container_count": len(containers),
+        "unhealthy_count": unhealthy_count,
+        "crash_looping_count": crash_looping_count,
+        "disk_alerts": sum(1 for d in disk if d.get("alert")),
         "open_findings": open_findings,
         "last_scan": monitor.timestamp if monitor else None,
+        "last_scan_mode": monitor.mode if monitor else None,
         "state_available": monitor is not None or findings is not None,
     }
 
@@ -134,29 +152,59 @@ def summarize_pipeline_status() -> dict:
     }
 
 
+# Which MonitorSnapshot fields each casa_leela.run_*() mode actually populates --
+# run_status() covers containers/disk/services only, run_updates() covers only
+# image_candidates, only run_full() covers everything. An independent Codex review
+# caught that the dashboard was treating a partial mode's untouched fields (default
+# empty lists on the pydantic model) as confirmed-zero real data -- e.g. running
+# /updates overwrites STATE_MONITOR with a snapshot that has no containers/stacks/disk
+# data at all, and the dashboard showed "0/0 containers healthy" as if that were a real
+# observation, not "not collected this run." These sets gate what's safe to trust.
+_MODES_WITH_CONTAINERS = {"full", "status"}
+_MODES_WITH_DISK = {"full", "status"}
+_MODES_WITH_STACK_COMPLETENESS = {"full"}
+_MODES_WITH_SYSTEM_AND_BACKUPS = {"full"}
+
+
 def summarize_containers() -> dict:
     monitor = load_monitor()
-    if not monitor:
-        return {"total": 0, "healthy": 0, "issues": []}
+    if not monitor or monitor.mode not in _MODES_WITH_CONTAINERS:
+        return {"total": 0, "healthy": 0, "issues": [], "available": False}
     issues = [c for c in monitor.containers if c.get("issue")]
-    return {"total": len(monitor.containers), "healthy": len(monitor.containers) - len(issues), "issues": issues}
+    return {
+        "total": len(monitor.containers),
+        "healthy": len(monitor.containers) - len(issues),
+        "issues": issues,
+        "available": True,
+    }
 
 
 def summarize_stack_completeness() -> dict:
     monitor = load_monitor()
-    if not monitor:
-        return {"total": 0, "complete": 0, "incomplete": []}
+    if not monitor or monitor.mode not in _MODES_WITH_STACK_COMPLETENESS:
+        return {"total": 0, "complete": 0, "incomplete": [], "available": False}
     incomplete = [s for s in monitor.stack_completeness if s.get("alert")]
     return {
         "total": len(monitor.stack_completeness),
         "complete": len(monitor.stack_completeness) - len(incomplete),
         "incomplete": incomplete,
+        "available": True,
     }
 
 
-def summarize_disk() -> list[dict]:
+def summarize_disk() -> dict:
     monitor = load_monitor()
-    return monitor.disk if monitor else []
+    if not monitor or monitor.mode not in _MODES_WITH_DISK:
+        return {"list": [], "available": False}
+    return {"list": monitor.disk, "available": True}
+
+
+# Real casa_zoidberg.py status vocabulary, not the "stable"/"success" values the
+# first draft template guessed at (which don't actually occur) -- an independent Codex
+# review caught that this meant every real successful update ("updated") rendered with
+# the red alert-row styling. Decided here in Python, not string-compared ad hoc in the
+# template, since this is a business-logic classification, not presentation.
+_UPDATE_HISTORY_NON_ALERT_STATUSES = {"updated", "no_change"}
 
 
 def summarize_update_history(limit: int = 20) -> list[dict]:
@@ -165,6 +213,8 @@ def summarize_update_history(limit: int = 20) -> list[dict]:
         return []
     entries = [e.model_dump() for e in history.entries]
     entries.sort(key=lambda e: e.get("ts", ""), reverse=True)
+    for e in entries:
+        e["is_alert"] = e.get("status") not in _UPDATE_HISTORY_NON_ALERT_STATUSES
     return entries[:limit]
 
 
@@ -178,9 +228,27 @@ def summarize_rollback_candidates() -> list[dict]:
 
 
 def summarize_pending_plan() -> Optional[dict]:
+    """pending_plan.json is never deleted after a plan is approved/executed or
+    cancelled (confirmed: no unlink() of it anywhere in casa_farnsworth.py) -- an
+    independent Codex review caught that checking only "does this file have plans in
+    it" kept showing an already-resolved plan as pending indefinitely, until the next
+    scheduled run happened to overwrite it. RunStatus.state/pending_plan_id is the one
+    live signal that's actually authoritative for "is this still genuinely awaiting
+    approval right now" -- PipelineState.transition() updates it the moment a plan is
+    approved, cancelled, or finishes executing. Only show a plan that RunStatus still
+    says is pending."""
     plan_set = load_plan()
     if not plan_set or not plan_set.plans:
         return None
+
+    status = load_status()
+    if not status or status.state != "awaiting_approval" or not status.pending_plan_id:
+        return None
+
+    live_plans = [p for p in plan_set.plans if p.get("id") == status.pending_plan_id]
+    if not live_plans:
+        return None
+
     plans = [
         {
             "id": p.get("id"),
@@ -188,16 +256,16 @@ def summarize_pending_plan() -> Optional[dict]:
             "title": p.get("title"),
             "step_count": len(p.get("steps", [])),
         }
-        for p in plan_set.plans
+        for p in live_plans
     ]
     return {"planned_at": plan_set.planned_at, "plans": plans}
 
 
 def summarize_system_and_backups() -> dict:
     monitor = load_monitor()
-    if not monitor:
-        return {"system": {}, "backups": {}}
-    return {"system": monitor.system, "backups": monitor.backups}
+    if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
+        return {"system": {}, "backups": {}, "available": False}
+    return {"system": monitor.system, "backups": monitor.backups, "available": True}
 
 
 def build_dashboard_context() -> dict:

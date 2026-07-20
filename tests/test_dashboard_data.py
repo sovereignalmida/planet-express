@@ -101,6 +101,107 @@ def test_summarize_health_critical_status(tmp_path, monkeypatch):
     assert health["open_findings"] == 1
 
 
+def test_summarize_health_reflects_monitor_severity_with_no_findings_yet(tmp_path, monkeypatch):
+    # Regression test: the window between Leela writing STATE_MONITOR and Hermes
+    # finishing analysis (every pipeline run has one) previously showed "ok" no
+    # matter how bad the monitor snapshot looked, since only findings.has_critical/
+    # has_high were consulted.
+    monitor_path = tmp_path / "latest_monitor.json"
+    _write(monitor_path, {
+        "timestamp": "2026-07-15T14:36:53+00:00",
+        "mode": "full",
+        "containers": [{"name": "CASA_BAD", "status": "Restarting", "crash_looping": True}],
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor_path)
+    monkeypatch.setattr(config, "STATE_FINDINGS", tmp_path / "nope.json")
+    health = dashboard_data.summarize_health()
+    assert health["status"] == "critical"
+    assert health["crash_looping_count"] == 1
+
+
+def test_summarize_health_disk_critical_without_findings(tmp_path, monkeypatch):
+    monitor_path = tmp_path / "latest_monitor.json"
+    _write(monitor_path, {
+        "timestamp": "2026-07-15T14:36:53+00:00",
+        "mode": "full",
+        "disk": [{"mount": "/", "source": "/dev/sdb2", "used_pct": 95, "alert": "CRITICAL"}],
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor_path)
+    monkeypatch.setattr(config, "STATE_FINDINGS", tmp_path / "nope.json")
+    assert dashboard_data.summarize_health()["status"] == "critical"
+
+
+# ── mode-gated availability (an /updates or /status run overwrites STATE_MONITOR
+# with a partial snapshot -- fields that mode doesn't populate must never be shown
+# as confirmed-zero real data) ──────────────────────────────────────────────────
+
+def test_summarize_containers_unavailable_after_updates_mode_run(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-07-15T14:36:53+00:00", "mode": "updates"})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    result = dashboard_data.summarize_containers()
+    assert result["available"] is False
+
+
+def test_summarize_containers_available_after_status_mode_run(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": "2026-07-15T14:36:53+00:00", "mode": "status",
+        "containers": [{"name": "CASA_OK", "status": "Up"}],
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    result = dashboard_data.summarize_containers()
+    assert result["available"] is True
+    assert result["total"] == 1
+
+
+def test_summarize_stack_completeness_unavailable_after_status_mode_run(tmp_path, monkeypatch):
+    # stack_completeness is full-mode-only, unlike containers (full+status).
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-07-15T14:36:53+00:00", "mode": "status", "containers": []})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    assert dashboard_data.summarize_stack_completeness()["available"] is False
+
+
+def test_summarize_disk_unavailable_after_updates_mode_run(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-07-15T14:36:53+00:00", "mode": "updates"})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    assert dashboard_data.summarize_disk() == {"list": [], "available": False}
+
+
+def test_summarize_system_and_backups_unavailable_outside_full_mode(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-07-15T14:36:53+00:00", "mode": "status"})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    assert dashboard_data.summarize_system_and_backups()["available"] is False
+
+
+# ── update history alert classification ──────────────────────────────────────────
+
+def test_update_history_successful_update_not_flagged_as_alert(tmp_path, monkeypatch):
+    path = tmp_path / "update_history.json"
+    _write(path, {"entries": [
+        {"ts": "2026-07-15T00:00:00+00:00", "stack": "services", "service": "dozzle",
+         "old_id": "sha256:1", "new_id": "sha256:2", "status": "updated"},
+    ]})
+    monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", path)
+    result = dashboard_data.summarize_update_history()
+    assert result[0]["is_alert"] is False
+
+
+def test_update_history_rollback_failed_flagged_as_alert(tmp_path, monkeypatch):
+    path = tmp_path / "update_history.json"
+    _write(path, {"entries": [
+        {"ts": "2026-07-15T00:00:00+00:00", "stack": "services", "service": "planka",
+         "old_id": "sha256:1", "new_id": "sha256:2", "status": "rollback_failed",
+         "reason": "crash-looped after update"},
+    ]})
+    monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", path)
+    result = dashboard_data.summarize_update_history()
+    assert result[0]["is_alert"] is True
+
+
 def test_summarize_findings_counts_and_sorts_by_severity(tmp_path, monkeypatch):
     path = tmp_path / "latest_findings.json"
     _write(path, {
@@ -177,17 +278,40 @@ def test_summarize_pending_plan_none_when_no_plans(tmp_path, monkeypatch):
 
 
 def test_summarize_pending_plan_hides_step_commands(tmp_path, monkeypatch):
-    path = tmp_path / "pending_plan.json"
-    _write(path, {
+    plan_path = tmp_path / "pending_plan.json"
+    _write(plan_path, {
         "planned_at": "2026-07-15T14:37:15+00:00",
         "plans": [{"id": "p1", "priority": "medium", "title": "test",
                    "steps": [{"command": "sudo systemctl restart x"}, {"command": "echo done"}],
                    "rollback": []}],
     })
-    monkeypatch.setattr(config, "STATE_PLAN", path)
+    monkeypatch.setattr(config, "STATE_PLAN", plan_path)
+    status_path = tmp_path / "run_status.json"
+    _write(status_path, {
+        "state": "awaiting_approval", "pending_plan_id": "p1", "updated_at": "2026-07-15T14:37:20+00:00",
+    })
+    monkeypatch.setattr(config, "STATE_STATUS", status_path)
+
     result = dashboard_data.summarize_pending_plan()
     assert result["plans"][0]["step_count"] == 2
     assert "command" not in json.dumps(result)  # step commands never surface here
+
+
+def test_summarize_pending_plan_hidden_once_run_status_moves_on(tmp_path, monkeypatch):
+    # pending_plan.json is never deleted after resolution -- RunStatus is the only
+    # live signal that a plan is still genuinely pending, not just "the file still
+    # has an old plan in it."
+    plan_path = tmp_path / "pending_plan.json"
+    _write(plan_path, {
+        "planned_at": "2026-07-15T14:37:15+00:00",
+        "plans": [{"id": "p1", "priority": "medium", "title": "test", "steps": [], "rollback": []}],
+    })
+    monkeypatch.setattr(config, "STATE_PLAN", plan_path)
+    status_path = tmp_path / "run_status.json"
+    _write(status_path, {"state": "idle", "pending_plan_id": None, "updated_at": "2026-07-15T15:00:00+00:00"})
+    monkeypatch.setattr(config, "STATE_STATUS", status_path)
+
+    assert dashboard_data.summarize_pending_plan() is None
 
 
 # ── build_dashboard_context() ─────────────────────────────────────────────────────

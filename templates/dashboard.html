@@ -55,10 +55,17 @@
 
   <section class="card">
     <h2>Containers &amp; Stacks</h2>
+    {% if ctx.containers.available %}
     <p class="muted">
-      {{ ctx.containers.healthy }}/{{ ctx.containers.total }} containers healthy &middot;
-      {{ ctx.stack_completeness.complete }}/{{ ctx.stack_completeness.total }} stacks complete
+      {{ ctx.containers.healthy }}/{{ ctx.containers.total }} containers healthy
+      {% if ctx.stack_completeness.available %}
+      &middot; {{ ctx.stack_completeness.complete }}/{{ ctx.stack_completeness.total }} stacks complete
+      {% endif %}
     </p>
+    {% else %}
+    <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
+      container data. Available after the next full scan.</p>
+    {% endif %}
     {% if ctx.containers.issues %}
     <table>
       <thead><tr><th>Container</th><th>Status</th><th>Issue</th></tr></thead>
@@ -73,7 +80,9 @@
       </tbody>
     </table>
     {% endif %}
-    {% if ctx.stack_completeness.incomplete %}
+    {% if not ctx.stack_completeness.available %}
+    <p class="muted">Stack completeness: not available until the next full scan.</p>
+    {% elif ctx.stack_completeness.incomplete %}
     <table>
       <thead><tr><th>Stack</th><th>Present</th><th>Expected</th><th>Missing</th></tr></thead>
       <tbody>
@@ -92,10 +101,11 @@
 
   <section class="card">
     <h2>Disk</h2>
+    {% if ctx.disk.available %}
     <table>
       <thead><tr><th>Mount</th><th>Source</th><th>Used %</th></tr></thead>
       <tbody>
-        {% for d in ctx.disk %}
+        {% for d in ctx.disk.list %}
         <tr class="{{ 'alert-row' if d.get('alert') else '' }}">
           <td>{{ d.get('mount', '?') }}</td>
           <td>{{ d.get('source', '?') }}</td>
@@ -104,6 +114,10 @@
         {% endfor %}
       </tbody>
     </table>
+    {% else %}
+    <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
+      disk data. Available after the next full or status scan.</p>
+    {% endif %}
   </section>
 
   {% if ctx.rollback_candidates %}
@@ -153,7 +167,7 @@
       <thead><tr><th>When</th><th>Stack</th><th>Service</th><th>Status</th><th>Reason</th></tr></thead>
       <tbody>
         {% for h in ctx.update_history %}
-        <tr class="{{ 'alert-row' if h.status not in ('stable', 'success') else '' }}">
+        <tr class="{{ 'alert-row' if h.is_alert else '' }}">
           <td>{{ h.ts }}</td>
           <td>{{ h.stack }}</td>
           <td>{{ h.service }}</td>
@@ -170,9 +184,14 @@
 
   <section class="card">
     <h2>System</h2>
+    {% if ctx.system_and_backups.available %}
     <pre class="system-summary">{{ ctx.system_and_backups.system }}</pre>
     <h3>Backups</h3>
     <pre class="system-summary">{{ ctx.system_and_backups.backups }}</pre>
+    {% else %}
+    <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
+      system/backup data. Available after the next full scan.</p>
+    {% endif %}
   </section>
 
   <footer>
