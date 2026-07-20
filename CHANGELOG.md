@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Spec 6: minimal read-only web dashboard (`casa_scruffy.py`).** New, standalone
+  systemd unit (`casa-dashboard.service`) — deliberately separate from
+  `casa_farnsworth.py`, the security/execution-adjacent daemon, so a bug in a glance
+  dashboard can never touch anything that executes a command. Reads the six Spec 3
+  state files through a new `dashboard_data.py` (zero Flask import, pure summarization
+  functions returning JSON-primitive dicts), built so Spec 7's future Homepage-widget
+  JSON endpoint can reuse it directly — `summarize_health()` is already shaped to match
+  that contract. Flask + Jinja2 (the first web-framework dependency in this repo,
+  deliberately not FastAPI/uvicorn — every data source is a synchronous local file
+  read), no JS, `<meta http-equiv="refresh">` for auto-updating. No auth — LAN-trust
+  model, matching how Homepage itself is exposed; `deploy.sh` makes enabling it an
+  explicit interactive opt-in rather than a silent default, since even read-only
+  access is real information disclosure on the LAN. `casa-dashboard.service.template`
+  deliberately omits `Requires=docker.service` and `EnvironmentFile=/etc/planetexpress.env`
+  — this process needs neither Docker access nor any LLM/Telegram secret in its
+  environment, the concrete embodiment of "don't conflate blast radii."
+
+  An independent Codex review found **4 real issues**, all now fixed: (1) the health
+  indicator only consulted Hermes' findings, so a monitor snapshot already showing real
+  crash loops/disk-critical/incomplete stacks stayed "ok" for the entire window between
+  Leela writing state and Hermes finishing analysis (every pipeline run has one), and
+  indefinitely if Hermes ever failed outright — monitor-derived severity is now a
+  first-class input to the status calculation; (2) `/status` and `/updates` each
+  overwrite the shared monitor state file with a partial snapshot (`/updates` writes
+  none of containers/disk/stacks/system at all), and the dashboard was treating the
+  resulting empty pydantic defaults as confirmed real data ("0 containers healthy")
+  instead of "not collected this run" — sections now check `MonitorSnapshot.mode`
+  before trusting fields that mode doesn't populate, and show an explicit
+  not-available message instead; (3) a pending plan kept displaying as "still pending"
+  indefinitely after being approved, executed, or cancelled, since `pending_plan.json`
+  is never deleted — now cross-references `RunStatus.state`/`pending_plan_id`, the one
+  live signal that's actually authoritative; (4) update-history alert styling checked
+  for `status` values ("stable"/"success") that don't exist in `casa_zoidberg.py`'s
+  real vocabulary, so every real successful update rendered with red alert styling —
+  fixed with the actual status set, decided in Python not guessed at in the template.
+  86/86 tests passing (24 new). Live-verified on this host both before and after the
+  fix pass, against real pipeline data, not fixtures.
 - Repo scaffold: LICENSE (MIT), README, this CHANGELOG, and `CLAUDE.md` establishing a standing
   independent Codex-review gate for security/release-relevant work — same convention used on the
   author's other public project (Billarr), applied here from the very first commit rather than
