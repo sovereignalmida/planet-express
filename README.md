@@ -47,8 +47,12 @@ flowchart LR
     Farnsworth --> Scruffy["Scruffy\n(dashboard + /api/widget)"]
 ```
 
-Findings flow left to right through the pipeline; only Bender ever touches the host, and only
-after Farnsworth gets your explicit approval over Telegram.
+Findings flow left to right through the pipeline; only Bender ever touches the host. Plans that
+come out of a Hermes finding go through Farnsworth's explicit Telegram approval before Bender runs
+them. Two things are automated by design and only notify you afterward, not before: Zoidberg's
+canary image updates (bounded by its own watch-and-rollback logic) and safe-prune (only runs when
+disk pressure is real and every container is in a known-safe state). Both still go through
+Bender's independent safety layer either way.
 
 *Screenshots (Telegram approval flow, dashboard) — not yet added; pending a capture pass against a
 live install.*

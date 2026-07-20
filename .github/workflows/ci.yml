@@ -34,4 +34,6 @@ jobs:
         run: ruff check .
 
       - name: Test (pytest)
+        env:
+          CASA_CONFIG: ${{ github.workspace }}/config.example.yaml
         run: pytest
