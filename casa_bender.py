@@ -17,7 +17,6 @@ import fnmatch
 import json
 import logging
 import re
-import shlex
 import subprocess
 import sys
 import time
@@ -162,8 +161,8 @@ def _safety_check(command: str, plan: dict) -> None:
     needs_net_confirm = any(tok in command for tok in NETWORK_GUARD_TOKENS)
     if needs_net_confirm and not plan.get("requires_network_confirm", False):
         raise SafetyError(
-            f"Command touches network stack (Traefik/AdGuard) but plan does not have "
-            f"requires_network_confirm: true. Refusing to execute."
+            "Command touches network stack (Traefik/AdGuard) but plan does not have "
+            "requires_network_confirm: true. Refusing to execute."
         )
 
 

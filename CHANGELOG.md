@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Spec 8: docs/packaging polish, CI, first tagged release.** `.github/workflows/ci.yml` runs
+  `ruff check .` + the full pytest suite on every push/PR against Python 3.11 and 3.12 — scoped
+  honestly to what's actually CI-testable: the pure-logic suite built up across Specs 2-4 (state
+  round-trips, safety-check allow/deny, notifier/dashboard/template rendering against faked
+  collaborators), never real Docker/sudo/systemd behavior. New `requirements-dev.txt` (runtime
+  deps + `ruff`), and 9 pre-existing lint findings (unused imports, unnecessary f-string prefixes,
+  one ambiguous single-letter variable name) fixed across `casa_bender.py`, `casa_farnsworth.py`,
+  `casa_leela.py`, `config.py` — none behavioral, all cosmetic/dead-code. New `CONTRIBUTING.md`
+  with dev setup, lint/test commands, and a pointer to the standing second-review gate in
+  `CLAUDE.md`. README gains a Mermaid architecture diagram and an explicit "What's tested, what
+  isn't" section stating plainly that CI covers pure logic only, with a manual pre-release
+  checklist for everything else (deploy, full pipeline run, Telegram approval, Amy diagnosis,
+  Zoidberg canary/rollback, dashboard/widget). 88/88 tests passing, 0 ruff findings. First semver
+  git tag once dogfooded — closes out the 9-spec public-release roadmap.
 - **Spec 7: Homepage-widget-compatible endpoint.** One new route, `GET /api/widget` on
   `casa_scruffy.py`, returning `jsonify(dashboard_data.summarize_health())` — no new
   summarization logic needed, since Spec 6 deliberately shaped `summarize_health()` to

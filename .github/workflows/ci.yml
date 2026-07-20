@@ -1,0 +1,37 @@
+name: CI
+
+# What this checks: lint (ruff) and the pure-logic pytest suite (state-schema
+# round-trips, safety-check allow/deny logic, notifier/dashboard/template
+# rendering with faked collaborators). None of this touches a real Docker
+# daemon, sudo, or systemd — that behavior is only verified by the manual
+# pre-release checklist in README.md, dogfooded on a real host before each
+# release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Test (pytest)
+        run: pytest

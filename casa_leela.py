@@ -309,7 +309,7 @@ def check_system() -> dict:
     _, journal_out, _ = _run(
         "journalctl -p err -S '1 hour ago' --no-pager -q --output=short"
     )
-    errors = [l for l in journal_out.splitlines() if l.strip()]
+    errors = [line for line in journal_out.splitlines() if line.strip()]
     mem_lines = mem_out.splitlines()
     return {
         "memory_summary": mem_lines[1] if len(mem_lines) > 1 else mem_out,

@@ -34,6 +34,49 @@ There's also a read-only web dashboard (**Scruffy**) for a glance-and-go status 
 `/api/widget` JSON endpoint for embedding that status in a [Homepage](https://gethomepage.dev)
 dashboard.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    Leela["Leela\n(monitor)"] --> Hermes["Hermes\n(analyzer)"]
+    Hermes --> Farnsworth["Farnsworth\n(orchestrator + planner + Telegram bot)"]
+    Farnsworth -- "approval via Telegram" --> Bender["Bender\n(executor, own safety layer)"]
+    Bender -- "on repeat failure" --> Amy["Amy\n(diagnostician)"]
+    Amy -. "findings" .-> Farnsworth
+    Zoidberg["Zoidberg\n(canary updater)"] -.-> Bender
+    Farnsworth --> Scruffy["Scruffy\n(dashboard + /api/widget)"]
+```
+
+Findings flow left to right through the pipeline; only Bender ever touches the host, and only
+after Farnsworth gets your explicit approval over Telegram.
+
+*Screenshots (Telegram approval flow, dashboard) — not yet added; pending a capture pass against a
+live install.*
+
+## What's tested, what isn't
+
+CI (`.github/workflows/ci.yml`) runs `ruff check .` and the full pytest suite on every push/PR,
+Python 3.11 and 3.12. That test suite is **pure-logic only**: state-schema round-trips, safety-check
+allow/deny rules, notifier/dashboard/template rendering against faked collaborators — no real
+Docker daemon, sudo, or systemd involved anywhere in it.
+
+What CI does **not** cover, because it can't be tested in good faith without a real host:
+actual container start/stop/restart behavior, the sudo-scoped commands Bender runs, systemd unit
+installation, and the Telegram bot's live message flow. Those are verified manually against a real
+homelab before every release — see the pre-release checklist below — not implied to be covered by
+the green CI badge.
+
+### Manual pre-release checklist
+
+- `bash deploy.sh` on a clean checkout — venv, systemd units, sudoers.d grant all render correctly.
+- Full pipeline run (Leela → Hermes → Farnsworth) against a real Compose stack with at least one
+  induced failure (e.g. a stopped container) — confirm a real finding and a real plan.
+- Approve a plan over Telegram, confirm Bender executes it and the fix actually lands.
+- Trigger Amy by letting a remediation fail once — confirm it diagnoses without executing anything.
+- Zoidberg canary-update pass on a throwaway service — confirm rollback on an induced unhealthy
+  start.
+- Dashboard (Scruffy) loads and `/api/widget` returns valid JSON a Homepage instance can render.
+
 ## Why Futurama names
 
 The pipeline stages map onto the crew: Leela keeps watch, Hermes files the paperwork, Farnsworth

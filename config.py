@@ -12,11 +12,11 @@ import yaml
 from pydantic import ValidationError
 
 from config_schema import (
-    ExcludedService,
+    ExcludedService as ExcludedService,
     PlanetExpressConfig,
-    SudoAllowlist,
-    SudoGlobGrant,
-    SudoUnitGrant,
+    SudoAllowlist as SudoAllowlist,
+    SudoGlobGrant as SudoGlobGrant,
+    SudoUnitGrant as SudoUnitGrant,
 )
 
 # ── Directory paths (override via env vars for testing, or per-install via the
