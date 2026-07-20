@@ -59,7 +59,9 @@ bash deploy.sh
 6. **Systemd units** — renders `systemd/casa-planetexpress.service.template` (the always-on
    agent) and `systemd/casa-stacks.service.template` (boot-time `docker compose up -d` for
    every discovered stack) with your install path/user/config location, installs them under
-   `/etc/systemd/system/`.
+   `/etc/systemd/system/`. Also prompts for a dashboard port and, if you opt in, renders
+   `systemd/casa-dashboard.service.template` (the read-only web dashboard, `casa_scruffy.py`)
+   the same way.
 7. **Smoke test** — runs Leela (the monitor) once in status mode against your new config, so
    you see real container counts before anything is enabled.
 8. **Enable and start** — optionally enables and starts `casa-planetexpress.service` right
@@ -95,11 +97,36 @@ scheduled pass runs) a monitor → findings → idle cycle with no tracebacks. I
 If a `/check` produces a finding, you'll get an approve/cancel prompt — nothing executes
 without you tapping approve.
 
+## Homepage widget
+
+If you use [gethomepage.dev](https://gethomepage.dev), the dashboard also exposes a
+`customapi`-compatible JSON endpoint at `/api/widget`. Add an entry like this to your
+`services.yaml`:
+
+```yaml
+- Planet Express:
+    icon: mdi-rocket-launch
+    href: http://<dashboard-host>:8420/
+    description: Sysadmin agent status
+    widget:
+      type: customapi
+      url: http://<dashboard-host>:8420/api/widget
+      mappings:
+        - field: status
+          label: Status
+        - field: open_findings
+          label: Findings
+          format: number
+        - field: last_scan
+          label: Last Scan
+          format: relativeDate
+```
+
 ## What this does not cover
 
-- **No authentication on the (upcoming) web dashboard.** It's read-only and meant for a
-  LAN-trust environment, the same posture as most homelab dashboards (Homepage, etc.) — don't
-  expose it to the open internet without putting your own reverse-proxy auth in front of it.
+- **No authentication on the web dashboard.** It's read-only and meant for a LAN-trust
+  environment, the same posture as most homelab dashboards (Homepage, etc.) — don't expose it
+  to the open internet without putting your own reverse-proxy auth in front of it.
 - **Single Telegram chat only.** `TG_CHAT_ID` is one recipient; there's no multi-user
   approval flow.
 - **Docker Compose only.** No plain `docker run` fleets, no Portainer, no Kubernetes.

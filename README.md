@@ -30,6 +30,10 @@ Five roles, one per pipeline stage (yes, they're Futurama-named — see below):
 Plus a canary auto-updater (**Zoidberg**) that updates one service at a time, watches it, and rolls
 back automatically if it doesn't come up healthy.
 
+There's also a read-only web dashboard (**Scruffy**) for a glance-and-go status view, and a
+`/api/widget` JSON endpoint for embedding that status in a [Homepage](https://gethomepage.dev)
+dashboard.
+
 ## Why Futurama names
 
 The pipeline stages map onto the crew: Leela keeps watch, Hermes files the paperwork, Farnsworth

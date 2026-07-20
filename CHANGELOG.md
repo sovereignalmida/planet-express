@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Spec 7: Homepage-widget-compatible endpoint.** One new route, `GET /api/widget` on
+  `casa_scruffy.py`, returning `jsonify(dashboard_data.summarize_health())` — no new
+  summarization logic needed, since Spec 6 deliberately shaped `summarize_health()` to
+  already match gethomepage.dev's `customapi` widget contract (a `url` + a `mappings`
+  array of `{field, label, format}`, no fixed top-level response key required). Inherits
+  the dashboard's existing "never 500, even with zero state files present" behavior for
+  free (`status: "unknown"`/`state_available: false` on a fresh install). No new systemd
+  unit, no auth — same LAN-trust posture as the rest of the dashboard. `INSTALL.md` gains
+  a "Homepage widget" section with a copy-pasteable `services.yaml` snippet, and its
+  "Systemd units"/"What this does not cover" sections are corrected to reflect that the
+  dashboard (Spec 6) has actually shipped, rather than still describing it as upcoming.
+  88/88 tests passing (2 new). Live-verified on this host against the real pipeline's
+  current status, and wired into this host's actual Homepage instance.
 - **Spec 6: minimal read-only web dashboard (`casa_scruffy.py`).** New, standalone
   systemd unit (`casa-dashboard.service`) — deliberately separate from
   `casa_farnsworth.py`, the security/execution-adjacent daemon, so a bug in a glance

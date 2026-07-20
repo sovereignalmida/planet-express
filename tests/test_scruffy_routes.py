@@ -57,3 +57,44 @@ def test_index_renders_real_findings(tmp_path, monkeypatch):
     assert b"backups.daily" in resp.data
     assert b"Backup timer has not run in 9 days" in resp.data
     assert b"1 critical" in resp.data
+
+
+def test_widget_with_no_state_returns_200_unknown(tmp_path, monkeypatch):
+    for attr in (
+        "STATE_MONITOR", "STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS",
+        "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE",
+    ):
+        monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
+
+    resp = _client().get("/api/widget")
+    assert resp.status_code == 200
+    assert resp.content_type == "application/json"
+    data = resp.get_json()
+    assert data["status"] == "unknown"
+    assert data["state_available"] is False
+
+
+def test_widget_with_real_findings(tmp_path, monkeypatch):
+    findings_path = tmp_path / "latest_findings.json"
+    findings_path.write_text(json.dumps({
+        "analyzed_at": "2026-07-15T14:37:08+00:00",
+        "findings": [{
+            "id": "f1", "severity": "CRITICAL",
+            "resource": "backups.daily", "description": "Backup timer has not run in 9 days",
+        }],
+        "has_critical": True,
+        "has_high": False,
+    }))
+    monkeypatch.setattr(config, "STATE_FINDINGS", findings_path)
+    monkeypatch.setattr(config, "STATE_MONITOR", tmp_path / "nope.json")
+    monkeypatch.setattr(config, "STATE_PLAN", tmp_path / "nope.json")
+    monkeypatch.setattr(config, "STATE_STATUS", tmp_path / "nope.json")
+    monkeypatch.setattr(config, "ROLLBACK_CANDIDATES_FILE", tmp_path / "nope.json")
+    monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", tmp_path / "nope.json")
+
+    resp = _client().get("/api/widget")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["status"] == "critical"
+    assert data["open_findings"] == 1
+    assert data["state_available"] is True

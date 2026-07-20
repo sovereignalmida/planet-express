@@ -11,7 +11,7 @@ Homepage-widget JSON route (Spec 7) would import directly.
 
 import os
 
-from flask import Flask, render_template
+from flask import Flask, jsonify, render_template
 
 import dashboard_data
 
@@ -21,6 +21,11 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     return render_template("dashboard.html", ctx=dashboard_data.build_dashboard_context())
+
+
+@app.route("/api/widget")
+def widget():
+    return jsonify(dashboard_data.summarize_health())
 
 
 def main() -> None:
