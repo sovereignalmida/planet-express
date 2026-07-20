@@ -4,11 +4,11 @@ A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stack
 failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
 rollback, and talks to you over Telegram.
 
-**Status: pre-release, actively being generalized.** This project started as a bespoke agent
-running on one person's home server, hardcoded to that host. It's now being reworked into something
-anyone with their own Compose-based homelab can install — see [CHANGELOG.md](CHANGELOG.md) for
-what's landed so far. It is dogfooded on the author's own fleet from day one of that rework, not
-developed in isolation and thrown over the wall.
+**Status: v1.0.0, first tagged release.** This project started as a bespoke agent running on one
+person's home server, hardcoded to that host. It's now generalized into something anyone with
+their own Compose-based homelab can install — see [CHANGELOG.md](CHANGELOG.md) for the full spec
+history. It is dogfooded on the author's own fleet from day one of that rework, not developed in
+isolation and thrown over the wall.
 
 ## What it does
 
@@ -91,11 +91,11 @@ for, not just a joke.
 
 ## Project status
 
-This repo is being built out in small, independent specs rather than one big rewrite — see
+This repo was built out in small, independent specs rather than one big rewrite — see
 `CLAUDE.md` for the standing engineering process (including an independent second-review gate) and
-the project's planning history for the current roadmap. Still pre-release, but `git clone` +
-`bash deploy.sh` is now a real install path — see [INSTALL.md](INSTALL.md) for the full
-walkthrough, including how to get a Telegram bot token and what the optional sudo grant is for.
+[CHANGELOG.md](CHANGELOG.md) for the full history. `git clone` + `bash deploy.sh` is a real install
+path — see [INSTALL.md](INSTALL.md) for the full walkthrough, including how to get a Telegram bot
+token and what the optional sudo grant is for.
 
 ## License
 

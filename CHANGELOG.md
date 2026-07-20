@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-20
+
 ### Added
 - **Spec 8: docs/packaging polish, CI, first tagged release.** `.github/workflows/ci.yml` runs
   `ruff check .` + the full pytest suite on every push/PR against Python 3.11 and 3.12 — scoped
