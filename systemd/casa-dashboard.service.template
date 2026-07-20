@@ -1,0 +1,38 @@
+[Unit]
+Description=Planet Express — Read-only Web Dashboard (Scruffy)
+Documentation=https://github.com/sovereignalmida/planet-express
+# Deliberately no Requires=docker.service -- this process never calls docker/docker
+# compose, only reads state files Leela/Farnsworth/Zoidberg already wrote. It just
+# needs to bind a TCP port.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=$RUN_USER
+Group=$RUN_GROUP
+WorkingDirectory=$INSTALL_DIR
+
+# Deliberately no EnvironmentFile=/etc/planetexpress.env -- this process needs no LLM
+# API key and no Telegram bot token. Its environment shouldn't even contain those
+# secrets, not just "not use" them -- keeps the blast radius of a bug here strictly
+# smaller than casa-planetexpress.service's.
+Environment=CASA_CONFIG=$CONFIG_FILE
+Environment=CASA_STATE_DIR=$INSTALL_DIR/state
+Environment=CASA_LOG_DIR=$INSTALL_DIR/logs
+Environment=CASA_DASHBOARD_PORT=$DASHBOARD_PORT
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=$INSTALL_DIR/venv/bin/python casa_scruffy.py
+
+Restart=on-failure
+RestartSec=15s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=casa-dashboard
+
+[Install]
+WantedBy=multi-user.target

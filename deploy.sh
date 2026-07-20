@@ -21,6 +21,7 @@ RUN_GROUP="$(id -gn "$RUN_USER")"
 ENV_FILE="/etc/planetexpress.env"
 SERVICE_FILE="/etc/systemd/system/casa-planetexpress.service"
 STACKS_SERVICE_FILE="/etc/systemd/system/casa-stacks.service"
+DASHBOARD_SERVICE_FILE="/etc/systemd/system/casa-dashboard.service"
 PYTHON_BIN="python3"
 
 GREEN='\033[0;32m'
@@ -159,6 +160,16 @@ else
     info "Environment file already exists at $ENV_FILE"
 fi
 
+# ── Dashboard port ───────────────────────────────────────────────────────────────
+section "Read-only web dashboard"
+
+while true; do
+    read -rp "  Port for the read-only web dashboard [8420]: " dashboard_port
+    dashboard_port="${dashboard_port:-8420}"
+    [[ "$dashboard_port" =~ ^[0-9]+$ ]] && (( dashboard_port >= 1 && dashboard_port <= 65535 )) && break
+    warn "Must be a port number 1-65535."
+done
+
 # ── Systemd units ────────────────────────────────────────────────────────────────
 section "Installing systemd units"
 
@@ -170,15 +181,18 @@ render_unit() {
     # output; if rendering then fails (e.g. a rejected character), pipefail aborts the
     # script but the previously-good unit file is already empty. Rendering to a local
     # file first means a failure here never touches the installed unit at all.
+    # DASHBOARD_PORT is always passed -- string.Template silently ignores it for the
+    # two templates that don't reference $DASHBOARD_PORT, so this is a no-op for them.
     local rendered_tmp
     rendered_tmp="$(mktemp)"
-    venv/bin/python scripts/render_template.py "$1" "$INSTALL_DIR" "$RUN_USER" "$RUN_GROUP" "$CASA_CONFIG" \
+    venv/bin/python scripts/render_template.py "$1" "$INSTALL_DIR" "$RUN_USER" "$RUN_GROUP" "$CASA_CONFIG" "$dashboard_port" \
         > "$rendered_tmp"
     sudo install -m 644 "$rendered_tmp" "$2"
     rm -f "$rendered_tmp"
 }
 
 render_unit "$INSTALL_DIR/systemd/casa-planetexpress.service.template" "$SERVICE_FILE"
+render_unit "$INSTALL_DIR/systemd/casa-dashboard.service.template" "$DASHBOARD_SERVICE_FILE"
 
 # casa-stacks.service is handled separately: an independent Codex review found that
 # unconditionally overwriting it on a redeploy silently destroys any custom
@@ -201,7 +215,8 @@ fi
 
 sudo systemctl daemon-reload
 sudo systemctl enable casa-stacks > /dev/null
-info "Systemd units installed and casa-stacks enabled for boot (casa-planetexpress, casa-stacks)"
+info "Systemd units installed and casa-stacks enabled for boot (casa-planetexpress, casa-stacks,"
+info "casa-dashboard)"
 info "casa-stacks.service brings up your compose stacks at boot; casa-planetexpress.service"
 info "is the always-on agent. If your stacks need network mounts ready first, see"
 info "systemd/examples/casa-mounts.service.example."
@@ -238,6 +253,26 @@ else
     info "  sudo systemctl enable --now casa-planetexpress"
 fi
 
+echo ""
+# Interactive opt-in, not silently auto-enabled -- even read-only with no auth means
+# anyone on the LAN can see findings/backup-status/history, which is real information
+# disclosure worth an explicit yes, not a default-on.
+read -rp "  Enable and start the read-only dashboard now? [y/N] " start_dashboard_now
+if [[ "${start_dashboard_now,,}" == "y" ]]; then
+    sudo systemctl enable --now casa-dashboard
+    sleep 2
+    if sudo systemctl is-active --quiet casa-dashboard; then
+        DASH_IP="$(hostname -I | awk '{print $1}')"
+        info "Dashboard running: http://${DASH_IP}:${dashboard_port}/  (LAN-trust, no auth)"
+    else
+        warn "Dashboard may not have started cleanly. Check:"
+        warn "  journalctl -u casa-dashboard --no-pager -n 30"
+    fi
+else
+    info "Skipped. Start manually with:"
+    info "  sudo systemctl enable --now casa-dashboard"
+fi
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 section "Deploy complete"
 
@@ -247,6 +282,8 @@ echo "  Config file:   $CASA_CONFIG"
 echo "  Secrets file:  $ENV_FILE"
 echo "  Systemd units: $SERVICE_FILE"
 echo "                 $STACKS_SERVICE_FILE"
+echo "                 $DASHBOARD_SERVICE_FILE"
+echo "  Dashboard:     http://<this-host>:${dashboard_port}/  (LAN-trust, no auth)"
 echo "  Logs:          $INSTALL_DIR/logs/"
 echo "  State:         $INSTALL_DIR/state/"
 echo ""

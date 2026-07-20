@@ -49,3 +49,24 @@ def test_render_rejects_path_with_space():
 def test_render_rejects_other_unsafe_characters(bad_char):
     with pytest.raises(ValueError):
         render("$CONFIG_FILE", INSTALL_DIR="", RUN_USER="", RUN_GROUP="", CONFIG_FILE=f"/etc/pe{bad_char}x.yaml")
+
+
+def test_render_substitutes_dashboard_port():
+    out = render(
+        "Environment=CASA_DASHBOARD_PORT=$DASHBOARD_PORT",
+        INSTALL_DIR="", RUN_USER="", RUN_GROUP="", CONFIG_FILE="", DASHBOARD_PORT="8420",
+    )
+    assert out == "Environment=CASA_DASHBOARD_PORT=8420"
+
+
+def test_render_ignores_dashboard_port_when_template_does_not_reference_it():
+    # casa-planetexpress.service.template / casa-stacks.service.template don't
+    # contain $DASHBOARD_PORT -- render_template.py's CLI always passes it (empty
+    # string when not given), and this must stay a harmless no-op for those two.
+    text = "WorkingDirectory=$INSTALL_DIR\n"
+    out = render(
+        text,
+        INSTALL_DIR="/home/someuser/planet-express", RUN_USER="", RUN_GROUP="", CONFIG_FILE="",
+        DASHBOARD_PORT="8420",
+    )
+    assert out == "WorkingDirectory=/home/someuser/planet-express\n"

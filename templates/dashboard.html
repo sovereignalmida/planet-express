@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="60">
+  <title>Planet Express — Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Planet Express</h1>
+    <div class="status-line status-{{ ctx.health.status }}">
+      <span class="dot"></span>
+      pipeline: <strong>{{ ctx.pipeline_status.state }}</strong>
+      {% if ctx.pipeline_status.pending_plan_id %}
+        (pending plan <code>{{ ctx.pipeline_status.pending_plan_id }}</code>)
+      {% endif %}
+      &middot; last scan: {{ ctx.health.last_scan or "never" }}
+      <a class="refresh" href="/">refresh now</a>
+    </div>
+  </header>
+
+  {% if not ctx.health.state_available %}
+  <section class="card empty-state">
+    <p>No pipeline data yet — waiting for the first scheduled run.</p>
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>Findings</h2>
+    <div class="pills">
+      <span class="pill critical">{{ ctx.findings.counts.critical }} critical</span>
+      <span class="pill high">{{ ctx.findings.counts.high }} high</span>
+      <span class="pill medium">{{ ctx.findings.counts.medium }} medium</span>
+      <span class="pill low">{{ ctx.findings.counts.low }} low</span>
+    </div>
+    {% if ctx.findings.list %}
+    <table>
+      <thead><tr><th>Severity</th><th>Resource</th><th>Description</th></tr></thead>
+      <tbody>
+        {% for f in ctx.findings.list %}
+        <tr class="sev-{{ f.get('severity', 'unknown')|lower }}">
+          <td>{{ f.get('severity', 'unknown') }}</td>
+          <td>{{ f.get('resource', f.get('category', '—')) }}</td>
+          <td>{{ f.get('description', '') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No open findings.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Containers &amp; Stacks</h2>
+    <p class="muted">
+      {{ ctx.containers.healthy }}/{{ ctx.containers.total }} containers healthy &middot;
+      {{ ctx.stack_completeness.complete }}/{{ ctx.stack_completeness.total }} stacks complete
+    </p>
+    {% if ctx.containers.issues %}
+    <table>
+      <thead><tr><th>Container</th><th>Status</th><th>Issue</th></tr></thead>
+      <tbody>
+        {% for c in ctx.containers.issues %}
+        <tr>
+          <td>{{ c.get('name', '?') }}</td>
+          <td>{{ c.get('status', '?') }}</td>
+          <td>{{ c.get('issue', '') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if ctx.stack_completeness.incomplete %}
+    <table>
+      <thead><tr><th>Stack</th><th>Present</th><th>Expected</th><th>Missing</th></tr></thead>
+      <tbody>
+        {% for s in ctx.stack_completeness.incomplete %}
+        <tr>
+          <td>{{ s.get('stack', '?') }}</td>
+          <td>{{ s.get('present_count', '?') }}</td>
+          <td>{{ s.get('expected_count', '?') }}</td>
+          <td>{{ s.get('missing_services', [])|join(', ') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Disk</h2>
+    <table>
+      <thead><tr><th>Mount</th><th>Source</th><th>Used %</th></tr></thead>
+      <tbody>
+        {% for d in ctx.disk %}
+        <tr class="{{ 'alert-row' if d.get('alert') else '' }}">
+          <td>{{ d.get('mount', '?') }}</td>
+          <td>{{ d.get('source', '?') }}</td>
+          <td>{{ d.get('used_pct', '?') }}%</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  {% if ctx.rollback_candidates %}
+  <section class="card">
+    <h2>Open Rollback Candidates</h2>
+    <table>
+      <thead><tr><th>Stack</th><th>Service</th><th>Recorded</th><th>Expires</th></tr></thead>
+      <tbody>
+        {% for r in ctx.rollback_candidates %}
+        <tr>
+          <td>{{ r.stack }}</td>
+          <td>{{ r.service }}</td>
+          <td>{{ r.recorded_at }}</td>
+          <td>{{ r.expires_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+
+  {% if ctx.pending_plan %}
+  <section class="card">
+    <h2>Pending Plan</h2>
+    <p class="muted">planned at {{ ctx.pending_plan.planned_at }}</p>
+    <table>
+      <thead><tr><th>ID</th><th>Priority</th><th>Title</th><th>Steps</th></tr></thead>
+      <tbody>
+        {% for p in ctx.pending_plan.plans %}
+        <tr>
+          <td>{{ p.id }}</td>
+          <td>{{ p.priority }}</td>
+          <td>{{ p.title }}</td>
+          <td>{{ p.step_count }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted">Full step commands live in the Telegram approval flow, not shown here.</p>
+  </section>
+  {% endif %}
+
+  <section class="card">
+    <h2>Recent Update History</h2>
+    {% if ctx.update_history %}
+    <table>
+      <thead><tr><th>When</th><th>Stack</th><th>Service</th><th>Status</th><th>Reason</th></tr></thead>
+      <tbody>
+        {% for h in ctx.update_history %}
+        <tr class="{{ 'alert-row' if h.status not in ('stable', 'success') else '' }}">
+          <td>{{ h.ts }}</td>
+          <td>{{ h.stack }}</td>
+          <td>{{ h.service }}</td>
+          <td>{{ h.status }}</td>
+          <td>{{ h.reason or '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No update history yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>System</h2>
+    <pre class="system-summary">{{ ctx.system_and_backups.system }}</pre>
+    <h3>Backups</h3>
+    <pre class="system-summary">{{ ctx.system_and_backups.backups }}</pre>
+  </section>
+
+  <footer>
+    <p class="muted">Planet Express — read-only, no auth, LAN-trust. Auto-refreshes every 60s.</p>
+  </footer>
+</body>
+</html>

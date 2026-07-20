@@ -12,7 +12,11 @@ outright here with a clear error, rather than producing a unit file that silentl
 fails to start.
 
 Usage:
-    python render_template.py <template_path> <INSTALL_DIR> <RUN_USER> <RUN_GROUP> <CONFIG_FILE>
+    python render_template.py <template_path> <INSTALL_DIR> <RUN_USER> <RUN_GROUP> <CONFIG_FILE> [DASHBOARD_PORT]
+
+DASHBOARD_PORT is optional -- string.Template.substitute() silently ignores kwargs a
+template doesn't reference, so passing it when rendering casa-planetexpress.service.template
+or casa-stacks.service.template (neither of which contain $DASHBOARD_PORT) is a no-op.
 """
 
 import string
@@ -40,7 +44,12 @@ def render(template_text: str, **values: str) -> str:
 
 
 def main() -> None:
-    template_path, install_dir, run_user, run_group, config_file = sys.argv[1:6]
+    args = sys.argv[1:7]
+    if len(args) < 5:
+        sys.exit("usage: render_template.py <template_path> <INSTALL_DIR> <RUN_USER> "
+                 "<RUN_GROUP> <CONFIG_FILE> [DASHBOARD_PORT]")
+    template_path, install_dir, run_user, run_group, config_file = args[:5]
+    dashboard_port = args[5] if len(args) > 5 else ""
     with open(template_path) as f:
         template_text = f.read()
     rendered = render(
@@ -49,6 +58,7 @@ def main() -> None:
         RUN_USER=run_user,
         RUN_GROUP=run_group,
         CONFIG_FILE=config_file,
+        DASHBOARD_PORT=dashboard_port,
     )
     sys.stdout.write(rendered)
 
