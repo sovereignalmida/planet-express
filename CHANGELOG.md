@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checklist for everything else (deploy, full pipeline run, Telegram approval, Amy diagnosis,
   Zoidberg canary/rollback, dashboard/widget). 88/88 tests passing, 0 ruff findings. First semver
   git tag once dogfooded — closes out the 9-spec public-release roadmap.
+  An independent Codex review found **2 real issues**, both fixed: (1) the CI workflow as
+  originally written would fail on a clean checkout — several tests point `CASA_CONFIG` at the
+  gitignored, host-specific `config.yaml`, which doesn't exist on a fresh runner, so the pytest
+  step now sets `CASA_CONFIG` to the tracked `config.example.yaml`; (2) the README's architecture
+  section overstated the approval model, implying every host mutation goes through Farnsworth's
+  Telegram approval — corrected to state that Zoidberg's canary updates and safe-prune are both
+  automated, notify-after rather than approval-before, bounded by their own watch/rollback and
+  safety-gate logic instead.
 - **Spec 7: Homepage-widget-compatible endpoint.** One new route, `GET /api/widget` on
   `casa_scruffy.py`, returning `jsonify(dashboard_data.summarize_health())` — no new
   summarization logic needed, since Spec 6 deliberately shaped `summarize_health()` to
