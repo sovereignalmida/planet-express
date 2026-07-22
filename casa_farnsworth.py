@@ -17,11 +17,15 @@ Usage:
 import argparse
 import json
 import logging
+import re
 import shlex
 import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import yaml
 
 import config
 import casa_llm as llm
@@ -30,6 +34,7 @@ import casa_hermes as hermes
 import casa_bender as bender
 import casa_zoidberg as zoidberg
 import casa_amy as amy
+import casa_fry as fry
 import casa_stackctl as stackctl
 from telegram_client import TelegramClient
 from notifier import Notifier, TelegramNotifier
@@ -41,6 +46,12 @@ log = logging.getLogger("planetexpress.farnsworth")
 PIPELINE_INTERVAL_HOURS = 6
 PLAN_EXPIRY_HOURS = 24
 MAX_TOKENS = 8192  # 4096 truncates mid-JSON with 33 findings (~13k chars output)
+
+# /install only ever writes a LAN-only Traefik router (no auth of its own) — restricted to
+# this deployment's own LAN-only domain convention (config.LAN_ONLY_DOMAIN, defaulting to
+# this host's "casalan.com") so a mistyped or malicious domain can't silently expose a
+# brand-new, unreviewed container to the public internet.
+LAN_ONLY_DOMAIN = config.LAN_ONLY_DOMAIN
 
 # Canary auto-update cadence — deliberately separate from the 6h monitor cycle. Weekly,
 # Sunday 05:00 local, spaced away from the existing Sunday 03:30 Lidarr cron and the
@@ -552,6 +563,41 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
         else:
             threading.Thread(target=_run_stack_op, args=(notifier, "down", target), daemon=True).start()
 
+    elif cmd == "/install":
+        parts = text.split()
+        url = parts[1] if len(parts) > 1 else None
+        domain = parts[2] if len(parts) > 2 else None
+        if not url or not domain:
+            notifier.notify("Usage: `/install <url> <domain>`")
+        elif (
+            len(domain) > 253
+            or not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+", domain, re.IGNORECASE)
+        ):
+            # domain gets interpolated directly into a Traefik Host(`...`) label — reject
+            # anything that isn't a plain, single well-formed hostname up front (per-label
+            # length capped at 63 per DNS, overall length capped at 253), so a crafted
+            # value (backticks/parens/pipes, or a too-long label that'd never resolve)
+            # can't inject extra Traefik rule syntax or produce an unreachable router.
+            notifier.notify("⚠️ That doesn't look like a single valid hostname.")
+        elif not (domain.lower() == LAN_ONLY_DOMAIN or domain.lower().endswith("." + LAN_ONLY_DOMAIN)):
+            # This installer only ever writes LAN-only Traefik routers (no auth/hardening
+            # of its own) — restricting it to this host's established LAN-only domain
+            # convention prevents a typo'd or malicious domain from silently exposing a
+            # brand-new, unreviewed container to the public internet through Traefik.
+            notifier.notify(
+                f"⚠️ `/install` only supports `*.{LAN_ONLY_DOMAIN}` (this host's LAN-only "
+                f"domain convention). Public-facing installs need to be done by hand."
+            )
+        else:
+            # Capped at 20 chars: stack_name ends up embedded in a Telegram inline-button
+            # callback_data ("approve_diff:diff-<stack_name>-<timestamp>"), which Telegram
+            # rejects outright past 64 bytes (BUTTON_DATA_INVALID) — a long DNS label would
+            # silently make the resulting diff impossible to approve.
+            stack_name = (re.sub(r"[^a-z0-9-]", "", domain.split(".")[0].lower()) or "newstack")[:20]
+            threading.Thread(
+                target=_run_install, args=(notifier, stack_name, url, domain), daemon=True
+            ).start()
+
     elif cmd == "/help":
         notifier.notify(
             "*Planet Express — Available Commands*\n"
@@ -566,7 +612,8 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
             "/mounts — Verify NAS mounts are reachable\n"
             "/backups — Borg daily/weekly backup status\n"
             "/up `<stack>`|`all` — Bring a stack (or everything) up\n"
-            "/down `<stack>`|`all` — Bring a stack (or everything) down"
+            "/down `<stack>`|`all` — Bring a stack (or everything) down\n"
+            "/install `<url>` `<domain>` — Fry resolves a project URL, proposes a new stack (diff-approve)"
         )
 
 
@@ -605,8 +652,12 @@ def handle_callback(update: dict, tg: TelegramClient, notifier: Notifier, state:
         )
         try:
             result = bender.apply_pending_diff(decision.request_id)
+            if result["backup_path"]:
+                backup_line = f"Backup saved at <code>{TelegramClient.s(result['backup_path'])}</code>."
+            else:
+                backup_line = "New file — no prior version to back up."
             notifier.notify(
-                f"📝 Applied. Backup saved at <code>{TelegramClient.s(result['backup_path'])}</code>.\n"
+                f"📝 Applied. {backup_line}\n"
                 f"This only wrote the file — nothing has restarted. Run the normal update/restart "
                 f"plan (or /check) to pick up the change."
             )
@@ -746,6 +797,369 @@ def _investigate_failure(notifier: Notifier, container: str, reason: str) -> Non
             f"She didn't have enough to propose an exact diff — that edit still needs to be made "
             f"by hand and proposed through the normal diff-approval flow."
         )
+
+
+def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str) -> None:
+    """Onboard a new stack from a URL. Fry resolves the project's real deployment
+    requirements; this function synthesizes a standalone compose file matching the
+    Navidrome precedent (container_name CASA_<NAME>, casaproxy network, LAN-only
+    Traefik router) and proposes it through Bender's existing diff-approve flow.
+    Never writes anything itself — same "human approves the diff" contract as
+    _investigate_failure."""
+    s = TelegramClient.s
+    try:
+        req = fry.onboard(url, stack_name, domain)
+    except Exception as e:
+        log.exception(f"Fry's resolution crashed for {url}: {e}")
+        notifier.notify(f"🛑 Fry's resolution of {s(url)} crashed: `{str(e)[:200]}`")
+        return
+
+    try:
+        _process_fry_resolution(notifier, stack_name, url, domain, req)
+    except Exception as e:
+        # Fry's output is model-generated JSON — even though it matched the schema well
+        # enough to parse, a field can still be the wrong shape (e.g. a string where a
+        # list of dicts was expected). This runs in a daemon thread with no other
+        # handler above it, so without this the install would fail completely silently.
+        log.exception(f"Processing Fry's resolution crashed for {stack_name}: {e}")
+        notifier.notify(
+            f"🛑 Processing Fry's resolution for {s(stack_name)} crashed: `{str(e)[:200]}`. "
+            f"This needs to be onboarded by hand."
+        )
+
+
+def _process_fry_resolution(notifier: Notifier, stack_name: str, url: str, domain: str, req: dict) -> None:
+    s = TelegramClient.s
+
+    # Fry's JSON is model-generated, not schema-enforced. Validate the shape of every
+    # collection field up front, before anything below assumes it — a wrong-but-truthy
+    # type (e.g. a string where a list of dicts is expected) would otherwise crash
+    # outright (iterating characters, calling .get() on a non-dict) or, further down,
+    # silently produce a malformed/unsafe compose proposal.
+    ports = req.get("ports") or []
+    volumes = req.get("volumes") or []
+    env_vars = req.get("required_env") or []
+    if (
+        not isinstance(ports, list) or not all(isinstance(p, dict) for p in ports)
+        or not isinstance(volumes, list)
+        or not isinstance(env_vars, list) or not all(isinstance(e, dict) for e in env_vars)
+    ):
+        notifier.notify(
+            "⚠️ Fry's response has the wrong shape for ports/volumes/required_env (expected "
+            "lists, with ports/required_env entries as objects) — refusing to treat this as "
+            "usable structured data. This needs to be onboarded by hand."
+        )
+        return
+
+    # Checked before the summary is built below: every guardrail field interpolated
+    # there is a raw model-generated value with no HTML-escaping (they're supposed to be
+    # plain booleans, not user-facing text) — a wrong type could otherwise break
+    # Telegram's HTML parser for the summary message itself. Fail closed instead: require
+    # each boolean guardrail to actually be present as a real bool, or refuse rather than
+    # let incomplete/malformed safety metadata reach the summary at all.
+    bool_guardrail_fields = [
+        "needs_docker_socket", "has_own_reverse_proxy", "requires_companion_services",
+        "has_extra_directives", "named_volumes_need_special_config",
+    ]
+    missing_or_bad = [
+        field for field in bool_guardrail_fields if not isinstance(req.get(field), bool)
+    ]
+    if missing_or_bad or not isinstance(req.get("required_env"), list):
+        notifier.notify(
+            f"⚠️ Fry's response is missing or has the wrong type for required safety-guardrail "
+            f"field(s) ({s(', '.join(missing_or_bad) or 'required_env')}) — refusing to treat an "
+            f"incomplete response as a clean bill of health. This needs to be onboarded by hand."
+        )
+        return
+
+    port_lines = "\n".join(f"• {p.get('container_port')} — {s(p.get('purpose', ''))}" for p in ports) or "none"
+    volumes_text = ", ".join(s(v) for v in volumes) or "none"
+    env_text = "\n".join(f"• {s(e.get('name'))} — {s(e.get('purpose', ''))}" for e in env_vars) or "none"
+
+    summary = (
+        f"🚀 <b>Fry's resolution: {s(req.get('project_name', stack_name))}</b>\n"
+        f"Repo: {s(req.get('repo_url', 'unknown'))}\n"
+        f"Image: <code>{s(req.get('image', 'unknown'))}</code>\n"
+        f"Ports:\n{port_lines}\n"
+        f"Volumes: {volumes_text}\n"
+        f"Required env:\n{env_text}\n"
+        f"Docker socket needed: {req.get('needs_docker_socket')}\n"
+        f"Bundles its own reverse proxy: {req.get('has_own_reverse_proxy')}\n"
+        f"Needs companion services: {req.get('requires_companion_services')}\n"
+        f"Has extra directives (command/entrypoint/etc): {req.get('has_extra_directives')}\n"
+        f"Named volumes need special config: {req.get('named_volumes_need_special_config')}\n"
+        f"Notes: {s(req.get('notes', ''))}"
+    )
+    notifier.notify(summary)
+
+    if (
+        not req.get("sufficient_context")
+        or not isinstance(req.get("image"), str)
+        or not req["image"].strip()
+    ):
+        notifier.notify(
+            "⚠️ Fry didn't find an authoritative compose block to work from — refusing to "
+            "guess. This needs to be onboarded by hand."
+        )
+        return
+
+    if req.get("needs_docker_socket"):
+        notifier.notify(
+            "⚠️ This project mounts the Docker socket directly (no socket-proxy sidecar) — "
+            "refusing to auto-propose. That's a real blast-radius decision for a human to make "
+            "by hand, not something to wave through."
+        )
+        return
+
+    if req.get("has_own_reverse_proxy"):
+        notifier.notify(
+            "⚠️ This project bundles its own reverse proxy — that conflicts with Traefik "
+            "already fronting everything here. Refusing to auto-propose; needs a human decision "
+            "on which one wins."
+        )
+        return
+
+    if env_vars:
+        notifier.notify(
+            "⚠️ This project requires environment variables/secrets Fry can't generate on its "
+            "own (see list above). Refusing to auto-propose until those are supplied — generate "
+            "them, write a `.env` with `664` perms, then onboard by hand."
+        )
+        return
+
+    if req.get("requires_companion_services"):
+        notifier.notify(
+            "⚠️ This project needs its own companion service (its own database/cache/worker, "
+            "not just the main app) — this installer only ever builds a single-service stack "
+            "file. Refusing to auto-propose; needs to be onboarded by hand."
+        )
+        return
+
+    if req.get("has_extra_directives"):
+        notifier.notify(
+            "⚠️ This project's own service block relies on directives (command/entrypoint/"
+            "depends_on/devices/capabilities/etc) this installer doesn't carry through — only "
+            "image/ports/volumes/healthcheck/labels are synthesized. Refusing to auto-propose; "
+            "needs to be onboarded by hand."
+        )
+        return
+
+    if req.get("named_volumes_need_special_config"):
+        notifier.notify(
+            "⚠️ This project's named volume(s) need special top-level config (external/driver/"
+            "driver_opts) — this installer only ever emits plain default volumes, which would "
+            "give the app the wrong (empty) storage. Refusing to auto-propose; needs to be "
+            "onboarded by hand."
+        )
+        return
+
+    appdata_dir = Path.home() / "apps" / stack_name
+    if appdata_dir.exists():
+        notifier.notify(
+            f"⚠️ `{s(str(appdata_dir))}` already has content — this doesn't look like a clean "
+            f"install. Refusing to auto-propose; check it by hand first."
+        )
+        return
+
+    existing_compose = config.STACKS_ROOT / stack_name / "docker-compose.yml"
+    if existing_compose.is_file():
+        notifier.notify(
+            f"⚠️ `{s(str(existing_compose))}` already exists — this installer only ever "
+            f"proposes brand-new stacks, never a wholesale replacement of an existing one. "
+            f"Refusing to auto-propose; if this stack needs editing, do it through the normal "
+            f"diff-approval flow by hand instead."
+        )
+        return
+
+    port = req.get("primary_port")
+    # port gets spliced directly into a Traefik label below
+    # ("...loadbalancer.server.port={port}") — must be a genuine int in the valid TCP
+    # range, not just present, or a malformed/malicious string (e.g. containing a
+    # newline) could inject arbitrary extra Traefik labels. Also require `ports` to be
+    # non-empty: Fry's JSON isn't schema-enforced, so an empty ports list with a
+    # non-null primary_port is inconsistent output, not a confirmed real port.
+    if (
+        not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535)
+        or not ports or port not in {p.get("container_port") for p in ports}
+    ):
+        notifier.notify(
+            "⚠️ Fry didn't resolve a single unambiguous, valid web-UI port to route to — "
+            "refusing to auto-propose rather than guess which of the reported ports is correct."
+        )
+        return
+
+    # Upstream bind-mount host paths (e.g. "./config:/data", "/opt/app/data:/data", or
+    # "${HOME}/data:/data") are meaningful relative to the UPSTREAM project's own
+    # checkout/host, not this one — copying them in verbatim would write to the wrong
+    # location (or a path that doesn't exist here at all) rather than this host's
+    # `~/apps/<stack>` convention. Remapping them correctly needs a human decision on
+    # where the data should actually live, so refuse rather than guess. Long-syntax
+    # (dict-form) volume entries and any other non-string entry are treated as
+    # disqualifying too, rather than silently passed through unchecked.
+    bind_mounts = [
+        v for v in volumes
+        if not isinstance(v, str) or v.split(":", 1)[0].startswith(("/", "./", "../", "~", "$"))
+    ]
+    if bind_mounts:
+        notifier.notify(
+            f"⚠️ This project uses host bind-mount paths or non-standard volume entries "
+            f"({s(', '.join(str(v) for v in bind_mounts))}) rather than plain named volumes — "
+            f"those paths are specific to the upstream project's own deployment, not this "
+            f"host's `~/apps/<stack>` convention. Refusing to auto-propose; needs to be "
+            f"onboarded by hand."
+        )
+        return
+
+    # Defense in depth: these fields get spliced onto a single line each below (e.g.
+    # "    image: {req['image']}"). An embedded line break followed by unindented text
+    # would be reinterpreted by the YAML parser as a sibling key rather than part of
+    # this scalar's value — refuse rather than let that reach the synthesized document
+    # at all. PyYAML treats more than just "\n" as a line break: "\r", NEL (U+0085), and
+    # the Unicode line/paragraph separators (U+2028/U+2029) all split a scalar the same
+    # way, so a check for "\n" alone can be silently bypassed by any of those.
+    yaml_linebreak_chars = "\n\r\x85  "
+    if any(ch in (req.get("image") or "") for ch in yaml_linebreak_chars):
+        notifier.notify("⚠️ Fry's resolved image contains embedded line breaks — refusing to propose.")
+        return
+    if any(isinstance(v, str) and any(ch in v for ch in yaml_linebreak_chars) for v in volumes):
+        notifier.notify("⚠️ Fry's resolved volumes contain embedded line breaks — refusing to propose.")
+        return
+
+    # Built entirely from Fry's structured fields, not the raw upstream_service_yaml —
+    # that block still declares its own host port bind and container_name, which this
+    # host's standalone-stack convention (Traefik-routed, CASA_<NAME>, casaproxy) must
+    # override rather than inherit. Only volumes/healthcheck are trusted verbatim.
+    lines = [
+        "networks:",
+        "  casaproxy:",
+        "    external: true",
+        "",
+        "services:",
+        f"  {stack_name}:",
+        f"    image: {req['image']}",
+        f"    container_name: CASA_{stack_name.upper()}",
+        "    restart: unless-stopped",
+        "    networks:",
+        "      - casaproxy",
+    ]
+    if volumes:
+        lines.append("    volumes:")
+        lines += [f"      - {v}" for v in volumes]
+
+    healthcheck_yaml = req.get("healthcheck_yaml")
+    if healthcheck_yaml:
+        # Independently parse+validate this fragment before splicing it in — it must
+        # contain exactly a "healthcheck:" key and nothing else. Without this, a
+        # malicious/malformed fragment could smuggle in a sibling key (e.g. its own
+        # "volumes:") that bypasses both the service-level allowed_keys check (volumes
+        # is itself an allowed key) and the bind_mounts guardrail above, which only
+        # inspects req["volumes"] — not whatever actually ends up in the final YAML.
+        try:
+            parsed_hc = yaml.safe_load(healthcheck_yaml)
+        except yaml.YAMLError:
+            parsed_hc = None
+        if not isinstance(parsed_hc, dict) or set(parsed_hc.keys()) != {"healthcheck"}:
+            notifier.notify(
+                "⚠️ Fry's healthcheck_yaml didn't parse as a single, standalone `healthcheck:` "
+                "block — refusing to propose."
+            )
+            return
+        lines += healthcheck_yaml.rstrip("\n").split("\n")
+
+    lines += [
+        "    labels:",
+        "      - traefik.enable=true",
+        f"      - traefik.http.routers.{stack_name}-lan.rule=Host(`{domain}`)",
+        f"      - traefik.http.routers.{stack_name}-lan.entrypoints=websecure",
+        f"      - traefik.http.routers.{stack_name}-lan.tls=true",
+        f"      - traefik.http.services.{stack_name}.loadbalancer.server.port={port}",
+        f"      - traefik.http.routers.{stack_name}-lan.service={stack_name}",
+    ]
+
+    # Derived directly from `volumes` (already confirmed above to contain only
+    # plain named-volume strings, no bind mounts) rather than trusting Fry's separately
+    # model-supplied top_level_volumes field — that field could disagree with volumes
+    # (omit or misspell an entry), producing a compose file that references an
+    # undeclared volume. Deriving it from the same source volumes were built from
+    # guarantees the two stay consistent by construction.
+    top_level_volumes = list(dict.fromkeys(v.split(":", 1)[0] for v in volumes))
+    if top_level_volumes:
+        lines.append("")
+        lines.append("volumes:")
+        lines += [f"  {v}:" for v in top_level_volumes]
+
+    new_content = "\n".join(lines) + "\n"
+
+    # Defense in depth: req's string fields (healthcheck_yaml, volumes, image) are
+    # model-generated and only lightly shaped by the prompt, not schema-enforced — a
+    # malformed or adversarial response could smuggle extra YAML (another service,
+    # embedded newlines reinterpreted as new keys) or a docker.sock mount that
+    # contradicts a needs_docker_socket:false the guardrail above already trusted.
+    # Parse the actual synthesized document independently and re-check it before
+    # proposing, rather than relying solely on a human reading a (possibly truncated,
+    # see fmt_diff) diff message.
+    try:
+        parsed = yaml.safe_load(new_content)
+    except yaml.YAMLError as e:
+        notifier.notify(f"⚠️ Synthesized compose failed to parse as YAML ({s(str(e))}) — refusing to propose.")
+        return
+
+    # Allowlist the whole document's top-level keys too, not just the service block's —
+    # the newline guards above should already prevent it, but this is the actual backstop:
+    # an injected sibling top-level key (e.g. "include:") would parse as legitimate YAML
+    # without ever touching the services block the check below inspects.
+    top_level_allowed = {"networks", "services", "volumes"}
+    if not isinstance(parsed, dict) or set(parsed.keys()) - top_level_allowed:
+        notifier.notify(
+            "⚠️ Synthesized compose contains unexpected top-level keys beyond networks/services/"
+            "volumes — refusing to propose."
+        )
+        return
+
+    services = parsed.get("services") if isinstance(parsed, dict) else None
+    if not isinstance(services, dict) or set(services.keys()) != {stack_name}:
+        notifier.notify(
+            "⚠️ Synthesized compose doesn't have exactly the expected single service block — "
+            "refusing to propose."
+        )
+        return
+
+    service_block = services[stack_name]
+
+    # Allowlist rather than blocklist: this installer only ever writes these keys itself
+    # (see the `lines` build above) — anything else appearing here means one of Fry's
+    # model-generated string fields (image/healthcheck_yaml/volumes) smuggled extra YAML
+    # in via embedded newlines (e.g. a sibling "privileged: true" or "network_mode: host"
+    # line), not that a legitimate upstream requirement was missed.
+    allowed_keys = {"image", "container_name", "restart", "networks", "volumes", "healthcheck", "labels"}
+    extra_keys = set(service_block.keys()) - allowed_keys
+    if extra_keys:
+        notifier.notify(
+            f"⚠️ Synthesized compose contains unexpected directives ({s(', '.join(sorted(extra_keys)))}) "
+            f"beyond what this installer generates — refusing to propose."
+        )
+        return
+
+    mount_strings = [str(v) for v in (service_block.get("volumes") or [])]
+    if any("docker.sock" in v for v in mount_strings):
+        notifier.notify(
+            "⚠️ Synthesized compose would mount the Docker socket despite the guard above — "
+            "refusing to propose."
+        )
+        return
+
+    try:
+        diff = bender.propose_compose_diff(
+            stack_name, new_content,
+            reason=f"Fry onboarding {url} as {domain}",
+            is_new_stack=True,
+        )
+        notifier.request_approval(
+            TelegramClient.fmt_diff(stack_name, f"New stack onboarded from {url}", diff["diff_text"]),
+            diff["diff_id"], "diff",
+        )
+    except bender.SafetyError as e:
+        notifier.notify(f"⚠️ Could not turn Fry's resolution into a diff: {s(str(e))}")
 
 
 def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, plan_data: dict) -> None:

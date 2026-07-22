@@ -52,6 +52,20 @@ class PlanetExpressConfig(BaseModel):
     paused_containers: list[str] = []
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
+    # /install only ever writes a LAN-only Traefik router (no auth of its own) —
+    # restricted to this deployment's own LAN-only domain convention so a mistyped or
+    # malicious domain can't silently expose a brand-new, unreviewed container to the
+    # public internet. Defaults to this host's existing convention for compatibility
+    # with config.yaml files written before this field existed.
+    lan_only_domain: str = "casalan.com"
+
+    @field_validator("lan_only_domain")
+    @classmethod
+    def _lan_only_domain_lowercase(cls, v: str) -> str:
+        # DNS names are case-insensitive; the /install command lowercases the
+        # requested domain before comparing against this — normalize here too so a
+        # mixed-case config value (e.g. "CasaLan.com") doesn't reject every valid request.
+        return v.lower()
     # Empty by default -- a fresh install grants zero sudo actions until the operator
     # explicitly declares them here. Enforced in casa_bender.py's _safety_check(),
     # independent of whatever a plan's LLM-generated commands claim to need.

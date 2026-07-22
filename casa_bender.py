@@ -19,7 +19,9 @@ import logging
 import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -260,6 +262,12 @@ def run_safe_prune() -> dict:
 # backed up before writing.
 STACKS_ROOT = config.STACKS_ROOT
 PENDING_DIFFS_FILE = config.STATE_DIR / "pending_diffs.json"
+# Every propose/discard/apply call does a read-modify-write of the same file. Each
+# Telegram command runs in its own daemon thread, so without this lock two concurrent
+# calls (e.g. two /install proposals) could race and silently drop one's write.
+# Reentrant because apply_pending_diff() calls get_pending_diff()/discard_pending_diff()
+# (each of which also acquires this lock) from within its own held critical section.
+_PENDING_DIFFS_LOCK = threading.RLock()
 
 
 def _load_pending_diffs() -> dict:
@@ -307,19 +315,51 @@ def read_service_block(stack_name: str, service_key: str) -> tuple[str, str] | N
     return content, "".join(lines[start:end])
 
 
-def propose_compose_diff(stack_name: str, new_content: str, reason: str) -> dict:
+def propose_compose_diff(stack_name: str, new_content: str, reason: str, is_new_stack: bool = False) -> dict:
     """Propose a diff to a stack's docker-compose.yml. Writes nothing to the real
     file — only records the proposal and returns a unified diff for a human to
     review in Telegram. Raises SafetyError for forbidden stacks or any path that
-    isn't exactly stacks/<name>/docker-compose.yml."""
+    isn't exactly stacks/<name>/docker-compose.yml.
+
+    is_new_stack must be explicitly passed True by a caller that intends to onboard a
+    brand-new stack (Fry) — it is NOT inferred from the file's absence. Defaulting to
+    False preserves the original behavior for ordinary compose edits (Amy): if the file
+    is missing when an edit was expected, that's raised as an error, not silently
+    reinterpreted as "create a new stack" (e.g. if the file was deleted between Amy
+    reading the current block and proposing her edit)."""
     if stack_name in FORBIDDEN_STACKS:
         raise SafetyError(f"Refusing to propose a diff for forbidden stack '{stack_name}'")
 
     compose_path = STACKS_ROOT / stack_name / "docker-compose.yml"
-    if not compose_path.is_file():
+    if is_new_stack:
+        if compose_path.is_file():
+            raise SafetyError(
+                f"'{compose_path}' already exists — refusing to treat this as a new-stack "
+                f"proposal; propose an edit against the current file instead"
+            )
+    elif not compose_path.is_file():
         raise SafetyError(f"No docker-compose.yml for stack '{stack_name}' at {compose_path}")
 
-    old_content = compose_path.read_text()
+    # Only enforced for brand-new stacks (onboarding): existing stacks (Amy's normal
+    # compose-edit flow) may legitimately have names with characters this doesn't allow
+    # (underscores, uppercase, etc) — those are still safe because they already resolve
+    # to a real, existing path under STACKS_ROOT, checked below regardless. A new-stack
+    # name has no existing path to anchor it, so it's restricted to a safe character set
+    # up front rather than trusting callers (e.g. a Telegram-derived domain slug) to have
+    # already sanitized it.
+    if is_new_stack and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", stack_name):
+        raise SafetyError(f"Invalid stack name '{stack_name}' — must be lowercase alphanumeric/hyphen only")
+
+    # Belt-and-suspenders regardless of new vs. existing: if STACKS_ROOT/<stack_name> is
+    # ever a symlink to somewhere else, resolve() would follow it — verify the real,
+    # resolved destination is still under STACKS_ROOT before trusting it as the target of
+    # a diff that apply_pending_diff will later write to.
+    resolved_root = STACKS_ROOT.resolve()
+    resolved_target = compose_path.parent.resolve()
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+        raise SafetyError(f"Stack directory for '{stack_name}' resolves outside STACKS_ROOT — refusing")
+
+    old_content = compose_path.read_text() if not is_new_stack else ""
     if old_content == new_content:
         raise SafetyError("Proposed content is identical to the current file — nothing to diff")
 
@@ -330,49 +370,116 @@ def propose_compose_diff(stack_name: str, new_content: str, reason: str) -> dict
         tofile=f"{stack_name}/docker-compose.yml (proposed)",
     ))
 
-    diff_id = f"diff-{stack_name}-{int(time.time())}"
-    pending = _load_pending_diffs()
-    pending[diff_id] = {
-        "stack": stack_name,
-        "compose_path": str(compose_path),
-        "new_content": new_content,
-        "reason": reason,
-        "diff_text": diff_text,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _save_pending_diffs(pending)
+    with _PENDING_DIFFS_LOCK:
+        diff_id = f"diff-{stack_name}-{int(time.time())}"
+        pending = _load_pending_diffs()
+        if diff_id in pending:
+            # Two proposals for the same stack within the same second — make the ID
+            # unique rather than let the second silently overwrite the first. A short
+            # fixed-length (4 hex char) suffix, not a thread ident (which can run to 15+
+            # digits) — diff_id is embedded verbatim in a Telegram inline-button
+            # callback_data ("approve_diff:<diff_id>"), capped at 64 bytes total.
+            diff_id = f"{diff_id}-{uuid.uuid4().hex[:4]}"
+        pending[diff_id] = {
+            "stack": stack_name,
+            "compose_path": str(compose_path),
+            "new_content": new_content,
+            "reason": reason,
+            "diff_text": diff_text,
+            "is_new_stack": is_new_stack,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save_pending_diffs(pending)
     log.info(f"Proposed diff {diff_id} for {stack_name}/docker-compose.yml: {reason}")
     return {"diff_id": diff_id, "diff_text": diff_text, "stack": stack_name}
 
 
 def get_pending_diff(diff_id: str) -> dict | None:
-    return _load_pending_diffs().get(diff_id)
+    with _PENDING_DIFFS_LOCK:
+        return _load_pending_diffs().get(diff_id)
 
 
 def discard_pending_diff(diff_id: str) -> None:
-    pending = _load_pending_diffs()
-    pending.pop(diff_id, None)
-    _save_pending_diffs(pending)
+    with _PENDING_DIFFS_LOCK:
+        pending = _load_pending_diffs()
+        pending.pop(diff_id, None)
+        _save_pending_diffs(pending)
 
 
 def apply_pending_diff(diff_id: str) -> dict:
     """Apply a previously-approved diff: back up the current file (.yml.bak.<ts>),
     then write the new content. Does not restart anything — that's still a
     separate, normal plan-approval step afterward."""
+    with _PENDING_DIFFS_LOCK:
+        return _apply_pending_diff_locked(diff_id)
+
+
+def _apply_pending_diff_locked(diff_id: str) -> dict:
     entry = get_pending_diff(diff_id)
     if not entry:
         raise SafetyError(f"No pending diff found for '{diff_id}' (already applied or expired?)")
 
     compose_path = Path(entry["compose_path"])
-    backup_path = compose_path.with_name(
-        compose_path.name + f".bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    )
-    backup_path.write_text(compose_path.read_text())
+
+    # Re-check containment at apply time, not just at proposal time: the proposal-time
+    # check in propose_compose_diff() only proves the path was safe THEN. Between propose
+    # and approve, STACKS_ROOT/<stack>/ could be replaced with a symlink pointing outside
+    # STACKS_ROOT — is_file() would still read False for a symlinked dir with no compose
+    # file inside it, and mkdir(exist_ok=True) doesn't care that the directory entry is a
+    # symlink, so without this the write below would silently land outside STACKS_ROOT.
+    resolved_root = STACKS_ROOT.resolve()
+    resolved_target = compose_path.parent.resolve()
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+        raise SafetyError(f"'{compose_path.parent}' resolves outside STACKS_ROOT — refusing to apply")
+
+    # compose_path itself could be a (possibly broken) symlink even when its parent
+    # directory is fine — is_file() reads False for a broken symlink, so the new-stack
+    # branch below would treat it as absent, and write_text() follows the link and
+    # creates the real target wherever it points. Checking is_symlink() directly (rather
+    # than relying on resolve(), which by design still "succeeds" for a broken link)
+    # catches this even when the link's target doesn't exist yet to resolve.
+    if compose_path.is_symlink():
+        raise SafetyError(f"'{compose_path}' is a symlink — refusing to write through it")
+
+    # entry["is_new_stack"] records whether the file was absent at proposal time. If it's
+    # since appeared (another process/manual edit between propose and approve), applying
+    # this stale new-stack proposal would silently clobber whatever showed up — refuse
+    # instead of overwriting an unrelated, possibly manually-created file.
+    if entry.get("is_new_stack") and compose_path.is_file():
+        raise SafetyError(
+            f"'{compose_path}' now exists but this diff was proposed when it was absent — "
+            f"refusing to overwrite; discard this diff and re-propose against the current file"
+        )
+
+    # The mirror image of the check above: this was an ordinary edit of an existing file
+    # (is_new_stack False/absent from older entries), but the file has since disappeared
+    # (deleted, stack removed). Falling through to the "create it fresh" branch below
+    # would silently resurrect a removed stack with no backup and no history — refuse
+    # instead of treating a vanished existing file the same as a genuine new stack.
+    if not entry.get("is_new_stack") and not compose_path.is_file():
+        raise SafetyError(
+            f"'{compose_path}' no longer exists but this diff was proposed as an edit to an "
+            f"existing file — refusing to recreate it; discard this diff and re-propose if the "
+            f"stack is meant to exist"
+        )
+
+    backup_path = None
+    if compose_path.is_file():
+        backup_path = compose_path.with_name(
+            compose_path.name + f".bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        backup_path.write_text(compose_path.read_text())
+    else:
+        compose_path.parent.mkdir(parents=True, exist_ok=True)
     compose_path.write_text(entry["new_content"])
     discard_pending_diff(diff_id)
 
     log.info(f"Applied diff {diff_id} to {compose_path} (backup: {backup_path})")
-    return {"diff_id": diff_id, "compose_path": str(compose_path), "backup_path": str(backup_path)}
+    return {
+        "diff_id": diff_id,
+        "compose_path": str(compose_path),
+        "backup_path": str(backup_path) if backup_path else None,
+    }
 
 
 # ── Core execute function ─────────────────────────────────────────────────────
