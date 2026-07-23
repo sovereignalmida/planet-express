@@ -356,6 +356,14 @@ body {
 .finding-row.sev-high { border-left-color: var(--orange); background: rgba(240,134,74,.03); }
 .finding-row.sev-low { border-left-color: var(--cyan); background: rgba(86,182,224,.03); }
 
+.findings-collapse { margin-top: 4px; }
+.findings-collapse summary {
+  cursor: pointer; font-family: 'JetBrains Mono', monospace; font-size: 11.5px;
+  color: var(--faint2); padding: 8px 0; user-select: none;
+}
+.findings-collapse summary:hover { color: var(--muted2); }
+.findings-collapse[open] summary { border-bottom: 1px solid var(--border-hair); margin-bottom: 4px; }
+
 .sev-label { font-family: 'JetBrains Mono', monospace; font-weight: 600; }
 .sev-label.sev-critical { color: var(--red-text); }
 .sev-label.sev-high { color: var(--orange); }

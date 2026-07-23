@@ -132,6 +132,13 @@
         </section>
 
         <!-- Findings -->
+        {% macro finding_row(f) %}
+          <div class="grid-row cols-findings finding-row sev-{{ f.get('severity', 'unknown')|lower }}">
+            <span class="sev-label sev-{{ f.get('severity', 'unknown')|lower }}">{{ f.get('severity', 'unknown')|upper }}</span>
+            <span class="cell-mono cell-service">{{ f.get('resource', f.get('category', '—')) }}</span>
+            <span class="cell-text2">{{ f.get('description', '') }}</span>
+          </div>
+        {% endmacro %}
         <section class="panel">
           <div class="panel-head-row">
             <h3>FINDINGS</h3>
@@ -146,13 +153,25 @@
           <div class="grid-head cols-findings">
             <span>SEVERITY</span><span>RESOURCE</span><span>DESCRIPTION</span>
           </div>
-          {% for f in ctx.findings.list %}
-          <div class="grid-row cols-findings finding-row sev-{{ f.get('severity', 'unknown')|lower }}">
-            <span class="sev-label sev-{{ f.get('severity', 'unknown')|lower }}">{{ f.get('severity', 'unknown')|upper }}</span>
-            <span class="cell-mono cell-service">{{ f.get('resource', f.get('category', '—')) }}</span>
-            <span class="cell-text2">{{ f.get('description', '') }}</span>
-          </div>
+          {% for f in ctx.findings.top %}
+          {{ finding_row(f) }}
           {% endfor %}
+          {% if ctx.findings.medium_list %}
+          <details class="findings-collapse">
+            <summary>{{ ctx.findings.medium_list|length }} medium — click to expand</summary>
+            {% for f in ctx.findings.medium_list %}
+            {{ finding_row(f) }}
+            {% endfor %}
+          </details>
+          {% endif %}
+          {% if ctx.findings.low_list %}
+          <details class="findings-collapse">
+            <summary>{{ ctx.findings.low_list|length }} low — click to expand</summary>
+            {% for f in ctx.findings.low_list %}
+            {{ finding_row(f) }}
+            {% endfor %}
+          </details>
+          {% endif %}
           {% else %}
           <p class="muted-body">No open findings.</p>
           {% endif %}

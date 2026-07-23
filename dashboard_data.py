@@ -131,7 +131,10 @@ def summarize_findings() -> dict:
     # would silently return the bound method instead of the value in the template.
     findings = load_findings()
     if not findings:
-        return {"counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "list": [], "analyzed_at": None}
+        return {
+            "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "list": [],
+            "top": [], "medium_list": [], "low_list": [], "analyzed_at": None,
+        }
 
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
     for f in findings.findings:
@@ -140,7 +143,18 @@ def summarize_findings() -> dict:
             counts[sev] += 1
 
     ranked = sorted(findings.findings, key=_severity_rank)
-    return {"counts": counts, "list": ranked, "analyzed_at": findings.analyzed_at}
+    # Split for the template: critical/high (and anything with an unrecognized severity,
+    # so it's never silently hidden) always render in full. Medium/low get their own
+    # collapsed <details> -- a healthy fleet can easily rack up 20+ routine low findings
+    # that would otherwise force deep scrolling past the stuff that actually matters.
+    medium_list = [f for f in ranked if str(f.get("severity", "")).lower() == "medium"]
+    low_list = [f for f in ranked if str(f.get("severity", "")).lower() == "low"]
+    top = [f for f in ranked if str(f.get("severity", "")).lower() not in ("medium", "low")]
+    return {
+        "counts": counts, "list": ranked, "top": top,
+        "medium_list": medium_list, "low_list": low_list,
+        "analyzed_at": findings.analyzed_at,
+    }
 
 
 def summarize_pipeline_status() -> dict:
