@@ -5,307 +5,543 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="refresh" content="60">
   <title>Planet Express — Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
 </head>
 <body>
+  <div class="scanline" aria-hidden="true"></div>
+
   <header class="topbar">
-    <h1>Planet Express</h1>
-    <div class="status-line status-{{ ctx.health.status }}">
-      <span class="dot"></span>
-      pipeline: <strong>{{ ctx.pipeline_status.state }}</strong>
-      {% if ctx.pipeline_status.pending_plan_id %}
-        (pending plan <code>{{ ctx.pipeline_status.pending_plan_id }}</code>)
-      {% endif %}
-      &middot; last scan: {{ ctx.health.last_scan or "never" }}
-      <a class="refresh" href="/">refresh now</a>
+    <div class="brand">
+      <div class="logo">
+        <img src="{{ url_for('static', filename='logo.png') }}" alt="Planet Express">
+        <span class="dot"></span>
+      </div>
+      <div>
+        <div class="wordmark">PLANET&nbsp;EXPRESS</div>
+        <div class="tagline">sysadmin agent · our crew is replaceable, your containers aren't</div>
+      </div>
+    </div>
+
+    <div class="topbar-spacer"></div>
+
+    <div class="topbar-right">
+      <div class="pipeline-block">
+        <div class="pipeline-line">
+          <span class="led-dot status-{{ ctx.health.status }}"></span>
+          <span class="pipeline-label">pipeline</span>
+          <span class="pipeline-state">{{ ctx.pipeline_status.state }}</span>
+          {% if ctx.pipeline_status.state == "awaiting_approval" and ctx.pipeline_status.pending_plan_id %}
+          <span class="pipeline-plan-label">· pending plan</span>
+          <span class="plan-pill">{{ ctx.pipeline_status.pending_plan_id }}</span>
+          {% endif %}
+        </div>
+        <div class="lastscan">last scan: {{ ctx.health.last_scan or "never" }}</div>
+      </div>
+      <a class="refresh-btn" href="/"><span>↻</span> refresh now</a>
     </div>
   </header>
 
+  {% if ctx.pipeline_status.state == "running" %}
+  <div class="scanbar"><div class="scanbar-fill"></div></div>
+  {% endif %}
+
   <nav class="tabs">
-    <a href="#tab-overview">Overview</a>
-    <a href="#tab-backups">Backups</a>
-    <a href="#tab-network">Network</a>
-    <a href="#tab-actions">Actions</a>
+    <button class="tab active" data-tab="overview" type="button">Overview</button>
+    <button class="tab" data-tab="backups" type="button">Backups</button>
+    <button class="tab" data-tab="network" type="button">Network</button>
+    <button class="tab" data-tab="actions" type="button">Actions</button>
+    <div class="tabs-spacer"></div>
+    <div class="readonly-chip">READ-ONLY · LAN-TRUST</div>
   </nav>
 
   {% if not ctx.health.state_available %}
-  <section class="card empty-state">
-    <p>No pipeline data yet — waiting for the first scheduled run.</p>
-  </section>
+  <div style="padding: 18px 26px 0; position: relative; z-index: 2;">
+    <section class="panel">
+      <p class="muted-body">No pipeline data yet — waiting for the first scheduled run.</p>
+    </section>
+  </div>
   {% endif %}
 
-  <div id="tab-overview" class="tab-panel">
-    <section class="card">
-      <h2>Findings</h2>
-      <div class="pills">
-        <span class="pill critical">{{ ctx.findings.counts.critical }} critical</span>
-        <span class="pill high">{{ ctx.findings.counts.high }} high</span>
-        <span class="pill medium">{{ ctx.findings.counts.medium }} medium</span>
-        <span class="pill low">{{ ctx.findings.counts.low }} low</span>
-      </div>
-      {% if ctx.findings.list %}
-      <table>
-        <thead><tr><th>Severity</th><th>Resource</th><th>Description</th></tr></thead>
-        <tbody>
-          {% for f in ctx.findings.list %}
-          <tr class="sev-{{ f.get('severity', 'unknown')|lower }}">
-            <td>{{ f.get('severity', 'unknown') }}</td>
-            <td>{{ f.get('resource', f.get('category', '—')) }}</td>
-            <td>{{ f.get('description', '') }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="muted">No open findings.</p>
-      {% endif %}
-    </section>
+  <div class="body-grid">
+    <main class="main-col">
 
-    <section class="card">
-      <h2>Containers &amp; Stacks</h2>
-      {% if ctx.containers.available %}
-      <p class="muted">
-        {{ ctx.containers.healthy }}/{{ ctx.containers.total }} containers healthy
-        {% if ctx.stack_completeness.available %}
-        &middot; {{ ctx.stack_completeness.complete }}/{{ ctx.stack_completeness.total }} stacks complete
-        {% endif %}
-      </p>
-      {% else %}
-      <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-        container data. Available after the next full scan.</p>
-      {% endif %}
-      {% if ctx.containers.issues %}
-      <table>
-        <thead><tr><th>Container</th><th>Status</th><th>Issue</th></tr></thead>
-        <tbody>
+      <!-- ═══ OVERVIEW ═══ -->
+      <div class="tab-panel active" data-tab-panel="overview">
+
+        <!-- Fleet health hero -->
+        <section class="panel panel-green">
+          <div class="fleet-label">FLEET&nbsp;STATUS</div>
+          {% if ctx.containers.available %}
+          <div class="fleet-row">
+            <div>
+              <div class="fleet-eyebrow">CONTAINERS &amp; STACKS</div>
+              <div class="fleet-count">
+                <span class="fleet-num {{ 'crit' if ctx.containers.down else ('warn' if ctx.containers.degraded else '') }}">{{ ctx.containers.healthy }}</span>
+                <span class="fleet-total">/ {{ ctx.containers.total }}</span>
+                <span class="fleet-suffix">containers healthy</span>
+              </div>
+              <div class="fleet-sub">{{ ctx.containers.online }} online · {{ ctx.containers.degraded }} degraded · {{ ctx.containers.down }} down{% if ctx.containers.paused %} · {{ ctx.containers.paused }} paused{% endif %}</div>
+            </div>
+            <div class="fleet-matrix-wrap">
+              <div class="fleet-matrix">
+                {% for state in ctx.containers.cells %}
+                <span class="fleet-cell {{ 'degraded' if state == 'degraded' else ('down' if state == 'down' else ('paused' if state == 'paused' else '')) }}"></span>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+          <div class="fleet-footer">
+            {% if ctx.stack_completeness.available %}
+            Stack completeness: <span class="mono-inline">{{ ctx.stack_completeness.complete }}/{{ ctx.stack_completeness.total }} stacks complete</span>
+            {% else %}
+            Stack completeness: <span class="mono-inline">not available until the next full scan.</span>
+            {% endif %}
+          </div>
+          {% if ctx.containers.issues %}
+          <div class="grid-head cols-findings" style="grid-template-columns: 1fr 2fr; margin-top: 14px;">
+            <span>CONTAINER</span><span>ISSUE</span>
+          </div>
           {% for c in ctx.containers.issues %}
-          <tr>
-            <td>{{ c.get('name', '?') }}</td>
-            <td>{{ c.get('status', '?') }}</td>
-            <td>{{ c.get('issue', '') }}</td>
-          </tr>
+          <div class="grid-row alert-row" style="grid-template-columns: 1fr 2fr;">
+            <span class="cell-mono cell-service">{{ c.get('name', '?') }}</span>
+            <span class="cell-text2">{{ c.get('issue', '') }}</span>
+          </div>
           {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
-      {% if not ctx.stack_completeness.available %}
-      <p class="muted">Stack completeness: not available until the next full scan.</p>
-      {% elif ctx.stack_completeness.incomplete %}
-      <table>
-        <thead><tr><th>Stack</th><th>Present</th><th>Expected</th><th>Missing</th></tr></thead>
-        <tbody>
+          {% endif %}
+          {% if ctx.stack_completeness.incomplete %}
+          <div class="grid-head cols-updates" style="grid-template-columns: 1.6fr 1fr 1fr 1fr; margin-top: 14px;">
+            <span>STACK</span><span>PRESENT</span><span>EXPECTED</span><span>MISSING</span>
+          </div>
           {% for s in ctx.stack_completeness.incomplete %}
-          <tr>
-            <td>{{ s.get('stack', '?') }}</td>
-            <td>{{ s.get('present_count', '?') }}</td>
-            <td>{{ s.get('expected_count', '?') }}</td>
-            <td>{{ s.get('missing_services', [])|join(', ') }}</td>
-          </tr>
+          <div class="grid-row" style="grid-template-columns: 1.6fr 1fr 1fr 1fr;">
+            <span class="cell-mono cell-service">{{ s.get('stack', '?') }}</span>
+            <span class="cell-mono">{{ s.get('present_count', '?') }}</span>
+            <span class="cell-mono">{{ s.get('expected_count', '?') }}</span>
+            <span class="cell-mono cell-dim">{{ s.get('missing_services', [])|join(', ') }}</span>
+          </div>
           {% endfor %}
-        </tbody>
-      </table>
-      {% endif %}
-    </section>
+          {% endif %}
+          {% else %}
+          <div class="fleet-eyebrow">CONTAINERS &amp; STACKS</div>
+          <p class="muted-body">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
+            container data. Available after the next full scan.</p>
+          {% endif %}
+        </section>
 
-    <section class="card">
-      <h2>Disk</h2>
-      {% if ctx.disk.available %}
-      <table>
-        <thead><tr><th>Mount</th><th>Source</th><th>Used %</th></tr></thead>
-        <tbody>
+        <!-- Findings -->
+        <section class="panel">
+          <div class="panel-head-row">
+            <h3>FINDINGS</h3>
+            <div class="findings-pills">
+              <span class="fpill critical">{{ ctx.findings.counts.critical }} critical</span>
+              <span class="fpill high">{{ ctx.findings.counts.high }} high</span>
+              <span class="fpill medium">{{ ctx.findings.counts.medium }} medium</span>
+              <span class="fpill low">{{ ctx.findings.counts.low }} low</span>
+            </div>
+          </div>
+          {% if ctx.findings.list %}
+          <div class="grid-head cols-findings">
+            <span>SEVERITY</span><span>RESOURCE</span><span>DESCRIPTION</span>
+          </div>
+          {% for f in ctx.findings.list %}
+          <div class="grid-row cols-findings finding-row sev-{{ f.get('severity', 'unknown')|lower }}">
+            <span class="sev-label sev-{{ f.get('severity', 'unknown')|lower }}">{{ f.get('severity', 'unknown')|upper }}</span>
+            <span class="cell-mono cell-service">{{ f.get('resource', f.get('category', '—')) }}</span>
+            <span class="cell-text2">{{ f.get('description', '') }}</span>
+          </div>
+          {% endfor %}
+          {% else %}
+          <p class="muted-body">No open findings.</p>
+          {% endif %}
+        </section>
+
+        <!-- Disk -->
+        <section class="panel">
+          <h3 style="margin-bottom: 14px;">DISK</h3>
+          {% if ctx.disk.available %}
+          <div class="grid-head cols-disk">
+            <span>MOUNT</span><span>SOURCE</span><span>USED</span>
+          </div>
           {% for d in ctx.disk.list %}
-          <tr class="{{ 'alert-row' if d.get('alert') else '' }}">
-            <td>{{ d.get('mount', '?') }}</td>
-            <td>{{ d.get('source', '?') }}</td>
-            <td>{{ d.get('used_pct', '?') }}%</td>
-          </tr>
+          {% set pct = d.get('used_pct', 0) or 0 %}
+          <div class="grid-row cols-disk {{ 'alert-row' if d.get('alert') else '' }}">
+            <span class="cell-mount">{{ d.get('mount', '?') }}</span>
+            <span class="cell-source">{{ d.get('source', '?') }}</span>
+            <div class="disk-bar-row">
+              <div class="disk-bar-track">
+                <div class="disk-bar-fill {{ 'high' if pct >= 80 else ('mid' if pct >= 60 else 'low') }}" style="width: {{ pct }}%;"></div>
+              </div>
+              <span class="disk-pct">{{ pct }}%</span>
+            </div>
+          </div>
           {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-        disk data. Available after the next full or status scan.</p>
-      {% endif %}
-    </section>
+          {% else %}
+          <p class="muted-body">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
+            disk data. Available after the next full or status scan.</p>
+          {% endif %}
+        </section>
 
-    <section class="card">
-      <h2>System</h2>
-      {% if ctx.system_and_backups.available %}
-      <pre class="system-summary">{{ ctx.system_and_backups.system }}</pre>
-      {% else %}
-      <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-        system data. Available after the next full scan.</p>
-      {% endif %}
-    </section>
-  </div>
+        <!-- System -->
+        {% if ctx.system_and_backups.available %}
+        {% set sys = ctx.system_and_backups.system %}
+        {% set mem = sys.get('memory', {}) %}
+        {% set up = sys.get('uptime_parsed', {}) %}
+        <section class="panel">
+          <div class="panel-head-row">
+            <h3>SYSTEM</h3>
+            <span class="system-online-chip"><span class="dot-sm-green"></span>{{ sys.get('hostname', '?') }}</span>
+          </div>
 
-  <div id="tab-backups" class="tab-panel">
-    <section class="card">
-      <h2>Backups</h2>
-      {% if ctx.system_and_backups.available %}
-        {% if ctx.system_and_backups.backups %}
-        <table>
-          <thead><tr><th>Job</th><th>State</th><th>Result</th><th>Exit Code</th><th>Last Run</th></tr></thead>
-          <tbody>
+          <div class="stat-tiles">
+            <div class="stat-tile">
+              <div class="stat-tile-eyebrow">UPTIME</div>
+              <div class="stat-tile-value">{{ up.get('up_human', '?') }}</div>
+              <div class="stat-tile-sub">{{ ('since ' ~ up.since) if up.get('since') else '' }}</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-tile-eyebrow">LOAD AVG</div>
+              <div class="stat-tile-value" style="color: var(--green-text);">{{ up.get('load1', '?') }} <span class="dim">/ {{ up.get('load5', '?') }} / {{ up.get('load15', '?') }}</span></div>
+              <div class="stat-tile-sub">1m &middot; 5m &middot; 15m</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-tile-eyebrow">SESSIONS</div>
+              <div class="stat-tile-value">{{ up.get('users', '?') }} <span class="dim">user{{ '' if up.get('users') == '1' else 's' }}</span></div>
+              <div class="stat-tile-sub">{{ ('local time ' ~ up.now) if up.get('now') else '' }}</div>
+            </div>
+          </div>
+
+          <div class="mem-label-row">
+            <span class="system-stat-label" style="margin: 0;">MEMORY</span>
+            <span class="mono-inline" style="font-size: 12px;">{{ mem.get('used', '?') }} <span style="color: var(--faint);">used / {{ mem.get('total', '?') }} total &middot; {{ mem.get('available', '?') }} available</span></span>
+          </div>
+          <div class="mem-bar">
+            <div class="mem-bar-used" style="width: {{ mem.get('used_pct') or 0 }}%;"></div>
+            <div class="mem-bar-buffcache" style="width: {{ mem.get('buff_cache_pct') or 0 }}%;"></div>
+          </div>
+          <div class="mem-legend">
+            <span class="mem-legend-item"><span class="mem-swatch used"></span>used {{ mem.get('used', '?') }}</span>
+            <span class="mem-legend-item"><span class="mem-swatch buffcache"></span>buff/cache {{ mem.get('buff_cache', '?') }}</span>
+            <span class="mem-legend-item"><span class="mem-swatch free"></span>free {{ mem.get('free', '?') }}</span>
+            <span>shared {{ mem.get('shared', '?') }}</span>
+          </div>
+        </section>
+
+        <section class="panel errors-panel">
+          <div class="panel-head-row" style="margin-bottom: 6px;">
+            <h3>RECENT ERRORS</h3>
+            <span class="errors-count-pill">{{ sys.get('recent_error_count', 0) }}</span>
+          </div>
+          {% if sys.get('recent_errors') %}
+          <p class="errors-diagnosis">{{ sys.diagnosis }}</p>
+          <div class="errors-terminal">
+            {% for e in sys.parsed_errors[:8] %}
+            <div class="errors-terminal-line"><span class="ts">{{ e.ts }}</span> <span class="host">{{ e.host }}</span> <span class="proc">{{ e.proc }}</span> <span class="msg">{{ e.msg }}</span></div>
+            {% endfor %}
+          </div>
+          {% if sys.get('recent_error_count', 0) > 8 %}
+          <p class="muted-body" style="margin-top: 8px;">+{{ sys.get('recent_error_count', 0) - 8 }} more in the last hour.</p>
+          {% endif %}
+          {% else %}
+          <p class="muted-body">No errors in the last hour.</p>
+          {% endif %}
+        </section>
+        {% else %}
+        <section class="panel">
+          <div class="panel-head-row">
+            <h3>SYSTEM</h3>
+            <span class="status-chip">SENSOR OFFLINE</span>
+          </div>
+          <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span> didn't collect system data. Available after the next full scan.</p>
+        </section>
+        {% endif %}
+      </div>
+
+      <!-- ═══ BACKUPS ═══ -->
+      <div class="tab-panel" data-tab-panel="backups">
+        <section class="panel">
+          <div class="panel-head-row">
+            <h3>BACKUPS</h3>
+            <span class="status-chip {{ 'ok' if ctx.system_and_backups.available else '' }}">{{ 'COLLECTED' if ctx.system_and_backups.available else 'AWAITING FULL SCAN' }}</span>
+          </div>
+          {% if ctx.system_and_backups.available %}
+            {% if ctx.system_and_backups.backups %}
+            <div class="grid-head cols-backups">
+              <span>JOB</span><span>STATE</span><span>RESULT</span><span>EXIT CODE</span><span>LAST RUN</span>
+            </div>
             {% for name, b in ctx.system_and_backups.backups.items() %}
-            <tr class="{{ 'alert-row' if b.get('result') != 'success' else '' }}">
-              <td>{{ name }}</td>
-              <td>{{ b.get('state', '?') }}</td>
-              <td>{{ b.get('result', '?') }}</td>
-              <td>{{ b.get('exit_code', '?') }}</td>
-              <td>{{ b.get('last_run', '?') }}</td>
-            </tr>
+            <div class="grid-row cols-backups {{ 'alert-row' if b.get('result') != 'success' else '' }}">
+              <span class="cell-mono cell-service">{{ name }}</span>
+              <span class="cell-mono">{{ b.get('state', '?') }}</span>
+              <span class="cell-mono {{ 'status-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }}</span>
+              <span class="cell-mono">{{ b.get('exit_code', '?') }}</span>
+              <span class="cell-mono cell-when">{{ b.get('last_run', '?') }}</span>
+            </div>
             {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="muted">No backup job data in this scan.</p>
-        {% endif %}
-      {% else %}
-      <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-        backup data. Available after the next full scan.</p>
-      {% endif %}
-    </section>
+            {% else %}
+            <p class="muted-body">No backup job data in this scan.</p>
+            {% endif %}
+          {% else %}
+          <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span> didn't collect backup data. Available after the next full scan.</p>
+            {% if ctx.pending_plan %}
+            <div class="dashed-footer">
+              <span class="dot-amber"></span>
+              next full scan queued via plan <span style="color: var(--amber);">{{ ctx.pipeline_status.pending_plan_id }}</span>
+            </div>
+            {% endif %}
+          {% endif %}
+        </section>
 
-    <section class="card">
-      <h2>Certificates</h2>
-      {% if ctx.certs.available %}
-        {% set cert_list = ctx.certs.list %}
-        {% if cert_list and cert_list[0].get('error') %}
-        <p class="muted">{{ cert_list[0].error }}</p>
-        {% elif cert_list and cert_list[0].get('note') %}
-        <p class="muted">{{ cert_list[0].note }}</p>
-        {% elif cert_list %}
-        <table>
-          <thead><tr><th>Domain</th><th>SANs</th><th>Resolver</th></tr></thead>
-          <tbody>
+        <section class="panel">
+          <div class="panel-head-row">
+            <h3>CERTIFICATES</h3>
+            <span class="status-chip {{ 'ok' if ctx.certs.available else '' }}">{{ 'COLLECTED' if ctx.certs.available else 'AWAITING FULL SCAN' }}</span>
+          </div>
+          {% if ctx.certs.available %}
+            {% set cert_list = ctx.certs.list %}
+            {% if cert_list and cert_list[0].get('error') %}
+            <p class="muted-body">{{ cert_list[0].error }}</p>
+            {% elif cert_list and cert_list[0].get('note') %}
+            <p class="muted-body">{{ cert_list[0].note }}</p>
+            {% elif cert_list %}
+            <div class="grid-head cols-certs">
+              <span>DOMAIN</span><span>SANS</span><span>RESOLVER</span>
+            </div>
             {% for c in cert_list %}
-            <tr>
-              <td>{{ c.get('domain', '?') }}</td>
-              <td>{{ c.get('sans', [])|join(', ') }}</td>
-              <td>{{ c.get('resolver', '?') }}</td>
-            </tr>
+            <div class="grid-row cols-certs">
+              <span class="cell-mono cell-service">{{ c.get('domain', '?') }}</span>
+              <span class="cell-mono cell-dim">{{ c.get('sans', [])|join(', ') }}</span>
+              <span class="cell-mono">{{ c.get('resolver', '?') }}</span>
+            </div>
             {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="muted">No certificates found.</p>
-        {% endif %}
-      {% else %}
-      <p class="muted">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-        certificate data. Available after the next full scan.</p>
-      {% endif %}
-    </section>
-  </div>
+            {% else %}
+            <p class="muted-body">No certificates found.</p>
+            {% endif %}
+          {% else %}
+          <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span> didn't collect certificate data. Available after the next full scan.</p>
+          {% endif %}
+        </section>
+      </div>
 
-  <div id="tab-network" class="tab-panel">
-    <section class="card">
-      <h2>Traefik Routers</h2>
-      {% if ctx.traefik.available %}
-        {% if ctx.traefik.routers %}
-        <table>
-          <thead><tr><th>Router</th><th>Rule</th><th>Service</th><th>Status</th></tr></thead>
-          <tbody>
+      <!-- ═══ NETWORK ═══ -->
+      <div class="tab-panel" data-tab-panel="network">
+        <section class="panel">
+          <div class="net-head-row">
+            <h3>TRAEFIK ROUTERS</h3>
+            {% if ctx.traefik.available %}
+            <span class="net-count" id="net-count">showing {{ ctx.traefik.routers|length }} of {{ ctx.traefik.routers|length }}</span>
+            <div class="tabs-spacer"></div>
+            <input class="net-filter" id="net-filter" placeholder="filter routers…" autocomplete="off">
+            {% endif %}
+          </div>
+          {% if ctx.traefik.available %}
+            {% if ctx.traefik.routers %}
+            <div class="grid-head cols-net">
+              <span>ROUTER</span><span>RULE</span><span>SERVICE</span><span>STATUS</span>
+            </div>
             {% for r in ctx.traefik.routers %}
-            <tr>
-              <td>{{ r.name }}</td>
-              <td>{{ r.rule }}</td>
-              <td>{{ r.service }}</td>
-              <td>{{ r.status }}</td>
-            </tr>
+            <div class="grid-row cols-net net-filter-row" data-filter-text="{{ (r.name ~ ' ' ~ r.rule ~ ' ' ~ r.service)|lower }}">
+              <span class="cell-mono cell-router">{{ r.name }}</span>
+              <span class="cell-mono cell-rule" title="{{ r.rule }}">{{ r.rule }}</span>
+              <span class="cell-mono cell-service">{{ r.service }}</span>
+              <span class="status-ok {{ 'status-bad' if r.status != 'enabled' else '' }}">
+                <span class="dot-sm {{ 'bad' if r.status != 'enabled' else '' }}"></span>{{ r.status }}
+              </span>
+            </div>
             {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="muted">No routers reported.</p>
-        {% endif %}
-      {% else %}
-      <p class="muted">Traefik API unreachable at :8079 — is it running?</p>
-      {% endif %}
-    </section>
+            {% else %}
+            <p class="muted-body">No routers reported.</p>
+            {% endif %}
+          {% else %}
+          <p class="muted-body">Traefik API unreachable at :8079 — is it running?</p>
+          {% endif %}
+        </section>
 
-    <section class="card">
-      <h2>AdGuard</h2>
-      {% if not ctx.adguard.configured %}
-      <p class="muted">Not configured — set ADGUARD_USERNAME/ADGUARD_PASSWORD in /etc/planetexpress-dashboard.env.</p>
-      {% elif not ctx.adguard.available %}
-      <p class="muted">Stats unavailable — check credentials, or that adguard.casalan.com resolves through Traefik.</p>
-      {% else %}
-      <p class="muted">
-        {{ ctx.adguard.num_dns_queries }} queries
-        &middot; {{ ctx.adguard.num_blocked_filtering }} blocked
-        &middot; {{ ctx.adguard.avg_processing_time }}s avg processing time
-      </p>
-      {% endif %}
-    </section>
-  </div>
+        <section class="panel">
+          <div class="panel-head-row">
+            <h3>ADGUARD</h3>
+            <span class="status-chip {{ 'ok' if ctx.adguard.available else '' }}">{{ 'LIVE' if ctx.adguard.available else ('NOT CONFIGURED' if not ctx.adguard.configured else 'UNAVAILABLE') }}</span>
+          </div>
+          {% if not ctx.adguard.configured %}
+          <p class="muted-body">Not configured — set ADGUARD_USERNAME/ADGUARD_PASSWORD in /etc/planetexpress-dashboard.env.</p>
+          {% elif not ctx.adguard.available %}
+          <p class="muted-body">Stats unavailable — check credentials, or that adguard.casalan.com resolves through Traefik.</p>
+          {% else %}
+          <p class="muted-body">
+            <span class="mono-inline">{{ ctx.adguard.num_dns_queries }}</span> queries
+            &middot; <span class="mono-inline">{{ ctx.adguard.num_blocked_filtering }}</span> blocked
+            &middot; <span class="mono-inline">{{ ctx.adguard.avg_processing_time }}s</span> avg processing time
+          </p>
+          {% endif %}
+        </section>
+      </div>
 
-  <div id="tab-actions" class="tab-panel">
-    {% if ctx.pending_plan %}
-    <section class="card">
-      <h2>Pending Plan</h2>
-      <p class="muted">planned at {{ ctx.pending_plan.planned_at }}</p>
-      <table>
-        <thead><tr><th>ID</th><th>Priority</th><th>Title</th><th>Steps</th></tr></thead>
-        <tbody>
-          {% for p in ctx.pending_plan.plans %}
-          <tr>
-            <td>{{ p.id }}</td>
-            <td>{{ p.priority }}</td>
-            <td>{{ p.title }}</td>
-            <td>{{ p.step_count }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      <p class="muted">Full step commands live in the Telegram approval flow, not shown here.</p>
-    </section>
-    {% endif %}
+      <!-- ═══ ACTIONS ═══ -->
+      <div class="tab-panel" data-tab-panel="actions">
+        <div class="telegram-banner">
+          <span class="glyph">✈</span>
+          <div class="msg">Actions currently execute through Telegram{% if ctx.telegram_bot_username %} — <span class="mono-inline" style="color: var(--cyan-text);">@{{ ctx.telegram_bot_username }}</span>{% endif %}. In-dashboard execution is on the way; this view is your read-only audit trail for now.</div>
+        </div>
 
-    <section class="card">
-      <h2>Recent Update History</h2>
-      {% if ctx.update_history %}
-      <table>
-        <thead><tr><th>When</th><th>Stack</th><th>Service</th><th>Status</th><th>Reason</th></tr></thead>
-        <tbody>
+        <section class="panel">
+          <h3 style="margin-bottom: 16px;">RECENT UPDATE HISTORY</h3>
+          {% if ctx.update_history %}
+          <div class="grid-head cols-updates">
+            <span>WHEN</span><span>STACK</span><span>SERVICE</span><span>STATUS</span><span>REASON</span>
+          </div>
           {% for h in ctx.update_history %}
-          <tr class="{{ 'alert-row' if h.is_alert else '' }}">
-            <td>{{ h.ts }}</td>
-            <td>{{ h.stack }}</td>
-            <td>{{ h.service }}</td>
-            <td>{{ h.status }}</td>
-            <td>{{ h.reason or '' }}</td>
-          </tr>
+          <div class="grid-row cols-updates {{ 'alert-row' if h.is_alert else '' }}">
+            <span class="cell-mono cell-when">{{ h.ts }}</span>
+            <span class="cell-mono cell-dim">{{ h.stack }}</span>
+            <span class="cell-mono cell-service">{{ h.service }}</span>
+            <span class="status-ok {{ 'status-bad' if h.is_alert else '' }}">
+              <span class="dot-sm {{ 'bad' if h.is_alert else '' }}"></span>{{ h.status }}
+            </span>
+            <span class="cell-mono cell-dim">{{ h.reason or '—' }}</span>
+          </div>
           {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p class="muted">No update history yet.</p>
-      {% endif %}
-    </section>
+          {% else %}
+          <p class="muted-body">No update history yet.</p>
+          {% endif %}
+        </section>
 
-    {% if ctx.rollback_candidates %}
-    <section class="card">
-      <h2>Open Rollback Candidates</h2>
-      <table>
-        <thead><tr><th>Stack</th><th>Service</th><th>Recorded</th><th>Expires</th></tr></thead>
-        <tbody>
+        {% if ctx.rollback_candidates %}
+        <section class="panel">
+          <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
+          <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+            <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span>
+          </div>
           {% for r in ctx.rollback_candidates %}
-          <tr>
-            <td>{{ r.stack }}</td>
-            <td>{{ r.service }}</td>
-            <td>{{ r.recorded_at }}</td>
-            <td>{{ r.expires_at }}</td>
-          </tr>
+          <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+            <span class="cell-mono cell-dim">{{ r.stack }}</span>
+            <span class="cell-mono cell-service">{{ r.service }}</span>
+            <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
+            <span class="cell-mono cell-when">{{ r.expires_at }}</span>
+          </div>
           {% endfor %}
-        </tbody>
-      </table>
-    </section>
-    {% endif %}
+        </section>
+        {% endif %}
+      </div>
+    </main>
+
+    <!-- ═══ SIDEBAR ═══ -->
+    <aside class="aside">
+      <section class="panel panel-cyan">
+        <div class="sidebar-head">
+          <span class="led-dot" style="background: var(--cyan); box-shadow: 0 0 8px var(--cyan);"></span>
+          <span class="title">SHIP'S COMPUTER</span>
+        </div>
+        <div class="sidebar-body">
+          <div class="agent-row">
+            <div class="avatar"><img src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Prof. Farnsworth"></div>
+            <div>
+              <div class="agent-name">Prof. Farnsworth</div>
+              <div class="agent-sub">agent · online · slightly worried</div>
+            </div>
+          </div>
+          <div class="speech">
+            <span class="speech-line" data-tab-line="overview">{{ ctx.professor_lines.overview }}</span>
+            <span class="speech-line hidden" data-tab-line="backups">{{ ctx.professor_lines.backups }}</span>
+            <span class="speech-line hidden" data-tab-line="network">{{ ctx.professor_lines.network }}</span>
+            <span class="speech-line hidden" data-tab-line="actions">{{ ctx.professor_lines.actions }}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel panel-cyan">
+        <div class="sidebar-head">
+          <span class="led-dot" style="background: var(--cyan); box-shadow: 0 0 8px var(--cyan);"></span>
+          <span class="title">CREW</span>
+        </div>
+        <div class="sidebar-body crew-list">
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela"></div>
+            <div>
+              <div class="agent-name">Leela</div>
+              <div class="agent-sub">system monitor</div>
+            </div>
+          </div>
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad"></div>
+            <div>
+              <div class="agent-name">Hermes</div>
+              <div class="agent-sub">issue analyzer</div>
+            </div>
+          </div>
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender"></div>
+            <div>
+              <div class="agent-name">Bender</div>
+              <div class="agent-sub">action executor</div>
+            </div>
+          </div>
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg"></div>
+            <div>
+              <div class="agent-name">Dr. Zoidberg</div>
+              <div class="agent-sub">canary-tested auto-patcher</div>
+            </div>
+          </div>
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong"></div>
+            <div>
+              <div class="agent-name">Amy</div>
+              <div class="agent-sub">diagnostician &amp; researcher</div>
+            </div>
+          </div>
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry"></div>
+            <div>
+              <div class="agent-name">Fry</div>
+              <div class="agent-sub">onboarding</div>
+            </div>
+          </div>
+          <div class="crew-row">
+            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy"></div>
+            <div>
+              <div class="agent-name">Scruffy</div>
+              <div class="agent-sub">this dashboard · observes and does nothing</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {% if ctx.pending_plan %}
+      <section class="panel panel-amber plan-card" data-plan-id="{{ ctx.pipeline_status.pending_plan_id }}">
+        <div class="sidebar-head">
+          <span class="led-dot" style="background: var(--amber); box-shadow: 0 0 8px var(--amber);"></span>
+          <span class="title">PLAN {{ ctx.pipeline_status.pending_plan_id }} · PENDING</span>
+        </div>
+        <div class="sidebar-body">
+          {% for p in ctx.pending_plan.plans %}
+          <div class="plan-eyebrow">{{ p.priority|upper if p.priority else 'PLAN' }}</div>
+          <p class="plan-diagnosis">{{ p.title }} <span class="hl">({{ p.step_count }} step{{ '' if p.step_count == 1 else 's' }})</span></p>
+          {% endfor %}
+          <p class="muted-body" style="margin-bottom: 14px; font-size: 11.5px;">Full step commands live in the Telegram approval flow, not shown here.</p>
+
+          <div class="plan-actions">
+            {% if ctx.telegram_bot_username %}
+            <a href="https://t.me/{{ ctx.telegram_bot_username }}" target="_blank" rel="noopener noreferrer" class="btn-approve">Approve via Telegram ✈</a>
+            {% else %}
+            <div class="btn-approve" style="opacity: .55; cursor: default;" title="Set TELEGRAM_BOT_USERNAME in /etc/planetexpress-dashboard.env to enable this link">Approve via Telegram (bot not configured)</div>
+            {% endif %}
+            <div class="plan-actions-row">
+              <button type="button" class="btn-dismiss">Dismiss</button>
+              <div class="btn-soon">Execute here <span class="soon-badge">SOON</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      {% endif %}
+    </aside>
   </div>
 
   <footer>
-    <p class="muted">Planet Express — read-only, no auth, LAN-trust. Auto-refreshes every 60s.</p>
+    <p>Planet Express — read-only, no auth, LAN-trust · auto-refreshes every 60s · held together by good news</p>
   </footer>
+
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
 </body>
 </html>

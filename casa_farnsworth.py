@@ -174,10 +174,18 @@ class PipelineState:
         with self._lock:
             log.info(f"State: {self._state} → {new_state}")
             self._state = new_state
-            if plan_id is not None:
-                self._pending_plan_id = plan_id
-            if msg_id is not None:
-                self._pending_msg_id = msg_id
+            if new_state == self.IDLE:
+                # Returning to idle always means no plan is pending anymore -- callers
+                # that forget to clear these (e.g. /skip, error paths) previously left
+                # a stale pending_plan_id behind, which showed up as a dashboard pill
+                # for a plan that was no longer awaiting approval.
+                self._pending_plan_id = None
+                self._pending_msg_id = None
+            else:
+                if plan_id is not None:
+                    self._pending_plan_id = plan_id
+                if msg_id is not None:
+                    self._pending_msg_id = msg_id
             self._persist()
 
     def get_pending(self) -> tuple[str | None, int | None]:

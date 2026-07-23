@@ -14,6 +14,7 @@ import os
 from flask import Flask, jsonify, render_template
 
 import casa_scruffy_net
+import config
 import dashboard_data
 
 app = Flask(__name__)
@@ -28,6 +29,8 @@ def index():
     ctx = dashboard_data.build_dashboard_context()
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
+    ctx["telegram_bot_username"] = config.telegram_bot_username()
+    ctx["professor_lines"] = dashboard_data.build_professor_lines(ctx)
     return render_template("dashboard.html", ctx=ctx)
 
 

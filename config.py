@@ -127,6 +127,16 @@ def adguard_credentials() -> tuple[str, str]:
     rendering."""
     return os.environ.get("ADGUARD_USERNAME", ""), os.environ.get("ADGUARD_PASSWORD", "")
 
+def telegram_bot_username() -> str:
+    """Return TELEGRAM_BOT_USERNAME for the dashboard's "Approve via Telegram" deep
+    link. Also loaded from /etc/planetexpress-dashboard.env, not the main secrets
+    file -- a bot's @username is public (anyone who messages it can see it), unlike
+    TG_BOT_TOKEN, so it belongs with the other low-sensitivity dashboard-only values
+    in adguard_credentials() above, not with telegram_credentials()'s real secret.
+    Optional: returns "" if unset, so the dashboard can fall back to a generic
+    "open Telegram" prompt instead of guessing a wrong bot."""
+    return os.environ.get("TELEGRAM_BOT_USERNAME", "").lstrip("@")
+
 # ── LLM provider switch ────────────────────────────────────────────────────────
 # Set LLM_PROVIDER=anthropic in /etc/planetexpress.env to switch providers — every call
 # site (Hermes, Farnsworth, Amy) reads this, there's no per-file copy to forget.

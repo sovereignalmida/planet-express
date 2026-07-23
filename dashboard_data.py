@@ -12,7 +12,9 @@ this module -- so they're already jsonify()-safe for a future JSON route (Spec 7
 Homepage-widget endpoint) with no serialization pass to invent later.
 """
 
-from datetime import datetime, timezone
+import re
+import socket
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from pydantic import ValidationError
@@ -166,16 +168,43 @@ _MODES_WITH_STACK_COMPLETENESS = {"full"}
 _MODES_WITH_SYSTEM_AND_BACKUPS = {"full"}
 
 
+def _container_state(c: dict) -> str:
+    """Four-way bucket for the dashboard's fleet matrix -- crash-looping is a real
+    outage (down), a deliberately-stopped configured container is "paused" (not
+    "online" -- an independent Codex review caught the earlier version falling
+    through to online since it also has no "issue"), a running container with a
+    failing/starting healthcheck is degraded-but-alive, anything else is fully
+    healthy."""
+    if c.get("crash_looping"):
+        return "down"
+    if c.get("name") in config.PAUSED_CONTAINERS and not str(c.get("status", "")).startswith("Up"):
+        return "paused"
+    if not str(c.get("status", "")).startswith("Up"):
+        return "down"
+    if c.get("issue"):
+        return "degraded"
+    return "online"
+
+
 def summarize_containers() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_CONTAINERS:
-        return {"total": 0, "healthy": 0, "issues": [], "available": False}
+        return {
+            "total": 0, "healthy": 0, "issues": [], "available": False,
+            "online": 0, "degraded": 0, "down": 0, "paused": 0, "cells": [],
+        }
     issues = [c for c in monitor.containers if c.get("issue")]
+    states = [_container_state(c) for c in monitor.containers]
     return {
         "total": len(monitor.containers),
         "healthy": len(monitor.containers) - len(issues),
         "issues": issues,
         "available": True,
+        "online": states.count("online"),
+        "degraded": states.count("degraded"),
+        "down": states.count("down"),
+        "paused": states.count("paused"),
+        "cells": states,
     }
 
 
@@ -261,11 +290,147 @@ def summarize_pending_plan() -> Optional[dict]:
     return {"planned_at": plan_set.planned_at, "plans": plans}
 
 
+_MEM_SIZE_RE = re.compile(r"^([\d.]+)([KMGT]?)i?B?$", re.IGNORECASE)
+_MEM_FIELDS = ["total", "used", "free", "shared", "buff_cache", "available"]
+# procps `uptime`'s middle segment is either "N day(s), HH:MM" or "N day(s), M min"
+# (no HH:MM when uphours==0) -- both shapes seen in the wild, both handled here.
+_UPTIME_RE = re.compile(
+    r"^(?P<now>\d{1,2}:\d{2}:\d{2})\s+up\s+"
+    r"(?:(?P<days>\d+)\s+days?,\s*)?"
+    r"(?:(?P<hh>\d+):(?P<mm>\d+)|(?P<minonly>\d+)\s*min)\s*,\s*"
+    r"(?P<users>\d+)\s+users?,\s*"
+    r"load average:\s*(?P<load1>[\d.]+),\s*(?P<load5>[\d.]+),\s*(?P<load15>[\d.]+)"
+)
+# journalctl --output=short: "Jul 23 16:05:28 casamediaserver sudo[785667]: message"
+_ERROR_LINE_RE = re.compile(r"^(\S+\s+\S+\s+\S+)\s+(\S+)\s+(.+)$")
+
+
+def _parse_mem_size(token: str) -> Optional[float]:
+    """'15Gi' / '556Mi' (free -h's binary-unit output) -> bytes."""
+    m = _MEM_SIZE_RE.match(token.strip())
+    if not m:
+        return None
+    value, unit = m.groups()
+    mult = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+    return float(value) * mult[unit.upper()]
+
+
+def _parse_memory_summary(line: str) -> dict:
+    """'Mem: 15Gi 10Gi 556Mi 662Mi 5.5Gi 5.1Gi' -> labeled fields + used_pct/
+    buff_cache_pct for the stacked memory bar."""
+    fields = dict(zip(_MEM_FIELDS, line.split()[1:]))
+    total = _parse_mem_size(fields.get("total", ""))
+    used = _parse_mem_size(fields.get("used", ""))
+    buff_cache = _parse_mem_size(fields.get("buff_cache", ""))
+    fields["used_pct"] = round(used / total * 100) if total and used is not None else None
+    if total and buff_cache is not None and used is not None:
+        # Modern free derives "used" from total - available, not total - free -
+        # buff/cache, so used and buff/cache commonly overlap and can sum past
+        # 100%. Cap the reclaimable segment to what's actually left of the bar
+        # so the two stay mutually exclusive.
+        displayable_buff_cache = max(0.0, min(buff_cache, total - used))
+        fields["buff_cache_pct"] = round(displayable_buff_cache / total * 100)
+    else:
+        fields["buff_cache_pct"] = None
+    return fields
+
+
+def _parse_uptime(line: str, scan_dt: Optional[datetime]) -> dict:
+    """'16:09:30 up 20 days, 23:43, 5 users, load average: 1.74, 1.31, 1.12' -> the
+    stat-tile fields (up_human, since, load*, users, now). scan_dt (the monitor
+    snapshot's own timestamp, not wall-clock now()) anchors "since" so a dashboard
+    viewed hours after the scan still shows the boot time as of the scan, not a
+    drifted one."""
+    m = _UPTIME_RE.match(line.strip())
+    if not m:
+        return {}
+    g = m.groupdict()
+    days = int(g["days"] or 0)
+    if g["hh"] is not None:
+        hours, minutes = int(g["hh"]), int(g["mm"])
+    else:
+        hours, minutes = 0, int(g["minonly"] or 0)
+
+    if days:
+        up_human = f"{days}d {hours}h {minutes}m"
+    elif hours:
+        up_human = f"{hours}h {minutes}m"
+    else:
+        up_human = f"{minutes}m"
+
+    since = None
+    if scan_dt is not None:
+        boot_dt = scan_dt.astimezone() - timedelta(days=days, hours=hours, minutes=minutes)
+        since = boot_dt.strftime("%b %d · %H:%M")
+
+    return {
+        "up_human": up_human,
+        "now": g["now"],
+        "since": since,
+        "users": g["users"],
+        "load1": g["load1"],
+        "load5": g["load5"],
+        "load15": g["load15"],
+    }
+
+
+def _parse_error_line(line: str) -> dict:
+    """journalctl short line -> {ts, host, proc, msg} for the colorized terminal-log
+    block. Falls back to the raw line as msg if it doesn't match the expected shape
+    (e.g. a wrapped or non-syslog-formatted journal entry)."""
+    m = _ERROR_LINE_RE.match(line)
+    if not m:
+        return {"ts": "", "host": "", "proc": "", "msg": line}
+    ts, host, rest = m.groups()
+    proc, sep, msg = rest.partition(":")
+    return {"ts": ts, "host": host, "proc": f"{proc}:" if sep else proc, "msg": msg.strip()}
+
+
+def _diagnose_errors(errors: list[str], total: int | None = None) -> str:
+    """Best-effort plain-language summary of recent_errors. Heuristic, not exhaustive
+    -- an unrecognized error class falls back to a true but generic count rather than
+    a guessed diagnosis. `errors` is capped at 25 by Leela (recent_errors); `total` is
+    the real, uncapped recent_error_count -- pass it explicitly so a busy hour with
+    more than 25 errors doesn't get diagnosed as having only 25."""
+    if not errors:
+        return ""
+    n = total if total is not None else len(errors)
+    plural = "s" if n != 1 else ""
+    joined = "\n".join(errors)
+
+    m = re.search(r"COMMAND=\S*systemctl\s+restart\s+(\S+)", joined)
+    if m and ("pam_unix(sudo:auth)" in joined or "a password is required" in joined):
+        return (
+            f"{n} auth failure{plural} — a sudo restart of {m.group(1)} is prompting "
+            "for a password it can't supply non-interactively."
+        )
+    if re.search(r"\boom[-_]?killer\b|out of memory", joined, re.IGNORECASE):
+        return f"{n} out-of-memory event{plural} in the last hour."
+    if "Failed with result" in joined or "failed to start" in joined.lower():
+        return f"{n} service failure{plural} in the last hour."
+    return f"{n} error{plural} in the last hour — see the log below."
+
+
 def summarize_system_and_backups() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
         return {"system": {}, "backups": {}, "available": False}
-    return {"system": monitor.system, "backups": monitor.backups, "available": True}
+    system = dict(monitor.system)
+    system["hostname"] = socket.gethostname()
+    scan_dt = None
+    if monitor.timestamp:
+        try:
+            scan_dt = datetime.fromisoformat(monitor.timestamp)
+        except ValueError:
+            scan_dt = None
+    if system.get("memory_summary"):
+        system["memory"] = _parse_memory_summary(system["memory_summary"])
+    if system.get("uptime"):
+        system["uptime_parsed"] = _parse_uptime(system["uptime"], scan_dt)
+    if system.get("recent_errors"):
+        system["parsed_errors"] = [_parse_error_line(e) for e in system["recent_errors"]]
+        system["diagnosis"] = _diagnose_errors(system["recent_errors"], system.get("recent_error_count"))
+    return {"system": system, "backups": monitor.backups, "available": True}
 
 
 def summarize_certs() -> dict:
@@ -277,6 +442,125 @@ def summarize_certs() -> dict:
     if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
         return {"list": [], "available": False}
     return {"list": monitor.certs, "available": True}
+
+
+def build_professor_lines(ctx: dict) -> dict:
+    """"Ship's Computer" sidebar copy -- one line per tab, plus overrides for the
+    scanning and plan-approved states, all generated from the real ctx dict rather
+    than the design mockup's hardcoded flavor text. Takes the fully-merged ctx
+    (after casa_scruffy.py has added "traefik"/"adguard") since the Network tab's
+    line needs live data build_dashboard_context() itself never fetches."""
+    containers = ctx["containers"]
+    findings = ctx["findings"]
+    system_and_backups = ctx["system_and_backups"]
+    traefik = ctx["traefik"]
+    adguard = ctx["adguard"]
+    health = ctx["health"]
+    pipeline_status = ctx["pipeline_status"]
+
+    scanning = pipeline_status["state"] == "running"
+    last_scan_mode = health.get("last_scan_mode") or "?"
+
+    # Overview
+    if not containers["available"]:
+        overview = (
+            "I haven't the faintest idea how the fleet's doing — the last scan "
+            f"(mode: {last_scan_mode}) didn't collect container data."
+        )
+    elif containers["down"]:
+        overview = (
+            f"Bad news, everyone. {containers['down']} of {containers['total']} "
+            "containers are down. Check the Findings table before I have an aneurysm."
+        )
+    elif findings["counts"]["critical"] or findings["counts"]["high"]:
+        n = findings["counts"]["critical"] + findings["counts"]["high"]
+        overview = (
+            f"{containers['healthy']} of {containers['total']} containers are up, "
+            f"but {n} finding(s) need real attention. Don't make me say it twice."
+        )
+    elif sum(findings["counts"].values()):
+        n = sum(findings["counts"].values())
+        overview = (
+            f"Good news, everyone! {containers['healthy']} of {containers['total']} "
+            f"containers are alive and well. There's {n} nagging thing worth a look, mind you."
+        )
+    elif containers["degraded"]:
+        # A container can be running with a failing/starting healthcheck (degraded)
+        # before Hermes has ever analyzed it into a "finding" -- e.g. right after a
+        # fresh scan. Findings-based branches above don't catch that case, so without
+        # this the sidebar would call the fleet "alive and well" while a real issue
+        # sits unreported.
+        overview = (
+            f"{containers['healthy']} of {containers['total']} containers are up, but "
+            f"{containers['degraded']} {'is' if containers['degraded'] == 1 else 'are'} "
+            "running with a shaky healthcheck. Not a crisis, but don't ignore it."
+        )
+    else:
+        overview = (
+            f"Good news, everyone! All {containers['total']} of {containers['total']} "
+            "containers are alive and well — a personal best."
+        )
+
+    # Backups
+    if not system_and_backups["available"]:
+        backups = (
+            f"Backups? Oh, my. The last scan ran in '{last_scan_mode}' mode, so "
+            "I've collected precisely nothing. A full scan will fix that."
+        )
+    else:
+        jobs = system_and_backups["backups"]
+        failed = [name for name, b in jobs.items() if b.get("result") != "success"]
+        if failed:
+            backups = (
+                f"{len(failed)} of {len(jobs)} backup job(s) didn't finish cleanly "
+                f"({', '.join(failed)}). Not my finest hour, but at least I noticed."
+            )
+        elif jobs:
+            backups = f"All {len(jobs)} backup job(s) reporting success. Borg's doing its job; I'm doing mine, which is worrying about it anyway."
+        else:
+            backups = "No backup jobs reported in this scan."
+
+    # Network
+    if traefik["available"]:
+        not_enabled = [r for r in traefik["routers"] if r.get("status") != "enabled"]
+        if not_enabled:
+            network = (
+                f"{len(not_enabled)} of {len(traefik['routers'])} router(s) aren't reporting "
+                "enabled. Traefik's plumbing has sprung a leak somewhere."
+            )
+        else:
+            network = (
+                f"{len(traefik['routers'])} router(s), all reported enabled. Traefik is "
+                "my second-favourite plumbing — right after the ship's coolant loop."
+            )
+    else:
+        network = "Traefik's API isn't answering on :8079. Either it's down or having a moment — I can't tell which from here."
+    if adguard.get("configured") and adguard.get("available"):
+        network += (
+            f" AdGuard's blocked {adguard.get('num_blocked_filtering', '?')} of "
+            f"{adguard.get('num_dns_queries', '?')} queries, for what it's worth."
+        )
+
+    # Actions
+    bot_handle = f"@{ctx['telegram_bot_username']}" if ctx.get("telegram_bot_username") else "your Telegram bot"
+    actions = (
+        "Everything's been updated and nothing exploded! For now I carry out fixes "
+        f"over Telegram, {bot_handle}, while the good people bolt hands onto this dashboard."
+    )
+
+    lines = {"overview": overview, "backups": backups, "network": network, "actions": actions}
+
+    if scanning:
+        override = "Scanning the entire ship! Hold your hydrogen — this'll only take a moment, unless it takes several."
+        lines = {k: override for k in lines}
+    elif ctx["pending_plan"]:
+        plan_id = pipeline_status.get("pending_plan_id") or "?"
+        lines["overview"] = (
+            f"Good news, everyone! Well — mostly. I've drawn up plan {plan_id} for "
+            "the situation. Do have a look in the sidebar."
+        )
+
+    return lines
 
 
 def build_dashboard_context() -> dict:

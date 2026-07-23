@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-23
+
+### Added
+- **Redesigned Scruffy dashboard: Backups, Network, and Actions tabs.** Borg daily/weekly
+  backup status moves out of a raw `<pre>` dump into a proper table; a new Certificates
+  table surfaces Traefik ACME cert data (`check_certs()`) that was collected every scan but
+  never rendered anywhere; a new live Network tab polls Traefik's routers API and AdGuard's
+  stats API (`casa_scruffy_net.py`, 2s timeouts, never raises — AdGuard degrades to "not
+  configured" without `ADGUARD_USERNAME`/`ADGUARD_PASSWORD` in the new optional
+  `/etc/planetexpress-dashboard.env`); Actions tab reorganizes the existing pending-plan/
+  update-history/rollback views — no new execution paths, dashboard stays read-only.
+- `config.telegram_bot_username()` — optional `TELEGRAM_BOT_USERNAME` (also in
+  `/etc/planetexpress-dashboard.env`, not the main secrets file, since a bot's `@username`
+  is public) drives the dashboard's "Approve via Telegram" deep link, which previously
+  hardcoded this project's own bot handle and would have opened the wrong bot for every
+  other installation.
+
+### Fixed
+- `/skip` and other bare `state.transition(PipelineState.IDLE)` calls in
+  `casa_farnsworth.py` never cleared `pending_plan_id`, so the dashboard could keep showing
+  a "pending plan" pill for a plan that was no longer awaiting approval. `transition()` now
+  always clears pending-plan state on any transition to `IDLE`, regardless of caller.
+- Dashboard fleet matrix/sidebar copy could report a container with a failing/starting
+  healthcheck as fully healthy when no Hermes finding existed for it yet, and separately
+  counted deliberately-paused containers (`config.PAUSED_CONTAINERS`) as "online" instead
+  of a distinct "paused" state.
+- Tab selection didn't resync on browser Back/Forward (hash changed without the visible
+  tab updating); pending-plan card dismissal didn't survive the 60s auto-refresh.
+- Recent-errors diagnosis and "+N more" count used the 25-item-capped `recent_errors` list
+  length instead of Leela's real `recent_error_count`, understating totals past 25.
+- All found and fixed via the standing independent Codex review gate
+  (`codex review --uncommitted`) per `CLAUDE.md`.
+
 ## [1.0.0] - 2026-07-20
 
 ### Added
