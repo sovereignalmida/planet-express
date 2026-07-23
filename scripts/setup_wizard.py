@@ -197,6 +197,33 @@ VALID_ACTIONS = ("start", "stop", "restart")
 # -- and visudo -c has no opinion on this, since it's syntactically valid sudoers.
 _UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
 
+# Requires at least two labels (rejects a bare TLD like "com", which would make every
+# /install-generated router match on suffix far more broadly than intended) and standard
+# hostname label syntax (no scheme, no path, no comma) per label -- an independent Codex
+# review found the raw prompt had no validation at all: config_schema.py's own validator
+# only lowercases the value, so "https://lan.example", "lan,example", or "com" would all
+# pass through unchanged and end up interpolated into an unauthenticated Traefik
+# Host(...) rule by the /install command later.
+_DOMAIN_RE = re.compile(
+    r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$"
+)
+
+
+def _prompt_domain(text: str, default: str) -> str:
+    while True:
+        value = _prompt(text, default).strip().lower()
+        # casa_farnsworth.py's /install command checks the FULL requested hostname
+        # (shortest case: a 1-char label + "." + this domain) against a 253-char cap, not
+        # this domain alone -- capping at 251 here (253 minus "x.") guarantees at least
+        # one single-char label always fits, rather than accepting a value up to 253 that
+        # would make every possible /install request against it fail that downstream
+        # check, leaving the feature silently unusable.
+        if _DOMAIN_RE.match(value) and len(value) <= 251:
+            return value
+        print(f"  Invalid domain {value!r} -- must be a bare DNS domain with at least "
+              f"two labels, 251 characters or fewer, e.g. 'casalan.com' (no scheme, no "
+              f"path, no comma). Try again.")
+
 
 def _prompt_actions(text: str, default: list[str]) -> list[str]:
     while True:
@@ -391,13 +418,45 @@ def main() -> None:
         readline.set_completer(_path_completer)
 
         print("Planet Express setup wizard — topology config\n")
+        print("Basics -- everything needed for a working install.\n")
 
         stacks_root, forbidden_stacks = _collect_stacks_root_and_forbidden()
-        paused_containers = _prompt_list(
-            "Any containers that are intentionally stopped right now"
+
+        print(
+            "\nThat's the required part. Planet Express runs fine with nothing else "
+            "configured -- everything below is optional, and only narrows down "
+            "monitoring/auto-update noise or grants Bender scoped sudo access."
         )
-        mounts = _collect_mounts()
-        sudo_allowlist = _collect_sudo_allowlist()
+        # Defaulting this to No (rather than walking every advanced prompt unconditionally,
+        # the old behavior) is the actual point of this split -- a first-time installer
+        # with no paused containers, no tracked mounts, and no sudo grant to declare
+        # shouldn't have to blank-Enter through three separate prompt loops to find that
+        # out. Re-running this wizard later does NOT revisit these answers -- once
+        # config_target exists, main() reuses it unchanged (see the branch above) --
+        # so anyone who skips this now and wants it later must hand-edit config.yaml
+        # directly (see config.example.yaml), not re-run this script.
+        advanced = _prompt_yes_no(
+            "Configure advanced options now (paused containers, mount tracking, "
+            "sudo-scoped restart grants, /install's LAN-only domain)?",
+            default=False,
+        )
+
+        if advanced:
+            print("\nAdvanced options.\n")
+            paused_containers = _prompt_list(
+                "Any containers that are intentionally stopped right now"
+            )
+            mounts = _collect_mounts()
+            sudo_allowlist = _collect_sudo_allowlist()
+            lan_only_domain = _prompt_domain(
+                "LAN-only domain for the /install command's auto-router feature",
+                "casalan.com",
+            )
+        else:
+            paused_containers = []
+            mounts = {}
+            sudo_allowlist = {"units": [], "globs": []}
+            lan_only_domain = "casalan.com"
 
         answers = {
             "stacks_root": str(stacks_root),
@@ -406,6 +465,7 @@ def main() -> None:
             "mounts": mounts,
             "exclude_services": [],
             "sudo_allowlist": sudo_allowlist,
+            "lan_only_domain": lan_only_domain,
         }
 
         try:

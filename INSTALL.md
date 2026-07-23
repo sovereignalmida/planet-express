@@ -45,15 +45,22 @@ bash deploy.sh
 2. **Runtime directories** — creates `state/` and `logs/` under the repo (already
    gitignored).
 3. **Python virtualenv** — creates `venv/` and installs `requirements.txt` into it.
-4. **Configuration wizard** — runs `scripts/setup_wizard.py`, which asks about your stacks
-   directory, any stacks/containers to leave alone, any mounts to track, and whether Bender
-   (the executor) should be allowed to restart specific systemd units or mount units as
-   part of an approved remediation. Writes `config.yaml` (default
-   `/etc/planetexpress/config.yaml`) — see `config.example.yaml` for the full schema if you
-   want to hand-edit afterward. If you opted into any sudo-scoped actions, it also generates
-   and (with your confirmation) installs the matching `/etc/sudoers.d/planetexpress` grant —
-   generated from the same data you just declared, so the OS-level permission and the
-   code-level allowlist Bender enforces can never drift apart.
+4. **Configuration wizard** — runs `scripts/setup_wizard.py`, split into two parts:
+   - **Basics** (always asked): your stacks directory (auto-discovers stacks under it) and
+     any stacks to leave alone entirely. This alone is enough for a working install.
+   - **Advanced** (one yes/no gate, defaults to skip): any containers intentionally stopped
+     right now, any mounts to track, whether Bender (the executor) should be allowed to
+     restart specific systemd/mount units as part of an approved remediation, and the
+     LAN-only domain the `/install` command uses for its auto-router feature. Skipping this
+     is safe — every advanced field defaults to off/empty. Note that re-running the wizard
+     later will **not** revisit these answers (it reuses an existing `config.yaml`
+     unchanged) — to add any of this after the fact, hand-edit `config.yaml` directly (see
+     `config.example.yaml`).
+
+   Writes `config.yaml` (default `/etc/planetexpress/config.yaml`). If you opted into any
+   sudo-scoped actions, it also generates and (with your confirmation) installs the matching
+   `/etc/sudoers.d/planetexpress` grant — generated from the same data you just declared, so
+   the OS-level permission and the code-level allowlist Bender enforces can never drift apart.
 5. **Secrets setup** — prompts for your LLM provider choice + API key, and your Telegram
    bot token/chat id, writing them to `/etc/planetexpress.env` (mode 600, outside the repo).
 6. **Systemd units** — renders `systemd/casa-planetexpress.service.template` (the always-on
