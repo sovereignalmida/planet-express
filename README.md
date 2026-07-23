@@ -4,11 +4,11 @@ A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stack
 failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
 rollback, and talks to you over Telegram.
 
-**Status: v1.0.0, first tagged release.** This project started as a bespoke agent running on one
-person's home server, hardcoded to that host. It's now generalized into something anyone with
-their own Compose-based homelab can install — see [CHANGELOG.md](CHANGELOG.md) for the full spec
-history. It is dogfooded on the author's own fleet from day one of that rework, not developed in
-isolation and thrown over the wall.
+**Status: v1.1.0.** This project started as a bespoke agent running on one person's home server,
+hardcoded to that host. It's now generalized into something anyone with their own Compose-based
+homelab can install — see [CHANGELOG.md](CHANGELOG.md) for the full spec history, starting with
+v1.0.0's first tagged release. It is dogfooded on the author's own fleet from day one of that
+rework, not developed in isolation and thrown over the wall.
 
 ## What it does
 
@@ -30,9 +30,10 @@ Five roles, one per pipeline stage (yes, they're Futurama-named — see below):
 Plus a canary auto-updater (**Zoidberg**) that updates one service at a time, watches it, and rolls
 back automatically if it doesn't come up healthy.
 
-There's also a read-only web dashboard (**Scruffy**) for a glance-and-go status view, and a
-`/api/widget` JSON endpoint for embedding that status in a [Homepage](https://gethomepage.dev)
-dashboard.
+There's also a read-only web dashboard (**Scruffy**) with Overview, Backups, Network, and Actions
+tabs — fleet/container health, Borg backup and cert status, live Traefik router and AdGuard stats,
+and pending-plan/update history — plus a `/api/widget` JSON endpoint for embedding that status in a
+[Homepage](https://gethomepage.dev) dashboard.
 
 ## Architecture
 
@@ -54,8 +55,8 @@ canary image updates (bounded by its own watch-and-rollback logic) and safe-prun
 disk pressure is real and every container is in a known-safe state). Both still go through
 Bender's independent safety layer either way.
 
-*Screenshots (Telegram approval flow, dashboard) — not yet added; pending a capture pass against a
-live install.*
+![Scruffy dashboard](docs/screenshots/dashboard.png)
+![Telegram approval flow](docs/screenshots/telegram-approval.png)
 
 ## What's tested, what isn't
 
