@@ -18,7 +18,11 @@ WorkingDirectory=$INSTALL_DIR
 # Deliberately no EnvironmentFile=/etc/planetexpress.env -- this process needs no LLM
 # API key and no Telegram bot token. Its environment shouldn't even contain those
 # secrets, not just "not use" them -- keeps the blast radius of a bug here strictly
-# smaller than casa-planetexpress.service's.
+# smaller than casa-planetexpress.service's. AdGuard's own dashboard-panel credentials
+# (optional, only two low-sensitivity LAN-scoped values) live in their own file instead
+# of riding along in the main secrets file -- the "-" prefix makes it optional, so a
+# fresh install with no AdGuard creds set still starts cleanly.
+EnvironmentFile=-/etc/planetexpress-dashboard.env
 Environment=CASA_CONFIG=$CONFIG_FILE
 Environment=CASA_STATE_DIR=$INSTALL_DIR/state
 Environment=CASA_LOG_DIR=$INSTALL_DIR/logs

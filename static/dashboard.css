@@ -73,6 +73,35 @@ body {
   font-size: 0.85rem;
 }
 
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.tabs a {
+  padding: 0.4rem 0.9rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.tab-panel { display: none; }
+.tab-panel:target { display: block; }
+body:not(:has(.tab-panel:target)) #tab-overview { display: block; }
+
+body:has(#tab-overview:target) .tabs a[href="#tab-overview"],
+body:not(:has(.tab-panel:target)) .tabs a[href="#tab-overview"],
+body:has(#tab-backups:target) .tabs a[href="#tab-backups"],
+body:has(#tab-network:target) .tabs a[href="#tab-network"],
+body:has(#tab-actions:target) .tabs a[href="#tab-actions"] {
+  border-color: var(--low);
+  color: var(--text);
+}
+
 .card {
   background: var(--card-bg);
   border: 1px solid var(--border);

@@ -268,6 +268,17 @@ def summarize_system_and_backups() -> dict:
     return {"system": monitor.system, "backups": monitor.backups, "available": True}
 
 
+def summarize_certs() -> dict:
+    """check_certs() already encodes its own not-available states inline (a dead
+    acme.json returns [{"error": ...}], an empty one [{"note": ...}]) -- this only
+    gates on scan mode, same as summarize_system_and_backups(), since certs are only
+    collected on a full scan."""
+    monitor = load_monitor()
+    if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
+        return {"list": [], "available": False}
+    return {"list": monitor.certs, "available": True}
+
+
 def build_dashboard_context() -> dict:
     """Single entry point the Flask route calls."""
     return {
@@ -281,4 +292,5 @@ def build_dashboard_context() -> dict:
         "rollback_candidates": summarize_rollback_candidates(),
         "pending_plan": summarize_pending_plan(),
         "system_and_backups": summarize_system_and_backups(),
+        "certs": summarize_certs(),
     }

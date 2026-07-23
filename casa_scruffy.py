@@ -13,6 +13,7 @@ import os
 
 from flask import Flask, jsonify, render_template
 
+import casa_scruffy_net
 import dashboard_data
 
 app = Flask(__name__)
@@ -20,7 +21,14 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return render_template("dashboard.html", ctx=dashboard_data.build_dashboard_context())
+    # Live network pollers merged in separately from build_dashboard_context()'s
+    # file-based state -- keeps the file-vs-live-HTTP boundary explicit here, in the
+    # one route allowed to do this kind of I/O, rather than folding it into
+    # dashboard_data.py's zero-I/O contract.
+    ctx = dashboard_data.build_dashboard_context()
+    ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
+    ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
+    return render_template("dashboard.html", ctx=ctx)
 
 
 @app.route("/api/widget")

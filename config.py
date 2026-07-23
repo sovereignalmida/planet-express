@@ -115,6 +115,18 @@ def openai_api_key() -> str:
         )
     return key
 
+def adguard_credentials() -> tuple[str, str]:
+    """Return (ADGUARD_USERNAME, ADGUARD_PASSWORD) for the dashboard's live AdGuard
+    stats panel. Loaded from /etc/planetexpress-dashboard.env, NOT /etc/planetexpress.env
+    -- casa-dashboard.service.template deliberately keeps the LLM API key / Telegram
+    bot token out of this process's environment, so these two low-sensitivity,
+    LAN-scoped values get their own optional env file rather than riding along in the
+    main secrets file. Unlike telegram_credentials()/anthropic_api_key() above, this one
+    is optional: it returns ("", "") on a missing value instead of raising, since the
+    Network tab should degrade to "not configured" rather than take down dashboard
+    rendering."""
+    return os.environ.get("ADGUARD_USERNAME", ""), os.environ.get("ADGUARD_PASSWORD", "")
+
 # ── LLM provider switch ────────────────────────────────────────────────────────
 # Set LLM_PROVIDER=anthropic in /etc/planetexpress.env to switch providers — every call
 # site (Hermes, Farnsworth, Amy) reads this, there's no per-file copy to forget.
