@@ -414,8 +414,22 @@ _TRAEFIK_DYNAMIC_DIR = Path("/home/casaroot/apps/network/proxy/dynamic")
 _TRAEFIK_CERTS_CONTAINER_PREFIX = "/etc/traefik/certs/"
 _TRAEFIK_CERTS_HOST_DIR = Path("/home/casaroot/apps/network/proxy/certs")
 
-_CERT_CN_RE = re.compile(r"CN\s*=\s*([^,/\n]+)")
-_CERT_O_RE = re.compile(r"O\s*=\s*([^,/\n]+)")
+# openssl quotes a DN component's value (RFC2253-style) when it contains a comma -- e.g.
+# `O = "CloudFlare, Inc."` -- and whether that happens at all depends on which openssl
+# binary actually runs (this host has two: a Homebrew one on interactive PATHs that never
+# quotes, and /usr/bin/openssl, what casa-planetexpress.service's minimal systemd PATH
+# resolves to, which does). Match the quoted form first or an unquoted capture group
+# swallows everything up to the comma *inside* the quotes, e.g. `"CloudFlare` for
+# `"CloudFlare, Inc."`.
+_CERT_CN_RE = re.compile(r'CN\s*=\s*(?:"([^"]+)"|([^,/\n]+))')
+_CERT_O_RE = re.compile(r'O\s*=\s*(?:"([^"]+)"|([^,/\n]+))')
+
+
+def _dn_value(m: "re.Match | None") -> str | None:
+    """Pull whichever alternative (quoted or bare) matched _CERT_CN_RE/_CERT_O_RE."""
+    if not m:
+        return None
+    return (m.group(1) or m.group(2)).strip()
 _CERT_SAN_RE = re.compile(r"DNS:([^,\s]+)")
 _CERT_ENDDATE_RE = re.compile(r"notAfter=(.+)")
 _CERT_EXPIRING_SOON_DAYS = 30  # dashboard "RENEW SOON" amber tier
@@ -486,7 +500,7 @@ def _parse_cert_file(path: Path) -> dict:
     issuer_match = _CERT_CN_RE.search(issuer_line) or _CERT_O_RE.search(issuer_line)
     end_match = _CERT_ENDDATE_RE.search(out)
     sans = _CERT_SAN_RE.findall(out)
-    domain = cn_match.group(1).strip() if cn_match else path.stem
+    domain = _dn_value(cn_match) or path.stem
     if " " in domain and sans:
         # Cloudflare Origin Certs use a fixed, non-hostname CN ("CloudFlare Origin
         # Certificate") -- the real domain only shows up in the SANs, so prefer that
@@ -504,7 +518,7 @@ def _parse_cert_file(path: Path) -> dict:
         "domain": domain,
         "sans": sans,
         "resolver": path.stem,  # not an ACME resolver -- these are static file-provider certs, labeled by source file
-        "issuer": issuer_match.group(1).strip() if issuer_match else "?",
+        "issuer": _dn_value(issuer_match) or "?",
         "expires": expires,
         "days_remaining": days_remaining,
         "status": _cert_expiry_status(days_remaining),

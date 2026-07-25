@@ -139,6 +139,21 @@ def test_parse_cert_file_falls_back_to_san_when_cn_not_a_hostname(tmp_path):
     assert result["sans"] == ["*.casaalmida.com", "casaalmida.com"]
 
 
+def test_dn_value_handles_openssl_rfc2253_quoting():
+    # Real-world regression: this host has two openssl binaries -- a Homebrew one on
+    # interactive PATHs (never quotes DN values) and /usr/bin/openssl, what
+    # casa-planetexpress.service's minimal systemd PATH actually resolves to (quotes a
+    # value containing a comma, e.g. Cloudflare's `O = "CloudFlare, Inc."`). The live
+    # service showed a mangled issuer ('"CloudFlare' truncated at the quoted comma)
+    # until this was handled -- interactive testing with the Homebrew openssl never
+    # caught it because that binary doesn't quote at all.
+    quoted = casa_leela._CERT_O_RE.search('issuer=C = US, O = "CloudFlare, Inc.", OU = X')
+    unquoted = casa_leela._CERT_O_RE.search("issuer=C=US, O=CloudFlare, Inc., OU=X")
+    assert casa_leela._dn_value(quoted) == "CloudFlare, Inc."
+    assert casa_leela._dn_value(unquoted) == "CloudFlare"  # unquoted form truncates at the comma, unavoidably
+    assert casa_leela._dn_value(None) is None
+
+
 def test_parse_cert_file_missing_on_disk(tmp_path):
     result = casa_leela._parse_cert_file(tmp_path / "nope.crt")
     assert "error" in result
