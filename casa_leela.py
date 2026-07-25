@@ -15,13 +15,14 @@ Usage:
 import argparse
 import json
 import logging
-import os
 import re
 import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
 
 import config
 import casa_stackctl as stackctl
@@ -386,30 +387,102 @@ def check_images() -> list[dict]:
     return candidates
 
 
-def check_certs() -> list[dict]:
-    """Read Traefik ACME JSON for certificate domain list (expiry via openssl if needed).
+_TRAEFIK_DYNAMIC_DIR = Path("/home/casaroot/apps/network/proxy/dynamic")
+_TRAEFIK_CERTS_CONTAINER_PREFIX = "/etc/traefik/certs/"
+_TRAEFIK_CERTS_HOST_DIR = Path("/home/casaroot/apps/network/proxy/certs")
 
-    acme.json is confirmed-dead legacy data (2026-07-03): the entire certificatesResolvers
-    block in ~/apps/network/proxy/traefik.yml is commented out, so nothing reads or writes
-    this file — a permission-denied here is not a real problem, just noise. Suppressed at
-    the source rather than relying on Hermes to correctly downgrade it every single cycle
-    (it kept generating a LOW finding — and once, a whole diagnostic plan — every run)."""
-    acme_path = Path("/home/casaroot/apps/network/proxy/letsencrypt/acme.json")
-    if not acme_path.exists():
-        return [{"error": "acme.json not found — Traefik may not have issued certs yet"}]
-    if not os.access(acme_path, os.R_OK):
-        return []  # known-dead legacy file, root-only 0600, no active resolver reads it
+_CERT_CN_RE = re.compile(r"CN\s*=\s*([^,/\n]+)")
+_CERT_SAN_RE = re.compile(r"DNS:([^,\s]+)")
+_CERT_ENDDATE_RE = re.compile(r"notAfter=(.+)")
+
+
+def _discover_cert_files() -> list[Path]:
+    """Traefik's certificatesResolvers/ACME are disabled here (see check_certs()) --
+    the certs it actually serves are static files declared via the file provider's
+    tls.certificates[] blocks in ~/apps/network/proxy/dynamic/*.yml (that directory is
+    exactly what providers.file.directory watches in traefik.yml). Read those
+    declarations rather than globbing the certs directory directly: that directory also
+    holds the internal CA's cert/key and a stray .csr, which aren't certs Traefik serves."""
+    paths: list[Path] = []
+    if not _TRAEFIK_DYNAMIC_DIR.is_dir():
+        return paths
+    for yml_path in sorted(_TRAEFIK_DYNAMIC_DIR.glob("*.yml")):
+        try:
+            data = yaml.safe_load(yml_path.read_text()) or {}
+        except Exception as e:
+            # A malformed dynamic config is exactly the kind of thing this check exists
+            # to catch -- don't swallow it without a trace, even though it's rare enough
+            # that surfacing it as its own dashboard row isn't worth the complexity here.
+            log.warning(f"Skipping unparseable Traefik dynamic config {yml_path.name}: {e}")
+            continue
+        if not isinstance(data, dict):
+            continue
+        for entry in (data.get("tls") or {}).get("certificates") or []:
+            cert_file = entry.get("certFile", "")
+            if cert_file.startswith(_TRAEFIK_CERTS_CONTAINER_PREFIX):
+                host_path = _TRAEFIK_CERTS_HOST_DIR / cert_file[len(_TRAEFIK_CERTS_CONTAINER_PREFIX):]
+                if host_path not in paths:
+                    paths.append(host_path)
+    return paths
+
+
+def _parse_cert_file(path: Path) -> dict:
+    if not path.exists():
+        return {"error": f"{path.name}: declared in Traefik's dynamic config but missing on disk"}
     try:
-        data = json.loads(acme_path.read_text())
-        certs = []
-        for resolver, resolver_data in data.items():
-            for cert in resolver_data.get("Certificates", []):
-                domain = cert.get("domain", {}).get("main", "unknown")
-                sans = cert.get("domain", {}).get("sans", [])
-                certs.append({"domain": domain, "sans": sans, "resolver": resolver})
-        return certs if certs else [{"note": "acme.json parsed but no certs found"}]
+        result = subprocess.run(
+            ["openssl", "x509", "-in", str(path), "-noout", "-subject", "-ext", "subjectAltName", "-enddate"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
     except Exception as e:
-        return [{"error": str(e)}]
+        return {"error": f"{path.name}: openssl failed to read cert ({e})"}
+    out = result.stdout
+    cn_match = _CERT_CN_RE.search(out)
+    end_match = _CERT_ENDDATE_RE.search(out)
+    sans = _CERT_SAN_RE.findall(out)
+    domain = cn_match.group(1).strip() if cn_match else path.stem
+    if " " in domain and sans:
+        # Cloudflare Origin Certs use a fixed, non-hostname CN ("CloudFlare Origin
+        # Certificate") -- the real domain only shows up in the SANs, so prefer that
+        # when the CN clearly isn't a hostname.
+        domain = sans[0]
+    return {
+        "domain": domain,
+        "sans": sans,
+        "resolver": path.stem,  # not an ACME resolver -- these are static file-provider certs, labeled by source file
+        "expires": end_match.group(1).strip() if end_match else "?",
+    }
+
+
+def check_certs() -> list[dict]:
+    """Read the TLS certs Traefik actually serves.
+
+    ACME is disabled here (2026-07-03): the entire certificatesResolvers block in
+    ~/apps/network/proxy/traefik.yml is commented out, so acme.json is dead legacy data
+    nothing reads or writes -- a previous version of this function read that file and
+    always came back empty, which is why the Certificate Vault panel showed "no
+    certificates found" despite two real certs being live (an internal-CA wildcard for
+    casalan.com, a Cloudflare origin cert for casaalmida.com). Both are declared as
+    static files via Traefik's file provider instead, so this reads those declarations
+    and inspects the actual cert files with openssl."""
+    cert_files = _discover_cert_files()
+    if not cert_files:
+        return [{"note": "No TLS certificates declared in Traefik's file provider (~/apps/network/proxy/dynamic/*.yml)."}]
+    parsed = [_parse_cert_file(p) for p in cert_files]
+    certs = [c for c in parsed if "error" not in c]
+    errors = [c for c in parsed if "error" in c]
+    if not certs:
+        # Every declared cert is unreadable/missing -- report as the single error row
+        # the template contract expects (it only inspects cert_list[0]).
+        return [{"error": "; ".join(c["error"] for c in errors)}]
+    if errors:
+        # Some certs loaded fine but at least one declared cert didn't -- surface it as
+        # its own row instead of silently dropping it, so a broken cert doesn't get lost
+        # behind the ones that are still fine.
+        for e in errors:
+            e["domain"] = f"⚠ {e['error']}"
+        certs = certs + errors
+    return certs
 
 
 # ── Entry points ──────────────────────────────────────────────────────────────
