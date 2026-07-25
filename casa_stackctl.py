@@ -150,10 +150,13 @@ def check_mounts() -> list[tuple[str, str, bool]]:
 
 
 def _systemctl_show(unit: str, *props: str) -> dict:
-    out = subprocess.run(
-        ["systemctl", "show", unit, *[f"-p{p}" for p in props]],
-        capture_output=True, text=True, timeout=10,
-    ).stdout
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", unit, *[f"-p{p}" for p in props]],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except subprocess.TimeoutExpired:
+        return {}
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
 
 

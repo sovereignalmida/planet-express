@@ -177,6 +177,275 @@ def test_summarize_system_and_backups_unavailable_outside_full_mode(tmp_path, mo
     assert dashboard_data.summarize_system_and_backups()["available"] is False
 
 
+# ── backup freshness / verdict ──────────────────────────────────────────────────────
+
+def _fmt_systemd_local(dt_utc: datetime) -> str:
+    """Build a systemd-style local-time string (e.g. "Sat 2026-07-25 03:10:09 WEST")
+    from a UTC-aware datetime, for round-tripping through _parse_systemd_local_time --
+    mirrors what `systemctl show`'s human-readable timestamps actually look like."""
+    local_naive = datetime.fromtimestamp(dt_utc.timestamp())
+    return local_naive.strftime("%a %Y-%m-%d %H:%M:%S") + " LOCALTZ"
+
+
+def test_parse_systemd_local_time_round_trips(monkeypatch):
+    target = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=3)
+    parsed = dashboard_data._parse_systemd_local_time(_fmt_systemd_local(target))
+    assert abs((parsed - target).total_seconds()) < 2
+
+
+def test_parse_systemd_local_time_handles_placeholders():
+    for v in ("n/a", "unknown", "never", "-", "", None):
+        assert dashboard_data._parse_systemd_local_time(v) is None
+
+
+def test_format_age_human():
+    assert dashboard_data._format_age_human(0.4) == "24m"
+    assert dashboard_data._format_age_human(15) == "15h"
+    assert dashboard_data._format_age_human(220) == "9d 4h"
+
+
+def test_format_countdown_human():
+    now = datetime.now(timezone.utc)
+    assert dashboard_data._format_countdown_human(now + timedelta(minutes=5), now) == "in 5m"
+    assert dashboard_data._format_countdown_human(now + timedelta(hours=9, minutes=48), now) == "in 9h 48m"
+    assert dashboard_data._format_countdown_human(now + timedelta(days=2, hours=3), now) == "in 2d 3h"
+    assert dashboard_data._format_countdown_human(now - timedelta(minutes=1), now) == "overdue"
+
+
+def test_job_freshness_tiers():
+    # fresh: well under 1.5x cadence, armed, succeeded
+    assert dashboard_data._job_freshness(10, 24, "success", True) == "fresh"
+    # stale: timer not armed even though age is fine
+    assert dashboard_data._job_freshness(10, 24, "success", False) == "stale"
+    # stale: age crosses 1.5x cadence
+    assert dashboard_data._job_freshness(37, 24, "success", True) == "stale"
+    # overdue: age crosses 3x cadence
+    assert dashboard_data._job_freshness(75, 24, "success", True) == "overdue"
+    # failed always wins regardless of age
+    assert dashboard_data._job_freshness(1, 24, "failed", True) == "failed"
+    # unknown age (unparseable last_run) treated cautiously, not silently fresh
+    assert dashboard_data._job_freshness(None, 24, "success", True) == "stale"
+    # timer_armed=None (legacy snapshot, "next_run" never collected) judges on age alone --
+    # unknown timer state must not retroactively read as "confirmed disarmed"
+    assert dashboard_data._job_freshness(10, 24, "success", None) == "fresh"
+
+
+def test_summarize_system_and_backups_computes_freshness_from_real_now(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": now.isoformat(), "mode": "full",
+        "system": {}, "certs": [],
+        "backups": {
+            "daily": {
+                "state": "inactive", "result": "success", "exit_code": "0",
+                "last_run": _fmt_systemd_local(now - timedelta(hours=1)),
+                "next_run": _fmt_systemd_local(now + timedelta(hours=23)),
+                "cadence_hours": 24,
+            },
+        },
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+
+    result = dashboard_data.summarize_system_and_backups()
+    daily = result["backups"]["daily"]
+    assert daily["freshness"] == "fresh"
+    assert daily["timer_armed"] is True
+    assert abs(daily["age_hours"] - 1) < 0.05
+    assert daily["age_human"] == "1h"
+    assert result["verdict"]["level"] == "ok"
+    assert result["verdict"]["title"] == "DATA IS SAFE"
+
+
+def test_summarize_system_and_backups_legacy_record_uses_job_name_cadence(tmp_path, monkeypatch):
+    # A snapshot from before check_backups() started emitting cadence_hours itself --
+    # the weekly job must fall back to its own 168h cadence, not the daily job's 24h one.
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": now.isoformat(), "mode": "full",
+        "system": {}, "certs": [],
+        "backups": {
+            "weekly": {
+                "state": "inactive", "result": "success", "exit_code": "0",
+                "last_run": _fmt_systemd_local(now - timedelta(hours=144)),
+                "next_run": _fmt_systemd_local(now + timedelta(hours=24)),
+            },
+        },
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+
+    result = dashboard_data.summarize_system_and_backups()
+    weekly = result["backups"]["weekly"]
+    assert weekly["freshness"] != "overdue"
+    # the resolved fallback cadence must be written back -- the template reads b.cadence_hours
+    # directly for the window caption, and would otherwise render "through the 0h window"
+    assert weekly["cadence_hours"] == 168
+
+
+def test_summarize_system_and_backups_timer_still_armed_after_next_run_elapses(tmp_path, monkeypatch):
+    # next_run (systemd's NextElapseUSecRealtime) is always forward-looking as of scan
+    # time -- reading as "in the past" relative to render time just means the snapshot is
+    # a bit stale, not that the real systemd timer disarmed itself.
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": now.isoformat(), "mode": "full",
+        "system": {}, "certs": [],
+        "backups": {
+            "daily": {
+                "state": "inactive", "result": "success", "exit_code": "0",
+                "last_run": _fmt_systemd_local(now - timedelta(hours=1)),
+                "next_run": _fmt_systemd_local(now - timedelta(minutes=5)),
+                "cadence_hours": 24,
+            },
+        },
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+
+    result = dashboard_data.summarize_system_and_backups()
+    assert result["backups"]["daily"]["timer_armed"] is True
+
+
+def test_summarize_system_and_backups_legacy_missing_next_run_does_not_force_stale(tmp_path, monkeypatch):
+    # A snapshot from before check_backups() started emitting "next_run" at all has no such
+    # key -- that's unknown timer state, not a confirmed-disarmed one, so an otherwise fresh
+    # legacy job shouldn't retroactively read as DATA AGING until the next full scan.
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": now.isoformat(), "mode": "full",
+        "system": {}, "certs": [],
+        "backups": {
+            "daily": {
+                "state": "inactive", "result": "success", "exit_code": "0",
+                "last_run": _fmt_systemd_local(now - timedelta(hours=1)),
+            },
+        },
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+
+    result = dashboard_data.summarize_system_and_backups()
+    assert result["backups"]["daily"]["freshness"] == "fresh"
+    # tri-state: None ("unknown"), not False ("confirmed disarmed") -- the key never existed
+    assert result["backups"]["daily"]["timer_armed"] is None
+
+
+def test_backup_verdict_crit_when_job_overdue():
+    backups = {
+        "daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"},
+        "weekly": {"freshness": "overdue", "timer_armed": False, "age_hours": None, "age_human": "never"},
+    }
+    verdict = dashboard_data._backup_verdict(backups, [])
+    assert verdict["level"] == "crit"
+
+
+def test_backup_verdict_crit_when_cert_expiring():
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(backups, [{"status": "expiring", "days_remaining": 3}])
+    assert verdict["level"] == "crit"
+
+
+def test_backup_verdict_warn_when_cert_renew_soon():
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(backups, [{"status": "renew_soon", "days_remaining": 20}])
+    assert verdict["level"] == "warn"
+
+
+def test_backup_verdict_ok_mentions_soonest_cert_expiry():
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(
+        backups, [{"status": "valid", "days_remaining": 64}, {"status": "valid", "days_remaining": 311}]
+    )
+    assert verdict["level"] == "ok"
+    assert "64d" in verdict["detail"]
+
+
+def test_backup_verdict_unknown_when_no_backup_data():
+    # A "full" mode snapshot with an empty backups mapping shouldn't read as a clean bill
+    # of health -- it's a blind spot, same as sb.available == False.
+    verdict = dashboard_data._backup_verdict({}, [])
+    assert verdict["level"] == "unknown"
+
+
+def test_backup_verdict_crit_when_cert_row_is_unreadable_error_kind():
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(backups, [{"kind": "error", "error": "missing on disk"}])
+    assert verdict["level"] == "crit"
+    assert "Certificate Vault" in verdict["detail"]
+
+
+def test_backup_verdict_crit_when_cert_row_is_legacy_bare_error():
+    # A snapshot written by the pre-redesign check_certs() encoded the same failure with
+    # neither "kind" nor "status" set at all -- must not be silently dropped.
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(backups, [{"error": "openssl failed to read cert"}])
+    assert verdict["level"] == "crit"
+
+
+def test_backup_verdict_warn_when_cert_row_is_legacy_healthy_shape():
+    # A snapshot written by the pre-redesign check_certs() represents even a *healthy* cert
+    # with no "status" key at all (only domain/sans/expires) -- the Certificate Vault card
+    # already renders that as "NO DATA" rather than implying it's valid, so the verdict must
+    # not silently default it to "valid" either (that could hide an already-expired cert).
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(
+        backups, [{"domain": "example.com", "sans": [], "resolver": "example", "expires": "?"}]
+    )
+    assert verdict["level"] == "warn"
+
+
+def test_backup_verdict_crit_detail_names_both_when_job_and_cert_are_bad():
+    backups = {"daily": {"freshness": "overdue", "timer_armed": False, "age_hours": None, "age_human": "never"}}
+    verdict = dashboard_data._backup_verdict(backups, [{"status": "expired", "days_remaining": -3}])
+    assert verdict["level"] == "crit"
+    assert "job" in verdict["detail"] and "certificate" in verdict["detail"]
+
+
+def test_backup_verdict_ok_survives_cert_with_unparseable_expiry():
+    # status == "valid" with days_remaining == None (expiry parse failed) must not crash
+    # the min() over an otherwise-empty generator.
+    backups = {"daily": {"freshness": "fresh", "timer_armed": True, "age_hours": 1, "age_human": "1h"}}
+    verdict = dashboard_data._backup_verdict(backups, [{"status": "valid", "days_remaining": None}])
+    assert verdict["level"] == "ok"
+
+
+# ── build_professor_lines() backups sidebar line ───────────────────────────────────
+
+def _minimal_professor_ctx(backup_jobs: dict) -> dict:
+    """Just enough of build_dashboard_context()'s shape for build_professor_lines() to run
+    without crashing, with everything except system_and_backups deliberately boring."""
+    return {
+        "containers": {"available": True, "total": 3, "healthy": 3, "down": 0, "degraded": 0},
+        "findings": {"counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}},
+        "system_and_backups": {"available": True, "backups": backup_jobs},
+        "traefik": {"available": False},
+        "adguard": {},
+        "health": {"last_scan_mode": "full"},
+        "pipeline_status": {"state": "idle"},
+        "pending_plan": None,
+    }
+
+
+def test_build_professor_lines_backups_line_reflects_aging_not_just_result():
+    # A job that reported "success" but is stale/overdue must not get "all reporting
+    # success" copy in the sidebar while the tab itself shows DATA AGING/AT RISK.
+    ctx = _minimal_professor_ctx({
+        "daily": {"result": "success", "freshness": "overdue"},
+    })
+    lines = dashboard_data.build_professor_lines(ctx)
+    assert "reporting success" not in lines["backups"]
+    assert "daily" in lines["backups"]
+
+
+def test_build_professor_lines_backups_line_all_fresh():
+    ctx = _minimal_professor_ctx({
+        "daily": {"result": "success", "freshness": "fresh"},
+    })
+    lines = dashboard_data.build_professor_lines(ctx)
+    assert "reporting success" in lines["backups"]
+
+
 # ── update history alert classification ──────────────────────────────────────────
 
 def test_update_history_successful_update_not_flagged_as_alert(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ Homepage-widget endpoint) with no serialization pass to invent later.
 
 import re
 import socket
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -427,6 +428,154 @@ def _diagnose_errors(errors: list[str], total: int | None = None) -> str:
     return f"{n} error{plural} in the last hour — see the log below."
 
 
+def _parse_systemd_local_time(value: Optional[str]) -> Optional[datetime]:
+    """Parse systemd's human-readable local-time timestamps (from `systemctl show`
+    InactiveExitTimestamp / NextElapseUSecRealtime / LastTriggerUSec), e.g.
+    "Sat 2026-07-25 03:10:09 WEST". These always render in the system's local timezone,
+    and the abbreviation (WEST in summer, WET in winter here) isn't reliably parseable
+    via strptime's %Z across platforms -- strip it and let time.mktime() interpret the
+    naive value as local time (which is exactly what it is), then convert to a proper
+    UTC-aware datetime for arithmetic against datetime.now(timezone.utc)."""
+    if not value or value in ("n/a", "unknown", "never", "-"):
+        return None
+    parts = value.rsplit(" ", 1)
+    stripped = parts[0] if len(parts) == 2 and parts[1].isalpha() else value
+    try:
+        struct = time.strptime(stripped, "%a %Y-%m-%d %H:%M:%S")
+        return datetime.fromtimestamp(time.mktime(struct), tz=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _format_age_human(hours: float) -> str:
+    hours = max(hours, 0)
+    if hours < 1:
+        return f"{max(round(hours * 60), 1)}m"
+    days, rem_hours = divmod(int(hours), 24)
+    return f"{days}d {rem_hours}h" if days else f"{rem_hours}h"
+
+
+def _format_countdown_human(target: datetime, now: datetime) -> str:
+    delta_minutes = int((target - now).total_seconds() // 60)
+    if delta_minutes <= 0:
+        return "overdue"
+    days, rem_minutes = divmod(delta_minutes, 24 * 60)
+    hrs, mins = divmod(rem_minutes, 60)
+    if days:
+        return f"in {days}d {hrs}h"
+    if hrs:
+        return f"in {hrs}h {mins}m"
+    return f"in {mins}m"
+
+
+# Freshness tiers -- "worst job wins the tab verdict". A oneshot service's own
+# ActiveState is always "inactive" between runs (see casa_hermes.py's system prompt),
+# so it's deliberately not a factor here: freshness comes from age vs. cadence and the
+# service's own Result, matching the design handoff's explicit "silent staleness is
+# exactly how backups fail" rationale.
+_FRESHNESS_STALE_MULT = 1.5
+_FRESHNESS_OVERDUE_MULT = 3.0
+
+# Mirrors casa_leela._BACKUP_CADENCE_HOURS -- only used as a fallback for snapshots taken
+# before check_backups() started emitting cadence_hours itself, so a legacy weekly record
+# doesn't get judged against the daily 24h window and read as immediately overdue.
+_BACKUP_CADENCE_FALLBACK = {"daily": 24, "weekly": 168}
+
+
+def _job_freshness(age_hours: Optional[float], cadence_hours: int, result: str, timer_armed: Optional[bool]) -> str:
+    """timer_armed is tri-state: True/False from a snapshot new enough to carry "next_run"
+    at all, or None for a snapshot from before that field existed -- unknown legacy timer
+    state degrades to "judge on age alone", not "assume disarmed", or every otherwise-healthy
+    job in an existing install would read as a false DATA AGING warning until the next scan."""
+    if result != "success":
+        return "failed"
+    if age_hours is None:
+        return "stale"
+    if age_hours >= cadence_hours * _FRESHNESS_OVERDUE_MULT:
+        return "overdue"
+    if age_hours >= cadence_hours * _FRESHNESS_STALE_MULT or timer_armed is False:
+        return "stale"
+    return "fresh"
+
+
+_JOB_TIER_RANK = {"fresh": 0, "stale": 1, "overdue": 2, "failed": 2}
+_CERT_TIER_RANK = {"valid": 0, "renew_soon": 1, "unknown": 1, "expiring": 2, "expired": 2, "error": 2}
+
+
+def _backup_verdict(backups: dict, cert_list: list) -> dict:
+    """Tab-level "is my data safe" verdict, structurally mirroring Hull Diagnostics'
+    worst-tier alarm banner -- worst backup-job tier and worst live-cert tier both
+    escalate the same verdict, since either one is "is my data safe" going wrong."""
+    total = len(backups)
+    if total == 0:
+        return {
+            "level": "unknown",
+            "title": "BACKUP STATUS UNKNOWN",
+            "detail": "No borg job data in this snapshot — this is a blind spot, not a clean bill of health.",
+        }
+
+    job_tiers = [b["freshness"] for b in backups.values()]
+    worst_job = max(job_tiers, key=lambda t: _JOB_TIER_RANK.get(t, 0), default="fresh")
+    # Rows with kind=="error" (unreadable/missing cert file) have no "status" but are
+    # every bit as much a "data safety" problem as an expiring one -- treat them as the
+    # worst tier rather than silently dropping them from the verdict calculation. Also
+    # catches a snapshot written by the pre-redesign check_certs(), which represented the
+    # same failure as a bare {"error": ...} with neither "kind" nor "status" set.
+    cert_tiers = []
+    for c in cert_list:
+        if c.get("note"):
+            continue  # "no certs declared on this host at all" placeholder, not a real cert
+        if c.get("status"):
+            cert_tiers.append(c["status"])
+        elif c.get("kind") == "error" or c.get("error"):
+            cert_tiers.append("error")
+        else:
+            # A snapshot written by the pre-redesign check_certs() has a healthy-looking
+            # cert dict (domain/sans/expires) with no "status" at all -- the Certificate
+            # Vault card already renders that as an explicit "NO DATA" badge rather than
+            # implying it's valid (see the template's own comment on this), so the verdict
+            # must match that honesty instead of silently defaulting to "valid" and
+            # potentially hiding an already-expired legacy-shaped cert.
+            cert_tiers.append("unknown")
+    worst_cert = max(cert_tiers, key=lambda t: _CERT_TIER_RANK.get(t, 0), default="valid")
+
+    fresh_count = sum(1 for t in job_tiers if t == "fresh")
+    armed_count = sum(1 for b in backups.values() if b["timer_armed"])
+    live_certs = [c for c in cert_list if c.get("status")]
+
+    job_crit = worst_job in ("overdue", "failed")
+    cert_crit = worst_cert in ("expiring", "expired", "error")
+    if job_crit or cert_crit:
+        level = "crit"
+        title = "DATA AT RISK"
+        if job_crit and cert_crit:
+            detail = f"{fresh_count}/{total} borg job(s) healthy, and a certificate needs attention too. Check both the job and the Certificate Vault below."
+        elif job_crit:
+            detail = f"{fresh_count}/{total} borg job(s) healthy. Check the failing/overdue job below before trusting this backup set."
+        else:
+            detail = f"All {total} borg job(s) are healthy, but a certificate is expiring, expired, or unreadable. Check the Certificate Vault below."
+    elif worst_job == "stale" or worst_cert in ("renew_soon", "unknown"):
+        level = "warn"
+        title = "DATA AGING"
+        detail = f"{fresh_count}/{total} borg job(s) fresh, {armed_count}/{total} timer(s) armed. Nothing's failed outright, but a job or cert needs attention."
+    else:
+        level = "ok"
+        title = "DATA IS SAFE"
+        dated_jobs = [b for b in backups.values() if b.get("age_hours") is not None]
+        newest = min(dated_jobs, key=lambda b: b["age_hours"])["age_human"] if dated_jobs else None
+        clauses = [f"All {total} borg job(s) succeeded on schedule."]
+        if newest:
+            clauses.append(f"Newest snapshot {newest} ago.")
+        known_days = [c["days_remaining"] for c in live_certs if c.get("days_remaining") is not None]
+        if known_days:
+            clauses.append(f"{len(live_certs)} cert(s) live, soonest expiry in {min(known_days)}d.")
+        elif live_certs:
+            clauses.append(f"{len(live_certs)} cert(s) live.")
+        detail = " ".join(clauses)
+
+    return {"level": level, "title": title, "detail": detail}
+
+
 def summarize_system_and_backups() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
@@ -446,7 +595,53 @@ def summarize_system_and_backups() -> dict:
     if system.get("recent_errors"):
         system["parsed_errors"] = [_parse_error_line(e) for e in system["recent_errors"]]
         system["diagnosis"] = _diagnose_errors(system["recent_errors"], system.get("recent_error_count"))
-    return {"system": system, "backups": monitor.backups, "available": True}
+
+    now = datetime.now(timezone.utc)
+    backups = {}
+    for name, b in monitor.backups.items():
+        b = dict(b)
+        # "last_run" (systemd's InactiveEnterTimestamp, see casa_leela.check_backups()) is
+        # when the job last *finished* -- while a run is currently in progress
+        # (state == "activating"), this still correctly holds the previous completed run's
+        # time, since InactiveEnterTimestamp only updates on the *next* completion. No
+        # special-casing needed here for that case.
+        last_run_dt = _parse_systemd_local_time(b.get("last_run"))
+        # "next_run" is absent entirely (not even "n/a") only for a snapshot from before
+        # check_backups() started emitting it -- keep that as a real "unknown" distinct from
+        # "we asked systemd and it reported nothing", or a legacy install would read every
+        # otherwise-healthy job as a confirmed-disarmed timer until the next full scan.
+        next_run_known = "next_run" in b
+        next_run_dt = _parse_systemd_local_time(b.get("next_run"))
+        cadence_hours = b.get("cadence_hours") or _BACKUP_CADENCE_FALLBACK.get(name, 24)
+        b["cadence_hours"] = cadence_hours  # write the resolved fallback back for the template
+        age_hours = (now - last_run_dt).total_seconds() / 3600 if last_run_dt else None
+        b["age_hours"] = age_hours
+        b["age_human"] = _format_age_human(age_hours) if age_hours is not None else "never"
+        # Tri-state: True/False once a snapshot is new enough to carry "next_run" at all
+        # (next_run's own absence of a value, e.g. "n/a", is a real "not armed" signal --
+        # systemd's NextElapseUSecRealtime is always forward-looking *as of scan time*, so a
+        # parsed value reading as "in the past" by render time just means the snapshot is a
+        # few hours stale, not that the real timer disarmed -- presence alone is the right
+        # signal there); None ("unknown") only for a legacy snapshot with no "next_run" key
+        # at all -- never display or score that as a confirmed-disarmed timer.
+        timer_armed = (next_run_dt is not None) if next_run_known else None
+        b["timer_armed"] = timer_armed
+        if next_run_dt:
+            b["next_human"] = _format_countdown_human(next_run_dt, now)
+        elif timer_armed is None:
+            b["next_human"] = "unknown (pre-upgrade scan)"
+        else:
+            b["next_human"] = "timer not armed"
+        b["window_pct"] = min(round(age_hours / cadence_hours * 100), 100) if age_hours is not None else 0
+        b["freshness"] = _job_freshness(age_hours, cadence_hours, b.get("result", "unknown"), timer_armed)
+        backups[name] = b
+
+    return {
+        "system": system,
+        "backups": backups,
+        "available": True,
+        "verdict": _backup_verdict(backups, monitor.certs),
+    }
 
 
 def summarize_certs() -> dict:
@@ -524,12 +719,22 @@ def build_professor_lines(ctx: dict) -> dict:
             "I've collected precisely nothing. A full scan will fix that."
         )
     else:
+        # freshness (computed in summarize_system_and_backups(), same worst-signal-wins
+        # logic as the Backups tab's verdict banner) rather than raw result -- a job that
+        # reported "success" but is stale/overdue/unarmed shouldn't get a clean bill of
+        # health here while the tab itself is showing DATA AGING/AT RISK.
         jobs = system_and_backups["backups"]
-        failed = [name for name, b in jobs.items() if b.get("result") != "success"]
+        failed = [name for name, b in jobs.items() if b.get("freshness") == "failed"]
+        aging = [name for name, b in jobs.items() if b.get("freshness") in ("stale", "overdue")]
         if failed:
             backups = (
                 f"{len(failed)} of {len(jobs)} backup job(s) didn't finish cleanly "
                 f"({', '.join(failed)}). Not my finest hour, but at least I noticed."
+            )
+        elif aging:
+            backups = (
+                f"{len(aging)} of {len(jobs)} backup job(s) succeeded but are running "
+                f"behind schedule ({', '.join(aging)}). Not failed, but don't get comfortable."
             )
         elif jobs:
             backups = f"All {len(jobs)} backup job(s) reporting success. Borg's doing its job; I'm doing mine, which is worrying about it anyway."

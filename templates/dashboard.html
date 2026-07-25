@@ -335,40 +335,102 @@
 
       <!-- ═══ BACKUPS ═══ -->
       <div class="tab-panel" data-tab-panel="backups">
+        {% set sb = ctx.system_and_backups %}
+        {% set backup_jobs = sb.backups if sb.available else {} %}
+        {% set backup_cadence_label = {'daily': 'every 24h', 'weekly': 'every 7d'} %}
+        {% set backup_job_names = backup_jobs.keys()|list if backup_jobs else backup_cadence_label.keys()|list %}
+
+        {% if sb.available %}
+        {% set v = sb.verdict %}
+        <section class="panel alarm-banner verdict-strip {{ v.level }}">
+          <div class="alarm-orb">{{ '✓' if v.level == 'ok' else ('!' if v.level == 'warn' else ('?' if v.level == 'unknown' else '⚠')) }}</div>
+          <div class="alarm-text">
+            <p class="alarm-title">{{ v.title }}</p>
+            <p class="alarm-sub">{{ v.detail }}</p>
+          </div>
+          {% if backup_jobs %}
+          <div class="alarm-chips">
+            {% set fresh_count = backup_jobs.values()|selectattr('freshness', 'equalto', 'fresh')|list|length %}
+            {# timer_armed is tri-state -- None means "pre-upgrade scan, unknown", excluded
+               from this count entirely rather than counted as a confirmed-disarmed timer. #}
+            {% set known_timer_jobs = backup_jobs.values()|rejectattr('timer_armed', 'none')|list %}
+            {% set armed_count = known_timer_jobs|selectattr('timer_armed')|list|length %}
+            <span class="alarm-chip {{ 'ok' if fresh_count == backup_jobs|length else 'crit' }}">{{ fresh_count }}/{{ backup_jobs|length }} JOBS OK</span>
+            <span class="alarm-chip {{ 'ok' if armed_count == known_timer_jobs|length else 'crit' }}">{{ armed_count }}/{{ known_timer_jobs|length }} TIMERS ARMED</span>
+            {% if ctx.certs.available and ctx.certs.list and not ctx.certs.list[0].get('note') %}
+            <span class="alarm-chip info">{{ ctx.certs.list|length }} CERTS</span>
+            {% endif %}
+          </div>
+          {% endif %}
+        </section>
+        {% else %}
+        <section class="panel alarm-banner verdict-strip unknown">
+          <div class="alarm-orb">?</div>
+          <div class="alarm-text">
+            <p class="alarm-title">BACKUP STATUS UNKNOWN</p>
+            <p class="alarm-sub">Last scan ran <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span>, which doesn't read backup or certificate state. This is not a failure — it's a blind spot. Full scans run automatically every few hours — this dashboard doesn't trigger one itself.</p>
+          </div>
+          <a class="verdict-action" href="/">CHECK AGAIN ⟳</a>
+        </section>
+        {% endif %}
+
         <section class="panel">
           <div class="panel-head-row">
-            <h3>COLD STORAGE · BACKUPS</h3>
-            <span class="status-chip {{ 'ok' if ctx.system_and_backups.available else '' }}">{{ 'COLLECTED' if ctx.system_and_backups.available else 'AWAITING FULL SCAN' }}</span>
+            <h3>COLD STORAGE · BORG</h3>
+            <span class="status-chip {{ 'ok' if backup_jobs else '' }}">{{ 'COLLECTED' if backup_jobs else 'AWAITING FULL SCAN' }}</span>
+            <span class="panel-head-summary">source: systemd units · never touches the borg repo</span>
           </div>
-          {% if ctx.system_and_backups.available %}
-            {% if ctx.system_and_backups.backups %}
-            <div class="cryo-grid">
-              {% for name, b in ctx.system_and_backups.backups.items() %}
-              <div class="cryo-pod {{ 'alert' if b.get('result') != 'success' else '' }}">
-                <div class="cryo-pod-head">
-                  <span class="cryo-led"></span>
-                  <span class="cryo-name">{{ name|upper }}</span>
-                </div>
-                <div class="cryo-stats">
-                  <div class="cryo-stat-row"><span>STATE</span><span>{{ b.get('state', '?') }}</span></div>
-                  <div class="cryo-stat-row"><span>RESULT</span><span class="{{ 'cryo-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }}</span></div>
-                  <div class="cryo-stat-row"><span>EXIT CODE</span><span>{{ b.get('exit_code', '?') }}</span></div>
-                  <div class="cryo-stat-row"><span>LAST RUN</span><span>{{ b.get('last_run', '?') }}</span></div>
-                </div>
+          <div class="cryo-grid">
+            {% for name in backup_job_names %}
+            {% set b = backup_jobs.get(name, {}) %}
+            {% set dormant = not backup_jobs %}
+            {% set cadence_hours = b.get('cadence_hours', 0) %}
+            {% set cadence_label = ((cadence_hours // 24)|string ~ 'd') if cadence_hours and cadence_hours % 24 == 0 else (cadence_hours|string ~ 'h') %}
+            <div class="cryo-pod {{ 'nodata' if dormant else b.get('freshness', '') }}">
+              <div class="cryo-pod-head">
+                <span class="cryo-led"></span>
+                <span class="cryo-name">{{ name|upper }}</span>
+                {% if not dormant %}<span class="cryo-cadence">{{ backup_cadence_label.get(name, '') }}</span>{% endif %}
+                <span class="cryo-badge">{{ 'NO DATA' if dormant else b.get('freshness', '?')|upper }}</span>
               </div>
-              {% endfor %}
+              {% if dormant %}
+              <div class="cryo-stats">
+                <div class="cryo-stat-row"><span>NEXT RUN</span><span>—</span></div>
+                <div class="cryo-stat-row"><span>RESULT</span><span>—</span></div>
+                <div class="cryo-stat-row"><span>LAST RUN</span><span>—</span></div>
+              </div>
+              {% else %}
+              <div class="cryo-hero">
+                <span class="cryo-hero-num">{{ b.age_human }}</span>
+                {# systemd's completion timestamp updates on a failed attempt too, not just
+                   a successful one -- "SINCE LAST SNAPSHOT" would misleadingly claim a fresh
+                   snapshot exists when the last attempt actually failed. #}
+                <span class="cryo-hero-label">{{ 'SINCE LAST ATTEMPT' if b.get('result') != 'success' else 'SINCE LAST SNAPSHOT' }}</span>
+              </div>
+              <div class="cryo-window-track"><div class="cryo-window-fill" style="width: {{ b.window_pct }}%;"></div></div>
+              <div class="cryo-window-caption">
+                {% if b.window_pct < 100 %}{{ b.window_pct }}% through the {{ cadence_label }} window{% else %}past its {{ cadence_label }} window{% endif %}
+              </div>
+              <div class="cryo-stats">
+                <div class="cryo-stat-row"><span>NEXT RUN</span><span class="{{ 'cryo-bad' if b.timer_armed == false else '' }}">{{ b.next_human }}</span></div>
+                <div class="cryo-stat-row"><span>RESULT</span><span class="{{ 'cryo-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }} · exit {{ b.get('exit_code', '?') }}</span></div>
+                <div class="cryo-stat-row"><span>LAST RUN</span><span>{{ b.get('last_run', '?') }}</span></div>
+              </div>
+              <div class="cryo-footnote">
+                {% if b.freshness == 'failed' %}last run failed — check the logs before trusting this snapshot
+                {% elif b.timer_armed == false %}last run succeeded, but nothing is scheduled to run again
+                {% elif b.freshness == 'stale' or b.freshness == 'overdue' %}last run succeeded, but this job is running behind its {{ cadence_label }} cadence
+                {% else %}unit idle between runs (oneshot) — normal{% endif %}
+              </div>
+              {% endif %}
             </div>
-            {% else %}
-            <p class="muted-body">No backup job data in this scan.</p>
-            {% endif %}
-          {% else %}
-          <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span> didn't collect backup data. Available after the next full scan.</p>
-            {% if ctx.pending_plan %}
-            <div class="dashed-footer">
-              <span class="dot-amber"></span>
-              next full scan queued via plan <span style="color: var(--amber);">{{ ctx.pipeline_status.pending_plan_id }}</span>
-            </div>
-            {% endif %}
+            {% endfor %}
+          </div>
+          {% if ctx.pending_plan %}
+          <div class="dashed-footer">
+            <span class="dot-amber"></span>
+            plan <span style="color: var(--amber);">{{ ctx.pipeline_status.pending_plan_id }}</span> pending — persists in both the collected and awaiting states.
+          </div>
           {% endif %}
         </section>
 
@@ -376,25 +438,67 @@
           <div class="panel-head-row">
             <h3>CERTIFICATE VAULT</h3>
             <span class="status-chip {{ 'ok' if ctx.certs.available else '' }}">{{ 'COLLECTED' if ctx.certs.available else 'AWAITING FULL SCAN' }}</span>
+            {% if ctx.certs.available and ctx.certs.list and not ctx.certs.list[0].get('note') %}
+            {% set attention_count = ctx.certs.list|selectattr('status', 'in', ['expiring', 'renew_soon', 'expired'])|list|length %}
+            <span class="panel-head-summary">{{ ctx.certs.list|length }} collected</span>
+            {% if attention_count %}
+            <span class="cert-expiring-chip">{{ attention_count }} need{{ 's' if attention_count == 1 else '' }} attention</span>
+            {% endif %}
+            {% else %}
+            <span class="panel-head-summary">Traefik file provider · ACME disabled on this host</span>
+            {% endif %}
           </div>
           {% if ctx.certs.available %}
             {% set cert_list = ctx.certs.list %}
-            {% if cert_list and cert_list[0].get('error') %}
-            <p class="muted-body">{{ cert_list[0].error }}</p>
-            {% elif cert_list and cert_list[0].get('note') %}
+            {% if cert_list and cert_list[0].get('note') %}
             <p class="muted-body">{{ cert_list[0].note }}</p>
             {% elif cert_list %}
-            <div class="grid-head cols-certs">
-              <span>DOMAIN</span><span>SANS</span><span>SOURCE</span><span>EXPIRES</span>
+            <div class="cert-grid">
+              {% for c in cert_list %}
+              {# c.get('error') without 'kind' catches a snapshot written by the
+                 pre-redesign check_certs(), which encoded the same failure with neither
+                 "kind" nor "status" set -- still an error, not a "no data" placeholder. #}
+              {% if c.get('kind') == 'error' or c.get('error') %}
+              <div class="cert-card error">
+                <div class="cert-card-head">
+                  <span class="cert-led"></span>
+                  <span class="cert-domain">UNREADABLE</span>
+                  <span class="cert-badge">ERROR</span>
+                </div>
+                <p class="cert-error-msg">{{ c.error }}</p>
+                <div class="cert-stats">
+                  <div class="cert-stat-row"><span>SOURCE FILE</span><span>{{ c.get('resolver', '?') }}</span></div>
+                </div>
+              </div>
+              {% else %}
+              {# A monitor snapshot written before this cert-vault redesign shipped has no
+                 "status"/"days_remaining" keys at all -- default that to "unknown" rather
+                 than "valid", or a cert that's actually expired would show a reassuring
+                 green VALID badge until the next full scan re-parses it. #}
+              {% set status = c.get('status') or 'unknown' %}
+              <div class="cert-card {{ status }}">
+                <div class="cert-card-head">
+                  <span class="cert-led"></span>
+                  <span class="cert-domain" title="{{ c.get('domain', '?') }}">{{ c.get('domain', '?') }}</span>
+                  <span class="cert-badge">{{ 'EXPIRED' if status == 'expired' else ('EXPIRING' if status == 'expiring' else ('RENEW SOON' if status == 'renew_soon' else ('VALID' if status == 'valid' else 'NO DATA'))) }}</span>
+                </div>
+                {% if c.get('days_remaining') is not none %}
+                {% if status == 'expired' %}
+                <div class="cert-countdown">{{ -c.days_remaining }}d<span class="cert-countdown-label">OVERDUE</span></div>
+                {% else %}
+                <div class="cert-countdown">{{ c.days_remaining }}d<span class="cert-countdown-label">UNTIL EXPIRY</span></div>
+                {% endif %}
+                <div class="cert-bar-track"><div class="cert-bar-fill" style="width: {{ [[c.days_remaining / 90 * 100, 0]|max, 100]|min }}%;"></div></div>
+                {% endif %}
+                <div class="cert-stats">
+                  <div class="cert-stat-row"><span>SOURCE FILE</span><span>{{ c.get('resolver', '?') }}</span></div>
+                  <div class="cert-stat-row"><span>ISSUER</span><span title="{{ c.get('issuer', '?') }}">{{ c.get('issuer', '?') }}</span></div>
+                  <div class="cert-stat-row"><span>{{ c.get('sans', [])|length }} SAN{{ '' if c.get('sans', [])|length == 1 else 's' }}</span><span title="{{ c.get('sans', [])|join(', ') }}">{{ c.get('sans', [])|join(', ') }}</span></div>
+                </div>
+              </div>
+              {% endif %}
+              {% endfor %}
             </div>
-            {% for c in cert_list %}
-            <div class="grid-row cols-certs">
-              <span class="cell-mono cell-service">{{ c.get('domain', '?') }}</span>
-              <span class="cell-mono cell-dim">{{ c.get('sans', [])|join(', ') }}</span>
-              <span class="cell-mono">{{ c.get('resolver', '?') }}</span>
-              <span class="cell-mono cell-when">{{ c.get('expires', '?') }}</span>
-            </div>
-            {% endfor %}
             {% else %}
             <p class="muted-body">No certificates found.</p>
             {% endif %}

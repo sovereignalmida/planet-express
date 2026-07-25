@@ -320,13 +320,26 @@ def check_system() -> dict:
     }
 
 
+_BACKUP_CADENCE_HOURS = {"daily": 24, "weekly": 168}
+
+
 def check_backups() -> dict:
-    """Borg backup service status and last run."""
+    """Borg backup service + timer status.
+
+    Delegates the timer half (last/next trigger) to stackctl.check_backups() --
+    stackctl.BORG_JOBS is already the single source of truth for the service/timer unit
+    pairs (powers Farnsworth's /backups command), same reuse pattern as check_mounts()
+    delegating to stackctl.check_mounts() above. Reshaped into the dict-keyed-by-job-name
+    shape the dashboard already expects, plus a static cadence_hours the dashboard uses to
+    judge staleness (a oneshot service's own ActiveState is always "inactive" between
+    runs -- see casa_hermes.py's system prompt -- so "state" stays in the payload for
+    completeness but the dashboard doesn't lead with it)."""
+    timers = {t["label"]: t for t in stackctl.check_backups()}
     result = {}
     for unit in ["daily-borg-backup", "weekly-borg-backup"]:
         _, out, _ = _run(
             f"systemctl show {unit}.service "
-            "--property=ActiveState,Result,ExecMainStatus,InactiveExitTimestamp"
+            "--property=ActiveState,Result,ExecMainStatus,InactiveEnterTimestamp"
         )
         props = {}
         for line in out.splitlines():
@@ -334,11 +347,21 @@ def check_backups() -> dict:
                 k, v = line.split("=", 1)
                 props[k] = v
         key = "daily" if "daily" in unit else "weekly"
+        tmr = timers.get(key, {})
         result[key] = {
             "state": props.get("ActiveState", "unknown"),
             "result": props.get("Result", "unknown"),
             "exit_code": props.get("ExecMainStatus", "?"),
-            "last_run": props.get("InactiveExitTimestamp", "n/a"),
+            # InactiveEnterTimestamp, not InactiveExitTimestamp -- the latter is when the
+            # oneshot last *left* inactive (i.e. started running), the former is when it
+            # last *entered* inactive (i.e. finished). The dashboard reads this as "when did
+            # the last snapshot complete", and on this host those two differ by ~2h45m for
+            # the daily job -- using the start time understated every displayed age by the
+            # job's full runtime and could misclassify a still-running backup as fresh.
+            "last_run": props.get("InactiveEnterTimestamp", "n/a"),
+            "next_run": tmr.get("next_run_at", "n/a"),
+            "last_trigger": tmr.get("last_run_at", "n/a"),
+            "cadence_hours": _BACKUP_CADENCE_HOURS[key],
         }
     return result
 
@@ -392,8 +415,11 @@ _TRAEFIK_CERTS_CONTAINER_PREFIX = "/etc/traefik/certs/"
 _TRAEFIK_CERTS_HOST_DIR = Path("/home/casaroot/apps/network/proxy/certs")
 
 _CERT_CN_RE = re.compile(r"CN\s*=\s*([^,/\n]+)")
+_CERT_O_RE = re.compile(r"O\s*=\s*([^,/\n]+)")
 _CERT_SAN_RE = re.compile(r"DNS:([^,\s]+)")
 _CERT_ENDDATE_RE = re.compile(r"notAfter=(.+)")
+_CERT_EXPIRING_SOON_DAYS = 30  # dashboard "RENEW SOON" amber tier
+_CERT_EXPIRING_CRITICAL_DAYS = 7  # dashboard "EXPIRING" red tier
 
 
 def _discover_cert_files() -> list[Path]:
@@ -426,18 +452,38 @@ def _discover_cert_files() -> list[Path]:
     return paths
 
 
+def _cert_expiry_status(days_remaining: int | None) -> str:
+    if days_remaining is None:
+        return "valid"
+    if days_remaining < 0:
+        return "expired"
+    if days_remaining <= _CERT_EXPIRING_CRITICAL_DAYS:
+        return "expiring"
+    if days_remaining <= _CERT_EXPIRING_SOON_DAYS:
+        return "renew_soon"
+    return "valid"
+
+
 def _parse_cert_file(path: Path) -> dict:
     if not path.exists():
-        return {"error": f"{path.name}: declared in Traefik's dynamic config but missing on disk"}
+        return {"error": f"{path.name}: declared in Traefik's dynamic config but missing on disk", "resolver": path.stem}
     try:
         result = subprocess.run(
-            ["openssl", "x509", "-in", str(path), "-noout", "-subject", "-ext", "subjectAltName", "-enddate"],
+            ["openssl", "x509", "-in", str(path), "-noout", "-subject", "-issuer", "-ext", "subjectAltName", "-enddate"],
             capture_output=True, text=True, timeout=10, check=True,
         )
     except Exception as e:
-        return {"error": f"{path.name}: openssl failed to read cert ({e})"}
+        return {"error": f"{path.name}: openssl failed to read cert ({e})", "resolver": path.stem}
     out = result.stdout
-    cn_match = _CERT_CN_RE.search(out)
+    # -subject and -issuer both print a "...CN = ..." line -- search each field's own
+    # line rather than the whole blob, or a blind CN regex could grab the issuer's CN
+    # for a self-signed-style cert whose issuer line happens to come first.
+    subject_line = next((ln for ln in out.splitlines() if ln.startswith("subject=")), "")
+    issuer_line = next((ln for ln in out.splitlines() if ln.startswith("issuer=")), "")
+    cn_match = _CERT_CN_RE.search(subject_line)
+    # Issuer often has no CN (e.g. Cloudflare Origin CA's issuer is C/O/OU/L/ST only)
+    # -- fall back to the organization name, still more useful than "?".
+    issuer_match = _CERT_CN_RE.search(issuer_line) or _CERT_O_RE.search(issuer_line)
     end_match = _CERT_ENDDATE_RE.search(out)
     sans = _CERT_SAN_RE.findall(out)
     domain = cn_match.group(1).strip() if cn_match else path.stem
@@ -446,11 +492,22 @@ def _parse_cert_file(path: Path) -> dict:
         # Certificate") -- the real domain only shows up in the SANs, so prefer that
         # when the CN clearly isn't a hostname.
         domain = sans[0]
+    expires = end_match.group(1).strip() if end_match else "?"
+    days_remaining = None
+    if end_match:
+        try:
+            expiry_dt = datetime.strptime(expires.replace(" GMT", ""), "%b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+            days_remaining = (expiry_dt - datetime.now(timezone.utc)).days
+        except ValueError:
+            pass
     return {
         "domain": domain,
         "sans": sans,
         "resolver": path.stem,  # not an ACME resolver -- these are static file-provider certs, labeled by source file
-        "expires": end_match.group(1).strip() if end_match else "?",
+        "issuer": issuer_match.group(1).strip() if issuer_match else "?",
+        "expires": expires,
+        "days_remaining": days_remaining,
+        "status": _cert_expiry_status(days_remaining),
     }
 
 
@@ -469,20 +526,14 @@ def check_certs() -> list[dict]:
     if not cert_files:
         return [{"note": "No TLS certificates declared in Traefik's file provider (~/apps/network/proxy/dynamic/*.yml)."}]
     parsed = [_parse_cert_file(p) for p in cert_files]
-    certs = [c for c in parsed if "error" not in c]
-    errors = [c for c in parsed if "error" in c]
-    if not certs:
-        # Every declared cert is unreadable/missing -- report as the single error row
-        # the template contract expects (it only inspects cert_list[0]).
-        return [{"error": "; ".join(c["error"] for c in errors)}]
-    if errors:
-        # Some certs loaded fine but at least one declared cert didn't -- surface it as
-        # its own row instead of silently dropping it, so a broken cert doesn't get lost
-        # behind the ones that are still fine.
-        for e in errors:
-            e["domain"] = f"⚠ {e['error']}"
-        certs = certs + errors
-    return certs
+    # A cert that's declared but unreadable/missing gets its own explicit "kind": "error"
+    # row instead of smuggling the message through "domain" -- the dashboard renders
+    # these as their own card (red border, UNREADABLE in place of a domain), never
+    # crammed into a table cell. Never dropped, whether it's the only cert or one of many.
+    for c in parsed:
+        if "error" in c:
+            c["kind"] = "error"
+    return parsed
 
 
 # ── Entry points ──────────────────────────────────────────────────────────────
