@@ -1,10 +1,15 @@
-// dashboard.js — Planet Express dashboard interactions. All data is already
-// server-rendered on page load (no fetch calls here); this only handles
-// client-side view state: which tab is showing, the network router filter,
-// and dismissing the pending-plan card. "Approve" is a plain link to Telegram,
-// not JS-driven -- this dashboard has no route to actually approve anything.
+// dashboard.js — Planet Express dashboard interactions. Data is server-rendered on
+// first load; after that, a fetch()-based refresh swaps in fresh server-rendered HTML
+// every 60s (see refreshDashboard() below) instead of the page doing a hard reload --
+// a <meta http-equiv="refresh"> reload blanks the whole page and repaints from scratch,
+// which reads as a jarring full-screen flash. Fetching the same URL and replacing just
+// #dashboard-live's contents keeps the browser tab/scroll/focus alive and never blanks.
+// "Approve" is a plain link to Telegram, not JS-driven -- this dashboard has no route
+// to actually approve anything.
 (function () {
   "use strict";
+
+  var TAB_NAMES = ["overview", "backups", "network", "actions"];
 
   function setActiveTab(name) {
     document.querySelectorAll(".tab").forEach(function (btn) {
@@ -18,102 +23,101 @@
     });
   }
 
-  var TAB_NAMES = ["overview", "backups", "network", "actions"];
-
-  document.querySelectorAll(".tab").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      setActiveTab(btn.dataset.tab);
-      window.location.hash = btn.dataset.tab;
-    });
-  });
-
-  // The 60s meta-refresh reloads this same URL, and browsers preserve the
-  // fragment across that reload -- so the hash is what survives auto-refresh.
+  // A refresh swap re-renders from the server default (Overview active) -- reapply
+  // whichever tab the hash says is current so a refresh mid-Backups-tab doesn't
+  // silently bounce the view back to Overview.
   function applyHashTab() {
     var hashTab = window.location.hash.slice(1);
     if (TAB_NAMES.indexOf(hashTab) !== -1) {
       setActiveTab(hashTab);
     }
   }
-  applyHashTab();
-  // Tab clicks push a new fragment onto history, so Back/Forward change the
-  // hash without re-running this script -- listen for that too, or the visible
-  // tab and the URL drift apart.
-  window.addEventListener("hashchange", applyHashTab);
 
-  var filterInput = document.getElementById("net-filter");
-  if (filterInput) {
-    var rows = Array.prototype.slice.call(document.querySelectorAll(".net-filter-row"));
-    var counter = document.getElementById("net-count");
-    var total = rows.length;
-
-    filterInput.addEventListener("input", function () {
-      var q = filterInput.value.trim().toLowerCase();
-      var shown = 0;
-      rows.forEach(function (row) {
-        var match = !q || row.dataset.filterText.indexOf(q) !== -1;
-        row.classList.toggle("hidden", !match);
-        if (match) shown++;
-      });
-      if (counter) counter.textContent = "showing " + shown + " of " + total;
-    });
-  }
-
-  // Dismissal only lasts for this browser session and only for the plan ID
-  // dismissed -- the 60s meta-refresh reloads the page, and a plan ID is
-  // reused as "the same plan" across reloads but a *different* plan ID
-  // (new pending plan) should always show up regardless of a past dismissal.
+  // Dismissal only lasts for this browser session and only for the plan ID dismissed --
+  // a refresh (or a real reload) should keep a dismissed plan hidden, but a *different*
+  // plan ID (new pending plan) should always show up regardless of a past dismissal.
   var DISMISS_KEY = "planetexpress-dismissed-plan-id";
 
-  document.querySelectorAll(".plan-card").forEach(function (card) {
-    if (card.dataset.planId && card.dataset.planId === sessionStorage.getItem(DISMISS_KEY)) {
-      card.classList.add("hidden");
-    }
-  });
+  // Everything in here binds to DOM nodes -- must re-run after every refresh swap
+  // (fresh nodes from the fetched HTML have no listeners of their own yet).
+  function bindInteractions() {
+    document.querySelectorAll(".tab").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        setActiveTab(btn.dataset.tab);
+        window.location.hash = btn.dataset.tab;
+      });
+    });
 
-  document.querySelectorAll(".btn-dismiss").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      var card = btn.closest(".plan-card");
-      if (!card) return;
-      card.classList.add("hidden");
-      if (card.dataset.planId) {
-        sessionStorage.setItem(DISMISS_KEY, card.dataset.planId);
+    var filterInput = document.getElementById("net-filter");
+    if (filterInput) {
+      var rows = Array.prototype.slice.call(document.querySelectorAll(".net-filter-row"));
+      var counter = document.getElementById("net-count");
+      var total = rows.length;
+
+      filterInput.addEventListener("input", function () {
+        var q = filterInput.value.trim().toLowerCase();
+        var shown = 0;
+        rows.forEach(function (row) {
+          var match = !q || row.dataset.filterText.indexOf(q) !== -1;
+          row.classList.toggle("hidden", !match);
+          if (match) shown++;
+        });
+        if (counter) counter.textContent = "showing " + shown + " of " + total;
+      });
+    }
+
+    document.querySelectorAll(".plan-card").forEach(function (card) {
+      if (card.dataset.planId && card.dataset.planId === sessionStorage.getItem(DISMISS_KEY)) {
+        card.classList.add("hidden");
       }
     });
-  });
 
-  // Hull Diagnostics low/medium drawer -- one folded disclosure instead of two,
-  // so routine lows/mediums can never bury a real signal. Client-side only, same
-  // data the server already rendered inside it.
-  document.querySelectorAll("[data-hull-drawer-toggle]").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      var drawer = btn.closest("[data-hull-drawer]");
-      if (drawer) drawer.classList.toggle("open");
+    document.querySelectorAll(".btn-dismiss").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".plan-card");
+        if (!card) return;
+        card.classList.add("hidden");
+        if (card.dataset.planId) {
+          sessionStorage.setItem(DISMISS_KEY, card.dataset.planId);
+        }
+      });
     });
-  });
 
-  // Routing matrix: click a node to expand it in place (full rule/service/router
-  // id/status). All detail markup is already server-rendered, just visually
-  // collapsed -- no refetch, matches the low/medium drawer's pattern.
-  document.querySelectorAll("[data-net-node]").forEach(function (node) {
-    function toggle() {
-      node.classList.toggle("expanded");
-    }
-    node.addEventListener("click", toggle);
-    node.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault();
-        toggle();
+    // Hull Diagnostics low/medium drawer -- one folded disclosure instead of two, so
+    // routine lows/mediums can never bury a real signal. Client-side only, same data
+    // the server already rendered inside it.
+    document.querySelectorAll("[data-hull-drawer-toggle]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var drawer = btn.closest("[data-hull-drawer]");
+        if (drawer) drawer.classList.toggle("open");
+      });
+    });
+
+    // Routing matrix: click a node to expand it in place (full rule/service/router
+    // id/status). All detail markup is already server-rendered, just visually
+    // collapsed -- no refetch, matches the low/medium drawer's pattern.
+    document.querySelectorAll("[data-net-node]").forEach(function (node) {
+      function toggle() {
+        node.classList.toggle("expanded");
       }
+      node.addEventListener("click", toggle);
+      node.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          toggle();
+        }
+      });
     });
-  });
 
-  // Deployment manifest: group the flat update-history list (rendered into a JSON
-  // data island, not fetched) into "runs" -- a batch update writes many entries
-  // seconds apart, so cluster by stack + a small time-proximity gap and render a
-  // run card + timeline + chip board per cluster. Same data as the old flat table,
-  // just reorganized client-side -- no new backend endpoint.
-  (function buildDeployManifest() {
+    buildDeployManifest();
+  }
+
+  // Deployment manifest: group the flat update-history list (rendered into a JSON data
+  // island, not fetched) into "runs" -- a batch update writes many entries seconds
+  // apart, so cluster by stack + a small time-proximity gap and render a run card +
+  // timeline + chip board per cluster. Same data as the old flat table, just
+  // reorganized client-side -- no new backend endpoint.
+  function buildDeployManifest() {
     var dataEl = document.getElementById("update-history-data");
     var manifestEl = document.querySelector("[data-deploy-manifest]");
     if (!dataEl || !manifestEl) return;
@@ -205,5 +209,40 @@
 
       manifestEl.appendChild(card);
     });
-  })();
+  }
+
+  var REFRESH_INTERVAL_MS = 60000;
+
+  function refreshDashboard() {
+    // Don't yank focus/typed text out from under someone mid-filter.
+    var filterInput = document.getElementById("net-filter");
+    if (filterInput && document.activeElement === filterInput) return;
+
+    fetch(window.location.pathname, { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("bad response " + r.status);
+        return r.text();
+      })
+      .then(function (html) {
+        var freshLive = new DOMParser().parseFromString(html, "text/html").getElementById("dashboard-live");
+        var currentLive = document.getElementById("dashboard-live");
+        if (!freshLive || !currentLive) return;
+        currentLive.innerHTML = freshLive.innerHTML;
+        applyHashTab();
+        bindInteractions();
+      })
+      .catch(function () {
+        // Transient network blip -- next interval tries again, no need to surface
+        // an error on a passive read-only dashboard.
+      });
+  }
+
+  applyHashTab();
+  // Tab clicks push a new fragment onto history, so Back/Forward change the hash
+  // without re-running this script -- listen for that too, or the visible tab and the
+  // URL drift apart. Bound once (not in bindInteractions()) since window itself is
+  // never replaced by a refresh swap.
+  window.addEventListener("hashchange", applyHashTab);
+  bindInteractions();
+  setInterval(refreshDashboard, REFRESH_INTERVAL_MS);
 })();
