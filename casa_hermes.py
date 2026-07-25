@@ -48,7 +48,13 @@ SEVERITY RULES (apply all that match):
 - Disk used_pct >= 90: CRITICAL
 - Disk used_pct 80-89: HIGH
 - Missing SMB mount (missing list non-empty): HIGH — media services will be broken
-- Backup job result != "success" or last_run is empty/n/a: HIGH
+- Backup job result != "success" or last_run is empty/n/a: HIGH. IMPORTANT: backup jobs run as
+  systemd oneshot units triggered by a timer — "state": "inactive" is their NORMAL resting state
+  between scheduled runs, not a failure signal. A failed run shows up as "state": "failed" or
+  "result" != "success", never as "inactive" with "result": "success". Do NOT create a finding,
+  and do NOT describe the job as "not scheduled" or having "no recent verified run", solely
+  because state is "inactive" — check result and last_run instead. A backup job with
+  state=inactive, result=success, and a real last_run timestamp is healthy.
 - systemd service inactive: MEDIUM (only casa-startup is actively checked as of 2026-07-04;
   nebula and dnclient were both decommissioned — remote access is now Tailscale on OPNsense,
   outside this host)
