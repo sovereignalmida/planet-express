@@ -298,6 +298,8 @@ def summarize_pending_plan() -> Optional[dict]:
             "priority": p.get("priority"),
             "title": p.get("title"),
             "step_count": len(p.get("steps", [])),
+            "fix_steps": [s.get("description", "") for s in p.get("steps", []) if s.get("description")],
+            "rollback_steps": [s.get("description", "") for s in p.get("rollback", []) if s.get("description")],
         }
         for p in live_plans
     ]

@@ -12,6 +12,7 @@
 </head>
 <body>
   <div class="scanline" aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
 
   <header class="topbar">
     <div class="brand">
@@ -21,13 +22,19 @@
       </div>
       <div>
         <div class="wordmark">PLANET&nbsp;EXPRESS</div>
-        <div class="tagline">sysadmin agent · our crew is replaceable, your containers aren't</div>
+        <div class="tagline">SHIP COMPUTER v3000 · crew replaceable, containers aren't</div>
       </div>
     </div>
 
     <div class="topbar-spacer"></div>
 
     <div class="topbar-right">
+      <div class="osc-gauge" aria-hidden="true">
+        <svg viewBox="0 0 132 58" preserveAspectRatio="none">
+          <polyline class="osc-wave" points="0,44 10,44 16,20 22,50 28,30 34,44 44,44 50,14 56,44 66,44 72,34 78,44 88,44 94,24 100,44 110,44 116,38 122,44 132,44"></polyline>
+        </svg>
+        <span class="osc-label">LOAD {{ ctx.system_and_backups.system.get('uptime_parsed', {}).get('load1', '—') if ctx.system_and_backups.available else '----' }}</span>
+      </div>
       <div class="pipeline-block">
         <div class="pipeline-line">
           <span class="led-dot status-{{ ctx.health.status }}"></span>
@@ -40,13 +47,32 @@
         </div>
         <div class="lastscan">last scan: {{ ctx.health.last_scan or "never" }}</div>
       </div>
-      <a class="refresh-btn" href="/"><span>↻</span> refresh now</a>
+      <a class="refresh-btn" href="/"><span>↻</span> SCAN</a>
     </div>
   </header>
 
   {% if ctx.pipeline_status.state == "running" %}
   <div class="scanbar"><div class="scanbar-fill"></div></div>
   {% endif %}
+
+  <div class="lamp-rail">
+    <span class="beacon-item">
+      <span class="beacon-dot {{ 'amber' if ctx.pipeline_status.state == 'awaiting_approval' else '' }}"></span>
+      PIPELINE {{ ctx.pipeline_status.state|upper }}
+    </span>
+    {% if ctx.pipeline_status.state == "awaiting_approval" and ctx.pipeline_status.pending_plan_id %}
+    <span class="beacon-item">
+      <span class="beacon-dot amber"></span>
+      PLAN {{ ctx.pipeline_status.pending_plan_id }} PENDING
+    </span>
+    {% endif %}
+    <span class="beacon-item">
+      <span class="beacon-dot teal"></span>
+      SENSORS NOMINAL
+    </span>
+    <div class="lamp-rail-spacer"></div>
+    <span>last scan {{ ctx.health.last_scan or "never" }}</span>
+  </div>
 
   <nav class="tabs">
     <button class="tab active" data-tab="overview" type="button">Overview</button>
@@ -88,8 +114,14 @@
             <div class="fleet-matrix-wrap">
               <div class="fleet-matrix">
                 {% for state in ctx.containers.cells %}
-                <span class="fleet-cell {{ 'degraded' if state == 'degraded' else ('down' if state == 'down' else ('paused' if state == 'paused' else '')) }}"></span>
+                <span class="fleet-cell {{ 'degraded' if state == 'degraded' else ('down' if state == 'down' else ('paused' if state == 'paused' else '')) }}" style="animation-delay: {{ '%.2f'|format((loop.index0 % 9) * 0.18) }}s;"></span>
                 {% endfor %}
+              </div>
+              <div class="reactor-legend">
+                <span class="reactor-legend-item"><span class="reactor-legend-swatch online"></span>online</span>
+                <span class="reactor-legend-item"><span class="reactor-legend-swatch degraded"></span>degraded</span>
+                <span class="reactor-legend-item"><span class="reactor-legend-swatch down"></span>down</span>
+                <span class="reactor-legend-item"><span class="reactor-legend-swatch paused"></span>paused</span>
               </div>
             </div>
           </div>
@@ -131,49 +163,72 @@
           {% endif %}
         </section>
 
-        <!-- Findings -->
-        {% macro finding_row(f) %}
-          <div class="grid-row cols-findings finding-row sev-{{ f.get('severity', 'unknown')|lower }}">
-            <span class="sev-label sev-{{ f.get('severity', 'unknown')|lower }}">{{ f.get('severity', 'unknown')|upper }}</span>
-            <span class="cell-mono cell-service">{{ f.get('resource', f.get('category', '—')) }}</span>
-            <span class="cell-text2">{{ f.get('description', '') }}</span>
-          </div>
-        {% endmacro %}
+        <!-- Hull Diagnostics -->
+        {% set fc = ctx.findings.counts %}
+        {% if fc.critical %}{% set worst = 'crit' %}
+        {% elif fc.high %}{% set worst = 'high' %}
+        {% elif fc.medium %}{% set worst = 'medium' %}
+        {% elif fc.low %}{% set worst = 'low' %}
+        {% else %}{% set worst = 'none' %}
+        {% endif %}
+        {% set hull_copy = {
+          'crit': ('⚠', 'CRITICAL FAULT', fc.critical|string ~ ' critical fault' ~ ('' if fc.critical == 1 else 's') ~ ' — immediate action required'),
+          'high': ('⚠', 'HIGH ALERT', fc.high|string ~ ' high-severity finding' ~ ('' if fc.high == 1 else 's') ~ ' need attention'),
+          'medium': ('!', 'CAUTION', fc.medium|string ~ ' finding' ~ ('' if fc.medium == 1 else 's') ~ ' worth a look'),
+          'low': ('i', 'MINOR NOTES', fc.low|string ~ ' low-severity note' ~ ('' if fc.low == 1 else 's') ~ ' — informational, non-blocking'),
+          'none': ('✓', 'ALL SYSTEMS NOMINAL', 'No open findings.'),
+        } %}
         <section class="panel">
-          <div class="panel-head-row">
-            <h3>FINDINGS</h3>
-            <div class="findings-pills">
-              <span class="fpill critical">{{ ctx.findings.counts.critical }} critical</span>
-              <span class="fpill high">{{ ctx.findings.counts.high }} high</span>
-              <span class="fpill medium">{{ ctx.findings.counts.medium }} medium</span>
-              <span class="fpill low">{{ ctx.findings.counts.low }} low</span>
+          <h3 style="margin-bottom: 14px;">HULL DIAGNOSTICS</h3>
+          <div class="alarm-banner {{ worst }}">
+            <div class="alarm-orb">{{ hull_copy[worst][0] }}</div>
+            <div class="alarm-text">
+              <p class="alarm-title">{{ hull_copy[worst][1] }}</p>
+              <p class="alarm-sub">{{ hull_copy[worst][2] }}</p>
+            </div>
+            <div class="alarm-chips">
+              <span class="alarm-chip crit {{ 'zero' if not fc.critical }}">CRIT {{ fc.critical }}</span>
+              <span class="alarm-chip high {{ 'zero' if not fc.high }}">HIGH {{ fc.high }}</span>
+              <span class="alarm-chip med {{ 'zero' if not fc.medium }}">MED {{ fc.medium }}</span>
+              <span class="alarm-chip low {{ 'zero' if not fc.low }}">LOW {{ fc.low }}</span>
             </div>
           </div>
-          {% if ctx.findings.list %}
-          <div class="grid-head cols-findings">
-            <span>SEVERITY</span><span>RESOURCE</span><span>DESCRIPTION</span>
+
+          {% if ctx.findings.top %}
+          <div class="hull-cards">
+            {% for f in ctx.findings.top %}
+            <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}">
+              <span class="hull-dot"></span>
+              <div class="hull-card-body">
+                <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
+                <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div>
+                <p class="hull-card-desc">{{ f.get('description', '') }}</p>
+              </div>
+            </div>
+            {% endfor %}
           </div>
-          {% for f in ctx.findings.top %}
-          {{ finding_row(f) }}
-          {% endfor %}
-          {% if ctx.findings.medium_list %}
-          <details class="findings-collapse">
-            <summary>{{ ctx.findings.medium_list|length }} medium — click to expand</summary>
-            {% for f in ctx.findings.medium_list %}
-            {{ finding_row(f) }}
-            {% endfor %}
-          </details>
           {% endif %}
-          {% if ctx.findings.low_list %}
-          <details class="findings-collapse">
-            <summary>{{ ctx.findings.low_list|length }} low — click to expand</summary>
-            {% for f in ctx.findings.low_list %}
-            {{ finding_row(f) }}
-            {% endfor %}
-          </details>
-          {% endif %}
-          {% else %}
-          <p class="muted-body">No open findings.</p>
+
+          {% set drawer_items = (ctx.findings.medium_list or []) + (ctx.findings.low_list or []) %}
+          {% if drawer_items %}
+          <div class="hull-drawer" data-hull-drawer>
+            <button type="button" class="hull-drawer-toggle" data-hull-drawer-toggle>
+              <span class="hull-drawer-caret">▸</span>
+              {{ drawer_items|length }} low-severity note{{ '' if drawer_items|length == 1 else 's' }} · informational · non-blocking
+            </button>
+            <div class="hull-drawer-body">
+              {% for f in drawer_items %}
+              <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}" style="margin-bottom: 8px;">
+                <span class="hull-dot"></span>
+                <div class="hull-card-body">
+                  <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
+                  <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div>
+                  <p class="hull-card-desc">{{ f.get('description', '') }}</p>
+                </div>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
           {% endif %}
         </section>
 
@@ -282,23 +337,27 @@
       <div class="tab-panel" data-tab-panel="backups">
         <section class="panel">
           <div class="panel-head-row">
-            <h3>BACKUPS</h3>
+            <h3>COLD STORAGE · BACKUPS</h3>
             <span class="status-chip {{ 'ok' if ctx.system_and_backups.available else '' }}">{{ 'COLLECTED' if ctx.system_and_backups.available else 'AWAITING FULL SCAN' }}</span>
           </div>
           {% if ctx.system_and_backups.available %}
             {% if ctx.system_and_backups.backups %}
-            <div class="grid-head cols-backups">
-              <span>JOB</span><span>STATE</span><span>RESULT</span><span>EXIT CODE</span><span>LAST RUN</span>
+            <div class="cryo-grid">
+              {% for name, b in ctx.system_and_backups.backups.items() %}
+              <div class="cryo-pod {{ 'alert' if b.get('result') != 'success' else '' }}">
+                <div class="cryo-pod-head">
+                  <span class="cryo-led"></span>
+                  <span class="cryo-name">{{ name|upper }}</span>
+                </div>
+                <div class="cryo-stats">
+                  <div class="cryo-stat-row"><span>STATE</span><span>{{ b.get('state', '?') }}</span></div>
+                  <div class="cryo-stat-row"><span>RESULT</span><span class="{{ 'cryo-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }}</span></div>
+                  <div class="cryo-stat-row"><span>EXIT CODE</span><span>{{ b.get('exit_code', '?') }}</span></div>
+                  <div class="cryo-stat-row"><span>LAST RUN</span><span>{{ b.get('last_run', '?') }}</span></div>
+                </div>
+              </div>
+              {% endfor %}
             </div>
-            {% for name, b in ctx.system_and_backups.backups.items() %}
-            <div class="grid-row cols-backups {{ 'alert-row' if b.get('result') != 'success' else '' }}">
-              <span class="cell-mono cell-service">{{ name }}</span>
-              <span class="cell-mono">{{ b.get('state', '?') }}</span>
-              <span class="cell-mono {{ 'status-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }}</span>
-              <span class="cell-mono">{{ b.get('exit_code', '?') }}</span>
-              <span class="cell-mono cell-when">{{ b.get('last_run', '?') }}</span>
-            </div>
-            {% endfor %}
             {% else %}
             <p class="muted-body">No backup job data in this scan.</p>
             {% endif %}
@@ -315,7 +374,7 @@
 
         <section class="panel">
           <div class="panel-head-row">
-            <h3>CERTIFICATES</h3>
+            <h3>CERTIFICATE VAULT</h3>
             <span class="status-chip {{ 'ok' if ctx.certs.available else '' }}">{{ 'COLLECTED' if ctx.certs.available else 'AWAITING FULL SCAN' }}</span>
           </div>
           {% if ctx.certs.available %}
@@ -326,13 +385,14 @@
             <p class="muted-body">{{ cert_list[0].note }}</p>
             {% elif cert_list %}
             <div class="grid-head cols-certs">
-              <span>DOMAIN</span><span>SANS</span><span>RESOLVER</span>
+              <span>DOMAIN</span><span>SANS</span><span>SOURCE</span><span>EXPIRES</span>
             </div>
             {% for c in cert_list %}
             <div class="grid-row cols-certs">
               <span class="cell-mono cell-service">{{ c.get('domain', '?') }}</span>
               <span class="cell-mono cell-dim">{{ c.get('sans', [])|join(', ') }}</span>
               <span class="cell-mono">{{ c.get('resolver', '?') }}</span>
+              <span class="cell-mono cell-when">{{ c.get('expires', '?') }}</span>
             </div>
             {% endfor %}
             {% else %}
@@ -348,7 +408,7 @@
       <div class="tab-panel" data-tab-panel="network">
         <section class="panel">
           <div class="net-head-row">
-            <h3>TRAEFIK ROUTERS</h3>
+            <h3>ROUTING MATRIX</h3>
             {% if ctx.traefik.available %}
             <span class="net-count" id="net-count">showing {{ ctx.traefik.routers|length }} of {{ ctx.traefik.routers|length }}</span>
             <div class="tabs-spacer"></div>
@@ -357,19 +417,33 @@
           </div>
           {% if ctx.traefik.available %}
             {% if ctx.traefik.routers %}
-            <div class="grid-head cols-net">
-              <span>ROUTER</span><span>RULE</span><span>SERVICE</span><span>STATUS</span>
+            <div class="net-legend">
+              <span class="net-legend-item"><span class="net-legend-swatch docker"></span>docker</span>
+              <span class="net-legend-item"><span class="net-legend-swatch internal"></span>internal</span>
+              <span class="net-legend-item"><span class="net-legend-swatch file"></span>file (@file)</span>
             </div>
-            {% for r in ctx.traefik.routers %}
-            <div class="grid-row cols-net net-filter-row" data-filter-text="{{ (r.name ~ ' ' ~ r.rule ~ ' ' ~ r.service)|lower }}">
-              <span class="cell-mono cell-router">{{ r.name }}</span>
-              <span class="cell-mono cell-rule" title="{{ r.rule }}">{{ r.rule }}</span>
-              <span class="cell-mono cell-service">{{ r.service }}</span>
-              <span class="status-ok {{ 'status-bad' if r.status != 'enabled' else '' }}">
-                <span class="dot-sm {{ 'bad' if r.status != 'enabled' else '' }}"></span>{{ r.status }}
-              </span>
+            <div class="net-grid">
+              {% for r in ctx.traefik.routers %}
+              {% set provider = r.name.split('@')[1] if '@' in r.name else '' %}
+              {% set short_name = r.name.split('@')[0] %}
+              {% set primary_host = (r.rule|extract_host) or r.service %}
+              {% set more_hosts = r.rule|extra_host_count %}
+              <div class="net-node net-filter-row" data-filter-text="{{ (r.name ~ ' ' ~ r.rule ~ ' ' ~ r.service)|lower }}" data-net-node tabindex="0" role="button">
+                <div class="net-node-head">
+                  <span class="net-node-led {{ 'bad' if r.status != 'enabled' else '' }}"></span>
+                  {% if provider %}<span class="net-provider {{ provider }}">{{ provider }}</span>{% endif %}
+                  <span class="net-node-name" title="{{ r.name }}">{{ short_name }}</span>
+                </div>
+                <div class="net-node-host">{{ primary_host }}{% if more_hosts %} <span class="net-node-hosts-more">+{{ more_hosts }} host{{ '' if more_hosts == 1 else 's' }}</span>{% endif %}</div>
+                <div class="net-node-detail">
+                  <div class="net-node-detail-row"><span class="dlabel">RULE</span><span>{{ r.rule }}</span></div>
+                  <div class="net-node-detail-row"><span class="dlabel">SERVICE</span><span>{{ r.service }}</span></div>
+                  <div class="net-node-detail-row"><span class="dlabel">ROUTER</span><span>{{ r.name }}</span></div>
+                  <div class="net-node-detail-row"><span class="dlabel">STATUS</span><span class="status-ok {{ 'status-bad' if r.status != 'enabled' else '' }}"><span class="dot-sm {{ 'bad' if r.status != 'enabled' else '' }}"></span>{{ r.status }}</span></div>
+                </div>
+              </div>
+              {% endfor %}
             </div>
-            {% endfor %}
             {% else %}
             <p class="muted-body">No routers reported.</p>
             {% endif %}
@@ -405,22 +479,10 @@
         </div>
 
         <section class="panel">
-          <h3 style="margin-bottom: 16px;">RECENT UPDATE HISTORY</h3>
+          <h3 style="margin-bottom: 16px;">DEPLOYMENT MANIFEST</h3>
           {% if ctx.update_history %}
-          <div class="grid-head cols-updates">
-            <span>WHEN</span><span>STACK</span><span>SERVICE</span><span>STATUS</span><span>REASON</span>
-          </div>
-          {% for h in ctx.update_history %}
-          <div class="grid-row cols-updates {{ 'alert-row' if h.is_alert else '' }}">
-            <span class="cell-mono cell-when">{{ h.ts }}</span>
-            <span class="cell-mono cell-dim">{{ h.stack }}</span>
-            <span class="cell-mono cell-service">{{ h.service }}</span>
-            <span class="status-ok {{ 'status-bad' if h.is_alert else '' }}">
-              <span class="dot-sm {{ 'bad' if h.is_alert else '' }}"></span>{{ h.status }}
-            </span>
-            <span class="cell-mono cell-dim">{{ h.reason or '—' }}</span>
-          </div>
-          {% endfor %}
+          <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
+          <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
           {% else %}
           <p class="muted-body">No update history yet.</p>
           {% endif %}
@@ -476,49 +538,49 @@
         </div>
         <div class="sidebar-body crew-list">
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela"></div>
+            <div class="avatar avatar-sm ring-leela"><img src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela"></div>
             <div>
               <div class="agent-name">Leela</div>
               <div class="agent-sub">system monitor</div>
             </div>
           </div>
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad"></div>
+            <div class="avatar avatar-sm ring-hermes"><img src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad"></div>
             <div>
               <div class="agent-name">Hermes</div>
               <div class="agent-sub">issue analyzer</div>
             </div>
           </div>
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender"></div>
+            <div class="avatar avatar-sm ring-bender"><img src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender"></div>
             <div>
               <div class="agent-name">Bender</div>
               <div class="agent-sub">action executor</div>
             </div>
           </div>
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg"></div>
+            <div class="avatar avatar-sm ring-zoidberg"><img src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg"></div>
             <div>
               <div class="agent-name">Dr. Zoidberg</div>
               <div class="agent-sub">canary-tested auto-patcher</div>
             </div>
           </div>
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong"></div>
+            <div class="avatar avatar-sm ring-amy"><img src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong"></div>
             <div>
               <div class="agent-name">Amy</div>
               <div class="agent-sub">diagnostician &amp; researcher</div>
             </div>
           </div>
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry"></div>
+            <div class="avatar avatar-sm ring-fry"><img src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry"></div>
             <div>
               <div class="agent-name">Fry</div>
               <div class="agent-sub">onboarding</div>
             </div>
           </div>
           <div class="crew-row">
-            <div class="avatar avatar-sm"><img src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy"></div>
+            <div class="avatar avatar-sm ring-scruffy"><img src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy"></div>
             <div>
               <div class="agent-name">Scruffy</div>
               <div class="agent-sub">this dashboard · observes and does nothing</div>
@@ -535,10 +597,19 @@
         </div>
         <div class="sidebar-body">
           {% for p in ctx.pending_plan.plans %}
-          <div class="plan-eyebrow">{{ p.priority|upper if p.priority else 'PLAN' }}</div>
+          <div class="plan-eyebrow">{{ p.priority|upper if p.priority else 'PLAN' }} · DIAGNOSIS</div>
           <p class="plan-diagnosis">{{ p.title }} <span class="hl">({{ p.step_count }} step{{ '' if p.step_count == 1 else 's' }})</span></p>
-          {% endfor %}
+          {% if p.fix_steps %}
+          <div class="plan-eyebrow">PROPOSED FIX</div>
+          <ul class="plan-fix-list">
+            {% for step in p.fix_steps %}
+            <li>{{ step }}</li>
+            {% endfor %}
+          </ul>
+          {% else %}
           <p class="muted-body" style="margin-bottom: 14px; font-size: 11.5px;">Full step commands live in the Telegram approval flow, not shown here.</p>
+          {% endif %}
+          {% endfor %}
 
           <div class="plan-actions">
             {% if ctx.telegram_bot_username %}

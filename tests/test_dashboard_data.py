@@ -294,7 +294,36 @@ def test_summarize_pending_plan_hides_step_commands(tmp_path, monkeypatch):
 
     result = dashboard_data.summarize_pending_plan()
     assert result["plans"][0]["step_count"] == 2
+    assert result["plans"][0]["fix_steps"] == []
     assert "command" not in json.dumps(result)  # step commands never surface here
+
+
+def test_summarize_pending_plan_forwards_descriptions_never_commands(tmp_path, monkeypatch):
+    plan_path = tmp_path / "pending_plan.json"
+    _write(plan_path, {
+        "planned_at": "2026-07-15T14:37:15+00:00",
+        "plans": [{"id": "p1", "priority": "high", "title": "test",
+                   "steps": [
+                       {"command": "sudo systemctl restart x", "description": "Restart x"},
+                       {"command": "echo done", "description": "Confirm done"},
+                   ],
+                   "rollback": [
+                       {"command": "sudo systemctl stop x", "description": "Stop x"},
+                   ]}],
+    })
+    monkeypatch.setattr(config, "STATE_PLAN", plan_path)
+    status_path = tmp_path / "run_status.json"
+    _write(status_path, {
+        "state": "awaiting_approval", "pending_plan_id": "p1", "updated_at": "2026-07-15T14:37:20+00:00",
+    })
+    monkeypatch.setattr(config, "STATE_STATUS", status_path)
+
+    result = dashboard_data.summarize_pending_plan()
+    plan = result["plans"][0]
+    assert plan["fix_steps"] == ["Restart x", "Confirm done"]
+    assert plan["rollback_steps"] == ["Stop x"]
+    assert "command" not in json.dumps(result)
+    assert "sudo systemctl" not in json.dumps(result)
 
 
 def test_summarize_pending_plan_hidden_once_run_status_moves_on(tmp_path, monkeypatch):

@@ -10,6 +10,7 @@ Homepage-widget JSON route (Spec 7) would import directly.
 """
 
 import os
+import re
 
 from flask import Flask, jsonify, render_template
 
@@ -18,6 +19,33 @@ import config
 import dashboard_data
 
 app = Flask(__name__)
+
+_HOST_RULE_RE = re.compile(r"Host\(`([^`]+)`\)")
+_PATH_RULE_RE = re.compile(r"PathPrefix\(`([^`]+)`\)")
+
+
+@app.template_filter("extract_host")
+def extract_host(rule: str) -> str:
+    """Pull the display host out of a Traefik router rule for the Network tab's
+    routing-matrix cards -- purely a presentation shortener over a string that's
+    already in ctx, not a new data field. Falls back to the path prefix, then the
+    caller passes the router's own service name as the ultimate fallback via the
+    template's `or` chain since a rule can combine rules with no Host()/PathPrefix()
+    at all (e.g. a pure Method() or Headers() match)."""
+    m = _HOST_RULE_RE.search(rule or "")
+    if m:
+        return m.group(1)
+    m = _PATH_RULE_RE.search(rule or "")
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _extra_host_count(rule: str) -> int:
+    return max(len(_HOST_RULE_RE.findall(rule or "")) - 1, 0)
+
+
+app.jinja_env.filters["extra_host_count"] = _extra_host_count
 
 
 @app.route("/")
