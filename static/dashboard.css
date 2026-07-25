@@ -337,6 +337,7 @@ body {
 
 .panel-head-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
 .panel-head-summary { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint2); }
+.panel-head-note { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint2); }
 
 .status-chip {
   font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--amber);
@@ -851,6 +852,14 @@ body {
 .net-filter-row.hidden { display: none; }
 
 /* deployment manifest */
+.deploy-summary-chip {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600; color: var(--cp-green-text);
+  background: rgba(111,207,95,.1); border: 1px solid rgba(111,207,95,.3); border-radius: 20px; padding: 3px 11px;
+}
+.deploy-summary-chip.alert { color: var(--cp-crit-text); background: rgba(239,60,46,.1); border-color: rgba(239,60,46,.35); }
+.deploy-summary-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+
 .deploy-runs { display: flex; flex-direction: column; gap: 16px; }
 .deploy-run { border: 1px solid var(--cp-panel-border); border-radius: 12px; padding: 16px 18px; background: var(--cp-panel-bg); }
 .deploy-run.alert { border-color: rgba(239,60,46,.4); background: rgba(239,60,46,.04); }
@@ -862,12 +871,14 @@ body {
 }
 .deploy-run.alert .deploy-glyph { background: rgba(239,60,46,.14); color: var(--cp-crit-text); }
 .deploy-run-title { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 14px; color: var(--cream); }
+.deploy-run-title b { color: var(--cp-green-text); font-weight: 700; }
+.deploy-run.alert .deploy-run-title b { color: var(--cp-crit-text); }
 .deploy-run-sub { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint); margin-top: 2px; }
 .deploy-run-count { margin-left: auto; text-align: right; }
 .deploy-run-count .n { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 20px; color: var(--text); }
 .deploy-run-count .lbl { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--faint2); letter-spacing: .06em; }
 
-.deploy-timeline { position: relative; height: 26px; margin: 14px 0; }
+.deploy-timeline { position: relative; height: 26px; margin: 14px 0 4px; }
 .deploy-timeline-track { position: absolute; top: 50%; left: 4px; right: 4px; height: 2px; background: var(--border-hair); transform: translateY(-50%); }
 .deploy-timeline-node {
   position: absolute; top: 50%; width: 8px; height: 8px; border-radius: 50%;
@@ -877,13 +888,18 @@ body {
 .deploy-timeline-end { position: absolute; top: 50%; transform: translateY(-50%); font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--faint2); }
 .deploy-timeline-end.tl-start { left: 0; }
 .deploy-timeline-end.tl-end { right: 0; }
+.deploy-timeline-caption { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--faint2); margin-bottom: 14px; }
 
-.chip-board { display: flex; flex-wrap: wrap; gap: 7px; }
+.chip-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
 .deploy-chip {
-  font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 4px 10px; border-radius: 20px;
-  background: rgba(111,207,95,.1); border: 1px solid rgba(111,207,95,.3); color: var(--cp-green-text);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 7px 10px; border-radius: 8px;
+  background: var(--cp-inset-bg); border: 1px solid var(--cp-panel-border); color: var(--text2);
 }
-.deploy-chip.bad { background: rgba(239,60,46,.1); border-color: rgba(239,60,46,.35); color: var(--cp-crit-text); }
+.deploy-chip .svc { color: var(--cp-green-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deploy-chip .t { color: var(--faint2); flex: none; }
+.deploy-chip.bad { border-color: rgba(239,60,46,.35); background: rgba(239,60,46,.06); }
+.deploy-chip.bad .svc { color: var(--cp-crit-text); }
 
 /* actions banner */
 .telegram-banner {

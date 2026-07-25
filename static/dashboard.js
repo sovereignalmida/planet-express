@@ -146,10 +146,23 @@
     });
     runs.reverse(); // newest run first
 
-    function fmtTime(ts) {
+    // Full local date/time + the browser's own timezone abbreviation -- the source
+    // timestamps are UTC ISO strings, but a sysadmin reading "05:16:04" wants to know
+    // it's in their own timezone, not have to mentally convert from UTC.
+    function fmtDateTime(ts) {
       var d = new Date(ts);
-      if (isNaN(d.getTime())) return ts;
-      return d.toISOString().slice(11, 16) + "z";
+      if (isNaN(d.getTime())) return { date: ts, time: ts, tz: "" };
+      var tz = "";
+      try {
+        var part = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(d)
+          .find(function (p) { return p.type === "timeZoneName"; });
+        tz = part ? part.value : "";
+      } catch (e) { /* Intl unavailable -- degrade to no tz label */ }
+      return {
+        date: d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }),
+        time: d.toLocaleTimeString(undefined, { hour12: false }),
+        tz: tz,
+      };
     }
     function fmtSpan(ms) {
       var mins = Math.round(ms / 60000);
@@ -157,11 +170,34 @@
       if (mins < 60) return "~" + mins + " min";
       return "~" + (mins / 60).toFixed(1) + " hr";
     }
+    function fmtInterval(ms) {
+      var mins = Math.round(ms / 60000);
+      return mins < 1 ? "<1 min" : "~" + mins + " min";
+    }
+    function alertLabel(count) {
+      return count ? count + " alert" + (count === 1 ? "" : "s") : "all clean";
+    }
     function el(tag, className, text) {
       var node = document.createElement(tag);
       if (className) node.className = className;
       if (text !== undefined) node.textContent = text;
       return node;
+    }
+
+    var summaryEl = document.getElementById("deploy-summary-chip");
+    if (summaryEl) {
+      var newest = runs[0];
+      var newestAlerts = newest.entries.filter(function (e) { return e.is_alert; }).length;
+      // "updated" and "no_change" both count as non-alert, but only "updated" actually
+      // changed anything -- don't claim a no-op check "updated" a service.
+      var allActuallyUpdated = newest.entries.every(function (e) { return e.status === "updated"; });
+      summaryEl.classList.toggle("alert", newestAlerts > 0);
+      summaryEl.innerHTML = "";
+      summaryEl.appendChild(el("span", "dot"));
+      summaryEl.appendChild(document.createTextNode(
+        newest.entries.length + " service" + (newest.entries.length === 1 ? "" : "s") + " · " +
+        (newestAlerts ? newestAlerts + " alert" + (newestAlerts === 1 ? "" : "s") : (allActuallyUpdated ? "all updated" : "all clean"))
+      ));
     }
 
     manifestEl.innerHTML = "";
@@ -172,18 +208,29 @@
       var startMs = new Date(first.ts).getTime();
       var endMs = new Date(lastEntry.ts).getTime();
       var span = Math.max(endMs - startMs, 0);
+      var startDT = fmtDateTime(first.ts);
+      var endDT = fmtDateTime(lastEntry.ts);
 
       var card = el("div", "deploy-run" + (hasAlert ? " alert" : ""));
 
       var head = el("div", "deploy-run-head");
       head.appendChild(el("div", "deploy-glyph", "↑"));
       var titleWrap = el("div");
-      titleWrap.appendChild(el("div", "deploy-run-title", (run.stack || "unknown") + " stack · batch update"));
-      titleWrap.appendChild(el("div", "deploy-run-sub", fmtTime(first.ts) + " → " + fmtTime(lastEntry.ts) + " · " + fmtSpan(span)));
+      var title = el("div", "deploy-run-title");
+      var stackB = document.createElement("b");
+      stackB.textContent = run.stack || "unknown";
+      title.appendChild(stackB);
+      title.appendChild(document.createTextNode(" stack · batch update"));
+      titleWrap.appendChild(title);
+      var endLabel = endDT.date !== startDT.date ? (endDT.date + " " + endDT.time) : endDT.time;
+      titleWrap.appendChild(el(
+        "div", "deploy-run-sub",
+        startDT.date + " · " + startDT.time + " → " + endLabel + (endDT.tz ? " " + endDT.tz : "") + " · " + fmtSpan(span)
+      ));
       head.appendChild(titleWrap);
       var countWrap = el("div", "deploy-run-count");
       countWrap.appendChild(el("div", "n", String(run.entries.length)));
-      countWrap.appendChild(el("div", "lbl", "SERVICES"));
+      countWrap.appendChild(el("div", "lbl", "svcs"));
       head.appendChild(countWrap);
       card.appendChild(head);
 
@@ -194,16 +241,31 @@
         var pct = span > 0 && !isNaN(t) ? ((t - startMs) / span) * 100 : 50;
         var node = el("div", "deploy-timeline-node" + (e.is_alert ? " bad" : ""));
         node.style.left = pct + "%";
-        node.title = e.service + " · " + fmtTime(e.ts);
+        node.title = e.service + " · " + fmtDateTime(e.ts).time;
         timeline.appendChild(node);
       });
-      timeline.appendChild(el("span", "deploy-timeline-end tl-start", fmtTime(first.ts)));
-      timeline.appendChild(el("span", "deploy-timeline-end tl-end", fmtTime(lastEntry.ts)));
+      timeline.appendChild(el("span", "deploy-timeline-end tl-start", startDT.time));
+      timeline.appendChild(el("span", "deploy-timeline-end tl-end", endDT.time));
       card.appendChild(timeline);
+
+      var gaps = [];
+      for (var i = 1; i < run.entries.length; i++) {
+        var g = new Date(run.entries[i].ts).getTime() - new Date(run.entries[i - 1].ts).getTime();
+        if (!isNaN(g)) gaps.push(g);
+      }
+      var avgGap = gaps.length ? gaps.reduce(function (a, b) { return a + b; }, 0) / gaps.length : 0;
+      var runAlerts = run.entries.filter(function (e) { return e.is_alert; }).length;
+      card.appendChild(el(
+        "div", "deploy-timeline-caption",
+        (gaps.length ? "every " + fmtInterval(avgGap) + " · " : "") + alertLabel(runAlerts)
+      ));
 
       var chips = el("div", "chip-board");
       run.entries.forEach(function (e) {
-        chips.appendChild(el("span", "deploy-chip" + (e.is_alert ? " bad" : ""), (e.is_alert ? "✗ " : "✓ ") + e.service + " · " + fmtTime(e.ts)));
+        var chip = el("div", "deploy-chip" + (e.is_alert ? " bad" : ""));
+        chip.appendChild(el("span", "svc", (e.is_alert ? "✗ " : "✓ ") + e.service));
+        chip.appendChild(el("span", "t", fmtDateTime(e.ts).time));
+        chips.appendChild(chip);
       });
       card.appendChild(chips);
 

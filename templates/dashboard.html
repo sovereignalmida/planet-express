@@ -583,7 +583,13 @@
         </div>
 
         <section class="panel">
-          <h3 style="margin-bottom: 16px;">DEPLOYMENT MANIFEST</h3>
+          <div class="panel-head-row">
+            <h3>DEPLOYMENT MANIFEST</h3>
+            {% if ctx.update_history %}
+            <span class="panel-head-note">most recent run</span>
+            <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
+            {% endif %}
+          </div>
           {% if ctx.update_history %}
           <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
           <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
