@@ -92,6 +92,26 @@ class SafetyError(Exception):
     pass
 
 
+class SudoScopeError(SafetyError):
+    """A sudo command was outside the declared allowlist — distinct from other
+    safety blocks so callers can show a clearer "run it yourself" message instead
+    of a generic hard-fail (approving in chat could never make it actually run,
+    since Bender executes headlessly with no TTY for a password prompt).
+
+    action/unit are set only when the command parsed as `sudo systemctl <action>
+    <unit>` but that (action, unit) pair just isn't declared -- the only shape
+    /grant can turn into a concrete config.yaml suggestion. A command that didn't
+    even parse that way (arbitrary sudo) has neither, since there's no unit to
+    suggest a grant for -- this project's sudo mechanism only ever covers
+    systemctl start/stop/restart on a declared unit."""
+
+    def __init__(self, message: str, command: str, action: str | None = None, unit: str | None = None):
+        super().__init__(message)
+        self.command = command
+        self.action = action
+        self.unit = unit
+
+
 def _split_command_segments(command: str) -> list[str]:
     """Split a compound shell command on control operators so each piece can be
     checked independently — otherwise a legitimate `sudo systemctl start x.mount &&
@@ -128,15 +148,19 @@ def _check_sudo_allowlist(command: str) -> None:
             continue
         m = _SUDO_SYSTEMCTL_RE.match(segment)
         if not m:
-            raise SafetyError(
+            raise SudoScopeError(
                 f"Sudo command not in the declared allowlist (only 'sudo systemctl "
-                f"start|stop|restart <unit>' can ever be permitted): '{segment}'"
+                f"start|stop|restart <unit>' can ever be permitted): '{segment}'",
+                command=segment,
             )
         action, unit = m.group(1), m.group(2)
         if not _sudo_action_allowed(unit, action):
-            raise SafetyError(
+            raise SudoScopeError(
                 f"Sudo action '{action}' on '{unit}' is not declared in "
-                f"config.yaml's sudo_allowlist: '{segment}'"
+                f"config.yaml's sudo_allowlist: '{segment}'",
+                command=segment,
+                action=action.lower(),
+                unit=unit,
             )
 
 
@@ -513,6 +537,55 @@ def execute(
         # Safety check before every step
         try:
             _safety_check(command, plan)
+        except SudoScopeError as e:
+            msg = str(e)
+            log.error(f"Sudo scope block on step {n}: {msg}")
+            config.ensure_dirs()
+            config.LAST_SUDO_BLOCK_FILE.write_text(json.dumps({
+                "plan_id": plan_id,
+                "step": n,
+                "command": e.command,
+                "action": e.action,
+                "unit": e.unit,
+                "blocked_at": datetime.now(timezone.utc).isoformat(),
+            }))
+            # len(results), not n - 1: plan steps come straight from unvalidated LLM
+            # JSON (PlanSet uses extra="allow"), so a malformed/non-contiguous `n`
+            # shouldn't be trusted for "how many steps actually ran" -- results only
+            # grows once per completed iteration, so its length before this append is
+            # the real count regardless of what the step claims n is.
+            steps_ran = len(results)
+            if tg:
+                rollback_note = (
+                    f"\n\n⚠️ {steps_ran} earlier step(s) already ran before this block — "
+                    f"the plan is partially applied. Reply /rollback {plan_id} to roll "
+                    f"back or /skip {plan_id} to leave it as-is."
+                    if steps_ran > 0 else ""
+                )
+                tg.send(
+                    f"🔒 *Plan #{plan_id} step {n} needs sudo outside current scope*\n"
+                    f"`{TelegramClient.s(e.command)}`\n\n"
+                    f"Not in Bender's declared sudo allowlist. Approving here couldn't "
+                    f"run it anyway — the OS sudo grant doesn't cover it either, so it "
+                    f"would just hang on a password prompt until timeout. Run it "
+                    f"yourself if you want it applied. Remaining steps were not run."
+                    f"{rollback_note}\n\n"
+                    f"To permanently allow this, send `/grant` for the exact lines to "
+                    f"add to config.yaml and sudoers.d."
+                )
+            results.append({
+                "n": n, "command": command,
+                "exit_code": -1, "stdout_summary": "",
+                "error": f"SUDO_SCOPE_BLOCK: {msg}",
+            })
+            return {
+                "plan_id": plan_id,
+                "steps_completed": steps_ran,
+                "steps_total": total,
+                "results": results,
+                "final_status": "blocked_sudo",
+                "errors": [f"Step {n}: sudo scope block"],
+            }
         except SafetyError as e:
             msg = str(e)
             log.error(f"Safety check failed on step {n}: {msg}")

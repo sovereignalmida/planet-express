@@ -42,6 +42,7 @@ STATE_STATUS    = STATE_DIR / "run_status.json"
 # FORBIDDEN_STACKS duplication).
 ROLLBACK_CANDIDATES_FILE = STATE_DIR / "rollback_candidates.json"
 UPDATE_HISTORY_FILE      = STATE_DIR / "update_history.json"
+LAST_SUDO_BLOCK_FILE     = STATE_DIR / "last_sudo_block.json"
 
 # ── Topology config — single source of truth for per-install values ──────────
 # Every agent that needs "which stacks exist / which are off-limits / which mounts and

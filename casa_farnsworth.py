@@ -606,6 +606,81 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
                 target=_run_install, args=(notifier, stack_name, url, domain), daemon=True
             ).start()
 
+    elif cmd == "/grant":
+        # Fixed how-to steps are sent as their own message, ahead of the
+        # variable-length allowlist/block dump below — Telegram silently
+        # truncates at 4096 chars (TelegramClient.send()), and a long
+        # allowlist or blocked command must never be able to push the actual
+        # instructions out of the message.
+        install_dir = Path(__file__).resolve().parent
+        notifier.notify(
+            f"*How to widen sudo scope*\n"
+            f"Bender only ever runs `sudo systemctl start|stop|restart <unit>` "
+            f"and only if it's declared in the allowlist below — nothing else, "
+            f"and nothing wider can be granted from chat.\n"
+            f"1. Edit `{config.CONFIG_FILE}` → `sudo_allowlist:` — add a `units:` "
+            f"entry (`unit:`, `actions: [start, stop, restart]`) or a `globs:` "
+            f"entry (e.g. `glob: \"*.timer\"`).\n"
+            f"2. On the host, from any directory:\n"
+            f"`cd {shlex.quote(str(install_dir))} && "
+            f"CASA_CONFIG={shlex.quote(str(config.CONFIG_FILE))} "
+            f"venv/bin/python scripts/setup_wizard.py`\n"
+            f"(the `cd` and CASA_CONFIG pin matter so it reconciles against the "
+            f"same install and same file I'm actually running with, not whatever "
+            f"defaults apply from your login shell's cwd — mine are set via the "
+            f"systemd unit, not your shell). It reuses the existing config and always "
+            f"calls `reconcile_sudoers()`, which generates the matching sudoers.d "
+            f"grant (expanding any glob to exact discovered units, not a literal "
+            f"wildcard) and validates it with `visudo` before installing. Don't "
+            f"hand-edit `/etc/sudoers.d/planetexpress` directly — a literal glob "
+            f"there can match more than intended since sudoers wildcards cross "
+            f"whitespace.\n"
+            f"3. `sudo systemctl restart casa-planetexpress.service` — I only read "
+            f"sudo_allowlist at process startup, so I'll keep blocking any newly "
+            f"granted command until restarted, even after steps 1–2."
+        )
+
+        lines = ["*Current sudo allowlist scope*"]
+        for u in config.SUDO_ALLOWLIST.units:
+            lines.append(f"• `{u.unit}` — {', '.join(u.actions)}")
+        for g in config.SUDO_ALLOWLIST.globs:
+            lines.append(f"• `{g.glob}` (glob) — {', '.join(g.actions)}")
+        if not config.SUDO_ALLOWLIST.units and not config.SUDO_ALLOWLIST.globs:
+            lines.append("_nothing declared_")
+
+        if config.LAST_SUDO_BLOCK_FILE.exists():
+            try:
+                block = json.loads(config.LAST_SUDO_BLOCK_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                block = None
+            if block and block.get("unit") and block.get("action") and bender._sudo_action_allowed(
+                block["unit"], block["action"]
+            ):
+                # Already granted (config edited + service restarted since the
+                # block) — the recorded block is stale, so drop it rather than
+                # keep telling the operator to add something that's now already
+                # in scope.
+                config.LAST_SUDO_BLOCK_FILE.unlink(missing_ok=True)
+                block = None
+            if block:
+                lines.append(f"\n*Most recent block* (plan #{block['plan_id']} step {block['step']}):")
+                lines.append(f"`{TelegramClient.s(block['command'])}`")
+                if block.get("unit") and block.get("action"):
+                    lines.append(
+                        "To grant exactly this, add to config.yaml's "
+                        "`sudo_allowlist.units`:\n"
+                        f"```\n- unit: {block['unit']}\n  actions: [{block['action']}]\n```"
+                    )
+                else:
+                    lines.append(
+                        "This wasn't a `sudo systemctl start|stop|restart <unit>` "
+                        "call, so it can never be granted through this project's sudo "
+                        "mechanism — that's the only shape it will ever run as root, "
+                        "no config change can widen that."
+                    )
+
+        notifier.notify("\n".join(lines))
+
     elif cmd == "/help":
         notifier.notify(
             "*Planet Express — Available Commands*\n"
@@ -621,7 +696,8 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
             "/backups — Borg daily/weekly backup status\n"
             "/up `<stack>`|`all` — Bring a stack (or everything) up\n"
             "/down `<stack>`|`all` — Bring a stack (or everything) down\n"
-            "/install `<url>` `<domain>` — Fry resolves a project URL, proposes a new stack (diff-approve)"
+            "/install `<url>` `<domain>` — Fry resolves a project URL, proposes a new stack (diff-approve)\n"
+            "/grant — Show current sudo allowlist scope + how to widen it"
         )
 
 
@@ -1179,6 +1255,14 @@ def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, 
                 result["steps_completed"],
                 result.get("errors", []),
             ))
+        elif result["final_status"] == "blocked_sudo" and result["steps_completed"] == 0:
+            # Bender already sent a detailed message with the literal blocked
+            # command, and nothing ran before the block — not a real runtime
+            # failure, so skip the generic notify and don't wake up Amy over it.
+            # If earlier steps DID run first, fall through to the normal failure
+            # path below: the plan is partially applied and needs the same
+            # rollback-guidance/investigation treatment as any other failure.
+            pass
         else:
             notifier.notify(
                 f"⚠️ Plan #{plan_data['id']} finished with status: `{result['final_status']}`"
