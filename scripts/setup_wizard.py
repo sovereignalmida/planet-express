@@ -32,7 +32,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config_schema import PlanetExpressConfig, SudoAllowlist  # noqa: E402
+from config_schema import PlanetExpressConfig, SudoAllowlist
 
 
 def _path_completer(text: str, state: int):
@@ -187,7 +187,7 @@ def _docker_root_dir() -> str:
     try:
         result = subprocess.run(
             ["docker", "info", "--format", "{{.DockerRootDir}}"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return _DOCKER_ROOT_DIR_DEFAULT
@@ -202,7 +202,7 @@ def _discover_mount_units() -> list[str]:
     try:
         result = subprocess.run(
             ["systemctl", "list-units", "--type=mount", "--all", "--no-legend", "--plain"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -219,7 +219,7 @@ def _discover_mount_units() -> list[str]:
         # the whole batched call outright rather than just that one unit.
         show = subprocess.run(
             ["systemctl", "show", "-p", "Where", "--value", "--", *units],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return units
@@ -240,7 +240,7 @@ def _mount_where(unit: str) -> str:
     try:
         result = subprocess.run(
             ["systemctl", "show", unit, "-p", "Where", "--value"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
         return result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -425,7 +425,9 @@ def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
             tmp_sudoers = Path(tmp_sudoers_name)
             with os.fdopen(sudo_fd, "w") as f:
                 f.write(snippet)
-            check = subprocess.run([VISUDO_BIN, "-c", "-f", str(tmp_sudoers)], capture_output=True, text=True)
+            check = subprocess.run(
+                [VISUDO_BIN, "-c", "-f", str(tmp_sudoers)], capture_output=True, text=True, check=False,
+            )
             if check.returncode != 0:
                 print(f"visudo rejected the generated snippet, not installing:\n{check.stderr}")
                 tmp_sudoers.unlink()
@@ -446,13 +448,12 @@ def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
     # sitting at the OS level, granting privileges this run's config no longer declares.
     # An independent Codex review caught both the empty-allowlist and the declined-install
     # variant of this as separate gaps; handled here in one place so neither can reopen.
-    if not installed_new_grant and Path(DEFAULT_SUDOERS_TARGET).exists():
-        if _prompt_yes_no(
-            f"A sudoers grant already exists at {DEFAULT_SUDOERS_TARGET} from a previous "
-            f"run that doesn't match what's declared now. Remove it?", default=True
-        ):
-            subprocess.run(["sudo", "rm", "-f", DEFAULT_SUDOERS_TARGET], check=True)
-            print(f"Removed {DEFAULT_SUDOERS_TARGET}")
+    if not installed_new_grant and Path(DEFAULT_SUDOERS_TARGET).exists() and _prompt_yes_no(
+        f"A sudoers grant already exists at {DEFAULT_SUDOERS_TARGET} from a previous "
+        f"run that doesn't match what's declared now. Remove it?", default=True
+    ):
+        subprocess.run(["sudo", "rm", "-f", DEFAULT_SUDOERS_TARGET], check=True)
+        print(f"Removed {DEFAULT_SUDOERS_TARGET}")
 
 
 def main() -> None:

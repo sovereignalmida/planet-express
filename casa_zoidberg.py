@@ -27,11 +27,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import config
-import casa_bender as bender
 import casa_amy as amy
-from telegram_client import TelegramClient
+import casa_bender as bender
+import config
 from state_models import RollbackCandidates, UpdateHistory
+from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.zoidberg")
 
@@ -65,12 +65,12 @@ UPDATE_HISTORY_FILE = config.UPDATE_HISTORY_FILE
 def _run(cmd: str, timeout: int = 120) -> tuple[int, str, str]:
     try:
         result = subprocess.run(
-            shlex.split(cmd), capture_output=True, text=True, timeout=timeout
+            shlex.split(cmd), capture_output=True, text=True, timeout=timeout, check=False
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
         return 1, "", f"command timed out after {timeout}s"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return 1, "", str(e)
 
 
@@ -101,7 +101,7 @@ def service_image_id(stack_dir: Path, service: str) -> str | None:
     the rollback target if a canary update goes wrong — it's the last known-good state,
     which is not necessarily the same as what the compose-referenced tag resolves to
     locally (see service_image_ref/local_image_id below)."""
-    exit_code, out, err = _run(
+    exit_code, out, _err = _run(
         f"docker compose -f {stack_dir}/docker-compose.yml images -q {service}"
     )
     if exit_code != 0 or not out.strip():
@@ -112,7 +112,7 @@ def service_image_id(stack_dir: Path, service: str) -> str | None:
 def service_image_ref(stack_dir: Path, service: str) -> str | None:
     """The image reference (e.g. 'amir20/dozzle:latest') this service resolves to per
     its compose config — not what's running, what the compose file/env vars say."""
-    exit_code, out, err = _run(
+    exit_code, out, _err = _run(
         f"docker compose -f {stack_dir}/docker-compose.yml config --images {service}"
     )
     if exit_code != 0 or not out.strip():
@@ -130,7 +130,7 @@ def local_image_id(image_ref: str) -> str | None:
     :latest had already been re-pulled during an earlier stack recovery, but the running
     container was still 7 weeks old — comparing "running before" vs "running after" a
     no-op pull always reported no_change, silently missing a real pending update)."""
-    exit_code, out, err = _run(
+    exit_code, out, _err = _run(
         "docker image inspect --format " + shlex.quote("{{.Id}}") + f" {image_ref}"
     )
     if exit_code != 0 or not out.strip():
@@ -144,7 +144,7 @@ def _load_rollback_candidates() -> dict:
         return {"candidates": []}
     try:
         return json.loads(ROLLBACK_CANDIDATES_FILE.read_text())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {"candidates": []}
 
 
@@ -190,7 +190,7 @@ def _log_update_history(entry: dict) -> None:
             # means "nothing to carry forward," not an error.
             if isinstance(raw, dict):
                 entries = raw.get("entries", [])
-        except Exception:
+        except Exception:  # noqa: BLE001
             entries = []
     entries.append(entry)
     history = UpdateHistory(entries=entries[-200:])  # cap growth
@@ -199,7 +199,7 @@ def _log_update_history(entry: dict) -> None:
 
 # ── Canary health check (mirrors Leela's crash-loop signal) ─────────────────────
 def _container_name_for(stack_dir: Path, service: str) -> str | None:
-    exit_code, out, err = _run(
+    exit_code, out, _err = _run(
         f"docker compose -f {stack_dir}/docker-compose.yml ps -q {service}"
     )
     if exit_code != 0 or not out.strip():
@@ -290,13 +290,13 @@ def _rollback(stack_dir: Path, service: str, old_id: str | None,
         plan_ctx = {"id": f"zoidberg-rollback-{stack_name}-{service}"}
         try:
             bender._safety_check(f"docker tag {old_id} {image_repo}", plan=plan_ctx)
-            exit_code, _, err = bender._run_command(f"docker tag {old_id} {image_repo}")
+            exit_code, _, _err = bender._run_command(f"docker tag {old_id} {image_repo}")
             if exit_code == 0:
                 bender._safety_check(
                     f"docker compose -f {stack_dir}/docker-compose.yml up -d {service}",
                     plan=plan_ctx,
                 )
-                exit_code, _, err = bender._run_command(
+                exit_code, _, _err = bender._run_command(
                     f"docker compose -f {stack_dir}/docker-compose.yml up -d {service}"
                 )
                 if exit_code == 0:
@@ -348,7 +348,7 @@ def _investigate_update_failure(
             reason=reason, logs_tail=logs_tail,
         )
     except Exception as e:
-        log.exception(f"Amy investigation crashed for {stack_name}/{service}: {e}")
+        log.exception(f"Amy investigation crashed for {stack_name}/{service}")
         tg.send(f"🛑 Amy's investigation of {stack_name}/{service} crashed: `{str(e)[:200]}`")
         return
 
@@ -446,7 +446,7 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False) -> 
             try:
                 result = canary_update_service(stack_dir, service, tg, dry_run=dry_run)
             except Exception as e:
-                log.exception(f"Zoidberg update crashed for {stack_dir.name}/{service}: {e}")
+                log.exception(f"Zoidberg update crashed for {stack_dir.name}/{service}")
                 result = {"stack": stack_dir.name, "service": service, "status": "error", "reason": str(e)}
             results.append(result)
             if not dry_run:

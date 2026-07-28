@@ -218,11 +218,12 @@ def _run_command(command: str) -> tuple[int, str, str]:
             text=True,
             timeout=COMMAND_TIMEOUT_SECONDS,
             env=None,         # inherit environment
+            check=False,      # returncode inspected by the caller, not raised
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
         return 1, "", f"Command timed out after {COMMAND_TIMEOUT_SECONDS}s"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return 1, "", str(e)
 
 
@@ -230,7 +231,7 @@ def _run_command(command: str) -> tuple[int, str, str]:
 def _log_step(plan_id: str, step: dict, exit_code: int, stdout: str, stderr: str) -> None:
     try:
         config.ensure_dirs()
-        log_file = config.LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log"
+        log_file = config.LOG_DIR / f"{datetime.now().astimezone().strftime('%Y-%m-%d')}.log"
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "plan_id": plan_id,
@@ -242,7 +243,7 @@ def _log_step(plan_id: str, step: dict, exit_code: int, stdout: str, stderr: str
         }
         with open(log_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.warning(f"Failed to write step log: {e}")
 
 
@@ -299,7 +300,7 @@ def _load_pending_diffs() -> dict:
         return {}
     try:
         return json.loads(PENDING_DIFFS_FILE.read_text())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return {}
 
 
@@ -490,7 +491,7 @@ def _apply_pending_diff_locked(diff_id: str) -> dict:
     backup_path = None
     if compose_path.is_file():
         backup_path = compose_path.with_name(
-            compose_path.name + f".bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            compose_path.name + f".bak.{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}"
         )
         backup_path.write_text(compose_path.read_text())
     else:

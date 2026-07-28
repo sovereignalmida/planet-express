@@ -24,8 +24,8 @@ from pathlib import Path
 
 import yaml
 
-import config
 import casa_stackctl as stackctl
+import config
 
 log = logging.getLogger("planetexpress.leela")
 
@@ -36,7 +36,7 @@ def _run(cmd: str | list, timeout: int = 30) -> tuple[int, str, str]:
         cmd = shlex.split(cmd)
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
+            cmd, capture_output=True, text=True, timeout=timeout, check=False
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
@@ -171,7 +171,7 @@ def _previous_stack_completeness() -> dict[str, dict]:
     try:
         prev = json.loads(config.STATE_MONITOR.read_text())
         return {s["stack"]: s for s in prev.get("stack_completeness", [])}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.warning(f"Could not load previous snapshot for stack-completeness comparison: {e}")
         return {}
 
@@ -521,7 +521,7 @@ def _discover_cert_files() -> list[Path]:
     for yml_path in sorted(_TRAEFIK_DYNAMIC_DIR.glob("*.yml")):
         try:
             data = yaml.safe_load(yml_path.read_text()) or {}
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # A malformed dynamic config is exactly the kind of thing this check exists
             # to catch -- don't swallow it without a trace, even though it's rare enough
             # that surfacing it as its own dashboard row isn't worth the complexity here.
@@ -558,7 +558,7 @@ def _parse_cert_file(path: Path) -> dict:
             ["openssl", "x509", "-in", str(path), "-noout", "-subject", "-issuer", "-ext", "subjectAltName", "-enddate"],
             capture_output=True, text=True, timeout=10, check=True,
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         return {"error": f"{path.name}: openssl failed to read cert ({e})", "resolver": path.stem}
     out = result.stdout
     # -subject and -issuer both print a "...CN = ..." line -- search each field's own

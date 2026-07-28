@@ -261,7 +261,7 @@ def test_check_backups_merges_service_and_timer_data(monkeypatch):
 
 def test_check_backups_missing_timer_data_degrades_to_na(monkeypatch):
     monkeypatch.setattr(casa_leela, "_run", _fake_service_show)
-    monkeypatch.setattr(casa_leela.stackctl, "check_backups", lambda: [])  # timer query failed/empty
+    monkeypatch.setattr(casa_leela.stackctl, "check_backups", list)  # timer query failed/empty
 
     result = casa_leela.check_backups()
     assert result["daily"]["next_run"] == "n/a"
@@ -280,7 +280,7 @@ def test_check_backups_journal_fallback_carries_failure_not_just_timestamp(monke
         return 0, "ActiveState=inactive\nResult=success\nExecMainStatus=0\n", ""
 
     monkeypatch.setattr(casa_leela, "_run", fake_show)
-    monkeypatch.setattr(casa_leela.stackctl, "check_backups", lambda: [])
+    monkeypatch.setattr(casa_leela.stackctl, "check_backups", list)
     monkeypatch.setattr(
         casa_leela, "_last_journal_completion",
         lambda unit: ("Sun 2026-07-19 04:10:00 WEST", "failed"),
@@ -308,7 +308,7 @@ def test_check_backups_query_failure_does_not_trigger_journal_fallback(monkeypat
         return "Sun 2026-07-19 04:10:00 WEST", "success"
 
     monkeypatch.setattr(casa_leela, "_run", fake_show)
-    monkeypatch.setattr(casa_leela.stackctl, "check_backups", lambda: [])
+    monkeypatch.setattr(casa_leela.stackctl, "check_backups", list)
     monkeypatch.setattr(casa_leela, "_last_journal_completion", fake_journal)
 
     result = casa_leela.check_backups()

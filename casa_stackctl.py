@@ -67,7 +67,7 @@ def _run_compose_captured(stack_dir, args, timeout=180):
     try:
         result = subprocess.run(
             ["docker", "compose", "-f", str(compose_file), *args],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
         return False, f"timed out after {timeout}s"
@@ -153,7 +153,7 @@ def _systemctl_show(unit: str, *props: str) -> dict:
     try:
         out = subprocess.run(
             ["systemctl", "show", unit, *[f"-p{p}" for p in props]],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         ).stdout
     except subprocess.TimeoutExpired:
         return {}

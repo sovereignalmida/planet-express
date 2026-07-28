@@ -13,7 +13,7 @@ content should tolerate shape drift rather than crash the pipeline. MonitorSnaps
 RunStatus/RollbackCandidates/UpdateHistory are internally-produced and stay strict.
 """
 
-from typing import Literal, Optional
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -54,7 +54,7 @@ class PlanSet(BaseModel):
     schema_version: int = 1
     planned_at: str
     plans: list[dict] = []
-    expires_at: Optional[str] = None
+    expires_at: str | None = None
 
 
 class RunStatus(BaseModel):
@@ -62,8 +62,8 @@ class RunStatus(BaseModel):
 
     schema_version: int = 1
     state: str
-    pending_plan_id: Optional[str] = None
-    pending_msg_id: Optional[int] = None
+    pending_plan_id: str | None = None
+    pending_msg_id: int | None = None
     updated_at: str
 
 
@@ -92,10 +92,10 @@ class UpdateHistoryEntry(BaseModel):
     service: str
     # service_image_id() legitimately returns None (e.g. a stopped service with no
     # container to inspect) -- these must stay optional, not required strings.
-    old_id: Optional[str] = None
-    new_id: Optional[str] = None
+    old_id: str | None = None
+    new_id: str | None = None
     status: str
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 class UpdateHistory(BaseModel):

@@ -44,6 +44,7 @@ def bring_up_all_stacks() -> int:
         print(f"{log_prefix} Starting stack: {stack_dir.name}")
         result = subprocess.run(
             ["docker", "compose", "-f", str(compose_file), "up", "-d"],
+            check=False,
         )
         if result.returncode != 0:
             print(f"{log_prefix} ERROR: {stack_dir.name} failed (exit {result.returncode})")

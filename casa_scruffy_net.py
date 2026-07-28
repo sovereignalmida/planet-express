@@ -48,7 +48,7 @@ def fetch_traefik_routers() -> dict:
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):
-            raise ValueError(f"expected a list of routers, got {type(payload).__name__}")
+            raise TypeError(f"expected a list of routers, got {type(payload).__name__}")
         routers = [
             {
                 "name": r.get("name", "?"),
@@ -87,6 +87,6 @@ def fetch_adguard_stats() -> dict:
             "num_blocked_filtering": data.get("num_blocked_filtering"),
             "avg_processing_time": data.get("avg_processing_time"),
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.warning(f"AdGuard stats fetch failed: {e}")
         return {"available": False, "configured": True}

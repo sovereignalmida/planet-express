@@ -27,18 +27,18 @@ from pathlib import Path
 
 import yaml
 
-import config
-import casa_llm as llm
-import casa_leela as leela
-import casa_hermes as hermes
-import casa_bender as bender
-import casa_zoidberg as zoidberg
 import casa_amy as amy
+import casa_bender as bender
 import casa_fry as fry
+import casa_hermes as hermes
+import casa_leela as leela
+import casa_llm as llm
 import casa_stackctl as stackctl
-from telegram_client import TelegramClient
+import casa_zoidberg as zoidberg
+import config
 from notifier import Notifier, TelegramNotifier
 from state_models import MonitorSnapshot, PlanSet, RunStatus
+from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.farnsworth")
 
@@ -207,7 +207,7 @@ class PipelineState:
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
             config.STATE_STATUS.write_text(status.model_dump_json(indent=2))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log.warning(f"State persist failed: {e}")
 
 
@@ -272,7 +272,7 @@ def load_pending_plan(plan_id: str) -> dict | None:
         for p in data.get("plans", []):
             if p["id"] == plan_id:
                 return p
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.warning(f"Failed to load pending plan: {e}")
     return None
 
@@ -306,9 +306,7 @@ def _container_blocks_prune(c: dict) -> bool:
     status = c.get("status", "")
     if status.startswith("Up"):
         return c.get("health") == "unhealthy"
-    if status.startswith("Exited (0)"):
-        return False
-    return True
+    return not status.startswith("Exited (0)")
 
 
 def _has_incomplete_stacks(snapshot: dict) -> bool:
@@ -349,7 +347,7 @@ def _has_active_rollback_candidates() -> bool:
             datetime.fromisoformat(c["expires_at"]) > now
             for c in data.get("candidates", [])
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -413,8 +411,8 @@ def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -
         if mode == "full":
             try:
                 maybe_run_safe_prune(snapshot, notifier)
-            except Exception as e:
-                log.exception(f"Safe-prune check failed (non-fatal): {e}")
+            except Exception:
+                log.exception("Safe-prune check failed (non-fatal)")
 
         if mode in ("status", "updates"):
             # Short-circuit — just report, no planning needed
@@ -427,7 +425,7 @@ def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -
         findings = hermes.analyze(snapshot)
         hermes.save_findings(findings)
 
-        date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        date_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
         report_msg = TelegramClient.fmt_report(date_str, findings.get("findings", []))
         notifier.notify(report_msg)
 
@@ -459,7 +457,7 @@ def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -
             break
 
     except Exception as e:
-        log.exception(f"Pipeline error: {e}")
+        log.exception("Pipeline error")
         state.transition(PipelineState.IDLE)
         notifier.notify(f"🛑 *Pipeline error:* `{str(e)[:200]}`")
 
@@ -852,7 +850,7 @@ def _investigate_failure(notifier: Notifier, container: str, reason: str) -> Non
             current_service_yaml=current_service_yaml,
         )
     except Exception as e:
-        log.exception(f"Amy investigation crashed for {container}: {e}")
+        log.exception(f"Amy investigation crashed for {container}")
         notifier.notify(f"🛑 Amy's investigation of {container} crashed: `{str(e)[:200]}`")
         return
 
@@ -899,7 +897,7 @@ def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str) -> 
     try:
         req = fry.onboard(url, stack_name, domain)
     except Exception as e:
-        log.exception(f"Fry's resolution crashed for {url}: {e}")
+        log.exception(f"Fry's resolution crashed for {url}")
         notifier.notify(f"🛑 Fry's resolution of {s(url)} crashed: `{str(e)[:200]}`")
         return
 
@@ -910,7 +908,7 @@ def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str) -> 
         # enough to parse, a field can still be the wrong shape (e.g. a string where a
         # list of dicts was expected). This runs in a daemon thread with no other
         # handler above it, so without this the install would fail completely silently.
-        log.exception(f"Processing Fry's resolution crashed for {stack_name}: {e}")
+        log.exception(f"Processing Fry's resolution crashed for {stack_name}")
         notifier.notify(
             f"🛑 Processing Fry's resolution for {s(stack_name)} crashed: `{str(e)[:200]}`. "
             f"This needs to be onboarded by hand."
@@ -1280,7 +1278,7 @@ def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, 
                     daemon=True,
                 ).start()
     except Exception as e:
-        log.exception(f"Bender execution error: {e}")
+        log.exception("Bender execution error")
         notifier.notify(f"🛑 Bender crashed: `{str(e)[:200]}`")
     finally:
         state.transition(PipelineState.IDLE)
@@ -1309,8 +1307,8 @@ def scheduler_loop(notifier: Notifier, state: PipelineState) -> None:
         try:
             log.info("Scheduled pipeline run starting")
             run_pipeline(notifier, state, mode="full")
-        except Exception as e:
-            log.exception(f"Scheduled pipeline error: {e}")
+        except Exception:
+            log.exception("Scheduled pipeline error")
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)
 
 
@@ -1321,12 +1319,14 @@ def _run_update_pass(tg: TelegramClient, notifier: Notifier) -> None:
     try:
         zoidberg.run_update_pass(tg=tg)
     except Exception as e:
-        log.exception(f"Zoidberg update pass crashed: {e}")
+        log.exception("Zoidberg update pass crashed")
         notifier.notify(f"🛑 *Zoidberg update pass crashed:* `{str(e)[:200]}`")
 
 
 def _seconds_until_next_update_window() -> float:
-    now = datetime.now()
+    # naive on purpose: only ever compared against other naive values computed
+    # right here, never leaves the process -- tz-awareness would buy nothing
+    now = datetime.now()  # noqa: DTZ005
     days_ahead = (UPDATE_DAY_OF_WEEK - now.weekday()) % 7
     target = (now + timedelta(days=days_ahead)).replace(
         hour=UPDATE_HOUR, minute=0, second=0, microsecond=0
@@ -1354,13 +1354,14 @@ def update_scheduler_loop(tg: TelegramClient, state: PipelineState) -> None:
             try:
                 log.info("Scheduled canary update pass starting")
                 zoidberg.run_update_pass(tg=tg)
-            except Exception as e:
-                log.exception(f"Scheduled update pass error: {e}")
+            except Exception:
+                log.exception("Scheduled update pass error")
         time.sleep(3600)  # clear the target window before recomputing next week's delay
 
 
 def _seconds_until_next_digest() -> float:
-    now = datetime.now()
+    # naive on purpose, see _seconds_until_next_update_window above
+    now = datetime.now()  # noqa: DTZ005
     target = now.replace(hour=DIGEST_HOUR, minute=0, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -1380,8 +1381,8 @@ def digest_scheduler_loop(notifier: Notifier) -> None:
         try:
             results = stackctl.check_backups()
             notifier.notify("*Morning backup report*\n" + _fmt_backups_message(results))
-        except Exception as e:
-            log.exception(f"Digest error: {e}")
+        except Exception:
+            log.exception("Digest error")
         time.sleep(60)  # clear the target minute before recomputing next day's delay
 
 
@@ -1423,14 +1424,14 @@ def run_bot() -> None:
                         handle_message(update, tg, notifier, state)
                     elif "callback_query" in update:
                         handle_callback(update, tg, notifier, state)
-                except Exception as e:
-                    log.exception(f"Update handler error: {e}")
+                except Exception:
+                    log.exception("Update handler error")
         except KeyboardInterrupt:
             log.info("Farnsworth shutting down. Goodbye!")
             notifier.notify("🛑 <b>Planet Express going offline.</b>")
             break
-        except Exception as e:
-            log.exception(f"Poll loop error: {e}")
+        except Exception:
+            log.exception("Poll loop error")
             time.sleep(5)  # brief backoff on unexpected errors
 
 
@@ -1443,7 +1444,7 @@ if __name__ == "__main__":
         handlers=[
             logging.StreamHandler(sys.stdout),
             logging.FileHandler(
-                config.LOG_DIR / f"{datetime.now().strftime('%Y-%m-%d')}.log"
+                config.LOG_DIR / f"{datetime.now().astimezone().strftime('%Y-%m-%d')}.log"
             ) if config.LOG_DIR.exists() else logging.StreamHandler(sys.stdout),
         ],
     )

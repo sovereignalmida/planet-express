@@ -16,7 +16,6 @@ import re
 import socket
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 from pydantic import ValidationError
 
@@ -42,27 +41,27 @@ def _load(path, model_cls):
         return None
 
 
-def load_monitor() -> Optional[MonitorSnapshot]:
+def load_monitor() -> MonitorSnapshot | None:
     return _load(config.STATE_MONITOR, MonitorSnapshot)
 
 
-def load_findings() -> Optional[Findings]:
+def load_findings() -> Findings | None:
     return _load(config.STATE_FINDINGS, Findings)
 
 
-def load_plan() -> Optional[PlanSet]:
+def load_plan() -> PlanSet | None:
     return _load(config.STATE_PLAN, PlanSet)
 
 
-def load_status() -> Optional[RunStatus]:
+def load_status() -> RunStatus | None:
     return _load(config.STATE_STATUS, RunStatus)
 
 
-def load_rollback_candidates() -> Optional[RollbackCandidates]:
+def load_rollback_candidates() -> RollbackCandidates | None:
     return _load(config.ROLLBACK_CANDIDATES_FILE, RollbackCandidates)
 
 
-def load_update_history() -> Optional[UpdateHistory]:
+def load_update_history() -> UpdateHistory | None:
     return _load(config.UPDATE_HISTORY_FILE, UpdateHistory)
 
 
@@ -271,7 +270,7 @@ def summarize_rollback_candidates() -> list[dict]:
     return [c.model_dump() for c in unexpired]
 
 
-def summarize_pending_plan() -> Optional[dict]:
+def summarize_pending_plan() -> dict | None:
     """pending_plan.json is never deleted after a plan is approved/executed or
     cancelled (confirmed: no unlink() of it anywhere in casa_farnsworth.py) -- an
     independent Codex review caught that checking only "does this file have plans in
@@ -322,7 +321,7 @@ _UPTIME_RE = re.compile(
 _ERROR_LINE_RE = re.compile(r"^(\S+\s+\S+\s+\S+)\s+(\S+)\s+(.+)$")
 
 
-def _parse_mem_size(token: str) -> Optional[float]:
+def _parse_mem_size(token: str) -> float | None:
     """'15Gi' / '556Mi' (free -h's binary-unit output) -> bytes."""
     m = _MEM_SIZE_RE.match(token.strip())
     if not m:
@@ -352,7 +351,7 @@ def _parse_memory_summary(line: str) -> dict:
     return fields
 
 
-def _parse_uptime(line: str, scan_dt: Optional[datetime]) -> dict:
+def _parse_uptime(line: str, scan_dt: datetime | None) -> dict:
     """'16:09:30 up 20 days, 23:43, 5 users, load average: 1.74, 1.31, 1.12' -> the
     stat-tile fields (up_human, since, load*, users, now). scan_dt (the monitor
     snapshot's own timestamp, not wall-clock now()) anchors "since" so a dashboard
@@ -428,7 +427,7 @@ def _diagnose_errors(errors: list[str], total: int | None = None) -> str:
     return f"{n} error{plural} in the last hour — see the log below."
 
 
-def _parse_systemd_local_time(value: Optional[str]) -> Optional[datetime]:
+def _parse_systemd_local_time(value: str | None) -> datetime | None:
     """Parse systemd's human-readable local-time timestamps (from `systemctl show`
     InactiveExitTimestamp / NextElapseUSecRealtime / LastTriggerUSec), e.g.
     "Sat 2026-07-25 03:10:09 WEST". These always render in the system's local timezone,
@@ -482,7 +481,7 @@ _FRESHNESS_OVERDUE_MULT = 3.0
 _BACKUP_CADENCE_FALLBACK = {"daily": 24, "weekly": 168}
 
 
-def _job_freshness(age_hours: Optional[float], cadence_hours: int, result: str, timer_armed: Optional[bool]) -> str:
+def _job_freshness(age_hours: float | None, cadence_hours: int, result: str, timer_armed: bool | None) -> str:
     """timer_armed is tri-state: True/False from a snapshot new enough to carry "next_run"
     at all, or None for a snapshot from before that field existed -- unknown legacy timer
     state degrades to "judge on age alone", not "assume disarmed", or every otherwise-healthy

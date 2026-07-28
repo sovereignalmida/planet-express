@@ -16,8 +16,8 @@ import logging
 import sys
 from datetime import datetime, timezone
 
-import config
 import casa_llm as llm
+import config
 from state_models import Findings
 
 log = logging.getLogger("planetexpress.hermes")

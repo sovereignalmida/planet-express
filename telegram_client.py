@@ -6,7 +6,7 @@ predictable than Markdown v1/v2 where (, ), -, ., # etc. cause parse errors.
 """
 
 import logging
-from typing import Optional
+
 import requests
 
 log = logging.getLogger("planetexpress.telegram")
@@ -41,7 +41,7 @@ class TelegramClient:
         self,
         text: str,
         parse_mode: str = "HTML",
-        reply_markup: Optional[dict] = None,
+        reply_markup: dict | None = None,
     ) -> dict:
         payload: dict = {
             "chat_id": self.chat_id,
@@ -68,7 +68,7 @@ class TelegramClient:
         message_id: int,
         text: str,
         parse_mode: str = "HTML",
-        reply_markup: Optional[dict] = None,
+        reply_markup: dict | None = None,
     ) -> dict:
         payload: dict = {
             "chat_id": self.chat_id,
@@ -100,7 +100,7 @@ class TelegramClient:
             for u in updates:
                 self._offset = max(self._offset, u["update_id"] + 1)
             return updates
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             log.warning(f"Poll error (will retry): {e}")
             return []
 

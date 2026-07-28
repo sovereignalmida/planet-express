@@ -183,7 +183,8 @@ def _fmt_systemd_local(dt_utc: datetime) -> str:
     """Build a systemd-style local-time string (e.g. "Sat 2026-07-25 03:10:09 WEST")
     from a UTC-aware datetime, for round-tripping through _parse_systemd_local_time --
     mirrors what `systemctl show`'s human-readable timestamps actually look like."""
-    local_naive = datetime.fromtimestamp(dt_utc.timestamp())
+    # deliberately naive -- mirrors systemd's own naive local-time timestamp string
+    local_naive = datetime.fromtimestamp(dt_utc.timestamp())  # noqa: DTZ006
     return local_naive.strftime("%a %Y-%m-%d %H:%M:%S") + " LOCALTZ"
 
 

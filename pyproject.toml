@@ -1,0 +1,12 @@
+[tool.ruff.lint.isort]
+# This codebase groups multiple names from one module into a single parenthesized
+# import (including PEP 484 explicit re-exports like `X as X`, see per-file-ignores
+# below) -- isort's default keeps aliased imports in their own statement, which would
+# otherwise fragment those into one `from X import (...)` block per name.
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+# `ExcludedService as ExcludedService` etc. is the standard PEP 484 explicit-re-export
+# idiom (tells type checkers/import linters this name is intentionally re-exported from
+# config.py, not an accidental unused import) -- not a useless alias.
+"config.py" = ["PLC0414"]

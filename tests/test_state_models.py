@@ -56,7 +56,7 @@ def test_monitor_snapshot_status_mode_partial_fields():
         "disk": [],
         "services": {},
     }
-    instance, reloaded = _roundtrip(MonitorSnapshot, data)
+    instance, _reloaded = _roundtrip(MonitorSnapshot, data)
     assert instance.mode == "status"
     assert instance.image_candidates == []  # defaulted, not present in input
 
@@ -84,7 +84,7 @@ def test_plan_set_roundtrip():
         "plans": [{"id": "p1", "priority": "medium", "title": "test", "steps": [], "rollback": []}],
         "expires_at": "2026-07-16T14:37:15+00:00",
     }
-    instance, reloaded = _roundtrip(PlanSet, data)
+    _instance, reloaded = _roundtrip(PlanSet, data)
     assert reloaded.plans[0]["id"] == "p1"
 
 
@@ -95,7 +95,7 @@ def test_run_status_roundtrip():
         "pending_msg_id": 397,
         "updated_at": "2026-07-15T14:37:17+00:00",
     }
-    instance, reloaded = _roundtrip(RunStatus, data)
+    _instance, reloaded = _roundtrip(RunStatus, data)
     assert reloaded.pending_msg_id == 397
 
 
@@ -107,7 +107,7 @@ def test_rollback_candidates_roundtrip():
             "expires_at": "2026-07-15T00:15:00+00:00",
         }],
     }
-    instance, reloaded = _roundtrip(RollbackCandidates, data)
+    _instance, reloaded = _roundtrip(RollbackCandidates, data)
     assert reloaded.candidates[0].stack == "services"
 
 
@@ -121,6 +121,6 @@ def test_update_history_roundtrip_and_reason_optional():
              "reason": "crash-looped after update"},
         ],
     }
-    instance, reloaded = _roundtrip(UpdateHistory, data)
+    _instance, reloaded = _roundtrip(UpdateHistory, data)
     assert reloaded.entries[0].reason is None
     assert reloaded.entries[1].reason == "crash-looped after update"

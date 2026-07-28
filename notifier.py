@@ -9,11 +9,14 @@ button tap) that stays directly on TelegramClient in casa_farnsworth.py's handle
 until/unless a second channel actually needs it generalized too.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from telegram_client import TelegramClient
+
+log = logging.getLogger("planetexpress.notifier")
 
 
 @dataclass
@@ -36,7 +39,7 @@ class Notifier(ABC):
         Returns an opaque message id for the caller's own informational state tracking."""
 
     @abstractmethod
-    def interpret_decision(self, raw_event: dict) -> Optional[Decision]:
+    def interpret_decision(self, raw_event: dict) -> Decision | None:
         """None if raw_event isn't an approve/cancel tap this Notifier recognizes."""
 
     @abstractmethod
@@ -61,7 +64,7 @@ class TelegramNotifier(Notifier):
         sent = self._client.send(text, reply_markup=keyboard)
         return sent.get("message_id")
 
-    def interpret_decision(self, raw_event: dict) -> Optional[Decision]:
+    def interpret_decision(self, raw_event: dict) -> Decision | None:
         cb = raw_event.get("callback_query")
         if not cb:
             return None
@@ -97,8 +100,10 @@ class TelegramNotifier(Notifier):
         self._client.answer_callback(ref.get("cb_id", ""), ack_text)
         try:
             self._client.edit(ref.get("msg_id"), resolution_text)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 -- best-effort UI cleanup, decision is already resolved
+            # No exc_info/str(e) here: TelegramClient embeds the bot token in its
+            # request URL, and requests exceptions often stringify that URL.
+            log.warning("Failed to edit resolution message")
 
 
 class FakeNotifier(Notifier):
@@ -109,7 +114,7 @@ class FakeNotifier(Notifier):
         self.notifications: list[str] = []
         self.approval_requests: list[tuple[str, str, str]] = []  # (text, request_id, kind)
         self.resolutions: list[tuple[Decision, str, str]] = []   # (decision, ack, resolution)
-        self._next_decision: Optional[Decision] = None
+        self._next_decision: Decision | None = None
         self._next_message_id = 1
 
     def notify(self, text: str) -> None:
@@ -124,7 +129,7 @@ class FakeNotifier(Notifier):
     def queue_decision(self, decision: Decision) -> None:
         self._next_decision = decision
 
-    def interpret_decision(self, raw_event: dict) -> Optional[Decision]:
+    def interpret_decision(self, raw_event: dict) -> Decision | None:
         decision, self._next_decision = self._next_decision, None
         return decision
 
