@@ -13,7 +13,8 @@ from pydantic import ValidationError
 
 from setup_wizard import (
     build_config, generate_sudoers_snippet, _path_completer, _prompt_list,
-    _prompt_actions, _prompt_unit_name, _collect_mounts,
+    _prompt_actions, _prompt_unit_name, _collect_mounts, _discover_mount_units,
+    _docker_root_dir,
 )
 from config_schema import SudoAllowlist, SudoGlobGrant, SudoUnitGrant
 
@@ -68,11 +69,11 @@ def test_sudoers_snippet_empty_allowlist():
 
 def test_sudoers_snippet_unit_grant():
     allowlist = SudoAllowlist(
-        units=[SudoUnitGrant(unit="casa-startup.service", actions=["start", "stop", "restart"])],
+        units=[SudoUnitGrant(unit="casa-stacks.service", actions=["start", "stop", "restart"])],
     )
     snippet = generate_sudoers_snippet("casaroot", allowlist)
-    assert "casaroot ALL=(root) NOPASSWD: /usr/bin/systemctl start casa-startup.service, " \
-        "/usr/bin/systemctl stop casa-startup.service, /usr/bin/systemctl restart casa-startup.service" \
+    assert "casaroot ALL=(root) NOPASSWD: /usr/bin/systemctl start casa-stacks.service, " \
+        "/usr/bin/systemctl stop casa-stacks.service, /usr/bin/systemctl restart casa-stacks.service" \
         in snippet
 
 
@@ -168,9 +169,9 @@ def test_prompt_unit_name_rejects_sudoers_metacharacters(monkeypatch):
     # "*.service" (an actual wildcard) would flow straight into a NOPASSWD rule --
     # granting far more than intended, and invisibly to visudo -c since it's
     # syntactically valid sudoers either way.
-    responses = iter(["foo.service, /bin/bash", "*.service", "casa-startup.service"])
+    responses = iter(["foo.service, /bin/bash", "*.service", "casa-stacks.service"])
     monkeypatch.setattr("builtins.input", lambda _: next(responses))
-    assert _prompt_unit_name("Unit name") == "casa-startup.service"
+    assert _prompt_unit_name("Unit name") == "casa-stacks.service"
 
 
 def test_prompt_unit_name_accepts_blank_to_stop():
@@ -215,6 +216,160 @@ def test_sudoers_snippet_with_colon_passes_visudo(tmp_path):
     snippet_file.write_text(snippet)
     result = subprocess.run(["visudo", "-c", "-f", str(snippet_file)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# ── _discover_mount_units() ──────────────────────────────────────────────────────────
+
+def _fake_subprocess_run(list_units_stdout: str, where_by_unit: dict, docker_root: str = "/var/lib/docker"):
+    """Sequential fake for the three subprocess.run() calls _discover_mount_units() makes:
+    `docker info --format {{.DockerRootDir}}`, then `systemctl list-units --type=mount`,
+    then a single batched `systemctl show <units...> -p Where`."""
+    import subprocess as _subprocess
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "docker":
+            return _subprocess.CompletedProcess(cmd, 0, stdout=f"{docker_root}\n", stderr="")
+        if cmd[1] == "list-units":
+            return _subprocess.CompletedProcess(cmd, 0, stdout=list_units_stdout, stderr="")
+        # cmd == ["systemctl", "show", "-p", "Where", "--value", "--", *units]
+        # Real systemctl separates each unit's property block with a blank line when
+        # multiple units are queried at once -- reproduced here rather than a plain
+        # newline join, since that's the exact quirk _discover_mount_units() must handle.
+        units = cmd[6:]
+        stdout = "\n\n".join(where_by_unit.get(u, "") for u in units) + "\n"
+        return _subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    return fake_run
+
+
+def test_discover_mount_units_excludes_docker_managed_mounts(monkeypatch):
+    # Regression test: on a real Docker host, "systemctl list-units --type=mount" returns
+    # not just genuine host mounts but hundreds of Docker-internal netns/overlay2/volume
+    # bookkeeping mounts that churn on every container restart -- these must never reach
+    # the discovered-units list the "*.mount" sudo glob gets expanded against.
+    list_units_stdout = (
+        "urphotos.mount loaded active mounted Mount urphotos\n"
+        "run-docker-netns-abc123.mount loaded active mounted /run/docker/netns/abc123\n"
+        "var-lib-docker-overlay2-def456-merged.mount loaded active mounted /var/lib/docker/overlay2/def456/merged\n"
+    )
+    where_by_unit = {
+        "urphotos.mount": "/urphotos",
+        "run-docker-netns-abc123.mount": "/run/docker/netns/abc123",
+        "var-lib-docker-overlay2-def456-merged.mount": "/var/lib/docker/overlay2/def456/merged",
+    }
+    monkeypatch.setattr(
+        "subprocess.run", _fake_subprocess_run(list_units_stdout, where_by_unit)
+    )
+    assert _discover_mount_units() == ["urphotos.mount"]
+
+
+def test_discover_mount_units_handles_root_mount_unit_name(monkeypatch):
+    # Regression test: the root filesystem's mount unit is literally named "-.mount".
+    # Without a "--" separator before the unit list, systemctl parses that leading "-"
+    # as an (invalid) option and the whole batched "systemctl show" call fails outright
+    # -- silently falling back to the unfiltered (Docker-mount-polluted) list on every
+    # real host, since "-.mount" is present on virtually every Linux system.
+    import subprocess as _subprocess
+
+    list_units_stdout = (
+        "-.mount loaded active mounted Root Mount\n"
+        "urphotos.mount loaded active mounted Mount urphotos\n"
+        "run-docker-netns-abc123.mount loaded active mounted /run/docker/netns/abc123\n"
+    )
+    where_by_unit = {
+        "-.mount": "/",
+        "urphotos.mount": "/urphotos",
+        "run-docker-netns-abc123.mount": "/run/docker/netns/abc123",
+    }
+    seen_show_cmd = []
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "docker":
+            return _subprocess.CompletedProcess(cmd, 0, stdout="/var/lib/docker\n", stderr="")
+        if cmd[1] == "list-units":
+            return _subprocess.CompletedProcess(cmd, 0, stdout=list_units_stdout, stderr="")
+        seen_show_cmd.extend(cmd)
+        if "--" not in cmd:
+            # What real systemctl does when a unit name starting with "-" is passed
+            # without an option/argument separator: refuses to parse it as a unit at
+            # all, so the whole call errors out instead of yielding per-unit Where values.
+            return _subprocess.CompletedProcess(cmd, 1, stdout="", stderr="invalid option -- '.'")
+        units = cmd[cmd.index("--") + 1:]
+        stdout = "\n\n".join(where_by_unit.get(u, "") for u in units) + "\n"
+        return _subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _discover_mount_units() == ["-.mount", "urphotos.mount"]
+    assert "--" in seen_show_cmd
+
+
+def test_discover_mount_units_falls_back_to_unfiltered_on_where_lookup_mismatch(monkeypatch):
+    import subprocess as _subprocess
+
+    list_units_stdout = (
+        "urphotos.mount loaded active mounted Mount urphotos\n"
+        "mnt-casabu.mount loaded active mounted Mount casabu\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        if cmd[0] == "docker":
+            return _subprocess.CompletedProcess(cmd, 0, stdout="/var/lib/docker\n", stderr="")
+        if cmd[1] == "list-units":
+            return _subprocess.CompletedProcess(cmd, 0, stdout=list_units_stdout, stderr="")
+        # Only one block for two discovered units -- a shape this code didn't
+        # anticipate, so it must fail open to the unfiltered list rather than guess.
+        return _subprocess.CompletedProcess(cmd, 0, stdout="/urphotos\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _discover_mount_units() == ["urphotos.mount", "mnt-casabu.mount"]
+
+
+def test_discover_mount_units_excludes_docker_mounts_under_a_non_default_data_root(monkeypatch):
+    # Regression test for a Codex-flagged P2: Docker's daemon.json "data-root" option can
+    # point anywhere, e.g. /mnt/docker -- a hardcoded "/var/lib/docker/" prefix would then
+    # miss every overlay2/volume mount unit entirely and leak them into the sudoers rules.
+    list_units_stdout = (
+        "urphotos.mount loaded active mounted Mount urphotos\n"
+        "mnt-docker-overlay2-def456-merged.mount loaded active mounted /mnt/docker/overlay2/def456/merged\n"
+    )
+    where_by_unit = {
+        "urphotos.mount": "/urphotos",
+        "mnt-docker-overlay2-def456-merged.mount": "/mnt/docker/overlay2/def456/merged",
+    }
+    monkeypatch.setattr(
+        "subprocess.run",
+        _fake_subprocess_run(list_units_stdout, where_by_unit, docker_root="/mnt/docker"),
+    )
+    assert _discover_mount_units() == ["urphotos.mount"]
+
+
+def test_docker_root_dir_reports_docker_info(monkeypatch):
+    import subprocess as _subprocess
+
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["docker", "info", "--format", "{{.DockerRootDir}}"]
+        return _subprocess.CompletedProcess(cmd, 0, stdout="/mnt/docker\n", stderr="")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _docker_root_dir() == "/mnt/docker"
+
+
+def test_docker_root_dir_falls_back_to_default_on_error(monkeypatch):
+    import subprocess as _subprocess
+
+    def fake_run(cmd, **kwargs):
+        return _subprocess.CompletedProcess(cmd, 1, stdout="", stderr="Cannot connect to the Docker daemon")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _docker_root_dir() == "/var/lib/docker"
+
+
+def test_docker_root_dir_falls_back_to_default_when_docker_missing(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        raise FileNotFoundError("docker not found")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _docker_root_dir() == "/var/lib/docker"
 
 
 def test_collect_mounts_expands_tilde_and_rejects_relative(monkeypatch):

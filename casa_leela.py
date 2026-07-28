@@ -323,6 +323,55 @@ def check_system() -> dict:
 _BACKUP_CADENCE_HOURS = {"daily": 24, "weekly": 168}
 
 
+def _last_journal_completion(unit: str) -> tuple[str, str]:
+    """Fall back to the journal's persisted last terminal-event entry when systemd's own
+    InactiveEnterTimestamp comes back empty. That property is transient, in-memory systemd
+    state -- it resets to '' on any daemon-reload/reboot and only repopulates the next time
+    the unit runs, which falsely reads as "NEVER" on the dashboard for an infrequent job
+    (e.g. weekly) that actually completed fine before the reset. journalctl already reads
+    passwordlessly for casaroot elsewhere in this file (see check_system() above); scoped to
+    one unit here the same way. Matches both "Finished <unit>" (success) and "Failed to
+    start <unit>" (failure) -- matching only success would let a reset InactiveEnterTimestamp
+    silently pick an older successful run over a more recent failure, misreporting a broken
+    backup as healthy. journalctl's default (non-reversed) order is oldest-first, so the last
+    match seen while iterating forward is always the most recent terminal event regardless of
+    which of the two it is.
+
+    Returns (last_run, result) rather than just the timestamp -- an independent Codex review
+    caught that returning only the timestamp left the caller's separate `Result` property
+    (also reset to its default "success" by the same daemon-reload/reboot that wiped
+    InactiveEnterTimestamp) unexamined, so a unit whose last real run actually failed could
+    still surface with a fresh-looking last_run *and* result="success", i.e. exactly the
+    "misreport a broken backup as healthy" failure mode this function exists to prevent, just
+    moved from the timestamp into the result field instead. last_run is returned in the same
+    "%a %Y-%m-%d %H:%M:%S %Z" shape `systemctl show` emits, since
+    dashboard_data._parse_systemd_local_time() expects exactly that format regardless of
+    source; result is "success" or "failed" (empty string for either if no matching journal
+    entry was found at all)."""
+    _, out, _ = _run(f"journalctl -u {unit} -o json --no-pager -n 200")
+    last_ts = None
+    last_success = None
+    for line in out.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        message = entry.get("MESSAGE", "")
+        if f"Finished {unit}" in message:
+            last_ts = entry.get("__REALTIME_TIMESTAMP")
+            last_success = True
+        elif f"Failed to start {unit}" in message:
+            last_ts = entry.get("__REALTIME_TIMESTAMP")
+            last_success = False
+    if last_ts is None:
+        return "", ""
+    try:
+        dt = datetime.fromtimestamp(int(last_ts) / 1_000_000).astimezone()
+    except (ValueError, OSError):
+        return "", ""
+    return dt.strftime("%a %Y-%m-%d %H:%M:%S %Z"), ("success" if last_success else "failed")
+
+
 def check_backups() -> dict:
     """Borg backup service + timer status.
 
@@ -337,7 +386,7 @@ def check_backups() -> dict:
     timers = {t["label"]: t for t in stackctl.check_backups()}
     result = {}
     for unit in ["daily-borg-backup", "weekly-borg-backup"]:
-        _, out, _ = _run(
+        rc, out, _ = _run(
             f"systemctl show {unit}.service "
             "--property=ActiveState,Result,ExecMainStatus,InactiveEnterTimestamp"
         )
@@ -348,17 +397,40 @@ def check_backups() -> dict:
                 props[k] = v
         key = "daily" if "daily" in unit else "weekly"
         tmr = timers.get(key, {})
+        # InactiveEnterTimestamp, not InactiveExitTimestamp -- the latter is when the
+        # oneshot last *left* inactive (i.e. started running), the former is when it
+        # last *entered* inactive (i.e. finished). The dashboard reads this as "when did
+        # the last snapshot complete", and on this host those two differ by ~2h45m for
+        # the daily job -- using the start time understated every displayed age by the
+        # job's full runtime and could misclassify a still-running backup as fresh.
+        last_run = props.get("InactiveEnterTimestamp", "")
+        job_result = props.get("Result", "unknown")
+        if rc == 0 and not last_run:
+            # Empty (rc == 0, so the query itself succeeded), not missing -- a
+            # daemon-reload/reboot since this unit last ran wiped the transient property.
+            # Fall back to the journal so an infrequent job (e.g. weekly) doesn't falsely
+            # read as "NEVER" until it next happens to fire. Also take the journal's
+            # success/failure verdict, not just its timestamp -- the same reset that wiped
+            # InactiveEnterTimestamp resets `Result` to its default "success" too, which
+            # would otherwise report a job whose last real run actually failed as both
+            # fresh AND successful.
+            journal_run, journal_result = _last_journal_completion(f"{unit}.service")
+            last_run = journal_run or "n/a"
+            if journal_result:
+                job_result = journal_result
+        elif not last_run:
+            # rc != 0 -- the systemctl query itself failed (bad unit name, systemd
+            # unreachable, etc.), not just an empty transient property. An independent
+            # Codex review caught that falling back to the journal in this case too would
+            # silently paper over a real query failure with a stale-but-real historical
+            # result/timestamp; "unknown"/"n/a" here correctly surfaces the query failure
+            # instead of masking it.
+            last_run = "n/a"
         result[key] = {
             "state": props.get("ActiveState", "unknown"),
-            "result": props.get("Result", "unknown"),
+            "result": job_result,
             "exit_code": props.get("ExecMainStatus", "?"),
-            # InactiveEnterTimestamp, not InactiveExitTimestamp -- the latter is when the
-            # oneshot last *left* inactive (i.e. started running), the former is when it
-            # last *entered* inactive (i.e. finished). The dashboard reads this as "when did
-            # the last snapshot complete", and on this host those two differ by ~2h45m for
-            # the daily job -- using the start time understated every displayed age by the
-            # job's full runtime and could misclassify a still-running backup as fresh.
-            "last_run": props.get("InactiveEnterTimestamp", "n/a"),
+            "last_run": last_run,
             "next_run": tmr.get("next_run_at", "n/a"),
             "last_trigger": tmr.get("last_run_at", "n/a"),
             "cadence_hours": _BACKUP_CADENCE_HOURS[key],
@@ -371,7 +443,7 @@ def check_services() -> dict:
     Note: nebula.service and dnclient.service are both intentionally decommissioned —
     remote access is now via Tailscale on OPNsense (outside this host, not monitored here).
     dnclient retired 2026-07-04, see project_casaserver_reip_plan memory for context."""
-    units = ["casa-startup"]
+    units = ["casa-stacks"]
     status = {}
     for unit in units:
         _, out, _ = _run(f"systemctl is-active {unit}")

@@ -158,7 +158,47 @@ def _discover_stacks(stacks_root: Path) -> list[str]:
     return sorted(p.parent.name for p in stacks_root.glob("*/docker-compose.yml"))
 
 
+# Docker manages its own mount units for every container netns and every overlay2/volume
+# layer, entirely separately from the host mounts config.yaml's "mounts:" section and the
+# sudo_allowlist's "*.mount" glob actually care about. On a real Docker host these
+# regularly outnumber genuine host mounts by an order of magnitude and churn constantly as
+# containers are created/destroyed -- left in, they'd balloon the "*.mount" glob's
+# generated sudoers rules into hundreds of exact-unit entries that go stale on every
+# container restart (new containers ungranted, removed ones leaving dead entries), even
+# though Bender would never plausibly need sudo scope over Docker's own bookkeeping mounts.
+# Filtered by each unit's actual "Where" mount point rather than by unit-name prefix, since
+# that's the ground truth systemd's name-escaping is derived from. "/var/lib/docker" is
+# only Docker's *default* data-root -- daemon.json's "data-root" option (or a --data-root
+# flag) can point it anywhere, e.g. /mnt/docker, and every overlay2/volume mount unit would
+# then live under that path instead, silently defeating a hardcoded prefix. _docker_root_dir()
+# below asks Docker itself where its root actually is rather than assuming the default.
+_DOCKER_MOUNT_STATIC_PREFIX = "/run/docker/"
+_DOCKER_ROOT_DIR_DEFAULT = "/var/lib/docker"
+
+
+def _docker_root_dir() -> str:
+    """Docker's actual data-root directory, straight from `docker info` rather than
+    assumed -- an independent Codex review caught that hardcoding "/var/lib/docker/" missed
+    hosts configured with a non-default data-root (daemon.json's "data-root" option), where
+    every overlay2/volume mount unit then lives under that path instead and would leak back
+    into the generated sudoers rules despite genuinely belonging to Docker. Any unexpected
+    shape (docker not installed, command error, empty output) fails open to the documented
+    default rather than raising -- this is a filter refinement, not a hard dependency."""
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.DockerRootDir}}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return _DOCKER_ROOT_DIR_DEFAULT
+    root = result.stdout.strip()
+    if result.returncode != 0 or not root:
+        return _DOCKER_ROOT_DIR_DEFAULT
+    return root
+
+
 def _discover_mount_units() -> list[str]:
+    docker_mount_prefixes = (f"{_docker_root_dir().rstrip('/')}/", _DOCKER_MOUNT_STATIC_PREFIX)
     try:
         result = subprocess.run(
             ["systemctl", "list-units", "--type=mount", "--all", "--no-legend", "--plain"],
@@ -171,7 +211,29 @@ def _discover_mount_units() -> list[str]:
         parts = line.split()
         if parts and parts[0].endswith(".mount"):
             units.append(parts[0])
-    return units
+    if not units:
+        return []
+    try:
+        # Options before "--", units after: the root mount unit is literally named
+        # "-.mount", which systemctl otherwise parses as an (invalid) option and fails
+        # the whole batched call outright rather than just that one unit.
+        show = subprocess.run(
+            ["systemctl", "show", "-p", "Where", "--value", "--", *units],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return units
+    if show.returncode != 0:
+        return units
+    # `systemctl show unit1 unit2 ... -p Where` separates each unit's property block with
+    # a blank line -- splitlines() would silently misalign unit<->value pairs across the
+    # whole rest of the list. Split on the blank-line separator instead.
+    wheres = [block.strip() for block in show.stdout.split("\n\n")]
+    if len(wheres) != len(units):
+        # Unexpected shape -- fail open to the unfiltered list rather than risk dropping
+        # a real host mount on a mismatch we didn't anticipate.
+        return units
+    return [unit for unit, where in zip(units, wheres) if not where.startswith(docker_mount_prefixes)]
 
 
 def _mount_where(unit: str) -> str:

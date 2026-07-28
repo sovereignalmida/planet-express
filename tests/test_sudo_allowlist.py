@@ -18,7 +18,7 @@ from config import SudoAllowlist, SudoGlobGrant, SudoUnitGrant
 @pytest.fixture
 def allowlist(monkeypatch):
     fixture = SudoAllowlist(
-        units=[SudoUnitGrant(unit="casa-startup.service", actions=["start", "stop", "restart"])],
+        units=[SudoUnitGrant(unit="casa-stacks.service", actions=["start", "stop", "restart"])],
         globs=[SudoGlobGrant(glob="*.mount", actions=["start", "stop"])],
     )
     monkeypatch.setattr(bender, "SUDO_ALLOWLIST", fixture)
@@ -26,7 +26,7 @@ def allowlist(monkeypatch):
 
 
 def test_allowed_unit_restart(allowlist):
-    bender._safety_check("sudo systemctl restart casa-startup.service", plan={})  # no raise
+    bender._safety_check("sudo systemctl restart casa-stacks.service", plan={})  # no raise
 
 
 def test_allowed_glob_start(allowlist):
@@ -78,7 +78,7 @@ def test_plain_docker_command_unaffected(allowlist):
 def test_empty_allowlist_denies_everything(monkeypatch):
     monkeypatch.setattr(bender, "SUDO_ALLOWLIST", SudoAllowlist())
     with pytest.raises(bender.SafetyError, match="not declared"):
-        bender._safety_check("sudo systemctl restart casa-startup.service", plan={})
+        bender._safety_check("sudo systemctl restart casa-stacks.service", plan={})
 
 
 # ── Bypass cases an independent Codex review caught before this shipped: a
@@ -108,7 +108,7 @@ def test_denies_command_substitution_disguised_as_path_prefix(allowlist):
     # No path-prefix tolerance exists anymore -- this must be flatly rejected.
     with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
         bender._safety_check(
-            "$(sudo${IFS}mount${IFS}-a)/sudo systemctl restart casa-startup.service",
+            "$(sudo${IFS}mount${IFS}-a)/sudo systemctl restart casa-stacks.service",
             plan={},
         )
 

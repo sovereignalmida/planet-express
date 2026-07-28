@@ -266,3 +266,98 @@ def test_check_backups_missing_timer_data_degrades_to_na(monkeypatch):
     result = casa_leela.check_backups()
     assert result["daily"]["next_run"] == "n/a"
     assert result["daily"]["last_trigger"] == "n/a"
+
+
+def test_check_backups_journal_fallback_carries_failure_not_just_timestamp(monkeypatch):
+    # Regression test for a Codex-flagged P2: when InactiveEnterTimestamp is wiped (empty)
+    # by a daemon-reload/reboot, systemd resets Result to its default "success" too -- not
+    # just the timestamp -- so blindly keeping props["Result"] here would report a job whose
+    # actual last run failed as both fresh AND successful. The fallback's own verdict from
+    # the journal must override it.
+    def fake_show(cmd, timeout=30):
+        # ActiveState/Result/ExecMainStatus all at their post-reset defaults; no
+        # InactiveEnterTimestamp line at all since this boot has no invocation yet.
+        return 0, "ActiveState=inactive\nResult=success\nExecMainStatus=0\n", ""
+
+    monkeypatch.setattr(casa_leela, "_run", fake_show)
+    monkeypatch.setattr(casa_leela.stackctl, "check_backups", lambda: [])
+    monkeypatch.setattr(
+        casa_leela, "_last_journal_completion",
+        lambda unit: ("Sun 2026-07-19 04:10:00 WEST", "failed"),
+    )
+
+    result = casa_leela.check_backups()
+    assert result["daily"]["last_run"] == "Sun 2026-07-19 04:10:00 WEST"
+    assert result["daily"]["result"] == "failed"
+
+
+def test_check_backups_query_failure_does_not_trigger_journal_fallback(monkeypatch):
+    # Regression test for a Codex-flagged P2: an empty InactiveEnterTimestamp is only a
+    # legitimate "reboot wiped transient state" fallback trigger when the systemctl query
+    # itself succeeded (rc == 0). If the query failed outright (bad unit, systemd
+    # unreachable, etc.), props is empty for an unrelated reason -- falling back to the
+    # journal here too would silently paper over a real query failure with a stale-but-real
+    # historical result, instead of surfacing "unknown"/"n/a" the way a query failure should.
+    journal_called = []
+
+    def fake_show(cmd, timeout=30):
+        return 1, "", "Failed to connect to bus: Operation not permitted"
+
+    def fake_journal(unit):
+        journal_called.append(unit)
+        return "Sun 2026-07-19 04:10:00 WEST", "success"
+
+    monkeypatch.setattr(casa_leela, "_run", fake_show)
+    monkeypatch.setattr(casa_leela.stackctl, "check_backups", lambda: [])
+    monkeypatch.setattr(casa_leela, "_last_journal_completion", fake_journal)
+
+    result = casa_leela.check_backups()
+    assert journal_called == []
+    assert result["daily"]["last_run"] == "n/a"
+    assert result["daily"]["result"] == "unknown"
+
+
+# ── _last_journal_completion() ──────────────────────────────────────────────────────
+
+def _journal_line(message: str, realtime_us: int) -> str:
+    import json as _json
+    return _json.dumps({"MESSAGE": message, "__REALTIME_TIMESTAMP": str(realtime_us)})
+
+
+def test_last_journal_completion_prefers_latest_success_over_older_ones(monkeypatch):
+    lines = "\n".join([
+        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 1_000_000_000_000),
+        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 2_000_000_000_000),
+    ])
+    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
+    last_run, result = casa_leela._last_journal_completion("weekly-borg-backup.service")
+    assert last_run != ""
+    assert result == "success"
+
+
+def test_last_journal_completion_reports_a_later_failure_not_an_earlier_success(monkeypatch):
+    # Regression test for a Codex-flagged P2: if InactiveEnterTimestamp was wiped by a
+    # daemon-reload/reboot after the *latest* run of this unit failed, the fallback must
+    # not silently pick an older successful run instead -- that would misreport a broken
+    # backup as healthy on the dashboard and to Hermes.
+    lines = "\n".join([
+        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 1_000_000_000_000),
+        _journal_line("Failed to start weekly-borg-backup.service - Weekly Borg Backup.", 2_000_000_000_000),
+    ])
+    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
+    last_run, result = casa_leela._last_journal_completion("weekly-borg-backup.service")
+    # The later (failed) entry's timestamp -- and its "failed" verdict -- win over the
+    # earlier success.
+    from datetime import datetime
+    expected = datetime.fromtimestamp(2_000_000_000_000 / 1_000_000).astimezone()
+    assert last_run == expected.strftime("%a %Y-%m-%d %H:%M:%S %Z")
+    assert result == "failed"
+
+
+def test_last_journal_completion_ignores_unrelated_messages(monkeypatch):
+    lines = "\n".join([
+        _journal_line("Starting weekly-borg-backup.service - Weekly Borg Backup...", 1_000_000_000_000),
+        _journal_line("Some unrelated log line.", 3_000_000_000_000),
+    ])
+    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
+    assert casa_leela._last_journal_completion("weekly-borg-backup.service") == ("", "")

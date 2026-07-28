@@ -21,7 +21,7 @@ class ExcludedService(BaseModel):
 
 
 class SudoUnitGrant(BaseModel):
-    """Permission for a specific systemd unit name (e.g. 'casa-startup.service')."""
+    """Permission for a specific systemd unit name (e.g. 'casa-stacks.service')."""
     model_config = ConfigDict(extra="forbid")
     unit: str
     actions: list[Literal["start", "stop", "restart"]] = ["start", "stop", "restart"]

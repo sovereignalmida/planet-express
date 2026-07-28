@@ -55,7 +55,7 @@ SEVERITY RULES (apply all that match):
   and do NOT describe the job as "not scheduled" or having "no recent verified run", solely
   because state is "inactive" — check result and last_run instead. A backup job with
   state=inactive, result=success, and a real last_run timestamp is healthy.
-- systemd service inactive: MEDIUM (only casa-startup is actively checked as of 2026-07-04;
+- systemd service inactive: MEDIUM (only casa-stacks is actively checked as of 2026-07-28;
   nebula and dnclient were both decommissioned — remote access is now Tailscale on OPNsense,
   outside this host)
 - Journal errors same message repeated > 3 times in the window: MEDIUM

@@ -88,7 +88,7 @@ PLANNING RULES:
   first one failed (e.g. `docker compose pull && docker compose up -d`).
 - Bender runs as an unprivileged user (casaroot) with passwordless sudo for EXACTLY these,
   and nothing else: docker commands (no sudo needed, direct socket access);
-  `systemctl restart/start/stop casa-startup.service` (must be prefixed with `sudo`); and
+  `systemctl restart/start/stop casa-stacks.service` (must be prefixed with `sudo`); and
   `systemctl start/stop` on units matching `*.mount` (must be prefixed with `sudo`).
   Any other privileged command — a different systemd service, a `*.automount` unit
   (note: this is a different unit type than `*.mount` and is NOT covered by the mount
@@ -98,6 +98,11 @@ PLANNING RULES:
   passwordless grant and cannot type one interactively. Do NOT propose any such action.
   Make a diagnostic-only plan (or no plan) instead, and note in the title that it needs
   human action.
+- Read-only inspection commands (`systemctl status`, `systemctl is-active`, `journalctl`) never
+  need `sudo` and must NEVER be given it — the sudo allowlist above only ever covers
+  `start|stop|restart`, so a `sudo systemctl status ...` step is not a valid grant, gets blocked
+  by Bender's sudo-scope check every time, and stalls the whole plan on step 1 before the actual
+  restart step ever runs. Only prefix `sudo` on the actual start/stop/restart action step.
 - NEVER modify .env files
 - NEVER touch clawbot or ai stacks
 - Set requires_network_confirm: true for any plan touching CASA_TRAEFIK or CASA_ADGUARD

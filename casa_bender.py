@@ -68,7 +68,7 @@ SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
 # Deliberately requires a literal, bare `sudo` -- an earlier version of this regex
 # tolerated an arbitrary-path prefix (`\S*/`) to allow /usr/bin/sudo, but `\S` also
 # matches shell metacharacters: `$(sudo mount -a)/sudo systemctl restart
-# casa-startup.service` satisfied that prefix, letting the whole string through
+# casa-stacks.service` satisfied that prefix, letting the whole string through
 # _check_sudo_allowlist while the shell (shell=True) still executed the embedded
 # `sudo mount -a` via command substitution -- an independent Codex review caught
 # this before it shipped. Real plans only ever generate bare `sudo`; there is no
