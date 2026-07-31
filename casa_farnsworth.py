@@ -212,17 +212,26 @@ class PipelineState:
 
 
 # ── Planning logic ────────────────────────────────────────────────────────────
-def plan(findings: dict) -> dict:
-    """Good news, everyone — Farnsworth has a plan."""
-    if not findings.get("findings"):
-        return {
-            "planned_at": datetime.now(timezone.utc).isoformat(),
-            "plans": [],
-        }
+def _plan_batch(finding_list: list, parse_errors: list, update_candidates: list) -> list:
+    """Ask the LLM for plans covering finding_list. A large or unusually complex
+    batch of findings (e.g. a whole-host outage reported as one CRITICAL finding
+    per stack) can produce a plan response that overruns MAX_TOKENS and gets cut
+    off mid-JSON — confirmed on 2026-07-31, where 9 findings truncated even at
+    8192 tokens and Farnsworth silently devised 0 plans right when the incident
+    most needed one. Rather than keep raising the token ceiling for whatever the
+    next incident's finding count turns out to be, split the batch in half and
+    retry each half on a parse failure — this scales to any finding count instead
+    of failing again the next time a bigger incident exceeds the last ceiling.
 
-    findings_json = json.dumps(findings, separators=(",", ":"))
-
-    log.info(f"Farnsworth devising plan for {len(findings['findings'])} finding(s)...")
+    update_candidates is passed through unsplit on every sub-batch call — PLAN_SYSTEM_PROMPT
+    tells the LLM to skip anything in update_candidates (Zoidberg's territory), and it needs
+    that list every time to honor the rule, not just on the first, unsplit attempt.
+    """
+    findings_json = json.dumps(
+        {"findings": finding_list, "update_candidates": update_candidates},
+        separators=(",", ":"),
+    )
+    log.info(f"Farnsworth devising plan for {len(finding_list)} finding(s)...")
 
     raw = llm.complete(
         PLAN_SYSTEM_PROMPT,
@@ -234,18 +243,47 @@ def plan(findings: dict) -> dict:
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
 
     try:
-        plans = json.loads(raw)
+        return json.loads(raw).get("plans", [])
     except json.JSONDecodeError as e:
-        log.error(f"Farnsworth got invalid JSON from the LLM: {e}")
-        plans = {
-            "planned_at": datetime.now(timezone.utc).isoformat(),
-            "plans": [],
-            "_parse_error": str(e),
-        }
+        if len(finding_list) > 1:
+            mid = len(finding_list) // 2
+            log.warning(
+                f"Farnsworth's plan response for {len(finding_list)} finding(s) didn't "
+                f"parse ({e}); splitting into two batches of {mid} and {len(finding_list) - mid} and retrying."
+            )
+            return _plan_batch(
+                finding_list[:mid], parse_errors, update_candidates
+            ) + _plan_batch(finding_list[mid:], parse_errors, update_candidates)
+        log.error(f"Farnsworth got invalid JSON from the LLM for a single finding: {e}")
+        parse_errors.append(str(e))
+        return []
 
-    plans.setdefault("planned_at", datetime.now(timezone.utc).isoformat())
-    log.info(f"Farnsworth devised {len(plans.get('plans', []))} plan(s)")
-    return plans
+
+def plan(findings: dict) -> dict:
+    """Good news, everyone — Farnsworth has a plan."""
+    result = {
+        "planned_at": datetime.now(timezone.utc).isoformat(),
+        "plans": [],
+    }
+    if not findings.get("findings"):
+        return result
+
+    parse_errors: list = []
+    plans = _plan_batch(
+        findings["findings"], parse_errors, findings.get("update_candidates", [])
+    )
+    # Each split retry is an independent LLM call, so a plan's "id" (e.g. "p1") is
+    # only unique within its own sub-batch — concatenating sub-batches can produce
+    # duplicate ids, which would break the id-based lookups downstream
+    # (load_pending_plan(), /rollback <id>, dashboard_data.summarize_pending_plan()).
+    # Renumber once, here, after all sub-batches are merged.
+    for i, p in enumerate(plans, start=1):
+        p["id"] = f"p{i}"
+    result["plans"] = plans
+    if parse_errors:
+        result["_parse_errors"] = parse_errors
+    log.info(f"Farnsworth devised {len(result['plans'])} plan(s)")
+    return result
 
 
 def save_plans(plans: dict) -> None:
