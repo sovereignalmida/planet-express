@@ -18,3 +18,7 @@ logs/*.log
 
 # Design reference/handoff material for dashboard redo — not shipped code
 /design-handoff/
+
+# Local dev-tooling state — not app code, host/editor-specific
+/.claude/
+/.tokensave/
