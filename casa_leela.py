@@ -303,6 +303,31 @@ def check_mounts() -> dict:
     }
 
 
+def check_unraid_exports() -> dict:
+    """Check Unraid's /etc/exports for duplicate NFS fsid values.
+
+    A collision (two shares sharing an fsid) makes one of them resolve empty/wrong to NFS
+    clients while looking completely healthy at the mount level -- this exact bug silently
+    broke urphotos_nfs (see project_casamedia_nfs_migration memory, fixed 2026-08-13).
+    Cheap to catch here before it recurs as an "Immich shows empty photos"-style symptom.
+    Requires the `unraid` SSH alias (root@192.168.1.171, key-based) to be reachable from
+    this host; a connection failure is reported as its own alert rather than raising, since
+    Unraid being briefly unreachable shouldn't crash the whole Leela scan.
+    """
+    rc, out, err = _run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "unraid",
+         "grep -o 'fsid=[0-9]*' /etc/exports | sort | uniq -d"],
+        timeout=15,
+    )
+    if rc != 0 and not out:
+        return {"reachable": False, "error": err.strip() or f"ssh exited {rc}", "duplicate_fsids": []}
+    dupes = [line.strip() for line in out.splitlines() if line.strip()]
+    result: dict = {"reachable": True, "duplicate_fsids": dupes}
+    if dupes:
+        result["alert"] = "HIGH"
+    return result
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -635,6 +660,7 @@ def run_full() -> dict:
         "disk": check_disk(),
         "docker_disk": check_docker_disk(),
         "mounts": check_mounts(),
+        "unraid_exports": check_unraid_exports(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -645,11 +671,13 @@ def run_full() -> dict:
     n_crash  = sum(1 for c in snapshot["containers"] if c.get("crash_looping"))
     n_disk   = sum(1 for d in snapshot["disk"] if d.get("alert"))
     n_missing_stacks = sum(1 for s in snapshot["stack_completeness"] if s.get("alert"))
+    n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
         f"{n_missing_stacks} stack(s) with missing containers, "
-        f"{len(snapshot['mounts']['missing'])} missing mount(s)"
+        f"{len(snapshot['mounts']['missing'])} missing mount(s), "
+        f"{n_dupe_fsids} duplicate Unraid fsid(s)"
     )
     return snapshot
 
