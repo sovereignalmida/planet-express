@@ -36,6 +36,13 @@ SEVERITY RULES (apply all that match):
   present_count/expected_count yourself. This must never be silently missed — a stack with
   zero containers produces zero "container not running" findings on its own, since there's
   nothing there to report as down.
+- stale_nfs_mounts entries: an NFS-backed bind mount went stale (ESTALE) or errored on a probe
+  that Docker's own healthcheck can't see — the container itself may still show "Up"/"healthy"
+  while file I/O against that path is actually broken (e.g. silent upload failures). ALWAYS
+  create a finding for every entry, category "mount". Leela has already computed the right
+  severity in each entry's "alert" field ("HIGH" for a confirmed stale file handle, "MEDIUM" for
+  any other probe error) — USE THAT VALUE AS-IS, don't re-derive it. suggested_action should be
+  to restart the affected container to force a fresh bind mount.
 - Container has crash_looping: true: ALWAYS HIGH regardless of image — a container repeatedly
   restarting is exactly as urgent whether it's Postgres or a plain app container. Do not
   downgrade these to MEDIUM.
@@ -116,6 +123,9 @@ def _slim_snapshot(snapshot: dict) -> dict:
         "incomplete_stacks": incomplete_stacks,
         "disk": snapshot.get("disk", []),
         "mounts": snapshot.get("mounts", {}),
+        # Only stale mounts -- a clean probe with no "alert" key is not interesting to
+        # Hermes, same principle as healthy containers/complete stacks above.
+        "stale_nfs_mounts": [m for m in snapshot.get("nfs_mount_health", []) if m.get("alert")],
         "system": {
             "memory_summary": snapshot.get("system", {}).get("memory_summary"),
             "uptime": snapshot.get("system", {}).get("uptime"),

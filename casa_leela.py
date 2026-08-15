@@ -428,6 +428,44 @@ def check_unraid_exports() -> dict:
     return result
 
 
+# Containers whose bind-mounted NFS paths are worth probing for a stale file handle.
+# An NFS export/inode change on the server side (Unraid share remount, fsid churn --
+# see check_unraid_exports() above) can leave an already-running container's cached
+# mount broken while the container itself stays "Up"/"healthy": Docker's health
+# machinery only sees what the container's own healthcheck checks, and most
+# healthchecks (WeKnora's included) are a bare liveness ping that never touches the
+# filesystem. Found 2026-08-15 on CASA_WEKNORA_APP/data/files: 20+ real file uploads
+# 500'd for several minutes while `docker ps` and /health both kept reporting fine.
+NFS_MOUNT_WATCHLIST = [
+    ("CASA_WEKNORA_APP", "/data/files"),
+]
+
+
+def check_nfs_mount_health() -> list[dict]:
+    """Probe each watched container's NFS-backed bind mount for a stale file handle
+    (`stat` returns ESTALE/"Stale file handle" when the container's cached NFS
+    dentry/inode is invalidated but the mount stays bound). The only fix is a
+    container restart to force a fresh bind mount -- this exists to give Farnsworth
+    a finding to act on, since check_containers() never notices (see comment above)."""
+    results = []
+    for container, path in NFS_MOUNT_WATCHLIST:
+        # Wrap `stat` in the container's own `timeout` so a hard-mounted NFS lookup
+        # that blocks (server unreachable, not just ESTALE) gets killed *inside* the
+        # container. Without this, `docker exec`'s client-side timeout below only
+        # kills the local client -- the daemon-started `stat` stays wedged in the
+        # container's PID namespace and a prolonged outage leaks one per scan.
+        rc, out, err = _run(
+            ["docker", "exec", container, "timeout", "8", "stat", path], timeout=10
+        )
+        entry = {"container": container, "path": path}
+        if rc != 0:
+            message = err.strip() or out.strip()
+            entry["error"] = message
+            entry["alert"] = "HIGH" if "stale file handle" in message.lower() else "MEDIUM"
+        results.append(entry)
+    return results
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -761,6 +799,7 @@ def run_full() -> dict:
         "docker_disk": check_docker_disk(),
         "mounts": check_mounts(),
         "unraid_exports": check_unraid_exports(),
+        "nfs_mount_health": check_nfs_mount_health(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -772,12 +811,14 @@ def run_full() -> dict:
     n_disk   = sum(1 for d in snapshot["disk"] if d.get("alert"))
     n_missing_stacks = sum(1 for s in snapshot["stack_completeness"] if s.get("alert"))
     n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
+    n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
         f"{n_missing_stacks} stack(s) with missing containers, "
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
-        f"{n_dupe_fsids} duplicate Unraid fsid(s)"
+        f"{n_dupe_fsids} duplicate Unraid fsid(s), "
+        f"{n_stale_mounts} stale NFS mount(s)"
     )
     return snapshot
 

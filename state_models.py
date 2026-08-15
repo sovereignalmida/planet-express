@@ -31,6 +31,7 @@ class MonitorSnapshot(BaseModel):
     docker_disk: dict = {}
     mounts: dict = {}
     unraid_exports: dict = {}
+    nfs_mount_health: list[dict] = []
     system: dict = {}
     backups: dict = {}
     services: dict = {}

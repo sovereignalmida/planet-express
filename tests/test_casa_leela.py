@@ -361,3 +361,42 @@ def test_last_journal_completion_ignores_unrelated_messages(monkeypatch):
     ])
     monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
     assert casa_leela._last_journal_completion("weekly-borg-backup.service") == ("", "")
+
+
+# ── check_nfs_mount_health() ────────────────────────────────────────────────────────
+
+def test_check_nfs_mount_health_reports_stale_file_handle_as_high(monkeypatch):
+    monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("CASA_WEKNORA_APP", "/data/files")])
+    monkeypatch.setattr(
+        casa_leela, "_run",
+        lambda cmd, timeout=30: (1, "", "stat: cannot statx '/data/files': Stale file handle"),
+    )
+    results = casa_leela.check_nfs_mount_health()
+    assert results == [{
+        "container": "CASA_WEKNORA_APP",
+        "path": "/data/files",
+        "error": "stat: cannot statx '/data/files': Stale file handle",
+        "alert": "HIGH",
+    }]
+
+
+def test_check_nfs_mount_health_reports_other_errors_as_medium(monkeypatch):
+    monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("CASA_WEKNORA_APP", "/data/files")])
+    monkeypatch.setattr(
+        casa_leela, "_run",
+        lambda cmd, timeout=30: (1, "", "Error: No such container: CASA_WEKNORA_APP"),
+    )
+    results = casa_leela.check_nfs_mount_health()
+    assert results[0]["alert"] == "MEDIUM"
+
+
+def test_check_nfs_mount_health_clean_probe_has_no_alert(monkeypatch):
+    monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("CASA_WEKNORA_APP", "/data/files")])
+    monkeypatch.setattr(
+        casa_leela, "_run",
+        lambda cmd, timeout=30: (0, "  File: /data/files\n  Size: 4096", ""),
+    )
+    results = casa_leela.check_nfs_mount_health()
+    assert results == [{"container": "CASA_WEKNORA_APP", "path": "/data/files"}]
+    assert "alert" not in results[0]
+    assert "error" not in results[0]
