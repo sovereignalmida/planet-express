@@ -53,6 +53,45 @@ CRASH_LOOP_RESTART_THRESHOLD = 3
 # also treated as crash-looping — catches loops on containers with no restart policy,
 # where something external (Bender, a human, docker compose) keeps re-starting it.
 CRASH_LOOP_MIN_UPTIME_SECONDS = 60
+# Docker's own "starting" health state is expected to last through the container's
+# configured start_period plus enough failing checks to hit its retry count (e.g.
+# TubeArchivist's 30s start_period + up to 3 retries at a 2m interval — ~6.5 minutes
+# end to end). Flagging "starting" as an issue with no grace period means every
+# routine restart/reboot generates a false-positive finding (and a needless
+# Farnsworth restart plan) for any container mid-startup. Used as a fallback when a
+# container has no healthcheck configured at all (Docker's own defaults are also 0).
+DEFAULT_STARTING_GRACE_SECONDS = 60
+# Extra buffer on top of start_period + ((interval + timeout) * retries) for
+# scheduling jitter.
+STARTING_GRACE_BUFFER_SECONDS = 30
+# `docker inspect` only reflects fields explicitly set on the healthcheck — any field
+# left unspecified reports as its Go zero-value (0/"0s"), NOT the value Docker actually
+# uses at runtime. Applying Docker's own runtime defaults here (interval/timeout 30s,
+# retries 3) avoids under-counting the grace period for a healthcheck that e.g. only
+# sets `interval:` and leaves retries/timeout implicit.
+DOCKER_DEFAULT_INTERVAL_SECONDS = 30
+DOCKER_DEFAULT_TIMEOUT_SECONDS = 30
+DOCKER_DEFAULT_RETRIES = 3
+DOCKER_DEFAULT_START_INTERVAL_SECONDS = 5
+
+# Longer/multi-character units must be tried before their single-character prefixes
+# (e.g. "ms" before "m") or the regex greedily matches the wrong unit — "500ms" would
+# otherwise parse as "500m" (30000s) with a dangling unmatched "s".
+_GO_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|us|µs|ns|h|m|s)")
+_GO_DURATION_UNIT_SECONDS = {
+    "h": 3600, "m": 60, "s": 1, "ms": 1e-3, "us": 1e-6, "µs": 1e-6, "ns": 1e-9,
+}
+
+
+def _parse_go_duration_seconds(value: str) -> float:
+    """Parse Docker's Go-template duration strings (e.g. "30s", "2m0s", "1h30m0s",
+    "0s") into seconds. Returns 0.0 for anything unparseable/empty."""
+    if not value:
+        return 0.0
+    total = 0.0
+    for amount, unit in _GO_DURATION_RE.findall(value):
+        total += float(amount) * _GO_DURATION_UNIT_SECONDS[unit]
+    return total
 
 
 def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
@@ -60,11 +99,28 @@ def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
     One inspect call for every container is far cheaper than one call per container."""
     if not names:
         return {}
-    fmt = (
+    base_fields = (
         "{{.Name}}\t{{.RestartCount}}\t{{.State.Status}}\t"
-        "{{.State.StartedAt}}"
+        "{{.State.StartedAt}}\t"
+        "{{if .Config.Healthcheck}}1{{else}}0{{end}}\t"
+        "{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartPeriod}}{{else}}{{end}}\t"
     )
-    _, out, err = _run(["docker", "inspect", "--format", fmt, *names], timeout=30)
+    start_interval_field = "{{if .Config.Healthcheck}}{{.Config.Healthcheck.StartInterval}}{{else}}{{end}}\t"
+    remaining_fields = (
+        "{{if .Config.Healthcheck}}{{.Config.Healthcheck.Interval}}{{else}}{{end}}\t"
+        "{{if .Config.Healthcheck}}{{.Config.Healthcheck.Timeout}}{{else}}{{end}}\t"
+        "{{if .Config.Healthcheck}}{{.Config.Healthcheck.Retries}}{{else}}0{{end}}"
+    )
+    fmt = base_fields + start_interval_field + remaining_fields
+    field_count = 10
+    rc, out, err = _run(["docker", "inspect", "--format", fmt, *names], timeout=30)
+    if rc != 0 and "StartInterval" in err:
+        # Pre-25.0 Docker CLI: HealthConfig has no StartInterval field at all, so
+        # referencing it fails the whole template (unlike a Go map lookup, which
+        # would just return a zero value) — retry without that field.
+        fmt = base_fields + remaining_fields
+        field_count = 9
+        rc, out, err = _run(["docker", "inspect", "--format", fmt, *names], timeout=30)
     if not out:
         log.warning(f"docker inspect returned nothing: {err}")
         return {}
@@ -72,9 +128,19 @@ def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
     info = {}
     for line in out.splitlines():
         parts = line.split("\t")
-        if len(parts) != 4:
+        if len(parts) != field_count:
             continue
-        name, restart_count_str, state, started_at = parts
+        if field_count == 10:
+            (
+                name, restart_count_str, state, started_at,
+                has_healthcheck_str, start_period_str, start_interval_str, interval_str, timeout_str, retries_str,
+            ) = parts
+        else:
+            (
+                name, restart_count_str, state, started_at,
+                has_healthcheck_str, start_period_str, interval_str, timeout_str, retries_str,
+            ) = parts
+            start_interval_str = ""
         name = name.lstrip("/")
         uptime_seconds = None
         if state == "running" and started_at and not started_at.startswith("0001-01-01"):
@@ -83,9 +149,38 @@ def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
                 uptime_seconds = (datetime.now(timezone.utc) - started).total_seconds()
             except ValueError:
                 pass
+        # StartPeriod/StartInterval/Interval/Timeout render as Go duration strings
+        # ("30s", "2m0s"), not raw nanoseconds. A container is expected to stay
+        # "starting" through its start_period, then up to `retries` more failing
+        # checks — each cycle taking up to interval + timeout, since the next interval
+        # doesn't start until the current probe finishes — before Docker would even
+        # mark it "unhealthy". Any field left unset in the container's own healthcheck
+        # config inspects as its Go zero-value, not Docker's actual runtime default,
+        # so those get filled in below rather than treated as 0. During start_period,
+        # Docker probes at start_interval cadence (default 5s) rather than the regular
+        # interval — if start_interval is configured larger than start_period, the
+        # first probe may not even fire until start_interval elapses, so the effective
+        # start_period floor has to account for that too.
+        if has_healthcheck_str == "1":
+            start_period_seconds = _parse_go_duration_seconds(start_period_str)
+            start_interval_seconds = (
+                _parse_go_duration_seconds(start_interval_str) or DOCKER_DEFAULT_START_INTERVAL_SECONDS
+            )
+            effective_start_period_seconds = max(start_period_seconds, start_interval_seconds)
+            interval_seconds = _parse_go_duration_seconds(interval_str) or DOCKER_DEFAULT_INTERVAL_SECONDS
+            timeout_seconds = _parse_go_duration_seconds(timeout_str) or DOCKER_DEFAULT_TIMEOUT_SECONDS
+            retries = int(retries_str) if retries_str.isdigit() and int(retries_str) > 0 else DOCKER_DEFAULT_RETRIES
+            grace = (
+                effective_start_period_seconds
+                + (interval_seconds + timeout_seconds) * retries
+                + STARTING_GRACE_BUFFER_SECONDS
+            )
+        else:
+            grace = DEFAULT_STARTING_GRACE_SECONDS
         info[name] = {
             "restart_count": int(restart_count_str) if restart_count_str.isdigit() else 0,
             "uptime_seconds": uptime_seconds,
+            "starting_grace_seconds": grace,
         }
     return info
 
@@ -150,7 +245,12 @@ def check_containers() -> list[dict]:
         elif health == "unhealthy":
             issue = "healthcheck failing"
         elif health == "starting":
-            issue = "healthcheck still initialising"
+            grace = info.get("starting_grace_seconds", DEFAULT_STARTING_GRACE_SECONDS)
+            if uptime_seconds is not None and uptime_seconds > grace:
+                issue = (
+                    f"healthcheck still initialising after {int(uptime_seconds)}s "
+                    f"(expected within ~{int(grace)}s)"
+                )
         if crash_looping:
             issue = f"crash-looping (restarted {restart_count}x)" + (
                 f", {issue}" if issue else ""
