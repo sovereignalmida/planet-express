@@ -35,6 +35,7 @@ class MonitorSnapshot(BaseModel):
     chasingpt_ingest: dict = {}
     chasingpt_transcription: dict = {}
     chasingpt_captioning: dict = {}
+    chasingpt_scenes: dict = {}
     system: dict = {}
     backups: dict = {}
     services: dict = {}

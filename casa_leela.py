@@ -760,6 +760,91 @@ def check_chasingpt_captioning() -> dict:
     return result
 
 
+def check_chasingpt_scenes() -> dict:
+    """Chasing Portugal DAM scene-level video indexing backlog (Spec 10): how many video
+    resources have no Scene Index Status set yet, and how many permanently failed indexing.
+    Backlog query joins on relativearchivepath (like check_chasingpt_transcription()), not
+    a bare resource_type filter (like check_chasingpt_captioning()) -- index_scenes.py's own
+    discover_candidates() requires an archive path to locate the file, so a video resource
+    without one isn't actually indexable yet and shouldn't inflate the backlog count. Failed
+    count uses the same correlated NOT IN / JOIN-against-node shape as every other
+    chasingpt_* check here, to avoid resource_node fan-out.
+
+    Like captioning, scene indexing is opt-in on the index_scenes.py side: it silently
+    skips its whole run if openrouter.env is missing OPENROUTER_API_KEY/OPENROUTER_MODEL,
+    which would otherwise leave a fully-disabled scene-indexing pipeline invisible here
+    (backlog climbing with no alert) -- so that gets checked explicitly, same HIGH
+    treatment as missing DB creds."""
+    result: dict = {"backlog": 0, "failed_count": 0}
+
+    openrouter_creds = _read_env_file(CHASINGPT_OPENROUTER_ENV)
+    if not openrouter_creds.get("OPENROUTER_API_KEY") or not openrouter_creds.get("OPENROUTER_MODEL"):
+        result["error"] = (
+            f"chasingpt openrouter.env missing OPENROUTER_API_KEY/OPENROUTER_MODEL "
+            f"({CHASINGPT_OPENROUTER_ENV}) -- index_scenes.py skips its run without these"
+        )
+        result["alert"] = "HIGH"
+        return result
+
+    creds = _read_env_file(CHASINGPT_DB_ENV)
+    user = creds.get("MYSQL_USER")
+    password = creds.get("MYSQL_PASSWORD")
+    database = creds.get("MYSQL_DATABASE")
+    if not user or not password or not database:
+        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
+        result["alert"] = "HIGH"
+        return result
+
+    backlog_sql = """
+    SELECT COUNT(*) FROM resource r
+    JOIN resource_type_field ftf ON ftf.name = 'relativearchivepath'
+    JOIN resource_node path_rn ON path_rn.resource = r.ref
+    JOIN node path ON path.ref = path_rn.node AND path.resource_type_field = ftf.ref
+    WHERE r.resource_type = 3 AND path.name != ''
+    AND r.ref NOT IN (
+        SELECT rn.resource FROM resource_node rn
+        JOIN resource_type_field stf ON stf.name = 'sceneindexstatus'
+        JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
+        WHERE n.name IN ('done', 'failed')
+    );
+    """
+    failed_sql = """
+    SELECT COUNT(*) FROM resource_node rn
+    JOIN resource_type_field stf ON stf.name = 'sceneindexstatus'
+    JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
+    JOIN resource r ON r.ref = rn.resource
+    WHERE n.name = 'failed' AND r.resource_type = 3;
+    """
+
+    query_env = {**os.environ, "MYSQL_PWD": password}
+    for key, sql in (("backlog", backlog_sql), ("failed_count", failed_sql)):
+        rc, out, err = _run(
+            [
+                "docker", "exec",
+                "-e", "MYSQL_PWD",
+                CHASINGPT_DB_CONTAINER,
+                "mariadb", "-N", "-B", "-u", user, database, "-e", sql,
+            ],
+            timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
+            env=query_env,
+        )
+        if rc != 0:
+            result["error"] = f"chasingpt scene indexing DB query ({key}) failed: {err}"
+            result["alert"] = "HIGH"
+            return result
+        try:
+            result[key] = int(out.strip())
+        except ValueError:
+            result["error"] = f"unexpected DB query output for {key}: {out!r}"
+            result["alert"] = "HIGH"
+            return result
+
+    if result["failed_count"] > 0:
+        result["alert"] = "MEDIUM"
+
+    return result
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -1097,6 +1182,7 @@ def run_full() -> dict:
         "chasingpt_ingest": check_chasingpt_ingest(),
         "chasingpt_transcription": check_chasingpt_transcription(),
         "chasingpt_captioning": check_chasingpt_captioning(),
+        "chasingpt_scenes": check_chasingpt_scenes(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -1112,6 +1198,7 @@ def run_full() -> dict:
     n_quarantined = snapshot["chasingpt_ingest"].get("quarantined_count", 0)
     n_transcribe_failed = snapshot["chasingpt_transcription"].get("failed_count", 0)
     n_caption_failed = snapshot["chasingpt_captioning"].get("failed_count", 0)
+    n_scenes_failed = snapshot["chasingpt_scenes"].get("failed_count", 0)
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
@@ -1121,7 +1208,8 @@ def run_full() -> dict:
         f"{n_stale_mounts} stale NFS mount(s), "
         f"{n_quarantined} quarantined chasingpt project(s), "
         f"{n_transcribe_failed} failed chasingpt transcription(s), "
-        f"{n_caption_failed} failed chasingpt caption(s)"
+        f"{n_caption_failed} failed chasingpt caption(s), "
+        f"{n_scenes_failed} failed chasingpt scene index(es)"
     )
     return snapshot
 
