@@ -57,6 +57,13 @@ SEVERITY RULES (apply all that match):
   need a human to look at chasingpt-transcribe's logs (MEDIUM). An "error" key (DB unreachable,
   bad creds) is HIGH. backlog alone climbing is not itself an issue — it just means the timer
   hasn't caught up yet — only alert on it if it's paired with an "alert" key.
+- chasingpt_captioning: Chasing Portugal DAM's AI photo-captioning backlog via OpenRouter (same
+  separate app as chasingpt_ingest/chasingpt_transcription, not a Docker stack). Leela has already
+  computed the right severity in its "alert" field when present — USE THAT VALUE AS-IS.
+  failed_count > 0 means one or more photos permanently failed captioning (caption.py never
+  retries a failed resource) and need a human to look at chasingpt-caption's logs (MEDIUM). An
+  "error" key (DB unreachable, bad creds, or missing openrouter.env) is HIGH. backlog alone
+  climbing is not itself an issue — only alert on it if it's paired with an "alert" key.
 - Container has crash_looping: true: ALWAYS HIGH regardless of image — a container repeatedly
   restarting is exactly as urgent whether it's Postgres or a plain app container. Do not
   downgrade these to MEDIUM.
@@ -142,6 +149,7 @@ def _slim_snapshot(snapshot: dict) -> dict:
         "stale_nfs_mounts": [m for m in snapshot.get("nfs_mount_health", []) if m.get("alert")],
         "chasingpt_ingest": snapshot.get("chasingpt_ingest", {}),
         "chasingpt_transcription": snapshot.get("chasingpt_transcription", {}),
+        "chasingpt_captioning": snapshot.get("chasingpt_captioning", {}),
         "system": {
             "memory_summary": snapshot.get("system", {}).get("memory_summary"),
             "uptime": snapshot.get("system", {}).get("uptime"),

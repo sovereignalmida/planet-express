@@ -34,6 +34,7 @@ class MonitorSnapshot(BaseModel):
     nfs_mount_health: list[dict] = []
     chasingpt_ingest: dict = {}
     chasingpt_transcription: dict = {}
+    chasingpt_captioning: dict = {}
     system: dict = {}
     backups: dict = {}
     services: dict = {}

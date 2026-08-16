@@ -574,18 +574,24 @@ CHASINGPT_DB_ENV = Path("/home/casaroot/stacks/chasingpt/db.env")
 CHASINGPT_DB_CONTAINER = "CASA_CHASINGPT_DB"
 CHASINGPT_DB_QUERY_TIMEOUT_SECONDS = 15
 
+# Chasing Portugal DAM AI captioning pipeline (caption.py) -- same opt-in OpenRouter
+# creds file it reads itself; caption.py silently skips its whole run if this is
+# missing/incomplete, so check_chasingpt_captioning() needs to check it explicitly
+# rather than only checking the DB creds.
+CHASINGPT_OPENROUTER_ENV = Path("/home/casaroot/apps/chasingpt/openrouter.env")
 
-def _read_chasingpt_db_creds() -> dict:
+
+def _read_env_file(path: Path) -> dict:
     values: dict = {}
-    if not CHASINGPT_DB_ENV.is_file():
+    if not path.is_file():
         return values
     try:
-        text = CHASINGPT_DB_ENV.read_text()
+        text = path.read_text()
     except OSError:
         # Permission error, I/O error, or a race with the file being rewritten --
-        # report as missing creds (HIGH, via check_chasingpt_transcription()'s
-        # empty-values check) rather than letting this abort the whole run_full()
-        # pipeline before it can write a snapshot.
+        # report as missing creds (HIGH, via the caller's empty-values check) rather
+        # than letting this abort the whole run_full() pipeline before it can write
+        # a snapshot.
         return values
     for line in text.splitlines():
         line = line.strip()
@@ -606,7 +612,7 @@ def check_chasingpt_transcription() -> dict:
     pattern check_chasingpt_ingest() needs for its direct NFS filesystem calls."""
     result: dict = {"backlog": 0, "failed_count": 0}
 
-    creds = _read_chasingpt_db_creds()
+    creds = _read_env_file(CHASINGPT_DB_ENV)
     user = creds.get("MYSQL_USER")
     password = creds.get("MYSQL_PASSWORD")
     database = creds.get("MYSQL_DATABASE")
@@ -660,6 +666,85 @@ def check_chasingpt_transcription() -> dict:
         )
         if rc != 0:
             result["error"] = f"chasingpt transcription DB query ({key}) failed: {err}"
+            result["alert"] = "HIGH"
+            return result
+        try:
+            result[key] = int(out.strip())
+        except ValueError:
+            result["error"] = f"unexpected DB query output for {key}: {out!r}"
+            result["alert"] = "HIGH"
+            return result
+
+    if result["failed_count"] > 0:
+        result["alert"] = "MEDIUM"
+
+    return result
+
+
+def check_chasingpt_captioning() -> dict:
+    """Chasing Portugal DAM AI photo-captioning backlog (Spec 9): how many photo
+    resources have no AI Caption Status set yet, and how many permanently failed
+    captioning. Same query shape/creds/failure-handling as
+    check_chasingpt_transcription() -- correlated NOT IN subqueries against
+    resource_node/node, not a JOIN-based aggregate, to avoid fan-out.
+
+    Unlike transcription, captioning is opt-in on the caption.py side: it silently
+    skips its whole run if openrouter.env is missing OPENROUTER_API_KEY/
+    OPENROUTER_MODEL, which would otherwise leave a fully-disabled captioning
+    pipeline invisible here (backlog climbing with no alert) -- so that gets checked
+    explicitly, same HIGH treatment as missing DB creds."""
+    result: dict = {"backlog": 0, "failed_count": 0}
+
+    openrouter_creds = _read_env_file(CHASINGPT_OPENROUTER_ENV)
+    if not openrouter_creds.get("OPENROUTER_API_KEY") or not openrouter_creds.get("OPENROUTER_MODEL"):
+        result["error"] = (
+            f"chasingpt openrouter.env missing OPENROUTER_API_KEY/OPENROUTER_MODEL "
+            f"({CHASINGPT_OPENROUTER_ENV}) -- caption.py skips its run without these"
+        )
+        result["alert"] = "HIGH"
+        return result
+
+    creds = _read_env_file(CHASINGPT_DB_ENV)
+    user = creds.get("MYSQL_USER")
+    password = creds.get("MYSQL_PASSWORD")
+    database = creds.get("MYSQL_DATABASE")
+    if not user or not password or not database:
+        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
+        result["alert"] = "HIGH"
+        return result
+
+    backlog_sql = """
+    SELECT COUNT(*) FROM resource r
+    WHERE r.resource_type = 1
+    AND r.ref NOT IN (
+        SELECT rn.resource FROM resource_node rn
+        JOIN resource_type_field stf ON stf.name = 'aicaptionstatus'
+        JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
+        WHERE n.name IN ('done', 'failed')
+    );
+    """
+    failed_sql = """
+    SELECT COUNT(*) FROM resource_node rn
+    JOIN resource_type_field stf ON stf.name = 'aicaptionstatus'
+    JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
+    JOIN resource r ON r.ref = rn.resource
+    WHERE n.name = 'failed' AND r.resource_type = 1;
+    """
+
+    query_env = {**os.environ, "MYSQL_PWD": password}
+    for key, sql in (("backlog", backlog_sql), ("failed_count", failed_sql)):
+        rc, out, err = _run(
+            [
+                "docker", "exec",
+                "-e", "MYSQL_PWD",
+                CHASINGPT_DB_CONTAINER,
+                "mariadb", "-N", "-B", "-u", user, database, "-e", sql,
+            ],
+            timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
+            env=query_env,
+        )
+        if rc != 0:
+            result["error"] = f"chasingpt captioning DB query ({key}) failed: {err}"
             result["alert"] = "HIGH"
             return result
         try:
@@ -1011,6 +1096,7 @@ def run_full() -> dict:
         "nfs_mount_health": check_nfs_mount_health(),
         "chasingpt_ingest": check_chasingpt_ingest(),
         "chasingpt_transcription": check_chasingpt_transcription(),
+        "chasingpt_captioning": check_chasingpt_captioning(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -1025,6 +1111,7 @@ def run_full() -> dict:
     n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
     n_quarantined = snapshot["chasingpt_ingest"].get("quarantined_count", 0)
     n_transcribe_failed = snapshot["chasingpt_transcription"].get("failed_count", 0)
+    n_caption_failed = snapshot["chasingpt_captioning"].get("failed_count", 0)
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
@@ -1033,7 +1120,8 @@ def run_full() -> dict:
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
         f"{n_stale_mounts} stale NFS mount(s), "
         f"{n_quarantined} quarantined chasingpt project(s), "
-        f"{n_transcribe_failed} failed chasingpt transcription(s)"
+        f"{n_transcribe_failed} failed chasingpt transcription(s), "
+        f"{n_caption_failed} failed chasingpt caption(s)"
     )
     return snapshot
 
