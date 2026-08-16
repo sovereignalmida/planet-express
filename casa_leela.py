@@ -845,6 +845,172 @@ def check_chasingpt_scenes() -> dict:
     return result
 
 
+# Chasing Portugal DAM retrieval baskets (retrieve_baskets.py, Spec 11) -- same DB
+# creds/container every other chasingpt_* check uses, kept in sync manually since it's
+# a separate app, not a Planet Express stack.
+CHASINGPT_RETRIEVED_ROOT = Path("/chasingportugal_nfs/03_RETRIEVED")
+CHASINGPT_RETRIEVE_PREFIX = "RETRIEVE_"
+CHASINGPT_RETRIEVAL_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _chasingpt_retrieval_slug(name: str) -> str:
+    """Mirrors retrieve_baskets.py's slugify() exactly -- has to match its basket-dir
+    naming or this check ends up looking in the wrong place."""
+    stripped = name[len(CHASINGPT_RETRIEVE_PREFIX):] if name.startswith(CHASINGPT_RETRIEVE_PREFIX) else name
+    slug = CHASINGPT_RETRIEVAL_SLUG_RE.sub("-", stripped.lower()).strip("-")
+    return slug or "basket"
+
+
+def _scan_chasingpt_retrieval_baskets(collections: list) -> dict:
+    """Actual directory/manifest inspection for check_chasingpt_retrieval() -- kept
+    separate so it can be run under a hard timeout (see caller), same pattern as
+    _scan_chasingpt_ingest(). `collections` is a list of (ref, name, member_count)
+    tuples already resolved from the DB by the caller.
+
+    "Pending" is only an approximate signal (a basket's on-disk file count vs. its
+    collection's member count -- errors/collisions mean these aren't always exactly
+    equal even on a fully caught-up basket) good enough to flag a basket the 15-min
+    timer hasn't gotten to yet; it deliberately never sets alert on its own since some
+    catch-up lag between runs is normal, not a failure."""
+    result: dict = {"pending_baskets": 0, "baskets_with_errors": 0}
+
+    if not os.path.ismount(CHASINGPT_RETRIEVED_ROOT.parent) or not CHASINGPT_RETRIEVED_ROOT.is_dir():
+        result["error"] = f"{CHASINGPT_RETRIEVED_ROOT} missing or unmounted -- mount may be stale"
+        result["alert"] = "HIGH"
+        return result
+
+    for collection_ref, collection_name, member_count in collections:
+        basket_dir = CHASINGPT_RETRIEVED_ROOT / f"{_chasingpt_retrieval_slug(collection_name)}-{collection_ref}"
+        manifest_path = basket_dir / "manifest.json"
+
+        if not basket_dir.is_dir():
+            if member_count > 0:
+                result["pending_baskets"] += 1
+            continue
+
+        file_count = sum(
+            1 for entry in basket_dir.iterdir()
+            if entry.is_file() and entry.name != "manifest.json"
+        )
+        if file_count < member_count:
+            result["pending_baskets"] += 1
+
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (OSError, ValueError):
+                # A manifest that's missing/unreadable/corrupt isn't itself an alert --
+                # the file-count comparison above already covers "did the basket keep
+                # up," this is just extra detail retrieve_baskets.py writes.
+                continue
+            if isinstance(manifest, dict) and manifest.get("errors"):
+                result["baskets_with_errors"] += 1
+
+    if result["baskets_with_errors"] > 0:
+        result["alert"] = "MEDIUM"
+
+    return result
+
+
+def check_chasingpt_retrieval() -> dict:
+    """Chasing Portugal DAM retrieval-basket health (Spec 11): how many RETRIEVE_*
+    collections haven't fully copied to 03_RETRIEVED yet (pending_baskets, informational
+    only -- some catch-up lag between the 15-min timer runs is normal), and how many
+    baskets have a resource that failed on their most recent retrieve_baskets.py run
+    (baskets_with_errors, from manifest.json's errors list -- this is the one that
+    actually alerts).
+
+    Discovers RETRIEVE_* collections and their member counts via the same read-only DB
+    query/creds retrieve_baskets.py itself uses; the directory/manifest inspection then
+    runs under a hard timeout via a daemon thread, same NFS-hang tradeoff as
+    check_chasingpt_ingest()'s comment above."""
+    result: dict = {"pending_baskets": 0, "baskets_with_errors": 0}
+
+    creds = _read_env_file(CHASINGPT_DB_ENV)
+    user = creds.get("MYSQL_USER")
+    password = creds.get("MYSQL_PASSWORD")
+    database = creds.get("MYSQL_DATABASE")
+    if not user or not password or not database:
+        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
+        result["alert"] = "HIGH"
+        return result
+
+    query_env = {**os.environ, "MYSQL_PWD": password}
+    # LIKE '_' is a single-char wildcard, so the literal underscore in
+    # CHASINGPT_RETRIEVE_PREFIX ("RETRIEVE_") has to be escaped with a backslash
+    # (MariaDB's default LIKE escape char) -- otherwise this also matches e.g.
+    # "RETRIEVEX..." collections that were never meant to be picked up here.
+    like_prefix = CHASINGPT_RETRIEVE_PREFIX.replace("_", "\\_")
+    collections_sql = f"""
+    SELECT c.ref, c.name, COUNT(cr.resource)
+    FROM collection c
+    LEFT JOIN collection_resource cr ON cr.collection = c.ref
+    WHERE c.name LIKE '{like_prefix}%'
+    GROUP BY c.ref, c.name;
+    """
+    rc, out, err = _run(
+        [
+            "docker", "exec",
+            "-e", "MYSQL_PWD",
+            CHASINGPT_DB_CONTAINER,
+            "mariadb", "-N", "-B", "-u", user, database, "-e", collections_sql,
+        ],
+        timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
+        env=query_env,
+    )
+    if rc != 0:
+        result["error"] = f"chasingpt retrieval collections DB query failed: {err}"
+        result["alert"] = "HIGH"
+        return result
+
+    collections = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3:
+            continue
+        ref_str, name, count_str = parts
+        try:
+            collections.append((int(ref_str), name, int(count_str)))
+        except ValueError:
+            continue
+
+    # Always run the scan, even with zero RETRIEVE_* collections right now -- it still
+    # needs to confirm CHASINGPT_RETRIEVED_ROOT is mounted (retrieve_baskets.py itself
+    # would abort on that regardless of whether any baskets currently exist), not just
+    # report an empty-but-"healthy" result.
+    scan_result: dict = {}
+
+    def _run_scan() -> None:
+        try:
+            scan_result["value"] = _scan_chasingpt_retrieval_baskets(collections)
+        except OSError as e:
+            # e.g. an NFS I/O error mid-iterdir()/mid-read (not just a hang) -- report
+            # it as the same kind of alert a missing/unmounted root gets, rather than
+            # letting a KeyError on scan_result below abort the whole run_full()
+            # pipeline, same pattern as check_chasingpt_ingest()'s _run_scan().
+            scan_result["value"] = {
+                "pending_baskets": 0,
+                "baskets_with_errors": 0,
+                "error": f"scan failed: {e}",
+                "alert": "HIGH",
+            }
+
+    thread = threading.Thread(target=_run_scan, daemon=True)
+    thread.start()
+    thread.join(timeout=CHASINGPT_SCAN_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        return {
+            "pending_baskets": 0,
+            "baskets_with_errors": 0,
+            "error": f"scan timed out after {CHASINGPT_SCAN_TIMEOUT_SECONDS}s -- mount may be unreachable",
+            "alert": "HIGH",
+        }
+
+    return scan_result["value"]
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -1183,6 +1349,7 @@ def run_full() -> dict:
         "chasingpt_transcription": check_chasingpt_transcription(),
         "chasingpt_captioning": check_chasingpt_captioning(),
         "chasingpt_scenes": check_chasingpt_scenes(),
+        "chasingpt_retrieval": check_chasingpt_retrieval(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -1199,6 +1366,7 @@ def run_full() -> dict:
     n_transcribe_failed = snapshot["chasingpt_transcription"].get("failed_count", 0)
     n_caption_failed = snapshot["chasingpt_captioning"].get("failed_count", 0)
     n_scenes_failed = snapshot["chasingpt_scenes"].get("failed_count", 0)
+    n_retrieval_errors = snapshot["chasingpt_retrieval"].get("baskets_with_errors", 0)
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
@@ -1209,7 +1377,8 @@ def run_full() -> dict:
         f"{n_quarantined} quarantined chasingpt project(s), "
         f"{n_transcribe_failed} failed chasingpt transcription(s), "
         f"{n_caption_failed} failed chasingpt caption(s), "
-        f"{n_scenes_failed} failed chasingpt scene index(es)"
+        f"{n_scenes_failed} failed chasingpt scene index(es), "
+        f"{n_retrieval_errors} chasingpt retrieval basket(s) with errors"
     )
     return snapshot
 

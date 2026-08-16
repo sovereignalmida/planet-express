@@ -72,6 +72,14 @@ SEVERITY RULES (apply all that match):
   chasingpt-scenes's logs (MEDIUM). An "error" key (DB unreachable, bad creds, or missing
   openrouter.env) is HIGH. backlog alone climbing is not itself an issue — only alert on it if
   it's paired with an "alert" key.
+- chasingpt_retrieval: Chasing Portugal DAM's retrieval-basket hand-off (same separate app as the
+  other chasingpt_* entries, not a Docker stack). Leela has already computed the right severity in
+  its "alert" field when present — USE THAT VALUE AS-IS. baskets_with_errors > 0 means one or more
+  RETRIEVE_* collections had a resource fail on retrieve_baskets.py's most recent run (bad/missing
+  archive path, unreadable source file) and need a human to look at chasingpt-retrieval's logs and
+  the affected basket's manifest.json (MEDIUM). An "error" key (DB unreachable, bad creds, or NFS
+  mount unavailable) is HIGH. pending_baskets alone is not itself an issue — it just means the
+  15-min timer hasn't caught up yet — never alert on it by itself.
 - Container has crash_looping: true: ALWAYS HIGH regardless of image — a container repeatedly
   restarting is exactly as urgent whether it's Postgres or a plain app container. Do not
   downgrade these to MEDIUM.
@@ -159,6 +167,7 @@ def _slim_snapshot(snapshot: dict) -> dict:
         "chasingpt_transcription": snapshot.get("chasingpt_transcription", {}),
         "chasingpt_captioning": snapshot.get("chasingpt_captioning", {}),
         "chasingpt_scenes": snapshot.get("chasingpt_scenes", {}),
+        "chasingpt_retrieval": snapshot.get("chasingpt_retrieval", {}),
         "system": {
             "memory_summary": snapshot.get("system", {}).get("memory_summary"),
             "uptime": snapshot.get("system", {}).get("uptime"),
