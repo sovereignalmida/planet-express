@@ -34,12 +34,12 @@ log = logging.getLogger("planetexpress.leela")
 
 
 # ── Shell helper ──────────────────────────────────────────────────────────────
-def _run(cmd: str | list, timeout: int = 30) -> tuple[int, str, str]:
+def _run(cmd: str | list, timeout: int = 30, env: dict | None = None) -> tuple[int, str, str]:
     if isinstance(cmd, str):
         cmd = shlex.split(cmd)
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, check=False
+            cmd, capture_output=True, text=True, timeout=timeout, check=False, env=env
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
@@ -568,6 +568,113 @@ def check_chasingpt_ingest() -> dict:
     return scan_result["value"]
 
 
+# Chasing Portugal DAM transcription pipeline (transcribe.py) -- same DB/creds it uses
+# itself, kept in sync manually since it's a separate app, not a Planet Express stack.
+CHASINGPT_DB_ENV = Path("/home/casaroot/stacks/chasingpt/db.env")
+CHASINGPT_DB_CONTAINER = "CASA_CHASINGPT_DB"
+CHASINGPT_DB_QUERY_TIMEOUT_SECONDS = 15
+
+
+def _read_chasingpt_db_creds() -> dict:
+    values: dict = {}
+    if not CHASINGPT_DB_ENV.is_file():
+        return values
+    try:
+        text = CHASINGPT_DB_ENV.read_text()
+    except OSError:
+        # Permission error, I/O error, or a race with the file being rewritten --
+        # report as missing creds (HIGH, via check_chasingpt_transcription()'s
+        # empty-values check) rather than letting this abort the whole run_full()
+        # pipeline before it can write a snapshot.
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip()
+    return values
+
+
+def check_chasingpt_transcription() -> dict:
+    """Chasing Portugal DAM Whisper transcription backlog: how many eligible video/audio
+    resources are still untranscribed, and how many permanently failed transcription.
+
+    Queries the resourcespace DB directly via docker exec (same container/creds
+    transcribe.py itself uses) -- a read-only COUNT query, not a filesystem walk, so this
+    goes through _run()'s existing subprocess timeout rather than the daemon-thread
+    pattern check_chasingpt_ingest() needs for its direct NFS filesystem calls."""
+    result: dict = {"backlog": 0, "failed_count": 0}
+
+    creds = _read_chasingpt_db_creds()
+    user = creds.get("MYSQL_USER")
+    password = creds.get("MYSQL_PASSWORD")
+    database = creds.get("MYSQL_DATABASE")
+    if not user or not password or not database:
+        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
+        result["alert"] = "HIGH"
+        return result
+
+    # Two separate single-value queries rather than one JOIN-based aggregate: a LEFT JOIN
+    # through resource_node here would fan out one row per *any* field value the resource
+    # has (not just transcriptionstatus), over-counting backlog/failed -- correlated
+    # subqueries (same NOT IN pattern transcribe.py's own discover_candidates() uses)
+    # avoid that fan-out entirely.
+    backlog_sql = """
+    SELECT COUNT(*) FROM resource r
+    JOIN resource_type_field ftf ON ftf.name = 'relativearchivepath'
+    JOIN resource_node path_rn ON path_rn.resource = r.ref
+    JOIN node path ON path.ref = path_rn.node AND path.resource_type_field = ftf.ref
+    WHERE r.resource_type IN (3, 4) AND path.name != ''
+    AND r.ref NOT IN (
+        SELECT rn.resource FROM resource_node rn
+        JOIN resource_type_field stf ON stf.name = 'transcriptionstatus'
+        JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
+        WHERE n.name IN ('done', 'failed', 'no_audio')
+    );
+    """
+    failed_sql = """
+    SELECT COUNT(*) FROM resource_node rn
+    JOIN resource_type_field stf ON stf.name = 'transcriptionstatus'
+    JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
+    JOIN resource r ON r.ref = rn.resource
+    WHERE n.name = 'failed' AND r.resource_type IN (3, 4);
+    """
+
+    # Password never appears as an argv element (visible to any local user via `ps`/
+    # `/proc/<pid>/cmdline`): it's set only in this subprocess's own environment, and
+    # `docker exec -e MYSQL_PWD` (name only, no "=value") forwards that env var's value
+    # into the container for the mariadb CLI to read -- the value itself is never part
+    # of any command line, ours or the container's.
+    query_env = {**os.environ, "MYSQL_PWD": password}
+    for key, sql in (("backlog", backlog_sql), ("failed_count", failed_sql)):
+        rc, out, err = _run(
+            [
+                "docker", "exec",
+                "-e", "MYSQL_PWD",
+                CHASINGPT_DB_CONTAINER,
+                "mariadb", "-N", "-B", "-u", user, database, "-e", sql,
+            ],
+            timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
+            env=query_env,
+        )
+        if rc != 0:
+            result["error"] = f"chasingpt transcription DB query ({key}) failed: {err}"
+            result["alert"] = "HIGH"
+            return result
+        try:
+            result[key] = int(out.strip())
+        except ValueError:
+            result["error"] = f"unexpected DB query output for {key}: {out!r}"
+            result["alert"] = "HIGH"
+            return result
+
+    if result["failed_count"] > 0:
+        result["alert"] = "MEDIUM"
+
+    return result
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -903,6 +1010,7 @@ def run_full() -> dict:
         "unraid_exports": check_unraid_exports(),
         "nfs_mount_health": check_nfs_mount_health(),
         "chasingpt_ingest": check_chasingpt_ingest(),
+        "chasingpt_transcription": check_chasingpt_transcription(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -916,6 +1024,7 @@ def run_full() -> dict:
     n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
     n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
     n_quarantined = snapshot["chasingpt_ingest"].get("quarantined_count", 0)
+    n_transcribe_failed = snapshot["chasingpt_transcription"].get("failed_count", 0)
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
@@ -923,7 +1032,8 @@ def run_full() -> dict:
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
         f"{n_stale_mounts} stale NFS mount(s), "
-        f"{n_quarantined} quarantined chasingpt project(s)"
+        f"{n_quarantined} quarantined chasingpt project(s), "
+        f"{n_transcribe_failed} failed chasingpt transcription(s)"
     )
     return snapshot
 
