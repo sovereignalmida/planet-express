@@ -15,10 +15,13 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import re
 import shlex
 import subprocess
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -466,6 +469,105 @@ def check_nfs_mount_health() -> list[dict]:
     return results
 
 
+# Chasing Portugal DAM ingest pipeline (ingest.py) -- same NAS mount/state paths it uses
+# itself, kept in sync manually since it's a separate app, not a Planet Express stack.
+CHASINGPT_INGEST_ROOT = Path("/chasingportugal_nfs/01_INGEST")
+CHASINGPT_QUARANTINED = CHASINGPT_INGEST_ROOT / ".quarantined"
+CHASINGPT_STATE_DIR = Path("/home/casaroot/apps/chasingpt/processing")
+CHASINGPT_IGNORE_DIR_NAMES = {".completed", ".quarantined"}
+CHASINGPT_STUCK_LOCK_AGE_SECONDS = 2 * 60 * 60  # a lock older than this means ingest.py died mid-run
+CHASINGPT_SCAN_TIMEOUT_SECONDS = 10
+
+
+def _scan_chasingpt_ingest() -> dict:
+    """Actual traversal for check_chasingpt_ingest() -- kept separate so it can be run
+    under a hard timeout (see caller)."""
+    result: dict = {"queue_depth": 0, "quarantined_count": 0, "stuck_locks": []}
+
+    # os.path.ismount(), not just is_dir(): mirrors ingest.py's own check (NAS_ROOT in
+    # chasingpt/ingest/ingest.py) -- if the NFS mount is detached, 01_INGEST can still
+    # resolve as a plain empty local directory and report a false "healthy, empty queue".
+    if not os.path.ismount(CHASINGPT_INGEST_ROOT.parent) or not CHASINGPT_INGEST_ROOT.is_dir():
+        result["error"] = f"{CHASINGPT_INGEST_ROOT} missing or unmounted -- mount may be stale"
+        result["alert"] = "HIGH"
+        return result
+
+    result["queue_depth"] = sum(
+        1 for entry in CHASINGPT_INGEST_ROOT.iterdir()
+        if entry.is_dir() and entry.name not in CHASINGPT_IGNORE_DIR_NAMES and not entry.name.startswith(".")
+    )
+
+    if CHASINGPT_QUARANTINED.is_dir():
+        result["quarantined_count"] = sum(1 for entry in CHASINGPT_QUARANTINED.iterdir() if entry.is_dir())
+    if result["quarantined_count"] > 0:
+        result["alert"] = "MEDIUM"
+
+    if CHASINGPT_STATE_DIR.is_dir():
+        now = time.time()
+        for lock_file in CHASINGPT_STATE_DIR.glob("*.lock"):
+            # ingest.py can remove this lock between glob() and stat() as it finishes a
+            # project -- that's a normal race, not a scan failure, so skip it rather than
+            # letting the FileNotFoundError abort the whole run_full() pipeline.
+            try:
+                age = now - lock_file.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if age > CHASINGPT_STUCK_LOCK_AGE_SECONDS:
+                result["stuck_locks"].append({"project": lock_file.stem, "age_hours": round(age / 3600, 1)})
+        if result["stuck_locks"]:
+            result["alert"] = "HIGH"
+
+    return result
+
+
+def check_chasingpt_ingest() -> dict:
+    """Chasing Portugal DAM ingest queue health: pending/ready projects, quarantined
+    count, and any stuck lock file left behind by a crashed ingest.py run.
+
+    Not wired into NFS_MOUNT_WATCHLIST/check_mounts() -- those check host-level
+    reachability, this checks the app's own queue state on top of that mount.
+
+    /chasingportugal_nfs is hard-mounted, so if the NAS goes unreachable mid-scan,
+    Path.is_dir()/iterdir() can block indefinitely instead of failing fast -- unlike
+    check_unraid_exports()/check_nfs_mount_health() above, there's no subprocess
+    `timeout` to wrap here since this walks the local filesystem directly, not a
+    remote command. The scan runs in a daemon thread with a hard deadline instead;
+    same leak-on-hang tradeoff as check_nfs_mount_health()'s docker-exec comment --
+    a wedged thread is left behind rather than letting one hung scan take down the
+    whole run_full() pipeline before it can write a snapshot or raise this alert.
+    daemon=True (rather than ThreadPoolExecutor, whose worker threads are non-daemon)
+    so a genuinely wedged scan can't also block interpreter/process shutdown."""
+    scan_result: dict = {}
+
+    def _run_scan() -> None:
+        try:
+            scan_result["value"] = _scan_chasingpt_ingest()
+        except OSError as e:
+            # e.g. an NFS I/O error mid-iterdir() (not just a hang) -- report it as the
+            # same kind of alert a missing/unmounted root gets, rather than letting a
+            # KeyError on scan_result below abort the whole run_full() pipeline.
+            scan_result["value"] = {
+                "queue_depth": 0,
+                "quarantined_count": 0,
+                "stuck_locks": [],
+                "error": f"scan failed: {e}",
+                "alert": "HIGH",
+            }
+
+    thread = threading.Thread(target=_run_scan, daemon=True)
+    thread.start()
+    thread.join(timeout=CHASINGPT_SCAN_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        return {
+            "queue_depth": 0,
+            "quarantined_count": 0,
+            "stuck_locks": [],
+            "error": f"scan timed out after {CHASINGPT_SCAN_TIMEOUT_SECONDS}s -- mount may be unreachable",
+            "alert": "HIGH",
+        }
+    return scan_result["value"]
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -800,6 +902,7 @@ def run_full() -> dict:
         "mounts": check_mounts(),
         "unraid_exports": check_unraid_exports(),
         "nfs_mount_health": check_nfs_mount_health(),
+        "chasingpt_ingest": check_chasingpt_ingest(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -812,13 +915,15 @@ def run_full() -> dict:
     n_missing_stacks = sum(1 for s in snapshot["stack_completeness"] if s.get("alert"))
     n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
     n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
+    n_quarantined = snapshot["chasingpt_ingest"].get("quarantined_count", 0)
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
         f"{n_missing_stacks} stack(s) with missing containers, "
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
-        f"{n_stale_mounts} stale NFS mount(s)"
+        f"{n_stale_mounts} stale NFS mount(s), "
+        f"{n_quarantined} quarantined chasingpt project(s)"
     )
     return snapshot
 

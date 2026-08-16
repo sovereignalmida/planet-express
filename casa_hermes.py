@@ -43,6 +43,13 @@ SEVERITY RULES (apply all that match):
   severity in each entry's "alert" field ("HIGH" for a confirmed stale file handle, "MEDIUM" for
   any other probe error) — USE THAT VALUE AS-IS, don't re-derive it. suggested_action should be
   to restart the affected container to force a fresh bind mount.
+- chasingpt_ingest: Chasing Portugal DAM's ingest queue (a separate app, not a Docker stack).
+  Leela has already computed the right severity in its "alert" field when present — USE THAT
+  VALUE AS-IS. quarantined_count > 0 means one or more projects failed ingest repeatedly and
+  need a human to look at 01_INGEST/.quarantined (MEDIUM). Any entry in stuck_locks means
+  ingest.py died mid-run and needs manual cleanup of the stale lock file (HIGH). An "error" key
+  (mount missing) is HIGH. queue_depth alone climbing is not itself an issue — only alert on it
+  if it's paired with an "alert" key.
 - Container has crash_looping: true: ALWAYS HIGH regardless of image — a container repeatedly
   restarting is exactly as urgent whether it's Postgres or a plain app container. Do not
   downgrade these to MEDIUM.
@@ -126,6 +133,7 @@ def _slim_snapshot(snapshot: dict) -> dict:
         # Only stale mounts -- a clean probe with no "alert" key is not interesting to
         # Hermes, same principle as healthy containers/complete stacks above.
         "stale_nfs_mounts": [m for m in snapshot.get("nfs_mount_health", []) if m.get("alert")],
+        "chasingpt_ingest": snapshot.get("chasingpt_ingest", {}),
         "system": {
             "memory_summary": snapshot.get("system", {}).get("memory_summary"),
             "uptime": snapshot.get("system", {}).get("uptime"),
