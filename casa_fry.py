@@ -24,7 +24,7 @@ import config
 
 log = logging.getLogger("planetexpress.fry")
 
-MAX_TOKENS = 8000
+MAX_TOKENS = 16000
 MAX_SEARCH_USES = 4  # Anthropic only — OpenAI's Responses API web_search tool has no per-call cap
 MAX_FETCH_USES = 4   # Anthropic only — no web_fetch-equivalent tool on the OpenAI side
 
@@ -128,7 +128,14 @@ def _ask_anthropic(user_content: str) -> str:
         messages=[{"role": "user", "content": user_content}],
     ) as stream:
         response = stream.get_final_message()
-    return next((b.text for b in response.content if b.type == "text"), "")
+    text = next((b.text for b in response.content if b.type == "text"), "")
+    if not text:
+        block_types = [b.type for b in response.content]
+        log.error(
+            f"Fry's Anthropic response had no text block (stop_reason={response.stop_reason!r}, "
+            f"content block types={block_types!r}) — likely ran out of tokens mid-research"
+        )
+    return text
 
 
 def _ask_openai(user_content: str) -> str:
@@ -145,6 +152,8 @@ def _ask_openai(user_content: str) -> str:
             {"role": "user", "content": user_content},
         ],
     )
+    if not response.output_text:
+        log.error(f"Fry's OpenAI response had no output_text (status={response.status!r})")
     return response.output_text
 
 
