@@ -856,7 +856,7 @@ CHASINGPT_RETRIEVAL_SLUG_RE = re.compile(r"[^a-z0-9]+")
 def _chasingpt_retrieval_slug(name: str) -> str:
     """Mirrors retrieve_baskets.py's slugify() exactly -- has to match its basket-dir
     naming or this check ends up looking in the wrong place."""
-    stripped = name[len(CHASINGPT_RETRIEVE_PREFIX):] if name.startswith(CHASINGPT_RETRIEVE_PREFIX) else name
+    stripped = name.removeprefix(CHASINGPT_RETRIEVE_PREFIX)
     slug = CHASINGPT_RETRIEVAL_SLUG_RE.sub("-", stripped.lower()).strip("-")
     return slug or "basket"
 
