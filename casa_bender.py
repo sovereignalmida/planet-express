@@ -617,7 +617,10 @@ def execute(
         _log_step(plan_id, step, exit_code, stdout, stderr)
 
         ok = _step_succeeded(command, exit_code)
-        error_summary = stderr[:300] if stderr and not ok else ""
+        # Many failures (e.g. a probe script that echoes its diagnosis and exits 1)
+        # signal via stdout with empty stderr — fall back to stdout so that message
+        # isn't silently dropped from the error summary shown to the user/Amy.
+        error_summary = (stderr or stdout)[:300] if not ok else ""
 
         # Telegram step update
         if tg:

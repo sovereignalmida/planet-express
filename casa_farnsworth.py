@@ -859,10 +859,17 @@ def _run_stack_op(notifier: Notifier, verb: str, target: str) -> None:
     notifier.notify(f"{header}\n" + "\n".join(lines))
 
 
-def _investigate_failure(notifier: Notifier, container: str, reason: str) -> None:
+def _investigate_failure(
+    notifier: Notifier, container: str, reason: str, failed_step_detail: str | None = None
+) -> None:
     """Escalate to Amy after a plan step or Zoidberg update has already failed once.
     Never executes anything — sends a diagnosis, and a separate diff proposal with
-    its own approval if a compose-file edit looks necessary."""
+    its own approval if a compose-file edit looks necessary.
+
+    failed_step_detail, when the caller has it, is the actual failing plan step's own
+    command + stdout/stderr — a generic `docker logs` tail of the container's app
+    process often shows nothing wrong (e.g. a health check probe vs. an exec-based
+    mount check), so without this Amy is stuck diagnosing blind."""
     try:
         label_fmt = shlex.quote(
             '{{index .Config.Labels "com.docker.compose.project"}}\t'
@@ -878,7 +885,18 @@ def _investigate_failure(notifier: Notifier, container: str, reason: str) -> Non
         if block:
             _, current_service_yaml = block
 
-        _, logs_tail, _ = bender._run_command(f"docker logs {container} --tail 100")
+        _, container_logs, _ = bender._run_command(f"docker logs {container} --tail 100")
+        logs_tail = container_logs
+        if failed_step_detail:
+            # amy.diagnose() bounds the prompt with logs_tail[-4000:], so the failing
+            # step's own output — the most load-bearing evidence here — goes last and
+            # the (less reliable) container logs are capped up front, or a long docker
+            # logs tail would push the failed-step detail out of the window entirely.
+            logs_tail = (
+                f"[Container's own docker logs tail — may look clean if the failure "
+                f"was in an exec/probe step rather than the app process]\n{container_logs[-2000:]}\n\n"
+                f"[Output of the failing plan step itself]\n{failed_step_detail}"
+            )
         diagnosis = amy.diagnose(
             stack=stack_guess,
             service=service_guess,
@@ -1310,9 +1328,32 @@ def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, 
             )
             container = plan_data.get("container")
             if container:
+                failed_step_detail = None
+                steps = result.get("results") or []
+                if steps:
+                    failed_step = steps[-1]
+                    # bender's "error" is already stderr-with-a-stdout-fallback (see
+                    # error_summary in casa_bender.py execute()), so it isn't reliably
+                    # "the stderr" — label it generically. Only tack on stdout_summary
+                    # separately when it has content "error" doesn't already cover, to
+                    # avoid duplicating the same text under two mislabeled headers.
+                    step_error = failed_step.get("error") or ""
+                    step_stdout = failed_step.get("stdout_summary") or ""
+                    lines = []
+                    if step_error:
+                        lines.append(f"error_summary: {step_error}")
+                    if step_stdout and step_stdout not in step_error:
+                        lines.append(f"stdout: {step_stdout}")
+                    output = "\n".join(lines) or "(empty)"
+                    failed_step_detail = (
+                        f"command: {failed_step.get('command', '')}\n"
+                        f"exit_code: {failed_step.get('exit_code')}\n"
+                        f"output:\n{output}"
+                    )
                 threading.Thread(
                     target=_investigate_failure,
                     args=(notifier, container, f"plan {plan_data['id']} failed: {result.get('errors')}"),
+                    kwargs={"failed_step_detail": failed_step_detail},
                     daemon=True,
                 ).start()
     except Exception as e:
