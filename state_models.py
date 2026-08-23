@@ -32,6 +32,7 @@ class MonitorSnapshot(BaseModel):
     mounts: dict = {}
     unraid_exports: dict = {}
     nfs_mount_health: list[dict] = []
+    vpn_port_forwarding: dict = {}
     chasingpt_ingest: dict = {}
     chasingpt_transcription: dict = {}
     chasingpt_captioning: dict = {}

@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 import yaml
 
 import casa_stackctl as stackctl
@@ -467,6 +468,106 @@ def check_nfs_mount_health() -> list[dict]:
             entry["alert"] = "HIGH" if "stale file handle" in message.lower() else "MEDIUM"
         results.append(entry)
     return results
+
+
+# Gluetun's HTTP control server (published on host port 8000, network/docker-compose.yml)
+# requires this API key, same one GSP's own sync sidecar uses -- defined once in
+# network/config.toml and network/.env's GSP_GTN_API_KEY. Read straight from .env rather
+# than duplicating it into config.yaml, matching the hardcoded "unraid" SSH alias
+# convention check_unraid_exports() above already uses for a similarly stack-local secret.
+GLUETUN_ENV_FILE = Path("/home/casaroot/stacks/network/.env")
+GLUETUN_PORTFORWARD_URL = "http://localhost:8000/v1/portforward"
+QBIT_CONTAINER = "CASA_QBIT"
+QBIT_CONF_PATH = "/config/qBittorrent/qBittorrent.conf"
+
+
+def _read_env_var(env_file: Path, key: str) -> str | None:
+    try:
+        for line in env_file.read_text().splitlines():
+            if line.startswith(f"{key}="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def check_vpn_port_forwarding() -> dict:
+    """Gluetun's own healthcheck only proves the VPN tunnel is up, not that port
+    forwarding actually succeeded -- gluetun can report "healthy" for hours with an
+    empty/stale forwarded port (a NAT-PMP renewal RPC getting refused and never being
+    retried is a real failure mode, seen 2026-08-22, ~12h undetected). qBittorrent and
+    GSP (the sidecar meant to sync gluetun's forwarded port into qBittorrent's listen
+    port) both run inside gluetun's network namespace, so a dead port forward there
+    silently firewalls qBittorrent -- which then cascades into Sonarr/Radarr/etc queues
+    stalling with no alert firing on any of those containers directly. Cross-checks
+    gluetun's live forwarded port against qBittorrent's configured Session\\Port so this
+    drift (GSP stuck retrying against a dead port, exactly as it was before this check
+    existed) is caught on the next scan instead of only surfacing as "Firewalled" in the
+    qBittorrent UI.
+    """
+    api_key = _read_env_var(GLUETUN_ENV_FILE, "GSP_GTN_API_KEY")
+    if not api_key:
+        return {
+            "reachable": False,
+            "error": "GSP_GTN_API_KEY not found in network/.env",
+            "alert": "HIGH",
+            "issue": "cannot verify VPN port forwarding -- API key missing",
+        }
+
+    try:
+        resp = requests.get(
+            GLUETUN_PORTFORWARD_URL, headers={"X-Api-Key": api_key}, timeout=5
+        )
+        resp.raise_for_status()
+        gluetun_port = resp.json().get("port", 0)
+    except (requests.RequestException, ValueError) as e:
+        # A failure to even ask gluetun is itself worth flagging -- an unverifiable check
+        # should never look identical to a clean one (same reasoning as the missing-key
+        # path above and check_unraid_exports()'s reachable=False handling).
+        return {
+            "reachable": False,
+            "error": str(e),
+            "alert": "HIGH",
+            "issue": f"cannot verify VPN port forwarding -- gluetun control server unreachable: {e}",
+        }
+
+    result: dict = {"reachable": True, "gluetun_port": gluetun_port}
+
+    if not gluetun_port:
+        result["alert"] = "HIGH"
+        result["issue"] = "gluetun reports no forwarded port -- port forwarding is dead"
+        return result
+
+    rc, out, err = _run(["docker", "exec", QBIT_CONTAINER, "cat", QBIT_CONF_PATH], timeout=10)
+    if rc != 0:
+        result["alert"] = "HIGH"
+        result["issue"] = f"could not read qBittorrent's config: {err.strip() or out.strip()}"
+        return result
+
+    qbit_port = None
+    for line in out.splitlines():
+        if line.startswith("Session\\Port="):
+            try:
+                qbit_port = int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+            break
+
+    if qbit_port is None:
+        result["alert"] = "HIGH"
+        result["issue"] = "could not find Session\\Port in qBittorrent's config"
+        return result
+
+    result["qbit_port"] = qbit_port
+    if qbit_port != gluetun_port:
+        result["alert"] = "HIGH"
+        result["issue"] = (
+            f"qBittorrent's configured port ({qbit_port}) doesn't match gluetun's "
+            f"forwarded port ({gluetun_port}) -- GSP sync is stuck or qBittorrent needs "
+            f"a restart to pick up the new port"
+        )
+
+    return result
 
 
 # Chasing Portugal DAM ingest pipeline (ingest.py) -- same NAS mount/state paths it uses
@@ -1345,6 +1446,7 @@ def run_full() -> dict:
         "mounts": check_mounts(),
         "unraid_exports": check_unraid_exports(),
         "nfs_mount_health": check_nfs_mount_health(),
+        "vpn_port_forwarding": check_vpn_port_forwarding(),
         "chasingpt_ingest": check_chasingpt_ingest(),
         "chasingpt_transcription": check_chasingpt_transcription(),
         "chasingpt_captioning": check_chasingpt_captioning(),
@@ -1362,6 +1464,7 @@ def run_full() -> dict:
     n_missing_stacks = sum(1 for s in snapshot["stack_completeness"] if s.get("alert"))
     n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
     n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
+    n_vpn_port_issues = 1 if snapshot["vpn_port_forwarding"].get("alert") else 0
     n_quarantined = snapshot["chasingpt_ingest"].get("quarantined_count", 0)
     n_transcribe_failed = snapshot["chasingpt_transcription"].get("failed_count", 0)
     n_caption_failed = snapshot["chasingpt_captioning"].get("failed_count", 0)
@@ -1374,6 +1477,7 @@ def run_full() -> dict:
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
         f"{n_stale_mounts} stale NFS mount(s), "
+        f"{n_vpn_port_issues} VPN port-forwarding issue(s), "
         f"{n_quarantined} quarantined chasingpt project(s), "
         f"{n_transcribe_failed} failed chasingpt transcription(s), "
         f"{n_caption_failed} failed chasingpt caption(s), "

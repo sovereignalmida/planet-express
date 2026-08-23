@@ -163,6 +163,13 @@ def _slim_snapshot(snapshot: dict) -> dict:
         # Only stale mounts -- a clean probe with no "alert" key is not interesting to
         # Hermes, same principle as healthy containers/complete stacks above.
         "stale_nfs_mounts": [m for m in snapshot.get("nfs_mount_health", []) if m.get("alert")],
+        # Only forward when it has something to say -- a clean check with no
+        # "alert" key is not interesting to Hermes, same principle as above.
+        "vpn_port_forwarding": (
+            snapshot.get("vpn_port_forwarding", {})
+            if snapshot.get("vpn_port_forwarding", {}).get("alert")
+            else {}
+        ),
         "chasingpt_ingest": snapshot.get("chasingpt_ingest", {}),
         "chasingpt_transcription": snapshot.get("chasingpt_transcription", {}),
         "chasingpt_captioning": snapshot.get("chasingpt_captioning", {}),
