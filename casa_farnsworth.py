@@ -73,6 +73,68 @@ PLANNING RULES:
 - Prefer: docker compose pull && docker compose up -d <service>   over full stack restarts
 - Individual container restarts only; never docker compose down/up unless truly required
 - For unhealthy postgres/db containers: ALWAYS check logs as step 1 before any restart
+- For a vpn_port_forwarding finding: CASA_GSP and CASA_QBIT both run with
+  `network_mode: container:CASA_GLUETON` (CASA_GSP in stacks/network/docker-compose.yml,
+  CASA_QBIT in stacks/media/docker-compose.yml — two different compose files) — they share
+  gluetun's network namespace rather than having their own. Restarting CASA_GLUETON gives
+  it a brand new namespace; CASA_GSP and CASA_QBIT are NOT automatically attached to the
+  new one and stay silently orphaned on the old, torn-down namespace until they are
+  themselves restarted.
+  If the issue is "gluetun reports no forwarded port" (the forward itself is dead, e.g.
+  gluetun_port is 0/missing), a plan that restarts only CASA_GLUETON does not fix this
+  finding — it must restart all three, in this order, with a wait between each: (1) restart
+  CASA_GLUETON, (2) sleep ~20s for the wireguard tunnel and port-forward RPC to
+  re-establish, (3) restart CASA_GSP, (4) restart CASA_QBIT.
+  If instead gluetun reports a valid nonzero forwarded port but it just doesn't match
+  qBittorrent's configured port (a GSP sync mismatch, not a dead forward), do NOT restart
+  CASA_GLUETON — its own forward is fine and restarting it is needless disruption. Only
+  restart CASA_GSP, then CASA_QBIT.
+  Either way, the final verification step must be a single command that actually FAILS
+  (non-zero exit) if the sync didn't take — Bender only checks each step's exit code, it
+  does not read or judge `expected_output`, so a verification step that merely prints
+  something and exits 0 regardless proves nothing. Each step also runs as its own separate
+  shell invocation (Bender does not keep a shell alive across steps), so a variable set in
+  one step is not visible in the next — the whole check has to be one self-contained
+  command. Use exactly this pattern:
+  `SINCE=$(docker inspect --format '{{.State.StartedAt}}' CASA_GSP) && PORT=$(docker exec
+  CASA_QBIT grep -F 'Session\\Port=' /config/qBittorrent/qBittorrent.conf | cut -d= -f2 |
+  tr -d '\\r') && [ -n "$PORT" ] && docker logs CASA_GSP --since "$SINCE" | grep -F
+  "New : $PORT"`
+  — never `cat` the whole qBittorrent config file, it also contains qBittorrent's WebUI
+  username and password hash, which Bender would otherwise persist into its plan execution
+  log. Two details matter here and must not be dropped if you rephrase this: (a) the
+  explicit `[ -n "$PORT" ]` check — without it, a failed `docker exec`/grep/cut just
+  produces an empty $PORT rather than a non-zero exit from that whole pipe segment, and
+  `grep -F "New : "` (empty port) would then match almost any GSP log line and falsely
+  report success; (b) `--since "$SINCE"` (GSP's own last-start time from `docker inspect`),
+  not `--tail N` — `--tail` can still match a stale "New : <old port>" line from before this
+  restart even though the sync never actually happened this time. Never construct your own
+  command to query gluetun's control API directly (e.g. curl against :8000/v1/portforward)
+  — it requires the X-Api-Key header read from network/.env, and any command containing
+  that key would get persisted into Bender's plan execution log and posted to Telegram for
+  approval. GSP's own log already reports the comparison gluetun made internally, so
+  there's no need to re-query gluetun directly.
+  If instead the issue indicates the *check itself* couldn't run: a missing
+  GSP_GTN_API_KEY is read from the host's network/.env before any container is even
+  contacted, so no restart can ever fix it — always make a diagnostic-only plan (or no
+  plan) noting in the title that it needs human investigation into that .env file.
+  Exception: if the error text itself shows an auth failure talking to gluetun's control
+  server (401, 403, "Unauthorized", "Forbidden") rather than a connection failure, that's
+  a bad/stale GSP_GTN_API_KEY, not a dead container — a restart cannot fix it and you're
+  NEVER allowed to touch the .env file yourself, so make a diagnostic-only plan (or no
+  plan) instead, same as the missing-key case above.
+  For gluetun's control server being otherwise unreachable (connection refused/timeout,
+  not an auth error) or qBittorrent's config being unreadable, use the same full
+  three-container restart sequence as the dead-port case
+  above (restart CASA_GLUETON, sleep ~20s, restart CASA_GSP, restart CASA_QBIT) — do NOT
+  try to have the plan inspect container state first and branch on it. Bender executes a
+  plan as a fixed, linear list of steps and stops on the first failure; it has no way to
+  run one step conditionally on another step's output, and the finding itself carries no
+  structured container-health field for you to branch on at plan time either, so a rule
+  like "only restart CASA_GLUETON if it's actually unhealthy" is not something a plan can
+  act on — it would just be a guess. `docker restart` is safe to run against a container
+  whether it's already stopped or already running, so always issuing the full sequence
+  here is both simpler and strictly safer than guessing a narrower branch and being wrong.
 - For ANY step that starts, restarts, or recreates a container, ALWAYS append one more step
   after it that verifies the container is STILL running a bit later — not just that the
   start/restart command itself returned success. Use:
