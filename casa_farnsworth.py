@@ -124,17 +124,18 @@ PLANNING RULES:
   NEVER allowed to touch the .env file yourself, so make a diagnostic-only plan (or no
   plan) instead, same as the missing-key case above.
   For gluetun's control server being otherwise unreachable (connection refused/timeout,
-  not an auth error) or qBittorrent's config being unreadable, use the same full
-  three-container restart sequence as the dead-port case
-  above (restart CASA_GLUETON, sleep ~20s, restart CASA_GSP, restart CASA_QBIT) — do NOT
-  try to have the plan inspect container state first and branch on it. Bender executes a
-  plan as a fixed, linear list of steps and stops on the first failure; it has no way to
-  run one step conditionally on another step's output, and the finding itself carries no
-  structured container-health field for you to branch on at plan time either, so a rule
-  like "only restart CASA_GLUETON if it's actually unhealthy" is not something a plan can
-  act on — it would just be a guess. `docker restart` is safe to run against a container
-  whether it's already stopped or already running, so always issuing the full sequence
-  here is both simpler and strictly safer than guessing a narrower branch and being wrong.
+  not an auth error) or qBittorrent's config being unreadable: Bender executes a plan as
+  a fixed, linear list of steps and stops on the first failure — it has no way to run one
+  step conditionally on another step's output, so a plan itself can never branch at
+  execution time. But if a "Diagnostic findings gathered before planning" section appears
+  below, that state was already checked *before* you write this plan, so use it: if it
+  shows CASA_GLUETON is actually healthy and only CASA_GSP/CASA_QBIT are stale, restart
+  just those two. If no diagnostic section appears, or it doesn't clarify container health,
+  fall back to the full three-container restart sequence as the dead-port case above
+  (restart CASA_GLUETON, sleep ~20s, restart CASA_GSP, restart CASA_QBIT) — `docker
+  restart` is safe to run against a container whether it's already stopped or already
+  running, so the full sequence is always a safe default when you don't have real state
+  to narrow it from.
 - For ANY step that starts, restarts, or recreates a container, ALWAYS append one more step
   after it that verifies the container is STILL running a bit later — not just that the
   start/restart command itself returned success. Use:
@@ -216,6 +217,197 @@ OUTPUT SCHEMA — return exactly this, nothing else:
 
 If no findings require action, return plans as an empty array."""
 
+# ── Diagnostic pre-check (runs before PLAN_SYSTEM_PROMPT) ─────────────────────
+# Farnsworth's plan is a single-shot, tool-free completion (casa_llm.complete) —
+# it never gets to look at anything beyond what's already in the findings JSON,
+# which is exactly why PLAN_SYSTEM_PROMPT above has to tell it to guess
+# worst-case (e.g. always restart all three VPN containers) rather than check
+# state first. This pre-check gives it a bounded, read-only tool loop (routed
+# through bender.run_diagnostic — never a direct shell) to actually check real
+# state before that prompt runs, so the plan it writes can be the minimal fix
+# instead of the safe-but-padded guess. Never blocks planning: any failure here
+# just means planning proceeds without the extra context, same as before this
+# existed.
+MAX_DIAGNOSTIC_ROUNDS = 5
+DIAGNOSTIC_MAX_TOKENS = 1024
+
+DIAGNOSTIC_SYSTEM_PROMPT = """You are Professor Farnsworth's diagnostic pre-check, run before any plan is written.
+
+Given the findings below, decide whether checking real system state would change what a
+plan should do (e.g. "is the port-forward actually dead, or just unsynced" — restarting
+three containers is very different from restarting one). If so, call run_diagnostic with
+ONE read-only shell command per call: docker inspect, docker logs, docker ps, journalctl,
+systemctl status/is-active/is-enabled, or df. `docker inspect` MUST use --format targeting
+one of a small set of known-safe fields (State.*, Name, Id, Created, RestartCount, Image,
+or NetworkSettings.Networks.<net>.IPAddress/Gateway/MacAddress, e.g. --format
+'{{.State.Status}}') — bare `docker inspect` and any other field (including anything under
+Config, which holds Env and can contain secrets) are rejected. `docker logs` MUST use
+--tail <N> and journalctl MUST use -n/--lines <N>, with N a positive integer (not "all"),
+to bound output; neither may use a follow mode (-f/--follow), since it never terminates.
+You may call it up to 5 times total across this conversation. Skip diagnostics entirely for findings where the right fix is already
+unambiguous from the finding text alone (e.g. "root disk >90% full" needs no state check
+to know what to look at next) — most findings need none.
+
+When you're done gathering state (or decide none is needed), reply with plain text only —
+a short summary (2-5 sentences) of what you found and how it should narrow the plan, or
+exactly "No diagnostics needed." Do not write the plan itself here; a separate step does
+that."""
+
+DIAGNOSTIC_TOOL_SCHEMA = {
+    "name": "run_diagnostic",
+    "description": (
+        "Run one read-only diagnostic command to check real system state before a plan "
+        "is written. Never mutates anything — rejected if it isn't docker inspect/logs/ps, "
+        "journalctl, systemctl status/is-active/is-enabled, or df. docker inspect must use "
+        "--format targeting one of a small set of known-safe fields (bare inspect and "
+        "anything under Config, including Env, are rejected). docker logs must use --tail "
+        "and journalctl must use -n/--lines; neither may use a follow mode."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": (
+                    'The exact shell command to run, e.g. \'docker inspect --format '
+                    "\"{{.State.Status}}\" CASA_GLUETON'"
+                ),
+            },
+        },
+        "required": ["command"],
+    },
+}
+
+
+def _run_diagnostic_tool(command: str) -> str:
+    """Execute one diagnostic tool call via Bender's read-only allowlist. Never
+    raises — a rejected or failed command becomes visible tool output (so the
+    model can adjust) instead of crashing the planning pipeline."""
+    try:
+        exit_code, stdout, stderr = bender.run_diagnostic(command)
+    except bender.SafetyError as e:
+        return f"REJECTED: {e}"
+    return json.dumps({"exit_code": exit_code, "stdout": stdout[:2000], "stderr": stderr[:1000]})
+
+
+def _diagnostic_tool_output(command: str, calls_made: int) -> tuple[str, int]:
+    """Run one diagnostic tool call unless the shared MAX_DIAGNOSTIC_ROUNDS budget
+    is already spent. A single model turn can request several tool calls at once
+    (Anthropic can emit multiple tool_use blocks, OpenAI multiple function_calls in
+    one response), so the budget has to be enforced per call actually executed --
+    not per round -- or a single over-eager turn could run far more than 5
+    commands. Returns (tool_output, new_calls_made)."""
+    if calls_made >= MAX_DIAGNOSTIC_ROUNDS:
+        return (
+            f"REJECTED: diagnostic call budget exhausted "
+            f"(max {MAX_DIAGNOSTIC_ROUNDS} calls per plan)",
+            calls_made,
+        )
+    return _run_diagnostic_tool(command), calls_made + 1
+
+
+def _gather_diagnostics_anthropic(findings_json: str) -> str:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=config.anthropic_api_key())
+    messages = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
+    calls_made = 0
+    for _ in range(MAX_DIAGNOSTIC_ROUNDS):
+        response = client.messages.create(
+            model=config.model_for("small"),
+            max_tokens=DIAGNOSTIC_MAX_TOKENS,
+            system=DIAGNOSTIC_SYSTEM_PROMPT,
+            tools=[DIAGNOSTIC_TOOL_SCHEMA],
+            messages=messages,
+        )
+        messages.append({"role": "assistant", "content": response.content})
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        if not tool_uses:
+            return next((b.text for b in response.content if b.type == "text"), "").strip()
+        tool_results = []
+        for tu in tool_uses:
+            output, calls_made = _diagnostic_tool_output(tu.input.get("command", ""), calls_made)
+            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
+        messages.append({"role": "user", "content": tool_results})
+        if calls_made >= MAX_DIAGNOSTIC_ROUNDS:
+            # Budget's spent, but the last round's results are still sitting in
+            # `messages` unread -- one more completion with no tools attached (so
+            # it can't ask for more) lets the model actually summarize what it
+            # gathered, instead of throwing that state away.
+            final = client.messages.create(
+                model=config.model_for("small"),
+                max_tokens=DIAGNOSTIC_MAX_TOKENS,
+                system=DIAGNOSTIC_SYSTEM_PROMPT,
+                messages=messages,
+            )
+            return next((b.text for b in final.content if b.type == "text"), "").strip()
+    return "Diagnostic round limit reached before the model finished."
+
+
+def _gather_diagnostics_openai(findings_json: str) -> str:
+    import openai
+
+    client = openai.OpenAI(api_key=config.openai_api_key())
+    tool_schema = {
+        "type": "function",
+        "name": "run_diagnostic",
+        "description": DIAGNOSTIC_TOOL_SCHEMA["description"],
+        "parameters": DIAGNOSTIC_TOOL_SCHEMA["input_schema"],
+    }
+    input_items: list = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
+    calls_made = 0
+    for _ in range(MAX_DIAGNOSTIC_ROUNDS):
+        response = client.responses.create(
+            model=config.model_for("small"),
+            reasoning={"effort": "low"},
+            max_output_tokens=DIAGNOSTIC_MAX_TOKENS,
+            tools=[tool_schema],
+            input=[{"role": "system", "content": DIAGNOSTIC_SYSTEM_PROMPT}] + input_items,
+        )
+        function_calls = [item for item in response.output if item.type == "function_call"]
+        if not function_calls:
+            return (response.output_text or "").strip()
+        input_items.extend(response.output)
+        for call in function_calls:
+            try:
+                args = json.loads(call.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            output, calls_made = _diagnostic_tool_output(args.get("command", ""), calls_made)
+            input_items.append({
+                "type": "function_call_output",
+                "call_id": call.call_id,
+                "output": output,
+            })
+        if calls_made >= MAX_DIAGNOSTIC_ROUNDS:
+            # Budget's spent, but the last round's results are still sitting in
+            # `input_items` unread -- one more completion with no tools attached
+            # (so it can't ask for more) lets the model actually summarize what it
+            # gathered, instead of throwing that state away.
+            final = client.responses.create(
+                model=config.model_for("small"),
+                reasoning={"effort": "low"},
+                max_output_tokens=DIAGNOSTIC_MAX_TOKENS,
+                input=[{"role": "system", "content": DIAGNOSTIC_SYSTEM_PROMPT}] + input_items,
+            )
+            return (final.output_text or "").strip()
+    return "Diagnostic round limit reached before the model finished."
+
+
+def _gather_diagnostics(findings_json: str) -> str:
+    """Best-effort pre-planning diagnostic pass. Any failure (API error, bad tool
+    call, unsupported provider) just means planning proceeds without the extra
+    context — same behavior as before this existed."""
+    try:
+        if config.LLM_PROVIDER == "anthropic":
+            return _gather_diagnostics_anthropic(findings_json)
+        if config.LLM_PROVIDER == "openai":
+            return _gather_diagnostics_openai(findings_json)
+        return ""
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Diagnostic pre-check failed, planning without it: {e}")
+        return ""
+
 
 # ── State management ──────────────────────────────────────────────────────────
 class PipelineState:
@@ -274,7 +466,12 @@ class PipelineState:
 
 
 # ── Planning logic ────────────────────────────────────────────────────────────
-def _plan_batch(finding_list: list, parse_errors: list, update_candidates: list) -> list:
+def _plan_batch(
+    finding_list: list,
+    parse_errors: list,
+    update_candidates: list,
+    diagnostics: str | None = None,
+) -> list:
     """Ask the LLM for plans covering finding_list. A large or unusually complex
     batch of findings (e.g. a whole-host outage reported as one CRITICAL finding
     per stack) can produce a plan response that overruns MAX_TOKENS and gets cut
@@ -288,6 +485,12 @@ def _plan_batch(finding_list: list, parse_errors: list, update_candidates: list)
     update_candidates is passed through unsplit on every sub-batch call — PLAN_SYSTEM_PROMPT
     tells the LLM to skip anything in update_candidates (Zoidberg's territory), and it needs
     that list every time to honor the rule, not just on the first, unsplit attempt.
+
+    diagnostics is gathered once for the whole (unsplit) batch and threaded through
+    every recursive sub-batch call unchanged, rather than re-gathered per sub-batch --
+    otherwise a single big-incident parse failure could fan out into a fresh
+    MAX_DIAGNOSTIC_ROUNDS budget (and MAX_DIAGNOSTIC_ROUNDS more diagnostic commands
+    run against the host) for every half-split, recursively.
     """
     findings_json = json.dumps(
         {"findings": finding_list, "update_candidates": update_candidates},
@@ -295,9 +498,17 @@ def _plan_batch(finding_list: list, parse_errors: list, update_candidates: list)
     )
     log.info(f"Farnsworth devising plan for {len(finding_list)} finding(s)...")
 
+    if diagnostics is None:
+        diagnostics = _gather_diagnostics(findings_json)
+
+    user_content = f"Devise action plans for these findings:\n{findings_json}"
+    if diagnostics and diagnostics.strip().lower() != "no diagnostics needed.":
+        log.info(f"Farnsworth's diagnostic pre-check: {diagnostics}")
+        user_content += f"\n\nDiagnostic findings gathered before planning:\n{diagnostics}"
+
     raw = llm.complete(
         PLAN_SYSTEM_PROMPT,
-        f"Devise action plans for these findings:\n{findings_json}",
+        user_content,
         MAX_TOKENS,
         tier="small",
     ).strip()
@@ -314,8 +525,8 @@ def _plan_batch(finding_list: list, parse_errors: list, update_candidates: list)
                 f"parse ({e}); splitting into two batches of {mid} and {len(finding_list) - mid} and retrying."
             )
             return _plan_batch(
-                finding_list[:mid], parse_errors, update_candidates
-            ) + _plan_batch(finding_list[mid:], parse_errors, update_candidates)
+                finding_list[:mid], parse_errors, update_candidates, diagnostics
+            ) + _plan_batch(finding_list[mid:], parse_errors, update_candidates, diagnostics)
         log.error(f"Farnsworth got invalid JSON from the LLM for a single finding: {e}")
         parse_errors.append(str(e))
         return []

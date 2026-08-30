@@ -17,6 +17,7 @@ import fnmatch
 import json
 import logging
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -245,6 +246,207 @@ def _log_step(plan_id: str, step: dict, exit_code: int, stdout: str, stderr: str
             f.write(json.dumps(entry) + "\n")
     except Exception as e:  # noqa: BLE001
         log.warning(f"Failed to write step log: {e}")
+
+
+# ── Read-only diagnostics (pre-planning) ──────────────────────────────────────
+# Called by Farnsworth's diagnostic tool loop (casa_farnsworth.py) *before* a plan
+# is written, so plans can be based on real state (e.g. "is gluetun's forward
+# actually dead, or just out of sync") instead of a worst-case guess. Fail closed
+# on an allowlist of read-only command prefixes -- the inverse of _safety_check's
+# default-allow posture, appropriate here because this path runs fully unattended,
+# before any human has seen or approved anything. Routing diagnostics through
+# Bender (rather than giving Farnsworth its own shell access) keeps the README's
+# "only Bender ever touches the host" invariant true even for commands that never
+# become part of an approved plan.
+READONLY_DIAGNOSTIC_PREFIXES = [
+    "docker inspect",
+    "docker logs",
+    "docker ps",
+    "journalctl",
+    "systemctl status",
+    "systemctl is-active",
+    "systemctl is-enabled",
+    "df -h",
+    "df -i",
+]
+
+
+class DiagnosticNotAllowed(SafetyError):
+    """A diagnostic tool call didn't match the read-only allowlist."""
+
+
+# _split_command_segments only recognizes &&, ||, ;, |, and newline as separators
+# (that's all _safety_check's sudo-smuggling defense ever needed). It does NOT
+# recognize redirection (>, >>, <), command substitution ($(...) or backticks), or
+# a lone job-control `&` -- all of which shell=True still happily executes as a
+# *second* command/side effect tacked onto an otherwise-allowlisted one (e.g.
+# `docker ps > config.yaml` or `docker ps & rm -rf /`). Caught by an independent
+# Codex review before this shipped -- reject them outright rather than trying to
+# split on them too, since diagnostics never legitimately need any of them.
+_DIAGNOSTIC_SHELL_METACHAR_RE = re.compile(r"[<>`]|\$\(|(?<!&)&(?!&)")
+
+# journalctl's read-only-looking bare prefix still exposes flags that mutate
+# journal state on disk (rotate/vacuum/flush/etc.) or that never terminate
+# (--follow), which would hang planning until the command timeout. Rather than
+# denylist individual mutating/blocking flags (GNU getopt accepts unambiguous
+# abbreviations like `--rot` for `--rotate`, which a substring denylist can't
+# catch), allowlist the flags a real diagnostic read ever needs and reject
+# anything else outright.
+# Presence-only checks for --tail/-n would still accept `--tail 999999999999`,
+# so cap the actual bound to something a diagnostic call has any real use for.
+_DIAGNOSTIC_MAX_LINES = 2000
+
+_JOURNALCTL_SAFE_FLAGS = {
+    "-u", "--unit", "-n", "--lines", "-o", "--output", "-p", "--priority",
+    "-b", "--boot", "-k", "--dmesg", "-g", "--grep", "-e", "--pager-end",
+    "-x", "--catalog", "--no-pager", "--since", "--until", "--user",
+    "--system", "-r", "--reverse",
+}
+
+# docker inspect --format is Go template syntax, which is expressive enough
+# (index/call/range/with, nested navigation, functions) that trying to denylist
+# every way to spell "give me .Config.Env anyway" is a losing game -- e.g.
+# `{{json (index . "Config")}}` dumps the whole Config object (Env included)
+# without the literal substrings ".config" or "env" ever appearing (a real gap an
+# independent Codex review caught before this shipped). Allowlist the handful of
+# exact, known-safe field paths a diagnostic ever legitimately needs instead: the
+# actual --format/-f value (extracted via shlex, not a raw-string scan) must
+# match this exactly, or the whole command is rejected.
+_DOCKER_INSPECT_SAFE_FIELD_RE = re.compile(
+    r"^\{\{\s*(json\s+)?\."
+    r"(State(\.[A-Za-z]+){1,3}"
+    r"|Name|Id|Created|RestartCount|Image"
+    r"|NetworkSettings\.Networks\.[\w.\-]+\.(IPAddress|Gateway|MacAddress))"
+    r"\s*\}\}$"
+)
+
+
+def _flag_value(tokens: list[str], flag_names: tuple[str, ...]) -> str | None:
+    """Return the value passed to the LAST `--flag value` or `--flag=value`
+    occurrence in `tokens` (like getopt-based CLIs, later occurrences of a flag
+    win), or None if the flag isn't present at all. Used to validate the *value*
+    of a bounding/field-selecting flag, not just whether the flag was typed --
+    `--tail all`/`-n -1` would otherwise pass a presence-only check while still
+    letting the command dump unbounded output, and only checking the *first*
+    occurrence of a repeated flag (e.g. two `--format`s) would let a safe decoy
+    value hide the real, unsafe one docker actually uses."""
+    value = None
+    for i, token in enumerate(tokens):
+        if "=" in token:
+            name, _, val = token.partition("=")
+            if name in flag_names:
+                value = val
+        elif token in flag_names and i + 1 < len(tokens):
+            value = tokens[i + 1]
+    return value
+
+
+def _check_readonly_diagnostic(command: str) -> None:
+    """Raise DiagnosticNotAllowed unless every segment of `command` starts with an
+    allowlisted read-only prefix. Segment-split first (same helper _safety_check
+    uses for the same reason) so a compound command can't smuggle a mutating
+    command past a check that only looked at the first segment."""
+    if _DIAGNOSTIC_SHELL_METACHAR_RE.search(command):
+        raise DiagnosticNotAllowed(
+            f"Diagnostic command contains shell redirection/substitution/background "
+            f"operators, which are never allowed: '{command}'"
+        )
+    for segment in _split_command_segments(command):
+        seg_lower = segment.lower()
+        if not any(seg_lower.startswith(prefix) for prefix in READONLY_DIAGNOSTIC_PREFIXES):
+            raise DiagnosticNotAllowed(
+                f"Diagnostic command not in the read-only allowlist: '{segment}'"
+            )
+        if seg_lower.startswith("docker inspect"):
+            # Bare `docker inspect` dumps the full container config, including
+            # Config.Env -- which routinely holds passwords/API keys and would
+            # otherwise get shipped straight to the external LLM provider and
+            # written into the diagnostic log. Require a --format that doesn't
+            # touch Env/Config/the whole object so the model can only ever pull
+            # narrow, non-secret fields.
+            #
+            # Extract the value via shlex (proper POSIX quote parsing), not a
+            # regex scan of the raw string -- a regex scanning raw characters can
+            # be fooled by adjacent-quote concatenation tricks (e.g. splitting the
+            # literal "{{" across two quoted pieces) that shlex reassembles the
+            # same way a real shell would. If --format/-f is repeated, docker uses
+            # the LAST value, so _flag_value must (and does) return the last one
+            # too -- a safe first value can't be used as a decoy for an unsafe one.
+            docker_tokens = shlex.split(segment)
+            fmt_value = _flag_value(docker_tokens, ("--format", "-f"))
+            if fmt_value is None:
+                raise DiagnosticNotAllowed(
+                    f"docker inspect must use --format to select specific fields (bare "
+                    f"inspect dumps the full config, including Config.Env secrets): "
+                    f"'{segment}'"
+                )
+            if not _DOCKER_INSPECT_SAFE_FIELD_RE.match(fmt_value.strip()):
+                raise DiagnosticNotAllowed(
+                    f"docker inspect --format must be one of a small set of known-safe "
+                    f"field paths (State.*, Name, Id, Created, RestartCount, Image, "
+                    f"NetworkSettings.Networks.<net>.IPAddress/Gateway/MacAddress) -- "
+                    f"arbitrary Go-template expressions, including anything reaching "
+                    f"into Config (which holds Env/secrets), are rejected: '{segment}'"
+                )
+        if seg_lower.startswith("docker logs"):
+            tokens = shlex.split(segment)[2:]
+            if re.search(r"(^|\s)(-f|--follow)(=|\s|$)", seg_lower):
+                # Equals-form (`--follow=true`, `-f=true`) doesn't change that it's
+                # still the follow flag -- catch it before the value check below,
+                # since docker treats `--follow=false` the same as omitting it.
+                raise DiagnosticNotAllowed(
+                    f"docker logs --follow never terminates -- not allowed for a bounded "
+                    f"diagnostic call: '{segment}'"
+                )
+            tail_value = _flag_value(tokens, ("--tail",))
+            if (
+                tail_value is None
+                or not re.fullmatch(r"\d+", tail_value)
+                or int(tail_value) > _DIAGNOSTIC_MAX_LINES
+            ):
+                raise DiagnosticNotAllowed(
+                    f"docker logs must use --tail with an integer between 1 and "
+                    f"{_DIAGNOSTIC_MAX_LINES} to bound output ('all', a negative value, "
+                    f"omitting it, or an unreasonably large value all risk huge memory "
+                    f"use and blocking the planning pipeline): '{segment}'"
+                )
+        if seg_lower.startswith("journalctl"):
+            tokens = shlex.split(segment)[1:]
+            for token in tokens:
+                if not token.startswith("-"):
+                    continue  # positional arg (e.g. a filter expression), not a flag
+                flag = token.split("=", 1)[0]
+                if flag not in _JOURNALCTL_SAFE_FLAGS:
+                    raise DiagnosticNotAllowed(
+                        f"journalctl flag '{flag}' is not in the read-only allowlist "
+                        f"(covers state-mutating flags like --rotate/--vacuum and "
+                        f"never-terminating ones like --follow): '{segment}'"
+                    )
+            lines_value = _flag_value(tokens, ("-n", "--lines"))
+            if (
+                lines_value is None
+                or not re.fullmatch(r"\d+", lines_value)
+                or int(lines_value) > _DIAGNOSTIC_MAX_LINES
+            ):
+                raise DiagnosticNotAllowed(
+                    f"journalctl must use -n/--lines with an integer between 1 and "
+                    f"{_DIAGNOSTIC_MAX_LINES} to bound output ('all', a negative value, "
+                    f"omitting it, or an unreasonably large value all risk huge memory "
+                    f"use and blocking the planning pipeline): '{segment}'"
+                )
+
+
+def run_diagnostic(command: str) -> tuple[int, str, str]:
+    """Run a single read-only diagnostic command for Farnsworth's pre-planning tool
+    loop. Enforces the read-only allowlist AND the normal _safety_check (forbidden
+    commands/stacks, sudo scope) as defense in depth, then executes and logs it
+    exactly like a real plan step. Raises SafetyError (never runs the command) if
+    either check fails -- callers decide how to surface that to the model."""
+    _check_readonly_diagnostic(command)
+    _safety_check(command, plan={})
+    exit_code, stdout, stderr = _run_command(command)
+    _log_step("diagnostic", {"n": None, "command": command}, exit_code, stdout, stderr)
+    return exit_code, stdout, stderr
 
 
 # ── Safe prune ─────────────────────────────────────────────────────────────────
