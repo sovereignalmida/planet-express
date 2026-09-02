@@ -15,13 +15,10 @@ Usage:
 import argparse
 import json
 import logging
-import os
 import re
 import shlex
 import subprocess
 import sys
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -437,12 +434,11 @@ def check_unraid_exports() -> dict:
 # see check_unraid_exports() above) can leave an already-running container's cached
 # mount broken while the container itself stays "Up"/"healthy": Docker's health
 # machinery only sees what the container's own healthcheck checks, and most
-# healthchecks (WeKnora's included) are a bare liveness ping that never touches the
-# filesystem. Found 2026-08-15 on CASA_WEKNORA_APP/data/files: 20+ real file uploads
-# 500'd for several minutes while `docker ps` and /health both kept reporting fine.
-NFS_MOUNT_WATCHLIST = [
-    ("CASA_WEKNORA_APP", "/data/files"),
-]
+# healthchecks are a bare liveness ping that never touches the filesystem. Found
+# 2026-08-15 on WeKnora's CASA_WEKNORA_APP/data/files (removed 2026-08-31, entry
+# dropped below): 20+ real file uploads 500'd for several minutes while `docker ps`
+# and /health both kept reporting fine.
+NFS_MOUNT_WATCHLIST: list[tuple[str, str]] = []
 
 
 def check_nfs_mount_health() -> list[dict]:
@@ -570,548 +566,6 @@ def check_vpn_port_forwarding() -> dict:
     return result
 
 
-# Chasing Portugal DAM ingest pipeline (ingest.py) -- same NAS mount/state paths it uses
-# itself, kept in sync manually since it's a separate app, not a Planet Express stack.
-CHASINGPT_INGEST_ROOT = Path("/chasingportugal_nfs/01_INGEST")
-CHASINGPT_QUARANTINED = CHASINGPT_INGEST_ROOT / ".quarantined"
-CHASINGPT_STATE_DIR = Path("/home/casaroot/apps/chasingpt/processing")
-CHASINGPT_IGNORE_DIR_NAMES = {".completed", ".quarantined"}
-CHASINGPT_STUCK_LOCK_AGE_SECONDS = 2 * 60 * 60  # a lock older than this means ingest.py died mid-run
-CHASINGPT_SCAN_TIMEOUT_SECONDS = 10
-
-
-def _scan_chasingpt_ingest() -> dict:
-    """Actual traversal for check_chasingpt_ingest() -- kept separate so it can be run
-    under a hard timeout (see caller)."""
-    result: dict = {"queue_depth": 0, "quarantined_count": 0, "stuck_locks": []}
-
-    # os.path.ismount(), not just is_dir(): mirrors ingest.py's own check (NAS_ROOT in
-    # chasingpt/ingest/ingest.py) -- if the NFS mount is detached, 01_INGEST can still
-    # resolve as a plain empty local directory and report a false "healthy, empty queue".
-    if not os.path.ismount(CHASINGPT_INGEST_ROOT.parent) or not CHASINGPT_INGEST_ROOT.is_dir():
-        result["error"] = f"{CHASINGPT_INGEST_ROOT} missing or unmounted -- mount may be stale"
-        result["alert"] = "HIGH"
-        return result
-
-    result["queue_depth"] = sum(
-        1 for entry in CHASINGPT_INGEST_ROOT.iterdir()
-        if entry.is_dir() and entry.name not in CHASINGPT_IGNORE_DIR_NAMES and not entry.name.startswith(".")
-    )
-
-    if CHASINGPT_QUARANTINED.is_dir():
-        result["quarantined_count"] = sum(1 for entry in CHASINGPT_QUARANTINED.iterdir() if entry.is_dir())
-    if result["quarantined_count"] > 0:
-        result["alert"] = "MEDIUM"
-
-    if CHASINGPT_STATE_DIR.is_dir():
-        now = time.time()
-        for lock_file in CHASINGPT_STATE_DIR.glob("*.lock"):
-            # ingest.py can remove this lock between glob() and stat() as it finishes a
-            # project -- that's a normal race, not a scan failure, so skip it rather than
-            # letting the FileNotFoundError abort the whole run_full() pipeline.
-            try:
-                age = now - lock_file.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > CHASINGPT_STUCK_LOCK_AGE_SECONDS:
-                result["stuck_locks"].append({"project": lock_file.stem, "age_hours": round(age / 3600, 1)})
-        if result["stuck_locks"]:
-            result["alert"] = "HIGH"
-
-    return result
-
-
-def check_chasingpt_ingest() -> dict:
-    """Chasing Portugal DAM ingest queue health: pending/ready projects, quarantined
-    count, and any stuck lock file left behind by a crashed ingest.py run.
-
-    Not wired into NFS_MOUNT_WATCHLIST/check_mounts() -- those check host-level
-    reachability, this checks the app's own queue state on top of that mount.
-
-    /chasingportugal_nfs is hard-mounted, so if the NAS goes unreachable mid-scan,
-    Path.is_dir()/iterdir() can block indefinitely instead of failing fast -- unlike
-    check_unraid_exports()/check_nfs_mount_health() above, there's no subprocess
-    `timeout` to wrap here since this walks the local filesystem directly, not a
-    remote command. The scan runs in a daemon thread with a hard deadline instead;
-    same leak-on-hang tradeoff as check_nfs_mount_health()'s docker-exec comment --
-    a wedged thread is left behind rather than letting one hung scan take down the
-    whole run_full() pipeline before it can write a snapshot or raise this alert.
-    daemon=True (rather than ThreadPoolExecutor, whose worker threads are non-daemon)
-    so a genuinely wedged scan can't also block interpreter/process shutdown."""
-    scan_result: dict = {}
-
-    def _run_scan() -> None:
-        try:
-            scan_result["value"] = _scan_chasingpt_ingest()
-        except OSError as e:
-            # e.g. an NFS I/O error mid-iterdir() (not just a hang) -- report it as the
-            # same kind of alert a missing/unmounted root gets, rather than letting a
-            # KeyError on scan_result below abort the whole run_full() pipeline.
-            scan_result["value"] = {
-                "queue_depth": 0,
-                "quarantined_count": 0,
-                "stuck_locks": [],
-                "error": f"scan failed: {e}",
-                "alert": "HIGH",
-            }
-
-    thread = threading.Thread(target=_run_scan, daemon=True)
-    thread.start()
-    thread.join(timeout=CHASINGPT_SCAN_TIMEOUT_SECONDS)
-    if thread.is_alive():
-        return {
-            "queue_depth": 0,
-            "quarantined_count": 0,
-            "stuck_locks": [],
-            "error": f"scan timed out after {CHASINGPT_SCAN_TIMEOUT_SECONDS}s -- mount may be unreachable",
-            "alert": "HIGH",
-        }
-    return scan_result["value"]
-
-
-# Chasing Portugal DAM transcription pipeline (transcribe.py) -- same DB/creds it uses
-# itself, kept in sync manually since it's a separate app, not a Planet Express stack.
-CHASINGPT_DB_ENV = Path("/home/casaroot/stacks/chasingpt/db.env")
-CHASINGPT_DB_CONTAINER = "CASA_CHASINGPT_DB"
-CHASINGPT_DB_QUERY_TIMEOUT_SECONDS = 15
-
-# Chasing Portugal DAM AI captioning pipeline (caption.py) -- same opt-in OpenRouter
-# creds file it reads itself; caption.py silently skips its whole run if this is
-# missing/incomplete, so check_chasingpt_captioning() needs to check it explicitly
-# rather than only checking the DB creds.
-CHASINGPT_OPENROUTER_ENV = Path("/home/casaroot/apps/chasingpt/openrouter.env")
-
-
-def _read_env_file(path: Path) -> dict:
-    values: dict = {}
-    if not path.is_file():
-        return values
-    try:
-        text = path.read_text()
-    except OSError:
-        # Permission error, I/O error, or a race with the file being rewritten --
-        # report as missing creds (HIGH, via the caller's empty-values check) rather
-        # than letting this abort the whole run_full() pipeline before it can write
-        # a snapshot.
-        return values
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip()
-    return values
-
-
-def check_chasingpt_transcription() -> dict:
-    """Chasing Portugal DAM Whisper transcription backlog: how many eligible video/audio
-    resources are still untranscribed, and how many permanently failed transcription.
-
-    Queries the resourcespace DB directly via docker exec (same container/creds
-    transcribe.py itself uses) -- a read-only COUNT query, not a filesystem walk, so this
-    goes through _run()'s existing subprocess timeout rather than the daemon-thread
-    pattern check_chasingpt_ingest() needs for its direct NFS filesystem calls."""
-    result: dict = {"backlog": 0, "failed_count": 0}
-
-    creds = _read_env_file(CHASINGPT_DB_ENV)
-    user = creds.get("MYSQL_USER")
-    password = creds.get("MYSQL_PASSWORD")
-    database = creds.get("MYSQL_DATABASE")
-    if not user or not password or not database:
-        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
-        result["alert"] = "HIGH"
-        return result
-
-    # Two separate single-value queries rather than one JOIN-based aggregate: a LEFT JOIN
-    # through resource_node here would fan out one row per *any* field value the resource
-    # has (not just transcriptionstatus), over-counting backlog/failed -- correlated
-    # subqueries (same NOT IN pattern transcribe.py's own discover_candidates() uses)
-    # avoid that fan-out entirely.
-    backlog_sql = """
-    SELECT COUNT(*) FROM resource r
-    JOIN resource_type_field ftf ON ftf.name = 'relativearchivepath'
-    JOIN resource_node path_rn ON path_rn.resource = r.ref
-    JOIN node path ON path.ref = path_rn.node AND path.resource_type_field = ftf.ref
-    WHERE r.resource_type IN (3, 4) AND path.name != ''
-    AND r.ref NOT IN (
-        SELECT rn.resource FROM resource_node rn
-        JOIN resource_type_field stf ON stf.name = 'transcriptionstatus'
-        JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
-        WHERE n.name IN ('done', 'failed', 'no_audio')
-    );
-    """
-    failed_sql = """
-    SELECT COUNT(*) FROM resource_node rn
-    JOIN resource_type_field stf ON stf.name = 'transcriptionstatus'
-    JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
-    JOIN resource r ON r.ref = rn.resource
-    WHERE n.name = 'failed' AND r.resource_type IN (3, 4);
-    """
-
-    # Password never appears as an argv element (visible to any local user via `ps`/
-    # `/proc/<pid>/cmdline`): it's set only in this subprocess's own environment, and
-    # `docker exec -e MYSQL_PWD` (name only, no "=value") forwards that env var's value
-    # into the container for the mariadb CLI to read -- the value itself is never part
-    # of any command line, ours or the container's.
-    query_env = {**os.environ, "MYSQL_PWD": password}
-    for key, sql in (("backlog", backlog_sql), ("failed_count", failed_sql)):
-        rc, out, err = _run(
-            [
-                "docker", "exec",
-                "-e", "MYSQL_PWD",
-                CHASINGPT_DB_CONTAINER,
-                "mariadb", "-N", "-B", "-u", user, database, "-e", sql,
-            ],
-            timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
-            env=query_env,
-        )
-        if rc != 0:
-            result["error"] = f"chasingpt transcription DB query ({key}) failed: {err}"
-            result["alert"] = "HIGH"
-            return result
-        try:
-            result[key] = int(out.strip())
-        except ValueError:
-            result["error"] = f"unexpected DB query output for {key}: {out!r}"
-            result["alert"] = "HIGH"
-            return result
-
-    if result["failed_count"] > 0:
-        result["alert"] = "MEDIUM"
-
-    return result
-
-
-def check_chasingpt_captioning() -> dict:
-    """Chasing Portugal DAM AI photo-captioning backlog (Spec 9): how many photo
-    resources have no AI Caption Status set yet, and how many permanently failed
-    captioning. Same query shape/creds/failure-handling as
-    check_chasingpt_transcription() -- correlated NOT IN subqueries against
-    resource_node/node, not a JOIN-based aggregate, to avoid fan-out.
-
-    Unlike transcription, captioning is opt-in on the caption.py side: it silently
-    skips its whole run if openrouter.env is missing OPENROUTER_API_KEY/
-    OPENROUTER_MODEL, which would otherwise leave a fully-disabled captioning
-    pipeline invisible here (backlog climbing with no alert) -- so that gets checked
-    explicitly, same HIGH treatment as missing DB creds."""
-    result: dict = {"backlog": 0, "failed_count": 0}
-
-    openrouter_creds = _read_env_file(CHASINGPT_OPENROUTER_ENV)
-    if not openrouter_creds.get("OPENROUTER_API_KEY") or not openrouter_creds.get("OPENROUTER_MODEL"):
-        result["error"] = (
-            f"chasingpt openrouter.env missing OPENROUTER_API_KEY/OPENROUTER_MODEL "
-            f"({CHASINGPT_OPENROUTER_ENV}) -- caption.py skips its run without these"
-        )
-        result["alert"] = "HIGH"
-        return result
-
-    creds = _read_env_file(CHASINGPT_DB_ENV)
-    user = creds.get("MYSQL_USER")
-    password = creds.get("MYSQL_PASSWORD")
-    database = creds.get("MYSQL_DATABASE")
-    if not user or not password or not database:
-        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
-        result["alert"] = "HIGH"
-        return result
-
-    backlog_sql = """
-    SELECT COUNT(*) FROM resource r
-    WHERE r.resource_type = 1
-    AND r.ref NOT IN (
-        SELECT rn.resource FROM resource_node rn
-        JOIN resource_type_field stf ON stf.name = 'aicaptionstatus'
-        JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
-        WHERE n.name IN ('done', 'failed')
-    );
-    """
-    failed_sql = """
-    SELECT COUNT(*) FROM resource_node rn
-    JOIN resource_type_field stf ON stf.name = 'aicaptionstatus'
-    JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
-    JOIN resource r ON r.ref = rn.resource
-    WHERE n.name = 'failed' AND r.resource_type = 1;
-    """
-
-    query_env = {**os.environ, "MYSQL_PWD": password}
-    for key, sql in (("backlog", backlog_sql), ("failed_count", failed_sql)):
-        rc, out, err = _run(
-            [
-                "docker", "exec",
-                "-e", "MYSQL_PWD",
-                CHASINGPT_DB_CONTAINER,
-                "mariadb", "-N", "-B", "-u", user, database, "-e", sql,
-            ],
-            timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
-            env=query_env,
-        )
-        if rc != 0:
-            result["error"] = f"chasingpt captioning DB query ({key}) failed: {err}"
-            result["alert"] = "HIGH"
-            return result
-        try:
-            result[key] = int(out.strip())
-        except ValueError:
-            result["error"] = f"unexpected DB query output for {key}: {out!r}"
-            result["alert"] = "HIGH"
-            return result
-
-    if result["failed_count"] > 0:
-        result["alert"] = "MEDIUM"
-
-    return result
-
-
-def check_chasingpt_scenes() -> dict:
-    """Chasing Portugal DAM scene-level video indexing backlog (Spec 10): how many video
-    resources have no Scene Index Status set yet, and how many permanently failed indexing.
-    Backlog query joins on relativearchivepath (like check_chasingpt_transcription()), not
-    a bare resource_type filter (like check_chasingpt_captioning()) -- index_scenes.py's own
-    discover_candidates() requires an archive path to locate the file, so a video resource
-    without one isn't actually indexable yet and shouldn't inflate the backlog count. Failed
-    count uses the same correlated NOT IN / JOIN-against-node shape as every other
-    chasingpt_* check here, to avoid resource_node fan-out.
-
-    Like captioning, scene indexing is opt-in on the index_scenes.py side: it silently
-    skips its whole run if openrouter.env is missing OPENROUTER_API_KEY/OPENROUTER_MODEL,
-    which would otherwise leave a fully-disabled scene-indexing pipeline invisible here
-    (backlog climbing with no alert) -- so that gets checked explicitly, same HIGH
-    treatment as missing DB creds."""
-    result: dict = {"backlog": 0, "failed_count": 0}
-
-    openrouter_creds = _read_env_file(CHASINGPT_OPENROUTER_ENV)
-    if not openrouter_creds.get("OPENROUTER_API_KEY") or not openrouter_creds.get("OPENROUTER_MODEL"):
-        result["error"] = (
-            f"chasingpt openrouter.env missing OPENROUTER_API_KEY/OPENROUTER_MODEL "
-            f"({CHASINGPT_OPENROUTER_ENV}) -- index_scenes.py skips its run without these"
-        )
-        result["alert"] = "HIGH"
-        return result
-
-    creds = _read_env_file(CHASINGPT_DB_ENV)
-    user = creds.get("MYSQL_USER")
-    password = creds.get("MYSQL_PASSWORD")
-    database = creds.get("MYSQL_DATABASE")
-    if not user or not password or not database:
-        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
-        result["alert"] = "HIGH"
-        return result
-
-    backlog_sql = """
-    SELECT COUNT(*) FROM resource r
-    JOIN resource_type_field ftf ON ftf.name = 'relativearchivepath'
-    JOIN resource_node path_rn ON path_rn.resource = r.ref
-    JOIN node path ON path.ref = path_rn.node AND path.resource_type_field = ftf.ref
-    WHERE r.resource_type = 3 AND path.name != ''
-    AND r.ref NOT IN (
-        SELECT rn.resource FROM resource_node rn
-        JOIN resource_type_field stf ON stf.name = 'sceneindexstatus'
-        JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
-        WHERE n.name IN ('done', 'failed')
-    );
-    """
-    failed_sql = """
-    SELECT COUNT(*) FROM resource_node rn
-    JOIN resource_type_field stf ON stf.name = 'sceneindexstatus'
-    JOIN node n ON n.ref = rn.node AND n.resource_type_field = stf.ref
-    JOIN resource r ON r.ref = rn.resource
-    WHERE n.name = 'failed' AND r.resource_type = 3;
-    """
-
-    query_env = {**os.environ, "MYSQL_PWD": password}
-    for key, sql in (("backlog", backlog_sql), ("failed_count", failed_sql)):
-        rc, out, err = _run(
-            [
-                "docker", "exec",
-                "-e", "MYSQL_PWD",
-                CHASINGPT_DB_CONTAINER,
-                "mariadb", "-N", "-B", "-u", user, database, "-e", sql,
-            ],
-            timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
-            env=query_env,
-        )
-        if rc != 0:
-            result["error"] = f"chasingpt scene indexing DB query ({key}) failed: {err}"
-            result["alert"] = "HIGH"
-            return result
-        try:
-            result[key] = int(out.strip())
-        except ValueError:
-            result["error"] = f"unexpected DB query output for {key}: {out!r}"
-            result["alert"] = "HIGH"
-            return result
-
-    if result["failed_count"] > 0:
-        result["alert"] = "MEDIUM"
-
-    return result
-
-
-# Chasing Portugal DAM retrieval baskets (retrieve_baskets.py, Spec 11) -- same DB
-# creds/container every other chasingpt_* check uses, kept in sync manually since it's
-# a separate app, not a Planet Express stack.
-CHASINGPT_RETRIEVED_ROOT = Path("/chasingportugal_nfs/03_RETRIEVED")
-CHASINGPT_RETRIEVE_PREFIX = "RETRIEVE_"
-CHASINGPT_RETRIEVAL_SLUG_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _chasingpt_retrieval_slug(name: str) -> str:
-    """Mirrors retrieve_baskets.py's slugify() exactly -- has to match its basket-dir
-    naming or this check ends up looking in the wrong place."""
-    stripped = name.removeprefix(CHASINGPT_RETRIEVE_PREFIX)
-    slug = CHASINGPT_RETRIEVAL_SLUG_RE.sub("-", stripped.lower()).strip("-")
-    return slug or "basket"
-
-
-def _scan_chasingpt_retrieval_baskets(collections: list) -> dict:
-    """Actual directory/manifest inspection for check_chasingpt_retrieval() -- kept
-    separate so it can be run under a hard timeout (see caller), same pattern as
-    _scan_chasingpt_ingest(). `collections` is a list of (ref, name, member_count)
-    tuples already resolved from the DB by the caller.
-
-    "Pending" is only an approximate signal (a basket's on-disk file count vs. its
-    collection's member count -- errors/collisions mean these aren't always exactly
-    equal even on a fully caught-up basket) good enough to flag a basket the 15-min
-    timer hasn't gotten to yet; it deliberately never sets alert on its own since some
-    catch-up lag between runs is normal, not a failure."""
-    result: dict = {"pending_baskets": 0, "baskets_with_errors": 0}
-
-    if not os.path.ismount(CHASINGPT_RETRIEVED_ROOT.parent) or not CHASINGPT_RETRIEVED_ROOT.is_dir():
-        result["error"] = f"{CHASINGPT_RETRIEVED_ROOT} missing or unmounted -- mount may be stale"
-        result["alert"] = "HIGH"
-        return result
-
-    for collection_ref, collection_name, member_count in collections:
-        basket_dir = CHASINGPT_RETRIEVED_ROOT / f"{_chasingpt_retrieval_slug(collection_name)}-{collection_ref}"
-        manifest_path = basket_dir / "manifest.json"
-
-        if not basket_dir.is_dir():
-            if member_count > 0:
-                result["pending_baskets"] += 1
-            continue
-
-        file_count = sum(
-            1 for entry in basket_dir.iterdir()
-            if entry.is_file() and entry.name != "manifest.json"
-        )
-        if file_count < member_count:
-            result["pending_baskets"] += 1
-
-        if manifest_path.is_file():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-            except (OSError, ValueError):
-                # A manifest that's missing/unreadable/corrupt isn't itself an alert --
-                # the file-count comparison above already covers "did the basket keep
-                # up," this is just extra detail retrieve_baskets.py writes.
-                continue
-            if isinstance(manifest, dict) and manifest.get("errors"):
-                result["baskets_with_errors"] += 1
-
-    if result["baskets_with_errors"] > 0:
-        result["alert"] = "MEDIUM"
-
-    return result
-
-
-def check_chasingpt_retrieval() -> dict:
-    """Chasing Portugal DAM retrieval-basket health (Spec 11): how many RETRIEVE_*
-    collections haven't fully copied to 03_RETRIEVED yet (pending_baskets, informational
-    only -- some catch-up lag between the 15-min timer runs is normal), and how many
-    baskets have a resource that failed on their most recent retrieve_baskets.py run
-    (baskets_with_errors, from manifest.json's errors list -- this is the one that
-    actually alerts).
-
-    Discovers RETRIEVE_* collections and their member counts via the same read-only DB
-    query/creds retrieve_baskets.py itself uses; the directory/manifest inspection then
-    runs under a hard timeout via a daemon thread, same NFS-hang tradeoff as
-    check_chasingpt_ingest()'s comment above."""
-    result: dict = {"pending_baskets": 0, "baskets_with_errors": 0}
-
-    creds = _read_env_file(CHASINGPT_DB_ENV)
-    user = creds.get("MYSQL_USER")
-    password = creds.get("MYSQL_PASSWORD")
-    database = creds.get("MYSQL_DATABASE")
-    if not user or not password or not database:
-        result["error"] = f"chasingpt db.env missing MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE ({CHASINGPT_DB_ENV})"
-        result["alert"] = "HIGH"
-        return result
-
-    query_env = {**os.environ, "MYSQL_PWD": password}
-    # LIKE '_' is a single-char wildcard, so the literal underscore in
-    # CHASINGPT_RETRIEVE_PREFIX ("RETRIEVE_") has to be escaped with a backslash
-    # (MariaDB's default LIKE escape char) -- otherwise this also matches e.g.
-    # "RETRIEVEX..." collections that were never meant to be picked up here.
-    like_prefix = CHASINGPT_RETRIEVE_PREFIX.replace("_", "\\_")
-    collections_sql = f"""
-    SELECT c.ref, c.name, COUNT(cr.resource)
-    FROM collection c
-    LEFT JOIN collection_resource cr ON cr.collection = c.ref
-    WHERE c.name LIKE '{like_prefix}%'
-    GROUP BY c.ref, c.name;
-    """
-    rc, out, err = _run(
-        [
-            "docker", "exec",
-            "-e", "MYSQL_PWD",
-            CHASINGPT_DB_CONTAINER,
-            "mariadb", "-N", "-B", "-u", user, database, "-e", collections_sql,
-        ],
-        timeout=CHASINGPT_DB_QUERY_TIMEOUT_SECONDS,
-        env=query_env,
-    )
-    if rc != 0:
-        result["error"] = f"chasingpt retrieval collections DB query failed: {err}"
-        result["alert"] = "HIGH"
-        return result
-
-    collections = []
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        if len(parts) != 3:
-            continue
-        ref_str, name, count_str = parts
-        try:
-            collections.append((int(ref_str), name, int(count_str)))
-        except ValueError:
-            continue
-
-    # Always run the scan, even with zero RETRIEVE_* collections right now -- it still
-    # needs to confirm CHASINGPT_RETRIEVED_ROOT is mounted (retrieve_baskets.py itself
-    # would abort on that regardless of whether any baskets currently exist), not just
-    # report an empty-but-"healthy" result.
-    scan_result: dict = {}
-
-    def _run_scan() -> None:
-        try:
-            scan_result["value"] = _scan_chasingpt_retrieval_baskets(collections)
-        except OSError as e:
-            # e.g. an NFS I/O error mid-iterdir()/mid-read (not just a hang) -- report
-            # it as the same kind of alert a missing/unmounted root gets, rather than
-            # letting a KeyError on scan_result below abort the whole run_full()
-            # pipeline, same pattern as check_chasingpt_ingest()'s _run_scan().
-            scan_result["value"] = {
-                "pending_baskets": 0,
-                "baskets_with_errors": 0,
-                "error": f"scan failed: {e}",
-                "alert": "HIGH",
-            }
-
-    thread = threading.Thread(target=_run_scan, daemon=True)
-    thread.start()
-    thread.join(timeout=CHASINGPT_SCAN_TIMEOUT_SECONDS)
-    if thread.is_alive():
-        return {
-            "pending_baskets": 0,
-            "baskets_with_errors": 0,
-            "error": f"scan timed out after {CHASINGPT_SCAN_TIMEOUT_SECONDS}s -- mount may be unreachable",
-            "alert": "HIGH",
-        }
-
-    return scan_result["value"]
-
-
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -1165,7 +619,14 @@ def _last_journal_completion(unit: str) -> tuple[str, str]:
             entry = json.loads(line)
         except ValueError:
             continue
-        message = entry.get("MESSAGE", "")
+        message = entry.get("MESSAGE")
+        if not isinstance(message, str):
+            # journalctl -o json emits an explicit `"MESSAGE": null` for some entries
+            # (and a byte-array for non-UTF8 messages) -- .get(..., "") only covers a
+            # missing key, not a present key with a null/non-string value, so this
+            # crashed the whole pipeline run with "argument of type 'NoneType' is not
+            # iterable" the first time such an entry showed up in the last 200 lines.
+            continue
         if f"Finished {unit}" in message:
             last_ts = entry.get("__REALTIME_TIMESTAMP")
             last_success = True
@@ -1447,11 +908,6 @@ def run_full() -> dict:
         "unraid_exports": check_unraid_exports(),
         "nfs_mount_health": check_nfs_mount_health(),
         "vpn_port_forwarding": check_vpn_port_forwarding(),
-        "chasingpt_ingest": check_chasingpt_ingest(),
-        "chasingpt_transcription": check_chasingpt_transcription(),
-        "chasingpt_captioning": check_chasingpt_captioning(),
-        "chasingpt_scenes": check_chasingpt_scenes(),
-        "chasingpt_retrieval": check_chasingpt_retrieval(),
         "system": check_system(),
         "backups": check_backups(),
         "services": check_services(),
@@ -1465,11 +921,6 @@ def run_full() -> dict:
     n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
     n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
     n_vpn_port_issues = 1 if snapshot["vpn_port_forwarding"].get("alert") else 0
-    n_quarantined = snapshot["chasingpt_ingest"].get("quarantined_count", 0)
-    n_transcribe_failed = snapshot["chasingpt_transcription"].get("failed_count", 0)
-    n_caption_failed = snapshot["chasingpt_captioning"].get("failed_count", 0)
-    n_scenes_failed = snapshot["chasingpt_scenes"].get("failed_count", 0)
-    n_retrieval_errors = snapshot["chasingpt_retrieval"].get("baskets_with_errors", 0)
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
@@ -1477,12 +928,7 @@ def run_full() -> dict:
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
         f"{n_stale_mounts} stale NFS mount(s), "
-        f"{n_vpn_port_issues} VPN port-forwarding issue(s), "
-        f"{n_quarantined} quarantined chasingpt project(s), "
-        f"{n_transcribe_failed} failed chasingpt transcription(s), "
-        f"{n_caption_failed} failed chasingpt caption(s), "
-        f"{n_scenes_failed} failed chasingpt scene index(es), "
-        f"{n_retrieval_errors} chasingpt retrieval basket(s) with errors"
+        f"{n_vpn_port_issues} VPN port-forwarding issue(s)"
     )
     return snapshot
 
