@@ -17,7 +17,7 @@ import casa_bender as bender
 def test_allows_docker_inspect(monkeypatch):
     monkeypatch.setattr(bender, "_run_command", lambda cmd: (0, "running", ""))
     monkeypatch.setattr(bender, "_log_step", lambda *a, **k: None)
-    exit_code, stdout, stderr = bender.run_diagnostic(
+    exit_code, stdout, _stderr = bender.run_diagnostic(
         "docker inspect --format '{{.State.Status}}' CASA_GLUETON"
     )
     assert exit_code == 0

@@ -299,8 +299,10 @@ def _diagnostic_tool_output(command: str, calls_made: int) -> tuple[str, int]:
     commands. Returns (tool_output, new_calls_made)."""
     if calls_made >= MAX_DIAGNOSTIC_ROUNDS:
         return (
-            f"REJECTED: diagnostic call budget exhausted "
-            f"(max {MAX_DIAGNOSTIC_ROUNDS} calls per plan)",
+            (
+                f"REJECTED: diagnostic call budget exhausted "
+                f"(max {MAX_DIAGNOSTIC_ROUNDS} calls per plan)"
+            ),
             calls_made,
         )
     return _run_diagnostic_tool(command), calls_made + 1
