@@ -219,7 +219,7 @@ socket client is a ~40-line function in `integrations/rpc.py` that both sides im
 | `planet_express/execution/policy.py` | Unknown action/target/risk → DENY; target resolution failure → DENY. Slice-1 autonomy is hardcoded: R0 auto, everything above R0 requires approval. Configurable R0-R4 map is slice 3 |
 | `planet_express/execution/verifier.py` | `container_running`, `container_health` via argv `docker inspect` on the resolved container (through `run_argv`), polled until healthy or a timeout (default 90s). **Extracted, not re-implemented (eng review issue 4).** `service_container()`, `container_health()`, and `watch_until_stable()` move here from `casa_zoidberg.py` (`_container_name_for` `:201`, `_is_healthy_now` `:212`, `_watch_until_stable` `:245`). They keep the exact inspect template including the `{{if .State.Health}}…{{else}}none{{end}}` guard (`:221-227`) and run on `run_argv`. Zoidberg's `_run` was never a shell helper; it runs `shlex.split` with no shell (`:67-68`). Zoidberg and Amy's label lookup (`casa_farnsworth.py:1149-1154`) import these and delete their copies. The typed-action verifier snapshots `RestartCount` before the action and fails on an increase during the watch window, instead of Zoidberg's absolute `>= 1`; confirm the counting behavior on the test homelab |
 | `planet_express/application/command_service.py` | Single API: `query`, `propose`, `approve`, `deny`, `get_status`. Owns lock rule, dedup, and notifying both front ends |
-| `planet_express/integrations/local_rpc.py` | **raw `socket.AF_UNIX` (outside voice T2; stdlib `multiprocessing.connection` rejected because its authkey handshake runs inline in `accept()` and it binds and listens in one call).** The accept thread only accepts and checks `SO_PEERCRED` (no reads); a wrong uid is closed immediately. The connection then goes to the pool, where the worker calls `settimeout(5)` and reads a 4-byte big-endian length (max 1 MiB, larger closes the connection) followed by UTF-8 JSON. The response uses the same framing. No authkey: file permissions plus the peer-uid check are the authentication; `SO_PEERCRED` check; method allowlist = `query.container`, `logs.tail`, `proposal.create`, `proposal.list_pending`, `approval.decide`, `execution.get_status`; every request carries a `request_id`; responses within 5s. **Serving model (eng review issue 3):** the accept loop runs on its own daemon thread and hands each connection to a `ThreadPoolExecutor(max_workers=4)`. Each connection carries one request and is then closed, with a 5s read deadline so a client that never sends is dropped. If the pool is full, the server answers `{"error": "busy"}` immediately instead of queueing. One additional worker is reserved for `approval.decide` and `proposal.create`, so read polling can never lock out a decision. Synchronous docker reads on the RPC path (`compose config --services`, label lookup, `docker logs`, `docker inspect`) call `run_argv` with a 4s timeout; on timeout the method returns a typed `{"error": "timeout"}` that front ends show as "host slow, retry", never treated as success. `proposal.create` on timeout creates nothing |
+| `planet_express/integrations/local_rpc.py` | **raw `socket.AF_UNIX` (outside voice T2; stdlib `multiprocessing.connection` rejected because its authkey handshake runs inline in `accept()` and it binds and listens in one call).** The accept thread only accepts and checks `SO_PEERCRED` (no reads); a wrong uid is closed immediately. The connection then goes to the pool, where the worker calls `settimeout(5)` and reads a 4-byte big-endian length (max 1 MiB, larger closes the connection) followed by UTF-8 JSON. The response uses the same framing. No authkey: file permissions plus the peer-uid check are the authentication; `SO_PEERCRED` check; method allowlist = `query.container`, `logs.tail`, `proposal.create`, `proposal.list_pending`, `approval.decide`, `execution.get_status`; every request carries a `request_id`; responses within 5s. **Serving model (eng review issue 3):** the accept loop runs on its own daemon thread and hands each connection to a `ThreadPoolExecutor(max_workers=4)`. Each connection carries one request and is then closed, with a 5s read deadline so a client that never sends is dropped. If the pool is full, the server answers `{"error": "busy"}` immediately instead of queueing. One additional worker is reserved for `approval.decide` only, so neither read polling nor slow proposals can lock out a decision (T9 deviation: `proposal.create` was dropped from the reserved set because it can block on docker for up to 120s; revisit once T14 bounds that call). Synchronous docker reads on the RPC path (`compose config --services`, label lookup, `docker logs`, `docker inspect`) call `run_argv` with a 4s timeout; on timeout the method returns a typed `{"error": "timeout"}` that front ends show as "host slow, retry", never treated as success. `proposal.create` on timeout creates nothing |
 | `planet_express/web/core_client.py`, `web/auth.py` | Scruffy's socket client; login + session + CSRF |
 
 #### Behavior rules
@@ -571,7 +571,33 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 - [x] Plan doc statuses corrected; stray empty `v2.0.0-1r` file removed from the repo root.
 
 **Landing 1c — dashboard**
-- [ ] **T9 (P1, human: ~3h / CC: ~15min)** — rpc — Raw AF_UNIX RPC with length prefix, bounded pool, and reserved decision worker
+
+**Status (2026-09-15): in progress on `v2` (untagged).** T9 done; T10, T13, T14, T11 remain.
+- **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
+  here.
+  - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
+    `execution.get_status`.
+  - `query.container`, `logs.tail` and `action.request` return `unknown_method` until T14 and
+    the logs work add them.
+  - Core starts the server after startup reconciliation. It fails closed with one warning when
+    the socket directory, the group or a resolvable peer user is missing. On the test VM today
+    it logs `no resolvable RPC peer users` until T10 creates `planetexpress-web`, and Telegram
+    is unaffected.
+  - Accepted as designed: `requested_by`/`decided_by` are taken from the request, because only
+    the dashboard's uid can connect. T13's login is what makes those names trustworthy.
+  - Known gap, owned by T14: `proposal.create` resolves targets through docker with the 120s
+    timeout, not the plan's 4s RPC read timeout, so a slow daemon can hold a worker. Decisions
+    stay served because the reserved worker takes `approval.decide` only (second Codex review
+    finding on T9; `proposal.create` was dropped from the plan's reserved set).
+  - Third Codex review finding, bounded rather than restructured: the reserved slot is taken
+    before the method is read, so an idle overflow connection could hold it for the 5s read
+    timeout. The reserved slot now uses a 0.5s read deadline (the dashboard's `call()` sends the
+    whole frame at once), capping that to half a second without a separate reading pool. The
+    review loop stopped here at round three; this last change is covered by
+    `test_idle_overflow_connection_releases_reserved_slot_quickly`, not re-reviewed.
+  - Codex review finding fixed: `start()` unlinked a live socket; it now refuses when a listener
+    answers and only removes a socket whose connection is refused.
+- [x] **T9 (P1, human: ~3h / CC: ~15min)** — rpc — ✅ done 2026-09-15 — Raw AF_UNIX RPC with length prefix, bounded pool, and reserved decision worker
   - Surfaced by: Architecture issues 3 and 6; outside voice T2
   - Files: `planet_express/integrations/rpc.py`, `tests/test_local_rpc.py`
   - Verify: `pytest tests/test_local_rpc.py` (oversize frame, partial frame, wrong uid, busy pool)

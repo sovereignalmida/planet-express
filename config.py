@@ -41,6 +41,13 @@ DATA_DIR = Path(os.environ.get(
 ))
 ACTIONS_DB = DATA_DIR / "planetexpress.db"
 
+RPC_SOCKET = Path(os.environ.get("CASA_RPC_SOCKET", "/run/planetexpress/core.sock"))
+RPC_GROUP = os.environ.get("CASA_RPC_GROUP", "planetexpress-rpc")
+RPC_PEER_USERS = [
+    name.strip() for name in os.environ.get("CASA_RPC_PEER_USERS", "planetexpress-web").split(",")
+    if name.strip()
+]
+
 STATE_MONITOR   = STATE_DIR / "latest_monitor.json"
 STATE_FINDINGS  = STATE_DIR / "latest_findings.json"
 STATE_PLAN      = STATE_DIR / "pending_plan.json"

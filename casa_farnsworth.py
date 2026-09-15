@@ -17,6 +17,7 @@ Usage:
 import argparse
 import json
 import logging
+import pwd
 import re
 import shlex
 import sys
@@ -40,6 +41,7 @@ from notifier import Notifier, TelegramNotifier
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import Store
 from planet_express.execution import actions
+from planet_express.integrations.rpc import RpcServer, build_core_handlers
 from state_models import MonitorSnapshot, PlanSet, RunStatus
 from telegram_client import TelegramClient
 
@@ -2043,6 +2045,26 @@ def digest_scheduler_loop(notifier: Notifier) -> None:
 
 
 # ── Main bot loop ─────────────────────────────────────────────────────────────
+def _start_dashboard_rpc(commands: CommandService, store: Store) -> RpcServer | None:
+    """Optional dashboard transport: installation failures never prevent polling."""
+    try:
+        allowed_uids = set()
+        for name in config.RPC_PEER_USERS:
+            try:
+                allowed_uids.add(pwd.getpwnam(name).pw_uid)
+            except KeyError:
+                continue
+        if not allowed_uids:
+            raise ValueError("no resolvable RPC peer users")
+        server = RpcServer(config.RPC_SOCKET, build_core_handlers(commands, store),
+                           allowed_uids, config.RPC_GROUP)
+        server.start()
+        return server
+    except Exception as exc:  # noqa: BLE001 -- optional transport must not prevent core startup
+        log.warning("Dashboard RPC not started: %s", exc)
+        return None
+
+
 def run_bot() -> None:
     config.ensure_dirs()
     token, chat_id = config.telegram_credentials()
@@ -2058,6 +2080,8 @@ def run_bot() -> None:
     interrupted = commands.reconcile_on_startup()
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
+
+    rpc_server = _start_dashboard_rpc(commands, store)
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")
@@ -2092,6 +2116,8 @@ def run_bot() -> None:
                 except Exception:
                     log.exception("Update handler error")
         except KeyboardInterrupt:
+            if rpc_server is not None:
+                rpc_server.stop()
             log.info("Farnsworth shutting down. Goodbye!")
             notifier.notify("🛑 <b>Planet Express going offline.</b>")
             break

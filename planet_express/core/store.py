@@ -203,6 +203,15 @@ class Store:
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
         return dict(row) if row is not None else None
 
+    def list_pending(self) -> list[dict]:
+        """List pending approvals after applying the usual lazy expiry."""
+        with self._write() as conn:
+            self._expire_stale(conn, self._clock())
+            rows = conn.execute(
+                "SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at, id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def set_message_id(self, approval_id: str, message_id: int | None) -> None:
         with self._write() as conn:
             conn.execute("UPDATE approvals SET message_id = ? WHERE id = ?", (message_id, approval_id))

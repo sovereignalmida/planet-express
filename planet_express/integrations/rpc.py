@@ -1,0 +1,319 @@
+"""Bounded, peer-authenticated Unix socket RPC for the dashboard."""
+
+import grp
+import json
+import logging
+import os
+import socket
+import stat
+import struct
+import threading
+import time
+import uuid
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+from planet_express.application.command_service import CommandService
+from planet_express.core.store import Store
+
+MAX_FRAME = 1024 * 1024
+log = logging.getLogger("planetexpress.rpc")
+
+
+class RpcError(Exception):
+    """RPC transport failure or a typed handler error."""
+
+    def __init__(self, message: str, code: str = "internal"):
+        super().__init__(message)
+        self.code = code
+
+
+def _error(request_id, code, message):
+    return {"request_id": request_id, "ok": False, "error": {"code": code, "message": message}}
+
+
+def _receive(conn, deadline):
+    def exact(length):
+        data = bytearray()
+        while len(data) < length:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("frame read timed out")
+            conn.settimeout(remaining)
+            chunk = conn.recv(length - len(data))
+            if not chunk:
+                raise EOFError("connection closed without a complete frame")
+            data.extend(chunk)
+        return data
+
+    length = struct.unpack("!I", exact(4))[0]
+    if length > MAX_FRAME:
+        raise EOFError("frame exceeds MAX_FRAME")
+    return exact(length)
+
+
+def _send(conn, response):
+    data = json.dumps(response, allow_nan=False).encode("utf-8")
+    if len(data) > MAX_FRAME:
+        raise ValueError("response exceeds MAX_FRAME")
+    conn.sendall(struct.pack("!I", len(data)) + data)
+
+
+def _decode(data):
+    def reject_constant(value):
+        raise ValueError("invalid JSON constant")
+
+    return json.loads(data.decode("utf-8"), parse_constant=reject_constant)
+
+
+class RpcServer:
+    def __init__(
+        self, socket_path, handlers: dict[str, Callable[[dict], Any]],
+        allowed_uids: set[int], group, read_timeout=5.0, workers=4,
+        # Decisions only. proposal.create resolves targets through docker (up to 120s until T14
+        # bounds the RPC read path), so letting it into the reserved slot would let slow
+        # proposals exhaust the capacity that keeps approvals answerable (Codex review, T9).
+        reserved_methods=frozenset({"approval.decide"}),
+        reserved_read_timeout=0.5,
+    ):
+        if workers < 1 or read_timeout <= 0:
+            raise ValueError("workers and read_timeout must be positive")
+        self.socket_path = Path(socket_path)
+        self.handlers = dict(handlers)
+        self.allowed_uids = set(allowed_uids)
+        self.group = group
+        self.read_timeout = read_timeout
+        self.reserved_methods = frozenset(reserved_methods)
+        # The reserved slot is taken before the method is known, so an idle or trickling overflow
+        # connection could hold it for the full read timeout and starve decisions. The only peer is
+        # the dashboard, whose call() sends the whole frame at once, so a short deadline here
+        # bounds that to well under a second without a separate reading pool (Codex review, T9).
+        self.reserved_read_timeout = min(reserved_read_timeout, read_timeout)
+        self._general = threading.BoundedSemaphore(workers)
+        self._reserved = threading.BoundedSemaphore(1)
+        self._pool = ThreadPoolExecutor(max_workers=workers + 1, thread_name_prefix="rpc")
+        self._stopped = threading.Event()
+        self._socket = None
+        self._thread = None
+        self._identity = None
+        self._connections = set()
+        self._lock = threading.Lock()
+
+    def start(self):
+        if self._socket is not None or self._stopped.is_set():
+            raise RuntimeError("RPC server already started or stopped")
+        if not self.socket_path.parent.is_dir():
+            raise FileNotFoundError(f"socket directory does not exist: {self.socket_path.parent}")
+        try:
+            gid = grp.getgrnam(self.group).gr_gid if isinstance(self.group, str) else self.group
+        except KeyError:
+            raise LookupError(f"socket group does not exist: {self.group}") from None
+        try:
+            existing = self.socket_path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if not stat.S_ISSOCK(existing.st_mode):
+                raise FileExistsError(f"socket path is not a socket: {self.socket_path}")
+            # Only a refused connection proves the socket is stale. Unlinking a live one would
+            # silently orphan a server that is still running (Codex review, T9).
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.5)
+                try:
+                    probe.connect(str(self.socket_path))
+                except (ConnectionRefusedError, FileNotFoundError):
+                    pass
+                else:
+                    raise FileExistsError(f"another RPC server is listening on {self.socket_path}")
+            self.socket_path.unlink()
+        conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            old_umask = os.umask(0o007)
+            try:
+                conn.bind(str(self.socket_path))
+            finally:
+                os.umask(old_umask)
+            info = self.socket_path.lstat()
+            self._identity = (info.st_dev, info.st_ino)
+            if gid is not None:
+                os.chown(self.socket_path, -1, gid)
+            os.chmod(self.socket_path, 0o660)
+            conn.listen(16)
+            conn.settimeout(0.1)
+            self._socket = conn
+            self._thread = threading.Thread(target=self._accept, daemon=True, name="rpc-accept")
+            self._thread.start()
+        except Exception:
+            conn.close()
+            self._socket = None
+            self._unlink()
+            raise
+
+    def _unlink(self):
+        try:
+            info = self.socket_path.lstat()
+            if (info.st_dev, info.st_ino) == self._identity:
+                self.socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def _accept(self):
+        while not self._stopped.is_set():
+            try:
+                conn, _ = self._socket.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                break
+            try:
+                _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if uid not in self.allowed_uids:
+                    log.warning("Rejected RPC peer uid %s", uid)
+                    conn.close()
+                    continue
+                reserved = False
+                slot = self._general
+                if not slot.acquire(blocking=False):
+                    slot = self._reserved
+                    reserved = True
+                    if not slot.acquire(blocking=False):
+                        conn.settimeout(min(0.1, self.read_timeout))
+                        _send(conn, _error(None, "busy", "RPC workers are busy"))
+                        conn.close()
+                        continue
+                with self._lock:
+                    self._connections.add(conn)
+                try:
+                    self._pool.submit(self._serve, conn, slot, reserved)
+                except Exception:
+                    with self._lock:
+                        self._connections.discard(conn)
+                    slot.release()
+                    raise
+            except Exception:  # noqa: BLE001 -- keep accepting after a connection failure
+                conn.close()
+                log.warning("RPC connection dispatch failed")
+
+    def _serve(self, conn, slot, reserved):
+        request_id = None
+        try:
+            read_timeout = self.reserved_read_timeout if reserved else self.read_timeout
+            conn.settimeout(read_timeout)
+            data = _receive(conn, time.monotonic() + read_timeout)
+            try:
+                request = _decode(data)
+                if not isinstance(request, dict):
+                    raise TypeError("request must be an object")
+                candidate = request.get("request_id")
+                if isinstance(candidate, str) and 1 <= len(candidate) <= 64:
+                    request_id = candidate
+                if (request_id is None or not isinstance(request.get("method"), str)
+                        or not isinstance(request.get("params"), dict)):
+                    raise ValueError("invalid request shape")
+            except (TypeError, ValueError, UnicodeError, RecursionError):
+                response = _error(request_id, "bad_request", "Invalid JSON request or request shape")
+            else:
+                method = request["method"]
+                if reserved and method not in self.reserved_methods:
+                    response = _error(request_id, "busy", "RPC workers are busy")
+                elif method not in self.handlers:
+                    response = _error(request_id, "unknown_method", "Unknown method")
+                else:
+                    try:
+                        result = self.handlers[method](request["params"])
+                        response = {"request_id": request_id, "ok": True, "result": result}
+                        # Serialization failures are handler failures too.
+                        if len(json.dumps(response, allow_nan=False).encode("utf-8")) > MAX_FRAME:
+                            raise ValueError("response exceeds MAX_FRAME")
+                    except RpcError as exc:
+                        response = _error(request_id, exc.code, str(exc))
+                    except Exception as exc:  # noqa: BLE001 -- handler failures must not expose params
+                        # Type name only: the message and traceback can carry request params.
+                        log.warning("RPC handler failed for %s: %s", method, type(exc).__name__)
+                        response = _error(request_id, "internal", "Internal error")
+            conn.settimeout(self.read_timeout)
+            _send(conn, response)
+        except (OSError, EOFError):
+            pass
+        finally:
+            conn.close()
+            with self._lock:
+                self._connections.discard(conn)
+            slot.release()
+
+    def stop(self):
+        self._stopped.set()
+        if self._socket is not None:
+            self._socket.close()
+        if self._thread is not None:
+            self._thread.join()
+        with self._lock:
+            for conn in self._connections:
+                try:
+                    conn.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+        self._unlink()
+        self._pool.shutdown(wait=True)
+
+
+def call(socket_path, method, params=None, *, timeout=5.0, request_id=None) -> dict:
+    """Make one framed request; transport failures raise RpcError."""
+    request_id = uuid.uuid4().hex if request_id is None else request_id
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            deadline = time.monotonic() + timeout
+            conn.settimeout(timeout)
+            conn.connect(str(socket_path))
+            _send(conn, {"request_id": request_id, "method": method, "params": {} if params is None else params})
+            response = _decode(_receive(conn, deadline))
+            if not isinstance(response, dict):
+                raise TypeError("response must be an object")
+            return response
+    except (OSError, EOFError, TypeError, ValueError, RecursionError) as exc:
+        raise RpcError(str(exc)) from exc
+
+
+def _params(params, strings, booleans=()):
+    if not isinstance(params, dict) or set(params) != set(strings) | set(booleans):
+        raise RpcError("Invalid params", "bad_request")
+    for name, limit in strings.items():
+        value = params[name]
+        if not isinstance(value, str) or not value.strip() or len(value) > limit:
+            raise RpcError(f"Invalid {name}", "bad_request")
+    for name in booleans:
+        if not isinstance(params[name], bool):
+            raise RpcError(f"Invalid {name}", "bad_request")
+
+
+def build_core_handlers(commands: CommandService, store: Store) -> dict:
+    def propose(params):
+        _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
+        return asdict(commands.propose(**params, requested_via="dashboard"))
+
+    def pending(params):
+        _params(params, {})
+        result = []
+        for row in store.list_pending():
+            item = dict(row)
+            item.pop("message_id", None)
+            item["target"] = json.loads(item.pop("target_json"))
+            result.append(item)
+        return result
+
+    def decide(params):
+        _params(params, {"approval_id": 64, "decided_by": 256}, ("approve",))
+        return asdict(commands.decide(**params, decision=None))
+
+    def status(params):
+        _params(params, {"execution_id": 64})
+        result = commands.get_status(params["execution_id"])
+        if result is None:
+            raise RpcError("Execution not found", "not_found")
+        return result
+
+    return {"proposal.create": propose, "proposal.list_pending": pending,
+            "approval.decide": decide, "execution.get_status": status}
