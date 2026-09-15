@@ -30,6 +30,7 @@ from pathlib import Path
 import casa_amy as amy
 import casa_bender as bender
 import config
+from planet_express.execution import actions
 from state_models import RollbackCandidates, UpdateHistory
 from telegram_client import TelegramClient
 
@@ -198,61 +199,22 @@ def _log_update_history(entry: dict) -> None:
 
 
 # ── Canary health check (mirrors Leela's crash-loop signal) ─────────────────────
+# Moved to planet_express/execution/actions.py (landing 1a, T5) so the typed-action
+# verifier shares one implementation. These names stay as thin wrappers: the canary code
+# below and tests/test_zoidberg_health_regression.py call them unchanged. A freshly
+# recreated container has no prior restarts, so the baseline stays at the default 0.
 def _container_name_for(stack_dir: Path, service: str) -> str | None:
-    exit_code, out, _err = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml ps -q {service}"
-    )
-    if exit_code != 0 or not out.strip():
-        return None
-    container_id = out.strip().splitlines()[0]
-    exit_code, name, _ = _run(f"docker inspect --format {{{{.Name}}}} {container_id}")
-    return name.lstrip("/") if exit_code == 0 and name else None
+    return actions.service_container(stack_dir, service)
 
 
 def _is_healthy_now(container_name: str) -> tuple[bool, str]:
-    """Same signal Leela's check_containers() uses: running, not crash-looping, not
-    unhealthy. A container that never becomes healthy at all (no healthcheck defined,
-    status stays 'running') is treated as OK — absence of a healthcheck isn't a failure.
-
-    Most services on this host (e.g. Radarr) have no Docker healthcheck at all, in which
-    case `.State.Health` doesn't exist in the inspect output and a bare
-    `{{.State.Health.Status}}` template errors out completely — not just that field, the
-    whole `docker inspect` call fails. The `{{if .State.Health}}...{{else}}none{{end}}`
-    guard is required, not cosmetic; caught by dry-run testing before this ever ran live."""
-    exit_code, out, err = _run(
-        "docker inspect --format "
-        + shlex.quote(
-            "{{.State.Status}}\t{{.RestartCount}}\t"
-            "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}"
-        )
-        + f" {container_name}"
-    )
-    if exit_code != 0:
-        return False, f"inspect failed: {err}"
-    parts = out.split("\t")
-    status = parts[0] if len(parts) > 0 else ""
-    restart_count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-    health = parts[2] if len(parts) > 2 else ""
-    if status != "running":
-        return False, f"status={status}"
-    if health == "unhealthy":
-        return False, "healthcheck failing"
-    if restart_count >= 1:
-        return False, f"restarted {restart_count}x during watch window"
-    return True, "ok"
+    return actions.container_health(container_name)
 
 
 def _watch_until_stable(container_name: str, seconds: int) -> tuple[bool, str]:
-    elapsed = 0
-    last_reason = "no data"
-    while elapsed < seconds:
-        time.sleep(CANARY_POLL_INTERVAL_SECONDS)
-        elapsed += CANARY_POLL_INTERVAL_SECONDS
-        ok, reason = _is_healthy_now(container_name)
-        last_reason = reason
-        if not ok:
-            return False, reason
-    return True, last_reason
+    return actions.watch_until_stable(
+        container_name, seconds, poll_seconds=CANARY_POLL_INTERVAL_SECONDS
+    )
 
 
 # ── Rollback ───────────────────────────────────────────────────────────────────

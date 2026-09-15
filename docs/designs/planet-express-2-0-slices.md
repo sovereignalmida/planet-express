@@ -477,23 +477,37 @@ Synthesized from the eng review's findings (2026-09-13). Each task derives from 
   - Verify: fixture stacks come up; Leela reads the stubs without errors; 1.x installs from a home-dir clone
 
 **Landing 1a — safety plumbing**
-- [ ] **T2 (P1, human: ~4h / CC: ~20min)** — tests — CRITICAL regression tests, written before any 1a change
+
+**Status (2026-09-15): implemented and verified on `v2`, pending commit/tag `v2.0.0-1a`.**
+- 263 tests pass in the homelab VM, and `casa-planetexpress` restarts cleanly on the new code.
+- Six Codex review rounds. Findings, all fixed with regression tests:
+  - lock leaked if a plan approval failed before the thread started;
+  - weekly pass idle check and lock grab were separate steps;
+  - scans could start during a mutation;
+  - mutations could start during a scan (safe-prune exempt);
+  - `run_argv` dropped the Docker connection vars and `SSH_AUTH_SOCK`;
+  - lock release and the IDLE reset were separate steps;
+  - the extraction shortened the Docker timeout from 120s to 30s.
+- The last fix (restoring the 120s timeout) was not re-reviewed.
+- `try_begin_mutation` gained `require_idle` and `during_scan`, with `try_start_run()` and
+  `busy_reason` added alongside. `end_mutation` gained `reset_to_idle`.
+- [x] **T2 (P1, human: ~4h / CC: ~20min)** — tests — CRITICAL regression tests, written before any 1a change
   - Surfaced by: Test review (Zoidberg health semantics, legacy callback ordering, scheduler retry)
   - Files: `tests/test_zoidberg_health_regression.py`, `tests/test_mutation_lock.py`
   - Verify: `pytest tests/test_zoidberg_health_regression.py tests/test_mutation_lock.py` passes against pre-change code for the Zoidberg semantics
-- [ ] **T3 (P1, human: ~2h / CC: ~10min)** — bender — `casa_bender.run_argv` (`shell=False`, minimal env, typed timeout)
+- [x] **T3 (P1, human: ~2h / CC: ~10min)** — bender — `casa_bender.run_argv` (`shell=False`, minimal env, typed timeout)
   - Surfaced by: Test review; T2 architecture
   - Files: `casa_bender.py`, `tests/test_bender_run_argv.py`
   - Verify: `pytest tests/test_bender_run_argv.py`; Codex review gate
-- [ ] **T4 (P1, human: ~4h / CC: ~20min)** — farnsworth — Mutation lock on every mutating path, legacy callback reorder, scheduler retry
+- [x] **T4 (P1, human: ~4h / CC: ~20min)** — farnsworth — Mutation lock on every mutating path, legacy callback reorder, scheduler retry
   - Surfaced by: Spec review round 3; eng test review
   - Files: `casa_farnsworth.py`
   - Verify: `pytest tests/test_mutation_lock.py`; Codex review gate; VM rehearsal
-- [ ] **T5 (P2, human: ~1 day / CC: ~30min)** — execution — Extract Zoidberg/Amy health and target logic
+- [x] **T5 (P2, human: ~1 day / CC: ~30min)** — execution — Extract Zoidberg/Amy health and target logic
   - Surfaced by: Code quality issue 4
   - Files: `planet_express/execution/actions.py`, `casa_zoidberg.py`, `casa_farnsworth.py`
   - Verify: regression tests from T2 still pass; `/patchnow` on the VM behaves as before
-- [ ] **T6 (P2, human: ~10min / CC: ~2min)** — docs — Correct CLAUDE.md's stale sudo-allowlist claim
+- [x] **T6 (P2, human: ~10min / CC: ~2min)** — docs — Correct CLAUDE.md's stale sudo-allowlist claim
   - Surfaced by: TODO 1
   - Files: `CLAUDE.md`
   - Verify: the paragraph names `shell=True` legacy plans as the remaining unenforced boundary

@@ -48,6 +48,11 @@ class Notifier(ABC):
         message body to show the final outcome. Both are caller-supplied -- the Notifier
         doesn't invent copy, the caller's business logic still owns what each case says."""
 
+    @abstractmethod
+    def acknowledge(self, decision: Decision, text: str) -> None:
+        """Answer the tap without resolving the request: the card, its buttons and the
+        pending request all stay exactly as they were (e.g. "busy, try again shortly")."""
+
 
 class TelegramNotifier(Notifier):
     def __init__(self, client: TelegramClient):
@@ -95,6 +100,10 @@ class TelegramNotifier(Notifier):
             _ref={"cb_id": cb_id, "msg_id": msg_id},
         )
 
+    def acknowledge(self, decision: Decision, text: str) -> None:
+        ref = decision._ref or {}
+        self._client.answer_callback(ref.get("cb_id", ""), text)
+
     def resolve(self, decision: Decision, ack_text: str, resolution_text: str) -> None:
         ref = decision._ref or {}
         self._client.answer_callback(ref.get("cb_id", ""), ack_text)
@@ -114,6 +123,7 @@ class FakeNotifier(Notifier):
         self.notifications: list[str] = []
         self.approval_requests: list[tuple[str, str, str]] = []  # (text, request_id, kind)
         self.resolutions: list[tuple[Decision, str, str]] = []   # (decision, ack, resolution)
+        self.acknowledgements: list[tuple[Decision, str]] = []    # (decision, text)
         self._next_decision: Decision | None = None
         self._next_message_id = 1
 
@@ -135,3 +145,6 @@ class FakeNotifier(Notifier):
 
     def resolve(self, decision: Decision, ack_text: str, resolution_text: str) -> None:
         self.resolutions.append((decision, ack_text, resolution_text))
+
+    def acknowledge(self, decision: Decision, text: str) -> None:
+        self.acknowledgements.append((decision, text))

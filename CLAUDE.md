@@ -17,11 +17,15 @@ Run one of:
 Read every finding it reports and either fix it or tell the user explicitly why it's being left
 as-is — don't silently drop findings. Both reviews stay in the loop; they catch different things.
 
-This gate is most load-bearing on the sudo/execution-allowlist work specifically: the current
-`_safety_check()` in `casa_bender.py` is a pure blocklist with no allowlist check at all for
-sudo-scoped commands — the only things stopping an out-of-scope `sudo` today are prompt text and
-the OS-level sudoers.d grant. Any change to that logic is exactly the class of "unenforced safety
-boundary" bug an independent second reviewer exists to catch.
+This gate is most load-bearing on execution safety. The sudo scope is code-enforced:
+`_check_sudo_allowlist()` in `casa_bender.py` fails closed on any `sudo` that isn't a declared
+`sudo systemctl start|stop|restart <unit>` grant. The boundary that is still NOT enforced by
+structure is legacy LLM-written plans: their steps are shell strings run by `_run_command()` with
+`shell=True`, guarded only by `_safety_check()`'s pattern checks, until Planet Express 2.0 (slice 5)
+replaces them with typed actions that run through `run_argv()` (argv, no shell, minimal
+environment). Changes to any of these (the pattern checks, the sudo allowlist, `run_argv()`, or
+the host-mutation lock in `casa_farnsworth.py`'s `PipelineState`) are exactly the class of
+"unenforced safety boundary" bug an independent second reviewer exists to catch.
 
 ## Project shape
 

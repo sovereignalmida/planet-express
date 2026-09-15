@@ -37,6 +37,7 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
+from planet_express.execution import actions
 from state_models import MonitorSnapshot, PlanSet, RunStatus
 from telegram_client import TelegramClient
 
@@ -425,6 +426,10 @@ class PipelineState:
         self._state = self.IDLE
         self._pending_plan_id: str | None = None
         self._pending_msg_id: int | None = None
+        # Host-mutation lock, deliberately separate from _state: a legacy plan can sit in
+        # AWAITING_APPROVAL for hours, and returning _state to IDLE clears the pending
+        # plan, so reusing _state would either block every mutation or lose that plan.
+        self._mutation_owner: str | None = None
 
     @property
     def state(self) -> str:
@@ -452,6 +457,94 @@ class PipelineState:
     def get_pending(self) -> tuple[str | None, int | None]:
         with self._lock:
             return self._pending_plan_id, self._pending_msg_id
+
+    # ── Host-mutation lock ────────────────────────────────────────────────────
+    # Every path that changes the host takes this for its whole duration: legacy plan
+    # execution, diff apply, rollback, /patchnow, the weekly update pass, safe-prune,
+    # /up and /down. Check-and-set happens under one acquisition of _lock, so two
+    # callers can never both see it free.
+    #
+    #   try_begin_mutation(owner) ── True ──► mutate ──► end_mutation(owner) (in finally)
+    #            │
+    #            └─ False ──► report "busy (<busy_reason>)", change nothing
+    #                         (another mutation holds the lock, or a scan is RUNNING)
+    @property
+    def mutation_owner(self) -> str | None:
+        with self._lock:
+            return self._mutation_owner
+
+    @property
+    def busy_reason(self) -> str:
+        """Why a mutation would be refused right now, for "busy" messages."""
+        with self._lock:
+            if self._mutation_owner is not None:
+                return self._mutation_owner
+            if self._state == self.RUNNING:
+                return "scan running"
+            return f"pipeline {self._state}"
+
+    def try_begin_mutation(
+        self, owner: str, *, require_idle: bool = False, during_scan: bool = False
+    ) -> bool:
+        """Take the host-mutation lock. Every check happens in ONE acquisition of _lock,
+        the same lock transition() and try_start_run() use, so nothing can slip between a
+        check and the grab (each gap here was found by Codex review, landing 1a):
+
+          - refused while another mutation holds the lock;
+          - refused while a scan is RUNNING, so nothing changes the host under Leela's
+            snapshot. during_scan=True is only for safe-prune, which runs inside the
+            scan itself;
+          - require_idle additionally refuses unless the pipeline is IDLE (the weekly
+            update pass, which has always waited for a pending plan too)."""
+        with self._lock:
+            if self._mutation_owner is not None:
+                return False
+            if self._state == self.RUNNING and not during_scan:
+                return False
+            if require_idle and self._state != self.IDLE:
+                return False
+            self._mutation_owner = owner
+        log.info(f"Mutation lock taken by {owner}")
+        return True
+
+    def end_mutation(self, owner: str, *, reset_to_idle: bool = False) -> None:
+        """Release the lock if `owner` holds it. reset_to_idle also returns the pipeline to
+        IDLE and clears the pending plan in the SAME acquisition. Releasing first and
+        transitioning afterwards would let another approval take the lock and move to
+        EXECUTING in between, only for this thread to overwrite that with IDLE (Codex
+        review, landing 1a). If `owner` doesn't hold the lock, nothing is released or reset:
+        a finishing mutation must never clobber a newer one's state."""
+        with self._lock:
+            if self._mutation_owner != owner:
+                held_by = self._mutation_owner
+                release = False
+            else:
+                self._mutation_owner = None
+                release = True
+                if reset_to_idle:
+                    log.info(f"State: {self._state} → {self.IDLE}")
+                    self._state = self.IDLE
+                    self._pending_plan_id = None
+                    self._pending_msg_id = None
+                    self._persist()
+        if release:
+            log.info(f"Mutation lock released by {owner}")
+        else:
+            log.warning(f"end_mutation({owner!r}) ignored: lock held by {held_by!r}")
+
+    def try_start_run(self) -> bool:
+        """IDLE -> RUNNING for a pipeline scan, refused unless IDLE AND no host mutation
+        holds the lock. One acquisition, so a mutation taking the lock and a scan starting
+        can't interleave in either order (Codex review, landing 1a): scanning a host while
+        containers are being recreated yields inconsistent snapshots and false
+        remediation plans. Safe-prune inside a running scan still takes the lock itself."""
+        with self._lock:
+            if self._state != self.IDLE or self._mutation_owner is not None:
+                return False
+            log.info(f"State: {self._state} → {self.RUNNING}")
+            self._state = self.RUNNING
+            self._persist()
+            return True
 
     def _persist(self):
         try:
@@ -664,7 +757,7 @@ def _has_active_rollback_candidates() -> bool:
         return False
 
 
-def maybe_run_safe_prune(snapshot: dict, notifier: Notifier) -> None:
+def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState") -> None:
     """Prune Docker images/networks when root disk pressure is real AND every container
     is in a known-safe state. Skips entirely (logs why, no Telegram noise) if disk is
     fine, if anything is unhealthy/crash-looping/unrecognized, if a whole stack is
@@ -685,10 +778,19 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier) -> None:
         log.info("Safe-prune skipped: an update rollback window is still open")
         return
 
-    log.info(
-        f"Root disk at {disk_alert['used_pct']}% and all containers healthy — running safe prune"
-    )
-    result = bender.run_safe_prune()
+    owner = "safe-prune"
+    # during_scan: safe-prune is called from inside run_pipeline while the scan it belongs
+    # to is RUNNING; it is the one mutation allowed then.
+    if not state.try_begin_mutation(owner, during_scan=True):
+        log.info(f"Safe-prune skipped: host busy ({state.busy_reason})")
+        return
+    try:
+        log.info(
+            f"Root disk at {disk_alert['used_pct']}% and all containers healthy — running safe prune"
+        )
+        result = bender.run_safe_prune()
+    finally:
+        state.end_mutation(owner)
     notifier.notify(
         f"🧹 *Safe prune ran automatically*\n"
         f"Root disk was at {disk_alert['used_pct']}% ({disk_alert.get('alert', '')}). "
@@ -704,11 +806,13 @@ def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
     mode: 'full' | 'status' | 'updates'
     """
-    if state.state not in (PipelineState.IDLE,):
-        notifier.notify("⚠️ Pipeline already running or awaiting approval. Please wait.")
+    if not state.try_start_run():
+        owner = state.mutation_owner
+        if owner:
+            notifier.notify(f"⏳ Host busy ({owner}) — scan not started. Try again shortly.")
+        else:
+            notifier.notify("⚠️ Pipeline already running or awaiting approval. Please wait.")
         return
-
-    state.transition(PipelineState.RUNNING)
     try:
         # ── Step 1: Leela scans ──────────────────────────────────────────────
         notifier.notify("👁️ *Leela scanning...*")
@@ -723,7 +827,7 @@ def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -
 
         if mode == "full":
             try:
-                maybe_run_safe_prune(snapshot, notifier)
+                maybe_run_safe_prune(snapshot, notifier, state)
             except Exception:
                 log.exception("Safe-prune check failed (non-fatal)")
 
@@ -860,7 +964,7 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
                 "🩺 *Zoidberg starting a canary update pass now...*\n"
                 "Silent per-service unless something needs a rollback — that'll page you."
             )
-            threading.Thread(target=_run_update_pass, args=(tg, notifier), daemon=True).start()
+            threading.Thread(target=_run_update_pass, args=(tg, notifier, state), daemon=True).start()
 
     elif cmd == "/stacks":
         threading.Thread(target=_run_stacks_list, args=(notifier,), daemon=True).start()
@@ -877,7 +981,7 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
         if not target:
             notifier.notify("Usage: `/up <stack>` or `/up all`")
         else:
-            threading.Thread(target=_run_stack_op, args=(notifier, "up", target), daemon=True).start()
+            threading.Thread(target=_run_stack_op, args=(notifier, "up", target, state), daemon=True).start()
 
     elif cmd == "/down":
         parts = text.split()
@@ -885,7 +989,7 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
         if not target:
             notifier.notify("Usage: `/down <stack>` or `/down all`")
         else:
-            threading.Thread(target=_run_stack_op, args=(notifier, "down", target), daemon=True).start()
+            threading.Thread(target=_run_stack_op, args=(notifier, "down", target, state), daemon=True).start()
 
     elif cmd == "/install":
         parts = text.split()
@@ -1017,25 +1121,52 @@ def handle_message(update: dict, tg: TelegramClient, notifier: Notifier, state: 
         )
 
 
+def _busy_text(state: PipelineState) -> str:
+    return f"⏳ Busy right now ({state.busy_reason}). Try again shortly."
+
+
 def handle_callback(update: dict, tg: TelegramClient, notifier: Notifier, state: PipelineState) -> None:
     decision = notifier.interpret_decision(update)
     if decision is None:
         return
 
     if decision.kind == "plan" and decision.approved:
-        notifier.resolve(
-            decision, "Good news, everyone! Executing...",
-            f"✅ Plan #{decision.request_id} *approved*. Bender is on it.",
-        )
-        p = load_pending_plan(decision.request_id)
-        if not p:
-            notifier.notify(f"⚠️ Plan `{decision.request_id}` not found or expired.")
-            state.transition(PipelineState.IDLE)
+        # Lock BEFORE resolving the card or touching PipelineState. Previously the card
+        # said "Bender is on it" before anything was checked; while the host is busy the
+        # tap is now only acknowledged, and the card, the pending plan and
+        # AWAITING_APPROVAL stay untouched so the plan can be approved again later.
+        # _execute_plan releases the lock in its finally.
+        owner = f"plan:{decision.request_id}"
+        if not state.try_begin_mutation(owner):
+            notifier.acknowledge(decision, _busy_text(state))
             return
-        state.transition(PipelineState.EXECUTING, plan_id=decision.request_id)
-        threading.Thread(
-            target=_execute_plan, args=(tg, notifier, state, p), daemon=True
-        ).start()
+        # Until the execution thread has actually started, releasing the lock is this
+        # function's job: if resolve() (Telegram unreachable), the plan load, the state
+        # transition or Thread.start() raises, the poll loop swallows the exception and a
+        # leaked lock would report "busy" for every later mutation until a restart.
+        handed_off = False
+        try:
+            notifier.resolve(
+                decision, "Good news, everyone! Executing...",
+                f"✅ Plan #{decision.request_id} *approved*. Bender is on it.",
+            )
+            p = load_pending_plan(decision.request_id)
+            if not p:
+                notifier.notify(f"⚠️ Plan `{decision.request_id}` not found or expired.")
+                state.transition(PipelineState.IDLE)
+                return
+            state.transition(PipelineState.EXECUTING, plan_id=decision.request_id)
+            try:
+                threading.Thread(
+                    target=_execute_plan, args=(tg, notifier, state, p), daemon=True
+                ).start()
+            except Exception:
+                state.transition(PipelineState.IDLE)
+                raise
+            handed_off = True
+        finally:
+            if not handed_off:
+                state.end_mutation(owner)
 
     elif decision.kind == "plan" and not decision.approved:
         notifier.resolve(
@@ -1046,23 +1177,30 @@ def handle_callback(update: dict, tg: TelegramClient, notifier: Notifier, state:
         log.info(f"Plan {decision.request_id} cancelled by user")
 
     elif decision.kind == "diff" and decision.approved:
-        notifier.resolve(
-            decision, "Applying diff...",
-            f"✅ Diff `{decision.request_id}` <b>applied</b>.",
-        )
+        owner = f"diff:{decision.request_id}"
+        if not state.try_begin_mutation(owner):
+            notifier.acknowledge(decision, _busy_text(state))
+            return
         try:
-            result = bender.apply_pending_diff(decision.request_id)
-            if result["backup_path"]:
-                backup_line = f"Backup saved at <code>{TelegramClient.s(result['backup_path'])}</code>."
-            else:
-                backup_line = "New file — no prior version to back up."
-            notifier.notify(
-                f"📝 Applied. {backup_line}\n"
-                f"This only wrote the file — nothing has restarted. Run the normal update/restart "
-                f"plan (or /check) to pick up the change."
+            notifier.resolve(
+                decision, "Applying diff...",
+                f"✅ Diff `{decision.request_id}` <b>applied</b>.",
             )
-        except bender.SafetyError as e:
-            notifier.notify(f"⚠️ Could not apply diff `{decision.request_id}`: {TelegramClient.s(str(e))}")
+            try:
+                result = bender.apply_pending_diff(decision.request_id)
+                if result["backup_path"]:
+                    backup_line = f"Backup saved at <code>{TelegramClient.s(result['backup_path'])}</code>."
+                else:
+                    backup_line = "New file — no prior version to back up."
+                notifier.notify(
+                    f"📝 Applied. {backup_line}\n"
+                    f"This only wrote the file — nothing has restarted. Run the normal update/restart "
+                    f"plan (or /check) to pick up the change."
+                )
+            except bender.SafetyError as e:
+                notifier.notify(f"⚠️ Could not apply diff `{decision.request_id}`: {TelegramClient.s(str(e))}")
+        finally:
+            state.end_mutation(owner)
 
     elif decision.kind == "diff" and not decision.approved:
         notifier.resolve(
@@ -1112,10 +1250,20 @@ def _run_backups_check(notifier: Notifier) -> None:
     notifier.notify(_fmt_backups_message(results))
 
 
-def _run_stack_op(notifier: Notifier, verb: str, target: str) -> None:
-    notifier.notify(f"⏳ `{verb}` `{TelegramClient.s(target)}`...")
-    fn = stackctl.stack_up if verb == "up" else stackctl.stack_down
-    result = fn(target)
+def _run_stack_op(notifier: Notifier, verb: str, target: str, state: PipelineState) -> None:
+    owner = f"stack:{verb}:{target}"
+    if not state.try_begin_mutation(owner):
+        notifier.notify(
+            f"⏳ Busy right now ({state.busy_reason}) — `{verb}` `{TelegramClient.s(target)}` "
+            f"not started. Try again shortly."
+        )
+        return
+    try:
+        notifier.notify(f"⏳ `{verb}` `{TelegramClient.s(target)}`...")
+        fn = stackctl.stack_up if verb == "up" else stackctl.stack_down
+        result = fn(target)
+    finally:
+        state.end_mutation(owner)
 
     if result.get("refused"):
         notifier.notify(f"🚫 `{TelegramClient.s(target)}` is in FORBIDDEN_STACKS — refusing to start it.")
@@ -1146,14 +1294,8 @@ def _investigate_failure(
     process often shows nothing wrong (e.g. a health check probe vs. an exec-based
     mount check), so without this Amy is stuck diagnosing blind."""
     try:
-        label_fmt = shlex.quote(
-            '{{index .Config.Labels "com.docker.compose.project"}}\t'
-            '{{index .Config.Labels "com.docker.compose.service"}}'
-        )
-        _, label_out, _ = bender._run_command(f"docker inspect --format {label_fmt} {container}")
-        stack_guess, _, service_guess = label_out.strip().partition("\t")
-        stack_guess = stack_guess.strip() or "unknown"
-        service_guess = service_guess.strip() or container
+        # argv, not a shell string: `container` can come from an LLM-written plan.
+        stack_guess, service_guess = actions.container_compose_labels(container)
 
         current_service_yaml = None
         block = bender.read_service_block(stack_guess, service_guess)
@@ -1635,7 +1777,9 @@ def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, 
         log.exception("Bender execution error")
         notifier.notify(f"🛑 Bender crashed: `{str(e)[:200]}`")
     finally:
-        state.transition(PipelineState.IDLE)
+        # Taken by handle_callback before this thread started. Release and return to IDLE
+        # atomically, so a newer approval can't slip in between and be overwritten.
+        state.end_mutation(f"plan:{plan_data['id']}", reset_to_idle=True)
 
 
 def _do_rollback(tg: TelegramClient, notifier: Notifier, state: PipelineState, plan_id: str) -> None:
@@ -1643,13 +1787,22 @@ def _do_rollback(tg: TelegramClient, notifier: Notifier, state: PipelineState, p
     if not p or not p.get("rollback"):
         notifier.notify(f"⚠️ No rollback steps found for plan `{plan_id}`.")
         return
-    notifier.notify(f"↩️ *Rolling back plan #{plan_id}...*")
-    result = bender.execute_rollback(p, tg)
-    notifier.notify(
-        f"Rollback complete. Steps executed: {result['steps_completed']}. "
-        f"Errors: {result.get('errors', [])}"
-    )
-    state.transition(PipelineState.IDLE)
+    owner = f"rollback:{plan_id}"
+    if not state.try_begin_mutation(owner):
+        notifier.notify(
+            f"⏳ Busy right now ({state.busy_reason}) — rollback of plan `{plan_id}` not started. "
+            f"Try again shortly."
+        )
+        return
+    try:
+        notifier.notify(f"↩️ *Rolling back plan #{plan_id}...*")
+        result = bender.execute_rollback(p, tg)
+        notifier.notify(
+            f"Rollback complete. Steps executed: {result['steps_completed']}. "
+            f"Errors: {result.get('errors', [])}"
+        )
+    finally:
+        state.end_mutation(owner, reset_to_idle=True)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -1666,15 +1819,25 @@ def scheduler_loop(notifier: Notifier, state: PipelineState) -> None:
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)
 
 
-def _run_update_pass(tg: TelegramClient, notifier: Notifier) -> None:
-    """Zoidberg's canary update pass. Deliberately doesn't touch PipelineState's own
-    machinery — it's silent-on-success by design, Telegram only speaks up on rollback,
-    so there's no "plan awaiting approval" step for the routine case."""
+def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineState) -> None:
+    """Zoidberg's canary update pass (/patchnow). Doesn't touch PipelineState's _state —
+    it's silent-on-success by design, Telegram only speaks up on rollback, so there's no
+    "plan awaiting approval" step — but it does hold the host-mutation lock for its whole
+    duration, since it recreates containers."""
+    owner = "zoidberg-patchnow"
+    if not state.try_begin_mutation(owner):
+        notifier.notify(
+            f"⏳ Busy right now ({state.busy_reason}) — canary update pass not started. "
+            f"Try again shortly."
+        )
+        return
     try:
         zoidberg.run_update_pass(tg=tg)
     except Exception as e:
         log.exception("Zoidberg update pass crashed")
         notifier.notify(f"🛑 *Zoidberg update pass crashed:* `{str(e)[:200]}`")
+    finally:
+        state.end_mutation(owner)
 
 
 def _seconds_until_next_update_window() -> float:
@@ -1690,6 +1853,46 @@ def _seconds_until_next_update_window() -> float:
     return (target - now).total_seconds()
 
 
+UPDATE_BUSY_RETRY_SECONDS = 300
+UPDATE_BUSY_MAX_WAIT_SECONDS = 3600
+
+
+def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, sleep=time.sleep) -> str:
+    """One weekly-window attempt at Zoidberg's update pass. Returns "ran", "failed" or
+    "skipped".
+
+    Busy means either the pipeline isn't IDLE (a scan running or a plan awaiting
+    approval, the same condition this always checked) or another mutation holds the
+    lock. Instead of losing the whole week to a briefly busy host, it retries every
+    UPDATE_BUSY_RETRY_SECONDS for up to UPDATE_BUSY_MAX_WAIT_SECONDS, then logs a skip.
+    `sleep` is injectable so tests don't wait an hour."""
+    owner = "zoidberg-weekly"
+    waited = 0
+    while not state.try_begin_mutation(owner, require_idle=True):
+        busy = state.busy_reason
+        if waited >= UPDATE_BUSY_MAX_WAIT_SECONDS:
+            log.warning(
+                f"Skipping scheduled update pass: host still busy ({busy}) after "
+                f"{waited // 60} minutes; next attempt is next week's window"
+            )
+            return "skipped"
+        log.info(
+            f"Scheduled update pass waiting: host busy ({busy}), "
+            f"retrying in {UPDATE_BUSY_RETRY_SECONDS // 60} min"
+        )
+        sleep(UPDATE_BUSY_RETRY_SECONDS)
+        waited += UPDATE_BUSY_RETRY_SECONDS
+    try:
+        log.info("Scheduled canary update pass starting")
+        zoidberg.run_update_pass(tg=tg)
+        return "ran"
+    except Exception:
+        log.exception("Scheduled update pass error")
+        return "failed"
+    finally:
+        state.end_mutation(owner)
+
+
 def update_scheduler_loop(tg: TelegramClient, state: PipelineState) -> None:
     """Background thread — runs Zoidberg's canary update pass weekly. Separate cadence
     from the 6h monitor cycle on purpose: pulling/restarting every service every 6h would
@@ -1702,14 +1905,7 @@ def update_scheduler_loop(tg: TelegramClient, state: PipelineState) -> None:
         delay = _seconds_until_next_update_window()
         log.info(f"Next canary update pass in {delay / 3600:.1f}h")
         time.sleep(delay)
-        if state.state != PipelineState.IDLE:
-            log.warning("Skipping scheduled update pass: pipeline busy, will retry next week")
-        else:
-            try:
-                log.info("Scheduled canary update pass starting")
-                zoidberg.run_update_pass(tg=tg)
-            except Exception:
-                log.exception("Scheduled update pass error")
+        _run_scheduled_update_pass(tg, state)
         time.sleep(3600)  # clear the target window before recomputing next week's delay
 
 

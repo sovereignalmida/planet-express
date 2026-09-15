@@ -16,6 +16,7 @@ import difflib
 import fnmatch
 import json
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -226,6 +227,65 @@ def _run_command(command: str) -> tuple[int, str, str]:
         return 1, "", f"Command timed out after {COMMAND_TIMEOUT_SECONDS}s"
     except Exception as e:  # noqa: BLE001
         return 1, "", str(e)
+
+
+# ── Argv runner (typed actions + verifier) ────────────────────────────────────
+# The runner every typed action and the verifier go through. Unlike _run_command
+# (shell=True, kept only for legacy LLM-written plans until slice 5 retires them), the
+# command is an argv list that never passes through a shell, so no part of it can be
+# reinterpreted as `&&`, `$(...)` or a redirect. The child also gets a minimal
+# environment: casa-planetexpress's own environment carries the LLM API key and the
+# Telegram bot token, and nothing Bender runs needs either.
+RUN_ARGV_TIMEOUT_EXIT = 124  # same convention as coreutils timeout(1)
+# Non-secret variables only. The Docker ones are connection settings the docker CLI
+# needs to reach the same daemon the shell=True commands always inherited: a custom
+# DOCKER_HOST/DOCKER_CONTEXT or a rootless socket found via XDG_RUNTIME_DIR. Dropping them
+# would point health checks at the default socket, report healthy containers as missing,
+# and trigger false rollbacks (found by Codex review, landing 1a).
+_RUN_ARGV_ENV_KEYS = (
+    "PATH", "HOME", "LANG",
+    "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH",
+    "DOCKER_TLS_VERIFY", "DOCKER_API_VERSION", "XDG_RUNTIME_DIR",
+    # ssh:// Docker hosts/contexts authenticate through the agent; without its socket every
+    # docker call to a remote daemon fails (Codex review, landing 1a).
+    "SSH_AUTH_SOCK",
+)
+_RUN_ARGV_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def run_argv(argv: list[str], timeout: int) -> tuple[int, str, str]:
+    """Run argv without a shell; return (returncode, stdout, stderr), output stripped.
+
+    A string is rejected rather than split: callers must build argv themselves, so a
+    stray shell-style command string can never be quietly accepted. Timeout returns
+    RUN_ARGV_TIMEOUT_EXIT (124), a missing executable 127, and any other OS-level launch
+    failure 126, all with a human-readable stderr, never an exception."""
+    if not isinstance(argv, list):
+        raise TypeError(f"run_argv takes an argv list, got {type(argv).__name__}")
+    if not argv:
+        raise ValueError("run_argv needs a non-empty argv list")
+    if not all(isinstance(part, str) for part in argv):
+        raise TypeError("every run_argv argument must be a str")
+
+    env = {key: os.environ[key] for key in _RUN_ARGV_ENV_KEYS if key in os.environ}
+    env.setdefault("PATH", _RUN_ARGV_DEFAULT_PATH)
+    try:
+        result = subprocess.run(
+            argv,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,  # returncode inspected by the caller, not raised
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return RUN_ARGV_TIMEOUT_EXIT, "", f"{argv[0]} timed out after {timeout}s"
+    except FileNotFoundError:
+        return 127, "", f"{argv[0]}: executable not found"
+    except OSError as e:
+        return 126, "", f"{argv[0]}: {e}"
 
 
 # ── Log step to file ──────────────────────────────────────────────────────────
