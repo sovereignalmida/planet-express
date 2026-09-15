@@ -25,3 +25,6 @@ logs/*.log
 
 # Test homelab: the gluetun .env stub holds fake values and must be tracked
 !tests/homelab/host-stubs/stacks/network/.env
+
+# Typed-action database (core-only runtime state, landing 1b)
+/data/

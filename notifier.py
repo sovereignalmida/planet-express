@@ -24,6 +24,7 @@ class Decision:
     request_id: str
     kind: str             # caller-defined tag, e.g. "plan" or "diff"
     approved: bool
+    decided_by: str | None = None  # who tapped: "@username (id)" or "id" for Telegram
     _ref: Any = None      # opaque, implementation-owned handle resolve() needs (e.g.
                           # Telegram's message id) -- callers must never inspect this.
 
@@ -49,6 +50,12 @@ class Notifier(ABC):
         doesn't invent copy, the caller's business logic still owns what each case says."""
 
     @abstractmethod
+    def update_request(self, message_id: int | None, text: str) -> None:
+        """Replace the body of a previously sent request message by its id, without a tap
+        to answer: used when a decision arrives from somewhere else (the dashboard) or an
+        execution finishes later. Best-effort, like resolve()."""
+
+    @abstractmethod
     def acknowledge(self, decision: Decision, text: str) -> None:
         """Answer the tap without resolving the request: the card, its buttons and the
         pending request all stay exactly as they were (e.g. "busy, try again shortly")."""
@@ -62,10 +69,12 @@ class TelegramNotifier(Notifier):
         self._client.send(text)
 
     def request_approval(self, text: str, request_id: str, kind: str) -> int:
-        keyboard = (
-            TelegramClient.diff_approve_keyboard(request_id) if kind == "diff"
-            else TelegramClient.approve_keyboard(request_id)
-        )
+        if kind == "diff":
+            keyboard = TelegramClient.diff_approve_keyboard(request_id)
+        elif kind == "action":
+            keyboard = TelegramClient.act_keyboard(request_id)
+        else:
+            keyboard = TelegramClient.approve_keyboard(request_id)
         sent = self._client.send(text, reply_markup=keyboard)
         return sent.get("message_id")
 
@@ -89,16 +98,32 @@ class TelegramNotifier(Notifier):
         kind = {
             "approve": "plan", "cancel": "plan",
             "approve_diff": "diff", "cancel_diff": "diff",
+            "act_ok": "action", "act_no": "action",
         }.get(action)
         if kind is None:
             return None
 
-        approved = action in ("approve", "approve_diff")
+        approved = action in ("approve", "approve_diff", "act_ok")
         msg_id = cb.get("message", {}).get("message_id")
+        sender = cb.get("from") or {}
+        sender_id = sender.get("id")
+        username = sender.get("username")
+        if username:
+            decided_by = f"@{username} ({sender_id})"
+        else:
+            decided_by = str(sender_id) if sender_id is not None else None
         return Decision(
-            request_id=request_id, kind=kind, approved=approved,
+            request_id=request_id, kind=kind, approved=approved, decided_by=decided_by,
             _ref={"cb_id": cb_id, "msg_id": msg_id},
         )
+
+    def update_request(self, message_id: int | None, text: str) -> None:
+        if message_id is None:
+            return
+        try:
+            self._client.edit(message_id, text)
+        except Exception:  # noqa: BLE001 -- best-effort, same as resolve(); never log the error text
+            log.warning("Failed to update request message")
 
     def acknowledge(self, decision: Decision, text: str) -> None:
         ref = decision._ref or {}
@@ -124,6 +149,7 @@ class FakeNotifier(Notifier):
         self.approval_requests: list[tuple[str, str, str]] = []  # (text, request_id, kind)
         self.resolutions: list[tuple[Decision, str, str]] = []   # (decision, ack, resolution)
         self.acknowledgements: list[tuple[Decision, str]] = []    # (decision, text)
+        self.request_updates: list[tuple[int | None, str]] = []   # (message_id, text)
         self._next_decision: Decision | None = None
         self._next_message_id = 1
 
@@ -148,3 +174,6 @@ class FakeNotifier(Notifier):
 
     def acknowledge(self, decision: Decision, text: str) -> None:
         self.acknowledgements.append((decision, text))
+
+    def update_request(self, message_id: int | None, text: str) -> None:
+        self.request_updates.append((message_id, text))

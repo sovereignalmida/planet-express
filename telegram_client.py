@@ -106,6 +106,17 @@ class TelegramClient:
 
     # ── Keyboard helpers ──────────────────────────────────────────────────────
     @staticmethod
+    def act_keyboard(approval_id: str) -> dict:
+        """Typed-action approval card (landing 1b). Its own callback prefixes, so a tap
+        can never be routed into the legacy plan or diff branches."""
+        return {
+            "inline_keyboard": [[
+                {"text": "✅ Authorise", "callback_data": f"act_ok:{approval_id}"},
+                {"text": "❌ Deny",      "callback_data": f"act_no:{approval_id}"},
+            ]]
+        }
+
+    @staticmethod
     def approve_keyboard(plan_id: str) -> dict:
         return {
             "inline_keyboard": [[

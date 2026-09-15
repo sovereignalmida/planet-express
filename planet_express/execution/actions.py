@@ -10,10 +10,14 @@ old Amy label lookup, which interpolated a container name (possibly from an LLM-
 plan) into a shell=True command string.
 """
 
+import re
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import casa_bender as bender
+import config
 
 # Same as casa_zoidberg._run()'s default, which these checks used before the extraction.
 # A shorter value turns a slow or remote daemon into a "missing/unhealthy" verdict and a
@@ -52,6 +56,31 @@ def service_container(stack_dir: Path, service: str) -> str | None:
     return name.lstrip("/") if rc == 0 and name else None
 
 
+@dataclass(frozen=True)
+class HealthReading:
+    error: str | None  # set when docker inspect itself failed
+    status: str
+    restart_count: int
+    health: str  # "healthy" | "unhealthy" | "starting" | "none"
+
+
+def read_health(container_name: str) -> HealthReading:
+    """One `docker inspect` for status, RestartCount and health (with the Health guard)."""
+    rc, out, err = bender.run_argv(
+        ["docker", "inspect", "--format", _HEALTH_FORMAT, container_name],
+        timeout=DOCKER_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return HealthReading(error=err, status="", restart_count=0, health="")
+    parts = out.split("\t")
+    return HealthReading(
+        error=None,
+        status=parts[0] if len(parts) > 0 else "",
+        restart_count=int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0,
+        health=parts[2] if len(parts) > 2 else "",
+    )
+
+
 def container_health(container_name: str, baseline_restarts: int = 0) -> tuple[bool, str]:
     """Same signal Leela's check_containers() uses: running, not unhealthy, not
     restarting. A container with no healthcheck (health "none") and one whose healthcheck
@@ -60,21 +89,14 @@ def container_health(container_name: str, baseline_restarts: int = 0) -> tuple[b
     baseline_restarts is the RestartCount taken before the action being verified. The
     canary updater passes 0 (a freshly recreated container), so any restart fails. A
     typed restart of an existing container passes its pre-action count (landing 1b)."""
-    rc, out, err = bender.run_argv(
-        ["docker", "inspect", "--format", _HEALTH_FORMAT, container_name],
-        timeout=DOCKER_TIMEOUT_SECONDS,
-    )
-    if rc != 0:
-        return False, f"inspect failed: {err}"
-    parts = out.split("\t")
-    status = parts[0] if len(parts) > 0 else ""
-    restart_count = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-    health = parts[2] if len(parts) > 2 else ""
-    if status != "running":
-        return False, f"status={status}"
-    if health == "unhealthy":
+    reading = read_health(container_name)
+    if reading.error is not None:
+        return False, f"inspect failed: {reading.error}"
+    if reading.status != "running":
+        return False, f"status={reading.status}"
+    if reading.health == "unhealthy":
         return False, "healthcheck failing"
-    restarts = restart_count - baseline_restarts
+    restarts = reading.restart_count - baseline_restarts
     if restarts >= 1:
         return False, f"restarted {restarts}x during watch window"
     return True, "ok"
@@ -110,3 +132,159 @@ def container_compose_labels(container: str) -> tuple[str, str]:
     )
     stack, _, service = (out if rc == 0 else "").strip().partition("\t")
     return stack.strip() or "unknown", service.strip() or container
+
+
+# ── Targets (landing 1b) ─────────────────────────────────────────────────────────
+# Resolution happens before any mutating argv exists. Every refusal is a TargetError, and
+# the cheap refusals (bad names, forbidden stacks, network-guarded services) come before
+# any docker call at all.
+#
+#   names valid? ─► stack forbidden? ─► network-guarded? ─► compose file exists?
+#       ─► service in `config --services`? ─► exactly one container? ─► paused? ─► Target
+NETWORK_GUARDED_SUBSTRINGS = ("traefik", "adguard")  # same rule as Zoidberg and Bender's network guard
+_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+class TargetError(Exception):
+    """The target was refused; nothing was built or run."""
+
+
+@dataclass(frozen=True)
+class Target:
+    stack: str
+    service: str
+    container: str
+
+    @property
+    def key(self) -> str:
+        return f"{self.stack}/{self.service}"
+
+    def as_dict(self) -> dict:
+        return {"stack": self.stack, "service": self.service, "container": self.container}
+
+
+def compose_file(stack: str) -> Path:
+    return Path(config.STACKS_ROOT) / stack / "docker-compose.yml"
+
+
+def resolve_target(stack: str, service: str, *, for_mutation: bool = True) -> Target:
+    for label, value in (("stack", stack), ("service", service)):
+        if not isinstance(value, str) or not _NAME_RE.fullmatch(value) or ".." in value:
+            raise TargetError(f"invalid {label} name {value!r}")
+    if stack in config.FORBIDDEN_STACKS:
+        raise TargetError(f"stack {stack!r} is forbidden")
+    if for_mutation and any(tok in f"{stack}/{service}".lower() for tok in NETWORK_GUARDED_SUBSTRINGS):
+        raise TargetError(f"{stack}/{service} is network-guarded (Traefik/AdGuard); use a reviewed plan")
+
+    compose = compose_file(stack)
+    if not compose.is_file():
+        raise TargetError(f"no stack named {stack!r} under {config.STACKS_ROOT}")
+
+    rc, out, err = bender.run_argv(
+        ["docker", "compose", "-f", str(compose), "config", "--services"], timeout=DOCKER_TIMEOUT_SECONDS
+    )
+    if rc != 0:
+        raise TargetError(f"could not read the services of {stack!r}: {err[:200]}")
+    if service not in {line.strip() for line in out.splitlines() if line.strip()}:
+        raise TargetError(f"stack {stack!r} has no service {service!r}")
+
+    rc, out, err = bender.run_argv(
+        ["docker", "compose", "-f", str(compose), "ps", "-a", "-q", service], timeout=DOCKER_TIMEOUT_SECONDS
+    )
+    if rc != 0:
+        raise TargetError(f"could not list containers for {stack}/{service}: {err[:200]}")
+    ids = [line.strip() for line in out.splitlines() if line.strip()]
+    if not ids:
+        raise TargetError(f"{stack}/{service} has no container")
+    if len(ids) > 1:
+        raise TargetError(f"{stack}/{service} is ambiguous: {len(ids)} containers")
+
+    rc, name, err = bender.run_argv(
+        ["docker", "inspect", "--format", "{{.Name}}", ids[0]], timeout=DOCKER_TIMEOUT_SECONDS
+    )
+    if rc != 0 or not name.strip():
+        raise TargetError(f"could not inspect the container for {stack}/{service}: {err[:200]}")
+    container = name.strip().lstrip("/")
+    if for_mutation and container in config.PAUSED_CONTAINERS:
+        raise TargetError(f"{container} is paused by the operator (paused_containers)")
+    return Target(stack=stack, service=service, container=container)
+
+
+# ── Action registry (landing 1b) ─────────────────────────────────────────────────
+# Slice 1 lands only the restart action, through Telegram. The R0 reads (logs, inspect,
+# stats) arrive with 1c's dashboard. Actions only BUILD argv; command_service runs it
+# through casa_bender.run_argv.
+@dataclass(frozen=True)
+class ActionSpec:
+    name: str
+    risk: str
+    description: str
+    abortable: bool = False
+    rollbackable: bool = False
+    resumable: bool = False
+
+
+RESTART_SERVICE = "docker.restart_service"
+REGISTRY: dict[str, ActionSpec] = {
+    RESTART_SERVICE: ActionSpec(RESTART_SERVICE, "R1", "Restart one compose service"),
+}
+
+
+def restart_argv(target: Target) -> list[str]:
+    return ["docker", "compose", "-f", str(compose_file(target.stack)), "restart", target.service]
+
+
+def restart_count(container_name: str) -> int | None:
+    reading = read_health(container_name)
+    return None if reading.error is not None else reading.restart_count
+
+
+# ── Verifier (landing 1b) ────────────────────────────────────────────────────────
+VERIFY_TIMEOUT_SECONDS = 90
+VERIFY_STABLE_SECONDS = 15
+
+
+def verify_after_restart(
+    container_name: str,
+    baseline_restarts: int | None,
+    *,
+    timeout: float = VERIFY_TIMEOUT_SECONDS,
+    poll_seconds: float = DEFAULT_POLL_SECONDS,
+    stable_seconds: float = VERIFY_STABLE_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[bool, str]:
+    """Verify from container state, never from the restart command's exit code.
+
+    Fails at the first poll that shows the container not running, unhealthy, or restarted
+    beyond `baseline_restarts` (the count taken before the restart; `docker compose restart`
+    itself doesn't increment it). Passes once it has been running with health "healthy"
+    (or no healthcheck) for `stable_seconds`. A healthcheck still "starting" keeps waiting;
+    never reaching healthy within `timeout` fails."""
+    start = clock()
+    good_since: float | None = None
+    baseline = baseline_restarts
+    while True:
+        sleep(poll_seconds)
+        now = clock()
+        reading = read_health(container_name)
+        if reading.error is not None:
+            return False, f"inspect failed: {reading.error}"
+        if baseline is None:
+            baseline = reading.restart_count
+        if reading.status != "running":
+            return False, f"status={reading.status}"
+        if reading.health == "unhealthy":
+            return False, "healthcheck failing"
+        restarts = reading.restart_count - baseline
+        if restarts >= 1:
+            return False, f"restarted {restarts}x during verification"
+        if reading.health in ("healthy", "none"):
+            good_since = now if good_since is None else good_since
+            if now - good_since >= stable_seconds:
+                detail = "healthy" if reading.health == "healthy" else "running, no healthcheck"
+                return True, f"{detail} for {int(now - good_since)}s"
+        else:
+            good_since = None
+        if now - start >= timeout:
+            return False, f"not healthy within {int(timeout)}s (health={reading.health})"

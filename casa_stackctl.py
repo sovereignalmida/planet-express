@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 
+import casa_bender as bender
 import config
 
 log_prefix = "[casa_stackctl]"
@@ -252,6 +253,10 @@ def main() -> int:
         p = sub.add_parser(verb)
         p.add_argument("stack", nargs="?", help="stack name, e.g. media")
         p.add_argument("--all", action="store_true", help="apply to every stack")
+        p.add_argument(
+            "--force", action="store_true",
+            help="run even while casa-planetexpress is active (bypasses its mutation lock)",
+        )
 
     sub.add_parser("list")
     sub.add_parser("mounts")
@@ -268,6 +273,15 @@ def main() -> int:
 
     if not args.all and not args.stack:
         parser.error(f"{args.action} requires either a stack name or --all")
+
+    if not args.force and bender.core_service_active():
+        print(
+            "casa-planetexpress is running, and its host-mutation lock can't see this CLI, so "
+            f"`{args.action}` could collide with a plan, update or restart in progress. "
+            "Use Telegram /up or /down instead, or pass --force.",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.action == "up":
         return cmd_up(args.stack, args.all)

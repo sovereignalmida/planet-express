@@ -525,11 +525,16 @@ Synthesized from the eng review's findings (2026-09-13). Each task derives from 
   - Verify: the paragraph names `shell=True` legacy plans as the remaining unenforced boundary
 
 **Landing 1b — typed restart via Telegram**
-- [ ] **T7 (P1, human: ~3h / CC: ~15min)** — store — SQLite store, connection per call, WAL, core-only data dir
+**Status (2026-09-15): implemented and validated locally and on the test VM; live-host landing
+and tagging remain.** Local: 379 tests and `ruff check .` pass. VM: core restarts cleanly; a real
+typed restart of `healthy/web` reaches `passed` only after 15 seconds healthy; the out-of-process
+stack CLI refuses while core is active. Three Codex review passes found and fixed duplicate-card
+publication and non-atomic approval/execution creation; the final pass reported no issue.
+- [x] **T7 (P1, human: ~3h / CC: ~15min)** — store — SQLite store, connection per call, WAL, core-only data dir
   - Surfaced by: Architecture issue 2
   - Files: `planet_express/core/store.py`, `tests/test_store.py`
   - Verify: `pytest tests/test_store.py` (two-thread approval race)
-- [ ] **T8 (P1, human: ~3h / CC: ~15min)** — command-service — Startup reconciliation of interrupted executions, plus CLI lock guard
+- [x] **T8 (P1, human: ~3h / CC: ~15min)** — command-service — Startup reconciliation of interrupted executions, plus CLI lock guard
   - Surfaced by: Issue 7 (critical gap)
   - Files: `planet_express/application/command_service.py`, `casa_zoidberg.py`, `casa_stackctl.py`, `tests/test_cli_lock_guard.py`
   - Verify: seeded `running` row becomes `interrupted` on start; the CLI refuses while the service is active

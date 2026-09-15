@@ -33,6 +33,14 @@ LOG_DIR = Path(os.environ.get(
 ))
 
 # State file names
+# Core-only data directory for the typed-action database (landing 1b): proposals,
+# approvals, executions and the event log. planet_express.core.store.Store creates it
+# with mode 0700; the dashboard never opens it (landing 1c reads through RPC).
+DATA_DIR = Path(os.environ.get(
+    "CASA_DATA_DIR", str(Path(__file__).parent / "data")
+))
+ACTIONS_DB = DATA_DIR / "planetexpress.db"
+
 STATE_MONITOR   = STATE_DIR / "latest_monitor.json"
 STATE_FINDINGS  = STATE_DIR / "latest_findings.json"
 STATE_PLAN      = STATE_DIR / "pending_plan.json"

@@ -432,12 +432,30 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False) -> 
     return results
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Zoidberg — Planet Express canary auto-updater")
     parser.add_argument("--dry-run", action="store_true", help="Report what would update, touch nothing")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--force", action="store_true",
+        help="run a real update pass even while casa-planetexpress is active (bypasses its mutation lock)",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.dry_run and not args.force and bender.core_service_active():
+        print(
+            "casa-planetexpress is running, and its host-mutation lock can't see this CLI, so a "
+            "real update pass could collide with a plan, restart or scan in progress. Use "
+            "Telegram /patchnow, run with --dry-run, or pass --force.",
+            file=sys.stderr,
+        )
+        return 2
 
     config.ensure_dirs()
     out = run_update_pass(tg=None, dry_run=args.dry_run)
     print(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    sys.exit(main())

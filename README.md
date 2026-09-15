@@ -77,6 +77,8 @@ the green CI badge.
 - Full pipeline run (Leela → Hermes → Farnsworth) against a real Compose stack with at least one
   induced failure (e.g. a stopped container) — confirm a real finding and a real plan.
 - Approve a plan over Telegram, confirm Bender executes it and the fix actually lands.
+- Run `/restart <stack> <service>`, approve its typed action card, and confirm the service is
+  reported successful only after the post-restart health verification passes.
 - Trigger Amy by letting a remediation fail once — confirm it diagnoses without executing anything.
 - Zoidberg canary-update pass on a throwaway service — confirm rollback on an induced unhealthy
   start.

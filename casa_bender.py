@@ -288,6 +288,17 @@ def run_argv(argv: list[str], timeout: int) -> tuple[int, str, str]:
         return 126, "", f"{argv[0]}: {e}"
 
 
+CORE_SERVICE_UNIT = "casa-planetexpress.service"
+
+
+def core_service_active() -> bool:
+    """True if the Planet Express core service is running on this host. The mutating CLI
+    entry points (casa_zoidberg, casa_stackctl) refuse while it is, because they run
+    outside its in-process host-mutation lock (landing 1b)."""
+    rc, _out, _err = run_argv(["systemctl", "is-active", "--quiet", CORE_SERVICE_UNIT], timeout=10)
+    return rc == 0
+
+
 # ── Log step to file ──────────────────────────────────────────────────────────
 def _log_step(plan_id: str, step: dict, exit_code: int, stdout: str, stderr: str) -> None:
     try:
