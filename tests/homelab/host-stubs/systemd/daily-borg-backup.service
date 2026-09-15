@@ -1,0 +1,9 @@
+# Test homelab stand-in for the live host's daily borg job. Same unit name and oneshot
+# shape, so casa_leela.check_backups() and casa_stackctl.check_backups() read it the same way.
+# Set PE_FAIL_BACKUP=1 via a drop-in to rehearse a failed job.
+[Unit]
+Description=Daily borg backup (homelab stub)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'if [ "$${PE_FAIL_BACKUP:-0}" = 1 ]; then echo "borg stub: repository locked" >&2; exit 2; fi; echo "borg stub: archive daily-$$(date +%%F) created"'

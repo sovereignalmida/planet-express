@@ -1,0 +1,7 @@
+# Test homelab stand-in for the live host's weekly borg job (see daily-borg-backup.service).
+[Unit]
+Description=Weekly borg backup (homelab stub)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'if [ "$${PE_FAIL_BACKUP:-0}" = 1 ]; then echo "borg stub: repository locked" >&2; exit 2; fi; echo "borg stub: archive weekly-$$(date +%%F) created"'

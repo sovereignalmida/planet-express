@@ -1,0 +1,8 @@
+# Fixture: exits non-zero shortly after start, restart policy keeps bringing it back.
+# Leela should report a crash loop (rising RestartCount); verification must fail.
+services:
+  worker:
+    image: busybox:1.37
+    container_name: fixture-crash-loop
+    restart: unless-stopped
+    command: ["sh", "-c", "echo 'fixture: starting'; sleep 3; echo 'fixture: fatal error, exiting' >&2; exit 1"]

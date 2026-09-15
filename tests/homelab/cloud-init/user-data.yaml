@@ -1,0 +1,40 @@
+#cloud-config
+# First-boot config for the Planet Express test homelab guest. vm.sh substitutes
+# @SSH_PUBKEY@ and serves this over NoCloud (http://10.0.2.2:<seed port>/).
+#
+# Mirrors the live host's shape: an operator user named casaroot with passwordless sudo,
+# Docker + the compose v2 plugin, python3-venv for deploy.sh, acl for 1c's setfacl grants.
+
+hostname: pe-homelab
+manage_etc_hosts: true
+timezone: Europe/Lisbon
+
+users:
+  - name: casaroot
+    gecos: Planet Express test operator
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "@SSH_PUBKEY@"
+
+ssh_pwauth: false
+package_update: true
+package_upgrade: false
+packages:
+  - docker.io
+  - docker-compose-v2
+  - python3-venv
+  - python3-pip
+  - acl
+  - openssl
+  - git
+  - jq
+  - curl
+
+runcmd:
+  - [systemctl, enable, --now, docker]
+  - [usermod, -aG, docker, casaroot]
+  - [mkdir, -p, /var/lib/pe-homelab]
+  - [touch, /var/lib/pe-homelab/cloud-init-done]

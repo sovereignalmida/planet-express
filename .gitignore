@@ -22,3 +22,6 @@ logs/*.log
 # Local dev-tooling state — not app code, host/editor-specific
 /.claude/
 /.tokensave/
+
+# Test homelab: the gluetun .env stub holds fake values and must be tracked
+!tests/homelab/host-stubs/stacks/network/.env

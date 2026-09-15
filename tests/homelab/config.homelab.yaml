@@ -1,0 +1,25 @@
+# Planet Express topology config for the test homelab guest. provision.sh installs this as
+# /etc/planetexpress/config.yaml. Validated by config_schema.PlanetExpressConfig
+# (extra="forbid": unknown keys are hard errors).
+
+stacks_root: /home/casaroot/stacks
+
+forbidden_stacks: []
+
+# None paused by default. To rehearse paused-container handling, add "fixture-healthy" and
+# redeploy/restart casa-planetexpress.
+paused_containers: []
+
+# No systemd mount units in the homelab; the casa-mounts readiness gate is a oneshot service,
+# not a .mount unit, so it isn't listed here (same as the live host's example unit).
+mounts: {}
+
+exclude_services: []
+
+lan_only_domain: homelab.test
+
+# Empty, like a fresh install. Landing rehearsals that need a sudo grant add it here AND via
+# scripts/setup_wizard.py, exactly as on the live host.
+sudo_allowlist:
+  units: []
+  globs: []

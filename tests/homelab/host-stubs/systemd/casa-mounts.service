@@ -1,0 +1,15 @@
+# Test homelab mount-readiness gate, same shape as systemd/examples/casa-mounts.service.example.
+[Unit]
+Description=Casa mount readiness (homelab stub)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=casaroot
+ExecStart=/home/casaroot/apps/mounts_ready.sh
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

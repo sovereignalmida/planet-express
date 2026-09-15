@@ -149,6 +149,8 @@ A throwaway **full VM, not LXC** (eng issue 8: unprivileged LXC often can't appl
 
 This is the brief's "integration-test homelab" (P1), pulled forward to a prerequisite.
 
+**Status (2026-09-15): built and verified.** `tests/homelab/` (`vm.sh`, cloud-init, `guest/`, `host-stubs/`, fixtures). Ubuntu 24.04 KVM guest with the 1.x baseline deployed: `casa-planetexpress` and `casa-dashboard` active, test bot answering, `casa-stacks` gated on `casa-mounts`, all four fixtures behaving as designed. Found and fixed while building: `setup_wizard.reconcile_sudoers()` crashed on an empty sudo allowlist (unsudo'd stat of root-only `/etc/sudoers.d`).
+
 ### Slice 0 — dropped (outside voice, eng review T1)
 
 The install does not move. The live host keeps its clone, state, units, and sudoers file. The web
@@ -469,7 +471,7 @@ edits from issue 4 stay in lane D so lanes B and D never both touch `casa_*.py`.
 Synthesized from the eng review's findings (2026-09-13). Each task derives from a specific finding.
 
 **Prerequisite**
-- [ ] **T1 (P1, human: ~1 day / CC: ~1 session)** — test homelab — Build the full-VM test homelab with fixture stacks and host-shaped stubs
+- [x] **T1 (P1, human: ~1 day / CC: ~1 session)** — test homelab — ✅ done 2026-09-15 — Build the full-VM test homelab with fixture stacks and host-shaped stubs
   - Surfaced by: Outside voice issue 8 + D2
   - Files: `tests/homelab/`
   - Verify: fixture stacks come up; Leela reads the stubs without errors; 1.x installs from a home-dir clone

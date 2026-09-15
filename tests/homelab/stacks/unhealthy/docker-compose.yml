@@ -1,0 +1,13 @@
+# Fixture: the container keeps running but its healthcheck always fails.
+# Leela should report "unhealthy"; typed restart verification must fail with "healthcheck failing".
+services:
+  web:
+    image: nginx:1.27-alpine
+    container_name: fixture-unhealthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "sh", "-c", "exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 2
+      start_period: 5s

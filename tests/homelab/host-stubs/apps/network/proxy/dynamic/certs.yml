@@ -1,0 +1,10 @@
+# Test homelab stub of the live host's Traefik file-provider config. casa_leela.py reads
+# tls.certificates[] from dynamic/*.yml and maps /etc/traefik/certs/ to
+# /home/casaroot/apps/network/proxy/certs/ on the host. provision.sh generates both certs:
+# wildcard (60 days, "valid") and expiring (5 days, "expiring" tier).
+tls:
+  certificates:
+    - certFile: /etc/traefik/certs/wildcard.crt
+      keyFile: /etc/traefik/certs/wildcard.key
+    - certFile: /etc/traefik/certs/expiring.crt
+      keyFile: /etc/traefik/certs/expiring.key

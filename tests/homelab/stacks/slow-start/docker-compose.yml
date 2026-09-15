@@ -1,0 +1,14 @@
+# Fixture: reports "starting" for ~60s, then becomes healthy.
+# Exercises Docker's healthcheck grace handling and the verifier's 90s timeout (should pass).
+services:
+  app:
+    image: busybox:1.37
+    container_name: fixture-slow-start
+    restart: unless-stopped
+    command: ["sh", "-c", "rm -f /tmp/ready; echo 'fixture: warming up'; sleep 60; touch /tmp/ready; echo 'fixture: ready'; exec sleep infinity"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 75s
