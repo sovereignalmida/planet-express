@@ -18,7 +18,17 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 
 
-@pytest.mark.parametrize("rc, expected", [(0, True), (3, False)])
+@pytest.mark.parametrize(
+    "rc, expected",
+    [
+        (0, True),     # active
+        (3, False),    # inactive / failed
+        (4, False),    # no such unit (e.g. a dev machine without the service)
+        (1, True),     # unexpected: fail closed
+        (124, True),   # run_argv timeout: fail closed
+        (127, True),   # systemctl missing: fail closed
+    ],
+)
 def test_core_service_active_asks_systemctl(monkeypatch, rc, expected):
     calls = []
 

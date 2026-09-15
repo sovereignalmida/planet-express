@@ -479,7 +479,7 @@ Synthesized from the eng review's findings (2026-09-13). Each task derives from 
 
 **Landing 1a — safety plumbing**
 
-**Status (2026-09-15): landed. Tagged `v2.0.0-1a` at `396bc65` on `v2` (not yet on the live host).**
+**Status (2026-09-15): landed. Tagged `v2.0.0-1a` at `396bc65` on `v2`; on the live host since 1b (every later tag contains it).**
 - Commits: `00781df` (1a code), `d80b086` (CI now runs on `v2`, which it previously didn't), `33c7d46`
   (ruff fixes CI found), `396bc65` (merge of the `main` hotfix below).
 - **Homelab smoke test via the test bot:** `/up healthy` and `/check` during a `/patchnow` pass
@@ -489,7 +489,7 @@ Synthesized from the eng review's findings (2026-09-13). Each task derives from 
   `docker compose images -q` returns a bare image ID but `docker image inspect` returns
   `sha256:<id>`, so Zoidberg saw every service as updated and recreated it, and crash-looping
   services raised false "rollback also failed" alerts. After the fix a dry run shows `no_change`
-  for all four fixtures. The live host runs `main`, so it keeps this bug until redeployed.
+  for all four fixtures. The live host picked it up when it moved to `v2` tags with 1b.
 - Final checks: 268 tests in the homelab, CI green on Python 3.11 and 3.12.
 - 263 tests pass in the homelab VM, and `casa-planetexpress` restarts cleanly on the new code.
 - Six Codex review rounds. Findings, all fixed with regression tests:
@@ -530,6 +530,13 @@ Local: 379 tests and `ruff check .` pass. VM: core restarts cleanly; a real
 typed restart of `healthy/web` reaches `passed` only after 15 seconds healthy; the out-of-process
 stack CLI refuses while core is active. Three Codex review passes found and fixed duplicate-card
 publication and non-atomic approval/execution creation; the final pass reported no issue.
+- **Also inside `c12e20c`** (committed by the Codex takeover session together with 1b, not a
+  separate commit): the fix for Farnsworth's diagnostic pre-check fabricating tool output.
+  Planning evidence is now built only from commands that actually ran through
+  `casa_bender.run_diagnostic`, never from the model's final text (`casa_farnsworth.py`,
+  `tests/test_diagnostic_evidence.py`, `tests/test_diagnostic_budget.py`).
+- **Open finding carried to 1r.1:** the CLI lock guard treated any unexpected `systemctl` exit
+  as "not running" (flagged by a Codex review, not fixed before tagging).
 - [x] **T7 (P1, human: ~3h / CC: ~15min)** — store — SQLite store, connection per call, WAL, core-only data dir
   - Surfaced by: Architecture issue 2
   - Files: `planet_express/core/store.py`, `tests/test_store.py`
@@ -540,14 +547,28 @@ publication and non-atomic approval/execution creation; the final pass reported 
   - Verify: seeded `running` row becomes `interrupted` on start; the CLI refuses while the service is active
 
 **Landing 1r — visual re-skin (design v20)**
-**Status (2026-09-15): implemented and validated locally and on the test VM; live-host landing
-and tagging remain.** The four hash-addressed tabs were visually checked at 1440px against the v20
+**Status (2026-09-15): landed on the live host. Tagged `v2.0.0-1r` at `521e359` on `v2`.** The four hash-addressed tabs were visually checked at 1440px against the v20
 references. The VM dashboard restarted cleanly and served the page, `cockpit.css`, and new assets.
 Local: 379 tests, `ruff check .`, compileall, and `git diff --check` pass.
 - [x] **T12 (P2, human: ~2 days / CC: ~1 session)** — dashboard — Move the existing tabs onto `cockpit.css`, new assets, and the remaining data-contract gaps
   - Surfaced by: Design v20 intake (2026-09-15). The live `dashboard.css` has no `--pe-*` tokens, all portraits and the logo differ, and cert tiers are missing
   - Files: `static/cockpit.css`, `static/characters/`, `static/logo.png`, `templates/dashboard.html`, `static/dashboard.js`, `casa_leela.py`, `dashboard_data.py`, `tests/test_dashboard_data.py`
   - Verify: each tab against `reference/Dashboard v3 - Cockpit.dc.html` and `Backups Tab - Corrected.dc.html`; cert tier tests; the `"command" not in json.dumps(...)` guard stays green
+
+**Live-host override (2026-09-15).** casamediaserver runs each tag plus one local commit on
+branch `live/casa-disk-filter-1b`: `casa_leela.py`'s `check_disk()` patterns drop the retired
+`/dev/sdc` and `casafast` targets. Every tag upgrade there needs that commit cherry-picked again
+until the disk targets move into config (slice 6, P5). Because the host now follows `v2` tags,
+hotfixes go directly on `v2` (see "Branch, tags, and landings").
+
+**Landing 1r.1 — review follow-ups (2026-09-15)**
+- [x] Certificate vault header counts `tier` or legacy `status`, same fallback as the cards; a
+  pre-redesign snapshot no longer shows 0 needing attention beside an EXPIRING card (Codex
+  finding on 1r, flagged in all 7 review rounds, unfixed at tag).
+- [x] CLI lock guard fails closed: only `systemctl is-active` exit 3 (inactive/failed) or 4 (no
+  such unit), probed on the test homelab, count as "not running"; timeouts, a missing
+  `systemctl` or any other exit refuse without `--force` (Codex finding on 1b).
+- [x] Plan doc statuses corrected; stray empty `v2.0.0-1r` file removed from the repo root.
 
 **Landing 1c — dashboard**
 - [ ] **T9 (P1, human: ~3h / CC: ~15min)** — rpc — Raw AF_UNIX RPC with length prefix, bounded pool, and reserved decision worker

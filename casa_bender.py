@@ -289,6 +289,9 @@ def run_argv(argv: list[str], timeout: int) -> tuple[int, str, str]:
 
 
 CORE_SERVICE_UNIT = "casa-planetexpress.service"
+# `systemctl is-active` exit codes that mean "definitely not running", confirmed on the
+# test homelab (systemd 255): 3 = inactive or failed, 4 = no such unit.
+_SYSTEMCTL_NOT_RUNNING_EXIT_CODES = (3, 4)
 
 
 def core_service_active() -> bool:
@@ -296,7 +299,18 @@ def core_service_active() -> bool:
     entry points (casa_zoidberg, casa_stackctl) refuse while it is, because they run
     outside its in-process host-mutation lock (landing 1b)."""
     rc, _out, _err = run_argv(["systemctl", "is-active", "--quiet", CORE_SERVICE_UNIT], timeout=10)
-    return rc == 0
+    if rc == 0:
+        return True
+    if rc in _SYSTEMCTL_NOT_RUNNING_EXIT_CODES:
+        return False
+    # Fail closed: a timeout (124), a missing systemctl (127) or any other unexpected exit
+    # means we can't tell, and guessing "not running" would let the CLI collide with a
+    # mutation in progress (Codex review, landing 1b).
+    log.warning(
+        f"Could not determine whether {CORE_SERVICE_UNIT} is running "
+        f"(systemctl is-active exit {rc}); treating it as running"
+    )
+    return True
 
 
 # ── Log step to file ──────────────────────────────────────────────────────────

@@ -443,7 +443,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.dry_run and not args.force and bender.core_service_active():
         print(
-            "casa-planetexpress is running, and its host-mutation lock can't see this CLI, so a "
+            "casa-planetexpress is running (or its state couldn't be checked), and its "
+            "host-mutation lock can't see this CLI, so a "
             "real update pass could collide with a plan, restart or scan in progress. Use "
             "Telegram /patchnow, run with --dry-run, or pass --force.",
             file=sys.stderr,

@@ -276,7 +276,8 @@ def main() -> int:
 
     if not args.force and bender.core_service_active():
         print(
-            "casa-planetexpress is running, and its host-mutation lock can't see this CLI, so "
+            "casa-planetexpress is running (or its state couldn't be checked), and its "
+            "host-mutation lock can't see this CLI, so "
             f"`{args.action}` could collide with a plan, update or restart in progress. "
             "Use Telegram /up or /down instead, or pass --force.",
             file=sys.stderr,

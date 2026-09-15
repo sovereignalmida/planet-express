@@ -100,3 +100,43 @@ def test_widget_with_real_findings(tmp_path, monkeypatch):
     assert data["status"] == "critical"
     assert data["open_findings"] == 1
     assert data["state_available"] is True
+
+
+# ── 1r.1: certificate vault attention count (Codex finding on 1r) ───────────────
+def _render_with_certs(tmp_path, monkeypatch, certs):
+    monitor = tmp_path / "latest_monitor.json"
+    monitor.write_text(json.dumps({"timestamp": "2026-09-15T12:00:00+00:00", "mode": "full", "certs": certs}))
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor)
+    for attr in ("STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS", "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE"):
+        monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers", lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats", lambda: {"available": False})
+    resp = _client().get("/")
+    assert resp.status_code == 200
+    return resp.data.decode()
+
+
+def test_cert_attention_count_includes_legacy_status_only_snapshots(tmp_path, monkeypatch):
+    html = _render_with_certs(tmp_path, monkeypatch, [
+        {"domain": "a.example", "status": "expiring", "days_remaining": 3},
+        {"domain": "b.example", "status": "renew_soon", "days_remaining": 20},
+        {"domain": "c.example", "status": "valid", "days_remaining": 200},
+    ])
+    assert "3 collected" in html
+    assert "2 need attention" in html
+
+
+def test_cert_attention_count_uses_tier_when_present(tmp_path, monkeypatch):
+    html = _render_with_certs(tmp_path, monkeypatch, [
+        {"domain": "a.example", "tier": "expired", "days_left": -2},
+        {"domain": "b.example", "tier": "valid", "days_left": 90},
+    ])
+    assert "1 needs attention" in html
+
+
+def test_cert_attention_chip_absent_when_all_valid(tmp_path, monkeypatch):
+    html = _render_with_certs(tmp_path, monkeypatch, [
+        {"domain": "a.example", "tier": "valid", "days_left": 90},
+        {"domain": "b.example", "status": "valid", "days_remaining": 120},
+    ])
+    assert "need attention" not in html and "needs attention" not in html

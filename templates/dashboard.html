@@ -437,7 +437,12 @@
             <h3>CERTIFICATE VAULT</h3>
             <span class="status-chip {{ 'ok' if ctx.certs.available else '' }}">{{ 'COLLECTED' if ctx.certs.available else 'AWAITING FULL SCAN' }}</span>
             {% if ctx.certs.available and ctx.certs.list and not ctx.certs.list[0].get('note') %}
-            {% set attention_count = ctx.certs.list|selectattr('tier', 'in', ['expiring', 'renew_soon', 'expired'])|list|length %}
+            {# Same tier-or-status fallback as the cards below: a snapshot written before the
+               cert-vault redesign has "status" but no "tier", and counting only "tier" would
+               report 0 needing attention while a card shows EXPIRING (Codex review, 1r). #}
+            {% set cert_ns = namespace(attention=0) %}
+            {% for c in ctx.certs.list %}{% if (c.get('tier') or c.get('status')) in ['expiring', 'renew_soon', 'expired'] %}{% set cert_ns.attention = cert_ns.attention + 1 %}{% endif %}{% endfor %}
+            {% set attention_count = cert_ns.attention %}
             <span class="panel-head-summary">{{ ctx.certs.list|length }} collected</span>
             {% if attention_count %}
             <span class="cert-expiring-chip">{{ attention_count }} need{{ 's' if attention_count == 1 else '' }} attention</span>
