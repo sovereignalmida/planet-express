@@ -2045,7 +2045,7 @@ def digest_scheduler_loop(notifier: Notifier) -> None:
 
 
 # ── Main bot loop ─────────────────────────────────────────────────────────────
-def _start_dashboard_rpc(commands: CommandService, store: Store) -> RpcServer | None:
+def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notifier) -> RpcServer | None:
     """Optional dashboard transport: installation failures never prevent polling."""
     try:
         allowed_uids = set()
@@ -2056,7 +2056,7 @@ def _start_dashboard_rpc(commands: CommandService, store: Store) -> RpcServer | 
                 continue
         if not allowed_uids:
             raise ValueError("no resolvable RPC peer users")
-        server = RpcServer(config.RPC_SOCKET, build_core_handlers(commands, store),
+        server = RpcServer(config.RPC_SOCKET, build_core_handlers(commands, store, notifier),
                            allowed_uids, config.RPC_GROUP)
         server.start()
         return server
@@ -2081,7 +2081,7 @@ def run_bot() -> None:
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
 
-    rpc_server = _start_dashboard_rpc(commands, store)
+    rpc_server = _start_dashboard_rpc(commands, store, notifier)
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")

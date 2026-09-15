@@ -230,3 +230,216 @@ def test_interrupt_unfinished_marks_only_running_and_verifying(tmp_path):
     assert s.get_execution(verifying["id"])["reason"] == "core restarted"
     assert s.get_execution(passed["id"])["status"] == "passed"
     assert s.interrupt_unfinished("core restarted") == []
+
+
+@pytest.mark.parametrize('same_operator', [True, False])
+def test_auth_lockout_independent(tmp_path, same_operator):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    for i in range(3):
+        clock.t += 10
+        result = store.record_auth_failure('alice' if same_operator else f'op{i}',
+                                           f'ip{i}' if same_operator else 'ip')
+        assert result['just_locked'] == (i == 2)
+        assert result['remaining_attempts'] == 2 - i
+    operator, ip = ('alice', 'new') if same_operator else ('new', 'ip')
+    assert store.auth_status(operator, ip)['locked_until'] == clock.t + 900
+    assert not store.record_auth_failure(operator, ip)['just_locked']
+    clock.t += 900
+    assert not store.auth_status(operator, ip)['locked']
+    assert [e['kind'] for e in store.list_events()].count('auth.locked') == 1
+
+
+def test_auth_success_clears_both_and_prunes(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    for op, ip in [('alice', 'other'), ('bob', 'ip'), ('keep', 'keep')]:
+        store.record_auth_failure(op, ip)
+    store.record_auth_success('alice', 'ip')
+    assert store.auth_status('alice', 'ip')['remaining_attempts'] == 3
+    # bob's own failure still counts: a success resets only alice and ip (Codex re-review, T13a).
+    assert store.auth_status('bob', 'other')['remaining_attempts'] == 2
+    assert store.auth_status('keep', 'keep')['remaining_attempts'] == 2
+    clock.t += 1801
+    store.record_auth_failure('new', 'new')
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute('SELECT COUNT(*) FROM auth_failures').fetchone()[0] == 1
+    assert any(e['kind'] == 'auth.success' for e in store.list_events())
+
+
+def test_auth_replay_devices_and_notifications(tmp_path):
+    store = _store(tmp_path)
+    assert store.consume_totp_step('alice', 10)
+    assert not store.consume_totp_step('alice', 10)
+    assert not store.consume_totp_step('alice', 9)
+    assert store.consume_totp_step('alice', 11)
+    assert store.device_epoch('alice') == 0
+    assert store.revoke_devices('alice') == 1
+    assert store.revoke_devices('alice') == store.device_epoch('alice') == 2
+    assert store.device_epoch('bob') == 0
+    assert not store.auth_lock_notified('alice', 'ip', 1000.0)
+    assert store.auth_lock_notified('alice', 'ip', 1000.0)
+    assert not store.auth_lock_notified('alice', 'ip', 1001.0)
+    assert not store.auth_lock_notified('alice', 'other', 1000.0)
+
+
+def test_schema_v1_upgrade(tmp_path):
+    from planet_express.core.store import _SCHEMA
+
+    path = tmp_path / 'data' / 'old.db'
+    path.parent.mkdir()
+    with sqlite3.connect(path) as conn:
+        conn.executescript(_SCHEMA[_SCHEMA.index('CREATE TABLE IF NOT EXISTS approvals'):])
+        conn.execute('PRAGMA user_version = 1')
+    store = Store(path)
+    store.init()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {'auth_failures', 'auth_totp_steps', 'auth_device_epochs'} <= tables
+    assert store.consume_totp_step('alice', 1)
+
+
+def test_auth_later_locked_deadline(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    for _ in range(3):
+        store.record_auth_failure('alice', 'other')
+    clock.t += 10
+    for _ in range(3):
+        store.record_auth_failure('bob', 'ip')
+    assert store.auth_status('alice', 'ip')['locked_until'] == clock.t + 900
+
+
+def test_auth_atomic_consumes_and_notification_claims(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = _store(tmp_path)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        accepted = list(pool.map(lambda _: store.consume_totp_step('alice', 10), range(8)))
+        notified = list(pool.map(lambda _: store.auth_lock_notified('alice', 'ip', 1000), range(8)))
+        failures = list(pool.map(lambda _: store.record_auth_failure('alice', 'ip'), range(8)))
+    assert sum(accepted) == 1
+    assert sum(not notified_before for notified_before in notified) == 1
+    assert sum(result['just_locked'] for result in failures) == 1
+
+
+# ── Codex review (T13a): a lock holds until its own deadline ────────────────────
+def _auth_store(tmp_path):
+    now = [0.0]
+    store = Store(tmp_path / "data" / "auth.db", clock=lambda: now[0])
+    store.init()
+    return store, now
+
+
+def test_lock_holds_until_deadline_when_failures_are_spread(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for t in (0.0, 400.0, 800.0):
+        now[0] = t
+        result = store.record_auth_failure("alice", "10.0.0.1")
+    assert result["locked"] and result["just_locked"] and result["locked_until"] == 1700.0
+    for t in (900.0, 1200.0, 1699.0):
+        now[0] = t
+        assert store.auth_status("alice", "10.0.0.1")["locked"] is True, t
+    now[0] = 1700.5
+    status = store.auth_status("alice", "10.0.0.1")
+    assert status == {"locked": False, "locked_until": None, "remaining_attempts": 3}
+
+
+def test_failure_while_locked_does_not_extend_the_lock(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for t in (0.0, 1.0, 2.0):
+        now[0] = t
+        store.record_auth_failure("alice", "10.0.0.1")
+    now[0] = 500.0
+    again = store.record_auth_failure("alice", "10.0.0.1")
+    assert again["locked"] and not again["just_locked"] and again["locked_until"] == 902.0
+
+
+def test_ip_lock_is_independent_of_operator(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for i, op in enumerate(("alice", "bob", "?")):
+        now[0] = float(i)
+        store.record_auth_failure(op, "10.0.0.9")
+    assert store.auth_status("carol", "10.0.0.9")["locked"] is True
+    assert store.auth_status("carol", "10.0.0.10")["locked"] is False
+
+
+def test_success_clears_locks_for_both_keys(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for t in (0.0, 1.0, 2.0):
+        now[0] = t
+        store.record_auth_failure("alice", "10.0.0.1")
+    now[0] = 3.0
+    store.record_auth_success("alice", "10.0.0.1")
+    assert store.auth_status("alice", "10.0.0.1") == {"locked": False, "locked_until": None,
+                                                     "remaining_attempts": 3}
+
+
+# ── Codex re-review (T13a): locking one key never resets another key's counter ──
+def test_ip_lock_does_not_reset_operator_counter(tmp_path):
+    store, now = _auth_store(tmp_path)
+    now[0] = 0.0
+    store.record_auth_failure("alice", "ip1")
+    now[0] = 1.0
+    store.record_auth_failure("alice", "ip1")
+    now[0] = 2.0
+    locked_ip = store.record_auth_failure("bob", "ip1")      # 3rd failure from ip1
+    assert locked_ip["locked"] and locked_ip["just_locked"]
+    assert store.auth_status("carol", "ip1")["locked"] is True
+    now[0] = 3.0
+    alice = store.record_auth_failure("alice", "ip2")         # alice's 3rd within 15 min
+    assert alice["locked"] and alice["just_locked"]
+    assert store.auth_status("alice", "ip9")["locked"] is True
+
+
+def test_rotating_ips_cannot_bypass_operator_limit(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for i in range(3):
+        now[0] = float(i)
+        result = store.record_auth_failure("alice", f"10.0.0.{i}")
+    assert result["locked"] and result["just_locked"]
+    assert store.auth_status("alice", "10.0.0.99")["locked"] is True
+
+
+def test_after_expiry_a_key_gets_three_fresh_attempts(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for t in (0.0, 1.0, 2.0):
+        now[0] = t
+        store.record_auth_failure("alice", "10.0.0.1")
+    now[0] = 903.0                                             # lock (until 902) expired
+    for _ in range(2):
+        result = store.record_auth_failure("alice", "10.0.0.2")
+        assert not result["locked"], result
+    result = store.record_auth_failure("alice", "10.0.0.3")
+    assert result["locked"] and result["just_locked"] and result["locked_until"] == 1803.0
+
+
+def test_success_resets_only_its_own_keys(tmp_path):
+    store, now = _auth_store(tmp_path)
+    now[0] = 0.0
+    store.record_auth_failure("bob", "ip1")
+    now[0] = 1.0
+    store.record_auth_failure("bob", "ip1")
+    now[0] = 2.0
+    store.record_auth_success("alice", "ip1")                 # clears ip1 and alice, not bob
+    assert store.auth_status("?", "ip1")["remaining_attempts"] == 3
+    assert store.auth_status("bob", "ip2")["remaining_attempts"] == 1
+    now[0] = 3.0
+    assert store.record_auth_failure("bob", "ip3")["just_locked"] is True
+
+
+def test_failures_during_a_lock_do_not_spend_the_fresh_budget(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for t in (0.0, 0.0, 0.0):
+        now[0] = t
+        store.record_auth_failure("alice", "ip1")
+    now[0] = 899.0
+    for _ in range(3):
+        assert not store.record_auth_failure("alice", "ip2")["just_locked"]
+    now[0] = 901.0
+    assert store.auth_status("alice", "ip3") == {"locked": False, "locked_until": None,
+                                               "remaining_attempts": 3}
+    assert not store.record_auth_failure("alice", "ip3")["locked"]
+    # ...but ip2's own count still holds the three failures alice made from it while locked.
+    assert store.auth_status("?", "ip2")["locked"] is True

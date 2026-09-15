@@ -572,7 +572,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9 and T10 done; T13a, T13b, T14, T11 remain.
+**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10 and T13a done; T13b, T14, T11 remain.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -613,6 +613,34 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
     env file and are verified in the web process; core only counts, remembers the last used
     step per operator, and holds a per-operator device epoch that `scripts/revoke_devices.py`
     bumps.
+- **T13a notes.** Implemented by Codex, reviewed and corrected here over four Codex review rounds.
+  - `web_auth.py` (top level, readable by the web user): stdlib RFC 6238 TOTP returning the
+    matched step, Werkzeug passphrase hashes (12-character minimum), `load_operators()` reading
+    `PE_OPERATORS` plus `PE_OPERATOR_<NAME>_PASSPHRASE_HASH` / `_TOTP_SECRET`, and signed device
+    tokens carrying the operator's epoch. Errors name the variable, never the value.
+  - Core (`Store`, schema v2): `auth_failures`, `auth_counters`, `auth_totp_steps`,
+    `auth_device_epochs`; RPC methods `auth.status`, `auth.record_failure`,
+    `auth.record_success`, `auth.consume_totp_step`, `auth.device_epoch`, `auth.notify_locked`.
+    The first lock of a key sends one Telegram alert; `auth.notify_locked` sends at most one more
+    per lock.
+  - **Lock semantics (settled by review findings).**
+    - Operator and IP are independent keys. Three failures for either within 15 minutes lock
+      that key until the third failure + 15 minutes. That deadline is stored; it is not derived
+      from the rolling count, which lifted locks early.
+    - Failure rows are never deleted to reset a counter, because one row counts toward both
+      keys. Deleting it for one key reset the other and let an attacker rotate IPs past the
+      operator limit. Each key instead has a `reset_after_id` (a failure row id, so same-tick
+      resets are unambiguous).
+    - Failures made while a key is locked do not spend the three fresh attempts it gets at the
+      deadline; they still count toward the other key.
+    - A failure while locked never extends the lock. A success resets only its own operator and
+      IP.
+  - Operator names whose variable prefixes collide (`alice-bob`, `alice.bob`) are rejected.
+  - **Duty for T13b:** check `auth.status` (operator `?` + IP) before verifying anything, record
+    failures as `?` when no passphrase matches, and never log in when core is unreachable.
+  - Test VM rehearsal 6/6 over the real socket as `planetexpress-web`: schema upgrade on an
+    existing DB, lockout, IP rotation, notify-once, replay rejection, epoch bump via
+    `revoke_devices.py`, bad-request validation.
 - **T10 notes.** Implemented by Codex, reviewed and corrected here; `scripts/web_access.py`,
   both unit templates, `deploy.sh`, `rpc.py`, `dashboard_data.py`.
   - **Deviation from the P4 wording (least privilege): allowlist, not a recursive grant on the
@@ -659,7 +687,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Surfaced by: Outside voice T1; architecture issue 1
   - Files: `deploy.sh`, `systemd/casa-dashboard.service.template`, `systemd/casa-planetexpress.service.template`, `dashboard_data.py`
   - Verify: user-split success criteria on the VM, then the live host; `systemctl cat casa-stacks` unchanged
-- [ ] **T13a (P1, human: ~1 day / CC: ~30min)** — auth core — TOTP/passphrase/device-token library, lockout + TOTP replay + device revocation in core, `auth.*` RPC methods
+- [x] **T13a (P1, human: ~1 day / CC: ~30min)** — auth core — ✅ done 2026-09-15 — TOTP/passphrase/device-token library, lockout + TOTP replay + device revocation in core, `auth.*` RPC methods
   - Surfaced by: Design v20 intake, login decision; split from T13 on 2026-09-15 (too large for one unit)
   - Files: `web_auth.py`, `planet_express/core/store.py`, `planet_express/integrations/rpc.py`, `casa_farnsworth.py`, `scripts/revoke_devices.py`, `tests/test_web_auth.py`, `tests/test_store.py`, `tests/test_local_rpc.py`
   - Verify: RFC 6238 test vectors; ±1 step window; replayed step rejected in core; 3 failures → locked 15 min per operator and per IP; lock alert sent once; device token tamper/expiry/revocation

@@ -28,10 +28,30 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+AUTH_MAX_FAILURES = 3
+AUTH_LOCK_SECONDS = 900
 DEFAULT_TTL_SECONDS = 3600  # design v20: an approval card expires after 60 minutes
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS auth_failures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, operator TEXT, client_ip TEXT, at REAL
+);
+CREATE TABLE IF NOT EXISTS auth_totp_steps (
+    operator TEXT PRIMARY KEY, last_step INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_device_epochs (
+    operator TEXT PRIMARY KEY, epoch INTEGER NOT NULL
+);
+-- Per-key counter state. A lock carries its own deadline (deriving it from the rolling failure
+-- count lifted it early), and reset_after_id restarts one key's count without deleting failure
+-- rows that also count toward the other key (Codex reviews, T13a). It is a failure row id, not a
+-- time, so failures in the same clock tick as a reset are never ambiguous.
+CREATE TABLE IF NOT EXISTS auth_counters (
+    kind TEXT NOT NULL CHECK (kind IN ('operator', 'client_ip')), value TEXT NOT NULL,
+    reset_after_id INTEGER NOT NULL, locked_until REAL NOT NULL DEFAULT 0, PRIMARY KEY (kind, value)
+);
+
 CREATE TABLE IF NOT EXISTS approvals (
     id            TEXT PRIMARY KEY,
     action        TEXT NOT NULL,
@@ -318,3 +338,122 @@ class Store:
                 self._event(conn, "execution.interrupted", approval_id=r["approval_id"],
                             execution_id=r["id"], reason=reason)
         return [dict(r) | {"target": json.loads(r["target_json"]), "reason": reason} for r in rows]
+
+    # ── dashboard authentication ────────────────────────────────────────────
+    #   3 failures for an operator or an IP within 15 min ──► lock that key until
+    #   (3rd failure + 15 min) ──► after the deadline: 3 fresh attempts for that key.
+    #   A failure recorded while locked never extends the lock; a success clears both keys.
+    #   Failure rows are never deleted to reset a counter: one row counts toward BOTH an operator
+    #   and an IP, so deleting it for one key reset the other too, letting an attacker rotate IPs
+    #   past the per-operator limit (Codex review, T13a). Each key counts only failure rows after
+    #   its own reset_after_id instead.
+    _AUTH_KEYS = ("operator", "client_ip")
+
+    def _counter(self, conn, kind, value) -> tuple[float, float]:
+        row = conn.execute("SELECT reset_after_id, locked_until FROM auth_counters WHERE kind = ? AND value = ?",
+                           (kind, value)).fetchone()
+        return (row[0], row[1]) if row else (0, 0.0)
+
+    def _auth_status(self, conn, operator, client_ip, now) -> dict:
+        counts, deadlines = [], []
+        for kind, value in zip(self._AUTH_KEYS, (operator, client_ip)):
+            reset_after_id, locked_until = self._counter(conn, kind, value)
+            if locked_until > now:
+                deadlines.append(locked_until)
+            counts.append(conn.execute(
+                # at >= locked_until: attempts made while this key was locked never spend the
+                # fresh budget it gets at the deadline (Codex review, T13a). They still count
+                # toward the other key.
+                f"SELECT COUNT(*) FROM auth_failures WHERE {kind} = ? AND at > ? AND id > ? AND at >= ?",
+                (value, now - AUTH_LOCK_SECONDS, reset_after_id, locked_until),
+            ).fetchone()[0])
+        locked = bool(deadlines)
+        return {"locked": locked, "locked_until": max(deadlines) if locked else None,
+                "remaining_attempts": 0 if locked else max(0, AUTH_MAX_FAILURES - max(counts)),
+                "_counts": counts}
+
+    @staticmethod
+    def _public(status: dict) -> dict:
+        return {k: v for k, v in status.items() if not k.startswith("_")}
+
+    def auth_status(self, operator, client_ip) -> dict:
+        with self._connect() as conn:
+            return self._public(self._auth_status(conn, operator, client_ip, self._clock()))
+
+    def _reset_counter(self, conn, kind, value, locked_until) -> None:
+        last_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM auth_failures").fetchone()[0]
+        conn.execute(
+            "INSERT INTO auth_counters (kind, value, reset_after_id, locked_until) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(kind, value) DO UPDATE SET reset_after_id = excluded.reset_after_id, "
+            "locked_until = excluded.locked_until",
+            (kind, value, last_id, locked_until),
+        )
+
+    def record_auth_failure(self, operator, client_ip) -> dict:
+        with self._write() as conn:
+            now = self._clock()
+            before = self._auth_status(conn, operator, client_ip, now)
+            conn.execute("INSERT INTO auth_failures (operator, client_ip, at) VALUES (?, ?, ?)",
+                         (operator, client_ip, now))
+            conn.execute("DELETE FROM auth_failures WHERE at <= ?", (now - AUTH_LOCK_SECONDS,))
+            # A counter can be dropped once it filters nothing: its reset point precedes every
+            # remaining failure row (AUTOINCREMENT ids are never reused) and its deadline is a full
+            # window old, so no locked-period failure is still countable.
+            conn.execute(
+                "DELETE FROM auth_counters WHERE locked_until <= ? AND reset_after_id < "
+                "COALESCE((SELECT MIN(id) FROM auth_failures), reset_after_id + 1)",
+                (now - AUTH_LOCK_SECONDS,))
+            counted = self._auth_status(conn, operator, client_ip, now)
+            for (kind, value), count in zip(zip(self._AUTH_KEYS, (operator, client_ip)), counted["_counts"]):
+                if count >= AUTH_MAX_FAILURES and self._counter(conn, kind, value)[1] <= now:
+                    self._reset_counter(conn, kind, value, now + AUTH_LOCK_SECONDS)
+            status = self._public(self._auth_status(conn, operator, client_ip, now))
+            just_locked = status["locked"] and not before["locked"]
+            payload = {"operator": operator, "client_ip": client_ip, "locked_until": status["locked_until"]}
+            self._event(conn, "auth.failure", **payload)
+            if just_locked:
+                self._event(conn, "auth.locked", **payload)
+            return status | {"just_locked": just_locked}
+
+    def record_auth_success(self, operator, client_ip) -> None:
+        with self._write() as conn:
+            for kind, value in zip(self._AUTH_KEYS, (operator, client_ip)):
+                self._reset_counter(conn, kind, value, 0)
+            self._event(conn, "auth.success", operator=operator, client_ip=client_ip)
+
+    def consume_totp_step(self, operator, step: int) -> bool:
+        with self._write() as conn:
+            result = conn.execute(
+                "INSERT INTO auth_totp_steps (operator, last_step) VALUES (?, ?) "
+                "ON CONFLICT(operator) DO UPDATE SET last_step = excluded.last_step "
+                "WHERE excluded.last_step > auth_totp_steps.last_step", (operator, step),
+            )
+            return result.rowcount == 1
+
+    def device_epoch(self, operator) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT epoch FROM auth_device_epochs WHERE operator = ?",
+                               (operator,)).fetchone()
+            return row[0] if row else 0
+
+    def revoke_devices(self, operator) -> int:
+        with self._write() as conn:
+            row = conn.execute(
+                "INSERT INTO auth_device_epochs (operator, epoch) VALUES (?, 1) "
+                "ON CONFLICT(operator) DO UPDATE SET epoch = epoch + 1 RETURNING epoch",
+                (operator,),
+            ).fetchone()
+            self._event(conn, "auth.devices_revoked", operator=operator, epoch=row[0])
+            return row[0]
+
+    def auth_lock_notified(self, operator, client_ip, locked_until) -> bool:
+        payload = {"operator": operator, "client_ip": client_ip, "locked_until": locked_until}
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM events WHERE kind = 'auth.lock_notified' AND payload = ? LIMIT 1",
+                (json.dumps(payload, sort_keys=True),),
+            ).fetchone()
+            if row:
+                return True
+            self._event(conn, "auth.lock_notified", **payload)
+            return False

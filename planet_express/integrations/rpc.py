@@ -4,6 +4,7 @@ import grp
 import json
 import logging
 import os
+import re
 import socket
 import stat
 import struct
@@ -13,11 +14,13 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import Store
+from telegram_client import TelegramClient
 
 MAX_FRAME = 1024 * 1024
 log = logging.getLogger("planetexpress.rpc")
@@ -290,7 +293,7 @@ def _params(params, strings, booleans=()):
             raise RpcError(f"Invalid {name}", "bad_request")
 
 
-def build_core_handlers(commands: CommandService, store: Store) -> dict:
+def build_core_handlers(commands: CommandService, store: Store, notifier=None) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
         return asdict(commands.propose(**params, requested_via="dashboard"))
@@ -316,5 +319,66 @@ def build_core_handlers(commands: CommandService, store: Store) -> dict:
             raise RpcError("Execution not found", "not_found")
         return result
 
+    def auth_params(params, *, ip=False, step=False):
+        expected = {"operator"} | ({"client_ip"} if ip else set()) | ({"step"} if step else set())
+        if not isinstance(params, dict) or set(params) != expected:
+            raise RpcError("Invalid params", "bad_request")
+        operator = params["operator"]
+        if not isinstance(operator, str) or re.fullmatch(r"[a-z0-9_.-]{1,32}|\?", operator) is None:
+            raise RpcError("Invalid operator", "bad_request")
+        if ip:
+            value = params["client_ip"]
+            if not isinstance(value, str) or not 1 <= len(value) <= 64 or not value.isprintable():
+                raise RpcError("Invalid client_ip", "bad_request")
+        if step and (type(params["step"]) is not int or not 0 <= params["step"] <= 2**63 - 1):
+            raise RpcError("Invalid step", "bad_request")
+
+    def notify_lock(operator, client_ip, locked_until):
+        if notifier is None:
+            return
+        until = datetime.fromtimestamp(locked_until, timezone.utc).astimezone().strftime("%H:%M")
+        try:
+            notifier.notify(f"Dashboard login locked for {TelegramClient.s(operator)} "
+                            f"from {TelegramClient.s(client_ip)} until {until}")
+        except Exception:  # noqa: BLE001 -- never log exception URLs containing credentials
+            log.warning("Failed to send dashboard lock notification")
+
+    def auth_status(params):
+        auth_params(params, ip=True)
+        return store.auth_status(**params)
+
+    def auth_failure(params):
+        auth_params(params, ip=True)
+        result = store.record_auth_failure(**params)
+        if result["just_locked"] and notifier is not None:
+            notify_lock(**params, locked_until=result["locked_until"])
+        return result
+
+    def auth_success(params):
+        auth_params(params, ip=True)
+        store.record_auth_success(**params)
+        return {}
+
+    def consume_step(params):
+        auth_params(params, step=True)
+        return {"accepted": store.consume_totp_step(**params)}
+
+    def device_epoch(params):
+        auth_params(params)
+        return {"epoch": store.device_epoch(**params)}
+
+    def notify_locked(params):
+        auth_params(params, ip=True)
+        status = store.auth_status(**params)
+        if not status["locked"]:
+            return {"sent": False, "reason": "not_locked"}
+        if store.auth_lock_notified(**params, locked_until=status["locked_until"]):
+            return {"sent": False, "reason": "already_notified"}
+        notify_lock(**params, locked_until=status["locked_until"])
+        return {"sent": True}
+
     return {"proposal.create": propose, "proposal.list_pending": pending,
-            "approval.decide": decide, "execution.get_status": status}
+            "approval.decide": decide, "execution.get_status": status,
+            "auth.status": auth_status, "auth.record_failure": auth_failure,
+            "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
+            "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked}

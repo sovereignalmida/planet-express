@@ -255,7 +255,9 @@ def test_core_handlers():
     commands.get_status.return_value = {"id": "e", "status": "running"}
     store.list_pending.return_value = [{"id": "a", "target_json": '{"stack":"media"}', "message_id": 5}]
     handlers = build_core_handlers(commands, store)
-    assert set(handlers) == {"proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status"}
+    assert set(handlers) == {"proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
+                             "auth.status", "auth.record_failure", "auth.record_success",
+                             "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard")
@@ -313,13 +315,13 @@ def test_startup_failure_logs_and_returns(monkeypatch, caplog):
     server.start.side_effect = OSError("socket unavailable")
     factory = Mock(return_value=server)
     monkeypatch.setattr(farnsworth, "RpcServer", factory)
-    assert farnsworth._start_dashboard_rpc(Mock(), Mock()) is None
+    assert farnsworth._start_dashboard_rpc(Mock(), Mock(), Mock()) is None
     assert [r.message for r in caplog.records] == ["Dashboard RPC not started: socket unavailable"]
 
 
 def test_startup_no_peer_users(monkeypatch, caplog):
     monkeypatch.setattr(farnsworth.config, "RPC_PEER_USERS", [])
-    assert farnsworth._start_dashboard_rpc(Mock(), Mock()) is None
+    assert farnsworth._start_dashboard_rpc(Mock(), Mock(), Mock()) is None
     assert "Dashboard RPC not started: no resolvable RPC peer users" in caplog.text
 
 
@@ -396,7 +398,7 @@ def test_startup_missing_group(monkeypatch, caplog, socket_path):
     monkeypatch.setattr(farnsworth.config, "RPC_PEER_USERS", [pwd.getpwuid(os.getuid()).pw_name])
     monkeypatch.setattr(farnsworth.config, "RPC_SOCKET", socket_path)
     monkeypatch.setattr(farnsworth.config, "RPC_GROUP", "pe-t9-nonexistent-group")
-    assert farnsworth._start_dashboard_rpc(Mock(), Mock()) is None
+    assert farnsworth._start_dashboard_rpc(Mock(), Mock(), Mock()) is None
     assert len(caplog.records) == 1
     assert "Dashboard RPC not started:" in caplog.text
 
@@ -407,7 +409,7 @@ def test_startup_success_passes_configuration(monkeypatch, socket_path):
     monkeypatch.setattr(farnsworth.config, "RPC_GROUP", "rpc-group")
     factory = Mock()
     monkeypatch.setattr(farnsworth, "RpcServer", factory)
-    assert farnsworth._start_dashboard_rpc(Mock(), Mock()) is factory.return_value
+    assert farnsworth._start_dashboard_rpc(Mock(), Mock(), Mock()) is factory.return_value
     args = factory.call_args.args
     assert args[0] == socket_path
     assert args[2:] == ({os.getuid()}, "rpc-group")
@@ -507,3 +509,79 @@ def test_parent_chown_failure_closes_and_unlinks(socket_path, monkeypatch):
             conn.bind(str(socket_path))
     finally:
         instance.stop()
+
+
+def test_auth_handler_mapping():
+    store = Mock()
+    handlers = build_core_handlers(Mock(), store)
+    params = {'operator': '?', 'client_ip': '127.0.0.1'}
+    store.auth_status.return_value = {'locked': False}
+    assert handlers['auth.status'](params) == {'locked': False}
+    store.auth_status.assert_called_once_with(**params)
+    store.record_auth_failure.return_value = {'just_locked': False}
+    assert handlers['auth.record_failure'](params) == {'just_locked': False}
+    store.record_auth_failure.assert_called_once_with(**params)
+    assert handlers['auth.record_success'](params) == {}
+    store.record_auth_success.assert_called_once_with(**params)
+    store.consume_totp_step.return_value = True
+    assert handlers['auth.consume_totp_step']({'operator': 'alice', 'step': 0}) == {'accepted': True}
+    store.consume_totp_step.assert_called_once_with(operator='alice', step=0)
+    store.device_epoch.return_value = 3
+    assert handlers['auth.device_epoch']({'operator': 'alice'}) == {'epoch': 3}
+    store.device_epoch.assert_called_once_with(operator='alice')
+
+
+@pytest.mark.parametrize('params', [
+    {'operator': 'Alice', 'client_ip': 'ip'}, {'operator': '', 'client_ip': 'ip'},
+    {'operator': 'a/b', 'client_ip': 'ip'}, {'operator': 'a' * 33, 'client_ip': 'ip'},
+    {'operator': 'alice', 'client_ip': ''}, {'operator': 'alice', 'client_ip': 'x' * 65},
+    {'operator': 'alice', 'client_ip': 'ip\n'}, {'operator': None, 'client_ip': 'ip'},
+])
+def test_auth_invalid_params(params):
+    store = Mock()
+    handlers = build_core_handlers(Mock(), store)
+    for method in ('auth.status', 'auth.record_failure', 'auth.record_success', 'auth.notify_locked'):
+        with pytest.raises(RpcError) as error:
+            handlers[method](params)
+        assert error.value.code == 'bad_request'
+    assert not store.mock_calls
+
+
+@pytest.mark.parametrize('step', [True, False, -1, 1.0, '1', None, 2**63])
+def test_auth_invalid_step(step):
+    with pytest.raises(RpcError) as error:
+        build_core_handlers(Mock(), Mock())['auth.consume_totp_step']({'operator': '?', 'step': step})
+    assert error.value.code == 'bad_request'
+
+
+def test_auth_notifications(tmp_path, caplog):
+    store = Store(tmp_path / 'data' / 'auth.db', clock=lambda: 1000)
+    store.init()
+    notifier = Mock()
+    handlers = build_core_handlers(Mock(), store, notifier)
+    params = {'operator': 'alice', 'client_ip': '<ip>&'}
+    assert handlers['auth.notify_locked'](params) == {'sent': False, 'reason': 'not_locked'}
+    for _ in range(4):
+        result = handlers['auth.record_failure'](params)
+    assert result['locked']
+    notifier.notify.assert_called_once()
+    assert '&lt;ip&gt;&amp;' in notifier.notify.call_args.args[0]
+    assert handlers['auth.notify_locked'](params) == {'sent': True}
+    assert handlers['auth.notify_locked'](params) == {'sent': False, 'reason': 'already_notified'}
+    assert notifier.notify.call_count == 2
+    handlers['auth.record_success'](params)
+    notifier.notify.side_effect = RuntimeError('SECRET URL')
+    for _ in range(3):
+        result = handlers['auth.record_failure'](params)
+    assert result['just_locked']
+    assert 'Failed to send dashboard lock notification' in caplog.text
+    assert 'SECRET URL' not in caplog.text
+
+
+def test_manual_notification_failure():
+    store, notifier = Mock(), Mock()
+    store.auth_status.return_value = {'locked': True, 'locked_until': 1900}
+    store.auth_lock_notified.return_value = False
+    notifier.notify.side_effect = RuntimeError('private')
+    handlers = build_core_handlers(Mock(), store, notifier)
+    assert handlers['auth.notify_locked']({'operator': '?', 'client_ip': 'ip'}) == {'sent': True}
