@@ -415,8 +415,8 @@ def check_disk() -> list[dict]:
     _, out, _ = _run("df -h --output=source,target,pcent")
     patterns = [
         "casamedia", "immich", "erugo", "urphoto",
-        "/dev/sda", "/dev/sdc", "/dev/sdb2", "/home",
-        "casafast", "casabu",
+        "/dev/sda", "/dev/sdb2", "/home",
+        "casabu",
     ]
     disks = []
     for line in out.splitlines()[1:]:  # skip header
