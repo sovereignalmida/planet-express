@@ -478,7 +478,18 @@ Synthesized from the eng review's findings (2026-09-13). Each task derives from 
 
 **Landing 1a — safety plumbing**
 
-**Status (2026-09-15): implemented and verified on `v2`, pending commit/tag `v2.0.0-1a`.**
+**Status (2026-09-15): landed. Tagged `v2.0.0-1a` at `396bc65` on `v2` (not yet on the live host).**
+- Commits: `00781df` (1a code), `d80b086` (CI now runs on `v2`, which it previously didn't), `33c7d46`
+  (ruff fixes CI found), `396bc65` (merge of the `main` hotfix below).
+- **Homelab smoke test via the test bot:** `/up healthy` and `/check` during a `/patchnow` pass
+  both answered busy (`zoidberg-patchnow`); the pass released the lock when it finished;
+  `/status` worked afterwards.
+- **Pre-existing bug found by that smoke test, hotfixed on `main` (`c122cf3`) and merged:**
+  `docker compose images -q` returns a bare image ID but `docker image inspect` returns
+  `sha256:<id>`, so Zoidberg saw every service as updated and recreated it, and crash-looping
+  services raised false "rollback also failed" alerts. After the fix a dry run shows `no_change`
+  for all four fixtures. The live host runs `main`, so it keeps this bug until redeployed.
+- Final checks: 268 tests in the homelab, CI green on Python 3.11 and 3.12.
 - 263 tests pass in the homelab VM, and `casa-planetexpress` restarts cleanly on the new code.
 - Six Codex review rounds. Findings, all fixed with regression tests:
   - lock leaked if a plan approval failed before the thread started;
