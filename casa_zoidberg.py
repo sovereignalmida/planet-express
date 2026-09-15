@@ -96,6 +96,15 @@ def stack_services(stack_dir: Path) -> list[str]:
     ]
 
 
+def _normalize_image_id(image_id: str) -> str:
+    """`docker compose images -q` prints the bare hex image ID, while `docker image inspect
+    --format {{.Id}}` prints "sha256:<hex>" (seen with Compose 2.40.3 / Engine 29.1.3 in
+    the test homelab). Compared raw, they never matched, so every service looked updated:
+    the canary pass recreated all of them, and crash-looping services raised false
+    "rollback also failed" alerts. Normalize both sides to bare hex."""
+    return image_id.strip().removeprefix("sha256:")
+
+
 def service_image_id(stack_dir: Path, service: str) -> str | None:
     """Image ID the RUNNING container for this service currently uses, if any. This is
     the rollback target if a canary update goes wrong — it's the last known-good state,
@@ -106,7 +115,7 @@ def service_image_id(stack_dir: Path, service: str) -> str | None:
     )
     if exit_code != 0 or not out.strip():
         return None
-    return out.strip().splitlines()[0]
+    return _normalize_image_id(out.strip().splitlines()[0])
 
 
 def service_image_ref(stack_dir: Path, service: str) -> str | None:
@@ -135,7 +144,7 @@ def local_image_id(image_ref: str) -> str | None:
     )
     if exit_code != 0 or not out.strip():
         return None
-    return out.strip()
+    return _normalize_image_id(out)
 
 
 # ── Rollback-candidate bookkeeping (also read by Farnsworth's safe-prune gate) ──
