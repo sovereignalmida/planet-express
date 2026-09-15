@@ -434,7 +434,7 @@ def test_reconcile_sudoers_empty_allowlist_never_stats_sudoers_directly(monkeypa
     """Regression: must not call Path.exists() on the root-only sudoers target."""
     import setup_wizard
 
-    monkeypatch.setattr(setup_wizard, "_discover_mount_units", lambda: [])
+    monkeypatch.setattr(setup_wizard, "_discover_mount_units", list)
     calls = []
     monkeypatch.setattr("subprocess.run", _fake_sudo_test(1, calls))  # grant absent
 

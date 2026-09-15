@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -40,7 +41,7 @@ class _ForbiddenThread:
 
 
 class _RecordingThread:
-    spawned: list = []
+    spawned: ClassVar[list] = []
 
     def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
         self.target, self.args = target, args
