@@ -638,8 +638,29 @@ CRITICAL regression tests (T2) and lands alone as 1a behind the Codex review gat
 Unchanged channel: `git clone` + `bash deploy.sh` + systemd, CI via existing
 `.github/workflows/ci.yml` (ruff + pytest on 3.11/3.12). Slice 1 adds gunicorn, a dedicated web
 user, a socket group, and a required dashboard env file to the deploy flow; the README manual
-pre-release checklist gains the isolation checks above. Slices ship as 1.x minor releases behind
-shims; tag 2.0.0 when slices 1-5 have landed.
+pre-release checklist gains the isolation checks above. Development happens on the long-lived `v2` branch; see "Branch, tags, and landings".
+
+
+### Branch, tags, and landings
+
+- **All 2.0 work lives on `v2`.** `main` stays on 1.x until 2.0 is complete, then `v2` merges into
+  `main` once and is tagged `v2.0.0`. "Complete" means slices 1-5: every landing of slice 1, chat,
+  policy + incidents, config UI, and all Telegram commands migrated. That is full Telegram parity
+  in the dashboard. Slice 6 continues on `main` as 2.x.
+- **Every landing is a tag on `v2`**, cut only after it passes on the test VM:
+  `v2.0.0-1a`, `v2.0.0-1b`, `v2.0.0-1r`, `v2.0.0-1c`, then `v2.0.0-2`, `v2.0.0-3`, and so on.
+  Fixes to a landing get a suffix (`v2.0.0-1a.1`).
+- **The live host follows tags, not a branch head:**
+  `git fetch --tags && git checkout v2.0.0-1a`, then `bash deploy.sh` if the landing changes units
+  or deploy steps, otherwise restart `casa-planetexpress` and `casa-dashboard`. Rollback is
+  `git checkout` of the previous tag plus the same restart.
+- **Hotfixes, before the host's first `v2` tag:** fix on `main` (1.x patch), then merge `main` into
+  `v2`.
+- **Hotfixes, after the host moves to `v2` tags:** `main` is no longer deployed anywhere. Fix on
+  `v2` and cut a suffixed tag; `main` only receives the final merge.
+- **Keep `v2` current:** merge `main` into `v2` at least weekly while `main` is still receiving 1.x
+  fixes. Those fixes mostly touch `casa_leela.py` and `casa_farnsworth.py`, the files 1a changes.
+- CI (ruff + pytest) runs on every push to `v2`.
 
 ## Next Steps
 
