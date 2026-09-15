@@ -811,7 +811,7 @@ def _discover_cert_files() -> list[Path]:
 def _cert_expiry_status(days_remaining: int | None) -> str:
     if days_remaining is None:
         return "valid"
-    if days_remaining < 0:
+    if days_remaining <= 0:
         return "expired"
     if days_remaining <= _CERT_EXPIRING_CRITICAL_DAYS:
         return "expiring"
@@ -849,11 +849,11 @@ def _parse_cert_file(path: Path) -> dict:
         # when the CN clearly isn't a hostname.
         domain = sans[0]
     expires = end_match.group(1).strip() if end_match else "?"
-    days_remaining = None
+    days_left = None
     if end_match:
         try:
             expiry_dt = datetime.strptime(expires.replace(" GMT", ""), "%b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
-            days_remaining = (expiry_dt - datetime.now(timezone.utc)).days
+            days_left = (expiry_dt - datetime.now(timezone.utc)).days
         except ValueError:
             pass
     return {
@@ -862,8 +862,13 @@ def _parse_cert_file(path: Path) -> dict:
         "resolver": path.stem,  # not an ACME resolver -- these are static file-provider certs, labeled by source file
         "issuer": _dn_value(issuer_match) or "?",
         "expires": expires,
-        "days_remaining": days_remaining,
-        "status": _cert_expiry_status(days_remaining),
+        # v20 names these fields by what the operator sees. Keep the old aliases for
+        # snapshots/readers written before landing 1r; state files survive upgrades.
+        "days_left": days_left,
+        "tier": _cert_expiry_status(days_left),
+        "life_pct": min(max(round((days_left or 0) / 365 * 100), 0), 100),
+        "days_remaining": days_left,
+        "status": _cert_expiry_status(days_left),
     }
 
 

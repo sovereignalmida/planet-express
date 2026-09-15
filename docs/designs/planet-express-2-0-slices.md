@@ -525,8 +525,8 @@ Synthesized from the eng review's findings (2026-09-13). Each task derives from 
   - Verify: the paragraph names `shell=True` legacy plans as the remaining unenforced boundary
 
 **Landing 1b — typed restart via Telegram**
-**Status (2026-09-15): implemented and validated locally and on the test VM; live-host landing
-and tagging remain.** Local: 379 tests and `ruff check .` pass. VM: core restarts cleanly; a real
+**Status (2026-09-15): landed on the live host. Tagged `v2.0.0-1b` at `c12e20c` on `v2`.**
+Local: 379 tests and `ruff check .` pass. VM: core restarts cleanly; a real
 typed restart of `healthy/web` reaches `passed` only after 15 seconds healthy; the out-of-process
 stack CLI refuses while core is active. Three Codex review passes found and fixed duplicate-card
 publication and non-atomic approval/execution creation; the final pass reported no issue.
@@ -540,7 +540,11 @@ publication and non-atomic approval/execution creation; the final pass reported 
   - Verify: seeded `running` row becomes `interrupted` on start; the CLI refuses while the service is active
 
 **Landing 1r — visual re-skin (design v20)**
-- [ ] **T12 (P2, human: ~2 days / CC: ~1 session)** — dashboard — Move the existing tabs onto `cockpit.css`, new assets, and the remaining data-contract gaps
+**Status (2026-09-15): implemented and validated locally and on the test VM; live-host landing
+and tagging remain.** The four hash-addressed tabs were visually checked at 1440px against the v20
+references. The VM dashboard restarted cleanly and served the page, `cockpit.css`, and new assets.
+Local: 379 tests, `ruff check .`, compileall, and `git diff --check` pass.
+- [x] **T12 (P2, human: ~2 days / CC: ~1 session)** — dashboard — Move the existing tabs onto `cockpit.css`, new assets, and the remaining data-contract gaps
   - Surfaced by: Design v20 intake (2026-09-15). The live `dashboard.css` has no `--pe-*` tokens, all portraits and the logo differ, and cert tiers are missing
   - Files: `static/cockpit.css`, `static/characters/`, `static/logo.png`, `templates/dashboard.html`, `static/dashboard.js`, `casa_leela.py`, `dashboard_data.py`, `tests/test_dashboard_data.py`
   - Verify: each tab against `reference/Dashboard v3 - Cockpit.dc.html` and `Backups Tab - Corrected.dc.html`; cert tier tests; the `"command" not in json.dumps(...)` guard stays green

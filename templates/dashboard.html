@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
 </head>
 <body>
   <div class="scanline" aria-hidden="true"></div>
@@ -408,9 +408,7 @@
                 <span class="cryo-hero-label">{{ 'SINCE LAST ATTEMPT' if b.get('result') != 'success' else 'SINCE LAST SNAPSHOT' }}</span>
               </div>
               <div class="cryo-window-track"><div class="cryo-window-fill" style="width: {{ b.window_pct }}%;"></div></div>
-              <div class="cryo-window-caption">
-                {% if b.window_pct < 100 %}{{ b.window_pct }}% through the {{ cadence_label }} window{% else %}past its {{ cadence_label }} window{% endif %}
-              </div>
+              <div class="cryo-window-caption">{{ b.window_caption }}</div>
               <div class="cryo-stats">
                 <div class="cryo-stat-row"><span>NEXT RUN</span><span class="{{ 'cryo-bad' if b.timer_armed == false else '' }}">{{ b.next_human }}</span></div>
                 <div class="cryo-stat-row"><span>RESULT</span><span class="{{ 'cryo-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }} · exit {{ b.get('exit_code', '?') }}</span></div>
@@ -439,7 +437,7 @@
             <h3>CERTIFICATE VAULT</h3>
             <span class="status-chip {{ 'ok' if ctx.certs.available else '' }}">{{ 'COLLECTED' if ctx.certs.available else 'AWAITING FULL SCAN' }}</span>
             {% if ctx.certs.available and ctx.certs.list and not ctx.certs.list[0].get('note') %}
-            {% set attention_count = ctx.certs.list|selectattr('status', 'in', ['expiring', 'renew_soon', 'expired'])|list|length %}
+            {% set attention_count = ctx.certs.list|selectattr('tier', 'in', ['expiring', 'renew_soon', 'expired'])|list|length %}
             <span class="panel-head-summary">{{ ctx.certs.list|length }} collected</span>
             {% if attention_count %}
             <span class="cert-expiring-chip">{{ attention_count }} need{{ 's' if attention_count == 1 else '' }} attention</span>
@@ -472,23 +470,24 @@
               </div>
               {% else %}
               {# A monitor snapshot written before this cert-vault redesign shipped has no
-                 "status"/"days_remaining" keys at all -- default that to "unknown" rather
+                 "tier"/"days_left" keys at all -- default that to "unknown" rather
                  than "valid", or a cert that's actually expired would show a reassuring
                  green VALID badge until the next full scan re-parses it. #}
-              {% set status = c.get('status') or 'unknown' %}
+              {% set status = c.get('tier') or c.get('status') or 'unknown' %}
+              {% set days_left = c.get('days_left', c.get('days_remaining')) %}
               <div class="cert-card {{ status }}">
                 <div class="cert-card-head">
                   <span class="cert-led"></span>
                   <span class="cert-domain" title="{{ c.get('domain', '?') }}">{{ c.get('domain', '?') }}</span>
                   <span class="cert-badge">{{ 'EXPIRED' if status == 'expired' else ('EXPIRING' if status == 'expiring' else ('RENEW SOON' if status == 'renew_soon' else ('VALID' if status == 'valid' else 'NO DATA'))) }}</span>
                 </div>
-                {% if c.get('days_remaining') is not none %}
+                {% if days_left is not none %}
                 {% if status == 'expired' %}
-                <div class="cert-countdown">{{ -c.days_remaining }}d<span class="cert-countdown-label">OVERDUE</span></div>
+                <div class="cert-countdown">{{ -days_left }}d<span class="cert-countdown-label">OVERDUE</span></div>
                 {% else %}
-                <div class="cert-countdown">{{ c.days_remaining }}d<span class="cert-countdown-label">UNTIL EXPIRY</span></div>
+                <div class="cert-countdown">{{ days_left }}d<span class="cert-countdown-label">UNTIL EXPIRY</span></div>
                 {% endif %}
-                <div class="cert-bar-track"><div class="cert-bar-fill" style="width: {{ [[c.days_remaining / 90 * 100, 0]|max, 100]|min }}%;"></div></div>
+                <div class="cert-bar-track"><div class="cert-bar-fill" style="width: {{ c.get('life_pct', [[days_left / 365 * 100, 0]|max, 100]|min) }}%;"></div></div>
                 {% endif %}
                 <div class="cert-stats">
                   <div class="cert-stat-row"><span>SOURCE FILE</span><span>{{ c.get('resolver', '?') }}</span></div>

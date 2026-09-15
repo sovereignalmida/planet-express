@@ -254,6 +254,7 @@ def test_summarize_system_and_backups_computes_freshness_from_real_now(tmp_path,
     assert daily["timer_armed"] is True
     assert abs(daily["age_hours"] - 1) < 0.05
     assert daily["age_human"] == "1h"
+    assert daily["window_caption"] == "4% through the 24h window"
     assert result["verdict"]["level"] == "ok"
     assert result["verdict"]["title"] == "DATA IS SAFE"
 
@@ -282,6 +283,7 @@ def test_summarize_system_and_backups_legacy_record_uses_job_name_cadence(tmp_pa
     # the resolved fallback cadence must be written back -- the template reads b.cadence_hours
     # directly for the window caption, and would otherwise render "through the 0h window"
     assert weekly["cadence_hours"] == 168
+    assert weekly["window_caption"] == "86% through the 7d window"
 
 
 def test_summarize_system_and_backups_timer_still_armed_after_next_run_elapses(tmp_path, monkeypatch):

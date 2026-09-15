@@ -109,6 +109,9 @@ def test_parse_cert_file_extracts_domain_sans_expiry(tmp_path):
     assert result["issuer"] == "wildcard.casalan.com"
     assert result["status"] == "valid"
     assert result["days_remaining"] in (399, 400)  # +/-1 for wall-clock skew during the test run
+    assert result["tier"] == "valid"
+    assert result["days_left"] == result["days_remaining"]
+    assert result["life_pct"] == 100
 
 
 def test_parse_cert_file_expiry_status_tiers(tmp_path):
@@ -118,6 +121,8 @@ def test_parse_cert_file_expiry_status_tiers(tmp_path):
     assert casa_leela._parse_cert_file(critical)["status"] == "expiring"
     assert casa_leela._parse_cert_file(soon)["status"] == "renew_soon"
     assert casa_leela._parse_cert_file(valid)["status"] == "valid"
+    assert casa_leela._parse_cert_file(critical)["tier"] == "expiring"
+    assert casa_leela._parse_cert_file(soon)["life_pct"] in (5, 6)
 
 
 def test_cert_expiry_status_thresholds_directly():
@@ -126,7 +131,7 @@ def test_cert_expiry_status_thresholds_directly():
     assert casa_leela._cert_expiry_status(30) == "renew_soon"
     assert casa_leela._cert_expiry_status(8) == "renew_soon"
     assert casa_leela._cert_expiry_status(7) == "expiring"
-    assert casa_leela._cert_expiry_status(0) == "expiring"
+    assert casa_leela._cert_expiry_status(0) == "expired"
     assert casa_leela._cert_expiry_status(-1) == "expired"
 
 

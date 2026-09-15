@@ -32,6 +32,8 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     resp = _client().get("/")
     assert resp.status_code == 200
     assert b"waiting for the first scheduled run" in resp.data
+    assert b"cockpit.css" in resp.data
+    assert b"dashboard.css" not in resp.data
 
 
 def test_index_renders_real_findings(tmp_path, monkeypatch):

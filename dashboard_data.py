@@ -467,6 +467,14 @@ def _format_countdown_human(target: datetime, now: datetime) -> str:
     return f"in {mins}m"
 
 
+def _format_backup_window(cadence_hours: int) -> str:
+    if cadence_hours == 24:
+        return "24h"
+    if cadence_hours % 24 == 0:
+        return f"{cadence_hours // 24}d"
+    return f"{cadence_hours}h"
+
+
 # Freshness tiers -- "worst job wins the tab verdict". A oneshot service's own
 # ActiveState is always "inactive" between runs (see casa_hermes.py's system prompt),
 # so it's deliberately not a factor here: freshness comes from age vs. cadence and the
@@ -524,8 +532,8 @@ def _backup_verdict(backups: dict, cert_list: list) -> dict:
     for c in cert_list:
         if c.get("note"):
             continue  # "no certs declared on this host at all" placeholder, not a real cert
-        if c.get("status"):
-            cert_tiers.append(c["status"])
+        if c.get("tier") or c.get("status"):
+            cert_tiers.append(c.get("tier") or c["status"])
         elif c.get("kind") == "error" or c.get("error"):
             cert_tiers.append("error")
         else:
@@ -540,7 +548,7 @@ def _backup_verdict(backups: dict, cert_list: list) -> dict:
 
     fresh_count = sum(1 for t in job_tiers if t == "fresh")
     armed_count = sum(1 for b in backups.values() if b["timer_armed"])
-    live_certs = [c for c in cert_list if c.get("status")]
+    live_certs = [c for c in cert_list if c.get("tier") or c.get("status")]
 
     job_crit = worst_job in ("overdue", "failed")
     cert_crit = worst_cert in ("expiring", "expired", "error")
@@ -565,7 +573,11 @@ def _backup_verdict(backups: dict, cert_list: list) -> dict:
         clauses = [f"All {total} borg job(s) succeeded on schedule."]
         if newest:
             clauses.append(f"Newest snapshot {newest} ago.")
-        known_days = [c["days_remaining"] for c in live_certs if c.get("days_remaining") is not None]
+        known_days = [
+            c.get("days_left", c.get("days_remaining"))
+            for c in live_certs
+            if c.get("days_left", c.get("days_remaining")) is not None
+        ]
         if known_days:
             clauses.append(f"{len(live_certs)} cert(s) live, soonest expiry in {min(known_days)}d.")
         elif live_certs:
@@ -632,6 +644,13 @@ def summarize_system_and_backups() -> dict:
         else:
             b["next_human"] = "timer not armed"
         b["window_pct"] = min(round(age_hours / cadence_hours * 100), 100) if age_hours is not None else 0
+        window_label = _format_backup_window(cadence_hours)
+        if age_hours is None:
+            b["window_caption"] = "backup age unavailable"
+        elif age_hours <= cadence_hours:
+            b["window_caption"] = f"{b['window_pct']}% through the {window_label} window"
+        else:
+            b["window_caption"] = f"{_format_age_human(age_hours - cadence_hours)} past its {window_label} window"
         b["freshness"] = _job_freshness(age_hours, cadence_hours, b.get("result", "unknown"), timer_armed)
         backups[name] = b
 
