@@ -393,6 +393,20 @@ def _collect_stacks_root_and_forbidden() -> tuple[Path, list[str]]:
     return stacks_root, forbidden
 
 
+def _sudoers_target_exists() -> bool:
+    """Whether DEFAULT_SUDOERS_TARGET exists, checked through sudo like the install/rm
+    around it. /etc/sudoers.d is root-only (0750) on Ubuntu, so a plain Path.exists()
+    as the non-root RUN_USER raises PermissionError instead of answering -- found by the
+    test homelab, where an empty sudo_allowlist is the first path that reaches this check.
+    `sudo test -e` exits 0 if present, 1 if absent; anything else is a real failure."""
+    result = subprocess.run(["sudo", "test", "-e", DEFAULT_SUDOERS_TARGET], check=False)
+    if result.returncode not in (0, 1):
+        raise RuntimeError(
+            f"could not check {DEFAULT_SUDOERS_TARGET} via sudo (exit {result.returncode})"
+        )
+    return result.returncode == 0
+
+
 def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
     """Generate/install/remove /etc/sudoers.d/planetexpress to match cfg.sudo_allowlist.
 
@@ -448,7 +462,7 @@ def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
     # sitting at the OS level, granting privileges this run's config no longer declares.
     # An independent Codex review caught both the empty-allowlist and the declined-install
     # variant of this as separate gaps; handled here in one place so neither can reopen.
-    if not installed_new_grant and Path(DEFAULT_SUDOERS_TARGET).exists() and _prompt_yes_no(
+    if not installed_new_grant and _sudoers_target_exists() and _prompt_yes_no(
         f"A sudoers grant already exists at {DEFAULT_SUDOERS_TARGET} from a previous "
         f"run that doesn't match what's declared now. Remove it?", default=True
     ):

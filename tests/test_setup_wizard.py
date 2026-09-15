@@ -396,3 +396,58 @@ def test_collect_mounts_expands_tilde_and_rejects_relative(monkeypatch):
     mounts = _collect_mounts()
     assert mounts == {"data.mount": os.path.expanduser("~/nas")}
     assert os.path.isabs(mounts["data.mount"])
+
+
+# ── _sudoers_target_exists / reconcile_sudoers as non-root (test homelab finding) ──
+# /etc/sudoers.d is 0750 root on Ubuntu, so a plain Path.exists() as the non-root
+# RUN_USER raised PermissionError the first time reconcile_sudoers() ran with an empty
+# sudo_allowlist. The check now goes through `sudo test -e` like the install/rm around it.
+def _fake_sudo_test(returncode: int, calls: list):
+    import subprocess as _subprocess
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        return _subprocess.CompletedProcess(cmd, returncode)
+
+    return fake_run
+
+
+@pytest.mark.parametrize("returncode, expected", [(0, True), (1, False)])
+def test_sudoers_target_exists_uses_sudo_test(monkeypatch, returncode, expected):
+    import setup_wizard
+
+    calls = []
+    monkeypatch.setattr("subprocess.run", _fake_sudo_test(returncode, calls))
+    assert setup_wizard._sudoers_target_exists() is expected
+    assert calls == [["sudo", "test", "-e", setup_wizard.DEFAULT_SUDOERS_TARGET]]
+
+
+def test_sudoers_target_exists_raises_on_sudo_failure(monkeypatch):
+    import setup_wizard
+
+    monkeypatch.setattr("subprocess.run", _fake_sudo_test(126, []))
+    with pytest.raises(RuntimeError):
+        setup_wizard._sudoers_target_exists()
+
+
+def test_reconcile_sudoers_empty_allowlist_never_stats_sudoers_directly(monkeypatch):
+    """Regression: must not call Path.exists() on the root-only sudoers target."""
+    import setup_wizard
+
+    monkeypatch.setattr(setup_wizard, "_discover_mount_units", lambda: [])
+    calls = []
+    monkeypatch.setattr("subprocess.run", _fake_sudo_test(1, calls))  # grant absent
+
+    real_exists = Path.exists
+
+    def guarded_exists(self, *args, **kwargs):
+        if str(self) == setup_wizard.DEFAULT_SUDOERS_TARGET:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", guarded_exists)
+    monkeypatch.setattr(setup_wizard, "_prompt_yes_no", lambda *a, **k: pytest.fail("no prompt expected"))
+
+    cfg = setup_wizard.build_config({"stacks_root": "/home/someuser/stacks"})
+    setup_wizard.reconcile_sudoers(cfg)  # would raise PermissionError before the fix
+    assert ["sudo", "test", "-e", setup_wizard.DEFAULT_SUDOERS_TARGET] in calls
