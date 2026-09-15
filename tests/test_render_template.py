@@ -85,7 +85,11 @@ def test_real_identity_templates(service):
             assert directive in lines
     else:
         for directive in ('User=planetexpress-web', 'Group=planetexpress-web',
-                          'EnvironmentFile=-/etc/planetexpress-dashboard.env',
-                          'ExecStart=/srv/pe/venv/bin/python casa_scruffy.py'):
+                          'EnvironmentFile=/etc/planetexpress-dashboard.env',
+                          'NoNewPrivileges=yes', 'ProtectProc=invisible',
+                          'ProtectSystem=strict', 'PrivateTmp=yes',
+                          ('ExecStart=/srv/pe/venv/bin/gunicorn --workers 2 --threads 4 '
+                          '--bind 0.0.0.0:8420 --worker-tmp-dir /dev/shm --no-control-socket --access-logfile - '
+                          '--error-logfile - casa_scruffy:create_app()')):
             assert directive in lines
         assert 'EnvironmentFile=/etc/planetexpress.env' not in lines

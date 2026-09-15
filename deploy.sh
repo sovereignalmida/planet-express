@@ -175,6 +175,7 @@ done
 
 # Give the separate dashboard user read-only ACLs and access to core’s RPC socket.
 venv/bin/python scripts/web_access.py
+venv/bin/python scripts/dashboard_operators.py init
 
 # ── Systemd units ────────────────────────────────────────────────────────────────
 section "Installing systemd units"
@@ -263,13 +264,13 @@ echo ""
 # Interactive opt-in, not silently auto-enabled -- even read-only with no auth means
 # anyone on the LAN can see findings/backup-status/history, which is real information
 # disclosure worth an explicit yes, not a default-on.
-read -rp "  Enable and start the read-only dashboard now? [y/N] " start_dashboard_now
+read -rp "  Enable and start the authenticated read-only dashboard now? [y/N] " start_dashboard_now
 if [[ "${start_dashboard_now,,}" == "y" ]]; then
     sudo systemctl enable --now casa-dashboard
     sleep 2
     if sudo systemctl is-active --quiet casa-dashboard; then
         DASH_IP="$(hostname -I | awk '{print $1}')"
-        info "Dashboard running: http://${DASH_IP}:${dashboard_port}/  (LAN-trust, no auth)"
+        info "Dashboard running: http://${DASH_IP}:${dashboard_port}/  (passphrase + auth code)"
     else
         warn "Dashboard may not have started cleanly. Check:"
         warn "  journalctl -u casa-dashboard --no-pager -n 30"
@@ -291,7 +292,7 @@ echo "  Secrets file:  $ENV_FILE"
 echo "  Systemd units: $SERVICE_FILE"
 echo "                 $STACKS_SERVICE_FILE"
 echo "                 $DASHBOARD_SERVICE_FILE"
-echo "  Dashboard:     http://<this-host>:${dashboard_port}/  (LAN-trust, no auth)"
+echo "  Dashboard:     http://<this-host>:${dashboard_port}/  (passphrase + auth code)"
 echo "  Logs:          $INSTALL_DIR/logs/"
 echo "  State:         $INSTALL_DIR/state/"
 echo ""

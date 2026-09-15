@@ -572,7 +572,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10 and T13a done; T13b, T14, T11 remain.
+**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10, T13a and T13b done; T14, T11 remain.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -641,6 +641,50 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Test VM rehearsal 6/6 over the real socket as `planetexpress-web`: schema upgrade on an
     existing DB, lockout, IP rotation, notify-once, replay rejection, epoch bump via
     `revoke_devices.py`, bad-request validation.
+- **T13b notes.** Implemented by Codex, reviewed and corrected here over four Codex review rounds.
+  - `casa_scruffy.create_app()` is served by gunicorn (2 workers × 4 threads). It refuses to start
+    without `PE_DASHBOARD_SECRET_KEY` (≥ 32 chars) and at least one operator.
+    `/etc/planetexpress-dashboard.env` is now required.
+  - Airlock follows design v20: no username field; the passphrase identifies the operator (every
+    hash is checked); TOTP is always required. Public routes: `/login`, `/login/notify`,
+    `/api/widget`, `/static/*`. Every POST needs the session CSRF token.
+  - Cookies: `pe_auth` (device token with epoch) plus a signed `pe_auth_trust` marker bound to
+    that token. Trusted = 30 days; untrusted = browser session capped at 12 hours server-side.
+    `HttpOnly`, `SameSite=Strict`, `Secure` only over https or `CASA_DASHBOARD_HTTPS=1`.
+  - Rejection copy is generic ("PASSPHRASE OR AUTH CODE REJECTED"). **Deviation** from the
+    reference's "AUTH CODE REJECTED", which would reveal the passphrase was right.
+  - **Deviation: operator provisioning is `scripts/dashboard_operators.py`**
+    (`init`/`add`/`reset`/`remove`/`list`), not `setup_wizard.py`. The wizard is topology-only
+    and the env file is root-owned 0600, so provisioning needs its own sudo-aware tool.
+    `deploy.sh` runs `init` after `web_access.py`. Duplicate passphrases are rejected.
+  - **Core change (T13a follow-up, Codex review):** operator `?` (no passphrase matched) counts
+    toward the IP only. As an operator key it was global, so one client could seal the airlock
+    for every operator on every device.
+  - Codex review findings fixed: NOTIFY now targets the operator whose lock was shown (kept in
+    the signed session, set only after the passphrase matched), both for an existing lock and
+    for a failure that triggers one.
+  - Fixed here: a core outage returns the 503 Airlock page but keeps the cookies (Codex's
+    version cleared them, signing everyone out on every core restart); NOTIFY with no active
+    lock returns to login.
+  - **Found on the VM:** gunicorn 26's control server tries to create a socket under the web
+    user's home (`/nonexistent`) and hits `ProtectSystem=strict`. The unit passes
+    `--no-control-socket`, and requirements pin `gunicorn>=26.0` (older versions reject the flag).
+  - **Accepted:** the device epoch is cached per worker for 60s, so `revoke_devices.py` takes up
+    to a minute to sign a device out, and a core outage is only noticed once the cache expires.
+  - **Test VM rehearsal 19/19** (gunicorn as `planetexpress-web` with all four hardening
+    directives):
+    - provisioning writes a 600 root env file;
+    - unauthenticated `/` redirects; `/api/widget` stays public; a POST without CSRF gets 400;
+    - rejected attempts count down; login sets the right cookie flags; a replayed TOTP code is
+      rejected;
+    - logout works; an untrusted login gets a session cookie;
+    - with core down the page is 503 and the session is kept; it works again when core is back;
+    - revocation signs the device out within 60s;
+    - lockout seals the airlock and NOTIFY works;
+    - the journal shows no tracebacks, read-only or permission errors, and no passphrases.
+  - **Live-host steps at 1c tag time (in addition to T10's):** `venv/bin/pip install -r
+    requirements.txt`; run `scripts/dashboard_operators.py init` before restarting
+    `casa-dashboard`; re-render the dashboard unit.
 - **T10 notes.** Implemented by Codex, reviewed and corrected here; `scripts/web_access.py`,
   both unit templates, `deploy.sh`, `rpc.py`, `dashboard_data.py`.
   - **Deviation from the P4 wording (least privilege): allowlist, not a recursive grant on the
@@ -691,9 +735,9 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Surfaced by: Design v20 intake, login decision; split from T13 on 2026-09-15 (too large for one unit)
   - Files: `web_auth.py`, `planet_express/core/store.py`, `planet_express/integrations/rpc.py`, `casa_farnsworth.py`, `scripts/revoke_devices.py`, `tests/test_web_auth.py`, `tests/test_store.py`, `tests/test_local_rpc.py`
   - Verify: RFC 6238 test vectors; ±1 step window; replayed step rejected in core; 3 failures → locked 15 min per operator and per IP; lock alert sent once; device token tamper/expiry/revocation
-- [ ] **T13b (P1, human: ~1 day / CC: ~30min)** — auth web — Airlock login routes + template, session + CSRF, gunicorn + unit hardening + required dashboard env file, operator provisioning in the setup wizard
+- [x] **T13b (P1, human: ~1 day / CC: ~30min)** — auth web — ✅ done 2026-09-15 — Airlock login routes + template, session + CSRF, gunicorn + unit hardening + required dashboard env file, operator provisioning in `scripts/dashboard_operators.py`
   - Surfaced by: Design v20 intake, login decision; split from T13 on 2026-09-15
-  - Files: `casa_scruffy.py`, `templates/login.html`, `systemd/casa-dashboard.service.template`, `scripts/setup_wizard.py`, `requirements.txt`, `tests/test_scruffy_routes.py`, `tests/test_setup_wizard.py`
+  - Files: `casa_scruffy.py`, `templates/login.html`, `static/login.js`, `static/dashboard.js`, `templates/dashboard.html`, `static/cockpit.css`, `systemd/casa-dashboard.service.template`, `scripts/dashboard_operators.py`, `deploy.sh`, `requirements.txt`, `planet_express/core/store.py`, `tests/test_scruffy_routes.py`, `tests/test_dashboard_operators.py`, `tests/test_render_template.py`, `tests/test_store.py`
   - Verify: Airlock states default/rejected/busy/locked; unauthenticated `/` redirects to login; CSRF enforced; Scruffy refuses to start without session secret; trusted-device cookie honoured and revocable
 - [ ] **T14 (P1, human: ~1 day / CC: ~30min)** — actions — Operator-initiated `action.request`, action capability flags, and `docker.stats_service`
   - Surfaced by: Design v20 intake, restart-flow and run-controls decisions

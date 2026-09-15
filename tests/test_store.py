@@ -443,3 +443,19 @@ def test_failures_during_a_lock_do_not_spend_the_fresh_budget(tmp_path):
     assert not store.record_auth_failure("alice", "ip3")["locked"]
     # ...but ip2's own count still holds the three failures alice made from it while locked.
     assert store.auth_status("?", "ip2")["locked"] is True
+
+
+# ── Codex review (T13b): an unmatched passphrase never locks a global "?" key ──
+def test_unknown_operator_failures_lock_only_the_ip(tmp_path):
+    store, now = _auth_store(tmp_path)
+    for i in range(3):
+        now[0] = float(i)
+        result = store.record_auth_failure("?", "10.0.0.66")
+    assert result["locked"] and result["just_locked"]
+    assert store.auth_status("?", "10.0.0.66")["locked"] is True
+    assert store.auth_status("?", "10.0.0.7") == {"locked": False, "locked_until": None,
+                                                "remaining_attempts": 3}
+    assert store.auth_status("alice", "10.0.0.7")["remaining_attempts"] == 3
+    for i in range(3):
+        store.record_auth_failure("?", f"10.0.1.{i}")
+    assert store.auth_status("?", "10.0.2.1")["locked"] is False

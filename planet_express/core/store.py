@@ -347,7 +347,14 @@ class Store:
     #   and an IP, so deleting it for one key reset the other too, letting an attacker rotate IPs
     #   past the per-operator limit (Codex review, T13a). Each key counts only failure rows after
     #   its own reset_after_id instead.
+    #   Operator "?" means no passphrase matched: that failure counts toward the IP only. As an
+    #   operator key it would be global, and one client could seal the airlock for every
+    #   operator on every device (Codex review, T13b).
     _AUTH_KEYS = ("operator", "client_ip")
+
+    def _auth_keys(self, operator, client_ip) -> list[tuple[str, str]]:
+        keys = list(zip(self._AUTH_KEYS, (operator, client_ip)))
+        return keys[1:] if operator == "?" else keys
 
     def _counter(self, conn, kind, value) -> tuple[float, float]:
         row = conn.execute("SELECT reset_after_id, locked_until FROM auth_counters WHERE kind = ? AND value = ?",
@@ -356,7 +363,7 @@ class Store:
 
     def _auth_status(self, conn, operator, client_ip, now) -> dict:
         counts, deadlines = [], []
-        for kind, value in zip(self._AUTH_KEYS, (operator, client_ip)):
+        for kind, value in self._auth_keys(operator, client_ip):
             reset_after_id, locked_until = self._counter(conn, kind, value)
             if locked_until > now:
                 deadlines.append(locked_until)
@@ -404,7 +411,7 @@ class Store:
                 "COALESCE((SELECT MIN(id) FROM auth_failures), reset_after_id + 1)",
                 (now - AUTH_LOCK_SECONDS,))
             counted = self._auth_status(conn, operator, client_ip, now)
-            for (kind, value), count in zip(zip(self._AUTH_KEYS, (operator, client_ip)), counted["_counts"]):
+            for (kind, value), count in zip(self._auth_keys(operator, client_ip), counted["_counts"]):
                 if count >= AUTH_MAX_FAILURES and self._counter(conn, kind, value)[1] <= now:
                     self._reset_counter(conn, kind, value, now + AUTH_LOCK_SECONDS)
             status = self._public(self._auth_status(conn, operator, client_ip, now))
@@ -417,7 +424,7 @@ class Store:
 
     def record_auth_success(self, operator, client_ip) -> None:
         with self._write() as conn:
-            for kind, value in zip(self._AUTH_KEYS, (operator, client_ip)):
+            for kind, value in self._auth_keys(operator, client_ip):
                 self._reset_counter(conn, kind, value, 0)
             self._event(conn, "auth.success", operator=operator, client_ip=client_ip)
 

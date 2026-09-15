@@ -282,10 +282,15 @@
 
     fetch(window.location.pathname, { cache: "no-store" })
       .then(function (r) {
+        if (r.redirected && new URL(r.url).pathname === "/login") {
+          window.location.assign(r.url);
+          return null;
+        }
         if (!r.ok) throw new Error("bad response " + r.status);
         return r.text();
       })
       .then(function (html) {
+        if (html === null) return;
         var freshLive = new DOMParser().parseFromString(html, "text/html").getElementById("dashboard-live");
         var currentLive = document.getElementById("dashboard-live");
         if (!freshLive || !currentLive) return;

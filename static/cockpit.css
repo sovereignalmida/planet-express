@@ -1652,3 +1652,24 @@ footer p {
   .topbar-spacer { flex-basis: 100%; height: 0; }
   .topbar-right { flex-wrap: wrap; row-gap: 10px; }
 }
+
+/* Airlock: one column on phones and a focused panel on larger screens. */
+.pe-airlock { width: min(100%, 430px); min-height: 100dvh; margin: auto;
+              padding: 40px 26px; display: flex; flex-direction: column;
+              justify-content: center; gap: 24px; position: relative; }
+.pe-airlock-brand { text-align: center; }
+.pe-airlock-brand img { height: 74px; width: auto; }
+.pe-airlock h1 { font-family: var(--pe-font-display); font-size: 23px; letter-spacing: .09em; }
+.pe-airlock h2 { font-family: var(--pe-font-display); font-size: 14px; }
+.pe-airlock-fields, .pe-airlock form { display: flex; flex-direction: column; gap: 13px; }
+.pe-airlock .pe-input { width: 100%; min-width: 0; }
+.pe-airlock .pe-input:focus { outline: 2px solid var(--pe-accent); outline-offset: 2px; }
+.pe-airlock .pe-btn { min-height: 54px; width: 100%; }
+.pe-airlock-trust { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; }
+.pe-airlock-trust input { accent-color: var(--pe-accent); }
+.pe-airlock-warning, .pe-airlock-clock strong { color: var(--pe-warn); }
+.pe-airlock-clock { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.pe-airlock-clock strong { font-size: 44px; font-family: var(--pe-font-display); }
+.pe-airlock-clock progress { width: 100%; accent-color: var(--pe-warn); }
+.pe-logout { margin: 0; }
+.pe-logout button { min-height: 44px; cursor: pointer; }

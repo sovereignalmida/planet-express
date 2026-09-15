@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planet Express — Airlock</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+  <script src="{{ url_for('static', filename='login.js') }}" defer></script>
+</head>
+<body>
+  <main class="pe-airlock" data-state="{{ state }}">
+    <header class="pe-airlock-brand">
+      <img src="{{ url_for('static', filename='logo.png') }}" alt="">
+      <h1>PLANET EXPRESS</h1>
+      <p class="pe-screen-sub">SHIP'S COCKPIT · {{ domain }}</p>
+    </header>
+    {% if state == 'unavailable' %}
+    <section class="pe-card crit" role="alert">SHIP COMPUTER UNREACHABLE: login can't be verified right now</section>
+    {% elif state == 'locked' %}
+    <h2 class="pe-airlock-warning">AIRLOCK SEALED · TOO MANY FAILED ATTEMPTS</h2>
+    <section class="pe-card pe-countdown pe-airlock-clock" data-seconds="{{ seconds }}">
+      <strong id="retry-countdown">{{ countdown }}</strong>
+      <span class="pe-screen-sub">UNTIL RETRY</span>
+      <progress id="retry-progress" max="900" value="{{ seconds }}" aria-label="Time until retry"></progress>
+    </section>
+    <p>If this wasn't you, the lockout already did its job. Nothing was accessed.</p>
+    {% if note %}<p role="status">{{ note }}</p>{% endif %}
+    <form method="post" action="{{ url_for('notify') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="pe-btn" type="submit">NOTIFY {{ '@' ~ bot if bot else 'the bot' }}</button>
+    </form>
+    {% else %}
+    {% if state == 'rejected' %}
+    <section class="pe-card crit" role="alert">
+      <h2>PASSPHRASE OR AUTH CODE REJECTED</h2>
+      <p>{{ remaining }} attempts left before this device is locked for 15 minutes.</p>
+    </section>
+    {% endif %}
+    <form id="login-form" method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="next" value="{{ next_path }}">
+      <div id="login-fields" class="pe-airlock-fields">
+        <div class="pe-field">
+          <label for="passphrase">PASSPHRASE</label>
+          <input class="pe-input" id="passphrase" name="passphrase" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="pe-field {{ 'is-rejected' if state == 'rejected' else '' }}">
+          <label for="code">AUTH CODE</label>
+          <div class="pe-totp {{ 'is-rejected' if state == 'rejected' else '' }}">
+            <input class="pe-input pe-totp-cell" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+          </div>
+        </div>
+        <label class="pe-airlock-trust"><input type="checkbox" name="trust" checked> Trust this device for 30 days</label>
+      </div>
+      <button class="pe-btn primary accent" id="engage" type="submit">ENGAGE ✈</button>
+    </form>
+    <div class="pe-quip">
+      <img src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Professor Farnsworth">
+      <p id="login-quip">{% if state == 'rejected' %}"You've tried that already. Try it differently."{% else %}"Good news, everyone! The ship is still where you left it."{% endif %}</p>
+    </div>
+    {% endif %}
+  </main>
+</body>
+</html>

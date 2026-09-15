@@ -47,6 +47,10 @@
         </div>
         <div class="lastscan">last scan: {{ ctx.health.last_scan or "never" }}</div>
       </div>
+      <form class="pe-logout" method="post" action="{{ url_for('logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="refresh-btn" type="submit">LOG OUT</button>
+      </form>
       <a class="refresh-btn" href="/"><span>↻</span> SCAN</a>
     </div>
   </header>
@@ -80,7 +84,7 @@
     <button class="tab" data-tab="network" type="button">Network</button>
     <button class="tab" data-tab="actions" type="button">Actions</button>
     <div class="tabs-spacer"></div>
-    <div class="readonly-chip">READ-ONLY · LAN-TRUST</div>
+    <div class="readonly-chip">READ-ONLY · AUTHENTICATED</div>
   </nav>
 
   {% if not ctx.health.state_available %}
