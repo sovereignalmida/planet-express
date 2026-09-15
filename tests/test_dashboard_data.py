@@ -632,3 +632,22 @@ def test_build_dashboard_context_never_raises_with_no_state(tmp_path, monkeypatc
     assert ctx["pending_plan"] is None
     assert ctx["update_history"] == []
     assert ctx["rollback_candidates"] == []
+
+
+def test_permission_error_warns_once_per_path(tmp_path, monkeypatch, caplog):
+    def denied(path, *args, **kwargs):
+        raise PermissionError('denied')
+
+    monkeypatch.setattr(Path, 'read_text', denied)
+    paths = [tmp_path / 'one.json', tmp_path / 'two.json']
+    for path in paths * 3:
+        assert dashboard_data._load(path, dashboard_data.MonitorSnapshot) is None
+    assert len(caplog.records) == 2
+    for path, record in zip(paths, caplog.records):
+        assert str(path) in record.message
+        assert record.levelname == 'WARNING'
+
+
+def test_missing_state_silent(tmp_path, caplog):
+    assert dashboard_data._load(tmp_path / 'missing', dashboard_data.MonitorSnapshot) is None
+    assert not caplog.records

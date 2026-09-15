@@ -12,8 +12,10 @@ this module -- so they're already jsonify()-safe for a future JSON route (Spec 7
 Homepage-widget endpoint) with no serialization pass to invent later.
 """
 
+import logging
 import re
 import socket
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -29,11 +31,21 @@ from state_models import (
     UpdateHistory,
 )
 
+log = logging.getLogger("planetexpress.dashboard_data")
+_permission_warnings = set()
+_permission_warning_lock = threading.Lock()
+
 
 def _load(path, model_cls):
     try:
         text = path.read_text()
-    except (FileNotFoundError, OSError):
+    except PermissionError:
+        with _permission_warning_lock:
+            if path not in _permission_warnings:
+                _permission_warnings.add(path)
+                log.warning("Cannot read dashboard state: %s (permission denied)", path)
+        return None
+    except OSError:
         return None
     try:
         return model_cls.model_validate_json(text)

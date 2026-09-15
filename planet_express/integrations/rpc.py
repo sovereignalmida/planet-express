@@ -140,6 +140,7 @@ class RpcServer:
             self._identity = (info.st_dev, info.st_ino)
             if gid is not None:
                 os.chown(self.socket_path, -1, gid)
+                os.chown(self.socket_path.parent, -1, gid)
             os.chmod(self.socket_path, 0o660)
             conn.listen(16)
             conn.settimeout(0.1)

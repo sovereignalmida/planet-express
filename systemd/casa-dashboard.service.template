@@ -1,9 +1,9 @@
 [Unit]
 Description=Planet Express — Read-only Web Dashboard (Scruffy)
 Documentation=https://github.com/sovereignalmida/planet-express
-# Deliberately no Requires=docker.service -- this process never calls docker/docker
-# compose, only reads state files Leela/Farnsworth/Zoidberg already wrote. It just
-# needs to bind a TCP port.
+# Dedicated unprivileged identity, never in the docker group.
+# Reads code, config and snapshots through read-only ACLs; reaches core only
+# through its RPC socket using planetexpress-rpc membership.
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -11,8 +11,9 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=$RUN_USER
-Group=$RUN_GROUP
+User=planetexpress-web
+Group=planetexpress-web
+SupplementaryGroups=planetexpress-rpc
 WorkingDirectory=$INSTALL_DIR
 
 # Deliberately no EnvironmentFile=/etc/planetexpress.env -- this process needs no LLM

@@ -12,6 +12,10 @@ StartLimitBurst=5
 Type=simple
 User=$RUN_USER
 Group=$RUN_GROUP
+UMask=0027
+RuntimeDirectory=planetexpress
+RuntimeDirectoryMode=0750
+SupplementaryGroups=planetexpress-rpc
 WorkingDirectory=$INSTALL_DIR
 
 # Load secrets (Telegram bot token, LLM API key) from a separate file

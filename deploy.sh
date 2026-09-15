@@ -60,6 +60,9 @@ docker info > /dev/null 2>&1 \
         "add it to the docker group (sudo usermod -aG docker $RUN_USER) and start a new " \
         "shell session, then re-run this script."
 command -v $PYTHON_BIN > /dev/null         || error "python3 not found"
+# scripts/web_access.py grants the dashboard's separate user read-only ACLs; checked here so
+# a host without ACL tools fails before any account, group or unit changes are made.
+command -v setfacl > /dev/null             || error "setfacl not found -- install the acl package (e.g. sudo apt install acl) and re-run"
 $PYTHON_BIN -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' \
     || error "python3 is $($PYTHON_BIN --version 2>&1), need 3.11+ (repo code uses newer syntax that older Python can't even parse)"
 
@@ -170,6 +173,9 @@ while true; do
     warn "Must be a port number 1-65535."
 done
 
+# Give the separate dashboard user read-only ACLs and access to core’s RPC socket.
+venv/bin/python scripts/web_access.py
+
 # ── Systemd units ────────────────────────────────────────────────────────────────
 section "Installing systemd units"
 
@@ -278,6 +284,8 @@ section "Deploy complete"
 
 echo ""
 echo "  Install dir:   $INSTALL_DIR"
+echo "  Core user:     $RUN_USER"
+echo "  Dashboard user: planetexpress-web (read-only ACLs; RPC group planetexpress-rpc)"
 echo "  Config file:   $CASA_CONFIG"
 echo "  Secrets file:  $ENV_FILE"
 echo "  Systemd units: $SERVICE_FILE"

@@ -69,3 +69,23 @@ def test_render_ignores_dashboard_port_when_template_does_not_reference_it():
         DASHBOARD_PORT="8420",
     )
     assert out == "WorkingDirectory=/home/someuser/planet-express\n"
+
+
+@pytest.mark.parametrize('service', ['casa-planetexpress', 'casa-dashboard'])
+def test_real_identity_templates(service):
+    path = Path(__file__).resolve().parent.parent / 'systemd' / f'{service}.service.template'
+    template = path.read_text()
+    lines = render(template, INSTALL_DIR='/srv/pe', RUN_USER='installer', RUN_GROUP='installer',
+                   CONFIG_FILE='/etc/planetexpress/config.yaml', DASHBOARD_PORT='8420').splitlines()
+    assert 'SupplementaryGroups=planetexpress-rpc' in lines
+    if service == 'casa-planetexpress':
+        assert 'User=$RUN_USER' in template.splitlines()
+        for directive in ('User=installer', 'UMask=0027', 'RuntimeDirectory=planetexpress',
+                          'RuntimeDirectoryMode=0750'):
+            assert directive in lines
+    else:
+        for directive in ('User=planetexpress-web', 'Group=planetexpress-web',
+                          'EnvironmentFile=-/etc/planetexpress-dashboard.env',
+                          'ExecStart=/srv/pe/venv/bin/python casa_scruffy.py'):
+            assert directive in lines
+        assert 'EnvironmentFile=/etc/planetexpress.env' not in lines

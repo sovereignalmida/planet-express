@@ -474,3 +474,36 @@ def test_idle_overflow_connection_releases_reserved_slot_quickly(server, socket_
         finally:
             release.set()
         assert first.result()["ok"]
+
+
+def test_parent_chown_on_start(server, socket_path, monkeypatch):
+    chown = Mock(wraps=os.chown)
+    monkeypatch.setattr(os, 'chown', chown)
+    server(group=os.getgid())
+    assert chown.call_args_list == [
+        ((socket_path, -1, os.getgid()),),
+        ((socket_path.parent, -1, os.getgid()),),
+    ]
+    assert call(socket_path, 'echo')['ok']
+
+
+def test_parent_chown_failure_closes_and_unlinks(socket_path, monkeypatch):
+    real_chown = os.chown
+
+    def chown(path, uid, gid):
+        if path == socket_path.parent:
+            raise PermissionError('parent denied')
+        real_chown(path, uid, gid)
+
+    monkeypatch.setattr(os, 'chown', chown)
+    instance = RpcServer(socket_path, {}, allowed_uids={os.getuid()}, group=os.getgid())
+    try:
+        with pytest.raises(PermissionError, match='parent denied'):
+            instance.start()
+        assert instance._socket is None
+        assert not socket_path.exists()
+        # A real fresh bind proves cleanup leaves the endpoint reusable.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.bind(str(socket_path))
+    finally:
+        instance.stop()

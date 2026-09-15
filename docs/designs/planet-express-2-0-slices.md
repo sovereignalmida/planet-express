@@ -572,7 +572,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9 done; T10, T13, T14, T11 remain.
+**Status (2026-09-15): in progress on `v2` (untagged).** T9 and T10 done; T13, T14, T11 remain.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -597,11 +597,49 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
     `test_idle_overflow_connection_releases_reserved_slot_quickly`, not re-reviewed.
   - Codex review finding fixed: `start()` unlinked a live socket; it now refuses when a listener
     answers and only removes a socket whose connection is refused.
+- **T10 notes.** Implemented by Codex, reviewed and corrected here; `scripts/web_access.py`,
+  both unit templates, `deploy.sh`, `rpc.py`, `dashboard_data.py`.
+  - **Deviation from the P4 wording (least privilege): allowlist, not a recursive grant on the
+    whole clone.** The web user gets `rX` only on top-level `*.py`, `planet_express/`,
+    `templates/`, `static/`, `venv/` and `__pycache__/`. Every other top-level entry gets an
+    explicit `u:planetexpress-web:---` ACL, which POSIX ACLs apply instead of the world bits.
+    Codex's first version granted everything except `data/logs/state/.git`, which on the live
+    host would have exposed `.mcp.json`, `scpdump/` and world-readable step logs once the web
+    user could traverse into the clone. A config file inside the clone must be top-level; it is
+    denied first, then granted read last.
+  - `state/`: recursive + default `rX` ACL and `chmod -R o-rwx`. Snapshots are rewritten in
+    place, so the core unit's `UMask=0027` alone never removes existing world bits.
+  - Core unit: `UMask=0027`, `RuntimeDirectory=planetexpress`, `RuntimeDirectoryMode=0750`,
+    `SupplementaryGroups=planetexpress-rpc`. Dashboard unit: `User`/`Group=planetexpress-web`,
+    `SupplementaryGroups=planetexpress-rpc`. gunicorn, systemd hardening and the required
+    dashboard env file remain T13.
+  - `RpcServer.start()` also chgrps the socket's parent directory. systemd creates
+    `/run/planetexpress` as run_user:run_group 0750, so without it the web user could not
+    reach the socket. This gap was found while scoping T10.
+  - `dashboard_data._load` warns once per path on `PermissionError`.
+  - Codex review finding fixed: `setfacl` is checked in `deploy.sh` preflight and in
+    `web_access.main()` before any account change; `acl` added to INSTALL.md prerequisites.
+  - **Test VM rehearsal: 31/31.**
+    - The dashboard runs as `planetexpress-web`: no docker, and no read of `data/`, `logs/`,
+      `.git`, core's environ, `/etc/planetexpress.env`, or planted untracked files.
+    - It reads code, templates, state and config.
+    - RPC started; the socket is `660 planetexpress-rpc` in a `750 planetexpress-rpc` dir. The
+      web user's call succeeds and core's own uid is rejected.
+    - State has no world bits, including a freshly written snapshot.
+    - `casa-stacks` unit byte-identical; dashboard rollback to the previous unit and re-apply
+      both worked; `web_access.py` is idempotent.
+  - **Residual risk (accepted with T1's in-place install):** traversal ACLs on the home
+    directories above the clone let a compromised dashboard read any *world-readable* file
+    elsewhere in that home (e.g. a 644 stack `.env`). On the VM the stub `.env` is 600. Check
+    the live host's stack `.env` modes before the 1c tag lands there.
+  - **Live-host steps at 1c tag time:** install `acl` if missing; re-run `bash deploy.sh` (or
+    `scripts/web_access.py` plus re-rendering both units); re-apply the local disk-filter
+    commit as usual.
 - [x] **T9 (P1, human: ~3h / CC: ~15min)** — rpc — ✅ done 2026-09-15 — Raw AF_UNIX RPC with length prefix, bounded pool, and reserved decision worker
   - Surfaced by: Architecture issues 3 and 6; outside voice T2
   - Files: `planet_express/integrations/rpc.py`, `tests/test_local_rpc.py`
   - Verify: `pytest tests/test_local_rpc.py` (oversize frame, partial frame, wrong uid, busy pool)
-- [ ] **T10 (P1, human: ~3h / CC: ~15min)** — deploy — Web user split with in-place ACLs, `UMask=0027`, and a logged `PermissionError`
+- [x] **T10 (P1, human: ~3h / CC: ~15min)** — deploy — ✅ done 2026-09-15 — Web user split with in-place ACLs, `UMask=0027`, and a logged `PermissionError`
   - Surfaced by: Outside voice T1; architecture issue 1
   - Files: `deploy.sh`, `systemd/casa-dashboard.service.template`, `systemd/casa-planetexpress.service.template`, `dashboard_data.py`
   - Verify: user-split success criteria on the VM, then the live host; `systemctl cat casa-stacks` unchanged

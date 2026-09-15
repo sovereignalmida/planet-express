@@ -9,6 +9,8 @@ the wizard runs.
 - Linux with systemd, Docker, and the `docker compose` plugin (`docker compose version`
   should work — the standalone `docker-compose` binary is not enough).
 - Python 3.11+.
+- The `acl` package (`setfacl`): `deploy.sh` uses it to give the dashboard's separate
+  `planetexpress-web` user read-only access to exactly the files it needs.
 - One or more stacks under a single directory, each with its own `docker-compose.yml`
   (e.g. `~/stacks/media/docker-compose.yml`, `~/stacks/network/docker-compose.yml`, ...).
   Planet Express discovers stacks this way — it doesn't manage stacks that live elsewhere.
