@@ -572,7 +572,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9 and T10 done; T13, T14, T11 remain.
+**Status (2026-09-15): in progress on `v2` (untagged).** T9 and T10 done; T13a, T13b, T14, T11 remain.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -597,6 +597,22 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
     `test_idle_overflow_connection_releases_reserved_slot_quickly`, not re-reviewed.
   - Codex review finding fixed: `start()` unlinked a live socket; it now refuses when a listener
     answers and only removes a socket whose connection is refused.
+- **T13 decisions (2026-09-15, while scoping).**
+  - **Split** into T13a (core side + pure auth library) and T13b (web side), each delegated
+    separately.
+  - **`Secure` cookie flag is conditional.** Set when the request is HTTPS or
+    `CASA_DASHBOARD_HTTPS=1`; otherwise omitted. The dashboard is served over plain `http://`
+    (INSTALL.md, Homepage widget), where browsers never send `Secure` cookies, so an
+    unconditional flag would make login impossible. Transport confidentiality comes from D1's
+    VPN/Tailscale.
+  - **`/api/widget` stays unauthenticated.** Homepage fetches it server-side with no browser
+    session. It returns only a status word, counts and the last scan time/mode
+    (`summarize_health()`): no names, findings or paths. Every other route requires login.
+  - **Lockout, TOTP replay and device revocation live in core** (SQLite via `auth.*` RPC), since
+    gunicorn workers share no memory. Passphrase hashes and TOTP secrets stay in the dashboard
+    env file and are verified in the web process; core only counts, remembers the last used
+    step per operator, and holds a per-operator device epoch that `scripts/revoke_devices.py`
+    bumps.
 - **T10 notes.** Implemented by Codex, reviewed and corrected here; `scripts/web_access.py`,
   both unit templates, `deploy.sh`, `rpc.py`, `dashboard_data.py`.
   - **Deviation from the P4 wording (least privilege): allowlist, not a recursive grant on the
@@ -643,10 +659,14 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Surfaced by: Outside voice T1; architecture issue 1
   - Files: `deploy.sh`, `systemd/casa-dashboard.service.template`, `systemd/casa-planetexpress.service.template`, `dashboard_data.py`
   - Verify: user-split success criteria on the VM, then the live host; `systemctl cat casa-stacks` unchanged
-- [ ] **T13 (P1, human: ~1 day / CC: ~30min)** — auth — Passphrase + TOTP login, trusted device, and lockout, per design Airlock
-  - Surfaced by: Design v20 intake, login decision
-  - Files: `web_auth.py`, `casa_scruffy.py`, `templates/login.html`, `scripts/setup_wizard.py`, `tests/test_web_auth.py`
-  - Verify: RFC 6238 test vectors; ±1 step window; replayed code rejected; 3 failures → locked 15 min; trusted-device cookie expiry
+- [ ] **T13a (P1, human: ~1 day / CC: ~30min)** — auth core — TOTP/passphrase/device-token library, lockout + TOTP replay + device revocation in core, `auth.*` RPC methods
+  - Surfaced by: Design v20 intake, login decision; split from T13 on 2026-09-15 (too large for one unit)
+  - Files: `web_auth.py`, `planet_express/core/store.py`, `planet_express/integrations/rpc.py`, `casa_farnsworth.py`, `scripts/revoke_devices.py`, `tests/test_web_auth.py`, `tests/test_store.py`, `tests/test_local_rpc.py`
+  - Verify: RFC 6238 test vectors; ±1 step window; replayed step rejected in core; 3 failures → locked 15 min per operator and per IP; lock alert sent once; device token tamper/expiry/revocation
+- [ ] **T13b (P1, human: ~1 day / CC: ~30min)** — auth web — Airlock login routes + template, session + CSRF, gunicorn + unit hardening + required dashboard env file, operator provisioning in the setup wizard
+  - Surfaced by: Design v20 intake, login decision; split from T13 on 2026-09-15
+  - Files: `casa_scruffy.py`, `templates/login.html`, `systemd/casa-dashboard.service.template`, `scripts/setup_wizard.py`, `requirements.txt`, `tests/test_scruffy_routes.py`, `tests/test_setup_wizard.py`
+  - Verify: Airlock states default/rejected/busy/locked; unauthenticated `/` redirects to login; CSRF enforced; Scruffy refuses to start without session secret; trusted-device cookie honoured and revocable
 - [ ] **T14 (P1, human: ~1 day / CC: ~30min)** — actions — Operator-initiated `action.request`, action capability flags, and `docker.stats_service`
   - Surfaced by: Design v20 intake, restart-flow and run-controls decisions
   - Files: `planet_express/application/command_service.py`, `planet_express/execution/actions.py`, `planet_express/integrations/rpc.py`, `tests/test_command_service.py`, `tests/test_actions.py`
