@@ -145,7 +145,7 @@ A throwaway **full VM, not LXC** (eng issue 8: unprivileged LXC often can't appl
   - a `casa-mounts` gate (`Requires=`/`After=`) on `casa-stacks.service`, from
     `systemd/examples/casa-mounts.service.example`;
   - a dummy borg timer, so the backups checks report real data.
-\1
+- A separate test Telegram bot and chat, never the production bot
 
 This is the brief's "integration-test homelab" (P1), pulled forward to a prerequisite.
 
@@ -170,7 +170,8 @@ small change if ever wanted.
 - **`casa-stacks.service` is not re-rendered** by slice 1. `deploy.sh`'s existing prompt defaults to
   N (`deploy.sh:203-212`), and nothing in slice 1 changes that unit.
 
-\1
+### Slice 1 — prove the whole core with one action from both front ends
+
 #### Landing order: three separate landings on the live host (outside voice T3)
 
 Same total work, split into three reversible steps. Each is rehearsed on the test VM, then lands
@@ -178,7 +179,7 @@ alone.
 
 | Landing | Contents | User-visible | Rollback |
 |---|---|---|---|
-\1; **CLAUDE.md** second-review-gate paragraph corrected (eng TODO 1) | none (Telegram behaves as today, plus "busy" when paths collide) | `git checkout` previous tag + restart core |
+| **1a** safety plumbing | `casa_bender.run_argv`; `PipelineState.try_begin_mutation`/`end_mutation` wrapped around every mutating path; legacy plan/diff callback reorder; `update_scheduler_loop` retry; Zoidberg/Amy health + target extraction into `execution/actions.py`; **CLAUDE.md** second-review-gate paragraph corrected (eng TODO 1) | none (Telegram behaves as today, plus "busy" when paths collide) | `git checkout` previous tag + restart core |
 | **1b** typed restart via Telegram | `core/store.py`, `execution/policy.py`, `application/command_service.py`, typed `docker.restart_service` + verifier, `act_ok`/`act_no` callbacks, `/restart <stack> <service>`, startup recovery of interrupted executions | `/restart` in Telegram | same, plus DB left in place (unused by the older code) |
 | **1r** visual re-skin (design v20) | Swap `static/dashboard.css` for `static/cockpit.css`; new logo and 8 portraits from `assets/`; re-skin Overview/Backups/Network/Actions per `COMPONENTS.md`; remaining `DATA-CONTRACT.md` gaps (cert `days_left`/`tier`/`life_pct`, per-tab `verdict` where missing, availability gating) | new look, same data, still read-only | revert to previous tag |
 | **1c** dashboard | `planetexpress-web` + `planetexpress-rpc` + ACLs, `UMask`, `integrations/rpc.py`, gunicorn, passphrase + TOTP login with lockout, container detail (vitals via `docker.stats_service`), logs, operator restart sheet, approval card (6 states), execution screen (6 states, capability-gated controls), polling budget | dashboard actions | revert dashboard unit `User=` + previous tag |
@@ -337,7 +338,7 @@ socket client is a ~40-line function in `integrations/rpc.py` that both sides im
   - The `__main__` entry points of `casa_zoidberg.py` and `casa_stackctl.py` refuse mutating verbs
     while `systemctl is-active casa-planetexpress` succeeds, unless `--force` is passed. These CLIs
     are outside the in-process mutation lock.
-\1`approval.decide` returns immediately with an `execution_id`. Front ends
+- **Async execution.** `approval.decide` returns immediately with an `execution_id`. Front ends
   poll `execution.get_status` (Telegram gets a pushed result message).
 - **Polling budget (eng review issue 6).**
   - Scruffy polls `execution.get_status` every 2s, only while an execution is non-terminal.
@@ -650,7 +651,7 @@ CRITICAL regression tests (T2) and lands alone as 1a behind the Codex review gat
     before RPC serves; notifier receives the interrupted message.
   - `test_cli_lock_guard.py` (1b): `casa_zoidberg`/`casa_stackctl` mutating verbs refuse while the
     service is active (stubbed `systemctl is-active`), and proceed with `--force`.
-  \1two threads approve one approval → exactly one row transition, loser gets
+  - `test_store.py`: two threads approve one approval → exactly one row transition, loser gets
     "already decided"; expired rows marked lazily; partial unique index blocks a duplicate pending
     proposal.
   - `test_local_rpc.py` (extend): slow handler doesn't block a second request; idle client dropped
