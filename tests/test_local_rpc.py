@@ -255,12 +255,12 @@ def test_core_handlers():
     commands.get_status.return_value = {"id": "e", "status": "running"}
     store.list_pending.return_value = [{"id": "a", "target_json": '{"stack":"media"}', "message_id": 5}]
     handlers = build_core_handlers(commands, store)
-    assert set(handlers) == {"proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
+    assert set(handlers) == {"action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
-    commands.propose.assert_called_once_with(**params, requested_via="dashboard")
+    commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
     params = {"approval_id": "a", "approve": True, "decided_by": "Chris"}
     assert handlers["approval.decide"](params) == asdict(commands.decide.return_value)
     commands.decide.assert_called_once_with(**params, decision=None)
@@ -341,7 +341,7 @@ def test_core_errors_over_socket(server, socket_path):
     commands.get_status.return_value = None
     server(build_core_handlers(commands, Mock()))
     assert call(socket_path, "execution.get_status", {"execution_id": "missing"})["error"]["code"] == "not_found"
-    for method in ("query.container", "logs.tail", "action.request"):
+    for method in ("logs.tail",):
         assert call(socket_path, method)["error"]["code"] == "unknown_method"
 
 
@@ -585,3 +585,108 @@ def test_manual_notification_failure():
     notifier.notify.side_effect = RuntimeError('private')
     handlers = build_core_handlers(Mock(), store, notifier)
     assert handlers['auth.notify_locked']({'operator': '?', 'client_ip': 'ip'}) == {'sent': True}
+
+
+@pytest.mark.parametrize('operator', ['?', 'Chris', 'bad/name', '', ' ', 'a' * 33, None, 'chris\n'])
+def test_action_request_rejects_bad_operator(operator):
+    commands, store = Mock(), Mock()
+    handler = build_core_handlers(commands, store)['action.request']
+    with pytest.raises(RpcError) as error:
+        handler({'action': 'docker.restart_service', 'stack': 'healthy', 'service': 'web', 'operator': operator})
+    assert error.value.code == 'bad_request'
+    assert not commands.mock_calls and not store.mock_calls
+
+
+def test_action_request_exact_params_and_timeout_result():
+    from planet_express.application.command_service import RequestResult
+
+    commands = Mock()
+    commands.request_action.return_value = RequestResult('timeout', 'host slow, retry', None, None, {})
+    handler = build_core_handlers(commands, Mock())['action.request']
+    params = {'action': 'docker.restart_service', 'stack': 'healthy', 'service': 'web', 'operator': 'chris'}
+    for invalid in ({k: v for k, v in params.items() if k != 'operator'}, params | {'extra': True}):
+        with pytest.raises(RpcError) as error:
+            handler(invalid)
+        assert error.value.code == 'bad_request'
+    assert not commands.mock_calls
+    assert handler(params) == asdict(commands.request_action.return_value)
+    commands.request_action.assert_called_once_with(**params, timeout=4)
+
+
+def test_container_handler_shape_and_timeouts(monkeypatch):
+    from planet_express.execution import actions
+
+    target = actions.Target('healthy', 'web', 'fixture')
+    resolve = Mock(return_value=target)
+    stats = Mock(return_value={'ok': True, 'stats': {'cpu_percent': 1.0}})
+    from types import SimpleNamespace
+
+    import planet_express.integrations.rpc as rpc_module
+    monkeypatch.setattr(rpc_module, 'time', SimpleNamespace(monotonic=lambda: 50.0))
+    monkeypatch.setattr(actions, 'resolve_target', resolve)
+    monkeypatch.setattr(actions, 'read_stats', stats)
+    handler = build_core_handlers(Mock(), Mock())['query.container']
+    params = {'stack': 'healthy', 'service': 'web'}
+    result = handler(params)
+    assert result == {'target': target.as_dict(), 'vitals': stats.return_value,
+                      'actions': {actions.RESTART_SERVICE: actions.REGISTRY[actions.RESTART_SERVICE].capabilities()}}
+    resolve.assert_called_once_with(**params, for_mutation=False, timeout=4)
+    stats.assert_called_once_with('fixture', timeout=4)
+    stats.return_value = {'ok': False, 'error': 'timeout'}
+    assert handler(params)['vitals'] == stats.return_value
+    for exception, code in ((actions.TargetTimeout('slow'), 'timeout'),
+                            (actions.TargetError('healthy/web has no container'), 'not_found')):
+        resolve.side_effect = exception
+        with pytest.raises(RpcError) as error:
+            handler(params)
+        assert error.value.code == code
+        if code == 'not_found':
+            assert str(error.value) == str(exception)
+    for invalid in ({'stack': 'healthy'}, params | {'extra': True}):
+        with pytest.raises(RpcError) as error:
+            handler(invalid)
+        assert error.value.code == 'bad_request'
+
+
+def test_status_handler_returns_action_capabilities(tmp_path):
+    from planet_express.application.command_service import CommandService
+    from planet_express.execution import actions
+
+    store = Store(tmp_path / 'data' / 'core.db')
+    store.init()
+    result = store.create_direct_execution(action=actions.RESTART_SERVICE, target_key='healthy/web',
+                                           target={'stack': 'healthy', 'service': 'web', 'container': 'fixture'},
+                                           risk='R1', operator='chris', arrived_at=time.time())
+    commands = CommandService(store, Mock(), Mock())
+    response = build_core_handlers(commands, store)['execution.get_status']({'execution_id': result['execution']['id']})
+    assert response['capabilities'] == {'abortable': False, 'rollbackable': False, 'resumable': False}
+
+
+def test_container_stats_get_only_the_remaining_budget(monkeypatch):
+    from types import SimpleNamespace
+
+    import planet_express.integrations.rpc as rpc_module
+    from planet_express.execution import actions
+
+    now = [10.0]
+    target = actions.Target('healthy', 'web', 'fixture')
+
+    def resolve(**kwargs):
+        now[0] += spent[0]
+        return target
+
+    stats = Mock(return_value={'ok': True, 'stats': {}})
+    monkeypatch.setattr(rpc_module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(actions, 'resolve_target', resolve)
+    monkeypatch.setattr(actions, 'read_stats', stats)
+    handler = build_core_handlers(Mock(), Mock())['query.container']
+
+    spent = [1.5]
+    handler({'stack': 'healthy', 'service': 'web'})
+    stats.assert_called_once_with('fixture', timeout=2.5)
+
+    stats.reset_mock()
+    spent = [4.2]
+    result = handler({'stack': 'healthy', 'service': 'web'})
+    assert result['vitals'] == {'ok': False, 'error': 'timeout'}
+    stats.assert_not_called()

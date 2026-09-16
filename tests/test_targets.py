@@ -210,3 +210,67 @@ def test_verify_times_out_if_never_healthy(monkeypatch):
 def test_verify_fails_when_inspect_fails(monkeypatch):
     _readings(monkeypatch, (1, "No such container: c"))
     assert _verify(FakeTime()) == (False, "inspect failed: No such container: c")
+
+
+@pytest.mark.parametrize('fail_at', [None, 0, 1, 2])
+def test_resolve_propagates_timeout_to_every_call(stacks, monkeypatch, fail_at):
+    calls = []
+    outputs = ['web', 'abc', '/fixture-healthy']
+
+    def run(argv, timeout):
+        assert timeout == 4
+        index = len(calls)
+        calls.append(argv)
+        if index == fail_at:
+            return actions.bender.RUN_ARGV_TIMEOUT_EXIT, '', 'docker timed out after 4s'
+        return 0, outputs[index], ''
+
+    monkeypatch.setattr(actions.bender, 'run_argv', run)
+    if fail_at is None:
+        assert actions.resolve_target('healthy', 'web', timeout=4, clock=lambda: 100.0).container == 'fixture-healthy'
+        assert len(calls) == 3
+    else:
+        with pytest.raises(actions.TargetTimeout):
+            actions.resolve_target('healthy', 'web', timeout=4, clock=lambda: 100.0)
+        assert len(calls) == fail_at + 1
+
+
+@pytest.mark.parametrize('fail_at', [0, 1, 2])
+def test_target_errors_do_not_expose_stderr(stacks, monkeypatch, fail_at):
+    outputs = iter(['web', 'abc', '/fixture-healthy'])
+    calls = []
+
+    def run(argv, timeout):
+        calls.append(argv)
+        return (1, '', 'SECRET') if len(calls) == fail_at + 1 else (0, next(outputs), '')
+
+    monkeypatch.setattr(actions.bender, 'run_argv', run)
+    with pytest.raises(actions.TargetError) as error:
+        actions.resolve_target('healthy', 'web')
+    assert 'SECRET' not in str(error.value)
+
+
+def test_resolve_timeout_is_one_budget_across_calls(stacks, monkeypatch):
+    now = [0.0]
+    timeouts = []
+
+    def run(argv, timeout):
+        timeouts.append(timeout)
+        now[0] += 1.5
+        return 0, ['web', 'abc', '/fixture-healthy'][len(timeouts) - 1], ''
+
+    monkeypatch.setattr(actions.bender, 'run_argv', run)
+    assert actions.resolve_target('healthy', 'web', timeout=4, clock=lambda: now[0]).container == 'fixture-healthy'
+    assert timeouts == [4.0, 2.5, 1.0]
+
+    now[0], timeouts[:] = 0.0, []
+
+    def slow(argv, timeout):
+        timeouts.append(timeout)
+        now[0] += 2.5
+        return 0, ['web', 'abc', '/fixture-healthy'][len(timeouts) - 1], ''
+
+    monkeypatch.setattr(actions.bender, 'run_argv', slow)
+    with pytest.raises(actions.TargetTimeout):
+        actions.resolve_target('healthy', 'web', timeout=4, clock=lambda: now[0])
+    assert timeouts == [4.0, 1.5]                       # no third docker call once the budget is spent

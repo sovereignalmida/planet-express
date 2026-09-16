@@ -10,6 +10,7 @@ old Amy label lookup, which interpolated a container name (possibly from an LLM-
 plan) into a shell=True command string.
 """
 
+import math
 import re
 import time
 from collections.abc import Callable
@@ -24,6 +25,7 @@ import config
 # false canary rollback (Codex review, landing 1a). Latency-sensitive callers (the 1b RPC
 # read path) pass their own shorter timeout instead of lowering this.
 DOCKER_TIMEOUT_SECONDS = 120
+RPC_DOCKER_TIMEOUT_SECONDS = 4
 DEFAULT_POLL_SECONDS = 5
 
 # Most services have no Docker healthcheck, in which case .State.Health doesn't exist and
@@ -149,6 +151,10 @@ class TargetError(Exception):
     """The target was refused; nothing was built or run."""
 
 
+class TargetTimeout(TargetError):
+    """Docker did not answer within the requested deadline."""
+
+
 @dataclass(frozen=True)
 class Target:
     stack: str
@@ -167,7 +173,13 @@ def compose_file(stack: str) -> Path:
     return Path(config.STACKS_ROOT) / stack / "docker-compose.yml"
 
 
-def resolve_target(stack: str, service: str, *, for_mutation: bool = True) -> Target:
+def resolve_target(
+    stack: str, service: str, *, for_mutation: bool = True, timeout=DOCKER_TIMEOUT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> Target:
+    """`timeout` is one budget for all of resolution's docker calls, not a per-call limit:
+    three sequential 4s calls could otherwise outlast the dashboard's 5s RPC deadline
+    (Codex review, T14)."""
     for label, value in (("stack", stack), ("service", service)):
         if not isinstance(value, str) or not _NAME_RE.fullmatch(value) or ".." in value:
             raise TargetError(f"invalid {label} name {value!r}")
@@ -180,30 +192,44 @@ def resolve_target(stack: str, service: str, *, for_mutation: bool = True) -> Ta
     if not compose.is_file():
         raise TargetError(f"no stack named {stack!r} under {config.STACKS_ROOT}")
 
-    rc, out, err = bender.run_argv(
-        ["docker", "compose", "-f", str(compose), "config", "--services"], timeout=DOCKER_TIMEOUT_SECONDS
+    deadline = clock() + timeout
+
+    def remaining() -> float:
+        left = deadline - clock()
+        if left <= 0:
+            raise TargetTimeout("host slow, retry")
+        return left
+
+    rc, out, _err = bender.run_argv(
+        ["docker", "compose", "-f", str(compose), "config", "--services"], timeout=remaining()
     )
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        raise TargetTimeout("host slow, retry")
     if rc != 0:
-        raise TargetError(f"could not read the services of {stack!r}: {err[:200]}")
+        raise TargetError(f"could not read the services of {stack!r}")
     if service not in {line.strip() for line in out.splitlines() if line.strip()}:
         raise TargetError(f"stack {stack!r} has no service {service!r}")
 
-    rc, out, err = bender.run_argv(
-        ["docker", "compose", "-f", str(compose), "ps", "-a", "-q", service], timeout=DOCKER_TIMEOUT_SECONDS
+    rc, out, _err = bender.run_argv(
+        ["docker", "compose", "-f", str(compose), "ps", "-a", "-q", service], timeout=remaining()
     )
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        raise TargetTimeout("host slow, retry")
     if rc != 0:
-        raise TargetError(f"could not list containers for {stack}/{service}: {err[:200]}")
+        raise TargetError(f"could not list containers for {stack}/{service}")
     ids = [line.strip() for line in out.splitlines() if line.strip()]
     if not ids:
         raise TargetError(f"{stack}/{service} has no container")
     if len(ids) > 1:
         raise TargetError(f"{stack}/{service} is ambiguous: {len(ids)} containers")
 
-    rc, name, err = bender.run_argv(
-        ["docker", "inspect", "--format", "{{.Name}}", ids[0]], timeout=DOCKER_TIMEOUT_SECONDS
+    rc, name, _err = bender.run_argv(
+        ["docker", "inspect", "--format", "{{.Name}}", ids[0]], timeout=remaining()
     )
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        raise TargetTimeout("host slow, retry")
     if rc != 0 or not name.strip():
-        raise TargetError(f"could not inspect the container for {stack}/{service}: {err[:200]}")
+        raise TargetError(f"could not inspect the container for {stack}/{service}")
     container = name.strip().lstrip("/")
     if for_mutation and container in config.PAUSED_CONTAINERS:
         raise TargetError(f"{container} is paused by the operator (paused_containers)")
@@ -223,15 +249,66 @@ class ActionSpec:
     rollbackable: bool = False
     resumable: bool = False
 
+    def capabilities(self) -> dict[str, bool]:
+        return {"abortable": self.abortable, "rollbackable": self.rollbackable, "resumable": self.resumable}
+
 
 RESTART_SERVICE = "docker.restart_service"
+STATS_SERVICE = "docker.stats_service"
 REGISTRY: dict[str, ActionSpec] = {
-    RESTART_SERVICE: ActionSpec(RESTART_SERVICE, "R1", "Restart one compose service"),
+    RESTART_SERVICE: ActionSpec(RESTART_SERVICE, "R1", "Restart one compose service",
+                                abortable=False, rollbackable=False, resumable=False),
+    STATS_SERVICE: ActionSpec(STATS_SERVICE, "R0", "Read CPU and memory for one service"),
 }
 
 
 def restart_argv(target: Target) -> list[str]:
     return ["docker", "compose", "-f", str(compose_file(target.stack)), "restart", target.service]
+
+
+STATS_FORMAT = "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+# Docker prints binary units for sizes and decimal ones in some versions; hosts with at least
+# 1 TiB of memory print TiB limits (Codex review, T14).
+_MEMORY_UNITS = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3, "TiB": 1024**4, "PiB": 1024**5,
+                 "kB": 1000, "MB": 1000**2, "GB": 1000**3, "TB": 1000**4, "PB": 1000**5}
+
+
+def stats_argv(container: str) -> list[str]:
+    return ["docker", "stats", "--no-stream", "--format", STATS_FORMAT, container]
+
+
+def parse_stats(out: str) -> dict | None:
+    def percent(value):
+        if not value.strip().endswith("%"):
+            raise ValueError("missing percent")
+        number = float(value.strip()[:-1])
+        if not math.isfinite(number) or number < 0:
+            raise ValueError("invalid percent")
+        return number
+
+    def memory(value):
+        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(B|KiB|MiB|GiB|TiB|PiB|kB|MB|GB|TB|PB)\s*", value)
+        if match is None:
+            raise ValueError("invalid memory")
+        return int(float(match[1]) * _MEMORY_UNITS[match[2]])
+
+    try:
+        cpu, usage, mem = out.strip().split("\t")
+        used, limit = usage.split("/")
+        return {"cpu_percent": percent(cpu), "memory_percent": percent(mem),
+                "memory_used_bytes": memory(used), "memory_limit_bytes": memory(limit)}
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
+def read_stats(container: str, *, timeout) -> dict:
+    rc, out, _err = bender.run_argv(stats_argv(container), timeout=timeout)
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        return {"ok": False, "error": "timeout"}
+    stats = parse_stats(out) if rc == 0 else None
+    if stats is None:
+        return {"ok": False, "error": "unavailable"}
+    return {"ok": True, "stats": stats}
 
 
 def restart_count(container_name: str) -> int | None:

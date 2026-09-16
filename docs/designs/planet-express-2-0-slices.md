@@ -572,7 +572,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10, T13a and T13b done; T14, T11 remain.
+**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10, T13a, T13b and T14 done; T11 remains.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -641,6 +641,59 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Test VM rehearsal 6/6 over the real socket as `planetexpress-web`: schema upgrade on an
     existing DB, lockout, IP rotation, notify-once, replay rejection, epoch bump via
     `revoke_devices.py`, bad-request validation.
+- **T14 notes.** Implemented by Codex, reviewed and corrected here over four Codex review rounds. The loop stopped at round four: the
+  last fix (the deadline check inside the store transaction, round-four finding) is covered by
+  tests but not re-reviewed.
+  - New RPC methods `action.request` and `query.container`. `proposal.create` and
+    `execution.get_status` are extended.
+  - **`action.request` (the confirm sheet is the approval).**
+    - `CommandService.request_action` goes through target resolution, `policy.decide` and
+      `policy.allows_direct_request` (R1 only in slice 1), then the host-mutation lock, which is
+      taken before any row is written. `Store.create_direct_execution` then writes the approved
+      row and the running execution in one transaction.
+    - The same lock hand-off as `decide` follows (`_execution_handoff`); restart and verify are
+      unchanged.
+    - The approval row is `requested_via='dashboard-direct'`, `decided_by=<operator>`, with no
+      Telegram card. Telegram gets an FYI message instead.
+    - Outcomes: `started | busy | refused | timeout`. `busy`, `refused` and `timeout` create
+      nothing.
+    - **Coordinator decision:** if a live Telegram card already exists for the same target, the
+      direct request approves that card (card updated, one approval) instead of creating a second
+      one. A later tap on the card answers "already approved". The card is adopted only when its
+      recorded container matches the one just resolved (Codex review); otherwise the direct
+      request gets its own approved row, and the stale card keeps its "container changed" refusal.
+  - **Capability flags:** `ActionSpec.capabilities()`. Restart declares abort, rollback and resume
+    all False. `action.request`, `execution.get_status` and `query.container` return them.
+  - **Container vitals:** `docker.stats_service` (R0) with a constant `docker stats --no-stream`
+    template. `parse_stats` handles Docker's binary and decimal units up to PiB/PB (Codex review:
+    TiB limits on large hosts) and returns None on odd output. `read_stats`
+    returns a typed `timeout` or `unavailable` error, never stderr. Target refusals no longer
+    carry docker stderr.
+  - **4s RPC budget (Codex review findings, fixed here).**
+    - `resolve_target(timeout=…)` is one budget across its docker calls, not a per-call limit.
+      `query.container` gives the stats read only what remains.
+    - `action.request` waits for a concurrent card send only for the remaining budget, and times
+      out creating nothing, so a restart never starts after its caller gave up. The same deadline
+      is re-checked inside `create_direct_execution` once `BEGIN IMMEDIATE` holds the write lock,
+      so SQLite contention can't push a restart past it either.
+    - `proposal.create` uses the budget for target resolution: this closes T9's known gap.
+  - **Telegram never blocks an RPC reply (Codex review, fixed here).**
+    - The direct-request FYI, a dashboard decision's card edit, and execution-outcome messages go
+      through one serial background worker, so a card's edits stay in order.
+    - The FYI is queued before the worker starts; a spawn failure queues a "failed to start"
+      message after it.
+    - Telegram taps are still answered inline.
+  - **Known gap, accepted:** `proposal.create` still sends its card synchronously; the
+    dashboard's restart flow uses `action.request`, which doesn't. A slow Telegram can make a
+    dashboard `proposal.create` call time out while the card is still delivered.
+  - **Test VM rehearsal (real docker, RPC as `planetexpress-web`), 18 checks:**
+    - `query.container` answered in 1.2s with parsed `docker stats` vitals;
+    - direct restart of `healthy/web` passed verification and the container really restarted;
+    - a concurrent request got `busy`;
+    - `unhealthy/web` failed verification;
+    - operator `?` and a stats "action" were refused;
+    - a pending card was adopted (one approval), and a late decision got `already_decided`;
+    - DB rows are `dashboard-direct` and decided by the operator; no core tracebacks.
 - **T13b notes.** Implemented by Codex, reviewed and corrected here over four Codex review rounds.
   - `casa_scruffy.create_app()` is served by gunicorn (2 workers × 4 threads). It refuses to start
     without `PE_DASHBOARD_SECRET_KEY` (≥ 32 chars) and at least one operator.
@@ -739,7 +792,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Surfaced by: Design v20 intake, login decision; split from T13 on 2026-09-15
   - Files: `casa_scruffy.py`, `templates/login.html`, `static/login.js`, `static/dashboard.js`, `templates/dashboard.html`, `static/cockpit.css`, `systemd/casa-dashboard.service.template`, `scripts/dashboard_operators.py`, `deploy.sh`, `requirements.txt`, `planet_express/core/store.py`, `tests/test_scruffy_routes.py`, `tests/test_dashboard_operators.py`, `tests/test_render_template.py`, `tests/test_store.py`
   - Verify: Airlock states default/rejected/busy/locked; unauthenticated `/` redirects to login; CSRF enforced; Scruffy refuses to start without session secret; trusted-device cookie honoured and revocable
-- [ ] **T14 (P1, human: ~1 day / CC: ~30min)** — actions — Operator-initiated `action.request`, action capability flags, and `docker.stats_service`
+- [x] **T14 (P1, human: ~1 day / CC: ~30min)** — actions — ✅ done 2026-09-15 — Operator-initiated `action.request`, action capability flags, and `docker.stats_service`
   - Surfaced by: Design v20 intake, restart-flow and run-controls decisions
   - Files: `planet_express/application/command_service.py`, `planet_express/execution/actions.py`, `planet_express/integrations/rpc.py`, `tests/test_command_service.py`, `tests/test_actions.py`
   - Verify: direct request records approval `decided_by` the operator and still passes policy, lock, and verify; restart declares no abort/rollback/resume; stats parsing

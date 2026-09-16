@@ -82,3 +82,57 @@ def test_service_container_passes_stack_path_with_spaces_intact(monkeypatch):
     assert fake.calls[0] == [
         "docker", "compose", "-f", "/home/casaroot/stacks/my stack/docker-compose.yml", "ps", "-q", "web",
     ]
+
+
+def test_restart_capabilities():
+    assert actions.REGISTRY[actions.RESTART_SERVICE].capabilities() == {
+        'abortable': False, 'rollbackable': False, 'resumable': False,
+    }
+
+
+def test_stats_argv_uses_fixed_template():
+    assert actions.stats_argv('container') == [
+        'docker', 'stats', '--no-stream', '--format',
+        '{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}', 'container',
+    ]
+
+
+def test_stats_unit_conversions():
+    units = {'B': 1, 'KiB': 1024, 'MiB': 1024**2, 'GiB': 1024**3,
+             'kB': 1000, 'MB': 1000**2, 'GB': 1000**3}
+    for unit, multiplier in units.items():
+        assert actions.parse_stats(f'125.5%\t1.5{unit} / 2 {unit}\t75.00%') == {
+            'cpu_percent': 125.5, 'memory_percent': 75.0,
+            'memory_used_bytes': int(1.5 * multiplier), 'memory_limit_bytes': 2 * multiplier,
+        }
+
+
+def test_stats_malformed_output():
+    for value in (None, 42, b'bad', '', 'bad', '1%\t2MB\t3%', '1%\t2XB / 3GB\t3%',
+                  'NaN%\t1B / 2B\t3%', 'inf%\t1B / 2B\t3%', '-1%\t1B / 2B\t3%',
+                  '1\t1B / 2B\t3%', '1%\t1B / 2B\t3%\nextra',
+                  '1%\t' + '9' * 400 + 'GB / 2B\t3%'):
+        assert actions.parse_stats(value) is None
+
+
+def test_read_stats_typed_errors_and_success(monkeypatch):
+    for response, expected in (
+        ((actions.bender.RUN_ARGV_TIMEOUT_EXIT, '', 'secret'), {'ok': False, 'error': 'timeout'}),
+        ((1, '', 'secret'), {'ok': False, 'error': 'unavailable'}),
+        ((0, 'bad', 'secret'), {'ok': False, 'error': 'unavailable'}),
+        ((0, '1%\t1MiB / 2GiB\t3%', ''),
+         {'ok': True, 'stats': actions.parse_stats('1%\t1MiB / 2GiB\t3%')}),
+    ):
+        def run(argv, timeout, response=response):
+            assert argv == actions.stats_argv('c') and timeout == 4
+            return response
+        monkeypatch.setattr(actions.bender, 'run_argv', run)
+        assert actions.read_stats('c', timeout=4) == expected
+
+
+def test_parse_stats_accepts_terabyte_units():
+    from planet_express.execution import actions
+
+    assert actions.parse_stats("0.5%\t1.5GiB / 1.25TiB\t0.1%")["memory_limit_bytes"] == int(1.25 * 1024**4)
+    assert actions.parse_stats("0.5%\t3MB / 2TB\t0.1%")["memory_limit_bytes"] == 2 * 1000**4
+    assert actions.parse_stats("0.5%\t3MB / 2EB\t0.1%") is None

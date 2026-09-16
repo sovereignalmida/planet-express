@@ -288,6 +288,57 @@ class Store:
             ).fetchone()
         return dict(row)
 
+    def create_direct_execution(
+        self, *, action: str, target_key: str, target: dict, risk: str,
+        operator: str, arrived_at: float, deadline: float | None = None,
+    ) -> dict | None:
+        """Record an operator confirmation and its execution in one transaction.
+
+        Returns None, writing nothing, when `deadline` has passed by the time the write lock is
+        held: BEGIN IMMEDIATE can wait up to 5s behind another writer, and the caller's RPC deadline
+        may already have expired (Codex review, T14)."""
+        with self._write() as conn:
+            now = self._clock()
+            if deadline is not None and now > deadline:
+                return None
+            self._expire_stale(conn, arrived_at)
+            pending = conn.execute(
+                "SELECT * FROM approvals WHERE action = ? AND target_key = ? AND status = 'pending'",
+                (action, target_key),
+            ).fetchone()
+            # Adopt a live card only when it names the target the operator just confirmed. A card
+            # whose container has since changed would make the worker refuse the restart as
+            # "container changed since approval" (Codex review, T14); that card stays pending and
+            # keeps its own refusal if tapped.
+            adopted = pending is not None and json.loads(pending["target_json"]) == target
+            if adopted:
+                approval_id = pending["id"]
+                conn.execute(
+                    "UPDATE approvals SET status = 'approved', decided_by = ?, decided_at = ? WHERE id = ?",
+                    (operator, now, approval_id),
+                )
+            else:
+                approval_id = _new_id()
+                conn.execute(
+                    "INSERT INTO approvals (id, action, target_key, target_json, risk, status, "
+                    "requested_via, requested_by, created_at, expires_at, decided_by, decided_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'approved', 'dashboard-direct', ?, ?, ?, ?, ?)",
+                    (approval_id, action, target_key, json.dumps(target, sort_keys=True), risk,
+                     operator, now, now, operator, now),
+                )
+                self._event(conn, "proposal.created", approval_id=approval_id, action=action,
+                            target=target, risk=risk, requested_via="dashboard-direct", requested_by=operator)
+            execution_id = _new_id()
+            conn.execute(
+                "INSERT INTO executions (id, approval_id, status, started_at) VALUES (?, ?, 'running', ?)",
+                (execution_id, approval_id, now),
+            )
+            self._event(conn, "approval.approved", approval_id=approval_id, decided_by=operator)
+            self._event(conn, "execution.running", approval_id=approval_id, execution_id=execution_id)
+            approval = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+            execution = conn.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
+        return {"approval": dict(approval), "execution": dict(execution), "adopted": adopted}
+
     # ── executions ──────────────────────────────────────────────────────────
     def create_execution(self, approval_id: str) -> dict:
         execution_id = _new_id()

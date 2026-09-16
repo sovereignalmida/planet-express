@@ -46,3 +46,8 @@ def test_unknown_risk_class_is_denied(monkeypatch):
 def test_restart_action_declares_no_abort_rollback_or_resume():
     spec = actions.REGISTRY[actions.RESTART_SERVICE]
     assert (spec.abortable, spec.rollbackable, spec.resumable) == (False, False, False)
+
+
+def test_only_r1_allows_direct_request():
+    for risk in (*policy.RISK_LEVELS, 'R9', '', None):
+        assert policy.allows_direct_request(risk) is (risk == 'R1')

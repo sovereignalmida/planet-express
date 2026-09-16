@@ -20,6 +20,7 @@ from typing import Any
 
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import Store
+from planet_express.execution import actions, policy
 from telegram_client import TelegramClient
 
 MAX_FRAME = 1024 * 1024
@@ -76,9 +77,8 @@ class RpcServer:
     def __init__(
         self, socket_path, handlers: dict[str, Callable[[dict], Any]],
         allowed_uids: set[int], group, read_timeout=5.0, workers=4,
-        # Decisions only. proposal.create resolves targets through docker (up to 120s until T14
-        # bounds the RPC read path), so letting it into the reserved slot would let slow
-        # proposals exhaust the capacity that keeps approvals answerable (Codex review, T9).
+        # Decisions only. Docker reads use general workers so slow reads cannot exhaust
+        # the capacity that keeps approvals answerable (Codex review, T9).
         reserved_methods=frozenset({"approval.decide"}),
         reserved_read_timeout=0.5,
     ):
@@ -296,7 +296,35 @@ def _params(params, strings, booleans=()):
 def build_core_handlers(commands: CommandService, store: Store, notifier=None) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
-        return asdict(commands.propose(**params, requested_via="dashboard"))
+        return asdict(commands.propose(**params, requested_via="dashboard",
+                                       timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS))
+
+    def request_action(params):
+        _params(params, {"action": 128, "stack": 255, "service": 255, "operator": 32})
+        auth_params({"operator": params["operator"]})
+        if params["operator"] == "?":
+            raise RpcError("Invalid operator", "bad_request")
+        return asdict(commands.request_action(**params, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS))
+
+    def container(params):
+        _params(params, {"stack": 255, "service": 255})
+        # One budget for the whole call: resolution and the stats read share the 4s, so the reply
+        # beats the client's 5s deadline and a stats timeout still arrives typed (Codex review, T14).
+        deadline = time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS
+        try:
+            target = actions.resolve_target(**params, for_mutation=False,
+                                            timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except actions.TargetTimeout:
+            raise RpcError("host slow, retry", "timeout") from None
+        except actions.TargetError as e:
+            raise RpcError(str(e), "not_found") from None
+        left = deadline - time.monotonic()
+        vitals = (actions.read_stats(target.container, timeout=left) if left > 0
+                  else {"ok": False, "error": "timeout"})
+        return {"target": target.as_dict(),
+                "vitals": vitals,
+                "actions": {name: spec.capabilities() for name, spec in actions.REGISTRY.items()
+                            if spec.risk in policy.RISK_LEVELS[1:]}}
 
     def pending(params):
         _params(params, {})
@@ -377,7 +405,8 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None) -
         notify_lock(**params, locked_until=status["locked_until"])
         return {"sent": True}
 
-    return {"proposal.create": propose, "proposal.list_pending": pending,
+    return {"action.request": request_action, "query.container": container,
+            "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,

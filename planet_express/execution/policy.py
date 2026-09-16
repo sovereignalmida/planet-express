@@ -37,3 +37,8 @@ def decide(action: str, target_error: str | None = None) -> PolicyDecision:
     if spec.risk in AUTOMATIC_RISKS:
         return PolicyDecision(True, False, spec.risk, f"{spec.risk}: runs automatically")
     return PolicyDecision(True, True, spec.risk, f"{spec.risk}: needs approval")
+
+
+def allows_direct_request(risk: str) -> bool:
+    # Slice 1 operator confirmations authorize only R1; higher risks need future policy work.
+    return risk == "R1"

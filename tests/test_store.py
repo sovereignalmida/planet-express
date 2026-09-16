@@ -3,6 +3,7 @@ planet_express/core/store.py (landing 1b): dedup, one-use approvals, lazy expiry
 arrival-time expiry, racing consumes, execution lifecycle, startup interruption.
 """
 
+import json
 import os
 import sqlite3
 import stat
@@ -459,3 +460,99 @@ def test_unknown_operator_failures_lock_only_the_ip(tmp_path):
     for i in range(3):
         store.record_auth_failure("?", f"10.0.1.{i}")
     assert store.auth_status("?", "10.0.2.1")["locked"] is False
+
+
+def _direct(store, arrived_at=1_000_000):
+    return store.create_direct_execution(action='docker.restart_service', target_key='healthy/web',
+                                         target=TARGET, risk='R1', operator='chris', arrived_at=arrived_at)
+
+
+def test_direct_insert_and_new_pending_can_coexist(tmp_path):
+    store = _store(tmp_path)
+    result = _direct(store)
+    row, execution = result['approval'], result['execution']
+    assert result['adopted'] is False
+    assert row['status'] == 'approved' and row['message_id'] is None
+    assert row['requested_via'] == 'dashboard-direct'
+    assert row['requested_by'] == row['decided_by'] == 'chris'
+    assert row['created_at'] == row['decided_at'] == row['expires_at'] == 1_000_000
+    assert execution['approval_id'] == row['id'] and execution['status'] == 'running'
+    events = store.list_events()
+    assert [event['kind'] for event in events] == ['proposal.created', 'approval.approved', 'execution.running']
+    assert events[0]['payload']['requested_via'] == 'dashboard-direct'
+    pending, created = _propose(store)
+    assert created and pending['id'] != row['id']
+    assert store.get_approval(row['id'])['status'] == 'approved'
+
+
+def test_direct_adopts_pending_with_card(tmp_path):
+    store = _store(tmp_path)
+    pending, _ = _propose(store)
+    store.set_message_id(pending['id'], 42)
+    result = _direct(store)
+    assert result['adopted'] is True
+    row = result['approval']
+    assert row['id'] == pending['id'] and row['message_id'] == 42
+    assert row['status'] == 'approved' and row['decided_by'] == 'chris'
+    assert row['requested_via'] == 'telegram'
+    assert [e['kind'] for e in store.list_events()] == [
+        'proposal.created', 'approval.approved', 'execution.running',
+    ]
+
+
+@pytest.mark.parametrize('adopt', [False, True])
+def test_direct_execution_insert_failure_rolls_back(tmp_path, adopt):
+    store = _store(tmp_path)
+    pending = _propose(store)[0] if adopt else None
+    before = store.list_events()
+    with store._connect() as conn:
+        conn.execute("CREATE TRIGGER fail_execution BEFORE INSERT ON executions "
+                     "BEGIN SELECT RAISE(ABORT, 'insert failed'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='insert failed'):
+        _direct(store)
+    assert store.list_events() == before
+    with store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM executions').fetchone()[0] == 0
+        assert conn.execute('SELECT COUNT(*) FROM approvals').fetchone()[0] == int(adopt)
+    if adopt:
+        assert store.get_approval(pending['id'])['status'] == 'pending'
+
+
+def test_direct_expires_stale_pending(tmp_path):
+    clock = Clock()
+    store = _store(tmp_path, clock)
+    pending, _ = _propose(store, ttl_seconds=1)
+    clock.t += 1
+    result = _direct(store, arrived_at=clock.t)
+    assert not result['adopted'] and result['approval']['id'] != pending['id']
+    assert store.get_approval(pending['id'])['status'] == 'expired'
+
+
+# ── Codex review (T14): adopt a pending card only for the target just confirmed ──
+def test_direct_execution_does_not_adopt_a_card_for_a_stale_container(tmp_path):
+    store, now = _auth_store(tmp_path)
+    old = {"stack": "media", "service": "sonarr", "container": "sonarr-old"}
+    new = dict(old, container="sonarr-new")
+    card, _ = store.propose(action="docker.restart_service", target_key="media/sonarr", target=old, risk="R1",
+                            requested_via="telegram", requested_by="@chris")
+    result = store.create_direct_execution(action="docker.restart_service", target_key="media/sonarr",
+                                           target=new, risk="R1", operator="chris", arrived_at=now[0])
+    assert result["adopted"] is False
+    assert json.loads(result["approval"]["target_json"]) == new
+    assert result["approval"]["requested_via"] == "dashboard-direct"
+    assert store.get_approval(card["id"])["status"] == "pending"
+    same = store.create_direct_execution(action="docker.restart_service", target_key="media/sonarr",
+                                         target=old, risk="R1", operator="chris", arrived_at=now[0])
+    assert same["adopted"] is True and same["approval"]["id"] == card["id"]
+
+
+def test_direct_execution_past_its_deadline_writes_nothing(tmp_path):
+    store, now = _auth_store(tmp_path)
+    now[0] = 100.0
+    target = {"stack": "media", "service": "sonarr", "container": "sonarr"}
+    assert store.create_direct_execution(action="docker.restart_service", target_key="media/sonarr", target=target,
+                                         risk="R1", operator="chris", arrived_at=95.0, deadline=99.0) is None
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
+    assert store.list_events() == []

@@ -22,9 +22,12 @@ Rules (design doc, "Approval order" and "Lock rule"):
 import json
 import logging
 import re
+import secrets
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import casa_bender as bender
@@ -55,6 +58,15 @@ class DecideResult:
     execution_id: str | None = None
 
 
+@dataclass(frozen=True)
+class RequestResult:
+    outcome: str  # started | busy | refused | timeout
+    message: str
+    approval_id: str | None
+    execution_id: str | None
+    capabilities: dict[str, bool]
+
+
 def _spawn_daemon(fn: Callable, *args) -> None:
     threading.Thread(target=fn, args=args, daemon=True, name="typed-action").start()
 
@@ -71,6 +83,7 @@ class CommandService:
         verify: Callable | None = None,
         restart_count: Callable | None = None,
         spawn: Callable | None = None,
+        background: Callable[[Callable[[], None]], object] | None = None,
         clock: Callable[[], float] = time.time,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
     ):
@@ -82,6 +95,13 @@ class CommandService:
         self._verify = verify or actions.verify_after_restart
         self._restart_count = restart_count or actions.restart_count
         self._spawn = spawn or _spawn_daemon
+        # Telegram side effects an RPC reply must not wait on: each can take Telegram's 35s HTTP
+        # timeout, longer than the dashboard's 5s RPC deadline, and approval.decide runs on the one
+        # reserved worker (Codex review, T14). One serial worker keeps a card's edits in order
+        # ("approved…" before "verified good").
+        if background is None:
+            background = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram-updates").submit
+        self._background = background
         self._clock = clock
         self._ttl = ttl_seconds
         # Store.propose deduplicates rows atomically, but sending the corresponding card
@@ -92,13 +112,16 @@ class CommandService:
 
     # ── propose ─────────────────────────────────────────────────────────────
     def propose(
-        self, action: str, stack: str, service: str, *, requested_via: str, requested_by: str | None
+        self, action: str, stack: str, service: str, *, requested_via: str, requested_by: str | None,
+        timeout=actions.DOCKER_TIMEOUT_SECONDS,
     ) -> ProposeResult:
         target = None
         target_error = None
         if action in actions.REGISTRY:
             try:
-                target = self._resolve(stack, service, for_mutation=True)
+                target = self._resolve(stack, service, for_mutation=True, timeout=timeout)
+            except actions.TargetTimeout:
+                return ProposeResult(False, None, False, "host slow, retry")
             except actions.TargetError as e:
                 target_error = str(e)
         decision = policy.decide(action, target_error)
@@ -160,9 +183,7 @@ class CommandService:
                        f"This request stays valid for {minutes} more min.")
             return self._reply(decision, DecideResult("busy", message))
 
-        handed_off = False
-        execution_id = None
-        try:
+        with self._execution_handoff(owner) as start:
             execution = self._store.approve_and_create_execution(
                 approval_id, decided_by=decided_by, arrived_at=arrived
             )
@@ -171,19 +192,100 @@ class CommandService:
             execution_id = execution["id"]
             text = f"✅ Restart of <code>{_s(key)}</code> approved by {_s(decided_by)}. Restarting…"
             self._safe_finalize_card(row, decision, ack="Approved. Restarting…", text=text)
-            self._spawn(self._run_execution, row, execution_id, owner, decided_by)
-            handed_off = True
+            start(row, execution_id, decided_by)
             return DecideResult("started", text, execution_id)
-        except Exception:
-            if execution_id is not None:
+
+    @contextmanager
+    def _execution_handoff(self, owner):
+        handed_off = False
+
+        def start(row, execution_id, decided_by):
+            nonlocal handed_off
+            try:
+                self._spawn(self._run_execution, row, execution_id, owner, decided_by)
+            except Exception:
                 self._store.set_execution_status(execution_id, "failed", reason="failed to start")
-            raise
+                key = _s(row["target_key"])
+                self._in_background(lambda: self._notify_quietly(
+                    f"🔴 <b>Restart failed</b> for <code>{key}</code>: failed to start"))
+                raise
+            handed_off = True
+
+        try:
+            yield start
         finally:
             if not handed_off:
                 self._state.end_mutation(owner)
 
+    def request_action(
+        self, action: str, stack: str, service: str, *, operator: str,
+        timeout=actions.DOCKER_TIMEOUT_SECONDS,
+    ) -> RequestResult:
+        arrived = self._clock()
+        spec = actions.REGISTRY.get(action)
+        capabilities = spec.capabilities() if spec else {}
+        target = None
+        target_error = None
+        if spec is not None:
+            try:
+                target = self._resolve(stack, service, for_mutation=True, timeout=timeout)
+            except actions.TargetTimeout:
+                return RequestResult("timeout", "host slow, retry", None, None, capabilities)
+            except actions.TargetError as e:
+                target_error = str(e)
+        decision = policy.decide(action, target_error)
+        if not decision.allowed:
+            self._store.record_event("proposal.refused", action=action, stack=stack, service=service,
+                                     reason=decision.reason, requested_via="dashboard-direct", requested_by=operator)
+            return RequestResult("refused", decision.reason, None, None, capabilities)
+        if not decision.needs_approval:
+            return RequestResult("refused", f"{action} is a read, not an action", None, None, capabilities)
+        if not policy.allows_direct_request(decision.risk):
+            return RequestResult("refused", f"direct requests are not allowed for {decision.risk}",
+                                 None, None, capabilities)
+
+        owner = f"act:direct:{secrets.token_hex(6)}"
+        if not self._state.try_begin_mutation(owner):
+            return RequestResult("busy", f"Busy right now ({self._state.busy_reason}).",
+                                 None, None, capabilities)
+        with self._execution_handoff(owner) as start:
+            # Wait for any pending card delivery to finish before adopting its row, but only for what
+            # is left of the request budget: propose() holds this lock across a Telegram send (up to
+            # 35s) and the dashboard's caller gives up after 5s. Nothing is created on timeout, so a
+            # restart never starts after its caller was told it failed (Codex review, T14).
+            left = timeout - (self._clock() - arrived)
+            if left <= 0 or not self._proposal_card_lock.acquire(timeout=left):
+                return RequestResult("timeout", "host slow, retry", None, None, capabilities)
+            try:
+                result = self._store.create_direct_execution(
+                    action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
+                    operator=operator, arrived_at=arrived, deadline=arrived + timeout,
+                )
+                if result is None:
+                    return RequestResult("timeout", "host slow, retry", None, None, capabilities)
+                row, execution = result["approval"], result["execution"]
+                if result["adopted"] and row["message_id"] is not None:
+                    self._safe_finalize_card(
+                        row, None, ack="Approved. Restarting…",
+                        text=f"✅ Restart of <code>{_s(target.key)}</code> approved by {_s(operator)} "
+                             "from the dashboard. Restarting…",
+                    )
+            finally:
+                self._proposal_card_lock.release()
+            text = f"🛠 {_s(operator)} restarted <code>{_s(target.key)}</code> from the dashboard."
+            # Queued before the worker starts, so the outcome message can never land first. A spawn
+            # failure queues its own "failed to start" message after it.
+            self._in_background(lambda: self._notify_quietly(text))
+            start(row, execution["id"], operator)
+            return RequestResult("started", text, row["id"], execution["id"], capabilities)
+
     def get_status(self, execution_id: str) -> dict | None:
-        return self._store.get_execution(execution_id)
+        execution = self._store.get_execution(execution_id)
+        if execution is not None:
+            approval = self._store.get_approval(execution["approval_id"])
+            spec = actions.REGISTRY.get(approval["action"])
+            execution["capabilities"] = spec.capabilities() if spec else {}
+        return execution
 
     # ── execution (worker thread) ───────────────────────────────────────────
     def _run_execution(self, row: dict, execution_id: str, owner: str, decided_by: str) -> None:
@@ -222,14 +324,20 @@ class CommandService:
             text = f"🟢 <b>Verified good</b>: <code>{key}</code> restarted. {_s(reason)}"
         else:
             text = f"🔴 <b>Restart failed</b> for <code>{key}</code>: {_s(reason)}"
-        try:
-            self._notifier.notify(text)
-        except Exception:  # noqa: BLE001 -- notification delivery cannot change action outcome
-            log.warning(f"Failed to send outcome notification for {execution_id}")
-        try:
-            self._notifier.update_request(row["message_id"], text)
-        except Exception:  # noqa: BLE001 -- best-effort UI update; action is already terminal
-            log.warning(f"Failed to update approval card for {execution_id}")
+
+        def deliver():
+            try:
+                self._notifier.notify(text)
+            except Exception:  # noqa: BLE001 -- notification delivery cannot change action outcome
+                log.warning(f"Failed to send outcome notification for {execution_id}")
+            try:
+                if row["message_id"] is not None:
+                    self._notifier.update_request(row["message_id"], text)
+            except Exception:  # noqa: BLE001 -- best-effort UI update; action is already terminal
+                log.warning(f"Failed to update approval card for {execution_id}")
+
+        # Same serial worker as the card's earlier edit, so the final text lands last.
+        self._in_background(deliver)
 
     # ── startup reconciliation ──────────────────────────────────────────────
     def reconcile_on_startup(self) -> list[dict]:
@@ -246,7 +354,8 @@ class CommandService:
             except Exception:  # noqa: BLE001 -- reconciliation must not block core startup
                 log.warning(f"Failed to notify about interrupted execution {r['id']}")
             try:
-                self._notifier.update_request(r["message_id"], text)
+                if r["message_id"] is not None:
+                    self._notifier.update_request(r["message_id"], text)
             except Exception:  # noqa: BLE001 -- reconciliation must not block core startup
                 log.warning(f"Failed to update card for interrupted execution {r['id']}")
         return interrupted
@@ -288,8 +397,28 @@ class CommandService:
 
         A Telegram outage must not strand a consumed approval or suppress the host action.
         The database remains the source of truth and later front ends can display its state.
+        A Telegram tap is answered inline (its callback needs the ack); a dashboard decision
+        (decision=None) edits the card in the background so the RPC reply never waits on Telegram.
         """
+        def finalize():
+            try:
+                self._finalize_card(row, decision, ack=ack, text=text)
+            except Exception:  # noqa: BLE001 -- never log exception text; it can include the bot token
+                log.warning(f"Failed to finalize approval card for {row['id']}")
+
+        if decision is None:
+            self._in_background(finalize)
+        else:
+            finalize()
+
+    def _notify_quietly(self, text: str) -> None:
         try:
-            self._finalize_card(row, decision, ack=ack, text=text)
-        except Exception:  # noqa: BLE001 -- never log exception text; it can include the bot token
-            log.warning(f"Failed to finalize approval card for {row['id']}")
+            self._notifier.notify(text)
+        except Exception:  # noqa: BLE001 -- notification errors can contain credentials
+            log.warning("Failed to send a dashboard action notification")
+
+    def _in_background(self, fn: Callable[[], None]) -> None:
+        try:
+            self._background(fn)
+        except Exception:  # noqa: BLE001 -- a presentation side effect must never undo an accepted action
+            log.warning("Failed to schedule a Telegram update")
