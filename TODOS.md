@@ -14,4 +14,49 @@
 **Priority:** P3
 **Depends on:** Landing 1c (dashboard RPC + container panel)
 
+### Chat spend ceiling: count cost, not calls
+
+**What:** Record per-call token usage and make the daily chat ceiling a cost budget instead of a
+call count.
+
+**Why:** Calls are a poor proxy for money. One long investigation with five diagnostic rounds and a
+large context can cost more than twenty short questions, so a call ceiling that feels safe can still
+produce a surprising bill, while a cheap-but-chatty session gets throttled for no financial reason.
+
+**Context:** Deferred during `/plan-eng-review` (2026-09-16, decision D26). D22 chose calls
+deliberately — it is what the existing `MAX_DIAGNOSTIC_ROUNDS` budget counts and it needs no price
+table — but required slice 2 to record enough per call to switch later, so the groundwork ships
+either way and this item is only the switch. Note the shape changes: the ceiling reserves quota
+transactionally in the same `BEGIN IMMEDIATE` that records the call, so a spend ceiling means
+reserving an *estimated* cost and reconciling against actual usage afterwards. Needs per-provider
+usage parsing (Anthropic `usage`, OpenAI `response.usage`) and a price table that goes stale on every
+repricing. Revisit once there is real usage data showing whether the call ceiling was ever the
+binding constraint.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** T21 (slice 2 chat with the call-based ceiling)
+
+### Collapse the provider client-setup duplication in casa_amy
+
+**What:** After the shared tool loop is extracted, `casa_amy.py` still branches per provider in
+`_ask_anthropic` (`:84`) and `_ask_openai` (`:104`) — two functions that build a client, set model and
+effort, attach web-search tools, and pull text out of the response.
+
+**Why:** It is the last provider fork once the loop extraction lands. A new model tier, a key
+rotation, an SDK bump, or slice 6's openai-compatible endpoint has to be made in both, and they
+already differ in shape: Anthropic streams with adaptive thinking plus `web_fetch`, OpenAI does one
+non-streaming call with `web_search` only.
+
+**Context:** Accepted residue of `/plan-eng-review` decision D10 (2026-09-16), not an oversight. D10
+deliberately excluded Amy from the loop extraction because her search runs provider-side with no
+client-side tool loop, so this is a different abstraction (client construction) and merging the two
+was rejected. ~30 lines that change rarely. The trigger is slice 6's openai-compatible provider:
+that is when two branches become three and the fork starts costing something. Do not fold this into
+the loop extraction.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** T20 (loop extraction); realistically slice 6
+
 ## Completed

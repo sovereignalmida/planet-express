@@ -395,16 +395,77 @@ socket client is a ~40-line function in `integrations/rpc.py` that both sides im
   - a required dashboard env file with the session secret and password hash.
 - `requirements.txt`: add `gunicorn`.
 
-### Later slices (order to confirm in /plan-eng-review)
+### Later slices (scope and order confirmed by /plan-eng-review, 2026-09-16)
 
-2. **Chat → Amy.** `chat.ask` RPC method; the tool loop runs in core (keys stay in core), reusing
-   `run_diagnostic`; output is a proposal through `CommandService`; daily quota.
-3. **Policy + incidents.** R0-R4 autonomy config; incident fingerprinting; Scruffy incident timeline.
-4. **Config UI** (depends on slice 3 for autonomy fields). Edit P3 fields via diff + confirm; decide
-   reload semantics (config is read at startup today).
-5. **Migrate Telegram commands** (`/up`, `/down`, `/patchnow`, `/rollback`, `/install` diff flow)
-   onto typed actions + `CommandService`, shrinking Farnsworth; legacy shell plans retired.
+Rescoped by decisions D3-D25 of that review (13 findings across four sections, plus 10 from the
+Codex outside voice). Three of the four slices turned out to be partly built already, and two rested
+on premises that did not survive reading the code.
+
+2. **Chat → Amy.** `chat.ask` RPC returning a **ticket**, polled like `execution.get_status` (D7):
+   an LLM tool loop is tens of seconds and the RPC pool is four workers on a 5s deadline.
+   - **Reuses** the existing `run_diagnostic` loop, read-only allowlist and call budget rather than a
+     new engine (D3) — but reuse alone does not deliver chat (D17, Codex). The loop deliberately
+     discards model prose (the anti-fabrication fix at `casa_farnsworth.py:287-296`), so slice 2 adds
+     its own contract: a structured answer, references to the evidence that justified it, an explicit
+     insufficient-evidence outcome, and refusal when no typed action covers the fix. Prose is the
+     answer; it never joins evidence.
+   - **Prerequisite (D13):** CRITICAL regression tests for both provider loops *before* the
+     extraction. `test_diagnostic_budget.py` tests the counter, not the loop; the ~80 duplicated
+     lines have zero cover.
+   - **One provider-agnostic loop** extracted with thin per-provider adapters; `casa_amy` untouched,
+     since it has no client-side tool loop (D6, D10).
+   - **Daily ceiling** counted from `events` (D5), but *reserved* transactionally in the same
+     `BEGIN IMMEDIATE` that records the call, with submissions deduplicated by a client-supplied id,
+     bounded workers and queue, and interrupted tickets terminated at startup (D22, Codex). Counts
+     calls, recording enough to switch to spend later.
+   - **`redact.py` must be built here (D20, Codex).** It is specified in the module table above and
+     was never written: `planet_express/core/` holds only `__init__.py` and `store.py`. Diagnostic
+     output reaches the provider and `_log_step`'s disk log unredacted, and slice 1's own
+     "redacts a planted `API_KEY=…` line" criterion cannot pass until it exists. Bound captured
+     output at read time: `capture_output=True` allocates before any `[:2000]` slice.
+   - **Diagnostics run shell-free first (D4, D12):** port `run_diagnostic` to `run_argv` and fix
+     `casa_farnsworth.py:1413`, which interpolates an LLM-sourced container name into a shell string
+     eight lines below the comment forbidding exactly that.
+3. **Policy + incidents.**
+   - **Leela is corrected before fingerprints derive from it (D19, Codex).** `ps -a` counts exited
+     containers as present, so an all-exited stack reports complete and silent; the downgrade never
+     compares missing counts; a discovery failure drops the stack from results. Slice 3 fixes those
+     three, defines per-service healthy/failing/unknown observations, and only then fingerprints.
+     **Prerequisite (D14):** tests for `check_stack_completeness` and its downgrade rule first — the
+     rule written after the 2026-07-03 missing-stack incident has none.
+   - **Autonomy limits land with the R0-R4 map (D23, Codex):** per-target cooldown, a persistent
+     attempt cap per fingerprint, and no automatic execution for any action declaring
+     `rollbackable=False` — R1 is called "reversible" while `docker.restart_service` declares it
+     False, and quarantine is not until slice 6.
+   - **Maintenance interlock (D24, Codex):** the weekly borg job tears down stacks and restarts all
+     three units as root every Sunday 02:30 without consulting the mutation lock. It sets a
+     maintenance marker core respects; stale markers expire.
+4. **Config UI** (depends on slice 3's autonomy fields).
+   - **The blocker is module-level constants, not reload semantics (D9).** `config.py:87` loads once
+     at import and publishes constants that 10+ modules read directly, so no signal or watcher can
+     change what they see. Edits therefore validate, write atomically, and activate explicitly.
+   - **Validation is split from loading (D15):** `_load_config` exits the process on bad input, so a
+     web worker cannot validate a draft. Add `validate()` returning errors; write via temp file +
+     fsync + rename.
+   - **Activation is core re-execing in place (D18, Codex).** Codex flagged a privilege dependency;
+     verified absent here (the live config is `casaroot`-owned in the clone, and the dashboard holds
+     read-only ACL so edits travel over RPC to core). The real gap: the core unit is
+     `Restart=on-failure`, so a clean exit would leave core stopped until Sunday.
+5. **Migrate Telegram commands — split (D25, Codex).** `CommandService._run_execution` does exactly
+   one shape: resolve, `restart_argv`, verify. Three of the five commands need parameters, approved
+   artifact versions, multi-step progress and per-action recovery, which capability booleans do not
+   provide.
+   - **5a:** `/up` and `/down` onto typed actions as they are.
+   - **5b:** design the multi-step execution model, then `/install`, canary updates and `/rollback`.
+     Legacy shell plans retire at the end of 5b.
 6. **P5 adapters** for host-specific checks and the hardcoded host paths listed under P5; quarantine; openai-compatible provider; MCP read surface.
+
+**Rollback stops working from slice 2/3 without this (D21, Codex).** `config_schema.py` sets
+`extra="forbid"` on every model, so a previous tag rejects a config carrying new autonomy fields; and
+`store.py:139` re-stamps `PRAGMA user_version` with no compatibility check, so a rolled-back core
+silently runs against a newer schema. The deploy snapshots `config.yaml` and the DB before each tag
+upgrade, rollback restores both, and `store.init()` fails closed on a database newer than it
+understands.
 
 ## Eng Review Outputs (2026-09-13)
 
@@ -856,6 +917,59 @@ green on each, and all four VM rehearsals pass on the tagged code (T10 28, T13a 
   - Files: `static/dashboard.js`, `planet_express/execution/actions.py`
   - Verify: a hidden tab sends no polls; the cache invalidates when the compose file's mtime changes
 
+**Slices 2-5 — from /plan-eng-review (2026-09-16).** Each task derives from a specific finding of
+that review; decision ids in brackets. Prerequisites first: T15, T16, T17 and T18 all gate work that
+follows them.
+
+- [ ] **T15 (P1, human: ~1 day / CC: ~30min)** — tests — CRITICAL regression tests for both diagnostic tool loops, written before any extraction [D13]
+  - Surfaced by: Test review — `test_diagnostic_budget.py:13-43` tests the counter, not the loop; the ~80 lines T20 replaces have zero cover and encode the anti-fabrication fix at `casa_farnsworth.py:287-296`
+  - Files: `tests/test_diagnostic_loop.py`
+  - Verify: multi-tool-call turn, budget exhausted mid-turn, no-tool-call termination, and no completion after the budget is spent — green before and after T20
+- [ ] **T16 (P1, human: ~half day / CC: ~20min)** — tests — Cover `check_stack_completeness` and its history downgrade before slice 3 edits it [D14]
+  - Surfaced by: Test review — 24 Leela tests cover certs, backups and NFS; nothing covers `:280-295`, the rule written after the 2026-07-03 missing-stack incident
+  - Files: `tests/test_casa_leela.py`
+  - Verify: complete → empty is CRITICAL/HIGH; already-incomplete is LOW; first run with no history is urgent; unreadable snapshot is treated as no history
+- [ ] **T17 (P1, human: ~1 day / CC: ~30min)** — bender — Port `run_diagnostic` to `run_argv`, and fix the interpolated shell call in `_investigate_failure` [D4, D12]
+  - Surfaced by: Architecture + code quality — `casa_bender.py:532` runs diagnostics through `_run_command(shell=True)`; `casa_farnsworth.py:1413` interpolates an LLM-sourced container name eight lines below the comment forbidding it
+  - Files: `casa_bender.py`, `casa_farnsworth.py`, `tests/test_readonly_diagnostics.py`
+  - Verify: allowlist and metachar tests still pass shell-free; no module calls `bender._run_command`; Codex review gate
+- [ ] **T18 (P1, human: ~1 day / CC: ~30min)** — core — Build `planet_express/core/redact.py` and apply it before evidence, provider submission and `_log_step` [D20]
+  - Surfaced by: Outside voice 6 — the module is specified in the table above but was never written; `core/` holds only `__init__.py` and `store.py`
+  - Files: `planet_express/core/redact.py`, `casa_bender.py`, `casa_farnsworth.py`, `tests/test_redact.py`
+  - Verify: a planted `API_KEY=…` line is redacted in evidence, in provider input and in the step log (closes a slice 1 criterion); output bounded at read time, not sliced after capture
+- [ ] **T19 (P1, human: ~2 days / CC: ~45min)** — leela — Correct completeness, then define per-service healthy/failing/unknown observations [D19]
+  - Surfaced by: Outside voice 4 — `:307` counts exited containers as present; `:321-323` downgrades without comparing missing counts; `:303-305` drops a stack when discovery fails
+  - Files: `casa_leela.py`, `tests/test_casa_leela.py`
+  - Verify: an all-exited stack alerts; 1→5 missing is not downgraded; a discovery failure reports unknown rather than vanishing; T16 stays green
+- [ ] **T20 (P1, human: ~1 day / CC: ~30min)** — execution — Extract one provider-agnostic tool loop with thin per-provider adapters [D6, D10]
+  - Surfaced by: Code quality — `_gather_diagnostics_anthropic` (`:345-377`) and `_gather_diagnostics_openai` (`:380-423`) duplicate ~80 lines including the budget guard comment; `casa_amy` stays out
+  - Files: `planet_express/execution/`, `casa_farnsworth.py`
+  - Verify: T15 green unchanged; one loop, one budget site; `casa_amy` untouched
+- [ ] **T21 (P1, human: ~2 days / CC: ~1 session)** — chat — `chat.ask` ticket + poll, answer/proposal contract, admission control and the daily ceiling [D5, D7, D17, D22]
+  - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
+  - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`
+  - Verify: ticket returns inside the RPC budget; a duplicate submission id returns the same ticket; two concurrent asks cannot both pass the last unit of quota; insufficient-evidence and unsupported-fix render; interrupted tickets terminate at startup
+- [ ] **T22 (P2, human: ~3h / CC: ~20min)** — store — Events index on `(kind, ts)` plus a 90-day startup prune [D16]
+  - Surfaced by: Performance — `_SCHEMA` has no index on `events` while the ceiling COUNTs it per call and incidents update it per scan
+  - Files: `planet_express/core/store.py`, `tests/test_store.py`
+  - Verify: the ceiling query uses the index; the prune keeps approval- and execution-linked rows
+- [ ] **T23 (P1, human: ~half day / CC: ~20min)** — deploy — Pre-upgrade config and DB snapshot, and `store.init()` refusing a newer `user_version` [D21]
+  - Surfaced by: Outside voice 10 — `config_schema.py` `extra="forbid"` makes a previous tag reject new config; `store.py:139` re-stamps `user_version` with no compatibility check
+  - Files: `deploy.sh`, `planet_express/core/store.py`, this doc
+  - Verify: a rehearsed downgrade on the test VM restores config and DB and starts; a v2 core refuses a v3 database loudly
+- [ ] **T24 (P1, human: ~1.5 days / CC: ~40min)** — policy — Autonomy limits shipped with the R0-R4 map [D23]
+  - Surfaced by: Outside voice 1 — R1 is called reversible while `docker.restart_service` declares `rollbackable=False`; quarantine is slice 6 and no cooldowns exist
+  - Files: `planet_express/execution/policy.py`, `planet_express/core/store.py`, `config_schema.py`
+  - Verify: per-target cooldown holds across restarts; the attempt cap stops a repeated-restart loop; an action declaring `rollbackable=False` never runs automatically
+- [ ] **T25 (P2, human: ~1 day / CC: ~30min)** — deploy — Maintenance-window interlock with the weekly borg backup [D24]
+  - Surfaced by: Outside voice 8 — `borg-backup.sh:149` tears down stacks and restarts all three units as root every Sunday 02:30 without consulting `PipelineState`
+  - Files: `casa_farnsworth.py`, `config_schema.py`, and the root-owned backup script (outside this repo)
+  - Verify: core refuses new mutations while the marker is set; the scheduler waits rather than starting a pass; a stale marker expires instead of wedging core
+- [ ] **T26 (P1, human: ~1 day / CC: ~30min)** — config — Split `validate()` from load, atomic write, and core re-exec activation [D15, D18]
+  - Surfaced by: Test review and outside voice 2/3 — `_load_config` (`:71-85`) exits the process, so a web worker cannot validate a draft; the core unit is `Restart=on-failure`, so a clean exit would leave core stopped
+  - Files: `config.py`, `planet_express/application/`, `casa_farnsworth.py`, `tests/test_config.py`
+  - Verify: an invalid draft is rejected with field errors and the file on disk is unchanged; an interrupted write leaves the old config intact; re-exec keeps the PID and picks up new values with no stopped-core window
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect
@@ -1043,3 +1157,34 @@ That list is the pre-slice-1 checklist for the in-place user split (add whether
   of scope. Framed as Amy's front door, it fits. That's the feature to protect from scope creep.
 - When Codex argued against the "core first" order you'd just chosen, you switched without
   hesitation. You care about what actually lands, not about defending an earlier answer.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | ISSUES_FOUND | 10 findings, 10 resolved |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 13 issues, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+Scope: the later slices (2-6). Slice 1 was already complete, tagged `v2.0.0-1c` and live. Mode:
+SCOPE_REDUCED — slice 2 was rescoped at Step 0 and slice 5 was split. 25 decisions (D3-D27), 12
+implementation tasks (T15-T26), 2 TODOs, 3 learnings logged.
+
+- **CODEX:** 10 findings, all resolved. Four were accepted outright and reshaped the plan: `redact.py`
+  was specified but never built; the weekly borg job mutates as root outside the mutation lock;
+  `capture_output=True` allocates before any truncation, so "bounded" output never was; and the
+  documented rollback breaks once slice 3 adds config fields a previous tag rejects. Two corrected me
+  specifically — argv says nothing about diagnostic *output* reaching a provider unredacted, and the
+  events COUNT has a race where concurrent asks both pass the same last unit of quota.
+- **CROSS-MODEL:** six tension points, five accepted (D17, D19, D20, D21, D22, D25) and one accepted
+  with its premise corrected (D18: Codex's privilege claim was false on this host — the live config is
+  `casaroot`-owned — but activation genuinely was undefined, and the real gap is that
+  `Restart=on-failure` means a clean exit leaves core stopped). Where the two reviews overlapped they
+  agreed on the tool-loop duplication and on the config editor needing more than an atomic write.
+  Where they diverged, Codex was right about premises and this review was right about the code:
+  D8's "Leela already computes incident identity" did not survive reading `:296-327`.
+- **VERDICT:** ENG CLEARED — ready to implement, prerequisites first (T15-T18).
+
+NO UNRESOLVED DECISIONS
