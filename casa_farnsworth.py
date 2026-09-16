@@ -42,6 +42,7 @@ from planet_express.application.command_service import CommandService
 from planet_express.core.redact import redact
 from planet_express.core.store import Store
 from planet_express.execution import actions
+from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
 from state_models import MonitorSnapshot, PlanSet, RunStatus
 from telegram_client import TelegramClient
@@ -343,85 +344,94 @@ def _log_diagnostic_model_text(text: str) -> None:
         log.info(f"Diagnostic pre-check model text (not passed to planner): {text[:1000]}")
 
 
-def _gather_diagnostics_anthropic(findings_json: str, evidence: list) -> None:
-    import anthropic
+class _AnthropicDiagnosticAdapter:
+    def __init__(self, findings_json: str):
+        import anthropic
 
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key())
-    messages = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
-    calls_made = 0
-    for _ in range(MAX_DIAGNOSTIC_ROUNDS):
-        response = client.messages.create(
+        self.client = anthropic.Anthropic(api_key=config.anthropic_api_key())
+        self.messages = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
+
+    def request(self) -> Turn:
+        response = self.client.messages.create(
             model=config.model_for("small"),
             max_tokens=DIAGNOSTIC_MAX_TOKENS,
             system=DIAGNOSTIC_SYSTEM_PROMPT,
             tools=[DIAGNOSTIC_TOOL_SCHEMA],
-            messages=messages,
+            messages=self.messages,
         )
-        _log_diagnostic_model_text(
-            " ".join(b.text for b in response.content if b.type == "text")
+        return Turn(
+            text=" ".join(b.text for b in response.content if b.type == "text"),
+            calls=[ToolCall(b.id, (b.input or {}).get("command", ""))
+                   for b in response.content if b.type == "tool_use"],
+            raw=response,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        if not tool_uses:
-            return
-        tool_results = []
-        for tu in tool_uses:
-            output, calls_made = _diagnostic_tool_output(
-                (tu.input or {}).get("command", ""), calls_made, evidence
-            )
-            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": output})
-        messages.append({"role": "user", "content": tool_results})
-        if calls_made >= MAX_DIAGNOSTIC_ROUNDS:
-            # Budget spent: stop here. No tools-less "summarize" call. That call is
-            # what produced fabricated tool transcripts (see the note above
-            # _run_diagnostic_tool), and the planner reads `evidence` directly anyway.
-            return
+
+    def record(self, turn: Turn, results: list[tuple[ToolCall, str]]) -> None:
+        # Retain the assistant message even when the turn has no tool calls.
+        self.messages.append({"role": "assistant", "content": turn.raw.content})
+        if turn.calls:
+            self.messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": call.id, "content": output}
+                for call, output in results
+            ]})
 
 
-def _gather_diagnostics_openai(findings_json: str, evidence: list) -> None:
-    import openai
+class _OpenAIDiagnosticAdapter:
+    def __init__(self, findings_json: str):
+        import openai
 
-    client = openai.OpenAI(api_key=config.openai_api_key())
-    tool_schema = {
-        "type": "function",
-        "name": "run_diagnostic",
-        "description": DIAGNOSTIC_TOOL_SCHEMA["description"],
-        "parameters": DIAGNOSTIC_TOOL_SCHEMA["input_schema"],
-    }
-    input_items: list = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
-    calls_made = 0
-    for _ in range(MAX_DIAGNOSTIC_ROUNDS):
-        response = client.responses.create(
+        self.client = openai.OpenAI(api_key=config.openai_api_key())
+        self.tool_schema = {
+            "type": "function",
+            "name": "run_diagnostic",
+            "description": DIAGNOSTIC_TOOL_SCHEMA["description"],
+            "parameters": DIAGNOSTIC_TOOL_SCHEMA["input_schema"],
+        }
+        self.input_items: list = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
+
+    def request(self) -> Turn:
+        response = self.client.responses.create(
             model=config.model_for("small"),
             reasoning={"effort": "low"},
             max_output_tokens=DIAGNOSTIC_MAX_TOKENS,
-            tools=[tool_schema],
-            input=[{"role": "system", "content": DIAGNOSTIC_SYSTEM_PROMPT}] + input_items,
+            tools=[self.tool_schema],
+            input=[{"role": "system", "content": DIAGNOSTIC_SYSTEM_PROMPT}] + self.input_items,
         )
-        _log_diagnostic_model_text(response.output_text)
-        function_calls = [item for item in response.output if item.type == "function_call"]
-        if not function_calls:
-            return
-        input_items.extend(response.output)
-        for call in function_calls:
+        calls = []
+        for call in response.output:
+            if call.type != "function_call":
+                continue
             try:
                 args = json.loads(call.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
             if not isinstance(args, dict):
                 args = {}
-            output, calls_made = _diagnostic_tool_output(
-                args.get("command", ""), calls_made, evidence
-            )
-            input_items.append({
-                "type": "function_call_output",
-                "call_id": call.call_id,
-                "output": output,
-            })
-        if calls_made >= MAX_DIAGNOSTIC_ROUNDS:
-            # Budget spent: stop. See the Anthropic loop above for why there's no
-            # tools-less summary call.
-            return
+            calls.append(ToolCall(call.call_id, args.get("command", "")))
+        return Turn(text=response.output_text, calls=calls, raw=response)
+
+    def record(self, turn: Turn, results: list[tuple[ToolCall, str]]) -> None:
+        if turn.calls:
+            self.input_items.extend(turn.raw.output)
+            self.input_items.extend({
+                "type": "function_call_output", "call_id": call.id, "output": output,
+            } for call, output in results)
+
+
+def _gather_diagnostics_anthropic(findings_json: str, evidence: list) -> None:
+    adapter = _AnthropicDiagnosticAdapter(findings_json)
+    run_tool_loop(
+        adapter, lambda cmd, n: _diagnostic_tool_output(cmd, n, evidence),
+        max_calls=MAX_DIAGNOSTIC_ROUNDS, log_text=_log_diagnostic_model_text,
+    )
+
+
+def _gather_diagnostics_openai(findings_json: str, evidence: list) -> None:
+    adapter = _OpenAIDiagnosticAdapter(findings_json)
+    run_tool_loop(
+        adapter, lambda cmd, n: _diagnostic_tool_output(cmd, n, evidence),
+        max_calls=MAX_DIAGNOSTIC_ROUNDS, log_text=_log_diagnostic_model_text,
+    )
 
 
 def _gather_diagnostics(findings_json: str) -> list[dict]:

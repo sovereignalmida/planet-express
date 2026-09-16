@@ -1020,7 +1020,7 @@ follows them.
     stopped or unhealthy containers shows them on the dashboard instead of reporting complete. A
     one-shot container that sits `Exited (0)` counts as failing unless listed in `paused_containers`
     — consistent with the per-container check, which already flags it "not running".
-- [ ] **T20 (P1, human: ~1 day / CC: ~30min)** — execution — Extract one provider-agnostic tool loop with thin per-provider adapters [D6, D10]
+- [x] **T20 (P1, human: ~1 day / CC: ~30min)** — execution — ✅ done 2026-09-16 — Extract one provider-agnostic tool loop with thin per-provider adapters [D6, D10]
   - Surfaced by: Code quality — `_gather_diagnostics_anthropic` (`:345-377`) and `_gather_diagnostics_openai` (`:380-423`) duplicate ~80 lines including the budget guard comment; `casa_amy` stays out
   - Files: `planet_express/execution/`, `casa_farnsworth.py`
   - Verify: T15 green unchanged; one loop, one budget site; `casa_amy` untouched
@@ -1029,6 +1029,17 @@ follows them.
     assert the rejection text per call, but it couples them to that helper's identity. The extraction
     must either keep a function of that name owning the budget, or update those four tests
     deliberately — not incidentally.
+  - **Landed:** `planet_express/execution/tool_loop.py` — `run_tool_loop(adapter, execute, max_calls,
+    log_text)` owns the round cap, per-turn execution, stop-on-no-calls and stop-when-budget-spent;
+    it imports no SDK. `casa_farnsworth.py` keeps `_diagnostic_tool_output` as the single budget site
+    (the seam above is respected — the loop's executor looks it up at call time, so T15's
+    `_record_diagnostic_outputs` still wraps it) and replaces the two loop bodies with
+    `_AnthropicDiagnosticAdapter` / `_OpenAIDiagnosticAdapter` holding the unchanged request kwargs.
+    Per-provider ordering is preserved by `record()` running on every turn: Anthropic appends the
+    assistant message even with no calls, OpenAI only extends input when there are calls. No existing
+    test changed; `casa_amy.py` untouched; new `tests/test_tool_loop.py` pins the loop and both
+    adapters' two-turn request kwargs. Implemented by Codex from a brief, reviewed, `codex review`
+    clean first round. 773 tests green.
 - [ ] **T21 (P1, human: ~2 days / CC: ~1 session)** — chat — `chat.ask` ticket + poll, answer/proposal contract, admission control and the daily ceiling [D5, D7, D17, D22]
   - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
   - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`
