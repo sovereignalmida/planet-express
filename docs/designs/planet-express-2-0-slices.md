@@ -950,10 +950,28 @@ follows them.
     639 tests green locally, ruff clean, Codex review clean.
   - **Found while briefing this:** five test files `setdefault` `CASA_CONFIG` to a gitignored
     `config.yaml` that no clone has, so they fail to collect standalone — fixed in the same commit.
-- [ ] **T17 (P1, human: ~1 day / CC: ~30min)** — bender — Port `run_diagnostic` to `run_argv`, and fix the interpolated shell call in `_investigate_failure` [D4, D12]
+- [x] **T17 (P1, human: ~1 day / CC: ~30min)** — bender — ✅ done 2026-09-16 — Port `run_diagnostic` to `run_argv`, and fix the interpolated shell call in `_investigate_failure` [D4, D12]
   - Surfaced by: Architecture + code quality — `casa_bender.py:532` runs diagnostics through `_run_command(shell=True)`; `casa_farnsworth.py:1413` interpolates an LLM-sourced container name eight lines below the comment forbidding it
   - Files: `casa_bender.py`, `casa_farnsworth.py`, `tests/test_readonly_diagnostics.py`
   - Verify: allowlist and metachar tests still pass shell-free; no module calls `bender._run_command`; Codex review gate
+  - **Landed.** `run_diagnostic` validates, then `shlex.split` + `run_argv`; `_investigate_failure`
+    passes argv. `_run_command` stays for legacy plans (three callers).
+  - **Scope grew, deliberately: compound diagnostics are now rejected.** The original brief called the
+    port mechanical; it wasn't. Validation accepted compounds and executed the whole string, and
+    `test_allows_double_ampersand_compound_of_allowlisted_commands` asserted that. Evidence for
+    narrowing it: the prompt (`casa_farnsworth.py:244`) and tool schema (`:264`) both say one command
+    per call, and 92 logged diagnostic steps on the live host contain zero genuine compounds.
+  - **Ordering matters and was corrected mid-task.** The compound check sits *after* the per-segment
+    allowlist, so `docker ps && rm -rf /` still fails on `rm -rf /` and keeps its
+    `"not in the read-only allowlist"` message — the guarantee
+    `test_denies_sudo_smuggled_via_compound_command` exists to prove. Rejecting compounds first would
+    have reassigned that to a generic "one command per call".
+  - **Assertions verified additive-only:** the only new `match=` strings are `"shell control
+    operator"` and `"must not be empty"`; no pre-existing message changed. One test renamed
+    (allow-case → deny-case), three added, none deleted. 42 in the file, 17 untouched in
+    evidence/budget, 647 in the suite, ruff clean, second-review gate clean.
+  - **Tightened before landing:** the operator set is now one shared `_SHELL_CONTROL_OPERATOR_RE`
+    instead of three copies (`_split_command_segments`, the new check, and an inline regex).
 - [ ] **T18 (P1, human: ~1 day / CC: ~30min)** — core — Build `planet_express/core/redact.py` and apply it before evidence, provider submission and `_log_step` [D20]
   - Surfaced by: Outside voice 6 — the module is specified in the table above but was never written; `core/` holds only `__init__.py` and `store.py`
   - Files: `planet_express/core/redact.py`, `casa_bender.py`, `casa_farnsworth.py`, `tests/test_redact.py`

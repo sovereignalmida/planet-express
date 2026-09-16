@@ -114,13 +114,20 @@ class SudoScopeError(SafetyError):
         self.unit = unit
 
 
+# The shell control operators that separate one command from another. Defined once and
+# shared by _split_command_segments (which checks each piece independently, for legacy
+# plans) and run_diagnostic's one-command-per-call rule -- three copies of this set would
+# have to agree forever, and wouldn't.
+_SHELL_CONTROL_OPERATOR_RE = re.compile(r"&&|\|\||;|\||\n")
+
+
 def _split_command_segments(command: str) -> list[str]:
     """Split a compound shell command on control operators so each piece can be
     checked independently — otherwise a legitimate `sudo systemctl start x.mount &&
     sudo rm -rf /` could smuggle a forbidden second command past a whole-string check.
     Newlines split too: `_run_command()` runs everything with shell=True, and bash
     treats a newline as a statement separator exactly like `;`."""
-    return [seg.strip() for seg in re.split(r"&&|\|\||;|\||\n", command) if seg.strip()]
+    return [seg.strip() for seg in _SHELL_CONTROL_OPERATOR_RE.split(command) if seg.strip()]
 
 
 def _sudo_action_allowed(unit: str, action: str) -> bool:
@@ -520,6 +527,18 @@ def _check_readonly_diagnostic(command: str) -> None:
                     f"use and blocking the planning pipeline): '{segment}'"
                 )
 
+    # Checked AFTER the per-segment allowlist above, deliberately: `docker ps && rm -rf /`
+    # must still fail on `rm -rf /` not being allowlisted, which is the guarantee
+    # test_denies_sudo_smuggled_via_compound_command asserts. Only a compound whose every
+    # segment is already allowlisted reaches here.
+    operator = _SHELL_CONTROL_OPERATOR_RE.search(command)
+    if operator:
+        name = "newline" if operator.group() == "\n" else operator.group()
+        raise DiagnosticNotAllowed(
+            f"Diagnostic command contains shell control operator {name!r}; "
+            f"only one command per call is allowed: '{command}'"
+        )
+
 
 def run_diagnostic(command: str) -> tuple[int, str, str]:
     """Run a single read-only diagnostic command for Farnsworth's pre-planning tool
@@ -529,7 +548,10 @@ def run_diagnostic(command: str) -> tuple[int, str, str]:
     either check fails -- callers decide how to surface that to the model."""
     _check_readonly_diagnostic(command)
     _safety_check(command, plan={})
-    exit_code, stdout, stderr = _run_command(command)
+    argv = shlex.split(command)
+    if not argv:
+        raise DiagnosticNotAllowed("Diagnostic command must not be empty")
+    exit_code, stdout, stderr = run_argv(argv, timeout=COMMAND_TIMEOUT_SECONDS)
     _log_step("diagnostic", {"n": None, "command": command}, exit_code, stdout, stderr)
     return exit_code, stdout, stderr
 

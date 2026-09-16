@@ -1410,7 +1410,10 @@ def _investigate_failure(
         if block:
             _, current_service_yaml = block
 
-        _, container_logs, _ = bender._run_command(f"docker logs {container} --tail 100")
+        _, container_logs, _ = bender.run_argv(
+            ["docker", "logs", container, "--tail", "100"],
+            timeout=bender.COMMAND_TIMEOUT_SECONDS,
+        )
         logs_tail = container_logs
         if failed_step_detail:
             # amy.diagnose() bounds the prompt with logs_tail[-4000:], so the failing
