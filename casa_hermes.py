@@ -28,14 +28,12 @@ You receive raw system snapshot JSON from Leela (the monitor) and output a struc
 Be terse. Return ONLY valid JSON. No prose, no markdown fences, no explanations.
 
 SEVERITY RULES (apply all that match):
-- incomplete_stacks entries: a whole stack lost some or all of its containers — NOT the same
-  as one container being down, it means containers were removed entirely (e.g. an interrupted
-  teardown, or images pruned out from under already-gone containers). Leela has already
-  computed the right severity in each entry's "alert" field (it has history this analysis
-  step doesn't) — USE THAT VALUE AS-IS for the finding's severity, don't re-derive it from
-  present_count/expected_count yourself. This must never be silently missed — a stack with
-  zero containers produces zero "container not running" findings on its own, since there's
-  nothing there to report as down.
+- incomplete_stacks entries mean services are missing OR not running/unhealthy.
+  An entry with status: "unknown" means Leela could not read the stack: report it,
+  don't claim its containers are gone. Leela has already computed the right severity
+  in each entry's "alert" field (it has history this analysis step doesn't) — USE THAT
+  VALUE AS-IS for the finding's severity, don't re-derive it from
+  present_count/expected_count yourself. Never silently miss these entries.
 - stale_nfs_mounts entries: an NFS-backed bind mount went stale (ESTALE) or errored on a probe
   that Docker's own healthcheck can't see — the container itself may still show "Up"/"healthy"
   while file I/O against that path is actually broken (e.g. silent upload failures). ALWAYS

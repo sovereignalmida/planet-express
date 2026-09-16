@@ -411,7 +411,6 @@ def test_check_nfs_mount_health_clean_probe_has_no_alert(monkeypatch):
 
 def _setup_stack_completeness(tmp_path, monkeypatch, stacks, previous=None):
     import json
-    import shlex
 
     root = tmp_path / "stacks"
     for name in stacks:
@@ -427,17 +426,26 @@ def _setup_stack_completeness(tmp_path, monkeypatch, stacks, previous=None):
     calls = []
 
     def fake_run(cmd: str | list, timeout: int = 30, env: dict | None = None):
-        assert isinstance(cmd, str)
+        assert isinstance(cmd, list)
         calls.append(cmd)
-        args = shlex.split(cmd)
-        assert args[:3] == ["docker", "compose", "-f"]
-        stack = stacks[Path(args[3]).parent.name]
-        if "config --services" in cmd:
+        name = Path(cmd[3]).parent.name
+        prefix = ["docker", "compose", "-f", str(root / name / "docker-compose.yml")]
+        stack = stacks[name]
+        if cmd[4:] == ["config", "--services"]:
+            assert cmd == prefix + ["config", "--services"]
             return stack["discovery"]
-        if "ps -a" in cmd:
-            assert args[4:] == ["ps", "-a", "--format", "{{.Service}}"]
-            # Docker's service-only format discards running/exited state.
-            return 0, "\n".join(service for service, state in stack["containers"]), ""
+        if cmd[4:] == ["ps", "-a", "--format", "json"]:
+            assert cmd == prefix + ["ps", "-a", "--format", "json"]
+            if "ps" in stack:
+                return stack["ps"]
+            containers = [
+                c if isinstance(c, dict) else
+                {"Service": c[0], "Name": c[0], "State": c[1], "ExitCode": 0}
+                for c in stack["containers"]
+            ]
+            output = (json.dumps(containers) if stack.get("json_array") else
+                      "\n".join(json.dumps(c) for c in containers))
+            return 0, output, ""
         raise AssertionError(f"Unexpected command: {cmd}")
 
     monkeypatch.setattr(casa_leela, "_run", fake_run)
@@ -452,12 +460,14 @@ def test_stack_completeness_complete(tmp_path, monkeypatch):
     })
     result = casa_leela.check_stack_completeness()
     assert result == [{"stack": "app", "expected_count": 2, "present_count": 2,
-                       "missing_services": []}]
+                       "missing_services": [], "status": "complete",
+                       "services": {name: {"status": "healthy", "state": "running"}
+                                    for name in ("web", "db")}}]
     assert "alert" not in result[0]
     compose = tmp_path / "stacks" / "app" / "docker-compose.yml"
     assert calls == [
-        f"docker compose -f {compose} config --services",
-        f"docker compose -f {compose} ps -a --format '{{{{.Service}}}}'",
+        ["docker", "compose", "-f", str(compose), "config", "--services"],
+        ["docker", "compose", "-f", str(compose), "ps", "-a", "--format", "json"],
     ]
 
 
@@ -468,7 +478,9 @@ def test_stack_completeness_all_missing_without_history(tmp_path, monkeypatch):
     })
     assert casa_leela.check_stack_completeness() == [
         {"stack": "app", "expected_count": 2, "present_count": 0,
-         "missing_services": ["web", "db"], "alert": "CRITICAL"},
+         "missing_services": ["web", "db"], "alert": "CRITICAL", "status": "incomplete",
+         "services": {name: {"status": "failing", "state": "absent"}
+                      for name in ("web", "db")}},
     ]
 
 
@@ -479,7 +491,9 @@ def test_stack_completeness_some_missing_without_history(tmp_path, monkeypatch):
     })
     assert casa_leela.check_stack_completeness() == [
         {"stack": "app", "expected_count": 2, "present_count": 1,
-         "missing_services": ["web"], "alert": "HIGH"},
+         "missing_services": ["web"], "alert": "HIGH", "status": "incomplete",
+         "services": {"web": {"status": "failing", "state": "absent"},
+                      "db": {"status": "healthy", "state": "running"}}},
     ]
 
 
@@ -497,10 +511,8 @@ def test_stack_completeness_previously_complete_stays_urgent(tmp_path, monkeypat
     assert results["some"]["alert"] == "HIGH"
 
 
-def test_stack_completeness_already_incomplete_downgrades_worsening(tmp_path, monkeypatch):
-    """Pin known-wrong LOW on worsening loss until the follow-up task fixes it."""
-    # Current behaviour downgrades even one missing service becoming four;
-    # the later task changes this rule, so this is not an endorsement.
+def test_stack_completeness_already_incomplete_keeps_worsening_urgent(tmp_path, monkeypatch):
+    """Only unchanged failures are downgraded; newly failing services stay urgent."""
     _setup_stack_completeness(tmp_path, monkeypatch, {
         name: {"discovery": (0, "web\ndb\nworker\ncache", ""), "containers": containers}
         for name, containers in {
@@ -516,11 +528,13 @@ def test_stack_completeness_already_incomplete_downgrades_worsening(tmp_path, mo
     assert results["all"]["missing_services"] == ["web", "db", "worker", "cache"]
     assert results["some"]["missing_services"] == ["web", "worker", "cache"]
     assert results["same"]["missing_services"] == ["web"]
-    assert all(entry["alert"] == "LOW" for entry in results.values())
+    assert results["all"]["alert"] == "CRITICAL"
+    assert results["some"]["alert"] == "HIGH"
+    assert results["same"]["alert"] == "LOW"
 
 
-def test_stack_completeness_discovery_failure_omits_stack(tmp_path, monkeypatch, caplog):
-    """Empty discovery, with success or failure status, omits only that stack."""
+def test_stack_completeness_discovery_failure_reports_unknown(tmp_path, monkeypatch, caplog):
+    """Empty or failed discovery retains the unreadable stacks."""
     calls = _setup_stack_completeness(tmp_path, monkeypatch, {
         "empty": {"discovery": (0, "", "")},
         "failed": {"discovery": (1, "", "compose failed")},
@@ -528,34 +542,45 @@ def test_stack_completeness_discovery_failure_omits_stack(tmp_path, monkeypatch,
     })
     with caplog.at_level("WARNING", logger="planetexpress.leela"):
         results = casa_leela.check_stack_completeness()
-    assert not any(entry["stack"] in {"empty", "failed"} for entry in results)
-    assert results == [{"stack": "good", "expected_count": 1, "present_count": 1,
-                        "missing_services": []}]
+    by_name = {entry["stack"]: entry for entry in results}
+    for name in ("empty", "failed"):
+        assert by_name[name] == {
+            "stack": name, "status": "unknown", "alert": "MEDIUM",
+            "error": "compose failed" if name == "failed" else "Compose returned no services",
+            "missing_services": [], "services": {},
+        }
+    assert by_name["good"] == {
+        "stack": "good", "expected_count": 1, "present_count": 1,
+        "missing_services": [], "status": "complete",
+        "services": {"web": {"status": "healthy", "state": "running"}},
+    }
     for name in ("empty", "failed"):
         assert any(rec.levelname == "WARNING" and
                    f"Could not determine services for stack {name}:" in rec.message
                    for rec in caplog.records)
     assert len(calls) == 4
-    assert len([cmd for cmd in calls if "config --services" in cmd]) == 3
-    assert [cmd for cmd in calls if "ps -a" in cmd] == [
-        f"docker compose -f {tmp_path}/stacks/good/docker-compose.yml ps -a --format '{{{{.Service}}}}'",
+    assert len([cmd for cmd in calls if cmd[4:] == ["config", "--services"]]) == 3
+    assert [cmd for cmd in calls if cmd[4:] == ["ps", "-a", "--format", "json"]] == [
+        ["docker", "compose", "-f", str(tmp_path / "stacks/good/docker-compose.yml"),
+         "ps", "-a", "--format", "json"],
     ]
 
 
-def test_stack_completeness_exited_containers_count_as_present(tmp_path, monkeypatch):
-    """Pin the known-wrong stopped-container blind spot until the follow-up fix."""
-    # Current ps -a service-only output counts exited containers as complete;
-    # the follow-up task fixes this blind spot.
+def test_stack_completeness_all_exited_is_critical(tmp_path, monkeypatch):
+    """Exited containers fail every service even when the exit code is zero."""
     calls = _setup_stack_completeness(tmp_path, monkeypatch, {
         "app": {"discovery": (0, "web\ndb", ""),
                 "containers": [("web", "exited"), ("db", "exited")]},
     })
     results = casa_leela.check_stack_completeness()
-    assert results == [{"stack": "app", "expected_count": 2, "present_count": 2,
-                        "missing_services": []}]
-    assert "alert" not in results[0]
+    assert results == [{
+        "stack": "app", "status": "incomplete", "expected_count": 2, "present_count": 0,
+        "missing_services": ["web", "db"], "alert": "CRITICAL",
+        "services": {name: {"status": "failing", "state": "exited(0)"}
+                     for name in ("web", "db")},
+    }]
     assert len(calls) == 2
-    assert "ps -a --format '{{.Service}}'" in calls[1]
+    assert calls[1][4:] == ["ps", "-a", "--format", "json"]
 
 
 def test_stack_completeness_malformed_history_stays_urgent(tmp_path, monkeypatch, caplog):
@@ -572,3 +597,101 @@ def test_stack_completeness_malformed_history_stays_urgent(tmp_path, monkeypatch
     assert any(rec.levelname == "WARNING" and
                "Could not load previous snapshot for stack-completeness comparison" in rec.message
                for rec in caplog.records)
+
+
+def test_stack_completeness_service_observations(tmp_path, monkeypatch):
+    cases = [
+        ({"State": "exited", "ExitCode": 1}, "failing", "exited(1)", "HIGH"),
+        ({"State": "running", "Health": "unhealthy"}, "failing", "running(unhealthy)", "HIGH"),
+        ({"State": "running", "Health": "starting"}, "unknown", "running(starting)", None),
+        ({"State": "running", "Health": "healthy"}, "healthy", "running(healthy)", None),
+        ({"State": "exited", "ExitCode": 0, "Name": "intentional"},
+         "healthy", "exited(0)", None),
+    ]
+    monkeypatch.setattr(casa_leela.config, "PAUSED_CONTAINERS", ["intentional"])
+    for index, (container, status, state, alert) in enumerate(cases):
+        _setup_stack_completeness(tmp_path / str(index), monkeypatch, {
+            "app with spaces": {"discovery": (0, "web\ndb", ""), "containers": [
+                {"Service": "web", "Name": "web", **container}, ("db", "running"),
+            ]},
+        })
+        entry, = casa_leela.check_stack_completeness()
+        assert entry["services"]["web"] == {"status": status, "state": state}
+        assert entry.get("alert") == alert
+        assert entry["status"] == ("incomplete" if alert else "complete")
+        assert entry["missing_services"] == (["web"] if alert else [])
+        assert entry["present_count"] == (1 if alert else 2)
+
+
+def test_stack_completeness_replicas_order_and_json_formats(tmp_path, monkeypatch):
+    results = []
+    for json_array in (False, True):
+        _setup_stack_completeness(tmp_path / str(json_array), monkeypatch, {
+            "app": {"discovery": (0, "worker\nweb\ncache\ndb", ""),
+                    "json_array": json_array, "containers": [
+                        ("db", "running"), ("web", "running"), ("worker", "running"),
+                        {"Service": "web", "State": "running", "Health": "starting"},
+                        {"Service": "worker", "State": "running", "Health": "starting"},
+                        {"Service": "worker", "State": "exited", "ExitCode": 1},
+                    ]},
+        })
+        entry, = casa_leela.check_stack_completeness()
+        assert list(entry["services"]) == ["worker", "web", "cache", "db"]
+        assert entry["missing_services"] == ["worker", "cache"]
+        assert entry["services"]["worker"] == {
+            "status": "failing", "state": "running, running(starting), exited(1)",
+        }
+        assert entry["services"]["web"] == {
+            "status": "unknown", "state": "running, running(starting)",
+        }
+        assert entry["alert"] == "HIGH"
+        results.append(entry)
+    assert results[0] == results[1]
+
+
+def test_stack_completeness_ps_errors_are_unknown(tmp_path, monkeypatch, caplog):
+    for index, ps in enumerate([(1, "", "failure" * 100), (0, "not json", ""),
+                                (0, '{"Service":"web"}\ninvalid', ""),
+                                (0, '[null]', '')]):
+        _setup_stack_completeness(tmp_path / str(index), monkeypatch, {
+            "app": {"discovery": (0, "web", ""), "ps": ps},
+        })
+        entry, = casa_leela.check_stack_completeness()
+        assert entry["status"] == "unknown"
+        assert entry["alert"] == "MEDIUM"
+        assert entry["services"] == {}
+        assert entry["missing_services"] == []
+        assert 0 < len(entry["error"]) <= 300
+        assert "expected_count" not in entry
+        assert "present_count" not in entry
+        if ps[0]:
+            assert entry["error"] == ps[2][:300]
+    assert "Could not determine containers for stack app:" in caplog.text
+
+
+def test_stack_completeness_failed_discovery_with_stdout(tmp_path, monkeypatch):
+    calls = _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (1, "web", "discovery failed")},
+    })
+    entry, = casa_leela.check_stack_completeness()
+    assert entry["status"] == "unknown"
+    assert entry["error"] == "discovery failed"
+    assert entry["alert"] == "MEDIUM"
+    assert len(calls) == 1
+
+
+def test_stack_completeness_unknown_history_stays_urgent(tmp_path, monkeypatch):
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (0, "web", ""), "containers": []},
+    }, previous=[{"stack": "app", "status": "unknown", "missing_services": ["web"]}])
+    entry, = casa_leela.check_stack_completeness()
+    assert entry["alert"] == "CRITICAL"
+
+
+def test_stack_completeness_improving_history_is_low(tmp_path, monkeypatch):
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (0, "web\ndb", ""), "containers": [("db", "running")]},
+    }, previous=[{"stack": "app", "status": "incomplete", "missing_services": ["web", "db"]}])
+    entry, = casa_leela.check_stack_completeness()
+    assert entry["missing_services"] == ["web"]
+    assert entry["alert"] == "LOW"

@@ -763,7 +763,7 @@ def _container_blocks_prune(c: dict) -> bool:
 
 
 def _has_incomplete_stacks(snapshot: dict) -> bool:
-    """True if any active stack has *urgently* missing containers (CRITICAL/HIGH — an
+    """True if any active stack is unreadable or has urgently failing services (CRITICAL/HIGH — an
     incident, not a long-known-dormant stack like an intentionally-unstarted pinepods,
     which Leela downgrades to LOW). The 2026-07-03 blind spot: a stack with ZERO
     containers produces no per-container 'not running' findings — there's nothing there
@@ -772,7 +772,7 @@ def _has_incomplete_stacks(snapshot: dict) -> bool:
     the only copies left, undeletable-from-registry custom builds included (see the
     casa/lidarr:local incident)."""
     return any(
-        s.get("alert") in ("CRITICAL", "HIGH")
+        s.get("status") == "unknown" or s.get("alert") in ("CRITICAL", "HIGH")
         for s in snapshot.get("stack_completeness", [])
     )
 
@@ -814,7 +814,7 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         return
     if _has_incomplete_stacks(snapshot):
         log.warning(
-            "Safe-prune skipped: at least one stack is missing containers entirely — "
+            "Safe-prune skipped: at least one stack has urgently failing services or can't be read — "
             "this is more urgent than the disk pressure that would have triggered pruning"
         )
         return

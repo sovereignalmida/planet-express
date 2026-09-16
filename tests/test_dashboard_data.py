@@ -651,3 +651,15 @@ def test_permission_error_warns_once_per_path(tmp_path, monkeypatch, caplog):
 def test_missing_state_silent(tmp_path, caplog):
     assert dashboard_data._load(tmp_path / 'missing', dashboard_data.MonitorSnapshot) is None
     assert not caplog.records
+
+
+def test_summarize_health_medium_stack_alert_is_warning(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": "2026-07-15T14:36:53+00:00", "mode": "full",
+        "stack_completeness": [{"stack": "app", "status": "unknown", "alert": "MEDIUM",
+                                "missing_services": [], "services": {}, "error": "unreadable"}],
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    monkeypatch.setattr(config, "STATE_FINDINGS", tmp_path / "no_findings.json")
+    assert dashboard_data.summarize_health()["status"] == "warning"

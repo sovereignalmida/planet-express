@@ -112,13 +112,13 @@ def summarize_health() -> dict:
     disk_critical = any(d.get("alert") == "CRITICAL" for d in disk)
     disk_high = any(d.get("alert") == "HIGH" for d in disk)
     stack_critical_or_high = any(s.get("alert") in ("CRITICAL", "HIGH") for s in stacks)
-    stack_low = any(s.get("alert") == "LOW" for s in stacks)
+    stack_warning = any(s.get("alert") in ("LOW", "MEDIUM") for s in stacks)
 
     if not monitor and not findings:
         status = "unknown"
     elif has_critical or crash_looping_count > 0 or disk_critical or stack_critical_or_high:
         status = "critical"
-    elif has_high or unhealthy_count > 0 or disk_high or stack_low:
+    elif has_high or unhealthy_count > 0 or disk_high or stack_warning:
         status = "warning"
     else:
         status = "ok"

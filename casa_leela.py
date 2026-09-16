@@ -278,48 +278,118 @@ def _previous_stack_completeness() -> dict[str, dict]:
 
 
 def check_stack_completeness() -> list[dict]:
-    """For every active (non-forbidden) stack, compare how many services its compose file
-    defines against how many actually have a container — running OR stopped — right now.
+    """For every active (non-forbidden) stack, observe each compose-defined service as
+    healthy, failing or unknown, and report the stack as complete, incomplete or unknown.
 
-    A stack that should have containers but has ZERO is the signature of the whole stack
-    having been torn down (e.g. an interrupted `docker compose down`, or images pruned out
-    from under containers that were already gone) — a distinct and more severe failure than
-    any single container being unhealthy, and one that "is everything currently running
-    healthy" can never catch, because there's nothing there to BE unhealthy. This exact gap
+    A stack that should have containers but has none RUNNING is the signature of the whole
+    stack having gone down (an interrupted `docker compose down`, a stop, images pruned out
+    from under containers) — a distinct and more severe failure than one unhealthy container,
+    and one that "is everything currently running healthy" can never catch. This exact gap
     let a fully-missing stack go unnoticed on 2026-07-03.
 
-    Severity depends on history, not just the current count: a stack that WAS complete last
-    run and isn't now is an active incident (CRITICAL/HIGH). A stack that was ALREADY
-    incomplete last run too (e.g. pinepods, defined but deliberately never started) is
-    downgraded to LOW — still reported, so it isn't lost, but not re-screamed every cycle.
-    First-ever run (no history) is treated as unknown and conservatively flagged urgent."""
+    Only a running container counts (T19). The previous `ps -a --format {{.Service}}` counted
+    stopped containers as present, so an all-exited stack reported complete and silent. A
+    stopped container is excused only when its name is in PAUSED_CONTAINERS, the same
+    intentional-stop list check_containers honours. A healthcheck still `starting` is
+    unknown, which does not by itself make a stack incomplete.
+
+    Severity depends on history: a stack whose failing services are all ALREADY failing in
+    the previous snapshot (e.g. pinepods, defined but deliberately never started) is LOW —
+    still reported, not re-screamed every cycle. Any NEWLY failing service keeps it
+    CRITICAL/HIGH; the old rule downgraded one missing becoming four. No history, malformed
+    history, or a previous `unknown` entry is treated as no history and stays urgent.
+
+    A stack that cannot be read (compose discovery or `ps` fails, or `ps` output is not
+    JSON) is reported as `status: "unknown"` with alert MEDIUM rather than dropped, so it
+    can neither vanish from the dashboard nor let safe-prune run blind."""
     previous = _previous_stack_completeness()
     results = []
     for stack_dir in config.active_stack_dirs():
         stack_name = stack_dir.name
         compose_file = stack_dir / "docker-compose.yml"
-        _, services_out, err = _run(f"docker compose -f {compose_file} config --services")
-        expected_services = [s for s in services_out.splitlines() if s.strip()]
-        if not expected_services:
+
+        def unreadable(error, stack_name=stack_name):
+            results.append({
+                "stack": stack_name, "status": "unknown", "error": error[:300],
+                "missing_services": [], "services": {}, "alert": "MEDIUM",
+            })
+
+        rc, services_out, err = _run(
+            ["docker", "compose", "-f", str(compose_file), "config", "--services"]
+        )
+        expected_services = [s.strip() for s in services_out.splitlines() if s.strip()]
+        if rc or not expected_services:
             log.warning(f"Could not determine services for stack {stack_name}: {err}")
+            unreadable(err or "Compose returned no services")
             continue
 
-        _, ps_out, _ = _run(
-            f"docker compose -f {compose_file} ps -a --format {shlex.quote('{{.Service}}')}"
+        rc, ps_out, err = _run(
+            ["docker", "compose", "-f", str(compose_file), "ps", "-a", "--format", "json"]
         )
-        present_services = {s for s in ps_out.splitlines() if s.strip()}
-        missing = [s for s in expected_services if s not in present_services]
+        try:
+            if rc:
+                raise ValueError(err or f"Compose ps exited with code {rc}")
+            if not ps_out.strip():
+                containers = []
+            elif ps_out.lstrip().startswith("["):
+                containers = json.loads(ps_out)
+            else:
+                containers = [json.loads(line) for line in ps_out.splitlines() if line.strip()]
+            if not isinstance(containers, list) or any(
+                not isinstance(c, dict) for c in containers
+            ):
+                raise ValueError("Compose ps output must contain JSON container objects")
+        except ValueError as exc:
+            log.warning(f"Could not determine containers for stack {stack_name}: {exc}")
+            unreadable(str(exc))
+            continue
 
+        services = {}
+        priority = {"healthy": 0, "unknown": 1, "failing": 2}
+        for service in expected_services:
+            observations = []
+            for container in containers:
+                if container.get("Service") != service:
+                    continue
+                state = container.get("State", "unknown")
+                health = container.get("Health", "")
+                if state == "running":
+                    status = {"unhealthy": "failing", "starting": "unknown"}.get(
+                        health, "healthy"
+                    )
+                    description = f"{state}({health})" if health else state
+                else:
+                    status = (
+                        "healthy" if container.get("Name") in config.PAUSED_CONTAINERS
+                        else "failing"
+                    )
+                    description = (
+                        f"{state}({container.get('ExitCode', 0)})" if state == "exited" else state
+                    )
+                observations.append((status, description))
+            services[service] = {
+                "status": max((o[0] for o in observations), key=priority.get)
+                if observations else "failing",
+                "state": ", ".join(o[1] for o in observations) if observations else "absent",
+            }
+        missing = [s for s in expected_services if services[s]["status"] == "failing"]
         entry = {
             "stack": stack_name,
+            "status": "incomplete" if missing else "complete",
             "expected_count": len(expected_services),
             "present_count": len(expected_services) - len(missing),
             "missing_services": missing,
+            "services": services,
         }
         if missing:
             prev_entry = previous.get(stack_name)
-            was_already_incomplete = prev_entry is not None and prev_entry.get("missing_services")
-            if was_already_incomplete:
+            unchanged_or_improving = (
+                prev_entry is not None
+                and prev_entry.get("status") != "unknown"
+                and prev_entry.get("missing_services")
+                and set(missing) <= set(prev_entry["missing_services"])
+            )
+            if unchanged_or_improving:
                 entry["alert"] = "LOW"
             else:
                 entry["alert"] = "CRITICAL" if len(missing) == len(expected_services) else "HIGH"
@@ -929,7 +999,7 @@ def run_full() -> dict:
     log.info(
         f"Leela scan complete — "
         f"{n_issues} container issue(s) ({n_crash} crash-looping), {n_disk} disk alert(s), "
-        f"{n_missing_stacks} stack(s) with missing containers, "
+        f"{n_missing_stacks} stack(s) incomplete or unreadable, "
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
         f"{n_stale_mounts} stale NFS mount(s), "

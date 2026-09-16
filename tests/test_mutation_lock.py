@@ -726,3 +726,13 @@ def test_finishing_plan_cannot_clobber_a_newer_execution(monkeypatch):
     assert s.mutation_owner == "plan:new"
     assert s.state == fw.PipelineState.EXECUTING
     assert s.get_pending() == ("new", 11)
+
+
+def test_unknown_stack_blocks_pruning():
+    snapshot = {
+        "containers": [{"name": "app", "status": "Up", "health": "healthy"}],
+        "stack_completeness": [{"stack": "unreadable", "status": "unknown",
+                                "missing_services": [], "alert": "MEDIUM"}],
+    }
+    assert fw._has_incomplete_stacks(snapshot) is True
+    assert fw._safe_to_prune(snapshot) is False

@@ -998,10 +998,28 @@ follows them.
   - **Process note:** most defect cycles were introduced by fixes for the previous finding, and the
     suite was green for every leak. Each finding now has a regression test, plus seven perf guards
     against the three quadratic regexes that shipped and were caught in review.
-- [ ] **T19 (P1, human: ~2 days / CC: ~45min)** — leela — Correct completeness, then define per-service healthy/failing/unknown observations [D19]
+- [x] **T19 (P1, human: ~2 days / CC: ~45min)** — leela — ✅ done 2026-09-16 — Correct completeness, then define per-service healthy/failing/unknown observations [D19]
   - Surfaced by: Outside voice 4 — `:307` counts exited containers as present; `:321-323` downgrades without comparing missing counts; `:303-305` drops a stack when discovery fails
   - Files: `casa_leela.py`, `tests/test_casa_leela.py`
   - Verify: an all-exited stack alerts; 1→5 missing is not downgraded; a discovery failure reports unknown rather than vanishing; T16 stays green
+  - **Landed:** `check_stack_completeness` reads `docker compose ps -a --format json` (NDJSON or array)
+    and records `services: {name: {status: healthy|failing|unknown, state}}` per stack, in compose
+    order. Only a running container counts; a stopped one is excused only via `paused_containers`
+    (the list `check_containers` already honours — no new config). `starting` healthchecks are
+    unknown and do not make a stack incomplete. Downgrade to LOW requires every failing service to
+    have been failing last snapshot. Unreadable stacks (discovery or `ps` failure, bad JSON) report
+    `status: "unknown"`, alert MEDIUM. Commands are argv lists now (a stack path with a space broke
+    the old shell string). Implemented by Codex from a brief; reviewed; `codex review` clean first
+    round. 765 tests green.
+  - **Deliberate T16 changes:** exactly the three pinned tests — all-exited is CRITICAL, worsening
+    stays CRITICAL/HIGH while unchanged is LOW, unreadable stacks are retained as unknown.
+  - **Consumer changes (beyond the listed files):** `_has_incomplete_stacks` also blocks safe-prune
+    on an unknown stack; the dashboard treats a MEDIUM stack alert as `warning`; Hermes's prompt says
+    incomplete means missing OR not running/unhealthy and unknown means unreadable.
+  - **Behaviour change on the live host:** `missing_services` now means *failing*, so a stack with
+    stopped or unhealthy containers shows them on the dashboard instead of reporting complete. A
+    one-shot container that sits `Exited (0)` counts as failing unless listed in `paused_containers`
+    — consistent with the per-container check, which already flags it "not running".
 - [ ] **T20 (P1, human: ~1 day / CC: ~30min)** — execution — Extract one provider-agnostic tool loop with thin per-provider adapters [D6, D10]
   - Surfaced by: Code quality — `_gather_diagnostics_anthropic` (`:345-377`) and `_gather_diagnostics_openai` (`:380-423`) duplicate ~80 lines including the budget guard comment; `casa_amy` stays out
   - Files: `planet_express/execution/`, `casa_farnsworth.py`
