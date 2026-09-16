@@ -574,7 +574,32 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Status (2026-09-16): complete, tagged `v2.0.0-1c`.** T9, T10, T13a, T13b, T14 and T11 all done, CI
 green on each, and all four VM rehearsals pass on the tagged code (T10 28, T13a 6, T13b 19, T14 5).
-The live host has NOT been migrated yet: see the T10/T13b/T14 live-host steps below.
+**Live host migrated 2026-09-16** (casamediaserver, install `/home/casaroot/apps/planetexpress`).
+- `live/deployed` reset to `v2.0.0-1c` with the local disk-filter commit cherry-picked on top
+  (`26cb710`); the pre-migration tip is kept on the branch `live-backup-1r.1`. `.mcp.json` and
+  `scpdump/` (untracked) were left alone.
+- `venv/bin/pip install -r requirements.txt` brought gunicorn 26.2.0.
+- **`scripts/web_access.py` must run with `CASA_CONFIG` set** when the config lives inside the
+  clone (this host: `config.yaml` at the clone's top level). It resolves the config from
+  `CASA_CONFIG`, defaulting to `/etc/planetexpress/config.yaml`; without it the real config stays
+  denied to the web user and the dashboard cannot start.
+- The operator ran the privileged half: `web_access.py`, `dashboard_operators.py init`, both units
+  re-rendered and installed, `daemon-reload`, restart. **Sudo on this host requires a password**
+  (no NOPASSWD beyond `systemctl start|stop *.mount`), so an agent cannot drive those steps.
+- Verified after restart: `/` → 302 `/login`; `/login` 200 (which proves the `auth.*` RPC path
+  works end to end, since that page calls `auth.status`); `/api/widget` 200 for Homepage; gunicorn
+  running as `planetexpress-web`; core still `casaroot`; socket `660 casaroot:planetexpress-rpc`
+  inside a `750` directory; ACLs `r-x` on `planet_express/`, `r--` on `config.yaml`, `---` on
+  `data/` and `.mcp.json`; zero errors in either journal.
+- **T10 residual risk closed on this host:** all 11 stack env files are now `640`
+  (8 named `.env`, plus `pinepods.env`, `hoarder.env`, `lube.env`, all referenced by `env_file:`).
+  `/home/casaroot/apps` stays `777` by the operator's choice.
+- **Incident (~4 min dashboard 500s):** checking the new tag out while the old Flask process was
+  still running broke the dashboard immediately — Jinja loads templates from disk per request, and
+  the new `templates/dashboard.html` calls `url_for('logout')`, which the old app object has no
+  route for. Core and Telegram were unaffected, and `/api/widget` kept working (no template).
+  **Next time: stop `casa-dashboard` before the checkout, or do checkout + unit install + restart
+  in one privileged block.**
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
