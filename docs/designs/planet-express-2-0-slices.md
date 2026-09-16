@@ -572,7 +572,9 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10, T13a, T13b, T14 and T11 done.
+**Status (2026-09-16): complete, tagged `v2.0.0-1c`.** T9, T10, T13a, T13b, T14 and T11 all done, CI
+green on each, and all four VM rehearsals pass on the tagged code (T10 28, T13a 6, T13b 19, T14 5).
+The live host has NOT been migrated yet: see the T10/T13b/T14 live-host steps below.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -799,6 +801,11 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - **Live-host steps at 1c tag time:** install `acl` if missing; re-run `bash deploy.sh` (or
     `scripts/web_access.py` plus re-rendering both units); re-apply the local disk-filter
     commit as usual.
+  - **Rehearsal note (2026-09-16):** the T10 script now reports 28 checks, not 31. Its rollback
+    block (3 checks) skips itself once the guest's saved unit template is already the T10 one, so
+    there is no pre-T10 unit to roll back to. That path passed when T10 landed; nothing regressed.
+    Its "dashboard HTTP 200" check now really sees the 302 to `/login` (T13b), because `curl -f`
+    doesn't fail on 3xx.
 - [x] **T9 (P1, human: ~3h / CC: ~15min)** — rpc — ✅ done 2026-09-15 — Raw AF_UNIX RPC with length prefix, bounded pool, and reserved decision worker
   - Surfaced by: Architecture issues 3 and 6; outside voice T2
   - Files: `planet_express/integrations/rpc.py`, `tests/test_local_rpc.py`
