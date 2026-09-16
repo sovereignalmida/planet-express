@@ -936,10 +936,20 @@ follows them.
     count, and no fabrication. Covers calls split across two responses (3 then 4) and one oversized
     response (7), per provider. Verified by mutation: removing the guard in `_diagnostic_tool_output`
     turns all four red. 631 tests green locally, ruff clean, Codex review clean.
-- [ ] **T16 (P1, human: ~half day / CC: ~20min)** — tests — Cover `check_stack_completeness` and its history downgrade before slice 3 edits it [D14]
+- [x] **T16 (P1, human: ~half day / CC: ~20min)** — tests — ✅ done 2026-09-16 — Cover `check_stack_completeness` and its history downgrade before slice 3 edits it [D14]
   - Surfaced by: Test review — 24 Leela tests cover certs, backups and NFS; nothing covers `:280-295`, the rule written after the 2026-07-03 missing-stack incident
   - Files: `tests/test_casa_leela.py`
   - Verify: complete → empty is CRITICAL/HIGH; already-incomplete is LOW; first run with no history is urgent; unreadable snapshot is treated as no history
+  - **Landed:** eight tests (+167 lines) in `tests/test_casa_leela.py`, the file's first `_run` fake —
+    it asserts the argv shape it receives, so a change to the command built by
+    `check_stack_completeness` fails loudly instead of testing a command that no longer exists. The
+    two known-wrong pins (worsening loss still LOW; exited containers counted as present) carry
+    comments saying a later task changes them and the test is not an endorsement. The worsening test
+    pins three stacks in one run (total, partial, unchanged loss) so T19's fix will spell out which
+    cases changed. Verified by mutation: removing the `was_already_incomplete` branch turns it red.
+    639 tests green locally, ruff clean, Codex review clean.
+  - **Found while briefing this:** five test files `setdefault` `CASA_CONFIG` to a gitignored
+    `config.yaml` that no clone has, so they fail to collect standalone — fixed in the same commit.
 - [ ] **T17 (P1, human: ~1 day / CC: ~30min)** — bender — Port `run_diagnostic` to `run_argv`, and fix the interpolated shell call in `_investigate_failure` [D4, D12]
   - Surfaced by: Architecture + code quality — `casa_bender.py:532` runs diagnostics through `_run_command(shell=True)`; `casa_farnsworth.py:1413` interpolates an LLM-sourced container name eight lines below the comment forbidding it
   - Files: `casa_bender.py`, `casa_farnsworth.py`, `tests/test_readonly_diagnostics.py`

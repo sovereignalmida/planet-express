@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.yaml"))
+os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 import casa_leela
 
@@ -405,3 +405,170 @@ def test_check_nfs_mount_health_clean_probe_has_no_alert(monkeypatch):
     assert results == [{"container": "CASA_TESTAPP", "path": "/data/files"}]
     assert "alert" not in results[0]
     assert "error" not in results[0]
+
+
+# ── check_stack_completeness() ────────────────────────────────────────────────────
+
+def _setup_stack_completeness(tmp_path, monkeypatch, stacks, previous=None):
+    import json
+    import shlex
+
+    root = tmp_path / "stacks"
+    for name in stacks:
+        stack_dir = root / name
+        stack_dir.mkdir(parents=True)
+        (stack_dir / "docker-compose.yml").touch()
+    snapshot = tmp_path / "latest_monitor.json"
+    if previous is not None:
+        snapshot.write_text(json.dumps({"stack_completeness": previous}))
+    monkeypatch.setattr(casa_leela.config, "STACKS_ROOT", root)
+    monkeypatch.setattr(casa_leela.config, "FORBIDDEN_STACKS", [])
+    monkeypatch.setattr(casa_leela.config, "STATE_MONITOR", snapshot)
+    calls = []
+
+    def fake_run(cmd: str | list, timeout: int = 30, env: dict | None = None):
+        assert isinstance(cmd, str)
+        calls.append(cmd)
+        args = shlex.split(cmd)
+        assert args[:3] == ["docker", "compose", "-f"]
+        stack = stacks[Path(args[3]).parent.name]
+        if "config --services" in cmd:
+            return stack["discovery"]
+        if "ps -a" in cmd:
+            assert args[4:] == ["ps", "-a", "--format", "{{.Service}}"]
+            # Docker's service-only format discards running/exited state.
+            return 0, "\n".join(service for service, state in stack["containers"]), ""
+        raise AssertionError(f"Unexpected command: {cmd}")
+
+    monkeypatch.setattr(casa_leela, "_run", fake_run)
+    return calls
+
+
+def test_stack_completeness_complete(tmp_path, monkeypatch):
+    """A stack with every expected service present has no alert."""
+    calls = _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (0, "web\ndb", ""),
+                "containers": [("web", "running"), ("db", "running")]},
+    })
+    result = casa_leela.check_stack_completeness()
+    assert result == [{"stack": "app", "expected_count": 2, "present_count": 2,
+                       "missing_services": []}]
+    assert "alert" not in result[0]
+    compose = tmp_path / "stacks" / "app" / "docker-compose.yml"
+    assert calls == [
+        f"docker compose -f {compose} config --services",
+        f"docker compose -f {compose} ps -a --format '{{{{.Service}}}}'",
+    ]
+
+
+def test_stack_completeness_all_missing_without_history(tmp_path, monkeypatch):
+    """Without history, a fully missing stack is CRITICAL."""
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (0, "web\ndb", ""), "containers": []},
+    })
+    assert casa_leela.check_stack_completeness() == [
+        {"stack": "app", "expected_count": 2, "present_count": 0,
+         "missing_services": ["web", "db"], "alert": "CRITICAL"},
+    ]
+
+
+def test_stack_completeness_some_missing_without_history(tmp_path, monkeypatch):
+    """Without history, a partially missing stack is HIGH."""
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (0, "web\ndb", ""), "containers": [("db", "running")]},
+    })
+    assert casa_leela.check_stack_completeness() == [
+        {"stack": "app", "expected_count": 2, "present_count": 1,
+         "missing_services": ["web"], "alert": "HIGH"},
+    ]
+
+
+def test_stack_completeness_previously_complete_stays_urgent(tmp_path, monkeypatch):
+    """Complete history does not downgrade new total or partial losses."""
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        "all": {"discovery": (0, "web\ndb", ""), "containers": []},
+        "some": {"discovery": (0, "web\ndb", ""), "containers": [("db", "running")]},
+    }, previous=[
+        {"stack": name, "expected_count": 2, "present_count": 2, "missing_services": []}
+        for name in ("all", "some")
+    ])
+    results = {entry["stack"]: entry for entry in casa_leela.check_stack_completeness()}
+    assert results["all"]["alert"] == "CRITICAL"
+    assert results["some"]["alert"] == "HIGH"
+
+
+def test_stack_completeness_already_incomplete_downgrades_worsening(tmp_path, monkeypatch):
+    """Pin known-wrong LOW on worsening loss until the follow-up task fixes it."""
+    # Current behaviour downgrades even one missing service becoming four;
+    # the later task changes this rule, so this is not an endorsement.
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        name: {"discovery": (0, "web\ndb\nworker\ncache", ""), "containers": containers}
+        for name, containers in {
+            "all": [], "some": [("db", "running")],
+            "same": [("db", "running"), ("worker", "running"), ("cache", "running")],
+        }.items()
+    }, previous=[
+        {"stack": name, "expected_count": 4, "present_count": 3,
+         "missing_services": ["web"], "alert": "HIGH"}
+        for name in ("all", "some", "same")
+    ])
+    results = {entry["stack"]: entry for entry in casa_leela.check_stack_completeness()}
+    assert results["all"]["missing_services"] == ["web", "db", "worker", "cache"]
+    assert results["some"]["missing_services"] == ["web", "worker", "cache"]
+    assert results["same"]["missing_services"] == ["web"]
+    assert all(entry["alert"] == "LOW" for entry in results.values())
+
+
+def test_stack_completeness_discovery_failure_omits_stack(tmp_path, monkeypatch, caplog):
+    """Empty discovery, with success or failure status, omits only that stack."""
+    calls = _setup_stack_completeness(tmp_path, monkeypatch, {
+        "empty": {"discovery": (0, "", "")},
+        "failed": {"discovery": (1, "", "compose failed")},
+        "good": {"discovery": (0, "web", ""), "containers": [("web", "running")]},
+    })
+    with caplog.at_level("WARNING", logger="planetexpress.leela"):
+        results = casa_leela.check_stack_completeness()
+    assert not any(entry["stack"] in {"empty", "failed"} for entry in results)
+    assert results == [{"stack": "good", "expected_count": 1, "present_count": 1,
+                        "missing_services": []}]
+    for name in ("empty", "failed"):
+        assert any(rec.levelname == "WARNING" and
+                   f"Could not determine services for stack {name}:" in rec.message
+                   for rec in caplog.records)
+    assert len(calls) == 4
+    assert len([cmd for cmd in calls if "config --services" in cmd]) == 3
+    assert [cmd for cmd in calls if "ps -a" in cmd] == [
+        f"docker compose -f {tmp_path}/stacks/good/docker-compose.yml ps -a --format '{{{{.Service}}}}'",
+    ]
+
+
+def test_stack_completeness_exited_containers_count_as_present(tmp_path, monkeypatch):
+    """Pin the known-wrong stopped-container blind spot until the follow-up fix."""
+    # Current ps -a service-only output counts exited containers as complete;
+    # the follow-up task fixes this blind spot.
+    calls = _setup_stack_completeness(tmp_path, monkeypatch, {
+        "app": {"discovery": (0, "web\ndb", ""),
+                "containers": [("web", "exited"), ("db", "exited")]},
+    })
+    results = casa_leela.check_stack_completeness()
+    assert results == [{"stack": "app", "expected_count": 2, "present_count": 2,
+                        "missing_services": []}]
+    assert "alert" not in results[0]
+    assert len(calls) == 2
+    assert "ps -a --format '{{.Service}}'" in calls[1]
+
+
+def test_stack_completeness_malformed_history_stays_urgent(tmp_path, monkeypatch, caplog):
+    """Malformed snapshot JSON warns and falls back to no-history severities."""
+    _setup_stack_completeness(tmp_path, monkeypatch, {
+        "all": {"discovery": (0, "web\ndb", ""), "containers": []},
+        "some": {"discovery": (0, "web\ndb", ""), "containers": [("db", "running")]},
+    })
+    casa_leela.config.STATE_MONITOR.write_text('{"stack_completeness": [')
+    with caplog.at_level("WARNING", logger="planetexpress.leela"):
+        results = {entry["stack"]: entry for entry in casa_leela.check_stack_completeness()}
+    assert results["all"]["alert"] == "CRITICAL"
+    assert results["some"]["alert"] == "HIGH"
+    assert any(rec.levelname == "WARNING" and
+               "Could not load previous snapshot for stack-completeness comparison" in rec.message
+               for rec in caplog.records)
