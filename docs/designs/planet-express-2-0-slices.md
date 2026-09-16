@@ -926,10 +926,16 @@ green on each, and all four VM rehearsals pass on the tagged code (T10 28, T13a 
 that review; decision ids in brackets. Prerequisites first: T15, T16, T17 and T18 all gate work that
 follows them.
 
-- [ ] **T15 (P1, human: ~2h / CC: ~15min)** — tests — Close the two loop-level budget gaps before the extraction [D13, corrected]
+- [x] **T15 (P1, human: ~2h / CC: ~15min)** — tests — ✅ done 2026-09-16 — Close the two loop-level budget gaps before the extraction [D13, corrected]
   - Surfaced by: Test review, corrected on verification — `test_diagnostic_evidence.py` already pins the anti-fabrication guard, termination and SDK failure for both loops; what it never does is put several tool calls in one response. Both multi-round tests script one call per response across `n+2` rounds
   - Files: `tests/test_diagnostic_evidence.py` (extend; reuse `_install_openai`, `_install_anthropic`, `_oa_calls`, `_an_tool`)
   - Verify: two tool calls in one response execute at most the remaining budget; exhaustion mid-turn stops further execution in that same turn; both loops; green before and after T20
+  - **Landed:** four tests in `tests/test_diagnostic_evidence.py` (+81 lines), reusing the existing
+    fakes. `_assert_budget_split` pins the exact split — which commands ran, the literal
+    `REJECTED: diagnostic call budget exhausted (max 5 calls per plan)` text for the rest, evidence
+    count, and no fabrication. Covers calls split across two responses (3 then 4) and one oversized
+    response (7), per provider. Verified by mutation: removing the guard in `_diagnostic_tool_output`
+    turns all four red. 631 tests green locally, ruff clean, Codex review clean.
 - [ ] **T16 (P1, human: ~half day / CC: ~20min)** — tests — Cover `check_stack_completeness` and its history downgrade before slice 3 edits it [D14]
   - Surfaced by: Test review — 24 Leela tests cover certs, backups and NFS; nothing covers `:280-295`, the rule written after the 2026-07-03 missing-stack incident
   - Files: `tests/test_casa_leela.py`
@@ -950,6 +956,11 @@ follows them.
   - Surfaced by: Code quality — `_gather_diagnostics_anthropic` (`:345-377`) and `_gather_diagnostics_openai` (`:380-423`) duplicate ~80 lines including the budget guard comment; `casa_amy` stays out
   - Files: `planet_express/execution/`, `casa_farnsworth.py`
   - Verify: T15 green unchanged; one loop, one budget site; `casa_amy` untouched
+  - **Seam to respect (from T15):** its four budget tests capture per-call outputs by wrapping
+    `farnsworth._diagnostic_tool_output` (`_record_diagnostic_outputs`). That is the only way to
+    assert the rejection text per call, but it couples them to that helper's identity. The extraction
+    must either keep a function of that name owning the budget, or update those four tests
+    deliberately — not incidentally.
 - [ ] **T21 (P1, human: ~2 days / CC: ~1 session)** — chat — `chat.ask` ticket + poll, answer/proposal contract, admission control and the daily ceiling [D5, D7, D17, D22]
   - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
   - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`

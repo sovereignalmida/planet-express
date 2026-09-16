@@ -136,7 +136,88 @@ def _evidence_lines(prompt):
     return [json.loads(line) for line in prompt.splitlines() if line.startswith('{"command"')]
 
 
+def _record_diagnostic_outputs(monkeypatch):
+    outputs = []
+    real_output = farnsworth._diagnostic_tool_output
+
+    def record(command, calls_made, evidence):
+        output, calls_made = real_output(command, calls_made, evidence)
+        outputs.append((command, output))
+        return output, calls_made
+
+    monkeypatch.setattr(farnsworth, "_diagnostic_tool_output", record)
+    return outputs
+
+
+def _assert_budget_split(commands, outputs, host, planner):
+    n = farnsworth.MAX_DIAGNOSTIC_ROUNDS
+    assert len(host) == n
+    assert host == commands[:n]
+    success = json.dumps({"exit_code": 0, "stdout": REAL_STDOUT, "stderr": ""})
+    rejected = f"REJECTED: diagnostic call budget exhausted (max {n} calls per plan)"
+    assert outputs == [(c, success) for c in commands[:n]] + [
+        (c, rejected) for c in commands[n:]
+    ]
+    (prompt,) = planner
+    _assert_no_fabrication(prompt)
+    evidence = _evidence_lines(prompt)
+    assert len(evidence) == n
+    assert [e["command"] for e in evidence] == host
+
+
 # ── Tests ─────────────────────────────────────────────────────────────────────
+def test_openai_multi_call_turns_share_budget(monkeypatch, host, planner):
+    """Multiple function calls must share the budget across response boundaries."""
+    commands = [f"docker ps --{i}" for i in range(farnsworth.MAX_DIAGNOSTIC_ROUNDS + 2)]
+    outputs = _record_diagnostic_outputs(monkeypatch)
+    requests = _install_openai(monkeypatch, [
+        _oa_calls(*commands[:3]), _oa_calls(*commands[3:]),
+    ])
+    farnsworth.plan({"findings": FINDINGS})
+
+    _assert_budget_split(commands, outputs, host, planner)
+    assert len(requests) == 2
+    assert all(r.get("tools") for r in requests)
+
+
+def test_openai_budget_exhausted_partway_through_turn(monkeypatch, host, planner):
+    """One oversized response must reject only calls past the limit and stop."""
+    commands = [f"docker ps --{i}" for i in range(farnsworth.MAX_DIAGNOSTIC_ROUNDS + 2)]
+    outputs = _record_diagnostic_outputs(monkeypatch)
+    requests = _install_openai(monkeypatch, [_oa_calls(*commands)])
+    farnsworth.plan({"findings": FINDINGS})
+
+    _assert_budget_split(commands, outputs, host, planner)
+    assert len(requests) == 1
+    assert all(r.get("tools") for r in requests)
+
+
+def test_anthropic_multi_call_turns_share_budget(monkeypatch, host, planner):
+    """Multiple tool-use blocks must share the budget across response boundaries."""
+    commands = [f"docker ps --{i}" for i in range(farnsworth.MAX_DIAGNOSTIC_ROUNDS + 2)]
+    outputs = _record_diagnostic_outputs(monkeypatch)
+    blocks = [_an_tool(command, i) for i, command in enumerate(commands)]
+    requests = _install_anthropic(monkeypatch, [_an(*blocks[:3]), _an(*blocks[3:])])
+    farnsworth.plan({"findings": FINDINGS})
+
+    _assert_budget_split(commands, outputs, host, planner)
+    assert len(requests) == 2
+    assert all(r.get("tools") for r in requests)
+
+
+def test_anthropic_budget_exhausted_partway_through_turn(monkeypatch, host, planner):
+    """One oversized response must reject only blocks past the limit and stop."""
+    commands = [f"docker ps --{i}" for i in range(farnsworth.MAX_DIAGNOSTIC_ROUNDS + 2)]
+    outputs = _record_diagnostic_outputs(monkeypatch)
+    response = _an(*[_an_tool(command, i) for i, command in enumerate(commands)])
+    requests = _install_anthropic(monkeypatch, [response])
+    farnsworth.plan({"findings": FINDINGS})
+
+    _assert_budget_split(commands, outputs, host, planner)
+    assert len(requests) == 1
+    assert all(r.get("tools") for r in requests)
+
+
 def test_openai_fabricated_final_text_never_reaches_planner(monkeypatch, host, planner):
     _install_openai(monkeypatch, [_oa_calls("docker ps -a"), _oa_text(FABRICATED)])
     farnsworth.plan({"findings": FINDINGS})
