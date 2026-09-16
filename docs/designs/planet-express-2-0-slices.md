@@ -409,9 +409,14 @@ on premises that did not survive reading the code.
      its own contract: a structured answer, references to the evidence that justified it, an explicit
      insufficient-evidence outcome, and refusal when no typed action covers the fix. Prose is the
      answer; it never joins evidence.
-   - **Prerequisite (D13):** CRITICAL regression tests for both provider loops *before* the
-     extraction. `test_diagnostic_budget.py` tests the counter, not the loop; the ~80 duplicated
-     lines have zero cover.
+   - **Prerequisite (D13, corrected 2026-09-16):** loop regression tests before the extraction —
+     but a smaller set than first stated. `tests/test_diagnostic_evidence.py` already drives **both**
+     real loops through `farnsworth.plan()` with fake SDK clients and already pins the anti-fabrication
+     guard (`:162-171` OpenAI, `:196-205` Anthropic assert exactly `n` requests, all carrying tools),
+     no-tool-call termination, and mid-loop SDK failure. The original claim of zero cover was an
+     inference from the filename, not a reading. Genuinely uncovered at loop level, and all T15 adds:
+     several tool calls in **one** response sharing the budget, and exhaustion partway through such a
+     turn. Existing fakes (`_install_openai`, `_install_anthropic`, `_oa_calls`, `_an_tool`) are reused.
    - **One provider-agnostic loop** extracted with thin per-provider adapters; `casa_amy` untouched,
      since it has no client-side tool loop (D6, D10).
    - **Daily ceiling** counted from `events` (D5), but *reserved* transactionally in the same
@@ -921,10 +926,10 @@ green on each, and all four VM rehearsals pass on the tagged code (T10 28, T13a 
 that review; decision ids in brackets. Prerequisites first: T15, T16, T17 and T18 all gate work that
 follows them.
 
-- [ ] **T15 (P1, human: ~1 day / CC: ~30min)** — tests — CRITICAL regression tests for both diagnostic tool loops, written before any extraction [D13]
-  - Surfaced by: Test review — `test_diagnostic_budget.py:13-43` tests the counter, not the loop; the ~80 lines T20 replaces have zero cover and encode the anti-fabrication fix at `casa_farnsworth.py:287-296`
-  - Files: `tests/test_diagnostic_loop.py`
-  - Verify: multi-tool-call turn, budget exhausted mid-turn, no-tool-call termination, and no completion after the budget is spent — green before and after T20
+- [ ] **T15 (P1, human: ~2h / CC: ~15min)** — tests — Close the two loop-level budget gaps before the extraction [D13, corrected]
+  - Surfaced by: Test review, corrected on verification — `test_diagnostic_evidence.py` already pins the anti-fabrication guard, termination and SDK failure for both loops; what it never does is put several tool calls in one response. Both multi-round tests script one call per response across `n+2` rounds
+  - Files: `tests/test_diagnostic_evidence.py` (extend; reuse `_install_openai`, `_install_anthropic`, `_oa_calls`, `_an_tool`)
+  - Verify: two tool calls in one response execute at most the remaining budget; exhaustion mid-turn stops further execution in that same turn; both loops; green before and after T20
 - [ ] **T16 (P1, human: ~half day / CC: ~20min)** — tests — Cover `check_stack_completeness` and its history downgrade before slice 3 edits it [D14]
   - Surfaced by: Test review — 24 Leela tests cover certs, backups and NFS; nothing covers `:280-295`, the rule written after the 2026-07-03 missing-stack incident
   - Files: `tests/test_casa_leela.py`
