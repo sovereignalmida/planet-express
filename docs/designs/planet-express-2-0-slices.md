@@ -876,10 +876,18 @@ CRITICAL regression tests (T2) and lands alone as 1a behind the Codex review gat
    retired in slice 5.
 3. **Verification HTTP checks** (slice 3+): source a service's health URL from the Traefik router
    data `casa_scruffy_net.py` already polls?
-4. **Does anything outside the repo hardcode the current install path?** Examples: cron entries,
-   shell aliases, the Homepage widget config, or backup include lists covering `state/`. The pre-slice-1
-   host checks answer this.
-5. **CLAUDE.md is stale (assigned to 1a, eng TODO 1).** It says `_safety_check()` has no sudo
+4. **Does anything outside the repo hardcode the current install path?** **Answered 2026-09-16 on
+   the live host.** Nothing in cron, `/etc/cron.*`, or any other systemd unit references the install
+   path, and `casaroot` is the only human-range account. The one job that covers it is
+   `weekly-borg-backup.service` (Sundays 02:30): it runs as **root**, so T10's `chmod o-rwx` on
+   `state/` and the deny ACLs cannot block it, and its source is `SOURCE1="/home/casaroot"`, which
+   includes `state/` and `data/`; no exclude pattern touches them. **Operationally important: that
+   script tears the stacks down and then restarts `casa-stacks`, `casa-planetexpress` and
+   `casa-dashboard` every week.** So a half-migrated tree does not sit idle — it gets restarted
+   unattended into whatever is on disk. Any deploy must finish its unit install and restart in the
+   same sitting. See the 1c migration incident above.
+5. **CLAUDE.md is stale (assigned to 1a, eng TODO 1).** **Closed: verified rewritten 2026-09-16**
+   (`CLAUDE.md` now states the sudo scope is code-enforced via `_check_sudo_allowlist()`). It said `_safety_check()` has no sudo
    allowlist, but `_check_sudo_allowlist()` now fails closed (`casa_bender.py:136`). 1a rewrites
    that paragraph: the sudo scope is code-enforced, and the remaining unenforced boundary is legacy
    LLM shell plans run with `shell=True` (`casa_bender.py:215-217`) until slice 5 retires them.
@@ -895,6 +903,18 @@ CRITICAL regression tests (T2) and lands alone as 1a behind the Codex review gat
 - Reverting the dashboard unit `User=` line restores the previous dashboard, rehearsed once on the
   test VM.
 - `systemctl cat casa-stacks` is byte-identical before and after slice 1.
+
+**Slice 1 criteria status (2026-09-16, after the live migration).** Verified on the live host: the
+dashboard runs as `planetexpress-web` under gunicorn; `/` redirects to `/login`; the Airlock page
+renders and **the operator logged in successfully**, which also proves the `auth.*` RPC path and
+Scruffy's fail-closed startup; `/api/widget` stays public for Homepage; the socket is
+`660 casaroot:planetexpress-rpc` in a `750` directory; ACLs are `r-x` on `planet_express/`, `r--` on
+`config.yaml`, `---` on `data/` and `.mcp.json`; `state/` is `770` with `640` files; `casa-stacks` was
+untouched; both journals are error-free. Still to confirm manually with sudo (the agent cannot):
+`sudo -u planetexpress-web docker ps` fails, `/proc/<core pid>/environ` is unreadable to that user,
+and a socket connection from another uid is rejected. Not yet applicable: the log-view criteria
+(skipped-lines marker, redaction) — the log UI was deferred out of 1c to a later slice. `main` and
+`v2` are in sync (0 commits on `main` missing from `v2`).
 
 - A restart proposed from Telegram `/restart` or the dashboard appears in **both** under one ID;
   proposing the same target again returns that ID.
