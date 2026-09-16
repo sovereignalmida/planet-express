@@ -326,3 +326,42 @@ def test_denies_empty_argv(monkeypatch, command):
     monkeypatch.setattr(bender, "run_argv", lambda *a, **k: pytest.fail("must not execute"))
     with pytest.raises(bender.DiagnosticNotAllowed, match="must not be empty"):
         bender.run_diagnostic(command)
+
+
+def test_diagnostic_log_redacts_before_slicing(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setattr(bender.config, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(bender.config, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(bender, "run_argv", lambda *a, **k: (
+        0, "API_KEY=planted\n" + "x" * 1970 + " PASSWORD=boundary-secret",
+        "TOKEN=stderr-secret",
+    ))
+    bender.run_diagnostic("journalctl -n 1 -g API_KEY=command-secret")
+    line = next(tmp_path.glob("*.log")).read_text()
+    entry = json.loads(line)
+    for secret in ("planted", "boundary-secret", "stderr-secret", "command-secret"):
+        assert secret not in line
+    assert "API_KEY=[REDACTED]" in entry["stdout"]
+    assert entry["stderr"] == "TOKEN=[REDACTED]"
+
+
+def test_log_step_literal_across_slice_boundary(monkeypatch, tmp_path):
+    import re
+
+    from planet_express.core import redact as redaction
+
+    monkeypatch.setattr(bender.config, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(bender.config, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(redaction, "_LITERAL_RE", re.compile("split-secret"))
+    bender._log_step("p", {}, 0, "x" * 1995 + "split-secret", "x" * 995 + "split-secret")
+    line = next(tmp_path.glob("*.log")).read_text()
+    assert "split" not in line
+
+
+def test_diagnostic_retained_output_bound(monkeypatch):
+    monkeypatch.setattr(bender, "run_argv", lambda *a, **k: (0, "x" * 100000, "y" * 100000))
+    monkeypatch.setattr(bender, "_log_step", lambda *a: None)
+    rc, out, err = bender.run_diagnostic("docker ps")
+    assert rc == 0
+    assert len(out) == len(err) == 65536

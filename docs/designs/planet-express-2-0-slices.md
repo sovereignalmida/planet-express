@@ -972,10 +972,32 @@ follows them.
     evidence/budget, 647 in the suite, ruff clean, second-review gate clean.
   - **Tightened before landing:** the operator set is now one shared `_SHELL_CONTROL_OPERATOR_RE`
     instead of three copies (`_split_command_segments`, the new check, and an inline regex).
-- [ ] **T18 (P1, human: ~1 day / CC: ~30min)** — core — Build `planet_express/core/redact.py` and apply it before evidence, provider submission and `_log_step` [D20]
+- [x] **T18 (P1, human: ~1 day / CC: ~30min)** — core — ✅ done 2026-09-16 — Build `planet_express/core/redact.py` and apply it before evidence, provider submission and `_log_step` [D20]
   - Surfaced by: Outside voice 6 — the module is specified in the table above but was never written; `core/` holds only `__init__.py` and `store.py`
   - Files: `planet_express/core/redact.py`, `casa_bender.py`, `casa_farnsworth.py`, `tests/test_redact.py`
   - Verify: a planted `API_KEY=…` line is redacted in evidence, in provider input and in the step log (closes a slice 1 criterion); output bounded at read time, not sliced after capture
+  - **Landed:** `redact()` applied at five egress points, three more than planned. Planned: diagnostic
+    evidence (`_run_diagnostic_tool`) and the step log (`_log_step`, `run_diagnostic` bounded to
+    64 KiB after redaction). **Found by audit, not by the plan:** (a) `_investigate_failure` sent raw
+    `docker logs` and failed-step output to Amy's provider on a path touching neither planned site;
+    (b) `execute()` and `run_safe_prune()` built `stdout_summary`/`error_summary` raw and sent them
+    to **Telegram** and the journal — now redacted at the source, verified end to end with a planted
+    key. 757 tests green; 14 `codex review` rounds, the last clean.
+  - **Deviation — design differs from this task's brief.** The brief said "replace the value, keep the
+    key". Six rounds of a value-parsing scanner leaked seven ways, every one an answer to "where does
+    this value end?", so the shipped filter never computes that: after the first sensitive key on a
+    line it **withholds the rest of the line** (`A=1 PASSWORD=x B=2` → `A=1 PASSWORD=[REDACTED]`,
+    innocent `B=2` lost). Rounds 11-13 then showed any fixed order of the literal / Bearer / userinfo
+    passes leaks, so all spans (overlapping literals included) are located on the original line and
+    masked once as a union. The exemption for already-redacted output is an exact list of the two
+    shapes `redact()` emits, not a rule — four looser versions each leaked a real credential.
+  - **Accepted gaps (booked in TODOS.md):** keys over 128 chars or >32 spaces from their value are not
+    recognised (bounds are what keep the scan linear); run-together keys outside the compound list
+    (`MYKEY=`) are missed; camelCase over-redacts `keyId`/`tokenCount`, matching the underscore forms.
+    Configured literals are the backstop for all of them.
+  - **Process note:** most defect cycles were introduced by fixes for the previous finding, and the
+    suite was green for every leak. Each finding now has a regression test, plus seven perf guards
+    against the three quadratic regexes that shipped and were caught in review.
 - [ ] **T19 (P1, human: ~2 days / CC: ~45min)** — leela — Correct completeness, then define per-service healthy/failing/unknown observations [D19]
   - Surfaced by: Outside voice 4 — `:307` counts exited containers as present; `:321-323` downgrades without comparing missing counts; `:303-305` drops a stack when discovery fails
   - Files: `casa_leela.py`, `tests/test_casa_leela.py`

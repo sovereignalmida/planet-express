@@ -39,6 +39,7 @@ import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
 from planet_express.application.command_service import CommandService
+from planet_express.core.redact import redact
 from planet_express.core.store import Store
 from planet_express.execution import actions
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
@@ -309,10 +310,10 @@ def _run_diagnostic_tool(command: str, evidence: list) -> str:
     except bender.SafetyError as e:
         return f"REJECTED: {e}"
     record = {
-        "command": command,
+        "command": redact(command),
         "exit_code": exit_code,
-        "stdout": stdout[:2000],
-        "stderr": stderr[:1000],
+        "stdout": redact(stdout)[:2000],
+        "stderr": redact(stderr)[:1000],
     }
     evidence.append(record)
     return json.dumps({k: record[k] for k in ("exit_code", "stdout", "stderr")})
@@ -1414,6 +1415,13 @@ def _investigate_failure(
             ["docker", "logs", container, "--tail", "100"],
             timeout=bender.COMMAND_TIMEOUT_SECONDS,
         )
+        # Both of these reach an external provider via amy.diagnose() below, on a path
+        # that goes through neither _run_diagnostic_tool nor _log_step — the two places
+        # redaction was wired into. A `docker logs` tail is exactly where a token shows
+        # up, and this runs unattended after a failure (found reviewing T18).
+        container_logs = redact(container_logs)
+        if failed_step_detail:
+            failed_step_detail = redact(failed_step_detail)
         logs_tail = container_logs
         if failed_step_detail:
             # amy.diagnose() bounds the prompt with logs_tail[-4000:], so the failing

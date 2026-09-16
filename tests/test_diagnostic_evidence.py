@@ -350,3 +350,45 @@ def test_split_retry_reuses_evidence_without_regathering(monkeypatch, host):
     assert len(gathered) == 1
     assert len(prompts) == 3
     assert all('{"command": "docker ps"' in p for p in prompts)
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_planted_secret_never_reaches_planner(monkeypatch, host, planner, provider):
+    monkeypatch.setattr(sys.modules[__name__], "REAL_STDOUT", "API_KEY=planted-secret")
+    if provider == "openai":
+        _install_openai(monkeypatch, [_oa_calls("docker ps"), _oa_text("done")])
+    else:
+        _install_anthropic(monkeypatch, [_an(_an_tool("docker ps")), _an(_an_text("done"))])
+    outputs = _record_diagnostic_outputs(monkeypatch)
+    farnsworth.plan({"findings": FINDINGS})
+    assert host == ["docker ps"]
+    assert "planted-secret" not in planner[0]
+    assert "API_KEY=[REDACTED]" in planner[0]
+    assert "planted-secret" not in outputs[0][1]
+
+
+def test_evidence_redacts_command_and_streams_before_slicing(monkeypatch):
+    monkeypatch.setattr(bender, "run_diagnostic", lambda command: (
+        0, "API_KEY=stdout-secret", "PASSWORD=stderr-secret",
+    ))
+    evidence = []
+    output = farnsworth._run_diagnostic_tool("journalctl -n 1 -g TOKEN=argument-secret", evidence)
+    assert evidence[0]["command"] == "journalctl -n 1 -g TOKEN=[REDACTED]"
+    assert evidence[0]["stdout"] == "API_KEY=[REDACTED]"
+    assert evidence[0]["stderr"] == "PASSWORD=[REDACTED]"
+    assert "secret" not in output
+
+
+def test_evidence_literal_across_slice_boundary(monkeypatch):
+    import re
+
+    from planet_express.core import redact as redaction
+
+    monkeypatch.setattr(redaction, "_LITERAL_RE", re.compile("split-secret"))
+    monkeypatch.setattr(bender, "run_diagnostic", lambda command: (
+        0, "x" * 1995 + "split-secret", "x" * 995 + "split-secret",
+    ))
+    evidence = []
+    output = farnsworth._run_diagnostic_tool("docker ps", evidence)
+    assert "split" not in output
+    assert "split" not in json.dumps(evidence)

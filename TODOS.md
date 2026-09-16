@@ -59,4 +59,26 @@ the loop extraction.
 **Priority:** P3
 **Depends on:** T20 (loop extraction); realistically slice 6
 
+## Core
+
+### Redaction: recover innocent same-line content and close the key-shape gaps
+
+**What:** Make `planet_express/core/redact.py` keep non-secret content after a redacted key on the same
+line, and recognise the key shapes it currently misses.
+
+**Why:** T18 shipped a deliberately conservative filter. After the first sensitive key it withholds the
+rest of the line, so `HOST=h API_KEY=x PORT=80` loses `PORT=80` from logs and planner evidence. It also
+misses run-together keys outside its compound list (`MYKEY=`), keys longer than 128 characters or more
+than 32 spaces from their value, and it over-redacts camelCase names such as `keyId` and `tokenCount`.
+
+**Context:** Accepted residue of T18 (2026-09-16), not an oversight. Every earlier attempt to find where a
+value ends leaked, and 14 review rounds are recorded in the T18 plan entry. Any change here must keep
+passing `tests/test_redact.py` in full, including the regression test for every review finding and the
+`test_no_superlinear_path` guards. Only start if log/evidence context loss is actually hurting
+diagnosis. Configured literal secrets are already redacted wherever they appear, whatever the key.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** T18
+
 ## Completed

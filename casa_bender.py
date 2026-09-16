@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config
+from planet_express.core.redact import redact
 from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.bender")
@@ -329,10 +330,10 @@ def _log_step(plan_id: str, step: dict, exit_code: int, stdout: str, stderr: str
             "ts": datetime.now(timezone.utc).isoformat(),
             "plan_id": plan_id,
             "step_n": step.get("n"),
-            "command": step.get("command"),
+            "command": redact(step["command"]) if step.get("command") else step.get("command"),
             "exit_code": exit_code,
-            "stdout": stdout[:2000],
-            "stderr": stderr[:1000],
+            "stdout": redact(stdout)[:2000],
+            "stderr": redact(stderr)[:1000],
         }
         with open(log_file, "a") as f:
             f.write(json.dumps(entry) + "\n")
@@ -552,6 +553,10 @@ def run_diagnostic(command: str) -> tuple[int, str, str]:
     if not argv:
         raise DiagnosticNotAllowed("Diagnostic command must not be empty")
     exit_code, stdout, stderr = run_argv(argv, timeout=COMMAND_TIMEOUT_SECONDS)
+    # Bound retained diagnostic output after redaction, including literal secrets
+    # spanning the cutoff. subprocess.run still captures the full output first;
+    # a true streaming memory bound is out of scope here.
+    stdout, stderr = redact(stdout)[:65536], redact(stderr)[:65536]
     _log_step("diagnostic", {"n": None, "command": command}, exit_code, stdout, stderr)
     return exit_code, stdout, stderr
 
@@ -574,6 +579,10 @@ def run_safe_prune() -> dict:
     for label, cmd in SAFE_PRUNE_STEPS:
         _safety_check(cmd, plan={})
         exit_code, stdout, stderr = _run_command(cmd)
+        # Redact here, not just in _log_step: the slices below go into the returned
+        # summary, which Farnsworth sends to TELEGRAM. A secret in a chat message cannot
+        # be unsent, so that boundary needs it more than the log file does.
+        stdout, stderr = redact(stdout), redact(stderr)
         _log_step("safe-prune", {"n": label, "command": cmd}, exit_code, stdout, stderr)
         results.append({
             "step": label, "command": cmd, "exit_code": exit_code,
@@ -921,6 +930,12 @@ def execute(
 
         # Execute
         exit_code, stdout, stderr = _run_command(command)
+        # Redact before anything derived from these strings escapes. _log_step redacts its
+        # own arguments, but stdout_summary/error_summary below bypass it entirely and
+        # reach Telegram (fmt_step_status, fmt_failed), the journal, and — via the step
+        # result's stdout_summary — Amy's prompt. Redaction is idempotent, so _log_step
+        # redacting again costs nothing.
+        stdout, stderr = redact(stdout), redact(stderr)
         stdout_summary = stdout[:500] if stdout else ""
 
         _log_step(plan_id, step, exit_code, stdout, stderr)
