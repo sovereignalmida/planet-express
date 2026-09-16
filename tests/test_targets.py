@@ -34,6 +34,7 @@ class FakeDocker:
 
 @pytest.fixture
 def stacks(tmp_path, monkeypatch):
+    actions.clear_compose_services_cache()
     root = tmp_path / "stacks"
     for name in ("healthy", "traefik", "ai"):
         (root / name).mkdir(parents=True)
@@ -263,6 +264,7 @@ def test_resolve_timeout_is_one_budget_across_calls(stacks, monkeypatch):
     assert actions.resolve_target('healthy', 'web', timeout=4, clock=lambda: now[0]).container == 'fixture-healthy'
     assert timeouts == [4.0, 2.5, 1.0]
 
+    actions.clear_compose_services_cache()
     now[0], timeouts[:] = 0.0, []
 
     def slow(argv, timeout):
@@ -274,3 +276,107 @@ def test_resolve_timeout_is_one_budget_across_calls(stacks, monkeypatch):
     with pytest.raises(actions.TargetTimeout):
         actions.resolve_target('healthy', 'web', timeout=4, clock=lambda: now[0])
     assert timeouts == [4.0, 1.5]                       # no third docker call once the budget is spent
+
+
+def _config_calls(fake):
+    return [argv for argv in fake.calls if argv[-2:] == ['config', '--services']]
+
+
+def test_services_cached_but_container_and_paused_state_stay_live(stacks, monkeypatch):
+    fake = _install(monkeypatch, FakeDocker())
+    actions.resolve_target('healthy', 'web')
+    fake.name = '/replacement'
+    assert actions.resolve_target('healthy', 'web').container == 'replacement'
+    monkeypatch.setattr(actions.config, 'PAUSED_CONTAINERS', ['replacement'])
+    with pytest.raises(actions.TargetError, match='paused'):
+        actions.resolve_target('healthy', 'web')
+    assert len(_config_calls(fake)) == 1
+    assert len([argv for argv in fake.calls if 'ps' in argv]) == 3
+    assert len([argv for argv in fake.calls if argv[1] == 'inspect']) == 3
+
+
+@pytest.mark.parametrize('change', ['mtime', 'size'])
+def test_services_cache_invalidates(stacks, monkeypatch, change):
+    fake = _install(monkeypatch, FakeDocker())
+    actions.resolve_target('healthy', 'web')
+    compose = stacks / 'healthy' / 'docker-compose.yml'
+    stat = compose.stat()
+    if change == 'mtime':
+        os.utime(compose, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    else:
+        compose.write_text('services: {db: {}}\n')
+        os.utime(compose, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    fake.services = 'db\n'
+    with pytest.raises(actions.TargetError, match='has no service'):
+        actions.resolve_target('healthy', 'web')
+    actions.resolve_target('healthy', 'db')
+    assert len(_config_calls(fake)) == 2
+
+
+@pytest.mark.parametrize('rc', [1, actions.bender.RUN_ARGV_TIMEOUT_EXIT])
+def test_failed_services_reads_are_not_cached(stacks, monkeypatch, rc):
+    calls = []
+
+    def fail(argv, timeout):
+        calls.append(argv)
+        return rc, 'web\n', 'failed'
+
+    _install(monkeypatch, fail)
+    error = actions.TargetTimeout if rc == actions.bender.RUN_ARGV_TIMEOUT_EXIT else actions.TargetError
+    for _ in range(2):
+        with pytest.raises(error):
+            actions.resolve_target('healthy', 'web')
+    assert len(calls) == 2
+    fake = _install(monkeypatch, FakeDocker())
+    actions.resolve_target('healthy', 'web')
+    assert len(_config_calls(fake)) == 1
+
+
+def test_missing_file_refused_even_after_cached(stacks, monkeypatch):
+    fake = _install(monkeypatch, FakeDocker())
+    actions.resolve_target('healthy', 'web')
+    (stacks / 'healthy' / 'docker-compose.yml').unlink()
+    with pytest.raises(actions.TargetError, match='no stack named'):
+        actions.resolve_target('healthy', 'web')
+    assert len(fake.calls) == 3
+
+
+def test_services_cache_bounded_and_evicts_oldest(stacks, monkeypatch):
+    fake = _install(monkeypatch, FakeDocker())
+    for i in range(257):
+        directory = stacks / f'stack{i}'
+        directory.mkdir()
+        (directory / 'docker-compose.yml').write_text('services: {}\n')
+        actions.resolve_target(f'stack{i}', 'web')
+    assert len(actions._compose_services_cache) == 256
+    actions.resolve_target('stack1', 'web')
+    assert len(_config_calls(fake)) == 257
+    actions.resolve_target('stack0', 'web')
+    assert len(_config_calls(fake)) == 258
+    assert len(actions._compose_services_cache) == 256
+    actions.clear_compose_services_cache()
+    actions.resolve_target('stack0', 'web')
+    assert len(_config_calls(fake)) == 259
+
+
+def test_compose_services_cache_entries_expire(stacks, monkeypatch):
+    """An include:d file can change without touching the top-level file (Codex review, T11)."""
+    actions.clear_compose_services_cache()
+    fake = _install(monkeypatch, FakeDocker())
+    now = [1000.0]
+
+    def resolve():
+        return actions.resolve_target('healthy', 'web', clock=lambda: now[0])
+
+    assert resolve().container == 'fixture-healthy'
+    services_calls = [c for c in fake.calls if c[-2:] == ['config', '--services']]
+    assert len(services_calls) == 1
+
+    now[0] += actions.COMPOSE_SERVICES_TTL_SECONDS - 1          # still fresh
+    resolve()
+    assert len([c for c in fake.calls if c[-2:] == ['config', '--services']]) == 1
+
+    now[0] += 2                                                  # past the TTL
+    resolve()
+    assert len([c for c in fake.calls if c[-2:] == ['config', '--services']]) == 2
+    actions.clear_compose_services_cache()

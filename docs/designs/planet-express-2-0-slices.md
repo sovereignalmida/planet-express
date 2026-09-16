@@ -572,7 +572,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
 
 **Landing 1c — dashboard**
 
-**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10, T13a, T13b and T14 done; T11 remains.
+**Status (2026-09-15): in progress on `v2` (untagged).** T9, T10, T13a, T13b, T14 and T11 done.
 - **T9 notes.** `planet_express/integrations/rpc.py`, implemented by Codex, reviewed and corrected
   here.
   - Methods, exactly four: `proposal.create`, `proposal.list_pending`, `approval.decide`,
@@ -641,6 +641,29 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Test VM rehearsal 6/6 over the real socket as `planetexpress-web`: schema upgrade on an
     existing DB, lockout, IP rotation, notify-once, replay rejection, epoch bump via
     `revoke_devices.py`, bad-request validation.
+- **T11 notes.** Implemented by Codex, reviewed and corrected here.
+  - `static/dashboard.js`: `pollWhileVisible(fn, intervalMs)` replaces the bare 60s `setInterval`.
+    A hidden tab clears its timer and sends nothing (including when the page loads hidden); on
+    becoming visible it refreshes at once only if the last successful refresh is older than the
+    interval; one request is in flight at a time. Focus-skipping while filtering, the `/login`
+    redirect and the silent catch are unchanged. Only a successful refresh resets freshness.
+    The execution-status (2s) and log-panel (3s) polls from the plan's polling budget belong to
+    screens that don't exist yet; the helper is there for them.
+  - `actions.resolve_target`: `docker compose config --services` is cached per resolved compose
+    file, keyed by mtime and size, 256 entries FIFO, behind a lock that is not held while docker
+    runs. Failures and timeouts are never cached, `compose ps` and `docker inspect` still run every
+    time (container identity and paused state must stay live), and a cache hit spends none of the
+    RPC budget. `clear_compose_services_cache()` exists for tests.
+  - **Deviation from the plan's "keyed by the compose file's mtime": entries also expire after
+    `COMPOSE_SERVICES_TTL_SECONDS = 60`.** `config --services` also reads `include:`d files, `.env`
+    and `extends` targets, whose changes leave the top-level file's mtime and size untouched. I
+    reproduced this on the test VM: renaming a service in an `include:`d file left the stack
+    refusing the new name ("has no service"), and it only recovered when the top-level file was
+    touched. Codex's review raised the same case. The TTL bounds that staleness to a minute while
+    keeping the win for bursts of dashboard reads.
+  - **Test VM smoke:** core and dashboard restart clean under the new code, the dashboard still
+    redirects to login, `query.container` answers twice in a row, resolution still works after the
+    compose file's mtime changes, and the core journal has no tracebacks.
 - **T14 notes.** Implemented by Codex, reviewed and corrected here over four Codex review rounds. The loop stopped at round four: the
   last fix (the deadline check inside the store transaction, round-four finding) is covered by
   tests but not re-reviewed.
@@ -796,7 +819,7 @@ hotfixes go directly on `v2` (see "Branch, tags, and landings").
   - Surfaced by: Design v20 intake, restart-flow and run-controls decisions
   - Files: `planet_express/application/command_service.py`, `planet_express/execution/actions.py`, `planet_express/integrations/rpc.py`, `tests/test_command_service.py`, `tests/test_actions.py`
   - Verify: direct request records approval `decided_by` the operator and still passes policy, lock, and verify; restart declares no abort/rollback/resume; stats parsing
-- [ ] **T11 (P2, human: ~3h / CC: ~15min)** — dashboard — Visible-only polling and compose-services mtime cache
+- [x] **T11 (P2, human: ~3h / CC: ~15min)** — dashboard — ✅ done 2026-09-16 — Visible-only polling and compose-services mtime cache
   - Surfaced by: Performance issue 6
   - Files: `static/dashboard.js`, `planet_express/execution/actions.py`
   - Verify: a hidden tab sends no polls; the cache invalidates when the compose file's mtime changes

@@ -275,12 +275,42 @@
 
   var REFRESH_INTERVAL_MS = 60000;
 
+  // fn resolves to true only on success; skipped/failed reads do not reset
+  // freshness. The initial server-rendered view starts fresh.
+  function pollWhileVisible(fn, intervalMs) {
+    var timer = null;
+    var inFlight = false;
+    var lastSuccess = Date.now();
+
+    function poll() {
+      if (inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      Promise.resolve().then(fn).then(function (success) {
+        if (success === true) lastSuccess = Date.now();
+        inFlight = false;
+      }, function () {
+        inFlight = false;
+      });
+    }
+
+    function visibilityChanged() {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastSuccess > intervalMs) poll();
+      timer = setInterval(poll, intervalMs);
+    }
+
+    document.addEventListener("visibilitychange", visibilityChanged);
+    visibilityChanged();
+  }
+
   function refreshDashboard() {
     // Don't yank focus/typed text out from under someone mid-filter.
     var filterInput = document.getElementById("net-filter");
     if (filterInput && document.activeElement === filterInput) return;
 
-    fetch(window.location.pathname, { cache: "no-store" })
+    return fetch(window.location.pathname, { cache: "no-store" })
       .then(function (r) {
         if (r.redirected && new URL(r.url).pathname === "/login") {
           window.location.assign(r.url);
@@ -297,6 +327,7 @@
         currentLive.innerHTML = freshLive.innerHTML;
         applyHashTab();
         bindInteractions();
+        return true;
       })
       .catch(function () {
         // Transient network blip -- next interval tries again, no need to surface
@@ -311,5 +342,5 @@
   // never replaced by a refresh swap.
   window.addEventListener("hashchange", applyHashTab);
   bindInteractions();
-  setInterval(refreshDashboard, REFRESH_INTERVAL_MS);
+  pollWhileVisible(refreshDashboard, REFRESH_INTERVAL_MS);
 })();

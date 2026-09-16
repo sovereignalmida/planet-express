@@ -12,7 +12,9 @@ plan) into a shell=True command string.
 
 import math
 import re
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -173,6 +175,22 @@ def compose_file(stack: str) -> Path:
     return Path(config.STACKS_ROOT) / stack / "docker-compose.yml"
 
 
+_COMPOSE_SERVICES_CACHE_LIMIT = 256
+# `docker compose config --services` also reads include:d files, .env and extends targets, whose
+# changes leave the top-level file's mtime and size untouched — a stale entry would refuse a newly
+# added service indefinitely (Codex review, T11; reproduced on the test VM). The design keys the
+# cache on the compose file's mtime, so keep that and bound how long any entry survives.
+COMPOSE_SERVICES_TTL_SECONDS = 60
+_compose_services_cache: OrderedDict[tuple[Path, int, int], tuple[frozenset[str], float]] = OrderedDict()
+_compose_services_cache_lock = threading.Lock()
+
+
+def clear_compose_services_cache() -> None:
+    """Discard cached service lists (also used to isolate tests)."""
+    with _compose_services_cache_lock:
+        _compose_services_cache.clear()
+
+
 def resolve_target(
     stack: str, service: str, *, for_mutation: bool = True, timeout=DOCKER_TIMEOUT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
@@ -200,14 +218,34 @@ def resolve_target(
             raise TargetTimeout("host slow, retry")
         return left
 
-    rc, out, _err = bender.run_argv(
-        ["docker", "compose", "-f", str(compose), "config", "--services"], timeout=remaining()
-    )
-    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
-        raise TargetTimeout("host slow, retry")
-    if rc != 0:
-        raise TargetError(f"could not read the services of {stack!r}")
-    if service not in {line.strip() for line in out.splitlines() if line.strip()}:
+    # Docker runs outside the lock; concurrent misses may duplicate reads.
+    try:
+        resolved = compose.resolve()
+        stat = resolved.stat()
+    except FileNotFoundError:
+        raise TargetError(f"no stack named {stack!r} under {config.STACKS_ROOT}") from None
+    cache_key = (resolved, stat.st_mtime_ns, stat.st_size)
+    with _compose_services_cache_lock:
+        entry = _compose_services_cache.get(cache_key)
+    services = entry[0] if entry is not None and clock() - entry[1] <= COMPOSE_SERVICES_TTL_SECONDS else None
+    if services is None:
+        rc, out, _err = bender.run_argv(
+            ["docker", "compose", "-f", str(compose), "config", "--services"], timeout=remaining()
+        )
+        if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+            raise TargetTimeout("host slow, retry")
+        if rc != 0:
+            raise TargetError(f"could not read the services of {stack!r}")
+        services = frozenset(line.strip() for line in out.splitlines() if line.strip())
+        with _compose_services_cache_lock:
+            # Keep only the latest inserted version for each resolved file.
+            for key in list(_compose_services_cache):
+                if key[0] == resolved and key != cache_key:
+                    del _compose_services_cache[key]
+            _compose_services_cache[cache_key] = (services, clock())
+            while len(_compose_services_cache) > _COMPOSE_SERVICES_CACHE_LIMIT:
+                _compose_services_cache.popitem(last=False)
+    if service not in services:
         raise TargetError(f"stack {stack!r} has no service {service!r}")
 
     rc, out, _err = bender.run_argv(
