@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 2
+EVENT_RETENTION_SECONDS = 90 * 24 * 3600
 AUTH_MAX_FAILURES = 3
 AUTH_LOCK_SECONDS = 900
 DEFAULT_TTL_SECONDS = 3600  # design v20: an approval card expires after 60 minutes
@@ -89,6 +90,11 @@ CREATE TABLE IF NOT EXISTS events (
     execution_id TEXT,
     payload      TEXT NOT NULL DEFAULT '{}'
 );
+-- (kind, ts) serves the daily chat ceiling's COUNT and kind lookups like auth_lock_notified (T22).
+-- No SCHEMA_VERSION bump: an added IF NOT EXISTS index is backward compatible (an older core
+-- opens this DB unchanged), and T23 makes user_version a compatibility gate, so it moves only
+-- for changes an older core cannot read.
+CREATE INDEX IF NOT EXISTS events_kind_ts ON events (kind, ts);
 """
 
 TERMINAL_EXECUTION_STATUSES = ("passed", "failed", "interrupted")
@@ -158,6 +164,17 @@ class Store:
     ) -> None:
         with self._write() as conn:
             self._event(conn, kind, approval_id=approval_id, execution_id=execution_id, **payload)
+
+    def prune_events(self, max_age_seconds: float = EVENT_RETENTION_SECONDS) -> int:
+        """Delete old unlinked events, preserving approval and execution audit trails."""
+        if max_age_seconds <= 0:
+            raise ValueError("max_age_seconds must be positive")
+        with self._write() as conn:
+            cursor = conn.execute(
+                "DELETE FROM events WHERE ts < ? AND approval_id IS NULL AND execution_id IS NULL",
+                (self._clock() - max_age_seconds,),
+            )
+            return cursor.rowcount
 
     def list_events(self, approval_id: str | None = None) -> list[dict]:
         with self._connect() as conn:

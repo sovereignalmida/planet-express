@@ -20,6 +20,7 @@ import logging
 import pwd
 import re
 import shlex
+import sqlite3
 import sys
 import threading
 import time
@@ -2086,6 +2087,17 @@ def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notif
         return None
 
 
+def _init_store(store: Store) -> None:
+    store.init()
+    try:
+        deleted = store.prune_events()
+    except sqlite3.Error as exc:
+        log.warning("Event pruning failed at startup: %s", exc)
+    else:
+        if deleted:
+            log.info("Pruned %d old unlinked events at startup", deleted)
+
+
 def run_bot() -> None:
     config.ensure_dirs()
     token, chat_id = config.telegram_credentials()
@@ -2096,7 +2108,7 @@ def run_bot() -> None:
     # Typed actions (landing 1b). Reconcile BEFORE polling starts: an execution left
     # running/verifying means core died mid-action, so it's marked interrupted, not resumed.
     store = Store(config.ACTIONS_DB)
-    store.init()
+    _init_store(store)
     commands = CommandService(store, notifier, state)
     interrupted = commands.reconcile_on_startup()
     if interrupted:

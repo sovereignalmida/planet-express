@@ -556,3 +556,96 @@ def test_direct_execution_past_its_deadline_writes_nothing(tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM approvals").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 0
     assert store.list_events() == []
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_events_index_init_and_query_plan(tmp_path, existing):
+    from planet_express.core.store import _SCHEMA, SCHEMA_VERSION
+
+    store = Store(tmp_path / "events.db")
+    if existing:
+        old_schema = _SCHEMA.replace(
+            "CREATE INDEX IF NOT EXISTS events_kind_ts ON events (kind, ts);", ""
+        )
+        with sqlite3.connect(store.path) as conn:
+            conn.executescript(old_schema)
+            conn.execute("PRAGMA user_version = 2")
+            conn.execute("INSERT INTO events (ts, kind) VALUES (1, 'old')")
+            assert not conn.execute("PRAGMA index_list(events)").fetchall()
+    store.init()
+    before = store.list_events()
+    assert len(before) == int(existing)
+    store.init()
+    assert store.list_events() == before
+    with sqlite3.connect(store.path) as conn:
+        assert SCHEMA_VERSION == conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert "events_kind_ts" in {row[1] for row in conn.execute("PRAGMA index_list(events)")}
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM events WHERE kind = ? AND ts >= ?",
+            ("old", 0),
+        ).fetchall()
+        assert any("events_kind_ts" in row[3] for row in plan)
+
+
+@pytest.mark.parametrize("max_age", [None, 100.0])
+def test_prune_events_preserves_audit_trails_and_cutoff(tmp_path, max_age):
+    from planet_express.core.store import EVENT_RETENTION_SECONDS
+
+    assert EVENT_RETENTION_SECONDS == 90 * 24 * 3600
+    clock = Clock(0)
+    store = _store(tmp_path, clock)
+    store.record_event("old")
+    store.record_event("approval", approval_id="approval-id")
+    store.record_event("execution", execution_id="execution-id")
+    clock.t = 1
+    store.record_event("cutoff")
+    clock.t = 2
+    store.record_event("new")
+    clock.t = 1 + (EVENT_RETENTION_SECONDS if max_age is None else max_age)
+    deleted = store.prune_events() if max_age is None else store.prune_events(max_age)
+    assert deleted == 1
+    assert [row["kind"] for row in store.list_events()] == ["approval", "execution", "cutoff", "new"]
+    assert store.prune_events(EVENT_RETENTION_SECONDS if max_age is None else max_age) == 0
+
+
+@pytest.mark.parametrize("max_age", [0, -1])
+def test_prune_events_rejects_nonpositive_age_without_deleting(tmp_path, max_age):
+    clock = Clock(0)
+    store = _store(tmp_path, clock)
+    store.record_event("old")
+    before = store.list_events()
+    clock.t = 100_000_000
+    with pytest.raises(ValueError, match="positive"):
+        store.prune_events(max_age)
+    assert store.list_events() == before
+
+
+@pytest.mark.parametrize("deleted", [0, 3])
+def test_startup_initializes_then_prunes(deleted, caplog):
+    from unittest.mock import Mock, call
+
+    from casa_farnsworth import _init_store
+
+    store = Mock(spec=Store)
+    store.prune_events.return_value = deleted
+    with caplog.at_level("INFO", logger="planetexpress.farnsworth"):
+        _init_store(store)
+    assert store.mock_calls == [call.init(), call.prune_events()]
+    assert [record.getMessage() for record in caplog.records] == (
+        ["Pruned 3 old unlinked events at startup"] if deleted else []
+    )
+    assert all(record.levelname == "INFO" for record in caplog.records)
+
+
+def test_startup_prune_failure_logs_and_continues(caplog):
+    from unittest.mock import Mock, call
+
+    from casa_farnsworth import _init_store
+
+    store = Mock(spec=Store)
+    store.prune_events.side_effect = sqlite3.OperationalError("database is locked")
+    _init_store(store)
+    assert store.mock_calls == [call.init(), call.prune_events()]
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "WARNING"
+    assert "Event pruning failed at startup: database is locked" in caplog.text

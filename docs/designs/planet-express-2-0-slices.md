@@ -1044,10 +1044,18 @@ follows them.
   - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
   - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`
   - Verify: ticket returns inside the RPC budget; a duplicate submission id returns the same ticket; two concurrent asks cannot both pass the last unit of quota; insufficient-evidence and unsupported-fix render; interrupted tickets terminate at startup
-- [ ] **T22 (P2, human: ~3h / CC: ~20min)** — store — Events index on `(kind, ts)` plus a 90-day startup prune [D16]
+- [x] **T22 (P2, human: ~3h / CC: ~20min)** — store — ✅ done 2026-09-16 — Events index on `(kind, ts)` plus a 90-day startup prune [D16]
   - Surfaced by: Performance — `_SCHEMA` has no index on `events` while the ceiling COUNTs it per call and incidents update it per scan
   - Files: `planet_express/core/store.py`, `tests/test_store.py`
   - Verify: the ceiling query uses the index; the prune keeps approval- and execution-linked rows
+  - **Landed:** `CREATE INDEX IF NOT EXISTS events_kind_ts ON events (kind, ts)` — `EXPLAIN QUERY
+    PLAN` for the ceiling-shaped `COUNT(*) WHERE kind = ? AND ts >= ?` uses it; an existing DB gains it
+    on `init()` with rows intact. `SCHEMA_VERSION` deliberately **not** bumped: the index is backward
+    compatible, and T23 turns `user_version` into a compatibility gate. `Store.prune_events()` deletes
+    events older than 90 days with neither `approval_id` nor `execution_id` (strict `<` cutoff, rejects
+    a non-positive age); core runs it once after `init()` via `_init_store`, logging and continuing on
+    `sqlite3.Error`. The ceiling itself arrives with T21. Implemented by Codex from a brief, reviewed,
+    `codex review` clean first round. 782 tests green.
 - [ ] **T23 (P1, human: ~half day / CC: ~20min)** — deploy — Pre-upgrade config and DB snapshot, and `store.init()` refusing a newer `user_version` [D21]
   - Surfaced by: Outside voice 10 — `config_schema.py` `extra="forbid"` makes a previous tag reject new config; `store.py:139` re-stamps `user_version` with no compatibility check
   - Files: `deploy.sh`, `planet_express/core/store.py`, this doc
