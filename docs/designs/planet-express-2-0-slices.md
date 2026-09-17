@@ -1056,7 +1056,7 @@ follows them.
     a non-positive age); core runs it once after `init()` via `_init_store`, logging and continuing on
     `sqlite3.Error`. The ceiling itself arrives with T21. Implemented by Codex from a brief, reviewed,
     `codex review` clean first round. 782 tests green.
-- [ ] **T23 (P1, human: ~half day / CC: ~20min)** — deploy — 🟡 code landed 2026-09-17, VM rehearsal open — Pre-upgrade config and DB snapshot, and `store.init()` refusing a newer `user_version` [D21]
+- [x] **T23 (P1, human: ~half day / CC: ~20min)** — deploy — ✅ done 2026-09-17 — Pre-upgrade config and DB snapshot, and `store.init()` refusing a newer `user_version` [D21]
   - Surfaced by: Outside voice 10 — `config_schema.py` `extra="forbid"` makes a previous tag reject new config; `store.py:139` re-stamps `user_version` with no compatibility check
   - Files: `deploy.sh`, `planet_express/core/store.py`, this doc
   - Verify: a rehearsed downgrade on the test VM restores config and DB and starts; a v2 core refuses a v3 database loudly
@@ -1079,7 +1079,23 @@ follows them.
   - Implemented by Codex from a brief; four `codex review` rounds (restore dependency on repo code and
     the service check; recorded absence; root-owned config; shell quoting), the last clean. 844 tests
     green.
-  - **OPEN:** the rehearsed downgrade on the test VM (restore + old tag starts; a newer DB refused).
+  - **Test VM rehearsal (2026-09-17), default-install shape — root-owned `/etc/planetexpress` with
+    the dashboard's ACL: 25/26 scripted checks, the 26th resolved below.** Snapshot taken with core
+    running (manifest schema 2, both checksums, dir 0700). Simulated upgrade: DB stamped version 3
+    plus a post-snapshot event, then a config key this code doesn't know. v2 core refused the DB with
+    `CRITICAL ... database schema is newer (database version 3, code version 2)`, DB bytes and
+    version unchanged; refused the config with `Invalid config ... Extra inputs are not permitted`.
+    Restore refused without `--skip-config` (naming the `sudo cp` step, nothing changed) and refused
+    while core was `activating`. `restore --yes --skip-config` plus the printed `sudo cp`: DB back to
+    version 2, post-snapshot event gone, config byte-identical to pre-upgrade, still `root:root`,
+    dashboard ACL intact, `pre-restore` snapshot holds the version-3 DB. **Downgrade:** the VM's code
+    replaced with `v2.0.0-1c` (4 core files verified byte-identical to the tag) started clean on the
+    restored state — core and dashboard active, no errors, dashboard 302 to login. VM returned to v2.
+  - **Found on the VM:** the one failed check was core refusing to start after the restore with
+    "Start request repeated too quickly" — the rehearsal's own refused starts had exhausted the unit's
+    `StartLimitBurst=5`/300s. Not a restore defect (after `systemctl reset-failed` core started clean
+    on v2), but a real operator trap after exactly this failure, so `INSTALL.md` now documents
+    `reset-failed` in the rollback procedure.
 - [ ] **T24 (P1, human: ~1.5 days / CC: ~40min)** — policy — Autonomy limits shipped with the R0-R4 map [D23]
   - Surfaced by: Outside voice 1 — R1 is called reversible while `docker.restart_service` declares `rollbackable=False`; quarantine is slice 6 and no cooldowns exist
   - Files: `planet_express/execution/policy.py`, `planet_express/core/store.py`, `config_schema.py`

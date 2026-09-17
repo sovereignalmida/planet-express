@@ -200,6 +200,15 @@ sudo cp --no-preserve=all data/snapshots/<snapshot>/config.yaml /etc/planetexpre
 `cp` onto the existing file rewrites it in place, so its owner, mode and the dashboard's read ACL
 are kept. The first command prints the second with the real paths.
 
+If core already tried to start on the newer state (it refuses: "database schema is newer" or
+"Invalid config"), systemd's start limit (5 starts in 300s) may be exhausted and the next start
+fails with "Start request repeated too quickly" even though the restore worked. Clear it first:
+
+```bash
+sudo systemctl reset-failed casa-planetexpress
+sudo systemctl start casa-planetexpress casa-dashboard
+```
+
 Restoring discards approvals and events recorded after the snapshot. If the core refuses
 to start with “database schema is newer”, the pre-upgrade state restoration step was
 skipped: restore the matching snapshot or upgrade the code again.
