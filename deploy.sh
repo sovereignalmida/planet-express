@@ -107,6 +107,12 @@ while true; do
 done
 export CASA_CONFIG="$config_path"
 
+if [[ -f venv/bin/python && ( -f "$CASA_CONFIG" || -f "${CASA_DATA_DIR-$INSTALL_DIR/data}/planetexpress.db" ) ]]; then
+    snapshot_path="$(venv/bin/python scripts/state_snapshot.py create --label pre-deploy)" \
+        || error "Pre-deploy snapshot failed; deployment stopped."
+    info "Pre-deploy snapshot: $snapshot_path"
+fi
+
 # Always run the wizard, even if $CASA_CONFIG already exists -- it detects that itself
 # and reuses the existing topology config unchanged rather than re-prompting, but an
 # independent Codex review found that skipping it here entirely (the previous

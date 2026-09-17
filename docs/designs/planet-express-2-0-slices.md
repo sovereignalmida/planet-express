@@ -1056,10 +1056,30 @@ follows them.
     a non-positive age); core runs it once after `init()` via `_init_store`, logging and continuing on
     `sqlite3.Error`. The ceiling itself arrives with T21. Implemented by Codex from a brief, reviewed,
     `codex review` clean first round. 782 tests green.
-- [ ] **T23 (P1, human: ~half day / CC: ~20min)** — deploy — Pre-upgrade config and DB snapshot, and `store.init()` refusing a newer `user_version` [D21]
+- [ ] **T23 (P1, human: ~half day / CC: ~20min)** — deploy — 🟡 code landed 2026-09-17, VM rehearsal open — Pre-upgrade config and DB snapshot, and `store.init()` refusing a newer `user_version` [D21]
   - Surfaced by: Outside voice 10 — `config_schema.py` `extra="forbid"` makes a previous tag reject new config; `store.py:139` re-stamps `user_version` with no compatibility check
   - Files: `deploy.sh`, `planet_express/core/store.py`, this doc
   - Verify: a rehearsed downgrade on the test VM restores config and DB and starts; a v2 core refuses a v3 database loudly
+  - **Landed (code):** `store.init()` reads `user_version` read-only first and raises
+    `SchemaTooNewError` (file untouched, schema not run) when the DB is newer; core logs CRITICAL and
+    stops, `revoke_devices.py` exits 1. New `scripts/state_snapshot.py` — **standard library only,
+    imports nothing from the repo** (it must run against an older checkout): `create` (consistent
+    `sqlite3` backup including WAL writes, byte copy of the config, manifest with SHA-256s, schema
+    version, `git describe`), `list`, `restore --yes` (checksums verified first; requires systemd to
+    POSITIVELY report the core `inactive`/`failed`, refuses transitional states even with
+    `--no-service-check`; automatic `pre-restore` snapshot; atomic replace keeping the live file's
+    owner and access ACL; removes a DB the snapshot recorded as absent; refuses when the snapshot has
+    no config but one exists). `deploy.sh` snapshots before the config wizard and aborts on failure.
+    `INSTALL.md` "Upgrading and rolling back": restore BEFORE checking out an older tag.
+  - **Root-owned config (Codex review round 2):** on a default install the core user cannot write
+    `/etc/planetexpress`, so restore detects that before changing anything and refuses with the exact
+    command; `--skip-config` restores the DB and prints a shell-quoted
+    `sudo cp --no-preserve=all -- <snapshot config> <config>`, which rewrites the file in place and keeps
+    owner, mode and ACL (verified on a real file). Same root cause as T26's open ownership decision.
+  - Implemented by Codex from a brief; four `codex review` rounds (restore dependency on repo code and
+    the service check; recorded absence; root-owned config; shell quoting), the last clean. 844 tests
+    green.
+  - **OPEN:** the rehearsed downgrade on the test VM (restore + old tag starts; a newer DB refused).
 - [ ] **T24 (P1, human: ~1.5 days / CC: ~40min)** — policy — Autonomy limits shipped with the R0-R4 map [D23]
   - Surfaced by: Outside voice 1 — R1 is called reversible while `docker.restart_service` declares `rollbackable=False`; quarantine is slice 6 and no cooldowns exist
   - Files: `planet_express/execution/policy.py`, `planet_express/core/store.py`, `config_schema.py`

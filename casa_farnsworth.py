@@ -43,7 +43,7 @@ from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
-from planet_express.core.store import Store
+from planet_express.core.store import SchemaTooNewError, Store
 from planet_express.execution import actions
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
@@ -2090,7 +2090,11 @@ def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notif
 
 
 def _init_store(store: Store) -> None:
-    store.init()
+    try:
+        store.init()
+    except SchemaTooNewError as exc:
+        log.critical("%s", exc)
+        raise
     try:
         deleted = store.prune_events()
     except sqlite3.Error as exc:

@@ -25,7 +25,7 @@ import secrets
 import sqlite3
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 2
@@ -107,6 +107,10 @@ def _new_id() -> str:
     return secrets.token_hex(6)
 
 
+class SchemaTooNewError(RuntimeError):
+    """The database requires a newer core or restoration of an older snapshot."""
+
+
 class Store:
     def __init__(self, path: Path, clock: Callable[[], float] = time.time):
         self.path = Path(path)
@@ -136,10 +140,24 @@ class Store:
             else:
                 conn.execute("COMMIT")
 
+    def _check_schema_version(self, conn: sqlite3.Connection) -> None:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise SchemaTooNewError(
+                f"{self.path}: database schema is newer (database version {version}, "
+                f"code version {SCHEMA_VERSION}); restore the pre-upgrade snapshot with "
+                "scripts/state_snapshot.py or upgrade the code."
+            )
+
     def init(self) -> None:
+        # A read-only preflight also avoids checkpointing an existing WAL on refusal.
+        if self.path.exists():
+            with closing(sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True)) as conn:
+                self._check_schema_version(conn)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path.parent.chmod(0o700)
         with self._connect() as conn:
+            self._check_schema_version(conn)
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(_SCHEMA)
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

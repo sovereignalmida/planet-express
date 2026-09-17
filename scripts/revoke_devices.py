@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from planet_express.core.store import Store
+from planet_express.core.store import SchemaTooNewError, Store
 from web_auth import OPERATOR_PATTERN
 
 
@@ -17,7 +17,11 @@ def main(argv, store_factory=Store) -> int:
 
     operator = argv[0]
     store = store_factory(config.ACTIONS_DB)
-    store.init()
+    try:
+        store.init()
+    except SchemaTooNewError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     epoch = store.revoke_devices(operator)
     print(f"Device epoch for {operator}: {epoch}. Every trusted device for this operator must log in again.")
     return 0

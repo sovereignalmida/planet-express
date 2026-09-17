@@ -143,3 +143,63 @@ If you use [gethomepage.dev](https://gethomepage.dev), the dashboard also expose
   logic (safety-check allow/deny matching, config schema validation, state-schema
   round-trips) — the actual container/sudo behavior on your box is exactly what this install
   walkthrough and the smoke test above are for.
+
+## Upgrading and rolling back
+
+Run these commands as the unprivileged core user, from the repository, with `CASA_CONFIG`
+and `CASA_DATA_DIR` set to the same paths used by the service if you changed their defaults
+(`/etc/planetexpress/config.yaml` and the repository's `data/`). The snapshot tool does not
+load or validate the config, so it also works with a config written by newer code.
+
+`deploy.sh` automatically snapshots existing config and database state before the
+configuration wizard runs, and aborts if the snapshot fails. Before a manual upgrade,
+stop both units and take a snapshot before checking out the new tag:
+
+```bash
+sudo systemctl stop casa-dashboard casa-planetexpress
+venv/bin/python scripts/state_snapshot.py create --label pre-upgrade
+git checkout <tag>
+bash deploy.sh
+```
+
+Always stop **both** units before checking out another tag: the dashboard renders templates
+from disk, so changing the checkout while it runs can mix old code with new templates.
+Snapshots live in `DATA_DIR/snapshots/`; creation prints the path. List them with
+`venv/bin/python scripts/state_snapshot.py list`. The database copy includes committed WAL
+writes, and the manifest records file checksums, schema version and Git revision.
+
+To roll back, select the snapshot taken before that upgrade:
+
+```bash
+sudo systemctl stop casa-dashboard casa-planetexpress
+venv/bin/python scripts/state_snapshot.py restore <snapshot> --yes
+git checkout <old-tag>
+venv/bin/pip install -r requirements.txt
+sudo systemctl start casa-planetexpress casa-dashboard
+```
+
+Restore **before** checking out the old tag: older tags do not contain
+`scripts/state_snapshot.py`. The script uses only the Python standard library and nothing from
+this repository, so a copy kept outside the clone works too. A restore verifies checksums,
+refuses unless systemd positively reports `casa-planetexpress` as `inactive` or `failed`, and
+takes a `pre-restore` snapshot to make the operation reversible. If the service state cannot be
+read (no systemctl, no bus), it refuses unless you add `--no-service-check`; only do that with
+the core certainly stopped. Each restored file is replaced atomically, keeping the live file's
+owner and access ACL. A database the snapshot recorded as absent is removed; a config it recorded
+as absent makes the restore refuse, since the config probably lived at another path.
+
+On a default install the config lives in root-owned `/etc/planetexpress`, which the core user
+cannot write. Restore detects that before changing anything and refuses with the exact command.
+Run it in two steps:
+
+```bash
+venv/bin/python scripts/state_snapshot.py restore <snapshot> --yes --skip-config
+sudo cp --no-preserve=all data/snapshots/<snapshot>/config.yaml /etc/planetexpress/config.yaml
+```
+
+`cp` onto the existing file rewrites it in place, so its owner, mode and the dashboard's read ACL
+are kept. The first command prints the second with the real paths.
+
+Restoring discards approvals and events recorded after the snapshot. If the core refuses
+to start with “database schema is newer”, the pre-upgrade state restoration step was
+skipped: restore the matching snapshot or upgrade the code again.

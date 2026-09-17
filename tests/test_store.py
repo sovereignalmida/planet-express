@@ -649,3 +649,57 @@ def test_startup_prune_failure_logs_and_continues(caplog):
     assert len(caplog.records) == 1
     assert caplog.records[0].levelname == "WARNING"
     assert "Event pruning failed at startup: database is locked" in caplog.text
+
+
+@pytest.mark.parametrize("version_offset", [0, -1, -2, 1])
+def test_schema_compatibility_gate(tmp_path, version_offset):
+    from planet_express.core.store import SCHEMA_VERSION, SchemaTooNewError
+
+    path = tmp_path / "gate.db"
+    version = SCHEMA_VERSION + version_offset
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"PRAGMA user_version = {version}")
+    before = path.read_bytes()
+    if version_offset > 0:
+        with pytest.raises(SchemaTooNewError) as caught:
+            Store(path).init()
+        assert str(path) in str(caught.value)
+        assert f"database version {version}" in str(caught.value)
+        assert f"code version {SCHEMA_VERSION}" in str(caught.value)
+        assert "scripts/state_snapshot.py" in str(caught.value)
+        assert path.read_bytes() == before
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("SELECT name FROM sqlite_master").fetchall() == []
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == version
+    else:
+        Store(path).init()
+        with sqlite3.connect(path) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+            assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'events'").fetchone()
+
+
+def test_startup_newer_schema_logs_critical_and_propagates(caplog):
+    from unittest.mock import Mock
+
+    from casa_farnsworth import _init_store
+    from planet_express.core.store import SchemaTooNewError
+
+    store = Mock(spec=Store)
+    error = SchemaTooNewError("database schema is newer")
+    store.init.side_effect = error
+    with pytest.raises(SchemaTooNewError) as caught:
+        _init_store(store)
+    assert caught.value is error
+    store.prune_events.assert_not_called()
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [("CRITICAL", str(error))]
+
+
+def test_revoke_devices_newer_schema(tmp_path, capsys):
+    from planet_express.core.store import SCHEMA_VERSION
+    from scripts.revoke_devices import main
+
+    path = tmp_path / "newer.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    assert main(["alice"], store_factory=lambda _: Store(path)) == 1
+    assert "database schema is newer" in capsys.readouterr().err
