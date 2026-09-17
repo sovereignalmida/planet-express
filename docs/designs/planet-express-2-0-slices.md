@@ -1120,7 +1120,18 @@ follows them.
     `ConfigService.apply`: invalid → nothing written; `try_begin_mutation(require_idle=True)` refused →
     `busy`; write → activate with the lock held. Built in `run_bot`, **not wired to RPC or Telegram**
     (slice 4). Implemented by Codex from a brief, reviewed; 811 tests green.
-  - **OPEN — needs a decision before slice 4 wires apply (Codex review round 2):** on a default install
+  - **DECIDED 2026-09-17 (D29, operator):** core owns the config directory on every install, and
+    dashboard edits to security-sensitive fields sit behind an enable switch.
+    - `setup_wizard.py` gives `/etc/planetexpress` (and the config in it) to the run user, so apply
+      works on default installs exactly as on the live host, whose config is already in the clone.
+    - `sudo_allowlist` and `forbidden_stacks` are **refused by default** in `ConfigService.apply`
+      (a draft differing from the live config in either field → `status: "locked"`, nothing written).
+    - The switch is `PE_ALLOW_SENSITIVE_CONFIG_EDITS=1` in `/etc/planetexpress.env` — root-owned,
+      mode 600, read by core at startup. It is deliberately **not** in `config.yaml`: a switch the
+      dashboard can flip protects nothing. Enabling needs a sudo edit plus a core restart; the
+      dashboard shows the switch's state and explains how to enable it.
+    - Lands with slice 4's config UI; until then apply stays unwired.
+  - **Was OPEN (Codex review round 2), resolved by D29 above:** on a default install
     `setup_wizard.py` creates `/etc/planetexpress` and the config as root, and core runs unprivileged,
     so every apply returns `write_failed` (safe: nothing written, core keeps running). Fixing it means
     granting core write access to the config directory — and the config carries `sudo_allowlist`, so
