@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from flask import (
     Flask,
     abort,
+    g,
     jsonify,
     redirect,
     render_template,
@@ -76,6 +77,30 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         epochs[operator] = (value, now)
         return value
 
+    def core(method, params):
+        response = rpc_call(method, params)
+        if not isinstance(response, dict):
+            raise RpcError("Core unavailable")
+        if response.get("ok") is not True:
+            error = response.get("error")
+            code = error.get("code") if isinstance(error, dict) else "internal"
+            raise RpcError("Core request failed", code)
+        result = response.get("result")
+        if not isinstance(result, dict):
+            raise RpcError("Core unavailable")
+        return result
+
+    def is_chat_request():
+        return request.path.startswith("/api/chat")
+
+    def check_csrf():
+        expected = session.get("csrf_token", "")
+        supplied = request.form.get("csrf_token", "")
+        if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
+            if is_chat_request():
+                return jsonify(error="Invalid CSRF token"), 400
+            abort(400)
+
     def cookie_options():
         return {"httponly": True, "samesite": "Strict",
                 "secure": request.is_secure or app.config["DASHBOARD_HTTPS"]}
@@ -103,17 +128,19 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
 
     @app.errorhandler(RpcError)
     def unavailable(error):
+        if is_chat_request():
+            status, message = {"bad_request": (400, "Invalid chat request"),
+                               "not_found": (404, "Chat ticket not found")}.get(
+                                   error.code, (503, "Chat unavailable; try again shortly"))
+            return jsonify(error=message), status
         # Fail closed for this request only: keep the cookies, so a core restart doesn't
         # sign every operator out.
         return app.make_response((airlock("unavailable"), 503))
 
     @app.before_request
     def authenticate():
-        if request.method == "POST":
-            expected = session.get("csrf_token", "")
-            supplied = request.form.get("csrf_token", "")
-            if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
-                abort(400)
+        if request.method == "POST" and not is_chat_request():
+            check_csrf()
         public = ((request.path == "/login" and request.method in {"GET", "POST"})
                   or (request.path == "/login/notify" and request.method == "POST")
                   or (request.path == "/api/widget" and request.method == "GET")
@@ -131,8 +158,15 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             secret, token, clock(), max_age=30 * 86400 if valid_trust and trust["t"] else 12 * 3600
         ) if valid_trust else None
         if identity and identity[0] in operators and epoch(identity[0]) == identity[1]:
+            g.operator = identity[0]
+            if request.method == "POST" and is_chat_request():
+                error = check_csrf()
+                if error is not None:
+                    return error
             csrf_token()
             return None
+        if is_chat_request():
+            return clear_auth(app.make_response((jsonify(error="Authentication required"), 401)))
         return clear_auth(redirect(url_for("login", next=request.path)))
 
     @app.after_request
@@ -197,6 +231,25 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def logout():
         session.clear()
         return clear_auth(redirect(url_for("login")))
+
+    @app.post("/api/chat")
+    def chat_ask():
+        question = request.form.get("question", "").strip()
+        submission_id = request.form.get("submission_id", "")
+        if not 1 <= len(question) <= 2000 or re.fullmatch(r"[A-Za-z0-9_-]{8,64}", submission_id) is None:
+            return jsonify(error="Invalid question or submission_id"), 400
+        return jsonify(core("chat.ask", {"operator": g.operator, "question": question,
+                                         "submission_id": submission_id}))
+
+    @app.get("/api/chat/<ticket_id>")
+    def chat_get(ticket_id):
+        if re.fullmatch(r"[0-9a-f]{12}", ticket_id) is None:
+            return jsonify(error="Chat ticket not found"), 404
+        return jsonify(core("chat.get", {"operator": g.operator, "ticket_id": ticket_id}))
+
+    @app.get("/api/chat/quota")
+    def chat_quota():
+        return jsonify(core("chat.quota", {}))
 
     app.add_template_filter(extract_host)
     app.add_template_filter(_extra_host_count, "extra_host_count")

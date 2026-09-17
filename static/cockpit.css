@@ -1673,3 +1673,17 @@ footer p {
 .pe-airlock-clock progress { width: 100%; accent-color: var(--pe-warn); }
 .pe-logout { margin: 0; }
 .pe-logout button { min-height: 44px; cursor: pointer; }
+
+/* Chat is a persistent sibling of the replaceable dashboard snapshot. */
+.chat-active #dashboard-live > .body-grid { display: none; }
+#chat-panel { padding: 22px 26px 40px; position: relative; z-index: 2; }
+#chat-form { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin-top: 18px; }
+#chat-question { width: 100%; box-sizing: border-box; resize: vertical; padding: 12px;
+  background: var(--cp-inset-bg); color: var(--text2); border: 1px solid var(--panel-border);
+  border-radius: 6px; font: inherit; }
+#chat-transcript { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
+#chat-transcript p, #chat-transcript h3, #chat-transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#chat-transcript pre { max-height: 320px; overflow: auto; }
+#chat-transcript summary { cursor: pointer; }
+#chat-transcript p, #chat-transcript details { margin: 12px 0; }
+#chat-ask:disabled { opacity: .5; cursor: wait; }

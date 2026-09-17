@@ -9,9 +9,10 @@
 (function () {
   "use strict";
 
-  var TAB_NAMES = ["overview", "backups", "network", "actions"];
+  var TAB_NAMES = ["overview", "backups", "network", "actions", "chat"];
 
   function setActiveTab(name) {
+    document.body.classList.toggle("chat-active", name === "chat");
     document.querySelectorAll(".tab").forEach(function (btn) {
       btn.classList.toggle("active", btn.dataset.tab === name);
     });

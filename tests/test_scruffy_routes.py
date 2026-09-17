@@ -6,6 +6,7 @@ test_dashboard_data.py.
 import json
 import os
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -37,7 +38,7 @@ class FakeRpc:
 
     def __call__(self, method, params):
         self.calls.append((method, params))
-        result = self.results.get((method, params["operator"]), self.results.get(method))
+        result = self.results.get((method, params.get("operator")), self.results.get(method))
         if isinstance(result, list):
             result = result.pop(0)
         if isinstance(result, Exception):
@@ -453,3 +454,142 @@ def test_notify_after_a_failure_that_locks_only_the_operator():
     response = client.post("/login/notify", data={"csrf_token": csrf(client)})
     assert b"Notification sent" in response.data
     assert [c for c in rpc.calls if c[0] == "auth.notify_locked"][-1][1]["operator"] == "alice"
+
+
+@pytest.fixture
+def chat_client():
+    client, rpc, now = make_client()
+    login(client, now)
+    token = csrf(client)
+    rpc.calls.clear()
+    return client, rpc, now, {"csrf_token": token, "question": " What failed? ",
+                              "submission_id": "submission-123"}
+
+
+def assert_chat_error(response, status):
+    assert response.status_code == status
+    assert set(response.get_json()) == {"error"}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert b"secret diagnostic" not in response.data
+    assert b"<html" not in response.data
+
+
+@pytest.mark.parametrize("path", ["/api/chat", "/api/chat/012345abcdef", "/api/chat/quota"])
+def test_chat_requires_auth_json(path):
+    client, rpc, _now = make_client()
+    response = client.post(path) if path == "/api/chat" else client.get(path)
+    assert_chat_error(response, 401)
+    assert not rpc.calls
+
+
+def test_chat_csrf_and_operator(chat_client):
+    client, rpc, _now, data = chat_client
+    assert_chat_error(client.post("/api/chat", data={"question": "hello"}), 400)
+    assert_chat_error(client.post("/api/chat", data=data | {"csrf_token": "wrong"}), 400)
+    assert not rpc.calls
+    ticket = {"ticket_id": "012345abcdef", "status": "queued"}
+    rpc.results["chat.ask"] = ticket
+    response = client.post("/api/chat", data=data | {"operator": "bob"})
+    assert response.status_code == 200 and response.get_json() == ticket
+    assert response.headers["Cache-Control"] == "no-store"
+    assert rpc.calls == [("chat.ask", {"operator": "alice", "question": "What failed?",
+                                       "submission_id": "submission-123"})]
+
+
+@pytest.mark.parametrize("field,value", [("question", ""), ("question", "  "),
+    ("question", "x" * 2001), ("submission_id", "short"), ("submission_id", "x" * 65),
+    ("submission_id", "invalid!"), ("submission_id", "abcdefgh\n")])
+def test_chat_validation_before_rpc(chat_client, field, value):
+    client, rpc, _now, data = chat_client
+    assert_chat_error(client.post("/api/chat", data=data | {field: value}), 400)
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("ticket_id", ["bad", "ABCDEF012345", "a" * 13, "a" * 11])
+def test_chat_malformed_ticket(chat_client, ticket_id):
+    client, rpc, _now, _data = chat_client
+    assert_chat_error(client.get("/api/chat/" + ticket_id), 404)
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("code,status", [("not_found", 404), ("bad_request", 400), ("internal", 503)])
+def test_chat_core_error_envelope(chat_client, code, status):
+    client, rpc, _now, _data = chat_client
+    # Exercise the actual wire envelope, rather than only raised transport errors.
+    original = rpc.__class__.__call__
+    with pytest.MonkeyPatch.context() as patch:
+        def call(self, method, params):
+            if method == "chat.get":
+                self.calls.append((method, params))
+                return {"ok": False, "error": {"code": code, "message": "secret diagnostic"}}
+            return original(self, method, params)
+        patch.setattr(FakeRpc, "__call__", call)
+        assert_chat_error(client.get("/api/chat/012345abcdef"), status)
+    assert rpc.calls == [("chat.get", {"operator": "alice", "ticket_id": "012345abcdef"})]
+
+
+@pytest.mark.parametrize("method", ["chat.ask", "chat.get", "chat.quota", "auth.device_epoch"])
+def test_chat_unreachable_is_json(chat_client, method):
+    client, rpc, now, data = chat_client
+    rpc.results[method] = RpcError("secret diagnostic")
+    if method == "auth.device_epoch":
+        now[0] += 61
+    response = (client.post("/api/chat", data=data) if method == "chat.ask" else
+                client.get("/api/chat/quota" if method == "chat.quota" else "/api/chat/012345abcdef"))
+    assert_chat_error(response, 503)
+    assert client.get_cookie("pe_auth") is not None
+
+
+def test_chat_quota_and_ticket_passthrough(chat_client):
+    client, rpc, _now, data = chat_client
+    quota = {"used": 12, "limit": 100, "resets_at": 1800050000}
+    ticket = {"ticket_id": "012345abcdef", "status": "failed", "error": "chat is busy, try again shortly"}
+    rpc.results.update({"chat.quota": quota, "chat.ask": ticket, "chat.get": ticket})
+    for response, expected in [(client.get("/api/chat/quota"), quota),
+                               (client.post("/api/chat", data=data), ticket),
+                               (client.get("/api/chat/012345abcdef"), ticket)]:
+        assert response.status_code == 200 and response.get_json() == expected
+        assert response.headers["Cache-Control"] == "no-store"
+    assert rpc.calls[0] == ("chat.quota", {})
+
+
+def test_chat_panel_outside_live_snapshot(tmp_path, monkeypatch):
+    class DashboardParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.chat_ancestors = None
+            self.chat_tab = False
+            self.csrf_meta = False
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("data-tab-panel") == "chat":
+                self.chat_ancestors = list(self.stack)
+                assert "tab-panel" in attrs.get("class", "").split()
+            if tag == "button" and attrs.get("data-tab") == "chat":
+                self.chat_tab = True
+            if tag == "meta" and attrs.get("name") == "csrf-token":
+                self.csrf_meta = bool(attrs.get("content"))
+            if tag not in {"meta", "link", "img", "input", "br", "hr"}:
+                self.stack.append((tag, attrs.get("id")))
+
+        def handle_endtag(self, tag):
+            if self.stack and self.stack[-1][0] == tag:
+                self.stack.pop()
+
+    parser = DashboardParser()
+    parser.feed(_render_with_certs(tmp_path, monkeypatch, []))
+    assert parser.chat_tab and parser.csrf_meta
+    assert parser.chat_ancestors is not None
+    assert ("div", "dashboard-live") not in parser.chat_ancestors
+    assert parser.chat_ancestors == [("html", None), ("body", None)]
+
+
+
+def test_chat_js_does_not_need_a_secure_context():
+    """crypto.randomUUID() only exists over HTTPS or localhost; the dashboard is plain HTTP on the LAN."""
+    js = (Path(__file__).resolve().parent.parent / "static" / "chat.js").read_text()
+    code = "\n".join(line for line in js.splitlines() if not line.strip().startswith("//"))
+    assert "randomUUID" not in code
+    assert "crypto.getRandomValues" in code

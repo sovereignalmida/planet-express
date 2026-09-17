@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>Planet Express — Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -83,6 +84,7 @@
     <button class="tab" data-tab="backups" type="button">Backups</button>
     <button class="tab" data-tab="network" type="button">Network</button>
     <button class="tab" data-tab="actions" type="button">Actions</button>
+    <button class="tab" data-tab="chat" type="button">Chat</button>
     <div class="tabs-spacer"></div>
     <div class="readonly-chip">READ-ONLY · AUTHENTICATED</div>
   </nav>
@@ -747,10 +749,26 @@
   </div>
   </div>
 
+  <div class="tab-panel" data-tab-panel="chat" id="chat-panel">
+    <section class="panel">
+      <h2>Chat</h2>
+      <p>Chat investigates with read-only checks and can only propose actions that still need approval.</p>
+      <form id="chat-form">
+        <label for="chat-question">Question</label>
+        <textarea id="chat-question" name="question" maxlength="2000" required rows="4"></textarea>
+        <button class="refresh-btn" id="chat-ask" type="submit">Ask</button>
+      </form>
+      <p id="chat-message" role="status"></p>
+      <p id="chat-quota" class="muted-body">Loading daily chat quota…</p>
+    </section>
+    <ol id="chat-transcript" aria-label="This page's questions" aria-live="polite"></ol>
+  </div>
+
   <footer>
     <p>Planet Express — read-only, no auth, LAN-trust · auto-refreshes every 60s · held together by good news</p>
   </footer>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  <script src="{{ url_for('static', filename='chat.js') }}"></script>
 </body>
 </html>

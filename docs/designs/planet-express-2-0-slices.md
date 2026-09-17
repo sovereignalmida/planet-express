@@ -1053,7 +1053,7 @@ follows them.
     root on the next Sunday run, bypassing the sudo allowlist. T25 moves it to root-owned
     `/usr/local/sbin/`, repoints both borg units, and adds the marker; rehearsed on the test VM, then
     installed by the operator with sudo. Marker older than 6 hours is ignored.
-- [ ] **T21 (P1, human: ~2 days / CC: ~1 session)** — chat — `chat.ask` ticket + poll, answer/proposal contract, admission control and the daily ceiling [D5, D7, D17, D22]
+- [x] **T21 (P1, human: ~2 days / CC: ~1 session)** — chat — ✅ done 2026-09-17 — `chat.ask` ticket + poll, answer/proposal contract, admission control and the daily ceiling [D5, D7, D17, D22]
   - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
   - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`
   - Verify: ticket returns inside the RPC budget; a duplicate submission id returns the same ticket; two concurrent asks cannot both pass the last unit of quota; insufficient-evidence and unsupported-fix render; interrupted tickets terminate at startup
@@ -1074,6 +1074,18 @@ follows them.
     `unsupported_fix` with the reason), answer redacted and capped at 4000 chars. RPC `chat.ask` /
     `chat.get` / `chat.quota`. Implemented by Codex from a brief; `codex review` clean first round.
     969 tests green. Dashboard panel is T21b.
+  - **T21b landed (dashboard), 2026-09-17:** a **Chat** tab; the panel lives OUTSIDE `#dashboard-live`
+    so the 60s refresh swap never wipes a draft, an answer or an in-flight poll. `POST /api/chat`,
+    `GET /api/chat/<id>`, `GET /api/chat/quota` — operator taken from the device token (never the
+    form), CSRF from the form field, and chat routes answer 400/401/404/503 as JSON instead of the
+    airlock redirect/page. `static/chat.js` renders server text with `textContent` only, polls every
+    2s while visible, keeps a submission id across a network retry (core dedupes) and uses a fresh one
+    for a Retry of a failed ticket; evidence cited vs "Other checks run" in `<details>`.
+  - **Codex review round 1 (fixed):** the brief specified `crypto.randomUUID()`, which browsers only
+    expose in secure contexts — on the plain-HTTP LAN dashboard every Ask would have thrown. Now
+    `crypto.getRandomValues()`; a test forbids `randomUUID` in `chat.js`. Round 2 clean. 994 tests green.
+  - **Known cosmetic gap:** a proposal's label reads "restart stack/service" literally because tickets
+    don't store the proposal target; the approval id and the Telegram card carry it.
 - [x] **T22 (P2, human: ~3h / CC: ~20min)** — store — ✅ done 2026-09-16 — Events index on `(kind, ts)` plus a 90-day startup prune [D16]
   - Surfaced by: Performance — `_SCHEMA` has no index on `events` while the ceiling COUNTs it per call and incidents update it per scan
   - Files: `planet_express/core/store.py`, `tests/test_store.py`
