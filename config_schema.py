@@ -73,6 +73,7 @@ class PlanetExpressConfig(BaseModel):
     stacks_root: Path
     forbidden_stacks: list[str] = []
     paused_containers: list[str] = []
+    backup_jobs: list[Literal["daily", "weekly"]] = ["daily", "weekly"]
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
     # /install only ever writes a LAN-only Traefik router (no auth of its own) —
@@ -93,6 +94,15 @@ class PlanetExpressConfig(BaseModel):
     # explicitly declares them here. Enforced in casa_bender.py's _safety_check(),
     # independent of whatever a plan's LLM-generated commands claim to need.
     sudo_allowlist: SudoAllowlist = SudoAllowlist()
+
+    @field_validator("backup_jobs")
+    @classmethod
+    def _validate_backup_jobs(cls, jobs: list[str]) -> list[str]:
+        if not jobs:
+            raise ValueError("backup_jobs must contain at least one job")
+        if len(jobs) != len(set(jobs)):
+            raise ValueError("backup_jobs must not contain duplicates")
+        return jobs
 
     @field_validator("stacks_root")
     @classmethod

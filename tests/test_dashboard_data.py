@@ -663,3 +663,46 @@ def test_summarize_health_medium_stack_alert_is_warning(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STATE_MONITOR", path)
     monkeypatch.setattr(config, "STATE_FINDINGS", tmp_path / "no_findings.json")
     assert dashboard_data.summarize_health()["status"] == "warning"
+
+
+def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
+    from flask import Flask, render_template
+
+    from casa_scruffy import _extra_host_count, extract_host
+
+    monkeypatch.setattr(config, 'BACKUP_JOBS', ['weekly'])
+    for constant in ('STATE_MONITOR', 'STATE_FINDINGS', 'STATE_STATUS', 'STATE_PLAN',
+                     'UPDATE_HISTORY_FILE', 'ROLLBACK_CANDIDATES_FILE'):
+        monkeypatch.setattr(config, constant, tmp_path / constant)
+    app = Flask(__name__, template_folder=str(Path(__file__).resolve().parent.parent / 'templates'))
+    app.add_url_rule('/logout', endpoint='logout', view_func=lambda: '', methods=['POST'])
+    app.jinja_env.globals['csrf_token'] = lambda: ''
+    app.add_template_filter(extract_host)
+    app.add_template_filter(_extra_host_count, 'extra_host_count')
+    now = datetime.now(timezone.utc)
+    # Includes a pre-upgrade two-job snapshot and both no-data fallback paths.
+    for names, mode in [(['weekly'], 'full'), (['daily', 'weekly'], 'full'),
+                        ([], 'full'), ([], 'quick')]:
+        _write(config.STATE_MONITOR, {
+            'timestamp': now.isoformat(), 'mode': mode,
+            'backups': {name: {
+                'result': 'success', 'last_run': _fmt_systemd_local(now - timedelta(hours=1)),
+                'next_run': _fmt_systemd_local(now + timedelta(hours=24)),
+            } for name in names},
+        })
+        ctx = dashboard_data.build_dashboard_context()
+        ctx.update(traefik={'available': False}, adguard={'available': False},
+                   telegram_bot_username='')
+        ctx['professor_lines'] = dashboard_data.build_professor_lines(ctx)
+        summary = ctx['system_and_backups']
+        assert list(summary['backups']) == names
+        if names:
+            assert summary['verdict']['level'] == 'ok'
+            assert f'All {len(names)} borg job(s)' in summary['verdict']['detail']
+            assert all(b['freshness'] == 'fresh' for b in summary['backups'].values())
+        with app.test_request_context('/'):
+            html = render_template('dashboard.html', ctx=ctx)
+        assert '<span class="cryo-name">WEEKLY</span>' in html
+        assert ('<span class="cryo-name">DAILY</span>' in html) == ('daily' in names)
+        if names:
+            assert f'{len(names)}/{len(names)} JOBS OK' in html

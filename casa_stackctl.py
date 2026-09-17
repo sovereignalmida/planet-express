@@ -50,6 +50,11 @@ BORG_JOBS = {
 }
 
 
+def enabled_borg_jobs() -> dict:
+    """Configured Borg jobs and their units, in config order."""
+    return {name: BORG_JOBS[name] for name in config.BACKUP_JOBS}
+
+
 def all_stack_dirs():
     """Every directory with a docker-compose.yml, forbidden or not -- used for
     `down`/`list`, where seeing/stopping a forbidden stack is the point."""
@@ -169,7 +174,7 @@ def check_backups() -> list[dict]:
     hands. Result=success/failure comes from the service unit; trigger times come from the
     timer unit, since the oneshot service unit resets between runs."""
     results = []
-    for label, (service, timer) in BORG_JOBS.items():
+    for label, (service, timer) in enabled_borg_jobs().items():
         svc = _systemctl_show(service, "Result", "ExecMainStatus")
         tmr = _systemctl_show(timer, "LastTriggerUSec", "NextElapseUSecRealtime")
         results.append({

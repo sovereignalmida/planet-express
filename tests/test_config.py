@@ -196,3 +196,22 @@ def test_invalid_autonomy(settings):
 
     with pytest.raises(ValidationError):
         PlanetExpressConfig(stacks_root='/srv', autonomy=settings)
+
+
+def test_backup_jobs_defaults():
+    from config_schema import PlanetExpressConfig
+
+    assert PlanetExpressConfig(stacks_root='/srv').backup_jobs == ['daily', 'weekly']
+
+
+def test_backup_jobs_weekly():
+    model, errors = validate_config_text('stacks_root: /srv\nbackup_jobs: [weekly]')
+    assert errors == []
+    assert model.backup_jobs == ['weekly']
+
+
+@pytest.mark.parametrize('jobs', ['[]', '[daily, daily]', '[monthly]'])
+def test_invalid_backup_jobs(jobs):
+    model, errors = validate_config_text(f'stacks_root: /srv\nbackup_jobs: {jobs}')
+    assert model is None
+    assert errors[0]['loc'].startswith('backup_jobs')

@@ -867,3 +867,30 @@ def test_stack_completeness_improving_history_is_low(tmp_path, monkeypatch):
     entry, = casa_leela.check_stack_completeness()
     assert entry["missing_services"] == ["web"]
     assert entry["alert"] == "LOW"
+
+
+def test_check_backups_only_queries_enabled_jobs(monkeypatch):
+    import shlex
+
+    monkeypatch.setattr(casa_leela.stackctl.config, 'BACKUP_JOBS', ['weekly'])
+    commands = []
+
+    def fake_run(cmd, timeout=30):
+        commands.append(shlex.split(cmd) if isinstance(cmd, str) else cmd)
+        return _fake_service_show(cmd, timeout)
+
+    queried_units = []
+
+    def fake_show(unit, *props):
+        queried_units.append(unit)
+        return {}
+
+    monkeypatch.setattr(casa_leela, '_run', fake_run)
+    monkeypatch.setattr(casa_leela.stackctl, '_systemctl_show', fake_show)
+    result = casa_leela.check_backups()
+    assert list(result) == ['weekly']
+    assert result['weekly']['cadence_hours'] == 168
+    assert len(commands) == 1
+    assert commands[0][:3] == ['systemctl', 'show', 'weekly-borg-backup.service']
+    assert all('daily-borg-backup' not in arg for cmd in commands for arg in cmd)
+    assert queried_units == ['weekly-borg-backup.service', 'weekly-borg-backup.timer']

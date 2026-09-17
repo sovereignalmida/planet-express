@@ -344,7 +344,7 @@
         {% set sb = ctx.system_and_backups %}
         {% set backup_jobs = sb.backups if sb.available else {} %}
         {% set backup_cadence_label = {'daily': 'every 24h', 'weekly': 'every 7d'} %}
-        {% set backup_job_names = backup_jobs.keys()|list if backup_jobs else backup_cadence_label.keys()|list %}
+        {% set backup_job_names = backup_jobs.keys()|list if backup_jobs else sb.enabled_jobs %}
 
         {% if sb.available %}
         {% set v = sb.verdict %}

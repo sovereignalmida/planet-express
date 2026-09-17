@@ -35,3 +35,13 @@ def test_system_prompt_clarifies_backup_inactive_state_is_not_a_failure_signal()
     assert "oneshot" in prompt.lower()
     assert '"state": "inactive"' in prompt
     assert "NORMAL resting state" in prompt
+
+
+def test_slim_snapshot_does_not_add_disabled_backup_jobs():
+    snapshot = {'backups': {'weekly': {
+        'state': 'inactive', 'result': 'success',
+        'last_run': 'Sun 2026-07-19 04:10:00 WEST',
+    }}}
+    slim = casa_hermes._slim_snapshot(snapshot)
+    assert slim['backups'] == snapshot['backups']
+    assert 'daily' not in slim['backups']

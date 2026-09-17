@@ -1223,7 +1223,7 @@ follows them.
     root-owned). Decide (a) who owns the config directory and (b) whether UI edits may touch
     `sudo_allowlist` at all, before exposing apply.
 
-- [ ] **T27 (P2, human: ~half day / CC: ~20min)** — config — `backup_jobs` setting so only enabled borg jobs are monitored
+- [x] **T27 (P2, human: ~half day / CC: ~20min)** — config — ✅ done 2026-09-17 — `backup_jobs` setting so only enabled borg jobs are monitored
   - Surfaced by: operator, 2026-09-17 — the daily borg job is disabled on purpose, but Planet Express
     assumes both run: Leela always checks `daily-borg-backup` and `weekly-borg-backup`
     (`casa_leela.py:728`, `casa_stackctl.py:48-49`), the dashboard marks a disabled timer stale and then
@@ -1236,6 +1236,12 @@ follows them.
     `extra="forbid"` rollback note applies).
   - Files: `config_schema.py`, `config.py`, `casa_leela.py`, `casa_stackctl.py`, `dashboard_data.py`, tests
   - Verify: with `[weekly]` no daily check, banner or finding appears; default config behaves as today
+  - **Landed:** `backup_jobs` (validated: non-empty, no duplicates; default both). `casa_stackctl.enabled_borg_jobs()`
+    is the single filter — `/backups`, Leela's `check_backups` (no second hardcoded list), and the digest
+    all read it, so a disabled job produces no snapshot key, card, verdict count or Hermes input. The
+    dashboard renders whatever the snapshot holds (a pre-change snapshot keeps `daily` until the next full
+    scan) and falls back to `config.BACKUP_JOBS` for no-data cards. Help text no longer says daily/weekly.
+    Implemented by Codex from a brief; `codex review` clean first round. 1027 tests green.
 
 - [x] **T28 (P1, human: ~half day / CC: ~20min)** — leela — ✅ done 2026-09-17 — Auto-discover NFS-backed container mounts for the stale-handle probe
   - Surfaced by: operator's chat question "any containers with stale nfs mounts?" (2026-09-17) came back

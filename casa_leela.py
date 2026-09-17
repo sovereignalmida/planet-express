@@ -787,7 +787,7 @@ def check_backups() -> dict:
     """Borg backup service + timer status.
 
     Delegates the timer half (last/next trigger) to stackctl.check_backups() --
-    stackctl.BORG_JOBS is already the single source of truth for the service/timer unit
+    stackctl.enabled_borg_jobs() is the single source of truth for enabled service/timer unit
     pairs (powers Farnsworth's /backups command), same reuse pattern as check_mounts()
     delegating to stackctl.check_mounts() above. Reshaped into the dict-keyed-by-job-name
     shape the dashboard already expects, plus a static cadence_hours the dashboard uses to
@@ -796,9 +796,9 @@ def check_backups() -> dict:
     completeness but the dashboard doesn't lead with it)."""
     timers = {t["label"]: t for t in stackctl.check_backups()}
     result = {}
-    for unit in ["daily-borg-backup", "weekly-borg-backup"]:
+    for key, (service, _timer) in stackctl.enabled_borg_jobs().items():
         rc, out, _ = _run(
-            f"systemctl show {unit}.service "
+            f"systemctl show {service} "
             "--property=ActiveState,Result,ExecMainStatus,InactiveEnterTimestamp"
         )
         props = {}
@@ -806,7 +806,6 @@ def check_backups() -> dict:
             if "=" in line:
                 k, v = line.split("=", 1)
                 props[k] = v
-        key = "daily" if "daily" in unit else "weekly"
         tmr = timers.get(key, {})
         # InactiveEnterTimestamp, not InactiveExitTimestamp -- the latter is when the
         # oneshot last *left* inactive (i.e. started running), the former is when it
@@ -825,7 +824,7 @@ def check_backups() -> dict:
             # InactiveEnterTimestamp resets `Result` to its default "success" too, which
             # would otherwise report a job whose last real run actually failed as both
             # fresh AND successful.
-            journal_run, journal_result = _last_journal_completion(f"{unit}.service")
+            journal_run, journal_result = _last_journal_completion(service)
             last_run = journal_run or "n/a"
             if journal_result:
                 job_result = journal_result

@@ -23,6 +23,10 @@ paused_containers: []
 # necessarily every mount on the host.
 mounts: {}
 
+# Borg backup jobs Planet Express monitors. Drop one you've disabled on purpose, or it keeps
+# warning that the job is overdue.
+# backup_jobs: [daily, weekly]
+
 # (stack, service) pairs to exclude from Zoidberg's canary auto-update pass —
 # typically your own actively-developed images that shouldn't be silently
 # auto-pulled and restarted.

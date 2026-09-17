@@ -1342,7 +1342,7 @@ def handle_message(
             "/state — Current pipeline state\n"
             "/stacks — List stacks\n"
             "/mounts — Verify NAS mounts are reachable\n"
-            "/backups — Borg daily/weekly backup status\n"
+            "/backups — Enabled Borg backup job status\n"
             "/up `<stack>`|`all` — Bring a stack (or everything) up\n"
             "/down `<stack>`|`all` — Bring a stack (or everything) down\n"
             "/restart `<stack>` `<service>` — Propose a verified restart (needs approval)\n"

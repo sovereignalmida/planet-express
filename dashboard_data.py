@@ -602,7 +602,7 @@ def _backup_verdict(backups: dict, cert_list: list) -> dict:
 def summarize_system_and_backups() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
-        return {"system": {}, "backups": {}, "available": False}
+        return {"system": {}, "backups": {}, "available": False, "enabled_jobs": config.BACKUP_JOBS}
     system = dict(monitor.system)
     system["hostname"] = socket.gethostname()
     scan_dt = None
@@ -669,6 +669,7 @@ def summarize_system_and_backups() -> dict:
     return {
         "system": system,
         "backups": backups,
+        "enabled_jobs": config.BACKUP_JOBS,
         "available": True,
         "verdict": _backup_verdict(backups, monitor.certs),
     }
