@@ -1237,6 +1237,29 @@ follows them.
   - Files: `config_schema.py`, `config.py`, `casa_leela.py`, `casa_stackctl.py`, `dashboard_data.py`, tests
   - Verify: with `[weekly]` no daily check, banner or finding appears; default config behaves as today
 
+- [x] **T28 (P1, human: ~half day / CC: ~20min)** — leela — ✅ done 2026-09-17 — Auto-discover NFS-backed container mounts for the stale-handle probe
+  - Surfaced by: operator's chat question "any containers with stale nfs mounts?" (2026-09-17) came back
+    `insufficient_evidence`. Root cause was not chat: `NFS_MOUNT_WATCHLIST` had been **empty since
+    2026-08-31** (its only entry left with WeKnora), so the live scan ran 0 probes while the host mounts
+    five Unraid NFS shares used by ~17 containers.
+  - **Landed:** discovery via `findmnt -t nfs,nfs4` + batched `docker inspect` of running containers;
+    each bind mount under an NFS target (path-component match) is probed with the existing
+    timeout-wrapped `stat`, six at a time, stable order. `status`: ok · stale (HIGH) · timeout (MEDIUM)
+    · error (MEDIUM, incl. a missing mount path) · unavailable (no `timeout`/`stat` in the image, no
+    alert) · unknown (discovery failed — one MEDIUM entry). The explicit watchlist stays for non-bind
+    paths. Hermes prompt describes the statuses.
+  - **Live read-only probe before landing (22 probes, 0.8s): found a real stale handle** —
+    `CASA_TA /youtube <- /casamedia_nfs/media/youtube: Stale file handle`, invisible to the deployed
+    Leela. The other 21 (incl. Radarr's `/casamedia`) are fine, so Radarr's "path does not exist" import
+    errors are a download-path mapping mismatch (`/complete` isn't mapped into Radarr), not NFS.
+  - **Codex review round 1 (fixed):** `findmnt` exits **1 with no output** when nothing matches
+    (verified on the NFS-less test VM, util-linux 2.39); that was being treated as a discovery failure,
+    raising a MEDIUM alert on every scan of every host without NFS and skipping the explicit watchlist.
+    A silent exit 1 now means "no NFS mounts"; the test that mocked rc 0 was corrected. Round 2 clean.
+    Implemented by Codex from a brief. 1015 tests green.
+  - Known edge: a container stopping between `docker ps` and `docker inspect` makes that one scan's
+    discovery report `unknown`.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

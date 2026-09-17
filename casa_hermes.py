@@ -34,13 +34,16 @@ SEVERITY RULES (apply all that match):
   in each entry's "alert" field (it has history this analysis step doesn't) — USE THAT
   VALUE AS-IS for the finding's severity, don't re-derive it from
   present_count/expected_count yourself. Never silently miss these entries.
-- stale_nfs_mounts entries: an NFS-backed bind mount went stale (ESTALE) or errored on a probe
-  that Docker's own healthcheck can't see — the container itself may still show "Up"/"healthy"
-  while file I/O against that path is actually broken (e.g. silent upload failures). ALWAYS
-  create a finding for every entry, category "mount". Leela has already computed the right
-  severity in each entry's "alert" field ("HIGH" for a confirmed stale file handle, "MEDIUM" for
-  any other probe error) — USE THAT VALUE AS-IS, don't re-derive it. suggested_action should be
-  to restart the affected container to force a fresh bind mount.
+- stale_nfs_mounts entries: status "stale" means a confirmed stale NFS file handle,
+  "timeout" means a hung/unreachable probe, and "error" means another probe failure.
+  Docker may still show the affected container as "Up"/"healthy" while file I/O fails.
+  Status "unknown" means discovery failed: report it, don't claim a mount is stale;
+  suggest investigating discovery instead of restarting a container. Status "ok" and
+  "unavailable" (missing probe tools) have no alert and are filtered out.
+  ALWAYS create a finding for every entry, category "mount". Leela has already computed
+  severity in each entry's "alert" field — USE THAT VALUE AS-IS, don't re-derive it.
+  For confirmed stale handles, suggest restarting the affected container to refresh its
+  bind mount; for other probe failures, suggest investigating the reported error.
 - Container has crash_looping: true: ALWAYS HIGH regardless of image — a container repeatedly
   restarting is exactly as urgent whether it's Postgres or a plain app container. Do not
   downgrade these to MEDIUM.

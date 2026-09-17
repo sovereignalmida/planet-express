@@ -5,10 +5,15 @@ TLS certs Traefik's file provider actually declares (~/apps/network/proxy/dynami
 and inspects the real cert files with openssl, same real-binary-invocation style as
 tests/test_setup_wizard.py's visudo -c test.
 """
+import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
@@ -370,18 +375,22 @@ def test_last_journal_completion_ignores_unrelated_messages(monkeypatch):
 
 # ── check_nfs_mount_health() ────────────────────────────────────────────────────────
 
+NFS_FIND = ["findmnt", "-n", "-l", "-t", "nfs,nfs4", "-o", "TARGET"]
+NFS_INSPECT = ["docker", "inspect", "--format", "{{.Name}}\t{{json .Mounts}}"]
+
+
 def test_check_nfs_mount_health_reports_stale_file_handle_as_high(monkeypatch):
     monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("CASA_TESTAPP", "/data/files")])
     monkeypatch.setattr(
         casa_leela, "_run",
-        lambda cmd, timeout=30: (1, "", "stat: cannot statx '/data/files': Stale file handle"),
+        lambda cmd, timeout=30: (0, "", "") if cmd == NFS_FIND else (1, "", "stat: cannot statx '/data/files': Stale file handle"),
     )
     results = casa_leela.check_nfs_mount_health()
     assert results == [{
         "container": "CASA_TESTAPP",
         "path": "/data/files",
         "error": "stat: cannot statx '/data/files': Stale file handle",
-        "alert": "HIGH",
+        "alert": "HIGH", "status": "stale", "mount": None, "nfs": None,
     }]
 
 
@@ -389,7 +398,7 @@ def test_check_nfs_mount_health_reports_other_errors_as_medium(monkeypatch):
     monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("CASA_TESTAPP", "/data/files")])
     monkeypatch.setattr(
         casa_leela, "_run",
-        lambda cmd, timeout=30: (1, "", "Error: No such container: CASA_TESTAPP"),
+        lambda cmd, timeout=30: (0, "", "") if cmd == NFS_FIND else (1, "", "Error: No such container: CASA_TESTAPP"),
     )
     results = casa_leela.check_nfs_mount_health()
     assert results[0]["alert"] == "MEDIUM"
@@ -399,12 +408,175 @@ def test_check_nfs_mount_health_clean_probe_has_no_alert(monkeypatch):
     monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("CASA_TESTAPP", "/data/files")])
     monkeypatch.setattr(
         casa_leela, "_run",
-        lambda cmd, timeout=30: (0, "  File: /data/files\n  Size: 4096", ""),
+        lambda cmd, timeout=30: (0, "", "") if cmd == NFS_FIND else (0, "  File: /data/files\n  Size: 4096", ""),
     )
     results = casa_leela.check_nfs_mount_health()
-    assert results == [{"container": "CASA_TESTAPP", "path": "/data/files"}]
+    assert results == [{"container": "CASA_TESTAPP", "path": "/data/files",
+                        "mount": None, "nfs": None, "status": "ok"}]
     assert "alert" not in results[0]
     assert "error" not in results[0]
+
+
+def _nfs_fake(monkeypatch, rows, probe, targets="/casamedia_nfs\n/photos"):
+    ids = [str(i) for i in range(len(rows))]
+    calls = []
+
+    def run(cmd, timeout=30):
+        calls.append(cmd)
+        if cmd == NFS_FIND:
+            return 0, targets, ""
+        if cmd == ["docker", "ps", "-q"]:
+            return 0, "\n".join(ids), ""
+        if cmd[:4] == NFS_INSPECT:
+            batch = cmd[4:]
+            start = int(batch[0])
+            assert batch == ids[start:start + 50]
+            return 0, "\n".join(
+                "/" + rows[int(i)][0] + "\t" + json.dumps(rows[int(i)][1]) for i in batch
+            ), ""
+        assert cmd[:2] == ["docker", "exec"]
+        assert cmd[3:6] == ["timeout", "8", "stat"]
+        assert len(cmd) == 7 and timeout == 10
+        return probe(cmd[2], cmd[6])
+
+    monkeypatch.setattr(casa_leela, "_run", run)
+    return calls
+
+
+def _bind(source, destination="/data", kind="bind"):
+    return {"Type": kind, "Source": source, "Destination": destination}
+
+
+def test_nfs_discovery_and_watchlist_merge(monkeypatch):
+    calls = _nfs_fake(monkeypatch, [
+        ("zeta", [_bind("/casamedia_nfs/media"), _bind("/casamedia_nfs/media"),
+                  _bind("/casamedia_nfs/volume", "/volume", "volume")]),
+        ("alpha", [_bind("/photos")]),
+        ("sibling", [_bind("/casamedia_nfsx/media")]),
+    ], lambda container, path: (0, "", ""))
+    monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [
+        ("zeta", "/data"), ("extra", "/other"), ("extra", "/other"),
+    ])
+    assert casa_leela.check_nfs_mount_health() == [
+        {"container": "alpha", "path": "/data", "mount": "/photos", "nfs": "/photos", "status": "ok"},
+        {"container": "extra", "path": "/other", "mount": None, "nfs": None, "status": "ok"},
+        {"container": "zeta", "path": "/data", "mount": "/casamedia_nfs/media",
+         "nfs": "/casamedia_nfs", "status": "ok"},
+    ]
+    assert len([cmd for cmd in calls if cmd[:2] == ["docker", "exec"]]) == 3
+
+
+def test_nfs_inspect_chunking(monkeypatch):
+    calls = _nfs_fake(monkeypatch, [(f"app{i}", []) for i in range(101)],
+                      lambda *args: pytest.fail("unexpected probe"))
+    assert casa_leela.check_nfs_mount_health() == []
+    assert [len(cmd[4:]) for cmd in calls if cmd[:4] == NFS_INSPECT] == [50, 50, 1]
+
+
+@pytest.mark.parametrize("rc,message,status,alert", [
+    (0, "", "ok", None),
+    (1, "stat: Stale File Handle", "stale", "HIGH"),
+    (1, 'exec: "timeout": executable file not found in $PATH', "unavailable", None),
+    (1, 'exec: "stat": no such file or directory', "unavailable", None),
+    (1, "timeout: failed to run command ‘stat’: No such file or directory", "unavailable", None),
+    (126, "permission denied", "unavailable", None),
+    (127, "stat: not found", "unavailable", None),
+    (1, "stat: cannot statx '/data/timeout': No such file or directory", "error", "MEDIUM"),
+    (124, "", "timeout", "MEDIUM"),
+    (1, "command timed out after 10s", "timeout", "MEDIUM"),
+])
+def test_nfs_probe_classification(monkeypatch, rc, message, status, alert):
+    _nfs_fake(monkeypatch, [("app", [_bind("/photos", "/data/timeout")])],
+              lambda *args: (rc, "", message))
+    result, = casa_leela.check_nfs_mount_health()
+    assert result["status"] == status
+    assert result.get("alert") == alert
+    if status == "timeout":
+        assert result["error"] == "probe timed out (NFS server unreachable or hung?)"
+    elif rc:
+        assert result["error"] == message
+
+
+@pytest.mark.parametrize("failure", ["findmnt", "ps", "inspect", "exception"])
+def test_nfs_discovery_failure(monkeypatch, failure):
+    def run(cmd, timeout=30):
+        if cmd == NFS_FIND:
+            if failure == "exception":
+                raise OSError("discovery unavailable")
+            return (1, "", "findmnt failed") if failure == "findmnt" else (0, "/photos", "")
+        if cmd == ["docker", "ps", "-q"]:
+            return (1, "", "ps failed") if failure == "ps" else (0, "abc", "")
+        assert cmd == NFS_INSPECT + ["abc"]
+        return 1, "", "inspect failed"
+
+    monkeypatch.setattr(casa_leela, "_run", run)
+    monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("extra", "/data")])
+    result, = casa_leela.check_nfs_mount_health()
+    assert result["container"] is None and result["path"] is None
+    assert result["status"] == "unknown" and result["alert"] == "MEDIUM"
+    assert result["error"]
+
+
+@pytest.mark.parametrize("rc", [1, 0])
+def test_nfs_no_mounts_no_docker(monkeypatch, rc):
+    """Real findmnt (util-linux 2.39) exits 1 with no output when nothing matches; that is "no
+    NFS mounts", not a discovery failure. rc 0 with empty output is handled the same way."""
+    def run(cmd, timeout=30):
+        assert cmd == NFS_FIND
+        return rc, "", ""
+    monkeypatch.setattr(casa_leela, "_run", run)
+    assert casa_leela.check_nfs_mount_health() == []
+
+
+def test_nfs_no_mounts_still_probes_the_explicit_watchlist(monkeypatch):
+    calls = []
+
+    def run(cmd, timeout=30):
+        calls.append(cmd)
+        if cmd == NFS_FIND:
+            return 1, "", ""
+        return 0, "", ""
+    monkeypatch.setattr(casa_leela, "_run", run)
+    monkeypatch.setattr(casa_leela, "NFS_MOUNT_WATCHLIST", [("extra", "/data")])
+    result, = casa_leela.check_nfs_mount_health()
+    assert result["status"] == "ok" and "alert" not in result
+    assert ["docker", "exec", "extra", "timeout", "8", "stat", "/data"] in calls
+
+
+def test_nfs_concurrency_and_stable_order(monkeypatch):
+    lock = threading.Lock()
+    barrier = threading.Barrier(6)
+    active = maximum = 0
+    finished = []
+
+    def probe(container, path):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        barrier.wait(timeout=5)
+        time.sleep((12 - int(container)) * 0.01)
+        with lock:
+            finished.append(container)
+            active -= 1
+        return 0, "", ""
+
+    _nfs_fake(monkeypatch, [(str(i), [_bind("/photos")]) for i in reversed(range(12))], probe)
+    results = casa_leela.check_nfs_mount_health()
+    assert 1 < maximum <= 6
+    assert [r["container"] for r in results] == sorted(str(i) for i in range(12))
+    assert finished != [r["container"] for r in results]
+
+
+def test_nfs_hermes_forwards_only_alerts():
+    import casa_hermes
+
+    entries = [{"status": "ok"}, {"status": "unavailable"},
+               {"status": "stale", "alert": "HIGH"},
+               {"status": "unknown", "alert": "MEDIUM"},
+               {"status": "timeout", "alert": "MEDIUM"},
+               {"status": "error", "alert": "MEDIUM"}]
+    assert casa_hermes._slim_snapshot({"nfs_mount_health": entries})["stale_nfs_mounts"] == entries[2:]
 
 
 # ── check_stack_completeness() ────────────────────────────────────────────────────

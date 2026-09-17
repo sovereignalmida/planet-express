@@ -19,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -499,7 +500,8 @@ def check_unraid_exports() -> dict:
     return result
 
 
-# Containers whose bind-mounted NFS paths are worth probing for a stale file handle.
+# NFS-backed container bind mounts are auto-discovered and probed for stale handles.
+# The watchlist below is only for extra non-bind paths that discovery cannot find.
 # An NFS export/inode change on the server side (Unraid share remount, fsid churn --
 # see check_unraid_exports() above) can leave an already-running container's cached
 # mount broken while the container itself stays "Up"/"healthy": Docker's health
@@ -511,29 +513,98 @@ def check_unraid_exports() -> dict:
 NFS_MOUNT_WATCHLIST: list[tuple[str, str]] = []
 
 
+def _discover_nfs_probes() -> dict[tuple[str, str], dict]:
+    """Discover running containers' NFS binds; fail visibly rather than partially."""
+    def run(cmd):
+        rc, out, err = _run(cmd)
+        if rc:
+            raise ValueError(f"{cmd[0]} discovery failed: {err or out or f'exit {rc}'}")
+        return out
+
+    # findmnt exits 1 with no output at all when nothing matches (verified on util-linux 2.39),
+    # and also exits 1 on a real failure, but then prints the reason. Only the silent exit 1 means
+    # "this host has no NFS mounts"; treating it as a failure raised a MEDIUM alert on every scan
+    # of every NFS-less host (Codex review, T28).
+    rc, out, err = _run(["findmnt", "-n", "-l", "-t", "nfs,nfs4", "-o", "TARGET"])
+    if rc == 1 and not out.strip() and not err.strip():
+        out = ""
+    elif rc:
+        raise ValueError(f"findmnt discovery failed: {err or out or f'exit {rc}'}")
+    targets = [line.strip() for line in out.splitlines() if line.strip()]
+    probes = {}
+    if not targets:
+        return probes
+    # Prefer the most specific target when NFS mounts are nested.
+    targets.sort(key=lambda target: (-len(target), target))
+    ids = run(["docker", "ps", "-q"]).split()
+    for start in range(0, len(ids), 50):
+        out = run(["docker", "inspect", "--format", "{{.Name}}\t{{json .Mounts}}",
+                   *ids[start:start + 50]])
+        lines = out.splitlines()
+        if len(lines) != len(ids[start:start + 50]):
+            raise ValueError("docker inspect discovery returned incomplete results")
+        for line in lines:
+            name, mounts = line.split("\t", 1)
+            name = name.lstrip("/")
+            for mount in json.loads(mounts):
+                if mount["Type"] != "bind":
+                    continue
+                source, path = mount["Source"], mount["Destination"]
+                for target in targets:
+                    if source == target or source.startswith(target.rstrip("/") + "/"):
+                        probes.setdefault((name, path), {
+                            "container": name, "path": path, "mount": source, "nfs": target,
+                        })
+                        break
+    return probes
+
+
+def _probe_nfs_mount(entry: dict) -> dict:
+    # The in-container timeout also kills stat; timing out only the Docker client
+    # would leave daemon-started processes behind during an NFS outage.
+    rc, out, err = _run(
+        ["docker", "exec", entry["container"], "timeout", "8", "stat", entry["path"]],
+        timeout=10,
+    )
+    entry = {**entry, "status": "ok"}
+    if rc == 0:
+        return entry
+    message = "\n".join(part.strip() for part in (err, out) if part.strip())
+    entry["error"] = message
+    lower = message.lower()
+    # Match executable diagnostics, not stat's "cannot stat '/path'" diagnostic
+    # (even when the requested mount path happens to contain 'stat' or 'timeout').
+    missing_tool = re.search(
+        r"(?:exec(?:ute)?(?: failed)?:\s*|failed to run command\s+)"
+        r"[\"'‘`]?(?:timeout|stat)[\"'’`]?:?\s*"
+        r"(?:executable file not found|not found in \$path|no such file or directory)",
+        lower,
+    )
+    if "stale file handle" in lower:
+        entry.update(status="stale", alert="HIGH")
+    elif rc in (126, 127) or missing_tool:
+        entry["status"] = "unavailable"
+    elif rc == 124 or "command timed out after" in lower:
+        entry.update(status="timeout", alert="MEDIUM",
+                     error="probe timed out (NFS server unreachable or hung?)")
+    else:
+        entry.update(status="error", alert="MEDIUM")
+    return entry
+
+
 def check_nfs_mount_health() -> list[dict]:
-    """Probe each watched container's NFS-backed bind mount for a stale file handle
-    (`stat` returns ESTALE/"Stale file handle" when the container's cached NFS
-    dentry/inode is invalidated but the mount stays bound). The only fix is a
-    container restart to force a fresh bind mount -- this exists to give Farnsworth
-    a finding to act on, since check_containers() never notices (see comment above)."""
-    results = []
+    """Probe discovered NFS binds and explicit extra paths, with bounded concurrency."""
+    try:
+        probes = _discover_nfs_probes()
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as exc:
+        return [{"container": None, "path": None, "status": "unknown",
+                 "error": str(exc)[:240], "alert": "MEDIUM"}]
     for container, path in NFS_MOUNT_WATCHLIST:
-        # Wrap `stat` in the container's own `timeout` so a hard-mounted NFS lookup
-        # that blocks (server unreachable, not just ESTALE) gets killed *inside* the
-        # container. Without this, `docker exec`'s client-side timeout below only
-        # kills the local client -- the daemon-started `stat` stays wedged in the
-        # container's PID namespace and a prolonged outage leaks one per scan.
-        rc, out, err = _run(
-            ["docker", "exec", container, "timeout", "8", "stat", path], timeout=10
-        )
-        entry = {"container": container, "path": path}
-        if rc != 0:
-            message = err.strip() or out.strip()
-            entry["error"] = message
-            entry["alert"] = "HIGH" if "stale file handle" in message.lower() else "MEDIUM"
-        results.append(entry)
-    return results
+        probes.setdefault((container, path), {
+            "container": container, "path": path, "mount": None, "nfs": None,
+        })
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return list(pool.map(_probe_nfs_mount, (probes[key] for key in sorted(probes))))
 
 
 # Gluetun's HTTP control server (published on host port 8000, network/docker-compose.yml)
@@ -995,6 +1066,7 @@ def run_full() -> dict:
     n_missing_stacks = sum(1 for s in snapshot["stack_completeness"] if s.get("alert"))
     n_dupe_fsids = len(snapshot["unraid_exports"].get("duplicate_fsids", []))
     n_stale_mounts = sum(1 for m in snapshot["nfs_mount_health"] if m.get("alert"))
+    n_nfs_probes = sum(1 for m in snapshot["nfs_mount_health"] if m.get("status") != "unknown")
     n_vpn_port_issues = 1 if snapshot["vpn_port_forwarding"].get("alert") else 0
     log.info(
         f"Leela scan complete — "
@@ -1002,7 +1074,7 @@ def run_full() -> dict:
         f"{n_missing_stacks} stack(s) incomplete or unreadable, "
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
-        f"{n_stale_mounts} stale NFS mount(s), "
+        f"{n_stale_mounts} NFS alert(s) ({n_nfs_probes} probes ran), "
         f"{n_vpn_port_issues} VPN port-forwarding issue(s)"
     )
     return snapshot
