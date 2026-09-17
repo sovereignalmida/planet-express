@@ -1266,6 +1266,30 @@ follows them.
   - Known edge: a container stopping between `docker ps` and `docker inspect` makes that one scan's
     discovery report `unknown`.
 
+### Finish landing 1c — dashboard actions (found 2026-09-17)
+
+**Plan/implementation gap.** Landing 1c's scope (table row above) included container detail, logs, the
+operator restart sheet, approval cards and the execution screen, and 1c is marked complete — but only
+part of the core side landed (`query.container`, `action.request`, `proposal.*`, `approval.decide`,
+`execution.get_status`). There are **no dashboard routes or UI** for any of them, and `logs.tail` does not
+exist. The dashboard is read-only plus chat; every action still goes through Telegram. Rebuilt as three
+tasks against `ACTION-SCREENS.md`.
+
+- **Scope decisions (coordinator, from existing design intent):** container detail is a page
+  (`/containers/<stack>/<service>`), not an in-page panel, so the 60s refresh can't wipe it; it opens from
+  a named container list grouped by stack (the design's "reactor cells" are 88 anonymous dots here).
+  **Deferred:** RESUME (no unpause action), ABORT / ROLL BACK / FORCE ROLLBACK (restart declares none —
+  slice 5), the agent-hint card (needs incidents), "load earlier" log paging (TODOS.md).
+- **Expectation:** approval cards cover *typed* proposals (chat, Telegram `/restart`, dashboard). Legacy
+  Farnsworth LLM shell plans keep approving in Telegram until slice 5b retires them.
+
+- [ ] **T29 (P1, CC: ~40min)** — core — `logs.tail`, container facts in `query.container`, `approval.get`, `approval.list_recent`, approval summary on `execution.get_status`
+  - Verify: logs keep the newest lines under both caps with `skipped`, dedupe at the cursor, redact before truncating; the inspect template never reads `.Config`; all reads meet the 4s RPC budget
+- [ ] **T30 (P1, CC: ~1 session)** — dashboard — container list + `/containers/<stack>/<service>` (verdict, vitals, facts, polled log well with restarted divider) + two-step restart sheet → `action.request` → execution page
+  - Verify: states healthy/down/paused/restart-confirm; CSRF on the confirm; busy state in place; logs poll only while visible and survive the 60s refresh
+- [ ] **T31 (P1, CC: ~1 session)** — dashboard — approval cards (pending/approved/denied/expired/busy/empty) with Authorise/Deny, and `/executions/<id>` (running/verifying/passed/failed/interrupted/empty) rendering only declared capabilities
+  - Verify: a chat or Telegram `/restart` proposal can be authorised from the dashboard and watched to `passed`; resolved cards keep attribution; interrupted offers re-scan/re-propose only
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect
