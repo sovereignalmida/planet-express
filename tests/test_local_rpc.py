@@ -690,3 +690,65 @@ def test_container_stats_get_only_the_remaining_budget(monkeypatch):
     result = handler({'stack': 'healthy', 'service': 'web'})
     assert result['vitals'] == {'ok': False, 'error': 'timeout'}
     stats.assert_not_called()
+
+
+def _chat_handlers():
+    chat = Mock()
+    chat.ask.return_value = {'ticket_id': 'ticket', 'status': 'queued'}
+    chat.get.side_effect = lambda ticket_id, operator: (
+        {'id': ticket_id, 'status': 'done'} if operator == 'chris' else None)
+    chat.quota.return_value = {'used': 1, 'limit': 100, 'resets_at': 200}
+    return build_core_handlers(Mock(), Mock(), chat=chat), chat
+
+
+def test_chat_rpc_round_trip(server, socket_path):
+    handlers, chat = _chat_handlers()
+    server(handlers)
+    params = {'operator': 'chris', 'question': 'What failed?', 'submission_id': 'abcdefgh'}
+    assert call(socket_path, 'chat.ask', params)['result'] == chat.ask.return_value
+    chat.ask.assert_called_once_with(**params)
+    assert call(socket_path, 'chat.get', {'operator': 'chris', 'ticket_id': 'ticket'})['result']['status'] == 'done'
+    assert call(socket_path, 'chat.get', {'operator': 'other', 'ticket_id': 'ticket'})['error']['code'] == 'not_found'
+    assert call(socket_path, 'chat.quota')['result'] == chat.quota.return_value
+
+
+@pytest.mark.parametrize('method,params', [
+    ('chat.ask', {'operator': '?', 'question': '?', 'submission_id': 'abcdefgh'}),
+    ('chat.ask', {'operator': 'Invalid', 'question': '?', 'submission_id': 'abcdefgh'}),
+    ('chat.ask', {'operator': 'chris', 'question': 'x' * 2001, 'submission_id': 'abcdefgh'}),
+    ('chat.ask', {'operator': 'chris', 'question': ' ', 'submission_id': 'abcdefgh'}),
+    ('chat.ask', {'operator': 'chris', 'question': '?', 'submission_id': 'short'}),
+    ('chat.ask', {'operator': 'chris', 'question': '?', 'submission_id': 'x' * 65}),
+    ('chat.ask', {'operator': 'chris', 'question': '?', 'submission_id': 'invalid!'}),
+    ('chat.ask', {}), ('chat.quota', {'operator': 'chris'}),
+    ('chat.get', {'operator': '?', 'ticket_id': 'ticket'}),
+    ('chat.get', {'operator': 'chris', 'ticket_id': ''}),
+    ('chat.get', {'operator': 'chris', 'ticket_id': 'x' * 65}),
+])
+def test_chat_rpc_validation(method, params):
+    handlers, chat = _chat_handlers()
+    with pytest.raises(RpcError) as exc:
+        handlers[method](params)
+    assert exc.value.code == 'bad_request'
+    assert chat.mock_calls == []
+
+
+def test_chat_rpc_ownership_and_optional_handlers():
+    handlers, _ = _chat_handlers()
+    with pytest.raises(RpcError) as exc:
+        handlers['chat.get']({'operator': 'other', 'ticket_id': 'ticket'})
+    assert exc.value.code == 'not_found'
+    assert 'chat.ask' not in build_core_handlers(Mock(), Mock())
+
+
+def test_chat_ask_whitespace_question_is_bad_request_not_internal():
+    class Chat:
+        def ask(self, **params):
+            raise ValueError("Invalid question")
+
+    import planet_express.integrations.rpc as rpc_module
+
+    handlers = rpc_module.build_core_handlers(None, None, chat=Chat())
+    with pytest.raises(rpc_module.RpcError) as exc:
+        handlers["chat.ask"]({"operator": "chris", "question": "   ", "submission_id": "abcdefgh1"})
+    assert exc.value.code == "bad_request"

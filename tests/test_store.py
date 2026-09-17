@@ -739,3 +739,69 @@ def test_attempt_index_added_without_version_change(tmp_path):
         assert [r[2] for r in conn.execute('PRAGMA index_info(approvals_action_target)')] == [
             'action', 'target_key',
         ]
+
+
+def test_chat_ticket_dedupe_and_json(tmp_path):
+    s = _store(tmp_path)
+    first, created = s.create_chat_ticket(operator='one', submission_id='same', question='?')
+    again, repeated = s.create_chat_ticket(operator='one', submission_id='same', question='different')
+    other, separate = s.create_chat_ticket(operator='two', submission_id='same', question='?')
+    assert created and separate and not repeated
+    assert first == again and other['id'] != first['id']
+    s.finish_chat_ticket(first['id'], status='done', outcome='answer', evidence=[{'stdout': 'yes'}], cited=[0])
+    row = s.get_chat_ticket(first['id'])
+    assert row['evidence'] == [{'stdout': 'yes'}] and row['cited'] == [0]
+    assert s.get_chat_ticket('absent') is None
+
+
+def test_chat_reservation_race_and_day_boundary(tmp_path):
+    clock = Clock(100)
+    s = _store(tmp_path, clock)
+    ticket, _ = s.create_chat_ticket(operator='one', submission_id='same', question='?')
+    assert s.reserve_llm_call(ticket_id=ticket['id'], limit=2, day_start=0)
+    barrier = threading.Barrier(2)
+    results = []
+
+    def race():
+        independent = Store(s.path, clock=clock)
+        barrier.wait()
+        results.append(independent.reserve_llm_call(ticket_id=ticket['id'], limit=2, day_start=0))
+
+    threads = [threading.Thread(target=race) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+    assert sorted(results) == [False, True]
+    before = s.list_events()
+    assert s.get_chat_ticket(ticket['id'])['llm_calls'] == 2
+    assert not s.reserve_llm_call(ticket_id=ticket['id'], limit=2, day_start=0)
+    assert s.list_events() == before
+    assert s.get_chat_ticket(ticket['id'])['llm_calls'] == 2
+    assert all(e['approval_id'] is None for e in before)
+    clock.t = 200
+    assert s.chat_quota(limit=2, day_start=200) == {'used': 0, 'limit': 2}
+    assert s.reserve_llm_call(ticket_id=ticket['id'], limit=2, day_start=200)
+    assert s.chat_quota(limit=2, day_start=200)['used'] == 1
+
+
+def test_chat_interrupt_and_existing_v2(tmp_path):
+    s = _store(tmp_path)
+    with sqlite3.connect(s.path) as conn:
+        conn.execute('DROP TABLE chat_tickets')
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+    s.init()
+    rows = [s.create_chat_ticket(operator='one', submission_id=str(i), question='?')[0] for i in range(5)]
+    s.set_chat_ticket_running(rows[1]['id'])
+    for row, status in zip(rows[2:], ['done', 'failed', 'interrupted'], strict=True):
+        s.finish_chat_ticket(row['id'], status=status)
+    before = [s.get_chat_ticket(row['id']) for row in rows[2:]]
+    assert s.interrupt_chat_tickets('core restarted') == 2
+    assert [s.get_chat_ticket(row['id']) for row in rows[2:]] == before
+    for row in rows[:2]:
+        current = s.get_chat_ticket(row['id'])
+        assert current['status'] == 'interrupted' and current['finished_at'] is not None
+        assert current['error'] == 'core restarted'
+    with sqlite3.connect(s.path) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2

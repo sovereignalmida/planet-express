@@ -26,6 +26,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 
 import yaml
@@ -40,6 +41,11 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
+from planet_express.application.chat_service import (
+    MAX_ANSWER_CHARS,
+    ChatResult,
+    ChatService,
+)
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
 from planet_express.core.maintenance import MaintenanceWindow, active_window
@@ -350,17 +356,20 @@ def _log_diagnostic_model_text(text: str) -> None:
 
 
 class _AnthropicDiagnosticAdapter:
-    def __init__(self, findings_json: str):
+    def __init__(self, findings_json: str, *, system_prompt=DIAGNOSTIC_SYSTEM_PROMPT,
+                 max_tokens=DIAGNOSTIC_MAX_TOKENS, user_prefix="Findings:\n"):
         import anthropic
 
+        self.system_prompt = system_prompt
+        self.max_tokens = max_tokens
         self.client = anthropic.Anthropic(api_key=config.anthropic_api_key())
-        self.messages = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
+        self.messages = [{"role": "user", "content": f"{user_prefix}{findings_json}"}]
 
     def request(self) -> Turn:
         response = self.client.messages.create(
             model=config.model_for("small"),
-            max_tokens=DIAGNOSTIC_MAX_TOKENS,
-            system=DIAGNOSTIC_SYSTEM_PROMPT,
+            max_tokens=self.max_tokens,
+            system=self.system_prompt,
             tools=[DIAGNOSTIC_TOOL_SCHEMA],
             messages=self.messages,
         )
@@ -382,9 +391,12 @@ class _AnthropicDiagnosticAdapter:
 
 
 class _OpenAIDiagnosticAdapter:
-    def __init__(self, findings_json: str):
+    def __init__(self, findings_json: str, *, system_prompt=DIAGNOSTIC_SYSTEM_PROMPT,
+                 max_tokens=DIAGNOSTIC_MAX_TOKENS, user_prefix="Findings:\n"):
         import openai
 
+        self.system_prompt = system_prompt
+        self.max_tokens = max_tokens
         self.client = openai.OpenAI(api_key=config.openai_api_key())
         self.tool_schema = {
             "type": "function",
@@ -392,15 +404,15 @@ class _OpenAIDiagnosticAdapter:
             "description": DIAGNOSTIC_TOOL_SCHEMA["description"],
             "parameters": DIAGNOSTIC_TOOL_SCHEMA["input_schema"],
         }
-        self.input_items: list = [{"role": "user", "content": f"Findings:\n{findings_json}"}]
+        self.input_items: list = [{"role": "user", "content": f"{user_prefix}{findings_json}"}]
 
     def request(self) -> Turn:
         response = self.client.responses.create(
             model=config.model_for("small"),
             reasoning={"effort": "low"},
-            max_output_tokens=DIAGNOSTIC_MAX_TOKENS,
+            max_output_tokens=self.max_tokens,
             tools=[self.tool_schema],
-            input=[{"role": "system", "content": DIAGNOSTIC_SYSTEM_PROMPT}] + self.input_items,
+            input=[{"role": "system", "content": self.system_prompt}] + self.input_items,
         )
         calls = []
         for call in response.output:
@@ -421,6 +433,120 @@ class _OpenAIDiagnosticAdapter:
             self.input_items.extend({
                 "type": "function_call_output", "call_id": call.id, "output": output,
             } for call, output in results)
+
+
+# Reuse the diagnostic read-only rules verbatim, excluding its planner-only prose contract.
+CHAT_SYSTEM_PROMPT = DIAGNOSTIC_SYSTEM_PROMPT.split("\n\nThe planner receives ONLY", 1)[0] + """
+
+You are answering an operator's question, not writing a diagnostic pre-check summary.
+Investigate using only the read-only tools above. Never claim command output that is not
+in a tool result. Prose is the answer and never evidence. Cite zero-based indexes of
+run_diagnostic results for commands that actually executed (rejections are not evidence).
+If evidence is insufficient, say so. If no typed action covers a fix, refuse it as unsupported_fix.
+A proposal requires operator approval; it does not execute a fix.
+Your FINAL message must be ONLY this JSON object (no other keys):
+{"outcome": "answer"|"proposal"|"insufficient_evidence"|"unsupported_fix",
+ "answer": "<prose>", "cited_evidence": [<0-based indexes>],
+ "proposal": {"action": "docker.restart_service", "stack": "...", "service": "..."} | null}
+"""
+
+
+class _ChatQuotaExhausted(Exception):
+    pass
+
+
+class _ChatAdapter:
+    """Keep the final turn private to chat; the shared loop never forwards model prose."""
+
+    def __init__(self, adapter, reserve):
+        self.adapter = adapter
+        self.reserve = reserve
+        self.last = None
+
+    def request(self):
+        if not self.reserve():
+            raise _ChatQuotaExhausted
+        self.last = self.adapter.request()
+        return self.last
+
+    def record(self, turn, results):
+        self.adapter.record(turn, results)
+
+    def request_final(self):
+        history = (self.adapter.messages if isinstance(self.adapter, _AnthropicDiagnosticAdapter)
+                   else self.adapter.input_items)
+        history.append({"role": "user", "content": "The tool budget is spent. Return the final JSON now "
+                        "using only the recorded evidence, or report insufficient_evidence."})
+        return self.request()
+
+
+def _run_chat_investigation(question, reserve, *, operator, commands) -> ChatResult:
+    evidence = []
+    adapter_type = (_AnthropicDiagnosticAdapter if config.LLM_PROVIDER == "anthropic"
+                    else _OpenAIDiagnosticAdapter)
+    adapter = _ChatAdapter(adapter_type(question, system_prompt=CHAT_SYSTEM_PROMPT,
+                                       max_tokens=2048, user_prefix="Question:\n"), reserve)
+    try:
+        run_tool_loop(adapter, lambda cmd, n: _diagnostic_tool_output(cmd, n, evidence),
+                      max_calls=MAX_DIAGNOSTIC_ROUNDS, log_text=lambda text: None)
+        if adapter.last is not None and adapter.last.calls and adapter.request_final().calls:
+            return ChatResult(outcome="insufficient_evidence", evidence=evidence)
+    except _ChatQuotaExhausted:
+        return ChatResult(outcome="quota_exhausted", evidence=evidence)
+
+    try:
+        text = adapter.last.text.strip()
+        if text.startswith("```json\n") and text.endswith("\n```"):
+            text = text[8:-4]
+        def unique_object(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise ValueError("duplicate key")
+                obj[key] = value
+            return obj
+
+        def invalid_constant(value):
+            raise ValueError("invalid constant")
+
+        result = json.loads(text, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+        if (not isinstance(result, dict)
+                or set(result) != {"outcome", "answer", "cited_evidence", "proposal"}
+                or result["outcome"] not in ("answer", "proposal", "insufficient_evidence", "unsupported_fix")
+                or not isinstance(result["answer"], str)
+                or not isinstance(result["cited_evidence"], list)):
+            raise ValueError("invalid contract")
+        proposal = result["proposal"]
+        if proposal is not None and (
+                not isinstance(proposal, dict) or set(proposal) != {"action", "stack", "service"}
+                or any(not isinstance(v, str) or not v.strip() for v in proposal.values())):
+            raise ValueError("invalid proposal")
+        if (result["outcome"] == "proposal") != (proposal is not None):
+            raise ValueError("inconsistent proposal")
+    except (ValueError, TypeError, AttributeError, RecursionError):
+        return ChatResult(status="failed", error="model returned an invalid answer", evidence=evidence)
+
+    cited = [i for i in result["cited_evidence"] if type(i) is int and 0 <= i < len(evidence)]
+    outcome, answer = result["outcome"], result["answer"]
+    approval_id = None
+    if outcome == "answer" and not cited:
+        outcome = "insufficient_evidence"
+    if outcome == "proposal":
+        spec = actions.REGISTRY.get(proposal["action"])
+        if spec is None or spec.risk == "R0":
+            outcome = "unsupported_fix"
+        else:
+            proposed = commands.propose(proposal["action"], proposal["stack"], proposal["service"],
+                                        requested_via="chat", requested_by=operator)
+            if proposed.ok:
+                approval_id = proposed.approval_id
+            else:
+                outcome = "unsupported_fix"
+                # Leave room for the refusal even when the model filled its prose budget.
+                reason = redact(proposed.reason)[:MAX_ANSWER_CHARS - 2]
+                answer = redact(answer)[:MAX_ANSWER_CHARS - len(reason) - 2] + "\n\n" + reason
+    return ChatResult(outcome=outcome, answer=redact(answer)[:MAX_ANSWER_CHARS], evidence=evidence,
+                      cited=cited, approval_id=approval_id)
 
 
 def _gather_diagnostics_anthropic(findings_json: str, evidence: list) -> None:
@@ -2103,7 +2229,7 @@ def digest_scheduler_loop(notifier: Notifier) -> None:
 
 
 # ── Main bot loop ─────────────────────────────────────────────────────────────
-def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notifier) -> RpcServer | None:
+def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notifier, chat=None) -> RpcServer | None:
     """Optional dashboard transport: installation failures never prevent polling."""
     try:
         allowed_uids = set()
@@ -2114,7 +2240,7 @@ def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notif
                 continue
         if not allowed_uids:
             raise ValueError("no resolvable RPC peer users")
-        server = RpcServer(config.RPC_SOCKET, build_core_handlers(commands, store, notifier),
+        server = RpcServer(config.RPC_SOCKET, build_core_handlers(commands, store, notifier, chat),
                            allowed_uids, config.RPC_GROUP)
         server.start()
         return server
@@ -2162,11 +2288,13 @@ def run_bot() -> None:
     store = Store(config.ACTIONS_DB)
     _init_store(store)
     commands = CommandService(store, notifier, state)
+    chat = ChatService(store, commands, run_investigation=partial(_run_chat_investigation, commands=commands))
+    chat.reconcile_on_startup()
     interrupted = commands.reconcile_on_startup()
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
 
-    rpc_server = _start_dashboard_rpc(commands, store, notifier)
+    rpc_server = _start_dashboard_rpc(commands, store, notifier, chat)
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")

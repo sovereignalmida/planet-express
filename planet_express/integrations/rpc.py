@@ -293,7 +293,7 @@ def _params(params, strings, booleans=()):
             raise RpcError(f"Invalid {name}", "bad_request")
 
 
-def build_core_handlers(commands: CommandService, store: Store, notifier=None) -> dict:
+def build_core_handlers(commands: CommandService, store: Store, notifier=None, chat=None) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
         return asdict(commands.propose(**params, requested_via="dashboard",
@@ -405,9 +405,42 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None) -
         notify_lock(**params, locked_until=status["locked_until"])
         return {"sent": True}
 
-    return {"action.request": request_action, "query.container": container,
+    def chat_operator(params):
+        auth_params({"operator": params["operator"]})
+        if params["operator"] == "?":
+            raise RpcError("Invalid operator", "bad_request")
+
+    def chat_ask(params):
+        _params(params, {"operator": 32, "question": 2000, "submission_id": 64})
+        chat_operator(params)
+        if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", params["submission_id"]) is None:
+            raise RpcError("Invalid submission_id", "bad_request")
+        try:
+            return chat.ask(**params)
+        except ValueError as exc:
+            # ChatService validates too (e.g. a whitespace-only question); that is the caller's
+            # mistake, not an internal error.
+            raise RpcError(str(exc), "bad_request") from None
+
+    def chat_get(params):
+        _params(params, {"operator": 32, "ticket_id": 64})
+        chat_operator(params)
+        result = chat.get(**params)
+        if result is None:
+            raise RpcError("Ticket not found", "not_found")
+        return result
+
+    def chat_quota(params):
+        _params(params, {})
+        return chat.quota()
+
+    handlers = {"action.request": request_action, "query.container": container,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked}
+
+    if chat is not None:
+        handlers.update({"chat.ask": chat_ask, "chat.get": chat_get, "chat.quota": chat_quota})
+    return handlers

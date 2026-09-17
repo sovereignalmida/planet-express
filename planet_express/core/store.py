@@ -35,6 +35,17 @@ AUTH_LOCK_SECONDS = 900
 DEFAULT_TTL_SECONDS = 3600  # design v20: an approval card expires after 60 minutes
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS chat_tickets (
+    id TEXT PRIMARY KEY, operator TEXT NOT NULL, submission_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued','running','done','failed','interrupted')),
+    outcome TEXT CHECK (outcome IN ('answer','proposal','insufficient_evidence','unsupported_fix','quota_exhausted')),
+    answer TEXT, evidence_json TEXT NOT NULL DEFAULT '[]', cited_json TEXT NOT NULL DEFAULT '[]',
+    approval_id TEXT, error TEXT, llm_calls INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL, finished_at REAL,
+    UNIQUE (operator, submission_id)
+);
+
 CREATE TABLE IF NOT EXISTS auth_failures (
     id INTEGER PRIMARY KEY AUTOINCREMENT, operator TEXT, client_ip TEXT, at REAL
 );
@@ -205,6 +216,78 @@ class Store:
                     "SELECT * FROM events WHERE approval_id = ? ORDER BY id", (approval_id,)
                 ).fetchall()
         return [dict(r) | {"payload": json.loads(r["payload"])} for r in rows]
+
+    # Chat quota reservations and ticket transitions share the normal write transaction.
+    @staticmethod
+    def _chat_row(row):
+        if row is None:
+            return None
+        result = dict(row)
+        result["evidence"] = json.loads(result.pop("evidence_json"))
+        result["cited"] = json.loads(result.pop("cited_json"))
+        return result
+
+    def create_chat_ticket(self, *, operator, submission_id, question) -> tuple[dict, bool]:
+        with self._write() as conn:
+            row = conn.execute("SELECT * FROM chat_tickets WHERE operator=? AND submission_id=?",
+                               (operator, submission_id)).fetchone()
+            if row is not None:
+                return self._chat_row(row), False
+            ticket_id = _new_id()
+            conn.execute("INSERT INTO chat_tickets (id, operator, submission_id, question, status, created_at) "
+                         "VALUES (?, ?, ?, ?, 'queued', ?)",
+                         (ticket_id, operator, submission_id, question, self._clock()))
+            self._event(conn, "chat.queued", ticket_id=ticket_id)
+            return self._chat_row(conn.execute("SELECT * FROM chat_tickets WHERE id=?",
+                                               (ticket_id,)).fetchone()), True
+
+    def get_chat_ticket(self, ticket_id) -> dict | None:
+        with self._connect() as conn:
+            return self._chat_row(conn.execute("SELECT * FROM chat_tickets WHERE id=?",
+                                               (ticket_id,)).fetchone())
+
+    def set_chat_ticket_running(self, ticket_id):
+        with self._write() as conn:
+            conn.execute("UPDATE chat_tickets SET status='running' WHERE id=? AND status='queued'",
+                         (ticket_id,))
+
+    def finish_chat_ticket(self, ticket_id, *, status, outcome=None, answer=None,
+                           evidence=None, cited=None, approval_id=None, error=None):
+        if status not in ('done', 'failed', 'interrupted'):
+            raise ValueError("Invalid terminal chat status")
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE chat_tickets SET status=?, outcome=?, answer=?, evidence_json=?, cited_json=?, "
+                "approval_id=?, error=?, finished_at=? WHERE id=? AND status IN ('queued','running')",
+                (status, outcome, answer, json.dumps(evidence or []), json.dumps(cited or []),
+                 approval_id, error, self._clock(), ticket_id),
+            ).rowcount
+            if changed:
+                self._event(conn, "chat.finished", ticket_id=ticket_id, approval_id=approval_id, status=status)
+
+    def reserve_llm_call(self, *, ticket_id, limit, day_start) -> bool:
+        with self._write() as conn:
+            used = conn.execute("SELECT COUNT(*) FROM events WHERE kind='chat.llm_call' AND ts>=?",
+                                (day_start,)).fetchone()[0]
+            if used >= limit:
+                return False
+            changed = conn.execute("UPDATE chat_tickets SET llm_calls=llm_calls+1 WHERE id=?",
+                                   (ticket_id,)).rowcount
+            if not changed:
+                raise ValueError("Unknown chat ticket")
+            self._event(conn, "chat.llm_call", ticket_id=ticket_id)
+            return True
+
+    def chat_quota(self, *, limit, day_start) -> dict:
+        with self._connect() as conn:
+            used = conn.execute("SELECT COUNT(*) FROM events WHERE kind='chat.llm_call' AND ts>=?",
+                                (day_start,)).fetchone()[0]
+            return {"used": used, "limit": limit}
+
+    def interrupt_chat_tickets(self, reason) -> int:
+        with self._write() as conn:
+            return conn.execute("UPDATE chat_tickets SET status='interrupted', error=?, finished_at=? "
+                                "WHERE status IN ('queued','running')", (reason, self._clock())).rowcount
 
     # ── approvals ───────────────────────────────────────────────────────────
     def _expire_stale(self, conn: sqlite3.Connection, as_of: float) -> None:

@@ -1057,6 +1057,23 @@ follows them.
   - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
   - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`
   - Verify: ticket returns inside the RPC budget; a duplicate submission id returns the same ticket; two concurrent asks cannot both pass the last unit of quota; insufficient-evidence and unsupported-fix render; interrupted tickets terminate at startup
+  - **T21a landed (core), 2026-09-17:** `chat_tickets` table (IF NOT EXISTS, no version bump; unique
+    `(operator, submission_id)` so a resubmit returns the same ticket). `ChatService`
+    (`planet_express/application/chat_service.py`): `ask` validates, creates or returns the ticket and
+    enqueues on a bounded pool (1 worker + 3 queued; beyond that the ticket is `failed: chat is busy`),
+    never blocking the RPC thread; `get` only returns the asking operator's own ticket; `quota`;
+    queued/running tickets marked `interrupted` at startup. `Store.reserve_llm_call` counts and inserts a
+    `chat.llm_call` event in one `BEGIN IMMEDIATE` (D30: 100/day from local midnight) — a two-thread
+    barrier test on a real DB proves exactly one caller takes the last unit. `_run_chat_investigation`
+    reuses T20's loop and the diagnostic adapters (parameterised prompt/max_tokens/prefix, defaults
+    byte-identical), reserves before EVERY model request, never makes a tools-less call (one extra
+    tools-attached request for the final JSON if the budget was spent), captures the final turn
+    privately, and enforces the contract in code: exact keys, citations must index executed evidence,
+    `answer` without a valid citation → `insufficient_evidence`, proposals only for registered non-R0
+    actions via `CommandService.propose(requested_via="chat")` (T24 limits apply; refusal →
+    `unsupported_fix` with the reason), answer redacted and capped at 4000 chars. RPC `chat.ask` /
+    `chat.get` / `chat.quota`. Implemented by Codex from a brief; `codex review` clean first round.
+    969 tests green. Dashboard panel is T21b.
 - [x] **T22 (P2, human: ~3h / CC: ~20min)** — store — ✅ done 2026-09-16 — Events index on `(kind, ts)` plus a 90-day startup prune [D16]
   - Surfaced by: Performance — `_SCHEMA` has no index on `events` while the ceiling COUNTs it per call and incidents update it per scan
   - Files: `planet_express/core/store.py`, `tests/test_store.py`
