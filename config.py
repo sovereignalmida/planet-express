@@ -89,6 +89,7 @@ MOUNT_UNITS = _cfg.mounts
 EXCLUDE_SERVICES: set[tuple[str, str]] = {(s.stack, s.service) for s in _cfg.exclude_services}
 SUDO_ALLOWLIST = _cfg.sudo_allowlist
 LAN_ONLY_DOMAIN = _cfg.lan_only_domain
+AUTONOMY = _cfg.autonomy
 
 
 def active_stack_dirs() -> list[Path]:

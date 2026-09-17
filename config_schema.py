@@ -11,7 +11,29 @@ existing `from config import PlanetExpressConfig` (etc.) call site is unaffected
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+Risk = Literal["R0", "R1", "R2", "R3", "R4"]
+
+
+class AutonomyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    direct_request_risks: list[Risk] = ["R1"]
+    forbidden_risks: list[Risk] = ["R4"]
+    cooldown_seconds: int = Field(default=1800, ge=0)
+    max_attempts_per_day: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_risks(self) -> "AutonomyConfig":
+        if "R4" not in self.forbidden_risks:
+            raise ValueError("R4 must be forbidden")
+        if "R0" in self.forbidden_risks:
+            raise ValueError("R0 must not be forbidden")
+        if "R0" in self.direct_request_risks:
+            raise ValueError("R0 must not be directly requestable")
+        if set(self.forbidden_risks) & set(self.direct_request_risks):
+            raise ValueError("a risk cannot be both forbidden and directly requestable")
+        return self
 
 
 class ExcludedService(BaseModel):
@@ -47,6 +69,7 @@ class PlanetExpressConfig(BaseModel):
     # list the operator thought they'd set.
     model_config = ConfigDict(extra="forbid")
 
+    autonomy: AutonomyConfig = AutonomyConfig()
     stacks_root: Path
     forbidden_stacks: list[str] = []
     paused_containers: list[str] = []

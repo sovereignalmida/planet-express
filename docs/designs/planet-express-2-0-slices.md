@@ -1109,10 +1109,27 @@ follows them.
     `StartLimitBurst=5`/300s. Not a restore defect (after `systemctl reset-failed` core started clean
     on v2), but a real operator trap after exactly this failure, so `INSTALL.md` now documents
     `reset-failed` in the rollback procedure.
-- [ ] **T24 (P1, human: ~1.5 days / CC: ~40min)** — policy — Autonomy limits shipped with the R0-R4 map [D23]
+- [x] **T24 (P1, human: ~1.5 days / CC: ~40min)** — policy — ✅ done 2026-09-17 — Autonomy limits shipped with the R0-R4 map [D23]
   - Surfaced by: Outside voice 1 — R1 is called reversible while `docker.restart_service` declares `rollbackable=False`; quarantine is slice 6 and no cooldowns exist
   - Files: `planet_express/execution/policy.py`, `planet_express/core/store.py`, `config_schema.py`
   - Verify: per-target cooldown holds across restarts; the attempt cap stops a repeated-restart loop; an action declaring `rollbackable=False` never runs automatically
+  - **Landed:** `config_schema.AutonomyConfig` (`autonomy:` — `direct_request_risks` [R1],
+    `forbidden_risks` [R4, mandatory], `cooldown_seconds` 1800, `max_attempts_per_day` 3; R0 can be
+    neither forbidden nor requested). No `automatic_risks` field on purpose (D31). `policy.decide`
+    reads config; automatic is R0 only, with a separate explicit guard that a non-rollbackable
+    mutation is never automatic (D23). Limits live in `policy.limit_refusal` over
+    `Store.recent_attempts` (executions joined to approvals, so persistent across restarts; new
+    `approvals_action_target` index, no version bump) and apply only to non-operator origins
+    (`OPERATOR_ORIGINS` = telegram, dashboard, dashboard-direct) — i.e. future incident automation and
+    slice 2 chat proposals.
+  - **Codex review round 1, both fixed:** the lookback now covers `max(24h, cooldown)` so a cooldown
+    over a day can't expire early; `decide()` re-checks CURRENT policy before consuming an approval, so
+    a card created before its risk was forbidden is refused (closed as denied by `policy`, event
+    `approval.refused_by_policy`) instead of executing. Round 2 clean. Implemented by Codex from a
+    brief. 891 tests green.
+  - **For D29 (slice 4):** `autonomy` widens what may be done to the host, so it joins `sudo_allowlist`
+    and `forbidden_stacks` behind the root-only sensitive-edit switch. Premise P3's "sudo_allowlist is
+    display-only" is superseded by D29's switch.
 - [x] **T25 (P2, human: ~1 day / CC: ~30min)** — deploy — ✅ done 2026-09-17 (live install pending) — Maintenance-window interlock with the weekly borg backup [D24]
   - Surfaced by: Outside voice 8 — `borg-backup.sh:149` tears down stacks and restarts all three units as root every Sunday 02:30 without consulting `PipelineState`
   - Files: `casa_farnsworth.py`, `config_schema.py`, and the root-owned backup script (outside this repo)

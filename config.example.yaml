@@ -53,3 +53,11 @@ sudo_allowlist:
   # globs:
   #   - glob: "*.mount"
   #     actions: [start, stop]
+
+# Autonomy policy: only R0 reads are automatic; mutations require approval.
+# Limits apply to automation, never operator requests.
+# autonomy:
+#   direct_request_risks: [R1]
+#   forbidden_risks: [R4]
+#   cooldown_seconds: 1800
+#   max_attempts_per_day: 3

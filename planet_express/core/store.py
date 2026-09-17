@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_pending
     ON approvals (action, target_key) WHERE status = 'pending';
 
+CREATE INDEX IF NOT EXISTS approvals_action_target ON approvals (action, target_key);
+
 CREATE TABLE IF NOT EXISTS executions (
     id          TEXT PRIMARY KEY,
     approval_id TEXT NOT NULL REFERENCES approvals (id),
@@ -375,6 +377,18 @@ class Store:
         return {"approval": dict(approval), "execution": dict(execution), "adopted": adopted}
 
     # ── executions ──────────────────────────────────────────────────────────
+    def recent_attempts(self, action: str, target_key: str, since: float) -> list[float]:
+        """Execution starts for this action and target, including operator executions."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT e.started_at FROM executions e "
+                "JOIN approvals a ON a.id = e.approval_id "
+                "WHERE a.action = ? AND a.target_key = ? AND e.started_at >= ? "
+                "ORDER BY e.started_at",
+                (action, target_key, since),
+            ).fetchall()
+        return [row["started_at"] for row in rows]
+
     def create_execution(self, approval_id: str) -> dict:
         execution_id = _new_id()
         with self._write() as conn:

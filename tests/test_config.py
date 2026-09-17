@@ -170,3 +170,29 @@ def test_failure_to_copy_an_existing_acl_leaves_the_config_intact(tmp_path, monk
         config_io.write_config_text(DRAFT + "\n# edited\n", path)
     assert path.read_bytes() == before
     assert not list(tmp_path.glob(".config.yaml.*"))
+
+
+def test_autonomy_defaults():
+    from config_schema import PlanetExpressConfig
+
+    autonomy = PlanetExpressConfig(stacks_root='/srv').autonomy
+    assert autonomy.model_dump() == {
+        'direct_request_risks': ['R1'], 'forbidden_risks': ['R4'],
+        'cooldown_seconds': 1800, 'max_attempts_per_day': 3,
+    }
+
+
+@pytest.mark.parametrize('settings', [
+    {'forbidden_risks': []}, {'forbidden_risks': ['R0', 'R4']},
+    {'direct_request_risks': ['R0']},
+    {'forbidden_risks': ['R1', 'R4'], 'direct_request_risks': ['R1']},
+    {'cooldown_seconds': -1}, {'max_attempts_per_day': 0},
+    {'automatic_risks': ['R0']}, {'direct_request_risks': ['R9']},
+])
+def test_invalid_autonomy(settings):
+    from pydantic import ValidationError
+
+    from config_schema import PlanetExpressConfig
+
+    with pytest.raises(ValidationError):
+        PlanetExpressConfig(stacks_root='/srv', autonomy=settings)

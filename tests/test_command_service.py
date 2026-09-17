@@ -687,3 +687,112 @@ def test_approve_during_maintenance_stays_pending(env, monkeypatch):
     assert "maintenance: borg-backup" in result.message
     assert env.store.get_approval(approval_id)["status"] == "pending"
     assert env.argv_calls == [] and env.state.mutation_owner is None
+
+
+def _seed_attempts(env, ages):
+    now = env.clock.t
+    for age in ages:
+        env.clock.t = now - age
+        env.store.create_direct_execution(
+            action=RESTART, target_key=TARGET.key, target=TARGET.as_dict(), risk='R1',
+            operator='chris', arrived_at=env.clock.t,
+        )
+    env.clock.t = now
+
+
+@pytest.mark.parametrize(('ages', 'reason'), [
+    ([60], 'cooling down: last attempt 1m ago, cooldown 30m'),
+    ([2000, 4000, 6000], 'attempt cap reached: 3 in 24h (max 3)'),
+])
+def test_incident_limits_refuse_without_row_or_card(env, ages, reason):
+    _seed_attempts(env, ages)
+    with env.store._connect() as conn:
+        before = conn.execute('SELECT COUNT(*) FROM approvals').fetchone()[0]
+    result = env.propose(via='incident')
+    assert not result.ok and result.approval_id is None and not result.created
+    assert result.reason == reason
+    assert env.notifier.approval_requests == []
+    with env.store._connect() as conn:
+        assert conn.execute('SELECT COUNT(*) FROM approvals').fetchone()[0] == before
+    event = env.store.list_events()[-1]
+    assert event['kind'] == 'proposal.refused'
+    assert event['payload']['reason'] == reason
+    assert event['payload']['requested_via'] == 'incident'
+
+
+def test_incident_allowed_when_limits_clear(env):
+    _seed_attempts(env, [60, 120, 180])
+    env.clock.t += 86400
+    result = env.propose(via='incident')
+    assert result.ok and result.created
+    assert len(env.notifier.approval_requests) == 1
+
+
+@pytest.mark.parametrize('origin', ['telegram', 'dashboard', 'dashboard-direct'])
+def test_operator_proposals_bypass_limits(env, origin):
+    _seed_attempts(env, [0] * 5)
+    assert env.propose(via=origin).ok
+    assert len(env.notifier.approval_requests) == 1
+
+
+def test_direct_requests_bypass_limits(env):
+    _seed_attempts(env, [0] * 5)
+    assert direct(env).outcome == 'started'
+
+
+def test_direct_request_uses_configured_risks(env, monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(direct_request_risks=[]))
+    result = direct(env)
+    assert result.outcome == 'refused'
+    assert result.message == 'direct requests are not allowed for R1'
+    assert env.store.list_pending() == []
+    assert env.spawned == []
+
+
+
+def test_incident_cooldown_longer_than_a_day_is_enforced(env, monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(cooldown_seconds=48 * 3600))
+    _seed_attempts(env, [25 * 3600])            # outside the 24h cap window, inside the 48h cooldown
+    result = env.propose(via='incident')
+    assert not result.ok
+    assert result.reason.startswith('cooling down: last attempt 1500m ago')
+    assert env.notifier.approval_requests == []
+
+
+def test_pending_approval_is_refused_when_its_risk_becomes_forbidden(env, monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    proposed = env.propose()
+    assert proposed.ok
+    monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(forbidden_risks=['R1', 'R4'], direct_request_risks=[]))
+    tap = _tap(proposed.approval_id)
+    result = env.service.decide(proposed.approval_id, approve=True, decided_by='@chris (1001)', decision=tap)
+
+    assert result.outcome == 'refused'
+    assert 'refused by current policy' in result.message and 'never allowed' in result.message
+    assert env.spawned == [] and env.argv_calls == []
+    assert env.state.mutation_owner is None
+    row = env.store.get_approval(proposed.approval_id)
+    assert row['status'] == 'denied' and row['decided_by'] == 'policy'
+    assert env.store.list_events()[-1]['kind'] == 'approval.refused_by_policy'
+    assert env.notifier.resolutions and env.notifier.resolutions[-1][1] == 'Refused by policy.'
+    # a second tap can't resurrect it
+    again = env.service.decide(proposed.approval_id, approve=True, decided_by='@chris (1001)', decision=tap)
+    assert again.outcome == 'already_decided'
+
+
+def test_deny_still_works_for_a_newly_forbidden_risk(env, monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    proposed = env.propose()
+    monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(forbidden_risks=['R1', 'R4'], direct_request_risks=[]))
+    result = env.service.decide(proposed.approval_id, approve=False, decided_by='@chris (1001)')
+    assert result.outcome == 'denied'

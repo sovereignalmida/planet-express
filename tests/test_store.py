@@ -703,3 +703,39 @@ def test_revoke_devices_newer_schema(tmp_path, capsys):
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
     assert main(["alice"], store_factory=lambda _: Store(path)) == 1
     assert "database schema is newer" in capsys.readouterr().err
+
+
+def test_recent_attempts_filters_and_persists(tmp_path):
+    clock = Clock(100)
+    store = _store(tmp_path, clock)
+    row, _ = _propose(store)
+    clock.t = 110
+    store.approve_and_create_execution(row['id'], decided_by='chris', arrived_at=clock.t)
+    clock.t = 120
+    _direct(store, arrived_at=clock.t)
+    clock.t = 90
+    _direct(store, arrived_at=clock.t)
+    for action, key in [('other', 'healthy/web'), ('docker.restart_service', 'other/web')]:
+        row, _ = _propose(store, key=key, action=action)
+        store.approve_and_create_execution(row['id'], decided_by='chris', arrived_at=clock.t)
+    _propose(store)  # Pending proposals do not count as attempts.
+    for current in (store, Store(store.path)):
+        assert current.recent_attempts('docker.restart_service', 'healthy/web', 0) == [90, 110, 120]
+        assert current.recent_attempts('docker.restart_service', 'healthy/web', 110) == [110, 120]
+        assert current.recent_attempts('docker.restart_service', 'healthy/web', 121) == []
+        assert current.recent_attempts('missing', 'healthy/web', 0) == []
+
+
+def test_attempt_index_added_without_version_change(tmp_path):
+    from planet_express.core.store import SCHEMA_VERSION
+
+    store = _store(tmp_path)
+    with sqlite3.connect(store.path) as conn:
+        before = conn.execute('PRAGMA user_version').fetchone()[0]
+        conn.execute('DROP INDEX approvals_action_target')
+    Store(store.path).init()
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == before == SCHEMA_VERSION == 2
+        assert [r[2] for r in conn.execute('PRAGMA index_info(approvals_action_target)')] == [
+            'action', 'target_key',
+        ]

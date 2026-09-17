@@ -53,7 +53,7 @@ class ProposeResult:
 
 @dataclass(frozen=True)
 class DecideResult:
-    outcome: str  # started | denied | busy | already_decided | expired | unknown
+    outcome: str  # started | denied | refused | busy | already_decided | expired | unknown
     message: str
     execution_id: str | None = None
 
@@ -134,6 +134,18 @@ class CommandService:
             # Slice 1 registers no automatic mutations; an R0 action is a read, not a proposal.
             return ProposeResult(False, None, False, f"{action} runs automatically and is not proposed")
 
+        if requested_via not in policy.OPERATOR_ORIGINS:
+            now = self._clock()
+            reason = policy.limit_refusal(
+                self._store.recent_attempts(action, target.key, now - policy.limit_lookback_seconds()), now,
+            )
+            if reason is not None:
+                self._store.record_event(
+                    "proposal.refused", action=action, stack=stack, service=service,
+                    reason=reason, requested_via=requested_via, requested_by=requested_by,
+                )
+                return ProposeResult(False, None, False, reason)
+
         with self._proposal_card_lock:
             row, created = self._store.propose(
                 action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
@@ -175,6 +187,21 @@ class CommandService:
             text = f"❌ Restart of <code>{_s(key)}</code> denied by {_s(decided_by)}."
             self._safe_finalize_card(row, decision, ack="Denied.", text=text)
             return DecideResult("denied", text)
+
+        # Re-check CURRENT policy before consuming an approval. A card created before the operator
+        # forbade its risk class (config change + core restart) must not still execute: pending
+        # approvals survive restarts, and propose() only checked the policy of its own time
+        # (Codex review, T24). The approval is closed as denied so the card can't be retried.
+        current = policy.decide(row["action"])
+        if not current.allowed:
+            reason = f"refused by current policy: {current.reason}"
+            if self._store.consume(approval_id, decision="denied", decided_by="policy", arrived_at=arrived):
+                self._store.record_event("approval.refused_by_policy", approval_id=approval_id,
+                                         reason=current.reason, attempted_by=decided_by)
+                text = f"🚫 Restart of <code>{_s(key)}</code> {_s(reason)}."
+                self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
+                return DecideResult("refused", text)
+            return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
 
         owner = f"act:{approval_id}"
         if not self._state.try_begin_mutation(owner):

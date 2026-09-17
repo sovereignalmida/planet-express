@@ -51,3 +51,49 @@ def test_restart_action_declares_no_abort_rollback_or_resume():
 def test_only_r1_allows_direct_request():
     for risk in (*policy.RISK_LEVELS, 'R9', '', None):
         assert policy.allows_direct_request(risk) is (risk == 'R1')
+
+
+def test_configurable_policy(monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    autonomy = AutonomyConfig(direct_request_risks=['R2'], forbidden_risks=['R3', 'R4'])
+    monkeypatch.setattr(config, 'AUTONOMY', autonomy)
+    monkeypatch.setitem(actions.REGISTRY, 'test', actions.ActionSpec('test', 'R3', 'test'))
+    assert not policy.decide('test').allowed
+    assert policy.decide('test', autonomy=AutonomyConfig()).needs_approval
+    assert not policy.allows_direct_request('R1')
+    assert policy.allows_direct_request('R2')
+    assert not policy.allows_direct_request('R2', autonomy=AutonomyConfig())
+    for rollbackable in (False, True):
+        monkeypatch.setitem(actions.REGISTRY, 'test', actions.ActionSpec(
+            'test', 'R1', 'test', rollbackable=rollbackable,
+        ))
+        for settings in (AutonomyConfig(), autonomy, AutonomyConfig(direct_request_risks=[])):
+            decision = policy.decide('test', autonomy=settings)
+            assert decision.allowed and decision.needs_approval
+
+
+def test_limit_boundaries():
+    from config_schema import AutonomyConfig
+
+    now = 100_000
+    settings = AutonomyConfig()
+    check = lambda attempts: policy.limit_refusal(attempts, now, autonomy=settings)
+    assert check([]) is None
+    assert check([now - 1799]) == 'cooling down: last attempt 29m ago, cooldown 30m'
+    assert check([now - 1800]) is None
+    assert check([now - 4000, now - 2000]) is None
+    assert check([now - 86400, now - 4000, now - 2000]) == 'attempt cap reached: 3 in 24h (max 3)'
+    assert check([now - 86401, now - 4000, now - 2000]) is None
+    assert check([now - 60, now - 2000, now - 4000]) == (
+        'cooling down: last attempt 1m ago, cooldown 30m'
+    )
+    assert policy.limit_refusal([now], now, autonomy=AutonomyConfig(cooldown_seconds=0)) is None
+
+
+def test_limit_lookback_covers_the_longer_of_cooldown_and_a_day():
+    from config_schema import AutonomyConfig
+
+    assert policy.limit_lookback_seconds(autonomy=AutonomyConfig()) == 86400
+    assert policy.limit_lookback_seconds(autonomy=AutonomyConfig(cooldown_seconds=48 * 3600)) == 48 * 3600
