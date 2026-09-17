@@ -1040,6 +1040,19 @@ follows them.
     test changed; `casa_amy.py` untouched; new `tests/test_tool_loop.py` pins the loop and both
     adapters' two-turn request kwargs. Implemented by Codex from a brief, reviewed, `codex review`
     clean first round. 773 tests green.
+- **Operator decisions, 2026-09-17 (before T21/T24/T25):**
+  - **D30 — chat ceiling: 100 LLM calls per day,** shared by all dashboard operators, resetting at
+    local midnight (the D5/D22 transactional reservation counts calls; D26 keeps spend a later switch).
+  - **D31 — restarts are never automatic.** D23 stands as written: nothing above R0 runs without
+    approval. T24 still ships the configurable R0-R4 map, per-target cooldown and persistent attempt
+    cap; today they bound how often a proposal can be re-raised, and are ready if that changes.
+  - **D32 — the backup script moves to root ownership and gains the maintenance marker.** Found
+    reading it for T25: `weekly-borg-backup.service` runs `/home/casaroot/apps/borg-backup.sh` as
+    **root**, but the script is `casaroot:casaroot 775` inside a `casaroot`-owned directory, so
+    anything running as `casaroot` (core included, and legacy shell plans) could rewrite it and get
+    root on the next Sunday run, bypassing the sudo allowlist. T25 moves it to root-owned
+    `/usr/local/sbin/`, repoints both borg units, and adds the marker; rehearsed on the test VM, then
+    installed by the operator with sudo. Marker older than 6 hours is ignored.
 - [ ] **T21 (P1, human: ~2 days / CC: ~1 session)** — chat — `chat.ask` ticket + poll, answer/proposal contract, admission control and the daily ceiling [D5, D7, D17, D22]
   - Surfaced by: Architecture 3 and outside voice 5 and 7 — RPC is four workers on a 5s deadline; the loop discards prose so chat needs its own contract; retries and concurrency need transactional reservation
   - Files: `planet_express/integrations/rpc.py`, `planet_express/application/`, `planet_express/core/store.py`, `casa_scruffy.py`, `static/dashboard.js`
