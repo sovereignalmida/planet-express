@@ -81,4 +81,27 @@ diagnosis. Configured literal secrets are already redacted wherever they appear,
 **Priority:** P3
 **Depends on:** T18
 
+### redact() costs ~4µs per character, which bounds every log read
+
+**What:** Speed up `planet_express/core/redact.py`'s key scan so redacting a few MB of log text is not
+seconds of CPU.
+
+**Why:** `_ASSIGNMENT_RE` is `([A-Za-z0-9_]{1,128})["']{0,2}[ \t]{0,32}[:=]`, so on text with no
+separators the engine matches up to 128 identifier characters at **every** position and backtracks —
+measured 30ms per 8 KiB record, 15.1s for 500 such records (T29). T29 works around it by redacting
+newest-first under the caller's deadline and marking the gap, so a container writing long records
+returns fewer lines than it could.
+
+**Context:** The bounds are what made redact linear at all (T18 review rounds 6-7 found three
+quadratic paths), so this is not "remove the bounds". The likely shape is scanning for separators
+(`[:=]`) and walking back a bounded identifier, which is O(separators × 128) instead of
+O(characters × 128) — the T18 gate rejected an UNBOUNDED backward walk, not a bounded one. Any change
+must keep `tests/test_redact.py` green in full: every leak class from 14 review rounds plus the seven
+`test_no_superlinear_path` guards. Add a perf test asserting a 4 MB body redacts in well under a
+second before changing the matcher.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** nothing (T29 ships the workaround)
+
 ## Completed
