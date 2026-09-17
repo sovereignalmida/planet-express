@@ -8,9 +8,7 @@ one place.
 import os
 from pathlib import Path
 
-import yaml
-from pydantic import ValidationError
-
+from config_io import ConfigError, load_config_file
 from config_schema import (
     ExcludedService as ExcludedService,
     PlanetExpressConfig,
@@ -69,19 +67,17 @@ CONFIG_FILE = Path(os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml
 
 
 def _load_config() -> PlanetExpressConfig:
-    if not CONFIG_FILE.exists():
-        raise SystemExit(
-            f"Config file not found: {CONFIG_FILE}\n"
-            f"Copy config.example.yaml to {CONFIG_FILE} and edit it for your environment "
-            f"(or set CASA_CONFIG to point somewhere else). If you're upgrading an install "
-            f"that predates this file, see scripts/migrate_config.py."
-        )
-    with open(CONFIG_FILE) as f:
-        raw = yaml.safe_load(f) or {}
     try:
-        return PlanetExpressConfig(**raw)
-    except ValidationError as e:
-        raise SystemExit(f"Invalid config at {CONFIG_FILE}:\n{e}")
+        return load_config_file(CONFIG_FILE)
+    except ConfigError as e:
+        if isinstance(e.__cause__, FileNotFoundError):
+            raise SystemExit(
+                f"Config file not found: {CONFIG_FILE}\n"
+                f"Copy config.example.yaml to {CONFIG_FILE} and edit it for your environment "
+                f"(or set CASA_CONFIG to point somewhere else). If you're upgrading an install "
+                f"that predates this file, see scripts/migrate_config.py."
+            ) from e
+        raise SystemExit(f"Invalid config at {CONFIG_FILE}:\n{e}") from e
 
 
 _cfg = _load_config()

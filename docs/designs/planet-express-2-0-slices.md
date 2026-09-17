@@ -1068,10 +1068,29 @@ follows them.
   - Surfaced by: Outside voice 8 — `borg-backup.sh:149` tears down stacks and restarts all three units as root every Sunday 02:30 without consulting `PipelineState`
   - Files: `casa_farnsworth.py`, `config_schema.py`, and the root-owned backup script (outside this repo)
   - Verify: core refuses new mutations while the marker is set; the scheduler waits rather than starting a pass; a stale marker expires instead of wedging core
-- [ ] **T26 (P1, human: ~1 day / CC: ~30min)** — config — Split `validate()` from load, atomic write, and core re-exec activation [D15, D18]
+- [x] **T26 (P1, human: ~1 day / CC: ~30min)** — config — ✅ done 2026-09-17 — Split `validate()` from load, atomic write, and core re-exec activation [D15, D18]
   - Surfaced by: Test review and outside voice 2/3 — `_load_config` (`:71-85`) exits the process, so a web worker cannot validate a draft; the core unit is `Restart=on-failure`, so a clean exit would leave core stopped
   - Files: `config.py`, `planet_express/application/`, `casa_farnsworth.py`, `tests/test_config.py`
   - Verify: an invalid draft is rejected with field errors and the file on disk is unchanged; an interrupted write leaves the old config intact; re-exec keeps the PID and picks up new values with no stopped-core window
+  - **Landed:** `config_io.py` (imports only `config_schema`, so a draft validates without the
+    import-time load): `validate_config_text` returns dotted-loc field errors and never raises;
+    `load_config_file` raises `ConfigError`; `write_config_text` validates first, writes the operator's
+    TEXT (comments survive), temp file + fsync + `os.replace` + directory fsync, preserving mode,
+    owner (best effort) and the **POSIX access ACL** — `web_access.py`'s named-user entry for the
+    dashboard would otherwise vanish on replace (Codex review round 1). `config._load_config` keeps its
+    SystemExit messages. `planet_express/core/reexec.py` flushes and `os.execv`s (same PID; test proves
+    it). `TelegramClient.confirm_updates()` acknowledges the last polled batch before re-exec so it is
+    not replayed; accepted edge: a batch fetched but not yet handled is dropped, not replayed.
+    `ConfigService.apply`: invalid → nothing written; `try_begin_mutation(require_idle=True)` refused →
+    `busy`; write → activate with the lock held. Built in `run_bot`, **not wired to RPC or Telegram**
+    (slice 4). Implemented by Codex from a brief, reviewed; 811 tests green.
+  - **OPEN — needs a decision before slice 4 wires apply (Codex review round 2):** on a default install
+    `setup_wizard.py` creates `/etc/planetexpress` and the config as root, and core runs unprivileged,
+    so every apply returns `write_failed` (safe: nothing written, core keeps running). Fixing it means
+    granting core write access to the config directory — and the config carries `sudo_allowlist`, so
+    that also lets core rewrite the code-level allowlist Bender enforces (OS-level sudoers stays
+    root-owned). Decide (a) who owns the config directory and (b) whether UI edits may touch
+    `sudo_allowlist` at all, before exposing apply.
 
 ## Reviewer Concerns
 

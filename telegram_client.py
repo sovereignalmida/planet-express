@@ -104,6 +104,20 @@ class TelegramClient:
             log.warning(f"Poll error (will retry): {e}")
             return []
 
+    def confirm_updates(self) -> None:
+        # Telegram only marks updates confirmed when a later getUpdates passes an
+        # offset above them, so without this a re-exec (which resets _offset to 0)
+        # would REPLAY the last polled batch — duplicate /restart proposals and
+        # approvals. Updates returned by this call are NOT confirmed by it, so
+        # nothing new is lost. One accepted edge: poll_updates advances _offset when a batch
+        # is FETCHED, so a re-exec landing after a fetch but before that batch is handled
+        # drops it instead of replaying it. Dropping is the safe direction for approvals.
+        if self._offset > 0:
+            try:
+                self._call("getUpdates", offset=self._offset, timeout=0, limit=1)
+            except Exception:  # noqa: BLE001 -- confirmation must not prevent activation
+                log.warning("Failed to confirm Telegram updates before re-exec")
+
     # ── Keyboard helpers ──────────────────────────────────────────────────────
     @staticmethod
     def act_keyboard(approval_id: str) -> dict:

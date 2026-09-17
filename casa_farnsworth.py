@@ -40,7 +40,9 @@ import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
 from planet_express.application.command_service import CommandService
+from planet_express.application.config_service import ConfigService
 from planet_express.core.redact import redact
+from planet_express.core.reexec import reexec
 from planet_express.core.store import Store
 from planet_express.execution import actions
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
@@ -2098,12 +2100,24 @@ def _init_store(store: Store) -> None:
             log.info("Pruned %d old unlinked events at startup", deleted)
 
 
+def _reexec_core(tg: TelegramClient) -> None:
+    tg.confirm_updates()
+    log.info("Re-executing core to activate new config")
+    reexec()
+
+
+def build_config_service(state, tg) -> ConfigService:
+    return ConfigService(state, config_path=config.CONFIG_FILE, activate=lambda: _reexec_core(tg))
+
+
 def run_bot() -> None:
     config.ensure_dirs()
     token, chat_id = config.telegram_credentials()
     tg = TelegramClient(token, chat_id)
     notifier: Notifier = TelegramNotifier(tg)
     state = PipelineState()
+    # Slice 4 wires this service to RPC.
+    config_service = build_config_service(state, tg)  # noqa: F841
 
     # Typed actions (landing 1b). Reconcile BEFORE polling starts: an execution left
     # running/verifying means core died mid-action, so it's marked interrupted, not resumed.
