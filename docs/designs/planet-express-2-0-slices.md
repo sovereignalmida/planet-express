@@ -1113,10 +1113,35 @@ follows them.
   - Surfaced by: Outside voice 1 — R1 is called reversible while `docker.restart_service` declares `rollbackable=False`; quarantine is slice 6 and no cooldowns exist
   - Files: `planet_express/execution/policy.py`, `planet_express/core/store.py`, `config_schema.py`
   - Verify: per-target cooldown holds across restarts; the attempt cap stops a repeated-restart loop; an action declaring `rollbackable=False` never runs automatically
-- [ ] **T25 (P2, human: ~1 day / CC: ~30min)** — deploy — Maintenance-window interlock with the weekly borg backup [D24]
+- [x] **T25 (P2, human: ~1 day / CC: ~30min)** — deploy — ✅ done 2026-09-17 (live install pending) — Maintenance-window interlock with the weekly borg backup [D24]
   - Surfaced by: Outside voice 8 — `borg-backup.sh:149` tears down stacks and restarts all three units as root every Sunday 02:30 without consulting `PipelineState`
   - Files: `casa_farnsworth.py`, `config_schema.py`, and the root-owned backup script (outside this repo)
   - Verify: core refuses new mutations while the marker is set; the scheduler waits rather than starting a pass; a stale marker expires instead of wedging core
+  - **Landed (core):** `planet_express/core/maintenance.py` — marker `/var/lib/planetexpress/maintenance`
+    (`CASA_MAINTENANCE_MARKER`), stale by **mtime** after 6h (warned once per mtime), a fresh unreadable
+    or reason-less marker fails closed. `PipelineState` checks it first inside `_lock`:
+    `try_begin_mutation` refuses for every owner (incl. `during_scan`, `require_idle`), `try_start_run`
+    refuses, `busy_reason` says `maintenance: <reason>`. Scheduled scans wait silently (60s poll);
+    on-demand scans reply "Maintenance in progress"; the weekly update pass retries through it; an
+    approve during the window leaves the approval pending. Implemented by Codex from a brief;
+    `codex review` clean first round. 866 tests green.
+  - **Landed (host):** `scripts/host/install-borg-interlock.sh` (D32), run as the operator with sudo:
+    installs a root-owned `/usr/local/sbin/planetexpress-borg-backup.sh` = the existing script
+    byte-for-byte plus one marker block after `check_prerequisites || exit 1` (verified by stripping the
+    block and `cmp`), repoints both borg units with drop-ins, retires the old copy read-only, removes
+    world-write from `/home/casaroot/apps`. Marker removed on exit and on SIGTERM.
+  - **Test VM rehearsal 29/29** (one scripted count check was itself wrong; the diff shows exactly the
+    11-line block): reproduced the live wiring (root runs a casaroot script in a 777 dir, and
+    `planetexpress-web` could write it); after the installer, the web user can't, the installed script
+    is root-owned, both units repointed, installer idempotent. A real backup run tore the fixture
+    stacks down; during it core refused a mutation with `maintenance: borg-backup --weekly`, and casaroot
+    could not delete the marker; afterwards the marker was gone, core allowed mutation, stacks and units
+    back. `systemctl stop` mid-run cleared the marker; a 7h-old marker is ignored; a fresh garbage one
+    blocks.
+  - **Residual (pre-existing):** a scan already RUNNING when the backup starts can finish and propose a
+    plan from a torn-down snapshot; approving it is refused until the window ends.
+  - **Noticed on the live host:** `daily-borg-backup` has not run since 2026-08-31 although its timer
+    says 03:10 daily — worth checking `systemctl list-timers daily-borg-backup.timer`.
 - [x] **T26 (P1, human: ~1 day / CC: ~30min)** — config — ✅ done 2026-09-17 — Split `validate()` from load, atomic write, and core re-exec activation [D15, D18]
   - Surfaced by: Test review and outside voice 2/3 — `_load_config` (`:71-85`) exits the process, so a web worker cannot validate a draft; the core unit is `Restart=on-failure`, so a clean exit would leave core stopped
   - Files: `config.py`, `planet_express/application/`, `casa_farnsworth.py`, `tests/test_config.py`

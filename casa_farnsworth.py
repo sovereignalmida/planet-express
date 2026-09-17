@@ -24,6 +24,7 @@ import sqlite3
 import sys
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,6 +42,7 @@ import config
 from notifier import Notifier, TelegramNotifier
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
+from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
 from planet_express.core.store import SchemaTooNewError, Store
@@ -475,7 +477,8 @@ class PipelineState:
     AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
 
-    def __init__(self):
+    def __init__(self, maintenance: Callable[[], MaintenanceWindow | None] = active_window):
+        self.maintenance = maintenance
         self._lock = threading.Lock()
         self._state = self.IDLE
         self._pending_plan_id: str | None = None
@@ -531,6 +534,8 @@ class PipelineState:
     def busy_reason(self) -> str:
         """Why a mutation would be refused right now, for "busy" messages."""
         with self._lock:
+            if window := self.maintenance():
+                return f"maintenance: {window.reason}"
             if self._mutation_owner is not None:
                 return self._mutation_owner
             if self._state == self.RUNNING:
@@ -544,6 +549,7 @@ class PipelineState:
         the same lock transition() and try_start_run() use, so nothing can slip between a
         check and the grab (each gap here was found by Codex review, landing 1a):
 
+          - refused during maintenance, including during_scan and require_idle callers;
           - refused while another mutation holds the lock;
           - refused while a scan is RUNNING, so nothing changes the host under Leela's
             snapshot. during_scan=True is only for safe-prune, which runs inside the
@@ -551,6 +557,8 @@ class PipelineState:
           - require_idle additionally refuses unless the pipeline is IDLE (the weekly
             update pass, which has always waited for a pending plan too)."""
         with self._lock:
+            if self.maintenance() is not None:
+                return False
             if self._mutation_owner is not None:
                 return False
             if self._state == self.RUNNING and not during_scan:
@@ -593,6 +601,8 @@ class PipelineState:
         containers are being recreated yields inconsistent snapshots and false
         remediation plans. Safe-prune inside a running scan still takes the lock itself."""
         with self._lock:
+            if self.maintenance() is not None:
+                return False
             if self._state != self.IDLE or self._mutation_owner is not None:
                 return False
             log.info(f"State: {self._state} → {self.RUNNING}")
@@ -861,12 +871,20 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
 
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
-def run_pipeline(notifier: Notifier, state: PipelineState, mode: str = "full") -> None:
+def run_pipeline(
+    notifier: Notifier, state: PipelineState, mode: str = "full", *, scheduled: bool = False
+) -> None:
     """
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
     mode: 'full' | 'status' | 'updates'
     """
-    if not state.try_start_run():
+    while not state.try_start_run():
+        if window := state.maintenance():
+            if scheduled:
+                _wait_for_maintenance(state)
+                continue
+            notifier.notify(f"🧰 Maintenance in progress ({window.reason}) — scan not started.")
+            return
         owner = state.mutation_owner
         if owner:
             notifier.notify(f"⏳ Host busy ({owner}) — scan not started. Try again shortly.")
@@ -1938,14 +1956,30 @@ def _do_rollback(tg: TelegramClient, notifier: Notifier, state: PipelineState, p
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
+MAINTENANCE_POLL_SECONDS = 60
+
+
+def _wait_for_maintenance(state: PipelineState, sleep=time.sleep) -> None:
+    """Defer scheduled scans silently until the marker disappears or goes stale."""
+    window = state.maintenance()
+    if window is None:
+        return
+    log.info("Scheduled pipeline waiting for maintenance: %s", window.reason)
+    while window is not None:
+        sleep(MAINTENANCE_POLL_SECONDS)
+        window = state.maintenance()
+    log.info("Scheduled pipeline maintenance wait ended")
+
+
 def scheduler_loop(notifier: Notifier, state: PipelineState) -> None:
     """Background thread — runs full pipeline every PIPELINE_INTERVAL_HOURS hours."""
     log.info(f"Scheduler started — pipeline runs every {PIPELINE_INTERVAL_HOURS}h")
     time.sleep(60)  # brief delay on startup before first scheduled run
     while True:
         try:
+            _wait_for_maintenance(state)
             log.info("Scheduled pipeline run starting")
-            run_pipeline(notifier, state, mode="full")
+            run_pipeline(notifier, state, mode="full", scheduled=True)
         except Exception:
             log.exception("Scheduled pipeline error")
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)

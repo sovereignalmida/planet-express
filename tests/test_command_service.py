@@ -674,3 +674,16 @@ def test_direct_request_that_waited_on_the_database_past_its_budget_creates_noth
     assert env.state.mutation_owner is None
     assert not env.service._proposal_card_lock.locked()
     assert_no_actions(env)
+
+
+def test_approve_during_maintenance_stays_pending(env, monkeypatch):
+    approval_id = env.propose().approval_id
+    monkeypatch.setattr(
+        env.state, "maintenance",
+        lambda: fw.MaintenanceWindow("borg-backup", None, Path("/unused")),
+    )
+    result = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    assert result.outcome == "busy"
+    assert "maintenance: borg-backup" in result.message
+    assert env.store.get_approval(approval_id)["status"] == "pending"
+    assert env.argv_calls == [] and env.state.mutation_owner is None

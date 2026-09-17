@@ -736,3 +736,124 @@ def test_unknown_stack_blocks_pruning():
     }
     assert fw._has_incomplete_stacks(snapshot) is True
     assert fw._safe_to_prune(snapshot) is False
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"during_scan": True}, {"require_idle": True}])
+def test_maintenance_blocks_all_mutations_and_scans(kwargs, monkeypatch):
+    window = fw.MaintenanceWindow("borg-backup", None, Path("/unused"))
+    s = fw.PipelineState(maintenance=lambda: window)
+    monkeypatch.setattr(s, "_persist", lambda: None)
+    assert not s.try_begin_mutation("owner", **kwargs)
+    assert not s.try_start_run()
+    assert s.busy_reason == "maintenance: borg-backup"
+    assert s.state == s.IDLE and s.mutation_owner is None
+    assert s.get_pending() == (None, None)
+    assert not s._lock.locked()
+    window = None
+    assert s.try_begin_mutation("owner", **kwargs)
+    s.end_mutation("owner")
+    assert s.try_start_run()
+
+
+def test_maintenance_preserves_existing_owner_and_pending_plan(monkeypatch):
+    window = None
+    s = fw.PipelineState(maintenance=lambda: window)
+    monkeypatch.setattr(s, "_persist", lambda: None)
+    s.transition(s.AWAITING_APPROVAL, "plan", 123)
+    assert s.try_begin_mutation("existing")
+    window = fw.MaintenanceWindow("backup", None, Path("/unused"))
+    assert not s.try_begin_mutation("new", during_scan=True)
+    assert not s.try_start_run()
+    assert s.busy_reason == "maintenance: backup"
+    assert s.mutation_owner == "existing"
+    assert s.state == s.AWAITING_APPROVAL and s.get_pending() == ("plan", 123)
+
+
+def test_on_demand_scan_maintenance_message():
+    s = fw.PipelineState(maintenance=lambda: fw.MaintenanceWindow("backup", None, Path("/unused")))
+    notifier = FakeNotifier()
+    fw.run_pipeline(notifier, s)
+    assert notifier.notifications == ["🧰 Maintenance in progress (backup) — scan not started."]
+
+
+def test_scheduler_waits_then_runs_without_deferral_notification(monkeypatch, caplog):
+    window = fw.MaintenanceWindow("backup", None, Path("/unused"))
+    s = fw.PipelineState(maintenance=lambda: window)
+    notifier = FakeNotifier()
+    sleeps = []
+    runs = []
+
+    def sleep(seconds):
+        nonlocal window
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            window = None
+
+    original_wait = fw._wait_for_maintenance
+    monkeypatch.setattr(fw, "_wait_for_maintenance", lambda state: original_wait(state, sleep))
+    monkeypatch.setattr(fw, "run_pipeline", lambda *args, **kwargs: runs.append(window))
+
+    def scheduler_sleep(seconds):
+        if seconds != 60:
+            raise StopIteration
+
+    monkeypatch.setattr(fw.time, "sleep", scheduler_sleep)
+    with caplog.at_level(logging.INFO), pytest.raises(StopIteration):
+        fw.scheduler_loop(notifier, s)
+    assert sleeps == [60, 60] and runs == [None]
+    assert notifier.notifications == []
+    assert sum("waiting for maintenance" in r.message for r in caplog.records) == 1
+    assert sum("maintenance wait ended" in r.message for r in caplog.records) == 1
+
+
+def test_weekly_update_waits_through_maintenance(monkeypatch, caplog):
+    window = fw.MaintenanceWindow("backup", None, Path("/unused"))
+    s = fw.PipelineState(maintenance=lambda: window)
+    calls = []
+
+    def sleep(seconds):
+        nonlocal window
+        assert seconds == fw.UPDATE_BUSY_RETRY_SECONDS
+        assert s.mutation_owner is None
+        window = None
+
+    monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kwargs: calls.append(s.mutation_owner))
+    with caplog.at_level(logging.INFO):
+        assert fw._run_scheduled_update_pass(None, s, sleep=sleep) == "ran"
+    assert "maintenance: backup" in caplog.text
+    assert calls == ["zoidberg-weekly"] and s.mutation_owner is None
+
+
+def test_maintenance_blocks_safe_prune_inside_running_scan(monkeypatch):
+    window = None
+    s = fw.PipelineState(maintenance=lambda: window)
+    monkeypatch.setattr(s, "_persist", lambda: None)
+    assert s.try_start_run()
+    window = fw.MaintenanceWindow("backup", None, Path("/unused"))
+    assert not s.try_begin_mutation("safe-prune", during_scan=True)
+    assert s.state == s.RUNNING and s.mutation_owner is None
+    window = None
+    assert s.try_begin_mutation("safe-prune", during_scan=True)
+
+
+def test_scheduled_scan_admission_waits_without_maintenance_notification(monkeypatch, tmp_path):
+    window = fw.MaintenanceWindow("backup", None, Path("/unused"))
+    s = fw.PipelineState(maintenance=lambda: window)
+    monkeypatch.setattr(s, "_persist", lambda: None)
+    notifier = FakeNotifier()
+    scans = []
+
+    def wait(state):
+        nonlocal window
+        assert state is s and notifier.notifications == []
+        window = None
+
+    def scan():
+        scans.append(window)
+        raise RuntimeError("stop after scan admission")
+
+    monkeypatch.setattr(fw, "_wait_for_maintenance", wait)
+    monkeypatch.setattr(fw.leela, "run_full", scan)
+    fw.run_pipeline(notifier, s, scheduled=True)
+    assert scans == [None]
+    assert not any("Maintenance" in text for text in notifier.notifications)
