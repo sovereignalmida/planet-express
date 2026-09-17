@@ -1140,8 +1140,8 @@ follows them.
     blocks.
   - **Residual (pre-existing):** a scan already RUNNING when the backup starts can finish and propose a
     plan from a torn-down snapshot; approving it is refused until the window ends.
-  - **Noticed on the live host:** `daily-borg-backup` has not run since 2026-08-31 although its timer
-    says 03:10 daily — worth checking `systemctl list-timers daily-borg-backup.timer`.
+  - **Live host note:** `daily-borg-backup` is **disabled on purpose** by the operator (2026-09-17: too
+    noisy, not needed); weekly is the only backup. Planet Express still expects both — see T27.
 - [x] **T26 (P1, human: ~1 day / CC: ~30min)** — config — ✅ done 2026-09-17 — Split `validate()` from load, atomic write, and core re-exec activation [D15, D18]
   - Surfaced by: Test review and outside voice 2/3 — `_load_config` (`:71-85`) exits the process, so a web worker cannot validate a draft; the core unit is `Restart=on-failure`, so a clean exit would leave core stopped
   - Files: `config.py`, `planet_express/application/`, `casa_farnsworth.py`, `tests/test_config.py`
@@ -1176,6 +1176,20 @@ follows them.
     that also lets core rewrite the code-level allowlist Bender enforces (OS-level sudoers stays
     root-owned). Decide (a) who owns the config directory and (b) whether UI edits may touch
     `sudo_allowlist` at all, before exposing apply.
+
+- [ ] **T27 (P2, human: ~half day / CC: ~20min)** — config — `backup_jobs` setting so only enabled borg jobs are monitored
+  - Surfaced by: operator, 2026-09-17 — the daily borg job is disabled on purpose, but Planet Express
+    assumes both run: Leela always checks `daily-borg-backup` and `weekly-borg-backup`
+    (`casa_leela.py:728`, `casa_stackctl.py:48-49`), the dashboard marks a disabled timer stale and then
+    overdue (`dashboard_data.py:500-516`), and Hermes rates a never-run/failed backup HIGH
+    (`casa_hermes.py:56`). Disabling the timer only trades one warning for another.
+  - Design: `backup_jobs: list[Literal["daily", "weekly"]] = ["daily", "weekly"]` in `config_schema.py`
+    (default keeps existing installs unchanged; at least one job); Leela, `casa_stackctl` (`/backups`),
+    dashboard cadence/banner and anything feeding Hermes read only the enabled jobs. Live config sets
+    `backup_jobs: [weekly]` after deploy (the config key requires code that knows it — T23's
+    `extra="forbid"` rollback note applies).
+  - Files: `config_schema.py`, `config.py`, `casa_leela.py`, `casa_stackctl.py`, `dashboard_data.py`, tests
+  - Verify: with `[weekly]` no daily check, banner or finding appears; default config behaves as today
 
 ## Reviewer Concerns
 
