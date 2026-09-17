@@ -312,6 +312,12 @@ class CommandService:
             approval = self._store.get_approval(execution["approval_id"])
             spec = actions.REGISTRY.get(approval["action"])
             execution["capabilities"] = spec.capabilities() if spec else {}
+            execution["approval"] = {
+                key: approval[key] for key in (
+                    "id", "action", "risk", "requested_via", "requested_by", "decided_by", "decided_at"
+                )
+            }
+            execution["approval"]["target"] = json.loads(approval["target_json"])
         return execution
 
     # ── execution (worker thread) ───────────────────────────────────────────

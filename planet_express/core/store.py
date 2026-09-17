@@ -131,19 +131,19 @@ class Store:
 
     # ── connections ─────────────────────────────────────────────────────────
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+    def _connect(self, timeout: float = 5) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path, timeout=timeout, isolation_level=None)
         try:
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute(f"PRAGMA busy_timeout = {max(0, int(timeout * 1000))}")
             conn.execute("PRAGMA foreign_keys = ON")
             yield conn
         finally:
             conn.close()
 
     @contextmanager
-    def _write(self) -> Iterator[sqlite3.Connection]:
-        with self._connect() as conn:
+    def _write(self, timeout: float = 5) -> Iterator[sqlite3.Connection]:
+        with self._connect(timeout=timeout) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
@@ -335,10 +335,10 @@ class Store:
             created = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
             return dict(created), True
 
-    def get_approval(self, approval_id: str, as_of: float | None = None) -> dict | None:
+    def get_approval(self, approval_id: str, as_of: float | None = None, *, timeout: float = 5) -> dict | None:
         """Look up an approval, marking it expired first if its TTL has passed as of
         `as_of` (the request's arrival time), defaulting to now."""
-        with self._write() as conn:
+        with self._write(timeout=timeout) as conn:
             self._expire_stale(conn, self._clock() if as_of is None else as_of)
             row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
         return dict(row) if row is not None else None
@@ -349,6 +349,38 @@ class Store:
             self._expire_stale(conn, self._clock())
             rows = conn.execute(
                 "SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at, id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_recent_approvals(self, limit: int, *, timeout: float = 5) -> list[dict]:
+        """Resolved approvals after lazy expiry, with their latest execution."""
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("limit must be an integer from 1 to 20")
+        with self._write(timeout=timeout) as conn:
+            self._expire_stale(conn, self._clock())
+            rows = conn.execute(
+                "SELECT a.*, e.id AS execution_id, e.status AS execution_status, "
+                "e.started_at, e.finished_at, e.reason FROM approvals a "
+                "LEFT JOIN executions e ON e.id = (SELECT id FROM executions "
+                "WHERE approval_id = a.id ORDER BY started_at DESC, id DESC LIMIT 1) "
+                "WHERE a.status != 'pending' "
+                "ORDER BY COALESCE(a.decided_at, a.expires_at, a.created_at) DESC, a.id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            execution = {"id": item.pop("execution_id"), "status": item.pop("execution_status"),
+                         **{key: item.pop(key) for key in ("started_at", "finished_at", "reason")}}
+            item["execution"] = execution if execution["id"] is not None else None
+            result.append(item)
+        return result
+
+    def list_executions(self, approval_id: str, *, timeout: float = 5) -> list[dict]:
+        with self._connect(timeout=timeout) as conn:
+            rows = conn.execute(
+                "SELECT id, status, started_at, finished_at, reason FROM executions "
+                "WHERE approval_id = ? ORDER BY started_at DESC, id DESC", (approval_id,),
             ).fetchall()
         return [dict(row) for row in rows]
 

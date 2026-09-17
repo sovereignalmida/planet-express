@@ -112,3 +112,41 @@ def test_missing_executable_returns_127():
 def test_nonzero_exit_is_returned_not_raised():
     rc, _out, _err = bender.run_argv(["false"], timeout=5)
     assert rc == 1
+
+
+
+# ── run_argv_bounded (T29): memory-bounded capture for docker logs ─────────────────
+PY = sys.executable
+
+
+def test_bounded_keeps_the_newest_bytes_and_drops_the_partial_first_line():
+    script = "import sys\nfor i in range(20000): sys.stdout.write(f'line {i:05d}\\n')"
+    rc, out, err, truncated = bender.run_argv_bounded([PY, "-c", script], timeout=10, max_bytes=4096)
+    assert rc == 0 and truncated and err == ""
+    assert len(out.encode()) <= 4096
+    assert out.endswith("line 19999\n")                 # newest kept, NOT stripped
+    assert out.splitlines()[0].startswith("line ")       # no partial first line
+    assert all(len(line) == 10 for line in out.splitlines())
+
+
+def test_bounded_small_output_is_untouched_and_not_stripped():
+    rc, out, err, truncated = bender.run_argv_bounded(
+        [PY, "-c", "import sys; sys.stdout.write('a  \\n'); sys.stderr.write('e\\n')"], timeout=10, max_bytes=4096)
+    assert (rc, out, err, truncated) == (0, "a  \n", "e\n", False)
+
+
+def test_bounded_timeout_missing_executable_and_argv_rules():
+    rc, out, _err, truncated = bender.run_argv_bounded([PY, "-c", "import time; time.sleep(5)"], timeout=0.5, max_bytes=64)
+    assert rc == bender.RUN_ARGV_TIMEOUT_EXIT and out == "" and not truncated
+    assert bender.run_argv_bounded(["definitely-not-a-real-binary-pe"], timeout=5, max_bytes=64)[0] == 127
+    with pytest.raises(TypeError):
+        bender.run_argv_bounded("echo hi", timeout=5, max_bytes=64)
+    with pytest.raises(ValueError):
+        bender.run_argv_bounded(["true"], timeout=5, max_bytes=0)
+
+
+def test_bounded_child_gets_only_minimal_environment(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
+    rc, out, _err, _t = bender.run_argv_bounded(
+        [PY, "-c", "import os; print(os.environ.get('ANTHROPIC_API_KEY', 'absent'))"], timeout=10, max_bytes=1024)
+    assert rc == 0 and out.strip() == "absent"

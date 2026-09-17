@@ -805,3 +805,28 @@ def test_chat_interrupt_and_existing_v2(tmp_path):
         assert current['error'] == 'core restarted'
     with sqlite3.connect(s.path) as conn:
         assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+
+
+def test_recent_approvals_expiry_order_latest_and_limit(tmp_path):
+    clock = Clock(100)
+    store = _store(tmp_path, clock)
+    expired, _ = _propose(store, key='expired', ttl_seconds=5)
+    denied, _ = _propose(store, key='denied')
+    clock.t = 101
+    store.consume(denied['id'], decision='denied', decided_by='x', arrived_at=101)
+    clock.t = 102
+    approved = _direct(store, arrived_at=102)
+    clock.t = 103
+    latest = store.create_execution(approved['approval']['id'])
+    store.set_execution_status(latest['id'], 'passed', 'verified')
+    _propose(store, key='pending')
+    clock.t = 106
+    rows = store.list_recent_approvals(20)
+    assert [r['id'] for r in rows] == [expired['id'], approved['approval']['id'], denied['id']]
+    assert rows[0]['status'] == 'expired' and rows[0]['execution'] is None
+    assert rows[1]['execution'] == {'id': latest['id'], 'status': 'passed', 'started_at': 103,
+                                     'finished_at': 103, 'reason': 'verified'}
+    assert store.list_recent_approvals(1) == rows[:1]
+    for limit in (0, 21, True, '1', 1.5):
+        with pytest.raises(ValueError):
+            store.list_recent_approvals(limit)

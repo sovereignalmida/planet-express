@@ -1283,8 +1283,30 @@ tasks against `ACTION-SCREENS.md`.
 - **Expectation:** approval cards cover *typed* proposals (chat, Telegram `/restart`, dashboard). Legacy
   Farnsworth LLM shell plans keep approving in Telegram until slice 5b retires them.
 
-- [ ] **T29 (P1, CC: ~40min)** — core — `logs.tail`, container facts in `query.container`, `approval.get`, `approval.list_recent`, approval summary on `execution.get_status`
+- [x] **T29 (P1, CC: ~40min)** — core — ✅ done 2026-09-17 — `logs.tail`, container facts in `query.container`, `approval.get`, `approval.list_recent`, approval summary on `execution.get_status`
   - Verify: logs keep the newest lines under both caps with `skipped`, dedupe at the cursor, redact before truncating; the inspect template never reads `.Config`; all reads meet the 4s RPC budget
+  - **Landed:** `logs.tail` (cursor + content-hash dedupe, 500 lines / 256 KiB of SERIALIZED JSON,
+    4 KiB per line, `skipped` whenever anything was dropped, `started_at` for the restarted divider),
+    container `facts` in `query.container` (template reads only `State`, `RestartCount`,
+    `HostConfig.RestartPolicy`, `NetworkSettings.Ports`, `Image` — never `.Config`, asserted by test),
+    `approval.get`, `approval.list_recent` (limit 1-20, latest execution joined) and an `approval`
+    summary on `execution.get_status`. New `casa_bender.run_argv_bounded` keeps only the newest bytes
+    per stream (4 MiB) so a container writing huge records can't exhaust core; `run_argv` untouched.
+    Verified against real docker on the VM: healthy / unhealthy (streak 5535) / crash-looping
+    (restarting, 449 restarts), re-poll returns no duplicates, every call < 0.05s.
+  - **Five `codex review` rounds, all findings fixed (the last two rounds were on my own round-4
+    rewrite):** cursor hashes forgotten on an all-duplicate poll (replayed lines); a response could
+    carry more hashes than a request accepted (limit now 1000, shared constant); size budgeted with
+    the transport's own `json.dumps` (ASCII escapes: `é` is 6 bytes, ESC-heavy output was 774 KB
+    against a 256 KiB cap); blank final record parsed as a continuation; **records split on
+    `splitlines()` broke one docker record in two so `redact()` only saw the first half and leaked the
+    tail of a secret (P1)** — now newline-only; processing could outlast the RPC deadline (500 × 8 KiB
+    took 15.1s against 4s) — redaction now runs newest-first with a deadline check; the record buffer
+    is bounded while parsing (a newline flood peaked ~218 MB, now 0.07s and < 40 MB); the terminal
+    newline's sentinel no longer fabricates a blank line each poll.
+  - **Known limitation, booked in TODOS.md:** `redact()` costs ~4µs/char, so a container writing very
+    long records returns fewer lines than the caps allow (1.87s for 500 × 8 KiB, stopping at the size
+    budget). Not fixed here on purpose — that matcher needed 14 review rounds to stop leaking.
 - [ ] **T30 (P1, CC: ~1 session)** — dashboard — container list + `/containers/<stack>/<service>` (verdict, vitals, facts, polled log well with restarted divider) + two-step restart sheet → `action.request` → execution page
   - Verify: states healthy/down/paused/restart-confirm; CSRF on the confirm; busy state in place; logs poll only while visible and survive the 60s refresh
 - [ ] **T31 (P1, CC: ~1 session)** — dashboard — approval cards (pending/approved/denied/expired/busy/empty) with Authorise/Deny, and `/executions/<id>` (running/verifying/passed/failed/interrupted/empty) rendering only declared capabilities

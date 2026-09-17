@@ -10,17 +10,20 @@ old Amy label lookup, which interpolated a container name (possibly from an LLM-
 plan) into a shell=True command string.
 """
 
+import hashlib
+import json
 import math
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import casa_bender as bender
 import config
+from planet_express.core.redact import redact
 
 # Same as casa_zoidberg._run()'s default, which these checks used before the extraction.
 # A shorter value turns a slow or remote daemon into a "missing/unhealthy" verdict and a
@@ -403,3 +406,172 @@ def verify_after_restart(
             good_since = None
         if now - start >= timeout:
             return False, f"not healthy within {int(timeout)}s (health={reading.health})"
+
+
+# A request may carry back at most this many line hashes; a response never returns more. A batch
+# holds <= 500 lines, and merged hashes stay capped here, so any response is a valid next request.
+LOG_CURSOR_HASH_LIMIT = 1000
+LOG_RESPONSE_BUDGET_BYTES = 256 * 1024
+# Newest bytes kept per stream while capturing `docker logs`: 500 records at the 4 KiB per-line cap
+# is ~2 MiB, so 4 MiB never truncates a normal tail but bounds a pathological one.
+LOG_CAPTURE_MAX_BYTES = 4 * 1024 * 1024
+LOG_MAX_LINES = 500
+LOG_MAX_LINE_BYTES = 4096
+# Records parsed per call before the newest are kept: `--tail 500` bounds real records, but
+# continuation lines are unbounded, and every one costs a redact() pass.
+LOG_MAX_RECORDS = 2000
+LOG_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z")
+FACTS_FORMAT = (
+    "{{.State.Status}}\t{{.State.StartedAt}}\t"
+    "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\t"
+    "{{if .State.Health}}{{.State.Health.FailingStreak}}{{else}}0{{end}}\t"
+    "{{.RestartCount}}\t{{.HostConfig.RestartPolicy.Name}}\t"
+    "{{.HostConfig.RestartPolicy.MaximumRetryCount}}\t"
+    "{{json .NetworkSettings.Ports}}\t{{.Image}}"
+)
+
+
+def read_facts(container: str, *, timeout) -> dict:
+    if timeout <= 0:
+        return {"ok": False, "error": "timeout"}
+    rc, out, _err = bender.run_argv(
+        ["docker", "inspect", "--format", FACTS_FORMAT, container], timeout=timeout,
+    )
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        return {"ok": False, "error": "timeout"}
+    if rc != 0:
+        return {"ok": False, "error": "unavailable"}
+    try:
+        state, started, health, streak, restarts, policy, retries, ports_json, image = out.strip().split("\t")
+        if health not in {"healthy", "unhealthy", "starting", "none"}:
+            raise ValueError("invalid health")
+        ports = []
+        for port, bindings in (json.loads(ports_json) or {}).items():
+            number, protocol = port.split("/")
+            for binding in bindings or []:
+                ports.append({"container_port": number, "protocol": protocol,
+                              "host_ip": binding["HostIp"], "host_port": binding["HostPort"]})
+        facts = {"state": state, "started_at": started, "health": health,
+                 "failing_streak": int(streak), "restart_count": int(restarts),
+                 "restart_policy": {"name": policy, "max_retries": int(retries)},
+                 "ports": ports, "image_id": image}
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return {"ok": False, "error": "unavailable"}
+    return {"ok": True, "facts": facts}
+
+
+def logs_argv(container: str, cursor: str | None) -> list[str]:
+    if cursor is not None and not LOG_TIMESTAMP_RE.fullmatch(cursor):
+        raise ValueError("invalid cursor")
+    return ["docker", "logs", "--timestamps", "--tail", "500",
+            *(["--since", cursor] if cursor else []), container]
+
+
+def _log_hash(ts: str, text: str) -> str:
+    return hashlib.sha256((ts + "\0" + text).encode()).hexdigest()[:16]
+
+
+def _timestamp_key(ts: str) -> str:
+    # Fraction widths vary; lexical ordering of the original strings is incorrect.
+    seconds, _, fraction = ts[:-1].partition(".")
+    return seconds + fraction.ljust(9, "0")
+
+
+def read_logs(container: str, *, cursor, cursor_hashes, timeout) -> dict:
+    deadline = time.monotonic() + timeout
+    if timeout <= 0:
+        return {"ok": False, "error": "timeout"}
+    rc, out, err, truncated = bender.run_argv_bounded(
+        logs_argv(container, cursor), timeout=timeout, max_bytes=LOG_CAPTURE_MAX_BYTES,
+    )
+    if rc != 0:
+        return {"ok": False, "error": "timeout" if rc == bender.RUN_ARGV_TIMEOUT_EXIT else "unavailable"}
+
+    # Pass 1 — split into records, cheaply, without touching their text. Split on "\n" ONLY:
+    # str.splitlines() also breaks on \r, \v, \f and U+2028/2029, which Docker does not use as
+    # record separators, so one record became two and redact() only saw the first half — leaking the
+    # rest of a secret (Codex review, T29).
+    # Bounded while parsing, not after: an output of one timestamp plus a million newlines reached
+    # ~218 MB of records before the cap applied (Codex review, T29). A deque keeps the newest.
+    records: deque = deque(maxlen=LOG_MAX_RECORDS)
+    dropped = False
+    stamped = 0
+    for stream, output in (("stdout", out), ("stderr", err)):
+        previous = None
+        pieces = output.split("\n")
+        if pieces and pieces[-1] == "":
+            # The terminal newline's sentinel, not a record: keeping it fabricated a blank log entry
+            # on every poll (Codex review, T29). A real blank record is a bare timestamp line.
+            pieces.pop()
+        for raw in pieces:
+            raw = raw.removesuffix("\r")
+            ts, separator, text = raw.partition(" ")
+            if not separator and LOG_TIMESTAMP_RE.fullmatch(raw):
+                # A blank entry: run_argv_bounded keeps trailing content, but a record can still be
+                # just a timestamp.
+                separator, text = " ", ""
+            if separator and LOG_TIMESTAMP_RE.fullmatch(ts):
+                previous = ts
+                stamped += 1
+            elif previous is not None:
+                ts, text = previous, raw
+            else:
+                continue  # No timestamp to attach an initial malformed line to.
+            if len(records) == LOG_MAX_RECORDS:
+                dropped = True
+            records.append((ts, text, stream))
+
+    skipped = truncated or dropped
+    # `docker logs --tail 500` drops older records BEFORE we see them: if it returned its full 500,
+    # there may have been more since the cursor, so the gap must be shown. Docker applies the tail to
+    # the merged log, so count timestamped records across both streams.
+    if stamped >= 500:
+        skipped = True
+    records = sorted(records, key=lambda record: _timestamp_key(record[0]))
+
+    # Pass 2 — redact NEWEST FIRST, checking the deadline. redact() costs ~30µs per 8 KiB of text,
+    # so a few hundred long records can outlast the caller's 5s RPC deadline while it holds a worker
+    # (Codex review, T29). Stopping newest-first keeps the lines the operator is actually reading and
+    # marks the gap, instead of blowing the deadline or returning the oldest slice.
+    known = set(cursor_hashes)
+    kept, size = [], 0
+    for ts, text, stream in reversed(records):
+        if time.monotonic() >= deadline:
+            skipped = True
+            break
+        text = redact(text.rstrip())
+        encoded = text.encode()
+        if len(encoded) > LOG_MAX_LINE_BYTES:
+            # Shortening one long line is marked by its trailing ellipsis; it is not "earlier lines
+            # skipped", which the UI renders as a gap marker.
+            text = encoded[:LOG_MAX_LINE_BYTES - 3].decode("utf-8", errors="ignore") + "…"
+        line = {"ts": ts, "text": text, "stream": stream}
+        if ts == cursor and _log_hash(ts, text) in known:
+            continue
+        # Budget the SERIALIZED size with the transport's own settings: the RPC frame caps a response
+        # at 1 MiB of JSON, control characters (ESC in coloured output) expand to six-byte escapes,
+        # and "é" is 6 bytes with ensure_ascii on — raw text length undercounts badly.
+        length = len(json.dumps(line).encode()) + 1   # + the list separator
+        if len(kept) == LOG_MAX_LINES or size + length > LOG_RESPONSE_BUDGET_BYTES:
+            skipped = True
+            break
+        kept.append(line)
+        size += length
+    lines = kept[::-1]
+    newest = lines[-1]["ts"] if lines else cursor
+    hashes = [_log_hash(line["ts"], line["text"]) for line in lines if line["ts"] == newest]
+    if newest == cursor:
+        # The cursor didn't move: lines already seen at it are still "seen". Returning only this
+        # batch's hashes made an all-duplicate poll forget them and replay them next time
+        # (Codex review, T29). Newest additions last, capped to what a request may carry.
+        hashes = list(dict.fromkeys([*cursor_hashes, *hashes]))[-LOG_CURSOR_HASH_LIMIT:]
+    started = None
+    left = deadline - time.monotonic()
+    if left > 0:
+        rc, value, _err = bender.run_argv(
+            ["docker", "inspect", "--format", "{{.State.StartedAt}}", container], timeout=left,
+        )
+        if rc == 0:
+            started = value.strip() or None
+    return {"ok": True, "lines": lines, "cursor": newest, "cursor_hashes": hashes,
+            "skipped": skipped, "started_at": started}

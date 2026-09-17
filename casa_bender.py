@@ -296,6 +296,79 @@ def run_argv(argv: list[str], timeout: int) -> tuple[int, str, str]:
         return 126, "", f"{argv[0]}: {e}"
 
 
+def run_argv_bounded(argv: list[str], timeout: int, max_bytes: int) -> tuple[int, str, str, bool]:
+    """run_argv with a memory bound: keep only the NEWEST `max_bytes` of each stream.
+
+    `run_argv` uses capture_output, which buffers everything a command writes before the caller
+    can cap it. For `docker logs --tail 500` that is 500 records of unbounded size, polled every
+    few seconds from the dashboard, so one container writing huge records could exhaust core's
+    memory (Codex review, T29). Each stream is drained by its own thread into a rolling buffer; if
+    a stream overflows, the partial first line is dropped and `truncated` is True.
+
+    Same argv rules, minimal environment and exit conventions as run_argv (124 timeout, 127
+    missing executable, 126 other launch failure). Output is NOT stripped, so callers see
+    trailing content exactly as written. Returns (returncode, stdout, stderr, truncated)."""
+    if not isinstance(argv, list):
+        raise TypeError(f"run_argv_bounded takes an argv list, got {type(argv).__name__}")
+    if not argv:
+        raise ValueError("run_argv_bounded needs a non-empty argv list")
+    if not all(isinstance(part, str) for part in argv):
+        raise TypeError("every run_argv_bounded argument must be a str")
+    if not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive int")
+
+    env = {key: os.environ[key] for key in _RUN_ARGV_ENV_KEYS if key in os.environ}
+    env.setdefault("PATH", _RUN_ARGV_DEFAULT_PATH)
+    try:
+        proc = subprocess.Popen(
+            argv, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env,
+        )
+    except FileNotFoundError:
+        return 127, "", f"{argv[0]}: executable not found", False
+    except OSError as e:
+        return 126, "", f"{argv[0]}: {e}", False
+
+    captured: dict[str, bytes] = {}
+    overflowed: dict[str, bool] = {}
+
+    def drain(name, stream):
+        tail = bytearray()
+        over = False
+        try:
+            while chunk := stream.read(65536):
+                tail += chunk
+                if len(tail) > max_bytes:
+                    del tail[: len(tail) - max_bytes]
+                    over = True
+        finally:
+            stream.close()
+        captured[name], overflowed[name] = bytes(tail), over
+
+    readers = [threading.Thread(target=drain, args=("stdout", proc.stdout), daemon=True),
+               threading.Thread(target=drain, args=("stderr", proc.stderr), daemon=True)]
+    for reader in readers:
+        reader.start()
+    try:
+        returncode = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        for reader in readers:
+            reader.join(timeout=1)
+        return RUN_ARGV_TIMEOUT_EXIT, "", f"{argv[0]} timed out after {timeout}s", False
+    for reader in readers:
+        reader.join()
+
+    def text(name):
+        value = captured.get(name, b"").decode("utf-8", errors="replace")
+        if overflowed.get(name) and "\n" in value:
+            value = value.split("\n", 1)[1]   # drop the partial first line
+        return value
+
+    return returncode, text("stdout"), text("stderr"), any(overflowed.values())
+
+
 CORE_SERVICE_UNIT = "casa-planetexpress.service"
 # `systemctl is-active` exit codes that mean "definitely not running", confirmed on the
 # test homelab (systemd 255): 3 = inactive or failed, 4 = no such unit.

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import socket
+import sqlite3
 import stat
 import struct
 import threading
@@ -308,7 +309,7 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
 
     def container(params):
         _params(params, {"stack": 255, "service": 255})
-        # One budget for the whole call: resolution and the stats read share the 4s, so the reply
+        # One budget for the whole call: resolution, facts and stats share the 4s, so the reply
         # beats the client's 5s deadline and a stats timeout still arrives typed (Codex review, T14).
         deadline = time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS
         try:
@@ -319,12 +320,76 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
         except actions.TargetError as e:
             raise RpcError(str(e), "not_found") from None
         left = deadline - time.monotonic()
+        facts = (actions.read_facts(target.container, timeout=left) if left > 0
+                 else {"ok": False, "error": "timeout"})
+        left = deadline - time.monotonic()
         vitals = (actions.read_stats(target.container, timeout=left) if left > 0
                   else {"ok": False, "error": "timeout"})
         return {"target": target.as_dict(),
-                "vitals": vitals,
+                "vitals": vitals, "facts": facts,
                 "actions": {name: spec.capabilities() for name, spec in actions.REGISTRY.items()
                             if spec.risk in policy.RISK_LEVELS[1:]}}
+
+    def logs(params):
+        if not isinstance(params, dict) or set(params) - {"stack", "service", "cursor", "cursor_hashes"}:
+            raise RpcError("Invalid params", "bad_request")
+        _params({k: v for k, v in params.items() if k not in {"cursor", "cursor_hashes"}},
+                {"stack": 255, "service": 255})
+        cursor = params.get("cursor")
+        hashes = params.get("cursor_hashes", [])
+        if "cursor" in params and (not isinstance(cursor, str) or not actions.LOG_TIMESTAMP_RE.fullmatch(cursor)):
+            raise RpcError("Invalid cursor", "bad_request")
+        if (not isinstance(hashes, list) or len(hashes) > actions.LOG_CURSOR_HASH_LIMIT
+                or any(not isinstance(h, str) or re.fullmatch(r"[0-9a-f]{16}", h) is None for h in hashes)):
+            raise RpcError("Invalid cursor_hashes", "bad_request")
+        deadline = time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS
+        try:
+            target = actions.resolve_target(params["stack"], params["service"], for_mutation=False,
+                                            timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except actions.TargetTimeout:
+            raise RpcError("host slow, retry", "timeout") from None
+        except actions.TargetError:
+            raise RpcError("Container not found", "not_found") from None
+        left = deadline - time.monotonic()
+        return (actions.read_logs(target.container, cursor=cursor, cursor_hashes=hashes, timeout=left)
+                if left > 0 else {"ok": False, "error": "timeout"})
+
+    def approval_shape(row):
+        item = dict(row)
+        item.pop("message_id", None)
+        item["target"] = json.loads(item.pop("target_json"))
+        spec = actions.REGISTRY.get(item["action"])
+        item["capabilities"] = spec.capabilities() if spec else {}
+        return item
+
+    def approval_get(params):
+        _params(params, {"approval_id": 64})
+        deadline = time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS
+        try:
+            row = store.get_approval(params["approval_id"], timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except sqlite3.OperationalError:
+            raise RpcError("host slow, retry", "timeout") from None
+        if row is None:
+            raise RpcError("Approval not found", "not_found")
+        item = approval_shape(row)
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise RpcError("host slow, retry", "timeout")
+        try:
+            item["executions"] = store.list_executions(row["id"], timeout=left)
+        except sqlite3.OperationalError:
+            raise RpcError("host slow, retry", "timeout") from None
+        return item
+
+    def approval_recent(params):
+        if (not isinstance(params, dict) or set(params) != {"limit"}
+                or type(params["limit"]) is not int or not 1 <= params["limit"] <= 20):
+            raise RpcError("Invalid limit", "bad_request")
+        try:
+            rows = store.list_recent_approvals(params["limit"], timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except sqlite3.OperationalError:
+            raise RpcError("host slow, retry", "timeout") from None
+        return [approval_shape(row) for row in rows]
 
     def pending(params):
         _params(params, {})
@@ -434,7 +499,8 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
         _params(params, {})
         return chat.quota()
 
-    handlers = {"action.request": request_action, "query.container": container,
+    handlers = {"logs.tail": logs, "approval.get": approval_get,
+            "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
             "auth.status": auth_status, "auth.record_failure": auth_failure,

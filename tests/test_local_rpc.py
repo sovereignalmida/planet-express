@@ -255,7 +255,7 @@ def test_core_handlers():
     commands.get_status.return_value = {"id": "e", "status": "running"}
     store.list_pending.return_value = [{"id": "a", "target_json": '{"stack":"media"}', "message_id": 5}]
     handlers = build_core_handlers(commands, store)
-    assert set(handlers) == {"action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
+    assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
@@ -341,7 +341,8 @@ def test_core_errors_over_socket(server, socket_path):
     commands.get_status.return_value = None
     server(build_core_handlers(commands, Mock()))
     assert call(socket_path, "execution.get_status", {"execution_id": "missing"})["error"]["code"] == "not_found"
-    for method in ("logs.tail",):
+    # logs.tail was the unimplemented example until T29 built it; keep proving unknown methods fail.
+    for method in ("logs.follow", "container.exec"):
         assert call(socket_path, method)["error"]["code"] == "unknown_method"
 
 
@@ -625,10 +626,12 @@ def test_container_handler_shape_and_timeouts(monkeypatch):
     monkeypatch.setattr(rpc_module, 'time', SimpleNamespace(monotonic=lambda: 50.0))
     monkeypatch.setattr(actions, 'resolve_target', resolve)
     monkeypatch.setattr(actions, 'read_stats', stats)
+    monkeypatch.setattr(actions, 'read_facts', Mock(return_value={'ok': True, 'facts': {}}))
     handler = build_core_handlers(Mock(), Mock())['query.container']
     params = {'stack': 'healthy', 'service': 'web'}
     result = handler(params)
     assert result == {'target': target.as_dict(), 'vitals': stats.return_value,
+                      'facts': {'ok': True, 'facts': {}},
                       'actions': {actions.RESTART_SERVICE: actions.REGISTRY[actions.RESTART_SERVICE].capabilities()}}
     resolve.assert_called_once_with(**params, for_mutation=False, timeout=4)
     stats.assert_called_once_with('fixture', timeout=4)
@@ -679,6 +682,7 @@ def test_container_stats_get_only_the_remaining_budget(monkeypatch):
     monkeypatch.setattr(rpc_module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr(actions, 'resolve_target', resolve)
     monkeypatch.setattr(actions, 'read_stats', stats)
+    monkeypatch.setattr(actions, 'read_facts', Mock(return_value={'ok': True, 'facts': {}}))
     handler = build_core_handlers(Mock(), Mock())['query.container']
 
     spent = [1.5]
@@ -752,3 +756,155 @@ def test_chat_ask_whitespace_question_is_bad_request_not_internal():
     with pytest.raises(rpc_module.RpcError) as exc:
         handlers["chat.ask"]({"operator": "chris", "question": "   ", "submission_id": "abcdefgh1"})
     assert exc.value.code == "bad_request"
+
+
+@pytest.mark.parametrize('method,params', [
+    ('logs.tail', {'stack': 's', 'service': 's', 'cursor': 'yesterday'}),
+    ('logs.tail', {'stack': 's', 'service': 's', 'cursor': None}),
+    ('logs.tail', {'stack': 's', 'service': 's', 'cursor_hashes': ['0' * 16] * 1001}),
+    ('logs.tail', {'stack': 's', 'service': 's', 'cursor_hashes': 'bad'}),
+    ('logs.tail', {'stack': 's', 'service': 's', 'extra': 1}),
+    ('approval.get', {'approval_id': ''}),
+    ('approval.get', {'approval_id': 'a', 'extra': 1}),
+    *[('approval.list_recent', {'limit': limit}) for limit in (0, 21, True, '1', 1.5)],
+    ('approval.list_recent', {'limit': 1, 'extra': 1}),
+])
+def test_action_reads_validate(method, params):
+    with pytest.raises(RpcError) as error:
+        build_core_handlers(Mock(), Mock())[method](params)
+    assert error.value.code == 'bad_request'
+
+
+def test_action_reads_round_trip(server, socket_path, tmp_path, monkeypatch):
+    from planet_express.application.command_service import CommandService
+    from planet_express.execution import actions
+
+    store = Store(tmp_path / 'core.db')
+    store.init()
+    target = actions.Target('s', 'web', 'c')
+    monkeypatch.setattr(actions, 'resolve_target', lambda *a, **k: target)
+    ts = '2026-09-17T12:00:00Z'
+    monkeypatch.setattr(actions.bender, 'run_argv', lambda argv, **k: (0, ts, ''))
+    monkeypatch.setattr(actions.bender, 'run_argv_bounded', lambda argv, **k:
+                        (0, f'{ts} API_KEY=secret', '', False))
+    created = store.create_direct_execution(action=actions.RESTART_SERVICE, target_key=target.key,
+                                             target=target.as_dict(), risk='R1', operator='chris',
+                                             arrived_at=time.time())
+    server(build_core_handlers(CommandService(store, Mock(), Mock()), store))
+    logs = call(socket_path, 'logs.tail', {'stack': 's', 'service': 'web'})['result']
+    assert logs['lines'][0]['text'] == 'API_KEY=[REDACTED]' and logs['started_at'] == ts
+    approval = call(socket_path, 'approval.get', {'approval_id': created['approval']['id']})['result']
+    assert 'message_id' not in approval and 'target_json' not in approval
+    assert approval['target'] == target.as_dict()
+    assert approval['executions'][0]['id'] == created['execution']['id']
+    recent = call(socket_path, 'approval.list_recent', {'limit': 20})['result']
+    assert recent[0]['execution'] == approval['executions'][0]
+    status = call(socket_path, 'execution.get_status', {'execution_id': created['execution']['id']})['result']
+    assert status['approval'] == {k: approval[k] for k in (
+        'id', 'action', 'target', 'risk', 'requested_via', 'requested_by', 'decided_by', 'decided_at')}
+    assert call(socket_path, 'approval.get', {'approval_id': 'missing'})['error']['code'] == 'not_found'
+
+
+def test_logs_resolution_errors_and_budget(monkeypatch):
+    from planet_express.execution import actions
+    handler = build_core_handlers(Mock(), Mock())['logs.tail']
+    for exception, code in [(actions.TargetTimeout('secret'), 'timeout'), (actions.TargetError('secret'), 'not_found')]:
+        monkeypatch.setattr(actions, 'resolve_target', Mock(side_effect=exception))
+        with pytest.raises(RpcError) as error:
+            handler({'stack': 's', 'service': 's'})
+        assert error.value.code == code and 'secret' not in str(error.value)
+
+
+def test_container_facts_timeout_spends_shared_budget(monkeypatch):
+    from types import SimpleNamespace
+
+    import planet_express.integrations.rpc as rpc_module
+    from planet_express.execution import actions
+
+    now = [0]
+    monkeypatch.setattr(rpc_module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(actions, 'resolve_target', lambda **k: actions.Target('s', 's', 'c'))
+
+    def facts(container, timeout):
+        assert timeout == 4
+        now[0] += timeout
+        return {'ok': False, 'error': 'timeout'}
+
+    monkeypatch.setattr(actions, 'read_facts', facts)
+    stats = Mock()
+    monkeypatch.setattr(actions, 'read_stats', stats)
+    result = build_core_handlers(Mock(), Mock())['query.container']({'stack': 's', 'service': 's'})
+    assert result['facts'] == result['vitals'] == {'ok': False, 'error': 'timeout'}
+    stats.assert_not_called()
+
+
+def test_approval_reads_direct_expiry_history_and_status(tmp_path):
+    from planet_express.application.command_service import CommandService
+    from planet_express.execution import actions
+
+    now = [100]
+    store = Store(tmp_path / 'core.db', clock=lambda: now[0])
+    store.init()
+    target = {'stack': 's', 'service': 'web', 'container': 'c'}
+    row, _ = store.propose(action=actions.RESTART_SERVICE, target_key='s/web', target=target,
+                           risk='R1', requested_via='telegram', requested_by='chris', ttl_seconds=1)
+    store.set_message_id(row['id'], 42)
+    handlers = build_core_handlers(CommandService(store, Mock(), Mock()), store)
+    now[0] = 102
+    approval = handlers['approval.get']({'approval_id': row['id']})
+    assert approval['status'] == 'expired' and approval['executions'] == []
+    assert approval['target'] == target and 'target_json' not in approval and 'message_id' not in approval
+    first = store.create_execution(row['id'])
+    now[0] += 1
+    latest = store.create_execution(row['id'])
+    approval = handlers['approval.get']({'approval_id': row['id']})
+    assert [e['id'] for e in approval['executions']] == [latest['id'], first['id']]
+    recent = handlers['approval.list_recent']({'limit': 1})
+    assert recent[0]['execution'] == approval['executions'][0]
+    assert recent[0]['capabilities'] == approval['capabilities']
+    status = handlers['execution.get_status']({'execution_id': latest['id']})
+    assert status['approval'] == {k: approval[k] for k in (
+        'id', 'action', 'target', 'risk', 'requested_via', 'requested_by', 'decided_by', 'decided_at')}
+    with pytest.raises(RpcError) as error:
+        handlers['approval.get']({'approval_id': 'missing'})
+    assert error.value.code == 'not_found'
+
+
+def test_approval_reads_database_timeout():
+    import sqlite3
+
+    store = Mock()
+    store.get_approval.side_effect = sqlite3.OperationalError('secret')
+    store.list_recent_approvals.side_effect = sqlite3.OperationalError('secret')
+    handlers = build_core_handlers(Mock(), store)
+    for method, params in [('approval.get', {'approval_id': 'a'}), ('approval.list_recent', {'limit': 1})]:
+        with pytest.raises(RpcError) as error:
+            handlers[method](params)
+        assert error.value.code == 'timeout' and 'secret' not in str(error.value)
+
+
+def test_logs_remaining_budget_and_success(monkeypatch):
+    from types import SimpleNamespace
+
+    import planet_express.integrations.rpc as rpc_module
+    from planet_express.execution import actions
+
+    now = [0]
+    spent = [1.5]
+    monkeypatch.setattr(rpc_module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
+
+    def resolve(*args, **kwargs):
+        assert kwargs == {'for_mutation': False, 'timeout': 4}
+        now[0] += spent[0]
+        return actions.Target('s', 's', 'c')
+
+    monkeypatch.setattr(actions, 'resolve_target', resolve)
+    logs = Mock(return_value={'ok': True, 'lines': []})
+    monkeypatch.setattr(actions, 'read_logs', logs)
+    handler = build_core_handlers(Mock(), Mock())['logs.tail']
+    assert handler({'stack': 's', 'service': 's'}) == logs.return_value
+    logs.assert_called_once_with('c', cursor=None, cursor_hashes=[], timeout=2.5)
+    logs.reset_mock()
+    spent[0] = 4
+    assert handler({'stack': 's', 'service': 's'}) == {'ok': False, 'error': 'timeout'}
+    logs.assert_not_called()
