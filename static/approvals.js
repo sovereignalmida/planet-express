@@ -244,5 +244,6 @@
 
   state.timer = setInterval(updateCountdowns, 1000);
   document.addEventListener("visibilitychange", visibility);
+  window.addEventListener("planetexpress:approvals-refresh", load);
   visibility();
 })();

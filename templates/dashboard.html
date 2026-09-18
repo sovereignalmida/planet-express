@@ -757,6 +757,18 @@
 
   <!-- Kept outside #dashboard-live: its 60-second snapshot swap must not reset a
        countdown or replace a decision that is still in flight. -->
+  <div class="tab-panel incident-dock" data-tab-panel="actions" id="incident-panel"
+       data-api="/api/incidents">
+    <section class="panel">
+      <div class="panel-head-row">
+        <h2>INCIDENT CONSOLE</h2>
+        <span class="panel-head-note">reconciled evidence</span>
+      </div>
+      <p id="incident-message" role="status">Loading incidents…</p>
+      <div id="incident-cards" class="incident-cards" aria-live="polite"></div>
+    </section>
+  </div>
+
   <div class="tab-panel approval-dock" data-tab-panel="actions" id="approval-panel"
        data-api="/api/approvals">
     <section class="panel">
@@ -789,6 +801,7 @@
   </footer>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  <script src="{{ url_for('static', filename='incidents.js') }}"></script>
   <script src="{{ url_for('static', filename='approvals.js') }}"></script>
   <script src="{{ url_for('static', filename='chat.js') }}"></script>
 </body>

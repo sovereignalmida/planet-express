@@ -1725,6 +1725,24 @@ footer p {
 #restart[hidden] { display: none; }
 
 /* T31 approval cards and flight recorder. */
+.incident-dock { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 24px 26px 0; }
+.incident-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; margin-top: 14px; }
+.incident-card { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.incident-card.resolved { opacity: .72; border-style: dashed; }
+.incident-head { display: flex; align-items: center; gap: 9px; font-family: var(--pe-font-mono); font-size: 10px; }
+.incident-severity, .incident-state { padding: 3px 7px; border: 1px solid var(--pe-border); border-radius: 999px; letter-spacing: .06em; }
+.severity-critical { color: var(--pe-crit); }
+.severity-high { color: var(--pe-high); }
+.severity-medium { color: var(--pe-warn); }
+.severity-low, .severity-none { color: var(--pe-accent); }
+.incident-title { margin: 0; color: var(--pe-ink); font-family: var(--pe-font-display); font-size: 18px; overflow-wrap: anywhere; }
+.incident-resource { margin: 0; color: var(--pe-ink-label); font-family: var(--pe-font-mono); font-size: 10px; overflow-wrap: anywhere; }
+.incident-facts { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 7px 14px; margin: 0; }
+.incident-facts dt { color: var(--pe-ink-faint); font-family: var(--pe-font-mono); font-size: 9px; letter-spacing: .07em; }
+.incident-facts dd { margin: 0; color: var(--pe-ink-body); overflow-wrap: anywhere; }
+.incident-hint { padding: 10px 12px; border-left: 3px solid var(--pe-accent); background: var(--pe-well); color: var(--pe-ink-body); }
+.incident-hint.fresh_scan_required, .incident-hint.target_unavailable { border-left-color: var(--pe-warn); }
+.incident-hint.resolved { border-left-color: var(--pe-ok); }
 .approval-dock { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 24px 26px 40px; }
 .approval-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; margin-top: 14px; }
 .approval-card { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -1757,6 +1775,6 @@ footer p {
 .execution-empty { border-style: dashed; }
 
 @media (max-width: 720px) {
-  .approval-dock, .execution-screen { padding: 16px; }
+  .incident-dock, .approval-dock, .execution-screen { padding: 16px; }
   .approval-actions, .execution-actions { flex-direction: column; }
 }

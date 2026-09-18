@@ -371,10 +371,17 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
             item["denial_reason"] = f"Denied by {actor}."
             if actor == "policy":
                 refusal = next((event for event in reversed(store.list_events(item["id"]))
-                                if event["kind"] == "approval.refused_by_policy"), None)
+                                if event["kind"] in {"approval.refused_by_policy",
+                                                     "approval.refused_stale_incident"}), None)
                 reason = refusal["payload"].get("reason") if refusal is not None else None
-                item["denial_reason"] = (f"refused by current policy: {reason}"
-                                         if reason else "Refused by current policy.")
+                if refusal is not None and refusal["kind"] == "approval.refused_stale_incident":
+                    item["denial_reason"] = (
+                        f"Incident evidence refused: {reason}"
+                        if reason else "Incident evidence is no longer current."
+                    )
+                else:
+                    item["denial_reason"] = (f"refused by current policy: {reason}"
+                                             if reason else "Refused by current policy.")
         return item
 
     def approval_get(params):
@@ -426,6 +433,55 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
         if result is None:
             raise RpcError("Execution not found", "not_found")
         return result
+
+    def incident_params(params, *, item=False, operator=False):
+        expected = {"incident_id"} if item else {"status", "limit"}
+        if operator:
+            expected.add("operator")
+        if not isinstance(params, dict) or set(params) != expected:
+            raise RpcError("Invalid params", "bad_request")
+        if item:
+            value = params["incident_id"]
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{12}", value) is None:
+                raise RpcError("Invalid incident_id", "bad_request")
+        else:
+            if params["status"] not in {"open", "resolved", "all"}:
+                raise RpcError("Invalid status", "bad_request")
+            if type(params["limit"]) is not int or not 1 <= params["limit"] <= 100:
+                raise RpcError("Invalid limit", "bad_request")
+        if operator:
+            auth_params({"operator": params["operator"]})
+            if params["operator"] == "?":
+                raise RpcError("Invalid operator", "bad_request")
+
+    def incident_list(params):
+        incident_params(params)
+        try:
+            return commands.list_incidents(**params, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except actions.TargetTimeout:
+            raise RpcError("host slow, retry", "timeout") from None
+
+    def incident_get(params):
+        incident_params(params, item=True)
+        try:
+            result = commands.get_incident_context(
+                params["incident_id"], timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS
+            )
+        except actions.TargetTimeout:
+            raise RpcError("host slow, retry", "timeout") from None
+        if result is None:
+            raise RpcError("Incident not found", "not_found")
+        return result
+
+    def incident_propose(params):
+        incident_params(params, item=True, operator=True)
+        result = commands.propose_incident(
+            params["incident_id"], operator=params["operator"],
+            deadline=time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS,
+        )
+        if not result.ok and result.reason == "incident not found":
+            raise RpcError("Incident not found", "not_found")
+        return asdict(result)
 
     def auth_params(params, *, ip=False, step=False):
         expected = {"operator"} | ({"client_ip"} if ip else set()) | ({"step"} if step else set())
@@ -518,6 +574,8 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
+            "incident.list": incident_list, "incident.get": incident_get,
+            "incident.propose": incident_propose,
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked}

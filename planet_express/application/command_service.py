@@ -23,17 +23,22 @@ import json
 import logging
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import casa_bender as bender
+import config
 from notifier import Decision, Notifier
-from planet_express.core.store import DEFAULT_TTL_SECONDS, Store
+from planet_express.core.incidents import scan_id
+from planet_express.core.store import DEFAULT_TTL_SECONDS, IncidentSourceError, Store
 from planet_express.execution import actions, policy
+from state_models import MonitorSnapshot
 from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.commands")
@@ -86,6 +91,8 @@ class CommandService:
         background: Callable[[Callable[[], None]], object] | None = None,
         clock: Callable[[], float] = time.time,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
+        monitor_path: Path | None = None,
+        compose_identities: Callable | None = None,
     ):
         self._store = store
         self._notifier = notifier
@@ -104,6 +111,8 @@ class CommandService:
         self._background = background
         self._clock = clock
         self._ttl = ttl_seconds
+        self._monitor_path = Path(monitor_path or config.STATE_MONITOR)
+        self._compose_identities = compose_identities or actions.container_compose_identities
         # Store.propose deduplicates rows atomically, but sending the corresponding card
         # is an external side effect. Keep row creation, card delivery and message-id
         # recording in one in-process critical section so two front-end requests cannot
@@ -114,21 +123,35 @@ class CommandService:
     def propose(
         self, action: str, stack: str, service: str, *, requested_via: str, requested_by: str | None,
         timeout=actions.DOCKER_TIMEOUT_SECONDS,
+        incident_id: str | None = None, incident_scan_id: str | None = None,
+        expected_container: str | None = None,
+        deadline: float | None = None,
+        defer_card: bool = False,
     ) -> ProposeResult:
+        deadline = time.monotonic() + timeout if deadline is None else deadline
         target = None
         target_error = None
         if action in actions.REGISTRY:
             try:
-                target = self._resolve(stack, service, for_mutation=True, timeout=timeout)
+                target = self._resolve(
+                    stack, service, for_mutation=True, timeout=self._remaining(deadline)
+                )
             except actions.TargetTimeout:
                 return ProposeResult(False, None, False, "host slow, retry")
             except actions.TargetError as e:
                 target_error = str(e)
+            if target is not None and expected_container is not None and target.container != expected_container:
+                target_error = "resolved container does not match the incident resource"
         decision = policy.decide(action, target_error)
         if not decision.allowed:
-            self._store.record_event("proposal.refused", action=action, stack=stack, service=service,
-                                     reason=decision.reason, requested_via=requested_via,
-                                     requested_by=requested_by)
+            try:
+                self._store.record_event(
+                    "proposal.refused", action=action, stack=stack, service=service,
+                    reason=decision.reason, requested_via=requested_via,
+                    requested_by=requested_by, timeout=self._remaining(deadline),
+                )
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
             return ProposeResult(False, None, False, decision.reason)
         if not decision.needs_approval:
             # Slice 1 registers no automatic mutations; an R0 action is a read, not a proposal.
@@ -136,38 +159,268 @@ class CommandService:
 
         if requested_via not in policy.OPERATOR_ORIGINS:
             now = self._clock()
-            reason = policy.limit_refusal(
-                self._store.recent_attempts(action, target.key, now - policy.limit_lookback_seconds()), now,
-            )
-            if reason is not None:
-                self._store.record_event(
-                    "proposal.refused", action=action, stack=stack, service=service,
-                    reason=reason, requested_via=requested_via, requested_by=requested_by,
+            try:
+                attempts = self._store.recent_attempts(
+                    action, target.key, now - policy.limit_lookback_seconds(),
+                    timeout=self._remaining(deadline),
                 )
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
+            reason = policy.limit_refusal(attempts, now)
+            if reason is not None:
+                try:
+                    self._store.record_event(
+                        "proposal.refused", action=action, stack=stack, service=service,
+                        reason=reason, requested_via=requested_via, requested_by=requested_by,
+                        timeout=self._remaining(deadline),
+                    )
+                except (actions.TargetTimeout, sqlite3.OperationalError):
+                    return ProposeResult(False, None, False, "host slow, retry")
                 return ProposeResult(False, None, False, reason)
 
-        with self._proposal_card_lock:
-            row, created = self._store.propose(
-                action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
-                requested_via=requested_via, requested_by=requested_by, ttl_seconds=self._ttl,
-            )
+        try:
+            lock_timeout = self._remaining(deadline)
+        except actions.TargetTimeout:
+            return ProposeResult(False, None, False, "host slow, retry")
+        if not self._proposal_card_lock.acquire(timeout=lock_timeout):
+            return ProposeResult(False, None, False, "host slow, retry")
+        card_handed_off = False
+        try:
+            kwargs = {}
+            if incident_id is not None:
+                kwargs = {"incident_id": incident_id, "incident_scan_id": incident_scan_id}
+            try:
+                row, created = self._store.propose(
+                    action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
+                    requested_via=requested_via, requested_by=requested_by, ttl_seconds=self._ttl,
+                    timeout=self._remaining(deadline),
+                    **kwargs,
+                )
+            except IncidentSourceError as exc:
+                return ProposeResult(False, None, False, str(exc))
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
             if created or row["message_id"] is None:
                 # A pending row without a card (its send failed last time) gets one now. Otherwise a
                 # transient Telegram error would leave an approval nobody can see or act on, and
                 # every retry would dedup against it until it expired (Codex review, landing 1b).
-                try:
-                    message_id = self._notifier.request_approval(
-                        self._card_text(row, target, requested_by), row["id"], "action"
-                    )
-                except Exception:  # noqa: BLE001 -- never log the error text: Telegram errors can carry the bot token
-                    log.warning(f"Failed to send the approval card for {row['id']}")
-                    self._store.record_event("proposal.card_failed", approval_id=row["id"])
-                    return ProposeResult(
-                        False, row["id"], created, "could not send the approval card; send the request again to retry"
-                    )
-                self._store.set_message_id(row["id"], message_id)
+                def deliver_card():
+                    try:
+                        message_id = self._notifier.request_approval(
+                            self._card_text(row, target, requested_by), row["id"], "action"
+                        )
+                        self._store.set_message_id(row["id"], message_id)
+                    except Exception:  # Telegram errors can carry the bot token
+                        log.warning(f"Failed to send the approval card for {row['id']}")
+                        self._store.record_event("proposal.card_failed", approval_id=row["id"])
+                        if not defer_card:
+                            raise
+                    finally:
+                        if defer_card:
+                            self._proposal_card_lock.release()
+
+                if defer_card:
+                    card_handed_off = True
+                    try:
+                        self._background(deliver_card)
+                    except Exception:  # noqa: BLE001 -- scheduling failure is a typed refusal
+                        card_handed_off = False
+                        self._store.record_event("proposal.card_failed", approval_id=row["id"])
+                        return ProposeResult(False, row["id"], created, "could not schedule approval card")
+                else:
+                    try:
+                        deliver_card()
+                    except Exception:  # noqa: BLE001 -- already recorded without secret-bearing text
+                        return ProposeResult(
+                            False, row["id"], created,
+                            "could not send the approval card; send the request again to retry",
+                        )
                 return ProposeResult(True, row["id"], created, "awaiting approval")
             return ProposeResult(True, row["id"], False, "already awaiting approval")
+        finally:
+            if not card_handed_off:
+                self._proposal_card_lock.release()
+
+    # ── incidents ───────────────────────────────────────────────────────────
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise actions.TargetTimeout("host slow, retry")
+        return left
+
+    def _current_incident_scan(self, *, deadline: float | None = None) -> str | None:
+        try:
+            monitor = MonitorSnapshot.model_validate_json(self._monitor_path.read_text())
+        except Exception:  # noqa: BLE001 -- malformed/missing state fails closed
+            return None
+        if monitor.mode != "full":
+            return None
+        current = scan_id(monitor.model_dump(mode="json"))
+        receipt = self._store.latest_incident_reconciliation(
+            timeout=self._remaining(deadline) if deadline is not None else 5
+        )
+        return current if receipt is not None and receipt["scan_id"] == current else None
+
+    def _source_current(
+        self, incident: dict, expected_scan_id: str | None = None, *, deadline: float | None = None
+    ) -> tuple[bool, str | None]:
+        current = self._current_incident_scan(deadline=deadline)
+        valid = (
+            current is not None
+            and (expected_scan_id is None or current == expected_scan_id)
+            and incident["status"] == "open"
+            and incident["condition"] == "failing"
+            and incident["last_observed_scan_id"] == current
+        )
+        return valid, current
+
+    @staticmethod
+    def _proposal_summary(row: dict) -> dict:
+        return {key: row[key] for key in (
+            "id", "action", "risk", "status", "requested_via", "requested_by",
+            "created_at", "expires_at", "decided_by", "decided_at",
+        )}
+
+    def _decorate_incidents(self, rows: list[dict], *, deadline: float) -> list[dict]:
+        try:
+            current_scan = self._current_incident_scan(deadline=deadline)
+        except sqlite3.OperationalError:
+            raise actions.TargetTimeout("host slow, retry") from None
+        try:
+            proposal_rows = self._store.list_incident_proposals_batch(
+                [row["id"] for row in rows], timeout=self._remaining(deadline)
+            )
+        except sqlite3.OperationalError:
+            raise actions.TargetTimeout("host slow, retry") from None
+        eligible = [row["resource"] for row in rows if (
+            row["status"] == "open" and row["condition"] == "failing"
+            and row["last_observed_scan_id"] == current_scan and row["kind"] == "container_health"
+        )]
+        identities = {}
+        lookup_failed = False
+        if eligible:
+            try:
+                identities = self._compose_identities(eligible, timeout=self._remaining(deadline))
+            except (actions.TargetError, actions.TargetTimeout):
+                lookup_failed = True
+        result = []
+        for row in rows:
+            item = dict(row)
+            proposals = [self._proposal_summary(proposal)
+                         for proposal in proposal_rows[row["id"]]]
+            item["source_current"] = bool(
+                current_scan is not None and row["last_observed_scan_id"] == current_scan
+            )
+            if row["status"] == "resolved":
+                hint = {"agent": "Leela", "state": "resolved", "message": "This incident is resolved."}
+            elif not item["source_current"]:
+                hint = {"agent": "Leela", "state": "fresh_scan_required",
+                        "message": "Run a full scan before proposing remediation."}
+            elif row["condition"] == "unknown":
+                hint = {"agent": "Amy", "state": "investigation_required",
+                        "message": "The observation is uncertain and needs investigation."}
+            elif row["kind"] != "container_health":
+                hint = {"agent": "Amy", "state": "no_typed_remediation",
+                        "message": "No typed remediation is registered for this incident."}
+            elif any(proposal["status"] == "pending" for proposal in proposals):
+                hint = {"agent": "Farnsworth", "state": "awaiting_approval",
+                        "message": "A typed restart proposal is awaiting approval."}
+            elif lookup_failed or row["resource"] not in identities:
+                hint = {"agent": "Farnsworth", "state": "target_unavailable",
+                        "message": "A current Compose target could not be established."}
+            elif not policy.decide(actions.RESTART_SERVICE).allowed:
+                hint = {"agent": "Farnsworth", "state": "no_typed_remediation",
+                        "message": "Current policy does not allow the registered remediation."}
+            else:
+                stack, service = identities[row["resource"]]
+                item["proposed_target"] = {"stack": stack, "service": service}
+                hint = {"agent": "Farnsworth", "state": "proposal_available",
+                        "message": "A typed restart is available and requires approval."}
+            item["hint"] = hint
+            item["proposals"] = proposals
+            result.append(item)
+        return result
+
+    def list_incidents(self, *, status: str, limit: int, timeout: float) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        try:
+            rows = self._store.list_incidents(
+                None if status == "all" else status, limit, timeout=self._remaining(deadline)
+            )
+        except sqlite3.OperationalError:
+            raise actions.TargetTimeout("host slow, retry") from None
+        return self._decorate_incidents(rows, deadline=deadline)
+
+    def get_incident_context(self, incident_id: str, *, timeout: float) -> dict | None:
+        deadline = time.monotonic() + timeout
+        try:
+            incident = self._store.get_incident(incident_id, timeout=self._remaining(deadline))
+        except sqlite3.OperationalError:
+            raise actions.TargetTimeout("host slow, retry") from None
+        if incident is None:
+            return None
+        item = self._decorate_incidents([incident], deadline=deadline)[0]
+        try:
+            item["events"] = self._store.list_incident_events(
+                incident_id, timeout=self._remaining(deadline)
+            )
+        except sqlite3.OperationalError:
+            raise actions.TargetTimeout("host slow, retry") from None
+        return item
+
+    def propose_incident(
+        self, incident_id: str, *, operator: str, timeout: float | None = None,
+        deadline: float | None = None,
+    ) -> ProposeResult:
+        if deadline is None:
+            budget = actions.RPC_DOCKER_TIMEOUT_SECONDS if timeout is None else timeout
+            deadline = time.monotonic() + budget
+        owner = f"incident:{incident_id}"
+        if not self._state.try_begin_mutation(owner):
+            return ProposeResult(False, None, False, f"Busy right now ({self._state.busy_reason}).")
+        try:
+            try:
+                incident = self._store.get_incident(
+                    incident_id, timeout=self._remaining(deadline)
+                )
+            except sqlite3.OperationalError:
+                return ProposeResult(False, None, False, "host slow, retry")
+            if incident is None:
+                return ProposeResult(False, None, False, "incident not found")
+            try:
+                current, current_scan = self._source_current(incident, deadline=deadline)
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
+            if not current:
+                return ProposeResult(False, None, False, "incident source is no longer current")
+            if incident["kind"] != "container_health":
+                return ProposeResult(False, None, False, "no typed remediation is registered")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return ProposeResult(False, None, False, "host slow, retry")
+            try:
+                identities = self._compose_identities([incident["resource"]], timeout=left)
+            except actions.TargetTimeout:
+                return ProposeResult(False, None, False, "host slow, retry")
+            except actions.TargetError as exc:
+                return ProposeResult(False, None, False, str(exc))
+            identity = identities.get(incident["resource"])
+            if identity is None:
+                return ProposeResult(False, None, False, "current Compose target is unavailable")
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return ProposeResult(False, None, False, "host slow, retry")
+            try:
+                return self.propose(
+                    actions.RESTART_SERVICE, *identity, requested_via="incident", requested_by=operator,
+                    timeout=left, incident_id=incident_id, incident_scan_id=current_scan,
+                    expected_container=incident["resource"], deadline=deadline, defer_card=True,
+                )
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
+        finally:
+            self._state.end_mutation(owner)
 
     # ── decide ──────────────────────────────────────────────────────────────
     def decide(
@@ -188,20 +441,26 @@ class CommandService:
             self._safe_finalize_card(row, decision, ack="Denied.", text=text)
             return DecideResult("denied", text)
 
-        # Re-check CURRENT policy before consuming an approval. A card created before the operator
-        # forbade its risk class (config change + core restart) must not still execute: pending
-        # approvals survive restarts, and propose() only checked the policy of its own time
-        # (Codex review, T24). The approval is closed as denied so the card can't be retried.
-        current = policy.decide(row["action"])
-        if not current.allowed:
-            reason = f"refused by current policy: {current.reason}"
-            if self._store.consume(approval_id, decision="denied", decided_by="policy", arrived_at=arrived):
-                self._store.record_event("approval.refused_by_policy", approval_id=approval_id,
-                                         reason=current.reason, attempted_by=decided_by)
-                text = f"🚫 Restart of <code>{_s(key)}</code> {_s(reason)}."
-                self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
-                return DecideResult("refused", text)
-            return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+        provenance = self._store.get_incident_proposal(approval_id)
+
+        # Generic approvals retain the original early policy check. Incident approvals first take
+        # the scan/mutation lock and validate their evidence below, so stale evidence always gets
+        # the incident-specific durable refusal required by T33.
+        if provenance is None:
+            current = policy.decide(row["action"])
+            if not current.allowed:
+                reason = f"refused by current policy: {current.reason}"
+                if self._store.consume(
+                    approval_id, decision="denied", decided_by="policy", arrived_at=arrived
+                ):
+                    self._store.record_event(
+                        "approval.refused_by_policy", approval_id=approval_id,
+                        reason=current.reason, attempted_by=decided_by,
+                    )
+                    text = f"🚫 Restart of <code>{_s(key)}</code> {_s(reason)}."
+                    self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
+                    return DecideResult("refused", text)
+                return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
 
         owner = f"act:{approval_id}"
         if not self._state.try_begin_mutation(owner):
@@ -211,6 +470,36 @@ class CommandService:
             return self._reply(decision, DecideResult("busy", message))
 
         with self._execution_handoff(owner) as start:
+            if provenance is not None:
+                incident = self._store.get_incident(provenance["incident_id"])
+                current_source = incident is not None and self._source_current(
+                    incident, provenance["scan_id"]
+                )[0]
+                if not current_source:
+                    reason = "incident source is no longer current"
+                    if self._store.refuse_stale_incident_approval(
+                        approval_id, attempted_by=decided_by, arrived_at=arrived, reason=reason,
+                    ):
+                        text = f"🚫 Restart of <code>{_s(key)}</code> refused: {_s(reason)}."
+                        self._safe_finalize_card(row, decision, ack="Refused: stale incident.", text=text)
+                        return DecideResult("refused", text)
+                    return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+                current = policy.decide(row["action"])
+                if not current.allowed:
+                    reason = f"refused by current policy: {current.reason}"
+                    if self._store.consume(
+                        approval_id, decision="denied", decided_by="policy", arrived_at=arrived
+                    ):
+                        self._store.record_event(
+                            "approval.refused_by_policy", approval_id=approval_id,
+                            reason=current.reason, attempted_by=decided_by,
+                        )
+                        text = f"🚫 Restart of <code>{_s(key)}</code> {_s(reason)}."
+                        self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
+                        return DecideResult("refused", text)
+                    return self._reply(
+                        decision, self._not_pending(self._store.get_approval(approval_id))
+                    )
             execution = self._store.approve_and_create_execution(
                 approval_id, decided_by=decided_by, arrived_at=arrived
             )
@@ -364,8 +653,10 @@ class CommandService:
             except Exception:  # noqa: BLE001 -- notification delivery cannot change action outcome
                 log.warning(f"Failed to send outcome notification for {execution_id}")
             try:
-                if row["message_id"] is not None:
-                    self._notifier.update_request(row["message_id"], text)
+                current = self._store.get_approval(row["id"])
+                message_id = (current or row)["message_id"]
+                if message_id is not None:
+                    self._notifier.update_request(message_id, text)
             except Exception:  # noqa: BLE001 -- best-effort UI update; action is already terminal
                 log.warning(f"Failed to update approval card for {execution_id}")
 
@@ -435,7 +726,8 @@ class CommandService:
         """
         def finalize():
             try:
-                self._finalize_card(row, decision, ack=ack, text=text)
+                current = self._store.get_approval(row["id"]) if decision is None else row
+                self._finalize_card(current or row, decision, ack=ack, text=text)
             except Exception:  # noqa: BLE001 -- never log exception text; it can include the bot token
                 log.warning(f"Failed to finalize approval card for {row['id']}")
 

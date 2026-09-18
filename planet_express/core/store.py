@@ -30,7 +30,7 @@ from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
 AUTH_MAX_FAILURES = 3
 AUTH_LOCK_SECONDS = 900
@@ -125,6 +125,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_pending
 
 CREATE INDEX IF NOT EXISTS approvals_action_target ON approvals (action, target_key);
 
+CREATE TABLE IF NOT EXISTS incident_proposals (
+    approval_id TEXT PRIMARY KEY REFERENCES approvals (id),
+    incident_id TEXT NOT NULL REFERENCES incidents (id),
+    scan_id     TEXT NOT NULL REFERENCES incident_reconciliations (scan_id)
+);
+CREATE INDEX IF NOT EXISTS incident_proposals_incident
+    ON incident_proposals (incident_id, approval_id);
+
 CREATE TABLE IF NOT EXISTS executions (
     id          TEXT PRIMARY KEY,
     approval_id TEXT NOT NULL REFERENCES approvals (id),
@@ -159,6 +167,10 @@ def _new_id() -> str:
 
 class SchemaTooNewError(RuntimeError):
     """The database requires a newer core or restoration of an older snapshot."""
+
+
+class IncidentSourceError(RuntimeError):
+    """An incident proposal has no current reconciled source."""
 
 
 class Store:
@@ -235,9 +247,10 @@ class Store:
         )
 
     def record_event(
-        self, kind: str, *, approval_id: str | None = None, execution_id: str | None = None, **payload
+        self, kind: str, *, approval_id: str | None = None, execution_id: str | None = None,
+        timeout: float = 5, **payload,
     ) -> None:
-        with self._write() as conn:
+        with self._write(timeout=timeout) as conn:
             self._event(conn, kind, approval_id=approval_id, execution_id=execution_id, **payload)
 
     def prune_events(self, max_age_seconds: float = EVENT_RETENTION_SECONDS) -> int:
@@ -402,25 +415,27 @@ class Store:
             return [self._incident_row(conn.execute("SELECT * FROM incidents WHERE id=?", (item,)).fetchone())
                     for item in changed]
 
-    def latest_incident_reconciliation(self) -> dict | None:
-        with self._connect() as conn:
+    def latest_incident_reconciliation(self, *, timeout: float = 5) -> dict | None:
+        with self._connect(timeout=timeout) as conn:
             row = conn.execute(
                 "SELECT * FROM incident_reconciliations "
-                "ORDER BY reconciled_at DESC, rowid DESC LIMIT 1"
+                "ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def get_incident(self, incident_id: str) -> dict | None:
-        with self._connect() as conn:
+    def get_incident(self, incident_id: str, *, timeout: float = 5) -> dict | None:
+        with self._connect(timeout=timeout) as conn:
             row = conn.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
         return self._incident_row(row)
 
-    def list_incidents(self, status: str | None = None, limit: int = 20) -> list[dict]:
+    def list_incidents(
+        self, status: str | None = None, limit: int = 20, *, timeout: float = 5
+    ) -> list[dict]:
         if status not in (None, "open", "resolved"):
             raise ValueError("invalid incident status")
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("incident limit must be an integer from 1 to 100")
-        with self._connect() as conn:
+        with self._connect(timeout=timeout) as conn:
             if status is None:
                 rows = conn.execute(
                     "SELECT * FROM incidents ORDER BY last_seen DESC, id DESC LIMIT ?", (limit,)
@@ -432,12 +447,45 @@ class Store:
                 ).fetchall()
         return [self._incident_row(row) for row in rows]
 
-    def list_incident_events(self, incident_id: str) -> list[dict]:
-        with self._connect() as conn:
+    def list_incident_events(self, incident_id: str, *, timeout: float = 5) -> list[dict]:
+        with self._connect(timeout=timeout) as conn:
             rows = conn.execute(
                 "SELECT * FROM incident_events WHERE incident_id=? ORDER BY id", (incident_id,)
             ).fetchall()
         return [dict(row) | {"payload": json.loads(row["payload"])} for row in rows]
+
+    def get_incident_proposal(self, approval_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM incident_proposals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_incident_proposals(self, incident_id: str) -> list[dict]:
+        return self.list_incident_proposals_batch([incident_id]).get(incident_id, [])
+
+    def list_incident_proposals_batch(
+        self, incident_ids: list[str], *, timeout: float = 5
+    ) -> dict[str, list[dict]]:
+        """Return linked approvals with one bounded transaction and lazy expiry."""
+        if (not isinstance(incident_ids, list) or len(incident_ids) > 100
+                or any(not isinstance(item, str) or not item for item in incident_ids)):
+            raise ValueError("invalid incident IDs")
+        unique_ids = list(dict.fromkeys(incident_ids))
+        result = {incident_id: [] for incident_id in unique_ids}
+        if not unique_ids:
+            return result
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self._write(timeout=timeout) as conn:
+            self._expire_stale(conn, self._clock())
+            rows = conn.execute(
+                "SELECT ip.incident_id, ip.scan_id, a.* FROM incident_proposals ip "
+                f"JOIN approvals a ON a.id=ip.approval_id WHERE ip.incident_id IN ({placeholders}) "
+                "ORDER BY a.created_at DESC, a.id DESC", unique_ids,
+            ).fetchall()
+        for row in rows:
+            result[row["incident_id"]].append(dict(row))
+        return result
 
     # Chat quota reservations and ticket transitions share the normal write transaction.
     @staticmethod
@@ -530,18 +578,51 @@ class Store:
         requested_via: str,
         requested_by: str | None = None,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
+        incident_id: str | None = None,
+        incident_scan_id: str | None = None,
+        timeout: float = 5,
     ) -> tuple[dict, bool]:
         """Return (approval row, created). A live proposal for the same (action, target)
         is returned as-is instead of creating a second one. Lazy expiry, lookup and
         insert happen in one BEGIN IMMEDIATE transaction."""
         now = self._clock()
-        with self._write() as conn:
+        if (incident_id is None) != (incident_scan_id is None):
+            raise ValueError("incident_id and incident_scan_id must be supplied together")
+        with self._write(timeout=timeout) as conn:
             self._expire_stale(conn, now)
+            if incident_id is not None:
+                latest = conn.execute(
+                    "SELECT scan_id FROM incident_reconciliations ORDER BY rowid DESC LIMIT 1"
+                ).fetchone()
+                incident = conn.execute(
+                    "SELECT status, condition, last_observed_scan_id FROM incidents WHERE id=?",
+                    (incident_id,),
+                ).fetchone()
+                if (
+                    latest is None
+                    or latest["scan_id"] != incident_scan_id
+                    or incident is None
+                    or incident["status"] != "open"
+                    or incident["condition"] != "failing"
+                    or incident["last_observed_scan_id"] != incident_scan_id
+                ):
+                    raise IncidentSourceError("incident source is no longer current")
             row = conn.execute(
                 "SELECT * FROM approvals WHERE action = ? AND target_key = ? AND status = 'pending'",
                 (action, target_key),
             ).fetchone()
             if row is not None:
+                if incident_id is not None:
+                    linked = conn.execute(
+                        "SELECT incident_id, scan_id FROM incident_proposals WHERE approval_id=?",
+                        (row["id"],),
+                    ).fetchone()
+                    if linked is None or (linked["incident_id"], linked["scan_id"]) != (
+                        incident_id, incident_scan_id
+                    ):
+                        raise IncidentSourceError(
+                            "another pending proposal already exists for this target"
+                        )
                 return dict(row), False
             approval_id = _new_id()
             conn.execute(
@@ -554,8 +635,37 @@ class Store:
             self._event(conn, "proposal.created", approval_id=approval_id, action=action,
                         target=target, risk=risk, requested_via=requested_via,
                         requested_by=requested_by)
+            if incident_id is not None:
+                conn.execute(
+                    "INSERT INTO incident_proposals (approval_id, incident_id, scan_id) "
+                    "VALUES (?, ?, ?)", (approval_id, incident_id, incident_scan_id),
+                )
             created = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
             return dict(created), True
+
+    def refuse_stale_incident_approval(
+        self, approval_id: str, *, attempted_by: str, arrived_at: float, reason: str
+    ) -> bool:
+        """Deny a still-pending incident approval and record the refusal atomically."""
+        with self._write() as conn:
+            linked = conn.execute(
+                "SELECT 1 FROM incident_proposals WHERE approval_id=?", (approval_id,)
+            ).fetchone()
+            if linked is None:
+                return False
+            cur = conn.execute(
+                "UPDATE approvals SET status='denied', decided_by='policy', decided_at=? "
+                "WHERE id=? AND status='pending' AND expires_at>?",
+                (self._clock(), approval_id, arrived_at),
+            )
+            if cur.rowcount != 1:
+                return False
+            self._event(conn, "approval.denied", approval_id=approval_id, decided_by="policy")
+            self._event(
+                conn, "approval.refused_stale_incident", approval_id=approval_id,
+                reason=reason, attempted_by=attempted_by,
+            )
+            return True
 
     def get_approval(self, approval_id: str, as_of: float | None = None, *, timeout: float = 5) -> dict | None:
         """Look up an approval, marking it expired first if its TTL has passed as of
@@ -677,14 +787,19 @@ class Store:
                 return None
             self._expire_stale(conn, arrived_at)
             pending = conn.execute(
-                "SELECT * FROM approvals WHERE action = ? AND target_key = ? AND status = 'pending'",
+                "SELECT a.*, ip.approval_id AS incident_approval_id FROM approvals a "
+                "LEFT JOIN incident_proposals ip ON ip.approval_id=a.id "
+                "WHERE a.action = ? AND a.target_key = ? AND a.status = 'pending'",
                 (action, target_key),
             ).fetchone()
             # Adopt a live card only when it names the target the operator just confirmed. A card
             # whose container has since changed would make the worker refuse the restart as
             # "container changed since approval" (Codex review, T14); that card stays pending and
             # keeps its own refusal if tapped.
-            adopted = pending is not None and json.loads(pending["target_json"]) == target
+            adopted = (
+                pending is not None and pending["incident_approval_id"] is None
+                and json.loads(pending["target_json"]) == target
+            )
             if adopted:
                 approval_id = pending["id"]
                 conn.execute(
@@ -714,9 +829,11 @@ class Store:
         return {"approval": dict(approval), "execution": dict(execution), "adopted": adopted}
 
     # ── executions ──────────────────────────────────────────────────────────
-    def recent_attempts(self, action: str, target_key: str, since: float) -> list[float]:
+    def recent_attempts(
+        self, action: str, target_key: str, since: float, *, timeout: float = 5
+    ) -> list[float]:
         """Execution starts for this action and target, including operator executions."""
-        with self._connect() as conn:
+        with self._connect(timeout=timeout) as conn:
             rows = conn.execute(
                 "SELECT e.started_at FROM executions e "
                 "JOIN approvals a ON a.id = e.approval_id "

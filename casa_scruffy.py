@@ -97,7 +97,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def is_json_request():
         return (is_chat_request() or request.path.startswith("/api/containers/")
                 or request.path.startswith("/api/approvals")
-                or request.path.startswith("/api/executions/"))
+                or request.path.startswith("/api/executions/")
+                or request.path.startswith("/api/incidents"))
 
     def check_csrf():
         expected = session.get("csrf_token", "")
@@ -153,6 +154,11 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             status, message = {"bad_request": (400, "Invalid execution request"),
                                "not_found": (404, "Execution not found")}.get(
                                    error.code, (503, "Execution unavailable; try again shortly"))
+            return jsonify(error=message), status
+        if request.path.startswith("/api/incidents"):
+            status, message = {"bad_request": (400, "Invalid incident request"),
+                               "not_found": (404, "Incident not found")}.get(
+                                   error.code, (503, "Incidents unavailable; try again shortly"))
             return jsonify(error=message), status
         # Fail closed for this request only: keep the cookies, so a core restart doesn't
         # sign every operator out.
@@ -360,6 +366,33 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def execution_get(execution_id):
         return jsonify(core("execution.get_status", {
             "execution_id": action_id(execution_id, "Execution"),
+        }))
+
+    @app.get("/api/incidents")
+    def incidents_get():
+        status = request.args.get("status", "open")
+        raw_limit = request.args.get("limit", "20")
+        if status not in {"open", "resolved", "all"} or re.fullmatch(r"[0-9]{1,3}", raw_limit) is None:
+            return jsonify(error="Invalid incident request"), 400
+        limit = int(raw_limit)
+        if not 1 <= limit <= 100:
+            return jsonify(error="Invalid incident request"), 400
+        return jsonify(core("incident.list", {"status": status, "limit": limit}))
+
+    @app.get("/api/incidents/<incident_id>")
+    def incident_get(incident_id):
+        if re.fullmatch(r"[0-9a-f]{12}", incident_id) is None:
+            raise RpcError("Invalid incident ID", "bad_request")
+        return jsonify(core("incident.get", {
+            "incident_id": incident_id,
+        }))
+
+    @app.post("/api/incidents/<incident_id>/propose")
+    def incident_propose(incident_id):
+        if re.fullmatch(r"[0-9a-f]{12}", incident_id) is None:
+            raise RpcError("Invalid incident ID", "bad_request")
+        return jsonify(core("incident.propose", {
+            "incident_id": incident_id, "operator": g.operator,
         }))
 
     @app.get("/executions/<execution_id>")

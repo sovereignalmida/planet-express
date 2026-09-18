@@ -505,7 +505,7 @@ def test_direct_risk_restriction(env, monkeypatch, risk):
 
 def test_direct_and_propose_timeout_create_nothing(env):
     def timeout(stack, service, **kwargs):
-        assert kwargs == {'for_mutation': True, 'timeout': 4}
+        assert kwargs['for_mutation'] is True and 0 < kwargs['timeout'] <= 4
         raise actions.TargetTimeout('host slow')
     env.service._resolve = timeout
     assert direct(env).outcome == 'timeout'

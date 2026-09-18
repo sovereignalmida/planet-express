@@ -10,6 +10,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
@@ -75,6 +77,30 @@ def test_hostile_container_name_stays_one_argv_element(monkeypatch):
     actions.container_compose_labels(hostile)
     assert fake.calls[0][-1] == hostile
     assert fake.calls[0][:3] == ["docker", "inspect", "--format"]
+
+
+def test_strict_compose_identities_batch_and_omit_incomplete_labels(monkeypatch):
+    fake = _install(monkeypatch, FakeRunArgv((
+        0, "/CASA_WEB\tmedia\tweb\n/CASA_BARE\tmedia\t\n", "",
+    )))
+    assert actions.container_compose_identities(["CASA_WEB", "CASA_BARE"]) == {
+        "CASA_WEB": ("media", "web")
+    }
+    assert fake.calls[0][-2:] == ["CASA_WEB", "CASA_BARE"]
+
+
+def test_strict_compose_identities_accept_long_valid_container_name(monkeypatch):
+    name = "project_" + "service" * 20
+    _install(monkeypatch, FakeRunArgv((0, f"/{name}\tmedia\tweb\n", "")))
+    assert actions.container_compose_identities([name]) == {name: ("media", "web")}
+
+
+def test_strict_compose_identities_fail_closed(monkeypatch):
+    _install(monkeypatch, FakeRunArgv((actions.bender.RUN_ARGV_TIMEOUT_EXIT, "", "")))
+    with pytest.raises(actions.TargetTimeout):
+        actions.container_compose_identities(["CASA_WEB"])
+    with pytest.raises(actions.TargetError):
+        actions.container_compose_identities(["bad/name"])
 
 
 def test_service_container_passes_stack_path_with_spaces_intact(monkeypatch):

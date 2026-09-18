@@ -45,6 +45,10 @@ _COMPOSE_LABELS_FORMAT = (
     '{{index .Config.Labels "com.docker.compose.project"}}\t'
     '{{index .Config.Labels "com.docker.compose.service"}}'
 )
+_COMPOSE_IDENTITIES_FORMAT = (
+    '{{.Name}}\t{{index .Config.Labels "com.docker.compose.project"}}\t'
+    '{{index .Config.Labels "com.docker.compose.service"}}'
+)
 
 
 def service_container(stack_dir: Path, service: str) -> str | None:
@@ -150,6 +154,38 @@ def container_compose_labels(container: str) -> tuple[str, str]:
 #       ─► service in `config --services`? ─► exactly one container? ─► paused? ─► Target
 NETWORK_GUARDED_SUBSTRINGS = ("traefik", "adguard")  # same rule as Zoidberg and Bender's network guard
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+_CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}")
+
+
+def container_compose_identities(
+    containers: list[str], *, timeout=DOCKER_TIMEOUT_SECONDS
+) -> dict[str, tuple[str, str]]:
+    """Strict Compose identities from one bounded inspect; incomplete labels are omitted."""
+    if not containers:
+        return {}
+    if len(containers) > 100 or any(
+        not isinstance(name, str) or not _CONTAINER_NAME_RE.fullmatch(name) for name in containers
+    ):
+        raise TargetError("invalid container name")
+    rc, out, _err = bender.run_argv(
+        ["docker", "inspect", "--format", _COMPOSE_IDENTITIES_FORMAT, *containers], timeout=timeout,
+    )
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        raise TargetTimeout("host slow, retry")
+    if rc != 0:
+        raise TargetError("could not inspect container Compose labels")
+    result = {}
+    for line in out.splitlines():
+        name, separator, labels = line.strip().partition("\t")
+        stack, second, service = labels.partition("\t")
+        name = name.lstrip("/")
+        if (
+            separator and second and _CONTAINER_NAME_RE.fullmatch(name)
+            and _NAME_RE.fullmatch(stack) and _NAME_RE.fullmatch(service)
+            and ".." not in stack and ".." not in service
+        ):
+            result[name] = (stack, service)
+    return result
 
 
 class TargetError(Exception):

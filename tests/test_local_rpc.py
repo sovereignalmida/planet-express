@@ -253,11 +253,13 @@ def test_core_handlers():
     commands.propose.return_value = ProposeResult(True, "a", True, "pending")
     commands.decide.return_value = DecideResult("started", "ok", "e")
     commands.get_status.return_value = {"id": "e", "status": "running"}
+    commands.list_incidents.return_value = []
     store.list_pending.return_value = [{"id": "a", "target_json": '{"stack":"media"}', "message_id": 5}]
     handlers = build_core_handlers(commands, store)
     assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
                              "auth.status", "auth.record_failure", "auth.record_success",
-                             "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked"}
+                             "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
+                             "incident.list", "incident.get", "incident.propose"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
@@ -273,6 +275,39 @@ def test_core_handlers():
     assert error.value.code == "not_found"
 
 
+def test_incident_handlers_validate_and_route_operator():
+    commands, store = Mock(), Mock()
+    incident_id = "a" * 12
+    commands.list_incidents.return_value = [{"id": incident_id}]
+    commands.get_incident_context.return_value = {"id": incident_id, "events": []}
+    commands.propose_incident.return_value = ProposeResult(True, "b" * 12, True, "awaiting approval")
+    store.get_incident.return_value = {"id": incident_id}
+    handlers = build_core_handlers(commands, store)
+
+    assert handlers["incident.list"]({"status": "open", "limit": 20}) == [{"id": incident_id}]
+    commands.list_incidents.assert_called_once_with(status="open", limit=20, timeout=4)
+    assert handlers["incident.get"]({"incident_id": incident_id})["id"] == incident_id
+    assert handlers["incident.propose"]({"incident_id": incident_id, "operator": "alice"})["ok"]
+    call = commands.propose_incident.call_args
+    assert call.args == (incident_id,)
+    assert call.kwargs["operator"] == "alice"
+    assert call.kwargs["deadline"] > 0
+
+
+@pytest.mark.parametrize("method,params", [
+    ("incident.list", {"status": "bad", "limit": 20}),
+    ("incident.list", {"status": "open", "limit": 101}),
+    ("incident.get", {"incident_id": "BAD"}),
+    ("incident.propose", {"incident_id": "a" * 12, "operator": "?"}),
+])
+def test_incident_handlers_reject_bad_params(method, params):
+    commands, store = Mock(), Mock()
+    handler = build_core_handlers(commands, store)[method]
+    with pytest.raises(RpcError) as error:
+        handler(params)
+    assert error.value.code == "bad_request"
+
+
 @pytest.mark.parametrize("method,params", [
     ("proposal.create", {}),
     ("proposal.create", {"action": "a", "stack": "", "service": "s", "requested_by": "c"}),
@@ -281,6 +316,7 @@ def test_core_handlers():
     ("approval.decide", {"approval_id": "a", "approve": 1, "decided_by": "c"}),
     ("approval.decide", {"approval_id": "a", "approve": False, "decided_by": " "}),
     ("execution.get_status", {"execution_id": None}),
+    ("incident.get", {"incident_id": "A" * 12}),
 ])
 def test_bad_params(server, socket_path, method, params):
     commands, store = Mock(), Mock()
@@ -894,6 +930,12 @@ def test_approval_reads_preserve_denial_reason_from_audit_events(tmp_path):
     approval = handlers['approval.get']({'approval_id': row['id']})
     assert approval['denial_reason'] == 'refused by current policy: R1 actions are disabled'
     assert handlers['approval.list_recent']({'limit': 1})[0]['denial_reason'] == approval['denial_reason']
+    store.record_event('approval.refused_stale_incident', approval_id=row['id'],
+                       reason='incident source is no longer current', attempted_by='chris')
+    approval = handlers['approval.get']({'approval_id': row['id']})
+    assert approval['denial_reason'] == (
+        'Incident evidence refused: incident source is no longer current'
+    )
 
 
 def test_approval_reads_database_timeout():

@@ -818,12 +818,83 @@ def test_execution_status_passthrough_and_restart_has_no_unsupported_controls(ch
     assert b"execution.js" in page.data
 
 
+def test_incident_routes_validate_list_and_use_session_operator(chat_client):
+    client, rpc, _, data = chat_client
+    incident_id = "c" * 12
+    rows = [{"id": incident_id, "hint": {"state": "proposal_available"}}]
+    rpc.results["incident.list"] = [rows]
+    response = client.get("/api/incidents?status=open&limit=20")
+    assert response.status_code == 200 and response.get_json() == rows
+    assert rpc.calls == [("incident.list", {"status": "open", "limit": 20})]
+
+    rpc.calls.clear()
+    payload = {"ok": True, "approval_id": "a" * 12, "created": True,
+               "reason": "awaiting approval"}
+    rpc.results["incident.propose"] = payload
+    assert client.post(f"/api/incidents/{incident_id}/propose").status_code == 400
+    assert not rpc.calls
+    response = client.post(
+        f"/api/incidents/{incident_id}/propose",
+        data={"csrf_token": data["csrf_token"], "operator": "bob"},
+    )
+    assert response.status_code == 200 and response.get_json() == payload
+    assert rpc.calls == [("incident.propose", {"incident_id": incident_id, "operator": "alice"})]
+
+
+@pytest.mark.parametrize("query", ["status=bad&limit=20", "status=open&limit=0", "status=open&limit=x"])
+def test_incident_list_rejects_invalid_query_without_rpc(chat_client, query):
+    client, rpc, _, _ = chat_client
+    response = client.get("/api/incidents?" + query)
+    assert response.status_code == 400 and set(response.get_json()) == {"error"}
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/incidents/BAD"), ("post", "/api/incidents/short/propose"),
+])
+def test_incident_item_rejects_malformed_id_as_bad_request(chat_client, method, path):
+    client, rpc, _, data = chat_client
+    response = getattr(client, method)(
+        path, data={"csrf_token": data["csrf_token"]} if method == "post" else None,
+    )
+    assert response.status_code == 400 and set(response.get_json()) == {"error"}
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/incidents"), ("get", "/api/incidents/aaaaaaaaaaaa"),
+    ("post", "/api/incidents/aaaaaaaaaaaa/propose"),
+])
+def test_incident_apis_require_auth_json(method, path):
+    client, rpc, _ = make_client()
+    response = getattr(client, method)(path)
+    assert response.status_code == 401 and set(response.get_json()) == {"error"}
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("method,path", [
+    ("incident.get", "/api/incidents/aaaaaaaaaaaa"),
+    ("incident.list", "/api/incidents"),
+])
+@pytest.mark.parametrize("error,status", [
+    (RpcError("secret", "not_found"), 404), (RpcError("secret"), 503),
+])
+def test_incident_read_errors_are_json(chat_client, method, path, error, status):
+    client, rpc, _, _ = chat_client
+    rpc.results[method] = error
+    response = client.get(path)
+    assert response.status_code == status and set(response.get_json()) == {"error"}
+    assert b"secret" not in response.data and b"<html" not in response.data
+
+
 def test_approvals_panel_survives_dashboard_snapshot_refresh(tmp_path, monkeypatch):
     html = _render_with_certs(tmp_path, monkeypatch, [])
     live_start = html.index('id="dashboard-live"')
+    incident = html.index('id="incident-panel"')
     approval = html.index('id="approval-panel"')
     chat = html.index('id="chat-panel"')
-    assert live_start < approval < chat
+    assert live_start < incident < approval < chat
     # The closing snapshot wrapper immediately precedes the documented persistent mount.
-    assert "outside #dashboard-live" in html[approval - 250:approval]
+    assert "outside #dashboard-live" in html[incident - 250:incident]
+    assert "incidents.js" in html
     assert "approvals.js" in html

@@ -220,6 +220,16 @@ def test_invalid_batch_rolls_back_and_reads_validate_bounds(tmp_path):
         store.list_incidents(limit=0)
 
 
+def test_latest_reconciliation_uses_commit_order_when_clock_moves_backward(tmp_path):
+    now = [200.0]
+    store = Store(tmp_path / "core.db", clock=lambda: now[0])
+    store.init()
+    store.reconcile_incidents("a" * 64, "first", [])
+    now[0] = 100.0
+    store.reconcile_incidents("b" * 64, "second", [])
+    assert store.latest_incident_reconciliation()["scan_id"] == "b" * 64
+
+
 def test_concurrent_distinct_scans_share_one_incident(tmp_path):
     store = _store(tmp_path)
     barrier = threading.Barrier(2)
@@ -253,7 +263,7 @@ def test_schema_two_upgrade_preserves_existing_data_atomically(tmp_path):
         conn.execute("INSERT INTO events (ts, kind, payload) VALUES (1, 'old', '{}')")
     Store(path).init()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
         assert conn.execute("SELECT kind FROM events").fetchone()[0] == "old"
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"incidents", "incident_events", "incident_reconciliations"} <= tables
