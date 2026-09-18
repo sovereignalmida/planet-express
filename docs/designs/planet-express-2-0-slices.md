@@ -1362,6 +1362,14 @@ tasks against `ACTION-SCREENS.md`.
     decision; and classified pre-command failures without claiming a restart completed. Final
     verification: 1110 tests pass outside the sandbox, `ruff check .`, both JS syntax checks and
     `git diff --check` clean.
+  - **Live deployment (2026-09-18):** tagged `v2.0.0-3` at `05b40ad` and deployed it to
+    `live/deployed`, with the host-only disk-monitoring override cherry-picked as `4cc5f3e`.
+    Snapshot `20260918T135018Z-pre-v2-0-0-3` captured schema 2 and the prior
+    `v2.0.0-2c-1-g3e30b76` tree. Both units restarted active under their intended users; `/` returned
+    302, `/login`, `/api/widget`, both new static assets and the signed-in `/api/approvals` request
+    returned 200; the deployment-window journals contained no errors. The only tracked delta from
+    the tag is the expected two-line `casa_leela.py` disk filter; `.mcp.json` and `scpdump/` remain
+    untouched and untracked.
 
 ## Reviewer Concerns
 
