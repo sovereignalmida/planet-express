@@ -879,6 +879,23 @@ def test_approval_reads_direct_expiry_history_and_status(tmp_path):
     assert error.value.code == 'not_found'
 
 
+def test_approval_reads_preserve_denial_reason_from_audit_events(tmp_path):
+    from planet_express.execution import actions
+
+    store = Store(tmp_path / 'core.db', clock=lambda: 100)
+    store.init()
+    target = {'stack': 's', 'service': 'web', 'container': 'c'}
+    row, _ = store.propose(action=actions.RESTART_SERVICE, target_key='s/web', target=target,
+                           risk='R1', requested_via='chat', requested_by='chris', ttl_seconds=60)
+    assert store.consume(row['id'], decision='denied', decided_by='policy', arrived_at=100)
+    store.record_event('approval.refused_by_policy', approval_id=row['id'],
+                       reason='R1 actions are disabled', attempted_by='chris')
+    handlers = build_core_handlers(Mock(), store)
+    approval = handlers['approval.get']({'approval_id': row['id']})
+    assert approval['denial_reason'] == 'refused by current policy: R1 actions are disabled'
+    assert handlers['approval.list_recent']({'limit': 1})[0]['denial_reason'] == approval['denial_reason']
+
+
 def test_approval_reads_database_timeout():
     import sqlite3
 

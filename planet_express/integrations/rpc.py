@@ -366,6 +366,15 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
         item["target"] = json.loads(item.pop("target_json"))
         spec = actions.REGISTRY.get(item["action"])
         item["capabilities"] = spec.capabilities() if spec else {}
+        if item.get("status") == "denied":
+            actor = item.get("decided_by") or "unknown"
+            item["denial_reason"] = f"Denied by {actor}."
+            if actor == "policy":
+                refusal = next((event for event in reversed(store.list_events(item["id"]))
+                                if event["kind"] == "approval.refused_by_policy"), None)
+                reason = refusal["payload"].get("reason") if refusal is not None else None
+                item["denial_reason"] = (f"refused by current policy: {reason}"
+                                         if reason else "Refused by current policy.")
         return item
 
     def approval_get(params):

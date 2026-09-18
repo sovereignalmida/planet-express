@@ -598,11 +598,6 @@
 
       <!-- ═══ ACTIONS ═══ -->
       <div class="tab-panel" data-tab-panel="actions">
-        <div class="telegram-banner">
-          <span class="glyph">✈</span>
-          <div class="msg">Actions currently execute through Telegram{% if ctx.telegram_bot_username %} — <span class="mono-inline" style="color: var(--cyan-text);">@{{ ctx.telegram_bot_username }}</span>{% endif %}. In-dashboard execution is on the way; this view is your read-only audit trail for now.</div>
-        </div>
-
         <section class="panel">
           <div class="panel-head-row">
             <h3>DEPLOYMENT MANIFEST</h3>
@@ -760,6 +755,20 @@
   </div>
   </div>
 
+  <!-- Kept outside #dashboard-live: its 60-second snapshot swap must not reset a
+       countdown or replace a decision that is still in flight. -->
+  <div class="tab-panel approval-dock" data-tab-panel="actions" id="approval-panel"
+       data-api="/api/approvals">
+    <section class="panel">
+      <div class="panel-head-row">
+        <h2>FLIGHT AUTHORISATION</h2>
+        <span class="panel-head-note">typed actions</span>
+      </div>
+      <p id="approval-message" role="status">Loading approvals…</p>
+      <div id="approval-cards" class="approval-cards" aria-live="polite"></div>
+    </section>
+  </div>
+
   <div class="tab-panel" data-tab-panel="chat" id="chat-panel">
     <section class="panel">
       <h2>Chat</h2>
@@ -780,6 +789,7 @@
   </footer>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+  <script src="{{ url_for('static', filename='approvals.js') }}"></script>
   <script src="{{ url_for('static', filename='chat.js') }}"></script>
 </body>
 </html>

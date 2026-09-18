@@ -1,3 +1,41 @@
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Execution</title></head>
-<body><h1>Execution {{ execution_id }}</h1><a href="/#overview">Back to Overview</a></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planet Express — Execution {{ execution_id }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+</head>
+<body>
+  <div class="scanline" aria-hidden="true"></div>
+  <div class="vignette" aria-hidden="true"></div>
+  <main id="execution" class="execution-screen" data-api="{{ url_for('execution_get', execution_id=execution_id) }}">
+    <header class="pe-screen-head">
+      <a class="back" href="/#actions" aria-label="Back to actions">‹</a>
+      <div><h1 class="pe-screen-title">FLIGHT RECORDER</h1><p class="pe-screen-sub">RUN {{ execution_id }}</p></div>
+    </header>
+    <p id="execution-message" role="status">Loading execution…</p>
+    <section id="execution-verdict" class="pe-verdict unknown">
+      <div id="execution-orb" class="pe-verdict-orb" aria-hidden="true">●</div>
+      <div class="pe-verdict-text"><h2 id="execution-title">CONTACTING THE SHIP</h2><p id="execution-reason"></p></div>
+    </section>
+    <section id="execution-progress" class="pe-card">
+      <div class="execution-meta"><span id="execution-phase">WAITING</span><span id="execution-elapsed">00:00</span></div>
+      <div id="execution-rail" class="pe-rail" aria-label="Execution steps"></div>
+    </section>
+    <section id="execution-summary" class="pe-card" hidden>
+      <h2>RUN SUMMARY</h2>
+      <dl class="execution-facts">
+        <dt>TOTAL RUNTIME</dt><dd id="summary-runtime">—</dd>
+        <dt>AUTHORISED BY</dt><dd id="summary-operator">—</dd>
+        <dt>TARGET</dt><dd id="summary-target">—</dd>
+      </dl>
+    </section>
+    <div id="execution-actions" class="execution-actions"></div>
+  </main>
+  <script src="{{ url_for('static', filename='execution.js') }}"></script>
+</body>
+</html>

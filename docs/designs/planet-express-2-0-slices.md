@@ -1333,8 +1333,35 @@ tasks against `ACTION-SCREENS.md`.
     offered a restart the policy refuses; a `starting` healthcheck no longer renders green
     "RUNNING CLEAN" (matching `check_stack_completeness` and `verify_after_restart`); the log well
     only follows the tail when the operator is already at the bottom.
-- [ ] **T31 (P1, CC: ~1 session)** — dashboard — approval cards (pending/approved/denied/expired/busy/empty) with Authorise/Deny, and `/executions/<id>` (running/verifying/passed/failed/interrupted/empty) rendering only declared capabilities
-  - Verify: a chat or Telegram `/restart` proposal can be authorised from the dashboard and watched to `passed`; resolved cards keep attribution; interrupted offers re-scan/re-propose only
+- [x] **T31 (P1, CC: ~1 session)** — dashboard — ✅ done 2026-09-18 — approval cards (pending/approved/denied/expired/busy/empty) with Authorise/Deny, and `/executions/<id>` (running/verifying/passed/failed/interrupted/empty) rendering only declared capabilities
+  - **Landed:** authenticated JSON routes for pending/recent/single approvals, decisions and execution
+    status; the Actions tab now has attributed pending/resolved cards, a paused in-flight countdown,
+    capability-derived risk readout, and an empty state naming the last action. The approval dock is
+    outside `#dashboard-live`, like chat, so the 60s snapshot swap cannot replace a countdown or
+    submission. `/executions/<id>` polls every 2s only while visible, stops on terminal state, renders
+    restart + verification phases and exact verifier/failure reasons, and offers only DONE or the
+    interrupted re-scan/re-propose links. Restart's false abort/rollback/resume capabilities never
+    produce controls. `tests/homelab/t31-rehearsal.sh` preserves/restores the VM operator file and
+    drives the real HTTP flow.
+  - **Deviation forced by review:** `planet_express/integrations/rpc.py`'s approval read shape now adds
+    `denial_reason`. Manual denials derive it from the durable `decided_by`; policy denials recover the
+    exact persisted reason from the linked `approval.refused_by_policy` audit event. No schema,
+    mutation path or `SCHEMA_VERSION` changed. The brief required historical denial reasons verbatim,
+    but the pre-T31 read shape did not expose them.
+  - **VM rehearsal:** temporary `t31` passphrase + TOTP operator, restored afterward. A dashboard
+    proposal for `healthy/web` appeared pending; AUTHORISE created an execution that reached `passed`
+    with `reason="healthy for 15s"`, `decided_by="t31"`, all three capabilities false, and Docker
+    `StartedAt` moved. A second proposal was denied and read back with `decided_by="t31"` and
+    `denial_reason="Denied by t31."`. During an earlier run a scheduled scan held the mutation lock:
+    AUTHORISE returned `busy` and the approval remained pending, confirming the expected lock path.
+    Both VM units active and the original `rehearsal-a,rehearsal-b` operator list restored afterward.
+  - **Codex review, four rounds, all ten findings fixed:** deduplicated approvals that transition
+    between sequential reads; persisted denial explanations across reload; refreshed policy refusals;
+    corrected failed/interrupted step certainty; cleared stale submission messages; recovered exact
+    policy refusal reasons from audit events; invalidated successful *and failed* polls overlapping a
+    decision; and classified pre-command failures without claiming a restart completed. Final
+    verification: 1110 tests pass outside the sandbox, `ruff check .`, both JS syntax checks and
+    `git diff --check` clean.
 
 ## Reviewer Concerns
 

@@ -87,7 +87,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             code = error.get("code") if isinstance(error, dict) else "internal"
             raise RpcError("Core request failed", code)
         result = response.get("result")
-        if not isinstance(result, dict):
+        if not isinstance(result, (dict, list)):
             raise RpcError("Core unavailable")
         return result
 
@@ -95,7 +95,9 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return request.path.startswith("/api/chat")
 
     def is_json_request():
-        return is_chat_request() or request.path.startswith("/api/containers/")
+        return (is_chat_request() or request.path.startswith("/api/containers/")
+                or request.path.startswith("/api/approvals")
+                or request.path.startswith("/api/executions/"))
 
     def check_csrf():
         expected = session.get("csrf_token", "")
@@ -141,6 +143,16 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             status, message = {"bad_request": (400, "Invalid container request"),
                                "not_found": (404, "Container not found")}.get(
                                    error.code, (503, "host slow, retry"))
+            return jsonify(error=message), status
+        if request.path.startswith("/api/approvals"):
+            status, message = {"bad_request": (400, "Invalid approval request"),
+                               "not_found": (404, "Approval not found")}.get(
+                                   error.code, (503, "Approvals unavailable; try again shortly"))
+            return jsonify(error=message), status
+        if request.path.startswith("/api/executions/"):
+            status, message = {"bad_request": (400, "Invalid execution request"),
+                               "not_found": (404, "Execution not found")}.get(
+                                   error.code, (503, "Execution unavailable; try again shortly"))
             return jsonify(error=message), status
         # Fail closed for this request only: keep the cookies, so a core restart doesn't
         # sign every operator out.
@@ -301,8 +313,57 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             **container_target(stack, service), "action": "docker.restart_service", "operator": g.operator,
         }))
 
+    def action_id(value, kind):
+        if re.fullmatch(r"[0-9a-f]{12}", value) is None:
+            raise RpcError(f"{kind} not found", "not_found")
+        return value
+
+    def approval_for_web(item):
+        if item.get("status") == "denied":
+            actor = item.get("decided_by") or "unknown"
+            item = dict(item)
+            item.setdefault("denial_reason", "Refused by current policy."
+                            if actor == "policy" else f"Denied by {actor}.")
+        return item
+
+    @app.get("/api/approvals")
+    def approvals_get():
+        proposals = core("proposal.list_pending", {})
+        # proposal.list_pending intentionally exposes a compact card shape. Fetch each full
+        # approval so the browser receives declared capabilities instead of inferring them.
+        pending = [approval_for_web(core("approval.get", {"approval_id": item["id"]}))
+                   for item in proposals]
+        recent = [approval_for_web(item)
+                  for item in core("approval.list_recent", {"limit": 20})]
+        recent_ids = {item["id"] for item in recent}
+        pending = [item for item in pending
+                   if item.get("status") == "pending" and item.get("id") not in recent_ids]
+        return jsonify(pending=pending, recent=recent)
+
+    @app.get("/api/approvals/<approval_id>")
+    def approval_get(approval_id):
+        return jsonify(approval_for_web(core("approval.get", {
+            "approval_id": action_id(approval_id, "Approval"),
+        })))
+
+    @app.post("/api/approvals/<approval_id>/decide")
+    def approval_decide(approval_id):
+        approval_id = action_id(approval_id, "Approval")
+        approve = request.form.get("approve")
+        if approve not in {"0", "1"}:
+            return jsonify(error="Invalid approval decision"), 400
+        return jsonify(core("approval.decide", {
+            "approval_id": approval_id, "approve": approve == "1", "decided_by": g.operator,
+        }))
+
+    @app.get("/api/executions/<execution_id>")
+    def execution_get(execution_id):
+        return jsonify(core("execution.get_status", {
+            "execution_id": action_id(execution_id, "Execution"),
+        }))
+
     @app.get("/executions/<execution_id>")
-    def execution_placeholder(execution_id):
+    def execution_page(execution_id):
         return render_template("execution.html", execution_id=execution_id)
 
     app.add_template_filter(extract_host)

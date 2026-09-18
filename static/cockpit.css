@@ -1723,3 +1723,40 @@ footer p {
 .service-row .status-warn, #log-led.status-warn { background: var(--pe-warn); box-shadow: 0 0 8px var(--pe-warn); }
 .service-row .status-crit, #log-led.status-crit { background: var(--pe-crit); box-shadow: 0 0 8px var(--pe-crit); }
 #restart[hidden] { display: none; }
+
+/* T31 approval cards and flight recorder. */
+.approval-dock { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 24px 26px 40px; }
+.approval-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; margin-top: 14px; }
+.approval-card { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.approval-card.approved { border-color: rgba(111,207,95,.35); }
+.approval-card.denied { border-color: rgba(239,60,46,.35); background: linear-gradient(180deg,rgba(239,60,46,.06),var(--pe-panel)); }
+.approval-card.expired, .approval-card.empty { border-style: dashed; opacity: .82; }
+.approval-status { display: flex; align-items: center; gap: 9px; font-family: var(--pe-font-mono); font-size: 10px; letter-spacing: .08em; color: var(--pe-ink-label); }
+.approval-plan { margin-left: auto; overflow-wrap: anywhere; color: var(--pe-ink-faint); }
+.approval-title { margin: 0; font-family: var(--pe-font-display); font-size: 19px; color: var(--pe-ink); overflow-wrap: anywhere; }
+.approval-requested { margin: 0; color: var(--pe-ink-label); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.approval-facts, .execution-facts { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px 16px; margin: 0; }
+.approval-facts dt, .execution-facts dt { font-family: var(--pe-font-mono); font-size: 9.5px; letter-spacing: .08em; color: var(--pe-ink-faint); }
+.approval-facts dd, .execution-facts dd { margin: 0; color: var(--pe-ink-body); overflow-wrap: anywhere; }
+.approval-countdown-label { font-family: var(--pe-font-mono); font-size: 9.5px; color: var(--pe-ink-faint); }
+.approval-actions, .execution-actions { display: flex; gap: 10px; margin-top: auto; }
+.approval-actions > *, .execution-actions > * { flex: 1; min-height: 48px; }
+.approval-actions .primary { flex: 1.5; }
+.approval-avatar { display: inline-flex; width: 40px; height: 40px; flex: none; align-items: center; justify-content: center; border-radius: 50%; background: var(--pe-panel); color: var(--pe-ink-2); font-family: var(--pe-font-display); font-weight: 700; }
+
+.execution-screen { position: relative; z-index: 2; max-width: 760px; min-height: 100vh; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 18px; }
+.execution-screen .pe-screen-head { padding-inline: 0; }
+.execution-screen .pe-screen-head h1, .execution-screen .pe-screen-head p { margin: 0; }
+.execution-meta { display: flex; justify-content: space-between; margin-bottom: 18px; font-family: var(--pe-font-mono); font-size: 11px; color: var(--pe-ink-label); }
+.execution-verifying { border-color: rgba(53,197,216,.4); background: linear-gradient(180deg,rgba(53,197,216,.08),var(--pe-panel)); }
+.execution-verifying .pe-verdict-orb { background: var(--pe-accent); color: #061318; box-shadow: 0 0 22px rgba(53,197,216,.25); }
+.execution-verifying .pe-verdict-text h2 { color: var(--pe-accent); }
+.execution-interrupted { border-color: rgba(240,134,74,.45); background: linear-gradient(180deg,rgba(240,134,74,.08),var(--pe-panel)); }
+.execution-interrupted .pe-verdict-orb { background: var(--pe-high); color: #190b04; box-shadow: 0 0 22px rgba(240,134,74,.25); }
+.execution-interrupted .pe-verdict-text h2 { color: var(--pe-high); }
+.execution-empty { border-style: dashed; }
+
+@media (max-width: 720px) {
+  .approval-dock, .execution-screen { padding: 16px; }
+  .approval-actions, .execution-actions { flex-direction: column; }
+}

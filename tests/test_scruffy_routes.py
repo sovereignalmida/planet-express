@@ -687,3 +687,143 @@ def test_container_restart_identity_and_outcomes(chat_client, outcome):
     assert "Location" not in response.headers
     assert rpc.calls == [("action.request", {"stack": "media", "service": "search",
         "action": "docker.restart_service", "operator": "alice"})]
+
+
+def test_approvals_list_returns_pending_and_recent(chat_client):
+    client, rpc, _, _ = chat_client
+    pending = {"id": "a" * 12, "status": "pending", "capabilities": {"rollbackable": False}}
+    recent = {"id": "b" * 12, "status": "denied", "decided_by": "bob"}
+    # FakeRpc uses a list as a sequence of replies; nest collection results once.
+    rpc.results.update({"proposal.list_pending": [[{"id": "a" * 12}]],
+                        "approval.get": pending, "approval.list_recent": [[recent]]})
+    response = client.get("/api/approvals")
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "pending": [pending], "recent": [recent | {"denial_reason": "Denied by bob."}],
+    }
+    assert rpc.calls == [
+        ("proposal.list_pending", {}), ("approval.get", {"approval_id": "a" * 12}),
+        ("approval.list_recent", {"limit": 20}),
+    ]
+
+
+def test_approval_get_passthrough(chat_client):
+    client, rpc, _, _ = chat_client
+    payload = {"id": "a" * 12, "status": "pending", "executions": [],
+               "capabilities": {"rollbackable": False}}
+    rpc.results["approval.get"] = payload
+    response = client.get("/api/approvals/aaaaaaaaaaaa")
+    assert response.status_code == 200 and response.get_json() == payload
+    assert rpc.calls == [("approval.get", {"approval_id": "a" * 12})]
+
+
+def test_approvals_deduplicate_transition_and_keep_denial_reason(chat_client):
+    client, rpc, _, _ = chat_client
+    resolved = {"id": "a" * 12, "status": "denied", "decided_by": "alice"}
+    rpc.results.update({"proposal.list_pending": [[{"id": "a" * 12}]],
+                        "approval.get": resolved, "approval.list_recent": [[resolved]]})
+    response = client.get("/api/approvals")
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "pending": [], "recent": [resolved | {"denial_reason": "Denied by alice."}],
+    }
+
+    rpc.calls.clear()
+    rpc.results["approval.get"] = {"id": "b" * 12, "status": "denied", "decided_by": "policy"}
+    response = client.get("/api/approvals/bbbbbbbbbbbb")
+    assert response.get_json()["denial_reason"] == "Refused by current policy."
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/approvals"), ("get", "/api/approvals/aaaaaaaaaaaa"),
+    ("post", "/api/approvals/aaaaaaaaaaaa/decide"), ("get", "/api/executions/aaaaaaaaaaaa"),
+])
+def test_action_apis_require_auth_json(method, path):
+    client, rpc, _ = make_client()
+    response = getattr(client, method)(path)
+    assert response.status_code == 401 and set(response.get_json()) == {"error"}
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("method,path", [
+    ("approval.get", "/api/approvals/aaaaaaaaaaaa"),
+    ("execution.get_status", "/api/executions/aaaaaaaaaaaa"),
+])
+@pytest.mark.parametrize("error,status", [
+    (RpcError("secret", "not_found"), 404), (RpcError("secret"), 503),
+])
+def test_action_read_errors_are_json(chat_client, method, path, error, status):
+    client, rpc, _, _ = chat_client
+    rpc.results[method] = error
+    response = client.get(path)
+    assert response.status_code == status
+    assert set(response.get_json()) == {"error"}
+    assert b"<html" not in response.data
+    assert b"secret" not in response.data
+
+
+@pytest.mark.parametrize("path", [
+    "/api/approvals/not-an-id", "/api/approvals/not-an-id/decide", "/api/executions/not-an-id",
+])
+def test_action_ids_are_twelve_lowercase_hex(chat_client, path):
+    client, rpc, _, data = chat_client
+    response = (client.post(path, data={"csrf_token": data["csrf_token"], "approve": "1"})
+                if path.endswith("decide") else client.get(path))
+    assert response.status_code == 404
+    assert set(response.get_json()) == {"error"}
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("outcome", [
+    "started", "denied", "refused", "busy", "already_decided", "expired", "unknown",
+])
+def test_approval_decide_uses_device_identity_and_maps_outcome(chat_client, outcome):
+    client, rpc, _, data = chat_client
+    path = "/api/approvals/aaaaaaaaaaaa/decide"
+    assert client.post(path, data={"approve": "1"}).status_code == 400
+    assert not rpc.calls
+    payload = {"outcome": outcome, "message": "decision result",
+               "execution_id": "b" * 12 if outcome == "started" else None}
+    rpc.results["approval.decide"] = payload
+    response = client.post(path, data={"csrf_token": data["csrf_token"], "approve": "0", "decided_by": "bob"})
+    assert response.status_code == 200 and response.get_json() == payload
+    assert rpc.calls == [("approval.decide", {
+        "approval_id": "a" * 12, "approve": False, "decided_by": "alice",
+    })]
+
+
+def test_approval_decide_rejects_invalid_boolean(chat_client):
+    client, rpc, _, data = chat_client
+    response = client.post("/api/approvals/aaaaaaaaaaaa/decide",
+                           data={"csrf_token": data["csrf_token"], "approve": "true"})
+    assert response.status_code == 400
+    assert not rpc.calls
+
+
+def test_execution_status_passthrough_and_restart_has_no_unsupported_controls(chat_client):
+    client, rpc, _, _ = chat_client
+    payload = {"id": "a" * 12, "status": "passed", "reason": "healthy for 15s",
+               "capabilities": {"abortable": False, "rollbackable": False, "resumable": False}}
+    rpc.results["execution.get_status"] = payload
+    response = client.get("/api/executions/aaaaaaaaaaaa")
+    assert response.status_code == 200 and response.get_json() == payload
+    assert response.get_json()["capabilities"] == payload["capabilities"]
+    assert rpc.calls == [("execution.get_status", {"execution_id": "a" * 12})]
+
+    page = client.get("/executions/aaaaaaaaaaaa")
+    assert page.status_code == 200
+    assert b"ABORT" not in page.data
+    assert b"ROLL BACK" not in page.data
+    assert b"RESUME" not in page.data
+    assert b"execution.js" in page.data
+
+
+def test_approvals_panel_survives_dashboard_snapshot_refresh(tmp_path, monkeypatch):
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    live_start = html.index('id="dashboard-live"')
+    approval = html.index('id="approval-panel"')
+    chat = html.index('id="chat-panel"')
+    assert live_start < approval < chat
+    # The closing snapshot wrapper immediately precedes the documented persistent mount.
+    assert "outside #dashboard-live" in html[approval - 250:approval]
+    assert "approvals.js" in html
