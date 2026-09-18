@@ -1394,9 +1394,33 @@ tasks against `ACTION-SCREENS.md`.
     crash-loop stayed open at occurrence 3. A stale `CASA_FAKE:/media` incident survived a newer
     global NFS discovery failure with its older `last_observed_scan_id`. Fixtures restored; both
     units active and the five-minute error journal empty.
-- [ ] **T33 (P1, scope after T32)** — incidents/policy/dashboard — Route current incidents through
-  policy and typed proposals, then expose incident context and agent hints through RPC and the
-  dashboard. No incident-driven proposal may run unless its source scan reconciled successfully.
+- [x] **T33 (P1, scope after T32)** — incidents/policy/dashboard — ✅ done 2026-09-18 — Route
+  current incidents through policy and typed proposals, then expose incident context and agent hints
+  through RPC and the dashboard. No incident-driven proposal may run unless its source scan
+  reconciled successfully. Scope and acceptance tests: `docs/handoff/T33-brief.md`.
+  - Schema 4 links incident provenance to approvals. `CommandService` accepts only current failing
+    container incidents with an exact Compose project/service identity, applies the existing typed
+    restart policy and attempt cap, deduplicates pending proposals, and revalidates the source scan
+    under the mutation lock before execution. Stale approvals are durably refused without creating
+    an execution.
+  - RPC and Scruffy expose bounded incident list/detail/propose routes. The dashboard Incident Console
+    shows source freshness, lifecycle context, proposal history and explicit Leela/Amy/Farnsworth
+    hints; non-container incidents remain investigation context and cannot fabricate an action.
+  - **Codex review:** OpenAI review found and drove fixes for deadline propagation, exact container
+    identity, proposal-card races, stale approval ordering, audit-write failure handling, refresh
+    queuing and terminal execution correlation. Final review reported no actionable correctness
+    issues.
+  - **Verification:** 1,161 tests pass outside the socket sandbox; Ruff, JavaScript syntax checking
+    and `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-18):** pre-upgrade snapshot
+    `20260918T162036Z-pre-t33`; real core DB upgraded 3→4 and an actual full scan supplied current
+    incidents. `fixture-unhealthy` created approval `b13f33cfca12`; a repeat returned that approval
+    without a second row, and a newer healthy observation caused AUTHORISE to be refused as stale
+    with no execution. A current disk incident exposed `no_typed_remediation`. A guarded restart of
+    `slow-start/app` created execution `1adc76178c27`, moved the container `StartedAt`, and passed with
+    `healthy for 15s`; the existing daily attempt cap independently blocked an overused target.
+    Restoring the pre-T33 snapshot and restarting the candidate re-applied schema 4; both units were
+    active and `/login` returned 200.
 
 ## Reviewer Concerns
 
