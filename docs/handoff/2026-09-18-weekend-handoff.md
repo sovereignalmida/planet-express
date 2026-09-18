@@ -59,9 +59,10 @@ plans retire there). `v2.0.0` = slices 1-5 complete.
 
 ## Known live-host items
 
-- **`CASA_TA` (TubeArchivist) has a stale NFS handle** on `/youtube` (`/casamedia_nfs/media/youtube`),
-  found by T28's new probe and confirmed by Leela on the live host. The fix is a restart of that
-  container; Chris hasn't done it yet as far as I know. Until then Leela reports one HIGH finding.
+- **The `CASA_TA` stale NFS handle is resolved.** T28's new probe found it (`/youtube` on
+  `/casamedia_nfs/media/youtube`), Leela raised it HIGH, and the container has since been restarted:
+  the latest live snapshot reports **no NFS alerts** across 22 probes. This is exactly the failure the
+  deployed monitor could not see before T28 — Docker kept reporting the container healthy.
 - **Radarr's import errors are not NFS.** `/complete` isn't mapped into the container; its
   `/casamedia` mount probes healthy. That is a download-path mapping mismatch with qBittorrent.
 - **Daily borg backup is off on purpose**; `backup_jobs: [weekly]` is set in the live config (T27).
