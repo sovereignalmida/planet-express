@@ -1421,6 +1421,14 @@ tasks against `ACTION-SCREENS.md`.
     `healthy for 15s`; the existing daily attempt cap independently blocked an overused target.
     Restoring the pre-T33 snapshot and restarting the candidate re-applied schema 4; both units were
     active and `/login` returned 200.
+  - **Live deployment (2026-09-18):** tagged `v2.0.0-4` at `b2f45aa` and deployed it to
+    `live/deployed`, with the host-only disk-monitoring override replayed as `2be4353`. Snapshot
+    `20260918T163439Z-pre-v2-0-0-4` captured schema 2 and the prior `v2.0.0-3-1-g4cc5f3e` tree. Core
+    startup migrated the live DB 2→4; the existing topology config checksum remained unchanged.
+    Core and dashboard restarted active under `casaroot` and `planetexpress-web`; `/` returned 302,
+    `/login`, `incidents.js` and `approvals.js` returned 200, the RPC socket was
+    `casaroot:planetexpress-rpc` mode 660, and both deployment-window error journals were empty. The
+    known weekend-handoff edit, `.mcp.json` and `scpdump/` remain untouched.
 
 ## Reviewer Concerns
 
