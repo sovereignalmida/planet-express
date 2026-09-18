@@ -295,7 +295,7 @@ def test_schema_v1_upgrade(tmp_path):
     store = Store(path)
     store.init()
     with sqlite3.connect(path) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 3
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         assert {'auth_failures', 'auth_totp_steps', 'auth_device_epochs'} <= tables
     assert store.consume_totp_step('alice', 1)
@@ -578,7 +578,7 @@ def test_events_index_init_and_query_plan(tmp_path, existing):
     store.init()
     assert store.list_events() == before
     with sqlite3.connect(store.path) as conn:
-        assert SCHEMA_VERSION == conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert SCHEMA_VERSION == conn.execute("PRAGMA user_version").fetchone()[0] == 3
         assert "events_kind_ts" in {row[1] for row in conn.execute("PRAGMA index_list(events)")}
         plan = conn.execute(
             "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM events WHERE kind = ? AND ts >= ?",
@@ -735,7 +735,7 @@ def test_attempt_index_added_without_version_change(tmp_path):
         conn.execute('DROP INDEX approvals_action_target')
     Store(store.path).init()
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == before == SCHEMA_VERSION == 2
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == before == SCHEMA_VERSION == 3
         assert [r[2] for r in conn.execute('PRAGMA index_info(approvals_action_target)')] == [
             'action', 'target_key',
         ]
@@ -786,11 +786,11 @@ def test_chat_reservation_race_and_day_boundary(tmp_path):
     assert s.chat_quota(limit=2, day_start=200)['used'] == 1
 
 
-def test_chat_interrupt_and_existing_v2(tmp_path):
+def test_chat_interrupt_and_existing_schema(tmp_path):
     s = _store(tmp_path)
     with sqlite3.connect(s.path) as conn:
         conn.execute('DROP TABLE chat_tickets')
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 3
     s.init()
     rows = [s.create_chat_ticket(operator='one', submission_id=str(i), question='?')[0] for i in range(5)]
     s.set_chat_ticket_running(rows[1]['id'])
@@ -804,7 +804,7 @@ def test_chat_interrupt_and_existing_v2(tmp_path):
         assert current['status'] == 'interrupted' and current['finished_at'] is not None
         assert current['error'] == 'core restarted'
     with sqlite3.connect(s.path) as conn:
-        assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert conn.execute('PRAGMA user_version').fetchone()[0] == 3
 
 
 def test_recent_approvals_expiry_order_latest_and_limit(tmp_path):

@@ -20,7 +20,9 @@ ARRIVED before expires_at (the design pauses its countdown during submission), b
 client-supplied timestamp is never trusted.
 """
 
+import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -28,13 +30,51 @@ from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
 AUTH_MAX_FAILURES = 3
 AUTH_LOCK_SECONDS = 900
 DEFAULT_TTL_SECONDS = 3600  # design v20: an approval card expires after 60 minutes
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS incident_reconciliations (
+    scan_id TEXT PRIMARY KEY,
+    snapshot_timestamp TEXT NOT NULL,
+    reconciled_at REAL NOT NULL,
+    observation_count INTEGER NOT NULL CHECK (observation_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    id TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL UNIQUE,
+    fingerprint_version INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('open', 'resolved')),
+    condition TEXT NOT NULL CHECK (condition IN ('failing', 'unknown')),
+    severity TEXT CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW')),
+    summary TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    last_observed_scan_id TEXT NOT NULL REFERENCES incident_reconciliations(scan_id),
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    resolved_at REAL,
+    occurrences INTEGER NOT NULL CHECK (occurrences > 0)
+);
+CREATE INDEX IF NOT EXISTS incidents_status_last_seen ON incidents(status, last_seen DESC);
+
+CREATE TABLE IF NOT EXISTS incident_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id TEXT NOT NULL REFERENCES incidents(id),
+    scan_id TEXT NOT NULL REFERENCES incident_reconciliations(scan_id),
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('opened', 'observed', 'resolved', 'reopened')),
+    payload TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS incident_events_incident ON incident_events(incident_id, id);
+CREATE INDEX IF NOT EXISTS incident_reconciliations_time
+    ON incident_reconciliations(reconciled_at DESC);
+
 CREATE TABLE IF NOT EXISTS chat_tickets (
     id TEXT PRIMARY KEY, operator TEXT NOT NULL, submission_id TEXT NOT NULL,
     question TEXT NOT NULL,
@@ -104,9 +144,6 @@ CREATE TABLE IF NOT EXISTS events (
     payload      TEXT NOT NULL DEFAULT '{}'
 );
 -- (kind, ts) serves the daily chat ceiling's COUNT and kind lookups like auth_lock_notified (T22).
--- No SCHEMA_VERSION bump: an added IF NOT EXISTS index is backward compatible (an older core
--- opens this DB unchanged), and T23 makes user_version a compatibility gate, so it moves only
--- for changes an older core cannot read.
 CREATE INDEX IF NOT EXISTS events_kind_ts ON events (kind, ts);
 """
 
@@ -172,8 +209,15 @@ class Store:
         with self._connect() as conn:
             self._check_schema_version(conn)
             conn.execute("PRAGMA journal_mode = WAL")
-            conn.executescript(_SCHEMA)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            try:
+                conn.executescript(
+                    f"BEGIN IMMEDIATE;\n{_SCHEMA}\n"
+                    f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+                )
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
 
     # ── events ──────────────────────────────────────────────────────────────
     def _event(
@@ -216,6 +260,184 @@ class Store:
                     "SELECT * FROM events WHERE approval_id = ? ORDER BY id", (approval_id,)
                 ).fetchall()
         return [dict(r) | {"payload": json.loads(r["payload"])} for r in rows]
+
+    # ── incidents ──────────────────────────────────────────────────────────
+    @staticmethod
+    def _incident_row(row):
+        if row is None:
+            return None
+        result = dict(row)
+        result["details"] = json.loads(result.pop("details_json"))
+        return result
+
+    @staticmethod
+    def _validate_observations(observations):
+        valid_conditions = {"healthy", "failing", "unknown"}
+        valid_severities = {None, "CRITICAL", "HIGH", "MEDIUM", "LOW"}
+        normalized = []
+        fingerprints = set()
+        for observation in observations:
+            if not isinstance(observation, dict):
+                raise TypeError("incident observations must be dictionaries")
+            required = {"fingerprint", "fingerprint_version", "kind", "resource", "condition",
+                        "severity", "summary", "details"}
+            if set(observation) != required:
+                raise ValueError("incident observation has unexpected fields")
+            fingerprint = observation["fingerprint"]
+            if not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+                raise ValueError("invalid incident fingerprint")
+            if fingerprint in fingerprints:
+                raise ValueError("duplicate incident fingerprint")
+            fingerprints.add(fingerprint)
+            if observation["fingerprint_version"] != 1:
+                raise ValueError("unsupported incident fingerprint version")
+            if (not isinstance(observation["kind"], str) or not observation["kind"]
+                    or len(observation["kind"]) > 64):
+                raise ValueError("invalid incident kind")
+            if (not isinstance(observation["resource"], str) or not observation["resource"]
+                    or len(observation["resource"]) > 512):
+                raise ValueError("invalid incident resource")
+            identity = json.dumps(
+                {
+                    "version": observation["fingerprint_version"],
+                    "kind": observation["kind"],
+                    "resource": observation["resource"],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            if hashlib.sha256(identity).hexdigest() != fingerprint:
+                raise ValueError("incident fingerprint does not match its identity")
+            if observation["condition"] not in valid_conditions:
+                raise ValueError("invalid incident condition")
+            if observation["severity"] not in valid_severities:
+                raise ValueError("invalid incident severity")
+            if not isinstance(observation["summary"], str) or len(observation["summary"]) > 1024:
+                raise ValueError("invalid incident summary")
+            if not isinstance(observation["details"], dict):
+                raise TypeError("invalid incident details")
+            details_json = json.dumps(observation["details"], sort_keys=True, separators=(",", ":"))
+            if len(details_json) > 16 * 1024:
+                raise ValueError("incident details are too large")
+            normalized.append(observation | {"details_json": details_json})
+        return normalized
+
+    def reconcile_incidents(self, scan_id: str, snapshot_timestamp: str, observations) -> list[dict]:
+        if not isinstance(scan_id, str) or re.fullmatch(r"[0-9a-f]{64}", scan_id) is None:
+            raise ValueError("invalid incident scan id")
+        if (
+            not isinstance(snapshot_timestamp, str)
+            or not snapshot_timestamp
+            or len(snapshot_timestamp) > 128
+        ):
+            raise ValueError("invalid snapshot timestamp")
+        observations = self._validate_observations(observations)
+        now = self._clock()
+        changed = []
+        with self._write() as conn:
+            if conn.execute("SELECT 1 FROM incident_reconciliations WHERE scan_id=?", (scan_id,)).fetchone():
+                return []
+            conn.execute(
+                "INSERT INTO incident_reconciliations "
+                "(scan_id, snapshot_timestamp, reconciled_at, observation_count) VALUES (?, ?, ?, ?)",
+                (scan_id, snapshot_timestamp, now, len(observations)),
+            )
+            for item in observations:
+                row = conn.execute("SELECT * FROM incidents WHERE fingerprint=?",
+                                   (item["fingerprint"],)).fetchone()
+                condition, severity = item["condition"], item["severity"]
+                if condition == "healthy":
+                    if row is None:
+                        continue
+                    if row["status"] == "open":
+                        conn.execute(
+                            "UPDATE incidents SET status='resolved', last_observed_scan_id=?, "
+                            "last_seen=?, resolved_at=? WHERE id=?",
+                            (scan_id, now, now, row["id"]),
+                        )
+                        conn.execute(
+                            "INSERT INTO incident_events (incident_id, scan_id, ts, kind, payload) "
+                            "VALUES (?, ?, ?, 'resolved', '{}')", (row["id"], scan_id, now),
+                        )
+                        changed.append(row["id"])
+                    else:
+                        conn.execute(
+                            "UPDATE incidents SET last_observed_scan_id=?, last_seen=? WHERE id=?",
+                            (scan_id, now, row["id"]),
+                        )
+                    continue
+                if condition == "unknown" and severity is None and (
+                    row is None or row["status"] == "resolved"
+                ):
+                    continue
+                payload = json.dumps({"condition": condition, "severity": severity,
+                                      "summary": item["summary"]}, sort_keys=True)
+                if row is None:
+                    incident_id = _new_id()
+                    conn.execute(
+                        "INSERT INTO incidents (id, fingerprint, fingerprint_version, kind, resource, "
+                        "status, condition, severity, summary, details_json, last_observed_scan_id, "
+                        "first_seen, last_seen, occurrences) "
+                        "VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 1)",
+                        (incident_id, item["fingerprint"], item["fingerprint_version"], item["kind"],
+                         item["resource"], condition, severity, item["summary"], item["details_json"],
+                         scan_id, now, now),
+                    )
+                    event_kind = "opened"
+                else:
+                    incident_id = row["id"]
+                    event_kind = "reopened" if row["status"] == "resolved" else "observed"
+                    conn.execute(
+                        "UPDATE incidents SET status='open', condition=?, severity=?, summary=?, "
+                        "details_json=?, last_observed_scan_id=?, last_seen=?, resolved_at=NULL, "
+                        "occurrences=occurrences+1 WHERE id=?",
+                        (condition, severity, item["summary"], item["details_json"], scan_id, now,
+                         incident_id),
+                    )
+                conn.execute(
+                    "INSERT INTO incident_events (incident_id, scan_id, ts, kind, payload) "
+                    "VALUES (?, ?, ?, ?, ?)", (incident_id, scan_id, now, event_kind, payload),
+                )
+                changed.append(incident_id)
+            return [self._incident_row(conn.execute("SELECT * FROM incidents WHERE id=?", (item,)).fetchone())
+                    for item in changed]
+
+    def latest_incident_reconciliation(self) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM incident_reconciliations "
+                "ORDER BY reconciled_at DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_incident(self, incident_id: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
+        return self._incident_row(row)
+
+    def list_incidents(self, status: str | None = None, limit: int = 20) -> list[dict]:
+        if status not in (None, "open", "resolved"):
+            raise ValueError("invalid incident status")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("incident limit must be an integer from 1 to 100")
+        with self._connect() as conn:
+            if status is None:
+                rows = conn.execute(
+                    "SELECT * FROM incidents ORDER BY last_seen DESC, id DESC LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM incidents WHERE status=? ORDER BY last_seen DESC, id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+        return [self._incident_row(row) for row in rows]
+
+    def list_incident_events(self, incident_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM incident_events WHERE incident_id=? ORDER BY id", (incident_id,)
+            ).fetchall()
+        return [dict(row) | {"payload": json.loads(row["payload"])} for row in rows]
 
     # Chat quota reservations and ticket transitions share the normal write transaction.
     @staticmethod

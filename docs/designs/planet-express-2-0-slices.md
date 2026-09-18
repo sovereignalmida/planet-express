@@ -1373,10 +1373,27 @@ tasks against `ACTION-SCREENS.md`.
 
 ### Slice 3 incidents
 
-- [ ] **T32 (P1, CC: ~1 session)** — incidents — Deterministic observation fingerprints and a
-  durable open/observed/resolved/reopened lifecycle. Identity comes from Leela's structured facts,
-  never Hermes prose; missing or unknown data cannot fabricate recovery. Scope and acceptance tests:
-  `docs/handoff/T32-brief.md`.
+- [x] **T32 (P1, CC: ~1 session)** — incidents — ✅ done 2026-09-18 — Deterministic observation
+  fingerprints and a durable open/observed/resolved/reopened lifecycle. Identity comes from Leela's
+  structured facts, never Hermes prose; missing or unknown data cannot fabricate recovery. Scope and
+  acceptance tests: `docs/handoff/T32-brief.md`.
+  - `planet_express/core/incidents.py` converts validated full-scan facts into sorted, redacted,
+    bounded observations with versioned SHA-256 identities. The schema-3 store persists transactional
+    scan receipts, lifecycle rows and permanent events; retries are idempotent and each incident keeps
+    the exact scan that last observed it. Scheduled scans and `/check` reconcile after saving the
+    monitor snapshot and before Hermes; failures warn once and leave reporting available.
+  - **Codex review rounds 1–2 (fixed):** absent/defaulted global checks could emit false recovery;
+    equal-clock receipts used a hash tie-break instead of insertion order; critical-image matching
+    elevated startup-grace and clean-exit issues from MEDIUM to HIGH. Regression tests cover all
+    three. Round 3 clean.
+  - **Verification:** 1,124 tests pass outside the socket sandbox; Ruff and `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-18):** pre-upgrade snapshot
+    `20260918T142338Z-pre-t32`; real core DB upgraded 2→3 with both units active. Two full scans kept
+    `fixture-crash-loop` id `318c8b1e133f` and `fixture-unhealthy` id `74150447a6d4` while occurrences
+    moved 1→2. Replacing the unhealthy fixture with a healthy container resolved only that incident;
+    crash-loop stayed open at occurrence 3. A stale `CASA_FAKE:/media` incident survived a newer
+    global NFS discovery failure with its older `last_observed_scan_id`. Fixtures restored; both
+    units active and the five-minute error journal empty.
 - [ ] **T33 (P1, scope after T32)** — incidents/policy/dashboard — Route current incidents through
   policy and typed proposals, then expose incident context and agent hints through RPC and the
   dashboard. No incident-driven proposal may run unless its source scan reconciled successfully.

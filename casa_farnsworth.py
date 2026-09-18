@@ -48,6 +48,7 @@ from planet_express.application.chat_service import (
 )
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
+from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
@@ -998,7 +999,12 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
 def run_pipeline(
-    notifier: Notifier, state: PipelineState, mode: str = "full", *, scheduled: bool = False
+    notifier: Notifier,
+    state: PipelineState,
+    mode: str = "full",
+    *,
+    scheduled: bool = False,
+    incident_store: Store | None = None,
 ) -> None:
     """
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
@@ -1027,7 +1033,23 @@ def run_pipeline(
         else:
             snapshot = leela.run_full()
         config.ensure_dirs()
-        config.STATE_MONITOR.write_text(MonitorSnapshot(**snapshot).model_dump_json(indent=2))
+        monitor = MonitorSnapshot(**snapshot)
+        monitor_data = monitor.model_dump(mode="json")
+        config.STATE_MONITOR.write_text(monitor.model_dump_json(indent=2))
+
+        if mode == "full" and incident_store is not None:
+            try:
+                observations = observations_from_snapshot(monitor_data)
+                incident_store.reconcile_incidents(
+                    scan_id(monitor_data),
+                    monitor.timestamp,
+                    [observation.as_dict() for observation in observations],
+                )
+            except Exception:
+                log.exception("Incident reconciliation failed (non-fatal)")
+                notifier.notify(
+                    "⚠️ Incident history was not updated for this scan; the monitoring report will continue."
+                )
 
         if mode == "full":
             try:
@@ -1123,6 +1145,7 @@ def handle_message(
     notifier: Notifier,
     state: PipelineState,
     commands: CommandService | None = None,
+    incident_store: Store | None = None,
 ) -> None:
     msg = update.get("message", {})
     text = msg.get("text", "").strip()
@@ -1136,7 +1159,10 @@ def handle_message(
 
     if cmd == "/check":
         threading.Thread(
-            target=run_pipeline, args=(notifier, state, "full"), daemon=True
+            target=run_pipeline,
+            args=(notifier, state, "full"),
+            kwargs={"incident_store": incident_store},
+            daemon=True,
         ).start()
 
     elif cmd == "/status":
@@ -2097,7 +2123,7 @@ def _wait_for_maintenance(state: PipelineState, sleep=time.sleep) -> None:
     log.info("Scheduled pipeline maintenance wait ended")
 
 
-def scheduler_loop(notifier: Notifier, state: PipelineState) -> None:
+def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Store | None = None) -> None:
     """Background thread — runs full pipeline every PIPELINE_INTERVAL_HOURS hours."""
     log.info(f"Scheduler started — pipeline runs every {PIPELINE_INTERVAL_HOURS}h")
     time.sleep(60)  # brief delay on startup before first scheduled run
@@ -2105,7 +2131,9 @@ def scheduler_loop(notifier: Notifier, state: PipelineState) -> None:
         try:
             _wait_for_maintenance(state)
             log.info("Scheduled pipeline run starting")
-            run_pipeline(notifier, state, mode="full", scheduled=True)
+            run_pipeline(
+                notifier, state, mode="full", scheduled=True, incident_store=incident_store
+            )
         except Exception:
             log.exception("Scheduled pipeline error")
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)
@@ -2301,7 +2329,7 @@ def run_bot() -> None:
 
     # Start background schedulers
     sched = threading.Thread(
-        target=scheduler_loop, args=(notifier, state), daemon=True, name="scheduler"
+        target=scheduler_loop, args=(notifier, state, store), daemon=True, name="scheduler"
     )
     sched.start()
 
@@ -2323,7 +2351,7 @@ def run_bot() -> None:
             for update in updates:
                 try:
                     if "message" in update:
-                        handle_message(update, tg, notifier, state, commands)
+                        handle_message(update, tg, notifier, state, commands, store)
                     elif "callback_query" in update:
                         handle_callback(update, tg, notifier, state, commands)
                 except Exception:
