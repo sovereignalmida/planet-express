@@ -15,6 +15,7 @@ system/           the design system — this is what you implement against
   DATA-CONTRACT.md  context keys the templates need, and what's missing today
 
 handoffs/         point-in-time specs, newest first
+  SERVICES-STACK-CARDS.md  Overview services panel → stack cards (88 containers / 15 stacks)
   BACKUPS-TAB-FIXES.md   corrections to the v3 Backups tab — 7 faults, 3 Python diffs
   V3-COCKPIT-RESKIN.md   the original cockpit re-skin spec
   V1-ORIGINAL.md         first-pass dashboard spec, kept for provenance
@@ -47,6 +48,7 @@ These are design artefacts, not source. Open them in a browser to read exact spa
 
 | File | What it shows |
 | --- | --- |
+| `Services Grid - Stack Cards` | The services panel as stack cards. **Interactive** — DEMO flips incident/all-green, NAMED/DOTS and ATTENTION are live |
 | `Cockpit v4 - Action Screens` | Login, container detail, approval card, execution progress — 20 states + desktop split |
 | `Dashboard v3 - Cockpit` | The four main tabs as shipped |
 | `Backups Tab - Corrected` | The Backups tab as it should be, both data states, with the fault list |
@@ -56,9 +58,10 @@ These are design artefacts, not source. Open them in a browser to read exact spa
 ## Suggested order of work
 
 1. `system/DATA-CONTRACT.md` — the backend keys. Several screens can't be honest until these exist.
-2. `handoffs/BACKUPS-TAB-FIXES.md` — the outstanding correction to shipped code.
-3. `system/cockpit.css` + `COMPONENTS.md` — re-skin the existing tabs.
-4. `system/ACTION-SCREENS.md` — build the four new surfaces.
+2. `handoffs/SERVICES-STACK-CARDS.md` — the Overview panel that doesn't survive 88 containers.
+3. `handoffs/BACKUPS-TAB-FIXES.md` — the outstanding correction to shipped code.
+4. `system/cockpit.css` + `COMPONENTS.md` — re-skin the existing tabs.
+5. `system/ACTION-SCREENS.md` — build the four new surfaces.
 
 ## Two things that hold across all of it
 

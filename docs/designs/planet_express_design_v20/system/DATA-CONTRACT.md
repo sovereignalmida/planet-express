@@ -128,3 +128,26 @@ Every domain's states collapse onto the four card modifiers. Add new sources to 
 | Hull finding | — | MED | HIGH | CRIT | LOW (rolled up) |
 | Disk | < 75% | 75–89% | 90–94% | ≥ 95% | unreadable |
 | Router | reachable | slow | — | unreachable | not probed |
+
+---
+
+## Stack rollup (Overview services panel)
+
+Four derived fields per compose stack, so the panel can render as cards instead of 88 rows. Full spec in `handoffs/SERVICES-STACK-CARDS.md`.
+
+```python
+# dashboard_data.py — per stack
+"up":    14,                 # count of members at level ok
+"total": 16,
+"level": "crit",             # worst member: crit > warn > idle > ok
+"note":  "sonarr down · bazarr degraded",   # non-ok members only, "" when clean
+```
+
+```python
+WORD = {"crit": "down", "warn": "degraded", "idle": "paused"}
+RANK = {"crit": 0, "warn": 1, "idle": 2, "ok": 3}
+note = " · ".join(f'{c["name"]} {WORD[c["level"]]}' for c in bad)
+stacks.sort(key=lambda s: (RANK[s["level"]], -s["total"], s["name"]))
+```
+
+Member `level` maps from the existing 4-way container state, same as the reactor cells: `online → ok`, `degraded → warn`, `down → crit`, `paused → idle`. No new collection and no change to `check_containers()`.
