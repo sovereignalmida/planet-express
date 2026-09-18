@@ -28,6 +28,7 @@ import casa_scruffy_net
 import config
 import dashboard_data
 import web_auth
+from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
 
 
@@ -93,11 +94,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def is_chat_request():
         return request.path.startswith("/api/chat")
 
+    def is_json_request():
+        return is_chat_request() or request.path.startswith("/api/containers/")
+
     def check_csrf():
         expected = session.get("csrf_token", "")
         supplied = request.form.get("csrf_token", "")
         if not expected or not hmac.compare_digest(expected.encode(), supplied.encode()):
-            if is_chat_request():
+            if is_json_request():
                 return jsonify(error="Invalid CSRF token"), 400
             abort(400)
 
@@ -133,13 +137,18 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
                                "not_found": (404, "Chat ticket not found")}.get(
                                    error.code, (503, "Chat unavailable; try again shortly"))
             return jsonify(error=message), status
+        if request.path.startswith("/api/containers/"):
+            status, message = {"bad_request": (400, "Invalid container request"),
+                               "not_found": (404, "Container not found")}.get(
+                                   error.code, (503, "host slow, retry"))
+            return jsonify(error=message), status
         # Fail closed for this request only: keep the cookies, so a core restart doesn't
         # sign every operator out.
         return app.make_response((airlock("unavailable"), 503))
 
     @app.before_request
     def authenticate():
-        if request.method == "POST" and not is_chat_request():
+        if request.method == "POST" and not is_json_request():
             check_csrf()
         public = ((request.path == "/login" and request.method in {"GET", "POST"})
                   or (request.path == "/login/notify" and request.method == "POST")
@@ -159,13 +168,13 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         ) if valid_trust else None
         if identity and identity[0] in operators and epoch(identity[0]) == identity[1]:
             g.operator = identity[0]
-            if request.method == "POST" and is_chat_request():
+            if request.method == "POST" and is_json_request():
                 error = check_csrf()
                 if error is not None:
                     return error
             csrf_token()
             return None
-        if is_chat_request():
+        if is_json_request():
             return clear_auth(app.make_response((jsonify(error="Authentication required"), 401)))
         return clear_auth(redirect(url_for("login", next=request.path)))
 
@@ -250,6 +259,51 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     @app.get("/api/chat/quota")
     def chat_quota():
         return jsonify(core("chat.quota", {}))
+
+    def container_target(stack, service):
+        if any(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value) is None
+               for value in (stack, service)):
+            if is_json_request():
+                raise RpcError("Container not found", "not_found")
+            abort(404)
+        return {"stack": stack, "service": service}
+
+    @app.get("/containers/<stack>/<service>")
+    def container_detail(stack, service):
+        container_target(stack, service)
+        return render_template("container.html", stack=stack, service=service, operator=g.operator)
+
+    @app.get("/api/containers/<stack>/<service>")
+    def container_get(stack, service):
+        return jsonify(core("query.container", container_target(stack, service)))
+
+    # POST, not GET: a cursor can carry up to LOG_CURSOR_HASH_LIMIT (1000) dedupe hashes, and ~180 of
+    # them in a query string already exceed gunicorn's default 4094-byte request line — every later
+    # poll would fail before reaching Flask and the log stream would freeze until reload (Codex
+    # review, T30). A form body has no such limit and CSRF is already enforced on /api/containers/.
+    @app.post("/api/containers/<stack>/<service>/logs")
+    def container_logs(stack, service):
+        params = container_target(stack, service)
+        cursor = request.form.get("cursor")
+        if cursor:
+            if LOG_TIMESTAMP_RE.fullmatch(cursor) is None:
+                return jsonify(error="Invalid cursor"), 400
+            params["cursor"] = cursor
+        hashes = request.form.getlist("hash")[:LOG_CURSOR_HASH_LIMIT]
+        if any(re.fullmatch(r"[0-9a-f]{16}", value) is None for value in hashes):
+            return jsonify(error="Invalid cursor hashes"), 400
+        params["cursor_hashes"] = hashes
+        return jsonify(core("logs.tail", params))
+
+    @app.post("/api/containers/<stack>/<service>/restart")
+    def container_restart(stack, service):
+        return jsonify(core("action.request", {
+            **container_target(stack, service), "action": "docker.restart_service", "operator": g.operator,
+        }))
+
+    @app.get("/executions/<execution_id>")
+    def execution_placeholder(execution_id):
+        return render_template("execution.html", execution_id=execution_id)
 
     app.add_template_filter(extract_host)
     app.add_template_filter(_extra_host_count, "extra_host_count")

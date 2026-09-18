@@ -169,6 +169,17 @@
           {% endif %}
         </section>
 
+        <section class="panel" aria-label="Services">
+          <h2>SERVICES</h2>
+          {% for item in ctx.services %}
+          {% if loop.changed(item.stack) %}<h3>{{ item.stack }}</h3>{% endif %}
+          <a class="grid-row service-row" href="{{ url_for('container_detail', stack=item.stack, service=item.service) }}">
+            <span class="led-dot status-{{ {'healthy': 'ok', 'failing': 'crit'}.get(item.status, 'warn') }}" aria-label="{{ item.status }}"></span>
+            <span>{{ item.service }}</span><span>{{ item.state }}</span>
+          </a>
+          {% else %}<p>Service details are not available in this snapshot. Available after the next full scan.</p>{% endfor %}
+        </section>
+
         <!-- Hull Diagnostics -->
         {% set fc = ctx.findings.counts %}
         {% if fc.critical %}{% set worst = 'crit' %}

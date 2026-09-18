@@ -1307,8 +1307,32 @@ tasks against `ACTION-SCREENS.md`.
   - **Known limitation, booked in TODOS.md:** `redact()` costs ~4µs/char, so a container writing very
     long records returns fewer lines than the caps allow (1.87s for 500 × 8 KiB, stopping at the size
     budget). Not fixed here on purpose — that matcher needed 14 review rounds to stop leaking.
-- [ ] **T30 (P1, CC: ~1 session)** — dashboard — container list + `/containers/<stack>/<service>` (verdict, vitals, facts, polled log well with restarted divider) + two-step restart sheet → `action.request` → execution page
+- [x] **T30 (P1, CC: ~1 session)** — dashboard — ✅ done 2026-09-17 — container list + `/containers/<stack>/<service>` (verdict, vitals, facts, polled log well with restarted divider) + two-step restart sheet → `action.request` → execution page
   - Verify: states healthy/down/paused/restart-confirm; CSRF on the confirm; busy state in place; logs poll only while visible and survive the 60s refresh
+  - **Landed:** Overview gains a **SERVICES** panel (built from T19's per-service statuses — snapshot
+    `containers[]` carry no stack/service, so that was the only source), each row linking to
+    `/containers/<stack>/<service>`: `templates/container.html` + `static/container.js`, verdict →
+    vitals → facts → log well → bottom bar, polling facts/vitals every 5s and logs every 3s only while
+    visible, with in-flight guards; the page is its own route, so the dashboard's 60s swap can't wipe
+    it. `RESTART` opens the `.pe-sheet` two-step confirm (blast radius, DATA LOSS none, LOGGED AS
+    <operator> rendered server-side from `g.operator`), the confirm button becomes its own busy state,
+    and `action.request` runs with `operator=g.operator` — never a form value. `/executions/<id>` is a
+    placeholder until T31.
+  - **VM rehearsal, real login (passphrase + TOTP) and a real restart — 29 checks:** signed out, the
+    page 302s and its APIs return JSON 401; signed in, the SERVICES list links through, the page shows
+    live facts/vitals/logs, malformed names 404 and a bad cursor 400, a re-poll returns no duplicates;
+    restart without CSRF is 400, with CSRF it restarted `fixture-healthy` for real
+    (`StartedAt` moved), core recorded `decided_by=t30`, `requested_via=dashboard-direct`,
+    `status=passed`, `reason="healthy for 15s"`. While a scan held the lock, core refused with
+    "Busy right now (scan running)" and the sheet showed it — the mutation lock working.
+  - **Codex review, two rounds, all four findings fixed:** log dedupe hashes moved from the query
+    string into a POST body — ~180 hashes already exceed gunicorn's 4094-byte request line, so log
+    polling would have frozen permanently until reload (verified 1000 hashes now work); core's
+    `query.container` reports `paused` from `config.PAUSED_CONTAINERS` because those containers are
+    usually `exited`, not docker-paused, so the page labelled an intentional stop as failing and
+    offered a restart the policy refuses; a `starting` healthcheck no longer renders green
+    "RUNNING CLEAN" (matching `check_stack_completeness` and `verify_after_restart`); the log well
+    only follows the tail when the operator is already at the bottom.
 - [ ] **T31 (P1, CC: ~1 session)** — dashboard — approval cards (pending/approved/denied/expired/busy/empty) with Authorise/Deny, and `/executions/<id>` (running/verifying/passed/failed/interrupted/empty) rendering only declared capabilities
   - Verify: a chat or Telegram `/restart` proposal can be authorised from the dashboard and watched to `passed`; resolved cards keep attribution; interrupted offers re-scan/re-propose only
 

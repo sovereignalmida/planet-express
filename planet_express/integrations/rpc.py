@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import config
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import Store
 from planet_express.execution import actions, policy
@@ -326,6 +327,11 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
         vitals = (actions.read_stats(target.container, timeout=left) if left > 0
                   else {"ok": False, "error": "timeout"})
         return {"target": target.as_dict(),
+                # The operator's pause list holds container NAMES and those containers are usually
+                # `exited`, not docker-paused, so the state alone can't tell an intentional stop from
+                # a failure. Say so here instead of letting the UI find out by attempting a restart
+                # the policy then refuses (Codex review, T30).
+                "paused": target.container in config.PAUSED_CONTAINERS,
                 "vitals": vitals, "facts": facts,
                 "actions": {name: spec.capabilities() for name, spec in actions.REGISTRY.items()
                             if spec.risk in policy.RISK_LEVELS[1:]}}

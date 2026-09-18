@@ -630,9 +630,18 @@ def test_container_handler_shape_and_timeouts(monkeypatch):
     handler = build_core_handlers(Mock(), Mock())['query.container']
     params = {'stack': 'healthy', 'service': 'web'}
     result = handler(params)
-    assert result == {'target': target.as_dict(), 'vitals': stats.return_value,
+    assert result == {'target': target.as_dict(), 'vitals': stats.return_value, 'paused': False,
                       'facts': {'ok': True, 'facts': {}},
                       'actions': {actions.RESTART_SERVICE: actions.REGISTRY[actions.RESTART_SERVICE].capabilities()}}
+    # An operator-paused container is usually `exited`, not docker-paused, so the state alone can't
+    # say it was intentional: the read reports it (Codex review, T30).
+    resolve.assert_called_once_with(**params, for_mutation=False, timeout=4)
+    stats.assert_called_once_with('fixture', timeout=4)
+    monkeypatch.setattr(rpc_module.config, 'PAUSED_CONTAINERS', ['fixture'])
+    assert handler(params)['paused'] is True
+    monkeypatch.setattr(rpc_module.config, 'PAUSED_CONTAINERS', [])
+    resolve.reset_mock(); stats.reset_mock()
+    handler(params)
     resolve.assert_called_once_with(**params, for_mutation=False, timeout=4)
     stats.assert_called_once_with('fixture', timeout=4)
     stats.return_value = {'ok': False, 'error': 'timeout'}

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 import pytest
+from werkzeug.datastructures import MultiDict
 
 import casa_scruffy
 import config
@@ -593,3 +594,96 @@ def test_chat_js_does_not_need_a_secure_context():
     code = "\n".join(line for line in js.splitlines() if not line.strip().startswith("//"))
     assert "randomUUID" not in code
     assert "crypto.getRandomValues" in code
+
+
+def test_container_shell_and_validation(chat_client):
+    client, rpc, _, _ = chat_client
+    response = client.get("/containers/media/search")
+    assert response.status_code == 200
+    assert b'LOGGED AS</dt><dd>alice' in response.data
+    assert b'class="pe-sheet warn"' in response.data
+    assert b'container.js' in response.data
+    assert not rpc.calls
+    for name in ("bad!", "a" * 65):
+        assert client.get("/containers/media/" + name).status_code == 404
+        assert_chat_error(client.get("/api/containers/media/" + name), 404)
+    js = (Path(__file__).resolve().parent.parent / "static/container.js").read_text()
+    assert "innerHTML" not in js
+    assert client.get("/executions/test-id").status_code == 200
+
+
+def test_container_authentication():
+    client, rpc, _ = make_client()
+    assert client.get("/containers/media/search").location == "/login?next=/containers/media/search"
+    for suffix in ("", "/logs", "/restart"):
+        path = "/api/containers/media/search" + suffix
+        response = client.post(path) if suffix == "/restart" else client.get(path)
+        assert_chat_error(response, 401)
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("method,suffix", [("query.container", ""), ("logs.tail", "/logs")])
+def test_container_reads(chat_client, method, suffix):
+    client, rpc, _, _ = chat_client
+    payload = {"target": {"stack": "media", "service": "search"}, "facts": {}, "vitals": {}}
+    rpc.results[method] = payload
+    token = csrf(client)
+    rpc.calls.clear()        # csrf() fetches /login, which itself calls auth.status
+    response = (client.post("/api/containers/media/search" + suffix, data={"csrf_token": token})
+                if suffix else client.get("/api/containers/media/search"))
+    assert response.get_json() == payload
+    assert response.headers["Cache-Control"] == "no-store"
+    expected = {"stack": "media", "service": "search"}
+    if suffix:
+        expected["cursor_hashes"] = []
+    assert rpc.calls == [(method, expected)]
+
+
+@pytest.mark.parametrize("code,status", [("not_found", 404), ("bad_request", 400), ("internal", 503)])
+def test_container_rpc_errors(chat_client, code, status):
+    client, rpc, _, _ = chat_client
+    rpc.results["query.container"] = RpcError("secret diagnostic", code)
+    assert_chat_error(client.get("/api/containers/media/search"), status)
+
+
+def test_container_auth_outage_json(chat_client):
+    client, rpc, now, _ = chat_client
+    now[0] += 61
+    rpc.results["auth.device_epoch"] = RpcError("secret diagnostic")
+    assert_chat_error(client.get("/api/containers/media/search"), 503)
+
+
+def test_container_logs_cursor(chat_client):
+    client, rpc, _, _ = chat_client
+    path = "/api/containers/media/search/logs"
+    token = csrf(client)
+    rpc.calls.clear()        # csrf() fetches /login, which itself calls auth.status
+    # POSTed, not in the query string: 1000 hashes exceed gunicorn's request-line limit (T30).
+    assert_chat_error(client.post(path, data={"csrf_token": token, "cursor": "bad"}), 400)
+    assert_chat_error(client.post(path, data={"csrf_token": token, "hash": "bad"}), 400)
+    assert not rpc.calls
+    no_token = client.post(path, data={"cursor": "bad"})                         # no CSRF token
+    assert no_token.status_code == 400 and no_token.get_json()["error"]
+    cursor = "2026-09-17T12:34:56.123456789Z"
+    client.post(path, data=MultiDict([("csrf_token", token), ("cursor", cursor),
+                                      ("hash", "a" * 16), ("hash", "b" * 16)]))
+    assert rpc.calls[-1] == ("logs.tail", {"stack": "media", "service": "search",
+        "cursor": cursor, "cursor_hashes": ["a" * 16, "b" * 16]})
+    client.post(path, data=MultiDict([("csrf_token", token)] + [("hash", "a" * 16)] * 1001))
+    assert len(rpc.calls[-1][1]["cursor_hashes"]) == 1000
+    assert client.get(path).status_code == 405
+
+
+@pytest.mark.parametrize("outcome", ["started", "busy", "refused", "timeout"])
+def test_container_restart_identity_and_outcomes(chat_client, outcome):
+    client, rpc, _, data = chat_client
+    path = "/api/containers/media/search/restart"
+    assert_chat_error(client.post(path), 400)
+    assert not rpc.calls
+    payload = {"outcome": outcome, "message": "result", "execution_id": "exec-123" if outcome == "started" else None}
+    rpc.results["action.request"] = payload
+    response = client.post(path, data={"csrf_token": data["csrf_token"], "operator": "bob"})
+    assert response.status_code == 200 and response.get_json() == payload
+    assert "Location" not in response.headers
+    assert rpc.calls == [("action.request", {"stack": "media", "service": "search",
+        "action": "docker.restart_service", "operator": "alice"})]

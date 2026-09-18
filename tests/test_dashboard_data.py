@@ -706,3 +706,25 @@ def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
         assert ('<span class="cryo-name">DAILY</span>' in html) == ('daily' in names)
         if names:
             assert f'{len(names)}/{len(names)} JOBS OK' in html
+
+
+def test_services_preserve_snapshot_order(tmp_path, monkeypatch):
+    path = tmp_path / "monitor.json"
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "full",
+        "stack_completeness": [
+            {"stack": "zeta", "services": {"second": {"status": "failing", "state": "exited"},
+                                          "first": {"status": "healthy", "state": "running"}}},
+            {"stack": "alpha", "services": {"last": {"status": "unknown", "state": "missing"}}},
+            {"stack": "legacy"}]})
+    assert dashboard_data.build_dashboard_context()["services"] == [
+        {"stack": "zeta", "service": "second", "status": "failing", "state": "exited"},
+        {"stack": "zeta", "service": "first", "status": "healthy", "state": "running"},
+        {"stack": "alpha", "service": "last", "status": "unknown", "state": "missing"}]
+
+
+def test_services_status_snapshot(tmp_path, monkeypatch):
+    path = tmp_path / "monitor.json"
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "status"})
+    assert dashboard_data.build_dashboard_context()["services"] == []

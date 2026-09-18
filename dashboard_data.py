@@ -815,6 +815,16 @@ def build_professor_lines(ctx: dict) -> dict:
     return lines
 
 
+def summarize_services() -> list:
+    monitor = load_monitor()
+    return [
+        {"stack": stack["stack"], "service": service,
+         "status": detail.get("status", "unknown"), "state": detail.get("state", "")}
+        for stack in (monitor.stack_completeness if monitor else [])
+        for service, detail in stack.get("services", {}).items()
+    ]
+
+
 def build_dashboard_context() -> dict:
     """Single entry point the Flask route calls."""
     return {
@@ -823,6 +833,7 @@ def build_dashboard_context() -> dict:
         "pipeline_status": summarize_pipeline_status(),
         "containers": summarize_containers(),
         "stack_completeness": summarize_stack_completeness(),
+        "services": summarize_services(),
         "disk": summarize_disk(),
         "update_history": summarize_update_history(),
         "rollback_candidates": summarize_rollback_candidates(),

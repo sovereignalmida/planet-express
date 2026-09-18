@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>Planet Express — {{ service }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+</head>
+<body>
+<main id="container-detail" class="container-detail" data-api="{{ url_for('container_get', stack=stack, service=service) }}">
+  <header><a class="refresh-btn" href="/#overview">‹ OVERVIEW</a><h1>{{ service }}</h1><p>{{ stack }} · <span id="header-image">—</span></p></header>
+  <section id="verdict" class="pe-verdict unknown">
+    <div class="pe-verdict-orb" aria-hidden="true">●</div>
+    <div class="pe-verdict-text"><h2 id="verdict-text">Loading container…</h2></div>
+  </section>
+  <p id="detail-message" role="status"></p>
+  <section class="container-vitals" aria-label="Vitals">
+    {% for key, label in [('cpu', 'CPU'), ('memory', 'MEMORY')] %}
+    <div class="pe-card"><h2>{{ label }}</h2><strong id="{{ key }}-value" class="container-hero">—</strong>
+      <progress id="{{ key }}-bar" max="100" value="0" aria-label="{{ label }}"></progress></div>
+    {% endfor %}
+  </section>
+  <section class="pe-card"><h2>FACTS</h2><dl class="container-facts">
+    {% for key, label in [('health', 'HEALTH'), ('policy', 'RESTART POLICY'), ('restarts', 'RESTART COUNT'), ('ports', 'PORTS'), ('image', 'IMAGE')] %}
+    <dt>{{ label }}</dt><dd id="fact-{{ key }}">—</dd>
+    {% endfor %}
+  </dl></section>
+  <section class="pe-logwell" id="logwell">
+    <header class="pe-logwell-head"><span id="log-led" class="led-dot status-warn"></span><h4>LOGS</h4><span id="log-count"></span></header>
+    <p id="log-message" role="status">Loading logs…</p>
+    <div id="log-lines" class="pe-logwell-body" aria-label="Container log output"></div>
+  </section>
+  <div class="container-bottom"><button id="restart" class="pe-btn warn" type="button" hidden>RESTART ⟳</button></div>
+</main>
+<dialog id="restart-dialog" aria-labelledby="restart-title">
+  <div class="pe-sheet warn">
+    <div class="pe-verdict warn"><div class="pe-verdict-orb" aria-hidden="true">!</div>
+      <div class="pe-verdict-text"><h2 id="restart-title">CONFIRM RESTART</h2>
+      <p>{{ stack }}/{{ service }} will be unavailable for a few seconds</p></div></div>
+    <dl class="container-facts"><dt>AFFECTS</dt><dd>{{ stack }}/{{ service }}</dd>
+      <dt>DATA LOSS</dt><dd>None</dd><dt>LOGGED AS</dt><dd>{{ operator }}</dd></dl>
+    <p id="restart-message" role="status"></p>
+    <div class="container-sheet-actions">
+      <button id="restart-cancel" class="pe-btn" type="button">CANCEL</button>
+      <button id="restart-confirm" class="pe-btn warn" type="button"><span class="container-spinner" aria-hidden="true"></span><span id="restart-label">CONFIRM RESTART</span></button>
+    </div>
+  </div>
+</dialog>
+<script src="{{ url_for('static', filename='container.js') }}"></script>
+</body></html>
