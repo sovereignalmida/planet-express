@@ -1371,6 +1371,16 @@ tasks against `ACTION-SCREENS.md`.
     the tag is the expected two-line `casa_leela.py` disk filter; `.mcp.json` and `scpdump/` remain
     untouched and untracked.
 
+### Slice 3 incidents
+
+- [ ] **T32 (P1, CC: ~1 session)** — incidents — Deterministic observation fingerprints and a
+  durable open/observed/resolved/reopened lifecycle. Identity comes from Leela's structured facts,
+  never Hermes prose; missing or unknown data cannot fabricate recovery. Scope and acceptance tests:
+  `docs/handoff/T32-brief.md`.
+- [ ] **T33 (P1, scope after T32)** — incidents/policy/dashboard — Route current incidents through
+  policy and typed proposals, then expose incident context and agent hints through RPC and the
+  dashboard. No incident-driven proposal may run unless its source scan reconciled successfully.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect
