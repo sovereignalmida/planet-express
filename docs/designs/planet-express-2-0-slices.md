@@ -461,6 +461,11 @@ on premises that did not survive reading the code.
    artifact versions, multi-step progress and per-action recovery, which capability booleans do not
    provide.
    - **5a:** `/up` and `/down` onto typed actions as they are.
+     - **DECIDED 2026-09-21 (D33, operator):** tiered risk. `/up <stack>` R1 (operator-direct, runs
+       immediately with the default `direct_request_risks: [R1]`); `/down <stack>` and `/up all` R2
+       and `/down all` and down of the ingress stack (`network`, or a traefik/adguard stack) R3, all
+       behind an approval card. Forbidden stacks: up refused, down allowed (unchanged). Friction can
+       be loosened later via `direct_request_risks` (D29-sensitive). Built as T37.
    - **5b:** design the multi-step execution model, then `/install`, canary updates and `/rollback`.
      Legacy shell plans retire at the end of 5b.
 6. **P5 adapters** for host-specific checks and the hardcoded host paths listed under P5; quarantine; openai-compatible provider; MCP read surface.
