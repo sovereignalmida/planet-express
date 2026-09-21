@@ -1466,6 +1466,13 @@ tasks against `ACTION-SCREENS.md`.
     all survived a real 60s refresh swap. The first scripted login was refused by the TOTP replay guard
     (two logins inside one 30s step), which is correct. VM operators restored to
     `rehearsal-a,rehearsal-b`; both units active, no errors.
+  - **Live deployment (2026-09-21):** tagged `v2.0.0-5` at `1c014c1` and deployed it to
+    `live/deployed`, with the host-only disk-monitoring override replayed as `7c93309` and the
+    uncommitted weekend-handoff note re-applied. Snapshot `20260921T120304Z-pre-v2-0-0-5`; previous
+    code kept on `live-backup-4` (`2be4353`). No schema, config, unit or ACL change. Core and dashboard
+    active under `casaroot` and `planetexpress-web`; `/` 302, `/login`, `dashboard.js` and
+    `cockpit.css` 200; RPC socket `casaroot:planetexpress-rpc` 660; no warnings in the journals. The
+    rollup run over the live snapshot gives 14 stacks, 85/85 services online, none needing attention.
 
 ## Reviewer Concerns
 
