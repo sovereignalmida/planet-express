@@ -1573,6 +1573,15 @@ tasks against `ACTION-SCREENS.md`.
     VM's plan was cleared by hand to continue. **Not re-exercised in the browser:** the last two JS
     changes (stale-CHECK message, timeout re-check); code-reviewed only. VM config ownership, modes,
     ACL and operators restored; no warnings in either journal.
+- **Slice 4 live deployment (2026-09-21):** tagged `v2.0.0-6` at `b54cefe` (T35 + T36) and deployed it
+  to `live/deployed`, with the host-only disk-monitoring override replayed as `d24dc8b` and the
+  weekend-handoff note re-applied. Snapshot `20260921T161126Z-pre-v2-0-0-6`; previous code on
+  `live-backup-5` (`7c93309`). No schema (still 4), config, unit or ACL change: the live config lives
+  in the core-owned clone (`casaroot` 644, dashboard read ACL intact, gitignored), so D29's ownership
+  step is already satisfied there; `/etc/planetexpress.env` is the unit's EnvironmentFile and does not
+  set the sensitive switch. Both units active under their users with 0 restarts; `/` 302, `/login`,
+  `config.js`, `dashboard.js` 200; journals clean. The config file predates the core start, and core
+  loaded sha `b68ab75d54a3`, equal to the file: the Config tab reads ACTIVE. No config events yet.
 
 ## Reviewer Concerns
 
