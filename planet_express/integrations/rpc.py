@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,12 @@ class RpcError(Exception):
     def __init__(self, message: str, code: str = "internal"):
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True)
+class _PostReply:
+    result: Any
+    callback: Callable[[], None]
 
 
 def _error(request_id, code, message):
@@ -136,6 +142,9 @@ class RpcServer:
             self.socket_path.unlink()
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
+            # Be explicit even though modern Python defaults to close-on-exec: config
+            # activation re-execs core in place and the replacement must bind this path.
+            conn.set_inheritable(False)
             old_umask = os.umask(0o007)
             try:
                 conn.bind(str(self.socket_path))
@@ -205,6 +214,7 @@ class RpcServer:
 
     def _serve(self, conn, slot, reserved):
         request_id = None
+        post_reply = None
         try:
             read_timeout = self.reserved_read_timeout if reserved else self.read_timeout
             conn.settimeout(read_timeout)
@@ -230,6 +240,9 @@ class RpcServer:
                 else:
                     try:
                         result = self.handlers[method](request["params"])
+                        if isinstance(result, _PostReply):
+                            post_reply = result.callback
+                            result = result.result
                         response = {"request_id": request_id, "ok": True, "result": result}
                         # Serialization failures are handler failures too.
                         if len(json.dumps(response, allow_nan=False).encode("utf-8")) > MAX_FRAME:
@@ -245,6 +258,11 @@ class RpcServer:
         except (OSError, EOFError):
             pass
         finally:
+            if post_reply is not None:
+                try:
+                    post_reply()
+                except Exception:  # noqa: BLE001 -- a post-reply failure cannot change the reply
+                    log.warning("RPC post-reply hook failed")
             conn.close()
             with self._lock:
                 self._connections.discard(conn)
@@ -295,7 +313,9 @@ def _params(params, strings, booleans=()):
             raise RpcError(f"Invalid {name}", "bad_request")
 
 
-def build_core_handlers(commands: CommandService, store: Store, notifier=None, chat=None) -> dict:
+def build_core_handlers(
+    commands: CommandService, store: Store, notifier=None, chat=None, config_service=None
+) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
         return asdict(commands.propose(**params, requested_via="dashboard",
@@ -570,6 +590,41 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
         _params(params, {})
         return chat.quota()
 
+    def config_get(params):
+        _params(params, {})
+        try:
+            return config_service.get()
+        except (OSError, ValueError):
+            raise RpcError("Config unavailable") from None
+
+    def config_validate(params):
+        if not isinstance(params, dict) or set(params) != {"text"}:
+            raise RpcError("Invalid params", "bad_request")
+        text = params["text"]
+        if not isinstance(text, str) or len(text.encode("utf-8", errors="surrogatepass")) > 256 * 1024:
+            raise RpcError("Invalid text", "bad_request")
+        result = config_service.validate(text)
+        return {"ok": result.ok, "errors": result.errors,
+                "changed_fields": result.changed_fields, "locked_fields": result.locked_fields}
+
+    def config_apply(params):
+        if not isinstance(params, dict) or set(params) != {"text", "base_sha256", "operator"}:
+            raise RpcError("Invalid params", "bad_request")
+        text = params["text"]
+        digest = params["base_sha256"]
+        if (not isinstance(text, str)
+                or len(text.encode("utf-8", errors="surrogatepass")) > 256 * 1024
+                or not isinstance(digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+            raise RpcError("Invalid config apply params", "bad_request")
+        auth_params({"operator": params["operator"]})
+        if params["operator"] == "?":
+            raise RpcError("Invalid operator", "bad_request")
+        result = config_service.apply(text, base_sha256=digest, operator=params["operator"])
+        callback = getattr(result, "_post_reply", None)
+        public = result.as_dict()
+        return _PostReply(public, callback) if callback is not None else public
+
     handlers = {"logs.tail": logs, "approval.get": approval_get,
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "proposal.create": propose, "proposal.list_pending": pending,
@@ -582,4 +637,7 @@ def build_core_handlers(commands: CommandService, store: Store, notifier=None, c
 
     if chat is not None:
         handlers.update({"chat.ask": chat_ask, "chat.get": chat_get, "chat.quota": chat_quota})
+    if config_service is not None:
+        handlers.update({"config.get": config_get, "config.validate": config_validate,
+                         "config.apply": config_apply})
     return handlers

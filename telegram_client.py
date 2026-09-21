@@ -42,6 +42,7 @@ class TelegramClient:
         text: str,
         parse_mode: str = "HTML",
         reply_markup: dict | None = None,
+        req_timeout: int = 35,
     ) -> dict:
         payload: dict = {
             "chat_id": self.chat_id,
@@ -51,7 +52,7 @@ class TelegramClient:
         if reply_markup:
             payload["reply_markup"] = reply_markup
         try:
-            return self._call("sendMessage", **payload)
+            return self._call("sendMessage", req_timeout=req_timeout, **payload)
         except RuntimeError as e:
             if "parse" in str(e).lower() or "entities" in str(e).lower():
                 # HTML parse failure — retry as plain text so the pipeline
@@ -60,7 +61,7 @@ class TelegramClient:
                 plain: dict = {"chat_id": self.chat_id, "text": text[:4096]}
                 if reply_markup:
                     plain["reply_markup"] = reply_markup
-                return self._call("sendMessage", **plain)
+                return self._call("sendMessage", req_timeout=req_timeout, **plain)
             raise
 
     def edit(

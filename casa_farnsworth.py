@@ -17,6 +17,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import pwd
 import re
 import shlex
@@ -2257,7 +2258,9 @@ def digest_scheduler_loop(notifier: Notifier) -> None:
 
 
 # ── Main bot loop ─────────────────────────────────────────────────────────────
-def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notifier, chat=None) -> RpcServer | None:
+def _start_dashboard_rpc(
+    commands: CommandService, store: Store, notifier: Notifier, chat=None, config_service=None
+) -> RpcServer | None:
     """Optional dashboard transport: installation failures never prevent polling."""
     try:
         allowed_uids = set()
@@ -2268,8 +2271,12 @@ def _start_dashboard_rpc(commands: CommandService, store: Store, notifier: Notif
                 continue
         if not allowed_uids:
             raise ValueError("no resolvable RPC peer users")
-        server = RpcServer(config.RPC_SOCKET, build_core_handlers(commands, store, notifier, chat),
-                           allowed_uids, config.RPC_GROUP)
+        server = RpcServer(
+            config.RPC_SOCKET,
+            build_core_handlers(commands, store, notifier, chat, config_service),
+            allowed_uids,
+            config.RPC_GROUP,
+        )
         server.start()
         return server
     except Exception as exc:  # noqa: BLE001 -- optional transport must not prevent core startup
@@ -2298,8 +2305,20 @@ def _reexec_core(tg: TelegramClient) -> None:
     reexec()
 
 
-def build_config_service(state, tg) -> ConfigService:
-    return ConfigService(state, config_path=config.CONFIG_FILE, activate=lambda: _reexec_core(tg))
+def build_config_service(state, tg, store, *, sensitive_edits_enabled: bool) -> ConfigService:
+    return ConfigService(
+        state,
+        config_path=config.CONFIG_FILE,
+        activate=lambda: _reexec_core(tg),
+        store=store,
+        sensitive_edits_enabled=sensitive_edits_enabled,
+        notify=lambda message: tg.send(message, req_timeout=10),
+        loaded_sha256=config.CONFIG_SHA256,
+    )
+
+
+def _sensitive_config_edits_enabled(environ) -> bool:
+    return environ.get("PE_ALLOW_SENSITIVE_CONFIG_EDITS") == "1"
 
 
 def run_bot() -> None:
@@ -2308,13 +2327,17 @@ def run_bot() -> None:
     tg = TelegramClient(token, chat_id)
     notifier: Notifier = TelegramNotifier(tg)
     state = PipelineState()
-    # Slice 4 wires this service to RPC.
-    config_service = build_config_service(state, tg)  # noqa: F841
 
     # Typed actions (landing 1b). Reconcile BEFORE polling starts: an execution left
     # running/verifying means core died mid-action, so it's marked interrupted, not resumed.
     store = Store(config.ACTIONS_DB)
     _init_store(store)
+    config_service = build_config_service(
+        state,
+        tg,
+        store,
+        sensitive_edits_enabled=_sensitive_config_edits_enabled(os.environ),
+    )
     commands = CommandService(store, notifier, state)
     chat = ChatService(store, commands, run_investigation=partial(_run_chat_investigation, commands=commands))
     chat.reconcile_on_startup()
@@ -2322,7 +2345,7 @@ def run_bot() -> None:
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
 
-    rpc_server = _start_dashboard_rpc(commands, store, notifier, chat)
+    rpc_server = _start_dashboard_rpc(commands, store, notifier, chat, config_service)
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")

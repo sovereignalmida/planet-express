@@ -1,6 +1,7 @@
 """Validate and atomically persist configuration without loading runtime config."""
 
 import errno
+import hashlib
 import os
 import stat
 import tempfile
@@ -37,8 +38,15 @@ def validate_config_text(text: str) -> tuple[PlanetExpressConfig | None, list[di
 
 
 def load_config_file(path: Path) -> PlanetExpressConfig:
+    return load_config_file_with_sha256(path)[0]
+
+
+def load_config_file_with_sha256(path: Path) -> tuple[PlanetExpressConfig, str]:
+    """Load and validate, returning the SHA-256 of the exact bytes loaded, so a running process
+    can say which config it is actually using (the file on disk may be newer — T35)."""
     try:
-        text = path.read_text(encoding="utf-8")
+        data = path.read_bytes()
+        text = data.decode("utf-8")
     except FileNotFoundError as exc:
         raise ConfigError([{"loc": "", "msg": f"Config file not found: {path}"}]) from exc
     except UnicodeError as exc:
@@ -46,7 +54,7 @@ def load_config_file(path: Path) -> PlanetExpressConfig:
     model, errors = validate_config_text(text)
     if errors:
         raise ConfigError(errors)
-    return model
+    return model, hashlib.sha256(data).hexdigest()
 
 
 _ACL_XATTR = "system.posix_acl_access"
@@ -71,7 +79,19 @@ def _copy_access_acl(source: Path, target: Path) -> None:
     os.setxattr(target, _ACL_XATTR, acl)
 
 
-def write_config_text(text: str, path: Path) -> PlanetExpressConfig:
+class ConfigConflict(Exception):
+    """The file changed on disk after the caller last read it."""
+
+
+def write_config_text(
+    text: str, path: Path, *, expected_sha256: str | None = None
+) -> PlanetExpressConfig:
+    """Validate, then atomically replace `path` with `text`.
+
+    `expected_sha256`, when given, is re-checked against the file immediately before the rename, so
+    an edit made on the host while the draft was being validated and written is not overwritten
+    (Codex review round 3, T35). Without an OS-level lock the editor could still write in the
+    microseconds between that read and the rename; accepted: host editors take no lock to honour."""
     model, errors = validate_config_text(text)
     if errors:
         raise ConfigError(errors)
@@ -94,6 +114,13 @@ def write_config_text(text: str, path: Path) -> PlanetExpressConfig:
             os.chmod(temp, stat.S_IMODE(existing.st_mode) if existing else 0o640)
             if existing is not None:
                 _copy_access_acl(path, temp)
+        if expected_sha256 is not None:
+            try:
+                current = hashlib.sha256(path.read_bytes()).hexdigest()
+            except FileNotFoundError:
+                current = None
+            if current != expected_sha256:
+                raise ConfigConflict("config changed on disk since it was loaded")
         os.replace(temp, path)
     except BaseException:
         temp.unlink(missing_ok=True)

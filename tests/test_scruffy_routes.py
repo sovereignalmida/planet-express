@@ -949,6 +949,64 @@ def test_incident_read_errors_are_json(chat_client, method, path, error, status)
     assert b"secret" not in response.data and b"<html" not in response.data
 
 
+def test_config_routes_use_csrf_and_authenticated_operator(chat_client):
+    client, rpc, _, data = chat_client
+    snapshot = {"text": "stacks_root: /srv\n", "sha256": "a" * 64,
+                "path": "/etc/planetexpress/config.yaml", "sensitive_edits_enabled": False,
+                "editable_fields": ["backup_jobs"], "sensitive_fields": ["autonomy"]}
+    validation = {"ok": True, "errors": [], "changed_fields": ["backup_jobs"],
+                  "locked_fields": []}
+    applying = {"status": "activating", "errors": [], "reason": "",
+                "changed_fields": ["backup_jobs"], "locked_fields": []}
+    rpc.results.update({"config.get": snapshot, "config.validate": validation,
+                        "config.apply": applying})
+
+    assert client.get("/api/config").get_json() == snapshot
+    assert client.post("/api/config/validate", data={"text": "draft"}).status_code == 400
+    response = client.post("/api/config/validate", data={
+        "csrf_token": data["csrf_token"], "text": "draft",
+    })
+    assert response.status_code == 200 and response.get_json() == validation
+    response = client.post("/api/config/apply", data={
+        "csrf_token": data["csrf_token"], "text": "draft", "base_sha256": "a" * 64,
+        "operator": "bob",
+    })
+    assert response.status_code == 200 and response.get_json() == applying
+    assert rpc.calls == [
+        ("config.get", {}),
+        ("config.validate", {"text": "draft"}),
+        ("config.apply", {"text": "draft", "base_sha256": "a" * 64,
+                          "operator": "alice"}),
+    ]
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/config"), ("post", "/api/config/validate"),
+    ("post", "/api/config/apply"),
+])
+def test_config_routes_require_auth_as_json(method, path):
+    client, rpc, _ = make_client()
+    response = getattr(client, method)(path)
+    assert response.status_code == 401 and set(response.get_json()) == {"error"}
+    assert not rpc.calls
+
+
+@pytest.mark.parametrize("path", [
+    "/api/config", "/api/config/validate", "/api/config/apply",
+])
+def test_config_rpc_errors_are_always_503_json(chat_client, path):
+    client, rpc, _, data = chat_client
+    method = {"/api/config": "config.get", "/api/config/validate": "config.validate",
+              "/api/config/apply": "config.apply"}[path]
+    rpc.results[method] = RpcError("secret diagnostic", "bad_request")
+    response = (client.get(path) if path == "/api/config" else client.post(
+        path, data={"csrf_token": data["csrf_token"], "text": "draft",
+                    "base_sha256": "a" * 64}
+    ))
+    assert response.status_code == 503 and set(response.get_json()) == {"error"}
+    assert b"secret" not in response.data and b"<html" not in response.data
+
+
 def test_approvals_panel_survives_dashboard_snapshot_refresh(tmp_path, monkeypatch):
     html = _render_with_certs(tmp_path, monkeypatch, [])
     live_start = html.index('id="dashboard-live"')
@@ -960,3 +1018,40 @@ def test_approvals_panel_survives_dashboard_snapshot_refresh(tmp_path, monkeypat
     assert "outside #dashboard-live" in html[incident - 250:incident]
     assert "incidents.js" in html
     assert "approvals.js" in html
+
+
+def test_config_reload_watch_signals_once_for_a_new_valid_file(tmp_path):
+    # Codex review round 5, T35: dashboard workers must pick up an applied config.
+    import hashlib
+    import os
+
+    from casa_scruffy import ConfigReloadWatch
+    path = tmp_path / "config.yaml"
+    path.write_text("stacks_root: /srv/stacks\n")
+    loaded = hashlib.sha256(path.read_bytes()).hexdigest()
+    reloads = []
+    watch = ConfigReloadWatch(path, loaded, reload=lambda: reloads.append(1))
+
+    watch.check()
+    assert reloads == []                      # unchanged file: nothing to do
+
+    path.write_text("stacks_root: /srv/stacks\npaused_containers: [x]\n")
+    os.utime(path, ns=(1, 1))
+    watch.check()
+    watch.check()
+    assert reloads == [1]                     # new valid file: exactly one reload
+
+    path.write_text("stacks_root: relative/not/allowed\n")
+    os.utime(path, ns=(2, 2))
+    watch.check()
+    assert reloads == [1]                     # invalid file: never reload into a crash loop
+
+
+def test_config_reload_watch_only_runs_under_gunicorn(monkeypatch):
+    calls = []
+    monkeypatch.setattr(casa_scruffy.ConfigReloadWatch, "check", lambda self: calls.append(1))
+    client, _rpc, _now = make_client()
+    client.get("/login")
+    assert calls == []                        # test client / dev server: never signal a parent
+    client.get("/login", environ_base={"SERVER_SOFTWARE": "gunicorn/26.0"})
+    assert calls == [1]

@@ -215,3 +215,36 @@ def test_invalid_backup_jobs(jobs):
     model, errors = validate_config_text(f'stacks_root: /srv\nbackup_jobs: {jobs}')
     assert model is None
     assert errors[0]['loc'].startswith('backup_jobs')
+
+
+def test_config_sha256_is_the_loaded_bytes(tmp_path, monkeypatch):
+    # T35: the running process reports which config it loaded; the file may be newer.
+    import hashlib
+
+    import config
+    path = tmp_path / 'config.yaml'
+    path.write_text('# a comment counts too\nstacks_root: /srv/stacks\n')
+    monkeypatch.setattr(config, 'CONFIG_FILE', path)
+    _cfg, digest = config._load_config()
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_expected_sha_rechecked_just_before_replace(tmp_path, monkeypatch):
+    # Codex review round 3, T35: a host edit landing while the draft was validated and written
+    # must not be overwritten by a caller holding the older sha.
+    import hashlib
+    path = tmp_path / 'config.yaml'
+    path.write_text(DRAFT)
+    loaded = hashlib.sha256(path.read_bytes()).hexdigest()
+    host_edit = (DRAFT + '# edited on the host\n').encode()
+    real_copy = config_io._copy_access_acl
+
+    def host_editor_writes(source, target):
+        path.write_bytes(host_edit)
+        real_copy(source, target)
+
+    monkeypatch.setattr(config_io, '_copy_access_acl', host_editor_writes)
+    with pytest.raises(config_io.ConfigConflict):
+        write_config_text(DRAFT + '# dashboard draft\n', path, expected_sha256=loaded)
+    assert path.read_bytes() == host_edit
+    assert [p.name for p in tmp_path.iterdir()] == ['config.yaml']  # temp file cleaned up

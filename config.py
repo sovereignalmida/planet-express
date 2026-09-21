@@ -8,7 +8,7 @@ one place.
 import os
 from pathlib import Path
 
-from config_io import ConfigError, load_config_file
+from config_io import ConfigError, load_config_file_with_sha256
 from config_schema import (
     ExcludedService as ExcludedService,
     PlanetExpressConfig,
@@ -66,9 +66,9 @@ LAST_SUDO_BLOCK_FILE     = STATE_DIR / "last_sudo_block.json"
 CONFIG_FILE = Path(os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml"))
 
 
-def _load_config() -> PlanetExpressConfig:
+def _load_config() -> tuple[PlanetExpressConfig, str]:
     try:
-        return load_config_file(CONFIG_FILE)
+        return load_config_file_with_sha256(CONFIG_FILE)
     except ConfigError as e:
         if isinstance(e.__cause__, FileNotFoundError):
             raise SystemExit(
@@ -80,7 +80,7 @@ def _load_config() -> PlanetExpressConfig:
         raise SystemExit(f"Invalid config at {CONFIG_FILE}:\n{e}") from e
 
 
-_cfg = _load_config()
+_cfg, CONFIG_SHA256 = _load_config()  # sha of the bytes this process is running on (T35)
 
 STACKS_ROOT = _cfg.stacks_root
 FORBIDDEN_STACKS = _cfg.forbidden_stacks

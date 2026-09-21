@@ -1474,6 +1474,69 @@ tasks against `ACTION-SCREENS.md`.
     `cockpit.css` 200; RPC socket `casaroot:planetexpress-rpc` 660; no warnings in the journals. The
     rollup run over the live snapshot gives 14 stacks, 85/85 services online, none needing attention.
 
+### Slice 4 config UI
+
+- [x] **T35 (P1, CC: ~1 session)** — config/rpc/deploy — ✅ done 2026-09-21 — Config editing core:
+  D29 enforcement, config RPCs, activation the caller survives, wizard ownership. Scope and
+  acceptance tests: `docs/handoff/T35-brief.md`. The dashboard editor is T36.
+  - **Field policy (D29 + P3):** `ConfigService` compares live and draft per top-level field.
+    `paused_containers`, `exclude_services`, `backup_jobs` are editable; `sudo_allowlist`,
+    `forbidden_stacks`, `autonomy` only with `PE_ALLOW_SENSITIVE_CONFIG_EDITS=1` (exactly `"1"`, read
+    once from core's environment at startup, never from config or the request); everything else is
+    `locked` ("edit on the host"). A mixed draft is refused whole. Comment-only edits apply; identical
+    text is `unchanged`. Statuses: `invalid | locked | conflict | busy | unchanged | write_failed |
+    activation_failed | activating`. Every outcome is audited (`config.applied`,
+    `config.apply_refused`, `config.activation_failed`), never with the config text.
+  - **Concurrency:** `base_sha256` is checked under the mutation lock against a re-read of the file,
+    and again inside `write_config_text` immediately before the rename. **Accepted residue:** a host
+    editor writing in the microseconds between that last read and the rename is still overwritten;
+    editors take no lock we could honour.
+  - **Activation:** `apply` returns `activating` with the lock still held; an activation thread waits
+    for the RPC layer's new post-reply hook (bounded at 30s), sends a best-effort ≤10s Telegram notice,
+    then re-execs core in place. The RPC socket is explicitly close-on-exec, so the replacement binds
+    the stale path (proven by a real `execv` subprocess test; the in-process simulation Codex first
+    wrote could not fail and was replaced).
+  - **RPC/Scruffy:** `config.get` (text, `sha256` of the file, `loaded_sha256` of the bytes the
+    running core loaded, switch state, field classes), `config.validate`, `config.apply` (operator
+    from the device token only); `/api/config`, `/api/config/validate`, `/api/config/apply`.
+  - **Wizard (D29):** a default install's `/etc/planetexpress` is `run_user` 0750 and `config.yaml`
+    0640; a custom path gets the file owned by the run user and, only if the wizard creates it, the
+    parent; an existing custom directory (the live host's clone) is never re-owned. `web_access.py`
+    still grants the dashboard's read ACL afterwards. No unit test covers `main()`'s custom-parent
+    branch (interactive); the VM exercised the default path.
+  - **Deviations from the brief, all forced by findings:** (1) `loaded_sha256` added to `config.get`
+    and `config.CONFIG_SHA256` to `config.py` (via `config_io.load_config_file_with_sha256`): the VM
+    rehearsal showed the file's sha changes at write time, before the re-exec, so without it no caller
+    can tell whether a change is *active*. (2) `activation_failed` status. (3) The dashboard reloads
+    itself: `casa_scruffy.ConfigReloadWatch` checks the config mtime per request under gunicorn and,
+    when the file is new **and valid**, SIGHUPs its own gunicorn master once (not preloaded, so fresh
+    workers re-import config). An invalid host edit is never followed, since fresh workers would fail
+    to import it and take the dashboard down. **Accepted:** a valid host-side edit without a core
+    restart makes the dashboard show values core is not yet using.
+  - **Codex review, seven rounds, nine findings, all fixed:** custom-path wizard readability and
+    parent creation (P1×2); audit failure after the write skipped activation (P2); notification thread
+    start failure held the lock forever (P2); activation-thread start failure left the new file on
+    disk unactivated → previous file restored (P1); conflict check not tied to the rename (P2, narrowed
+    as above); wizard-created custom parent not writable by core (P2); an error after `os.replace`
+    (directory fsync) reported `write_failed` and skipped activation → re-read decides (P1); dashboard
+    workers kept stale config (P2 → reload watch). My own review added the bounded reply wait.
+    Round 6 (after a usage-limit pause): an existing custom config directory the core can't write
+    makes every apply `write_failed` (P2). Re-owning an arbitrary existing directory (possibly `/etc`)
+    is not acceptable, and the failure is already safe, so the wizard now prints a plain warning
+    naming the directory and the fix (`config_edit_warning`). Round 7 clean.
+  - **Verification:** 1,209 tests pass outside the socket sandbox; Ruff and `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-21):** `tests/homelab/t35-rehearsal.sh`, full HTTP flow as a
+    temporary operator against the VM's root-owned default config: apply → `write_failed`, file
+    untouched; the wizard's own ownership commands + `web_access.py` → `casaroot` 750/640, dashboard
+    ACL present and readable; sensitive field `locked` (switch off), `lan_only_domain` `locked`, stale
+    sha `conflict`, file unchanged after all refusals; editable apply → `activating`, core MainPID
+    unchanged with NRestarts 0, the running core reported the new `loaded_sha256`, dashboard workers
+    replaced under the same gunicorn master with the session intact, ACL survived the atomic replace,
+    all outcomes audited; with the switch on, `forbidden_stacks` applied; the original text restored
+    through the API. Original ownership, env files and operators restored; no warnings in either
+    journal. Two earlier script runs failed on script bugs (`web_access.py` refuses root; TOTP replay
+    guard within one 30s step), and one exposed the missing `loaded_sha256`.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

@@ -17,6 +17,7 @@ does the actual (privileged) file writes.
 
 import fnmatch
 import glob
+import grp
 import os
 import pwd
 import re
@@ -57,6 +58,35 @@ DEFAULT_SUDOERS_TARGET = "/etc/sudoers.d/planetexpress"
 # otherwise-supported install. Falls back to the FHS-standard location if not found on
 # PATH at all (still fails loudly there, just with a clearer "visudo not found").
 VISUDO_BIN = shutil.which("visudo") or "/usr/sbin/visudo"
+
+
+def _config_directory_command(target: Path, run_user: str, run_group: str) -> list[str]:
+    return [
+        "sudo", "install", "-d", "-m", "750", "-o", run_user, "-g", run_group,
+        str(target.parent),
+    ]
+
+
+def _config_install_command(source: Path, target: Path, run_user: str, run_group: str) -> list[str]:
+    return ["sudo", "install", "-m", "640", "-o", run_user, "-g", run_group, str(source), str(target)]
+
+
+def _config_ownership_commands(target: Path, run_user: str, run_group: str) -> list[list[str]]:
+    return [
+        ["sudo", "chown", f"{run_user}:{run_group}", str(target)],
+        ["sudo", "chmod", "640", str(target)],
+    ]
+
+
+def config_edit_warning(target: Path, run_user: str, *, access=os.access) -> str | None:
+    """Dashboard config edits replace the file atomically via a temp file in its directory, so
+    the core's run user needs write access to that directory. The wizard runs as that user."""
+    if access(target.parent, os.W_OK | os.X_OK):
+        return None
+    return (f"{target.parent} is not writable by {run_user}, so dashboard config edits will be "
+            f"refused (write_failed) and the config can only be edited on the host. To allow them, "
+            f"move the config into a directory {run_user} owns, or grant {run_user} write access "
+            f"to {target.parent}.")
 
 
 def build_config(answers: dict) -> PlanetExpressConfig:
@@ -474,6 +504,28 @@ def main() -> None:
     # deploy.sh decides and exports the target path (same CASA_CONFIG convention
     # config.py itself reads) so this and the systemd units it renders always agree.
     config_target = Path(os.environ.get("CASA_CONFIG", DEFAULT_CONFIG_TARGET))
+    account = pwd.getpwuid(os.getuid())
+    run_user = account.pw_name
+    run_group = grp.getgrgid(account.pw_gid).gr_name
+    managed_default = config_target == Path(DEFAULT_CONFIG_TARGET)
+
+    if managed_default:
+        subprocess.run(
+            _config_directory_command(config_target, run_user, run_group), check=True
+        )
+    elif not config_target.parent.exists():
+        # A custom parent the wizard creates is the config's own directory: core must own it,
+        # or every atomic replace fails (Codex review round 3, T35).
+        subprocess.run(
+            _config_directory_command(config_target, run_user, run_group), check=True
+        )
+    else:
+        # An existing custom parent may be any directory (e.g. the clone, or /etc itself): never
+        # re-own it. Say plainly if dashboard edits will fail there (Codex review round 6, T35);
+        # they fail safe (write_failed, nothing written), so this warns rather than aborts.
+        warning = config_edit_warning(config_target, run_user)
+        if warning:
+            print(f"\nWARNING: {warning}")
 
     if config_target.exists():
         # Reuse the existing config unchanged (an upgrade, or a re-run after
@@ -562,10 +614,17 @@ def main() -> None:
         with os.fdopen(tmp_fd, "w") as f:
             f.write(yaml.safe_dump(cfg.model_dump(mode="json"), sort_keys=False))
         print(f"\nWriting {config_target} (requires sudo)...")
-        subprocess.run(["sudo", "mkdir", "-p", str(config_target.parent)], check=True)
-        subprocess.run(["sudo", "install", "-m", "644", str(tmp_config), str(config_target)], check=True)
+        # D29: core owns the config it may rewrite on every install, default path or not;
+        # 0640 root-owned would leave the unprivileged core unable to read it (Codex review, T35).
+        subprocess.run(
+            _config_install_command(tmp_config, config_target, run_user, run_group), check=True
+        )
         tmp_config.unlink()
         print(f"config.yaml written to {config_target}")
+
+    if managed_default and config_target.exists():
+        for command in _config_ownership_commands(config_target, run_user, run_group):
+            subprocess.run(command, check=True)
 
     reconcile_sudoers(cfg)
     print(f"\nDone. config.yaml -> {config_target}")

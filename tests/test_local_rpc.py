@@ -22,7 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 import casa_farnsworth as farnsworth
+import planet_express.integrations.rpc as rpc_module
 from planet_express.application.command_service import DecideResult, ProposeResult
+from planet_express.application.config_service import ApplyResult, ValidationResult
 from planet_express.core.store import Store
 from planet_express.integrations.rpc import (
     MAX_FRAME,
@@ -202,6 +204,53 @@ def test_mode_stale_socket_and_stop(server, socket_path):
     assert not socket_path.exists()
 
 
+def test_post_reply_hook_runs_only_after_reply_is_read(server, socket_path):
+    activated = threading.Event()
+    server({"config.apply": lambda params: rpc_module._PostReply(
+        {"status": "activating"}, activated.set
+    )})
+    response = call(socket_path, "config.apply", {})
+    assert response["result"] == {"status": "activating"}
+    assert activated.wait(1)
+
+
+_EXEC_CHILD = r"""
+import os, sys, time
+from planet_express.integrations.rpc import RpcServer
+path, stage = sys.argv[1], sys.argv[2]
+if stage == "first":
+    server = RpcServer(path, {"echo": lambda p: p}, allowed_uids={os.getuid()}, group=None)
+    server.start()
+    assert server._socket.get_inheritable() is False
+    # Config activation re-execs core in place, without stop(): the listening fd must die
+    # with the old image and the replacement must treat the leftover path as stale.
+    os.execv(sys.executable, [sys.executable, "-c", sys.argv[3], path, "second", sys.argv[3]])
+server = RpcServer(path, {"echo": lambda p: {**p, "pid": os.getpid()}},
+                   allowed_uids={os.getuid()}, group=None)
+server.start()
+print("READY", os.getpid(), flush=True)
+time.sleep(30)
+"""
+
+
+def test_rpc_socket_rebinds_after_exec_in_place(socket_path):
+    import subprocess
+    repo = Path(__file__).resolve().parent.parent
+    child = subprocess.Popen(
+        [sys.executable, "-c", _EXEC_CHILD, str(socket_path), "first", _EXEC_CHILD],
+        cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={**os.environ, "PYTHONPATH": str(repo)},
+    )
+    try:
+        line = child.stdout.readline()
+        assert line.startswith("READY"), child.stderr.read()
+        assert int(line.split()[1]) == child.pid  # same PID: exec, not a new process
+        assert call(socket_path, "echo", {"new": True})["result"] == {"new": True, "pid": child.pid}
+    finally:
+        child.kill()
+        child.wait()
+
+
 def test_non_socket_not_removed(server, socket_path):
     socket_path.write_text("keep")
     with pytest.raises(FileExistsError, match="not a socket"):
@@ -273,6 +322,43 @@ def test_core_handlers():
     with pytest.raises(RpcError) as error:
         handlers["execution.get_status"]({"execution_id": "missing"})
     assert error.value.code == "not_found"
+
+
+def test_config_handlers_and_exact_param_validation():
+    service = Mock()
+    service.get.return_value = {"text": "x", "sha256": "a" * 64, "path": "/config",
+                                "sensitive_edits_enabled": False, "editable_fields": [],
+                                "sensitive_fields": []}
+    service.validate.return_value = ValidationResult(True, [], ["backup_jobs"], [])
+    applied = ApplyResult("activating", [], "", ["backup_jobs"], [])
+    callback = Mock()
+    object.__setattr__(applied, "_post_reply", callback)
+    service.apply.return_value = applied
+    handlers = build_core_handlers(Mock(), Mock(), config_service=service)
+
+    assert handlers["config.get"]({}) == service.get.return_value
+    assert handlers["config.validate"]({"text": "draft"}) == {
+        "ok": True, "errors": [], "changed_fields": ["backup_jobs"], "locked_fields": [],
+    }
+    reply = handlers["config.apply"]({
+        "text": "draft", "base_sha256": "a" * 64, "operator": "alice",
+    })
+    assert reply.result == applied.as_dict() and reply.callback is callback
+    service.apply.assert_called_once_with("draft", base_sha256="a" * 64, operator="alice")
+
+    invalid = [
+        ("config.get", {"extra": True}),
+        ("config.validate", {}),
+        ("config.validate", {"text": "x" * (256 * 1024 + 1)}),
+        ("config.apply", {"text": "x", "base_sha256": "bad", "operator": "alice"}),
+        ("config.apply", {"text": "x", "base_sha256": "a" * 64, "operator": "?"}),
+        ("config.apply", {"text": "x", "base_sha256": "a" * 64,
+                          "operator": "alice", "extra": True}),
+    ]
+    for method, params in invalid:
+        with pytest.raises(RpcError) as error:
+            handlers[method](params)
+        assert error.value.code == "bad_request"
 
 
 def test_incident_handlers_validate_and_route_operator():
@@ -451,6 +537,14 @@ def test_startup_success_passes_configuration(monkeypatch, socket_path):
     assert args[0] == socket_path
     assert args[2:] == ({os.getuid()}, "rpc-group")
     factory.return_value.start.assert_called_once_with()
+
+
+@pytest.mark.parametrize(("value", "enabled"), [
+    ("1", True), ("0", False), ("true", False), (" 1", False), (None, False),
+])
+def test_sensitive_config_switch_only_accepts_exact_one(value, enabled):
+    environ = {} if value is None else {"PE_ALLOW_SENSITIVE_CONFIG_EDITS": value}
+    assert farnsworth._sensitive_config_edits_enabled(environ) is enabled
 
 
 def test_live_socket_is_not_replaced(server, socket_path):

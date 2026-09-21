@@ -6,6 +6,7 @@ import math
 import os
 import re
 import secrets
+import signal
 import time
 from functools import partial
 from urllib.parse import urlsplit
@@ -28,6 +29,7 @@ import casa_scruffy_net
 import config
 import dashboard_data
 import web_auth
+from config_io import validate_config_text
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
 
@@ -35,6 +37,49 @@ from planet_express.integrations.rpc import RpcError, call
 class DashboardSessionInterface(SecureCookieSessionInterface):
     def get_cookie_secure(self, app):
         return request.is_secure or app.config["DASHBOARD_HTTPS"]
+
+
+class ConfigReloadWatch:
+    """Reload the dashboard's workers when core has been handed a new config (T35).
+
+    Config values (`paused_containers`, `backup_jobs`, ...) are module constants imported at
+    worker start, and core cannot restart this separate, unprivileged service. So each request
+    compares the config file's mtime with the last one seen; when the file no longer matches the
+    bytes this worker loaded AND is valid, the worker sends SIGHUP to its gunicorn master once,
+    which starts fresh workers (the app is not preloaded, so they re-import config) and retires
+    the old ones gracefully. An invalid file is never followed: fresh workers would fail to import
+    config and take the dashboard down (Codex review round 5, T35)."""
+
+    def __init__(self, path, loaded_sha256, *, reload=None):
+        self._path = path
+        self._loaded = loaded_sha256
+        self._reload = reload or (lambda: os.kill(os.getppid(), signal.SIGHUP))
+        self._seen_mtime = None
+        self._signalled = None
+
+    def check(self) -> None:
+        try:
+            mtime = os.stat(self._path).st_mtime_ns
+        except OSError:
+            return
+        if mtime == self._seen_mtime:
+            return
+        self._seen_mtime = mtime
+        try:
+            data = self._path.read_bytes()
+        except OSError:
+            return
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in (self._loaded, self._signalled):
+            return
+        try:
+            _model, errors = validate_config_text(data.decode("utf-8"))
+        except UnicodeError:
+            return
+        if errors:
+            return
+        self._signalled = digest
+        self._reload()
 
 
 def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
@@ -98,7 +143,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return (is_chat_request() or request.path.startswith("/api/containers/")
                 or request.path.startswith("/api/approvals")
                 or request.path.startswith("/api/executions/")
-                or request.path.startswith("/api/incidents"))
+                or request.path.startswith("/api/incidents")
+                or request.path.startswith("/api/config"))
 
     def check_csrf():
         expected = session.get("csrf_token", "")
@@ -135,6 +181,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
 
     @app.errorhandler(RpcError)
     def unavailable(error):
+        if request.path.startswith("/api/config"):
+            return jsonify(error="Config unavailable; try again shortly"), 503
         if is_chat_request():
             status, message = {"bad_request": (400, "Invalid chat request"),
                                "not_found": (404, "Chat ticket not found")}.get(
@@ -163,6 +211,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         # Fail closed for this request only: keep the cookies, so a core restart doesn't
         # sign every operator out.
         return app.make_response((airlock("unavailable"), 503))
+
+    config_watch = ConfigReloadWatch(config.CONFIG_FILE, config.CONFIG_SHA256)
+
+    @app.before_request
+    def follow_config_changes():
+        # Only a gunicorn worker has a master to signal; never the test client or a dev server.
+        if request.environ.get("SERVER_SOFTWARE", "").startswith("gunicorn"):
+            config_watch.check()
 
     @app.before_request
     def authenticate():
@@ -277,6 +333,22 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     @app.get("/api/chat/quota")
     def chat_quota():
         return jsonify(core("chat.quota", {}))
+
+    @app.get("/api/config")
+    def config_get():
+        return jsonify(core("config.get", {}))
+
+    @app.post("/api/config/validate")
+    def config_validate():
+        return jsonify(core("config.validate", {"text": request.form.get("text", "")}))
+
+    @app.post("/api/config/apply")
+    def config_apply():
+        return jsonify(core("config.apply", {
+            "text": request.form.get("text", ""),
+            "base_sha256": request.form.get("base_sha256", ""),
+            "operator": g.operator,
+        }))
 
     def container_target(stack, service):
         if any(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value) is None

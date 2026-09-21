@@ -12,6 +12,9 @@ import pytest
 from pydantic import ValidationError
 from setup_wizard import (
     _collect_mounts,
+    _config_directory_command,
+    _config_install_command,
+    _config_ownership_commands,
     _discover_mount_units,
     _docker_root_dir,
     _path_completer,
@@ -23,6 +26,23 @@ from setup_wizard import (
 )
 
 from config_schema import SudoAllowlist, SudoGlobGrant, SudoUnitGrant
+
+
+def test_default_config_install_commands_assign_core_user_and_modes():
+    target = Path("/etc/planetexpress/config.yaml")
+    source = Path("/tmp/generated.yaml")
+    assert _config_directory_command(target, "casaroot", "casaroot") == [
+        "sudo", "install", "-d", "-m", "750", "-o", "casaroot", "-g", "casaroot",
+        "/etc/planetexpress",
+    ]
+    assert _config_install_command(source, target, "casaroot", "casaroot") == [
+        "sudo", "install", "-m", "640", "-o", "casaroot", "-g", "casaroot",
+        "/tmp/generated.yaml", "/etc/planetexpress/config.yaml",
+    ]
+    assert _config_ownership_commands(target, "casaroot", "casaroot") == [
+        ["sudo", "chown", "casaroot:casaroot", "/etc/planetexpress/config.yaml"],
+        ["sudo", "chmod", "640", "/etc/planetexpress/config.yaml"],
+    ]
 
 
 def test_minimal_answers_produce_valid_secure_by_default_config():
@@ -451,3 +471,13 @@ def test_reconcile_sudoers_empty_allowlist_never_stats_sudoers_directly(monkeypa
     cfg = setup_wizard.build_config({"stacks_root": "/home/someuser/stacks"})
     setup_wizard.reconcile_sudoers(cfg)  # would raise PermissionError before the fix
     assert ["sudo", "test", "-e", setup_wizard.DEFAULT_SUDOERS_TARGET] in calls
+
+
+def test_config_edit_warning_for_unwritable_existing_custom_directory():
+    # Codex review round 6, T35: never re-own an arbitrary existing directory, but say plainly
+    # that dashboard edits will be refused there.
+    from scripts.setup_wizard import config_edit_warning
+    target = Path("/etc/custom/config.yaml")
+    warning = config_edit_warning(target, "casaroot", access=lambda path, mode: False)
+    assert "/etc/custom is not writable by casaroot" in warning
+    assert config_edit_warning(target, "casaroot", access=lambda path, mode: True) is None
