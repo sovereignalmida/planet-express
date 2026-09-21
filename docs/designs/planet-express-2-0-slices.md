@@ -1536,6 +1536,43 @@ tasks against `ACTION-SCREENS.md`.
     through the API. Original ownership, env files and operators restored; no warnings in either
     journal. Two earlier script runs failed on script bugs (`web_access.py` refuses root; TOTP replay
     guard within one 30s step), and one exposed the missing `loaded_sha256`.
+- [x] **T36 (P1, CC: ~1 session)** — dashboard — ✅ done 2026-09-21 — Config tab: edit, CHECK, line
+  diff, two-step confirm, and an activation watch that only says ACTIVE once the running core reports
+  the new `loaded_sha256`. Scope: `docs/handoff/T36-brief.md`. Web side only (`static/config.js`, the
+  tab + panel outside `#dashboard-live`, cockpit CSS, `TAB_NAMES`).
+  - Header shows ACTIVE vs **FILE NEWER THAN RUNNING CONFIG**, the three field classes (sensitive
+    marked LOCKED unless the root-only switch is on, with how to enable it and that the dashboard
+    can't), and the path. REVIEW needs a passed CHECK of the exact current text. Every apply status is
+    rendered in place; a conflict keeps the draft and offers LOAD LATEST; a dropped apply request says
+    the outcome is unknown and re-reads file and running-core state. The activation watch uses
+    `crypto.subtle` when present and otherwise (plain HTTP on the LAN) `loaded == file sha != base`.
+  - **Codex review, four rounds:** CHECK recorded the textarea at reply time instead of the text sent
+    (P2); edits made during activation were silently overwritten (P2 → editor read-only while applying
+    or activating); the ACTIVE message named the file's sha, not the one core loaded (P2); concurrent
+    CHECKs could report out of order (P2 → sequence number); a reply for an edited draft was shown as
+    its verdict (P2 → "draft changed while checking"). Round 4 clean. **Own review:** textareas
+    normalise `\r\n`, so a CRLF config looked dirty on load → dirty/diff compare against the
+    textarea's baseline (an apply from a CRLF file writes LF; accepted).
+  - **Found in the VM/browser rehearsal and fixed:** CORE BUSY said "a scan or action is running" when
+    the real cause was a legacy plan awaiting approval (config applies need a fully idle core, T26) →
+    it now shows core's reason; the 60s activation timeout was checked before polling, so returning to
+    a tab hidden during activation reported failure unseen → it now checks once more first.
+  - **Verification:** 1,210 tests pass outside the socket sandbox; Ruff, `node --check`,
+    `git diff --check` clean. No JS unit tests (the suite has no Node harness); the diff and flows
+    were exercised in the browser instead.
+  - **Test VM + browser rehearsal (2026-09-21):** with the D29 ownership applied and a temporary
+    operator: Config tab rendered ACTIVE, field classes and the switch note; editing
+    `paused_containers` → CHECK PASSED → the review sheet's diff showed exactly the one changed line →
+    APPLY & RESTART CORE → SUBMITTING → CORE RESTARTING… → ACTIVE with the core-loaded sha, editor
+    read-only during activation; a `forbidden_stacks` edit was refused at CHECK as LOCKED (sensitive)
+    with REVIEW disabled; a host-side edit made the header say FILE NEWER THAN RUNNING CONFIG; a second
+    host edit behind the page produced FILE CHANGED ON HOST with the draft kept and LOAD LATEST
+    offered; with `crypto.subtle` removed, restoring the original text via the UI confirmed ACTIVE at
+    the original sha through the fallback. Scheduled scans twice raised a legacy plan on the VM's
+    unhealthy fixtures and blocked applies (correct; the UI reported CORE BUSY and kept the draft) — the
+    VM's plan was cleared by hand to continue. **Not re-exercised in the browser:** the last two JS
+    changes (stale-CHECK message, timeout re-check); code-reviewed only. VM config ownership, modes,
+    ACL and operators restored; no warnings in either journal.
 
 ## Reviewer Concerns
 

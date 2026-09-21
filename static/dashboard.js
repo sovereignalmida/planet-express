@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var TAB_NAMES = ["overview", "backups", "network", "actions", "chat"];
+  var TAB_NAMES = ["overview", "backups", "network", "actions", "chat", "config"];
   var SERVICES_FILTER_KEY = "planetexpress-services-filter";
   var SERVICES_DENSITY_KEY = "planetexpress-services-density";
 

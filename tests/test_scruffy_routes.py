@@ -1020,6 +1020,37 @@ def test_approvals_panel_survives_dashboard_snapshot_refresh(tmp_path, monkeypat
     assert "approvals.js" in html
 
 
+def test_config_panel_is_persistent_and_loaded_by_javascript(tmp_path, monkeypatch):
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    class ConfigParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.ancestors = None
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id") == "config-panel":
+                self.ancestors = list(self.stack)
+            if tag not in {"meta", "link", "img", "input", "br", "hr"}:
+                self.stack.append((tag, attrs.get("id")))
+
+        def handle_endtag(self, tag):
+            if self.stack and self.stack[-1][0] == tag:
+                self.stack.pop()
+
+    parser = ConfigParser()
+    parser.feed(html)
+    config = html.index('id="config-panel"')
+    assert "outside #dashboard-live" in html[config - 300:config]
+    assert parser.ancestors == [("html", None), ("body", None)]
+    assert 'data-tab="config"' in html
+    assert 'data-tab-panel="config"' in html
+    assert "config.js" in html
+    assert 'id="config-editor"' in html
+    assert "stacks_root:" not in html
+
+
 def test_config_reload_watch_signals_once_for_a_new_valid_file(tmp_path):
     # Codex review round 5, T35: dashboard workers must pick up an applied config.
     import hashlib

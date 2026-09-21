@@ -85,8 +85,9 @@
     <button class="tab" data-tab="network" type="button">Network</button>
     <button class="tab" data-tab="actions" type="button">Actions</button>
     <button class="tab" data-tab="chat" type="button">Chat</button>
+    <button class="tab" data-tab="config" type="button">Config</button>
     <div class="tabs-spacer"></div>
-    <div class="readonly-chip">READ-ONLY · AUTHENTICATED</div>
+    <div class="readonly-chip">AUTHENTICATED OPERATOR</div>
   </nav>
 
   {% if not ctx.health.state_available %}
@@ -880,13 +881,82 @@
     <ol id="chat-transcript" aria-label="This page's questions" aria-live="polite"></ol>
   </div>
 
+  <!-- Kept outside #dashboard-live: a snapshot refresh must never destroy a config
+       draft, review sheet, apply request, or activation watch. Config text is loaded
+       only from /api/config by static/config.js. -->
+  <div class="tab-panel config-dock" data-tab-panel="config" id="config-panel">
+    <section class="panel config-shell">
+      <div class="panel-head-row">
+        <h2>CONFIG</h2>
+        <span class="panel-head-note">checked · audited · activated by core</span>
+      </div>
+      <p id="config-loading" role="status">Open this tab to load config…</p>
+      <div id="config-workspace" hidden>
+        <div id="config-verdict" class="pe-verdict unknown">
+          <div class="pe-verdict-orb" aria-hidden="true">?</div>
+          <div class="pe-verdict-text">
+            <h2 id="config-live-state">CONFIG STATE UNKNOWN</h2>
+            <p id="config-live-detail"></p>
+          </div>
+        </div>
+
+        <section class="pe-card config-policy" aria-labelledby="config-policy-title">
+          <div class="pe-card-head">
+            <h3 class="pe-card-title sm" id="config-policy-title">WHAT MAY CHANGE HERE</h3>
+          </div>
+          <p class="config-path"><span>PATH</span> <code id="config-path"></code></p>
+          <div id="config-field-groups" class="config-field-groups"></div>
+          <p id="config-sensitive-note" class="muted-body" hidden></p>
+        </section>
+
+        <section class="pe-card config-editor-card" aria-labelledby="config-editor-title">
+          <div class="pe-card-head">
+            <h3 class="pe-card-title sm" id="config-editor-title">CONFIG YAML</h3>
+            <span class="pe-spacer"></span>
+            <span id="config-dirty" class="config-dirty">SAVED</span>
+          </div>
+          <textarea id="config-editor" aria-label="Config YAML" spellcheck="false"
+                    autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
+          <div class="config-actions">
+            <button type="button" class="pe-btn" id="config-check">CHECK</button>
+            <button type="button" class="pe-btn" id="config-revert">REVERT</button>
+            <button type="button" class="pe-btn warn" id="config-review" disabled>REVIEW CHANGES</button>
+          </div>
+        </section>
+
+        <section id="config-outcome" class="pe-card config-outcome" aria-live="polite" hidden>
+          <h3 id="config-outcome-title" class="pe-card-title sm"></h3>
+          <div id="config-outcome-body"></div>
+        </section>
+      </div>
+    </section>
+
+    <dialog id="config-review-dialog" aria-labelledby="config-review-title">
+      <div class="pe-sheet warn">
+        <div class="pe-sheet-grab" aria-hidden="true"></div>
+        <h2 id="config-review-title">REVIEW CONFIG CHANGES</h2>
+        <p>Core restarts in place to apply this. Scans and actions are refused for a few seconds.</p>
+        <div id="config-review-fields" class="config-review-fields"></div>
+        <div class="pe-logwell config-diff">
+          <div class="pe-logwell-head"><h4>LINE DIFF</h4></div>
+          <div class="pe-logwell-body" id="config-diff-body"></div>
+        </div>
+        <div class="config-sheet-actions">
+          <button type="button" class="pe-btn" id="config-cancel">CANCEL</button>
+          <button type="button" class="pe-btn warn" id="config-apply">APPLY &amp; RESTART CORE</button>
+        </div>
+      </div>
+    </dialog>
+  </div>
+
   <footer>
-    <p>Planet Express — read-only, no auth, LAN-trust · auto-refreshes every 60s · held together by good news</p>
+    <p>Planet Express — authenticated LAN dashboard · auto-refreshes every 60s · held together by good news</p>
   </footer>
 
   <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
   <script src="{{ url_for('static', filename='incidents.js') }}"></script>
   <script src="{{ url_for('static', filename='approvals.js') }}"></script>
   <script src="{{ url_for('static', filename='chat.js') }}"></script>
+  <script src="{{ url_for('static', filename='config.js') }}"></script>
 </body>
 </html>

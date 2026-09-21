@@ -1688,6 +1688,62 @@ footer p {
 #chat-transcript p, #chat-transcript details { margin: 12px 0; }
 #chat-ask:disabled { opacity: .5; cursor: wait; }
 
+/* Config editor is a persistent sibling of the replaceable dashboard snapshot. */
+.config-dock { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 22px 26px 40px; }
+.config-active #dashboard-live > .body-grid { display: none; }
+.config-shell, #config-workspace { display: flex; flex-direction: column; gap: 18px; }
+.config-policy, .config-editor-card, .config-outcome { display: flex; flex-direction: column; gap: 14px; }
+.config-path { margin: 0; overflow-wrap: anywhere; color: var(--pe-ink-body); }
+.config-path span, .config-group-label { font: 10px var(--pe-font-mono); letter-spacing: .09em; color: var(--pe-ink-faint); }
+.config-path code { color: var(--pe-accent-ink); }
+.config-field-groups { display: grid; gap: 12px; }
+.config-field-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.config-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 3px 9px;
+  border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-pill); background: var(--pe-well);
+  color: var(--pe-ink-dim); font: 10px var(--pe-font-mono); overflow-wrap: anywhere; }
+.config-chip.editable { color: var(--pe-ok-ink); border-color: var(--pe-ok-line); }
+.config-chip.sensitive { color: var(--pe-warn-ink); border-color: var(--pe-warn-line); }
+.config-chip.locked { color: var(--pe-crit-ink); border-color: var(--pe-crit-line); }
+#config-editor { width: 100%; min-height: 54vh; box-sizing: border-box; resize: vertical; padding: 14px;
+  border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-md); background: #03130f;
+  color: #9adfb3; font: 12px/1.65 var(--pe-font-mono); tab-size: 2; }
+#config-editor:focus { outline: 2px solid var(--pe-accent); outline-offset: 2px; }
+.config-dirty { color: var(--pe-ok-ink); font: 10px var(--pe-font-mono); letter-spacing: .08em; }
+.config-dirty.is-dirty { color: var(--pe-warn-ink); }
+.config-actions, .config-sheet-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.config-actions .pe-btn { min-height: 44px; }
+.config-actions #config-review { margin-left: auto; }
+.config-actions button:disabled, .config-sheet-actions button:disabled { opacity: .45; cursor: wait; }
+.config-result-list { margin: 10px 0 0; padding-left: 20px; color: var(--pe-ink-body); }
+.config-result-list li { margin: 6px 0; overflow-wrap: anywhere; }
+.config-result-list code { color: var(--pe-warn-ink); }
+.config-result-chips { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; }
+.config-outcome p { margin: 8px 0 0; }
+.config-outcome-actions { margin-top: 14px; }
+#config-review-dialog { width: min(940px, calc(100% - 24px)); max-height: calc(100dvh - 24px); padding: 0;
+  border: 0; background: transparent; color: var(--pe-ink); }
+#config-review-dialog::backdrop { background: rgba(4,8,14,.78); }
+#config-review-dialog .pe-sheet { position: relative; max-height: calc(100dvh - 24px); overflow: auto;
+  border-bottom: 1px solid #3a2f18; border-radius: 22px; }
+#config-review-dialog h2, #config-review-dialog p { margin: 0; }
+.config-review-fields { display: flex; gap: 7px; flex-wrap: wrap; }
+.config-diff { min-height: 180px; max-height: 45vh; }
+.config-diff .pe-logwell-body { overflow: auto; display: block; padding: 0; }
+.config-diff-row { min-height: 20px; padding: 1px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.config-diff-row.add { color: var(--pe-ok-ink); background: rgba(111,207,95,.08); }
+.config-diff-row.del { color: var(--pe-crit-ink); background: rgba(239,60,46,.08); }
+.config-diff-row.context { color: var(--pe-ink-faint); }
+.config-diff-row.skip { color: var(--pe-ink-ghost); border-block: 1px dashed var(--pe-border-dash); }
+.config-sheet-actions > * { flex: 1; min-height: 54px; }
+
+@media (max-width: 640px) {
+  .config-dock { padding: 16px; }
+  #config-editor { min-height: 60vh; font-size: 11px; }
+  .config-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .config-actions #config-review { grid-column: 1 / -1; margin-left: 0; }
+  .config-sheet-actions { flex-direction: column; }
+}
+
 /* ---------- 16. SERVICES STACK CARDS ------------------------ */
 .pe-services-panel { display: flex; flex-direction: column; gap: 14px; }
 .pe-services-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
