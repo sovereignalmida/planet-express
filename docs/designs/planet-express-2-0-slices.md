@@ -1430,6 +1430,43 @@ tasks against `ACTION-SCREENS.md`.
     `casaroot:planetexpress-rpc` mode 660, and both deployment-window error journals were empty. The
     known weekend-handoff edit, `.mcp.json` and `scpdump/` remain untouched.
 
+### Overview design follow-ups
+
+- [x] **T34 (P2, CC: ~1 session)** — dashboard — ✅ done 2026-09-21 — Overview SERVICES panel as
+  stack cards, per `docs/designs/planet_express_design_v20/handoffs/SERVICES-STACK-CARDS.md`. Scope
+  and acceptance tests: `docs/handoff/T34-brief.md`. Web side only; no RPC, Leela or core change.
+  - `dashboard_data.summarize_services()` now returns a per-stack rollup (`up`/`total`/`level`/`note`
+    + members) sorted worst-first, then biggest, then name. Member levels derive from Leela's
+    per-service observation: running+healthy → ok, configured-paused → idle, `unknown` (healthcheck
+    starting) → warn "starting", running+unhealthy → warn "degraded", anything else → crit "down";
+    comma-joined multi-container services take the worst component. An unreadable stack is a warn card
+    "state unreadable", never dropped or green.
+  - The template renders the header counts, ALL/ATTENTION and NAMED/DOTS controls, the attention rail,
+    the `auto-fill`/`align-items:start` grid, chips (no `running(healthy)` anywhere) and DOTS; every
+    chip/dot links to the container page. Filter/density persist per viewer in `localStorage`
+    (try/catch) and re-apply after the 60s `#dashboard-live` swap, as does a mobile card expansion.
+  - **Deviations from the design handoff (brief, not implementation):** no `CAN'T REACH DOCKER` /
+    `RETRY SCAN` card and no `n / 15` busy counter: the dashboard has no scan trigger, no Docker error
+    source and no scan progress, and unknown must not look like down; the unavailable state keeps its
+    honest "available after the next full scan" copy. The attention-empty card states the last full
+    scan time instead of a "last state change" we don't record. No Config tab exists yet, so the empty
+    state names the `stacks_root` setting instead of a `CHECK STACK PATHS` button. Copy counts
+    *services* (live: 87 services, 88 containers; one container belongs to no stack).
+  - **Codex review:** round 1 found one P2 (stack heads were focusable `role="button"` controls that
+    did nothing outside mobile DOTS). Fixed: button semantics are applied by JS only when the card is
+    expandable, removed otherwise, and re-evaluated on crossing the 720px breakpoint. Round 2 clean.
+  - **Verification:** 1,166 tests pass outside the socket sandbox; Ruff, `node --check` and
+    `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-21):** `tests/homelab/t34-rehearsal.sh` against a real full scan:
+    cards ordered `crash-loop=crit, unhealthy=warn, healthy=ok, slow-start=ok`; rail
+    "NEEDS YOU NOW worker down (crash-loop) · web degraded (unhealthy)"; summary "4 stacks · 2 of 4
+    services online"; every service linked; container pages, JS and CSS 200. In the browser: ATTENTION
+    hid the ok cards and the rail, DOTS switched density, both persisted; at 375px the single-service
+    stacks showed their dot inline, tapping a head expanded it, and the expansion, density and filter
+    all survived a real 60s refresh swap. The first scripted login was refused by the TOTP replay guard
+    (two logins inside one 30s step), which is correct. VM operators restored to
+    `rehearsal-a,rehearsal-b`; both units active, no errors.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

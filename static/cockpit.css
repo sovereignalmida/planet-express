@@ -1688,8 +1688,96 @@ footer p {
 #chat-transcript p, #chat-transcript details { margin: 12px 0; }
 #chat-ask:disabled { opacity: .5; cursor: wait; }
 
-/* Service navigation and the independently polled reactor detail. */
-.service-row { grid-template-columns: 12px 1fr 1fr; min-height: 44px; text-decoration: none; color: var(--text2); }
+/* ---------- 16. SERVICES STACK CARDS ------------------------ */
+.pe-services-panel { display: flex; flex-direction: column; gap: 14px; }
+.pe-services-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pe-services-head h2 { font-size: 14px; letter-spacing: .11em; }
+.pe-services-summary { font: 11px var(--pe-font-mono); color: var(--pe-ink-label); }
+.pe-services-spacer, .pe-stack-spacer { flex: 1; min-width: 6px; }
+.pe-services-controls { display: flex; gap: 6px; }
+.pe-density-controls { border-left: 1px solid var(--pe-border); padding-left: 12px; }
+.pe-services-controls button, .pe-services-empty button {
+  min-height: 34px; padding: 7px 12px; border: 1px solid var(--pe-border-strong);
+  border-radius: var(--pe-r-sm); background: var(--pe-well); color: var(--pe-ink-dim);
+  font: 10px var(--pe-font-mono); letter-spacing: .08em; cursor: pointer;
+}
+.pe-services-controls button.is-active {
+  color: var(--pe-accent-hi); border-color: var(--pe-accent); background: var(--pe-accent-bg);
+}
+.pe-services-busy { display: flex; align-items: center; gap: 11px; color: var(--pe-accent-ink);
+  font: 700 13.5px var(--pe-font-display); letter-spacing: .06em; }
+.pe-services-busy .pe-led { background: var(--pe-accent); color: var(--pe-accent); box-shadow: 0 0 8px var(--pe-accent); }
+.pe-services-rail { display: flex; align-items: center; gap: 13px; padding: 13px 16px; flex-wrap: wrap; }
+.pe-services-rail strong { color: var(--pe-warn-ink); font: 700 13.5px var(--pe-font-display); letter-spacing: .06em; }
+.pe-services-rail.crit strong { color: var(--pe-crit-ink); }
+.pe-services-rail > span:last-child { color: var(--pe-ink-body); font-size: 13px; }
+.pe-stack-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(306px, 1fr));
+  gap: 13px; align-items: start; }
+.pe-stack-grid.is-busy { opacity: .48; }
+.pe-stack-card { padding: 14px 15px 15px; display: flex; flex-direction: column; gap: 12px; }
+.pe-stack-card.idle { border-left-color: var(--pe-idle); }
+.pe-stack-head { display: flex; align-items: center; gap: 9px; min-width: 0; outline: none; }
+.pe-stack-head:focus-visible { outline: 2px solid var(--pe-accent); outline-offset: 4px; border-radius: var(--pe-r-sm); }
+.pe-stack-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--pe-ink); font: 700 15.5px var(--pe-font-display); letter-spacing: .03em; }
+.pe-stack-tally { padding: 2px 9px; border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-pill);
+  color: var(--pe-ink-label); font: 700 10px var(--pe-font-mono); letter-spacing: .06em; white-space: nowrap; }
+.pe-stack-tally.ok { color: var(--pe-ok-ink); border-color: var(--pe-ok-line); }
+.pe-stack-tally.warn { color: var(--pe-warn-ink); border-color: var(--pe-warn-line); }
+.pe-stack-tally.crit { color: var(--pe-crit-ink); border-color: var(--pe-crit-line); }
+.pe-stack-note { color: var(--pe-ink-muted); font: 10.5px/1.5 var(--pe-font-mono); overflow-wrap: anywhere; }
+.pe-stack-card.crit .pe-stack-note { color: var(--pe-crit-ink); }
+.pe-stack-card.warn .pe-stack-note { color: var(--pe-warn-ink); }
+.pe-service-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pe-chip-svc { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px 0 8px;
+  border: 1px solid var(--pe-border); border-radius: 7px; background: var(--pe-well); color: var(--pe-ink-2);
+  font: 10.5px var(--pe-font-mono); white-space: nowrap; text-decoration: none; }
+.pe-chip-svc:hover { border-bottom-color: var(--pe-accent-hi); }
+.pe-chip-svc.warn { color: var(--pe-warn-ink); border-color: var(--pe-warn-line); background: var(--pe-warn-bg); }
+.pe-chip-svc.crit { color: var(--pe-crit-ink); border-color: var(--pe-crit-line); background: var(--pe-crit-bg); }
+.pe-chip-svc.idle { color: var(--pe-idle-ink); border-color: var(--pe-border); background: var(--pe-idle-bg); }
+.pe-chip-svc strong { font-size: 9px; letter-spacing: .08em; }
+.pe-service-dots, .pe-single-dot { display: none; flex-wrap: wrap; gap: 5px; }
+.pe-dot-svc { display: block; width: 13px; height: 13px; flex: none; border: 0; border-radius: 4px; background: var(--pe-ok); }
+.pe-dot-svc.warn { background: var(--pe-warn); color: var(--pe-warn); box-shadow: 0 0 7px var(--pe-warn-glow); animation: beacon 1.8s ease-in-out infinite; }
+.pe-dot-svc.crit { background: var(--pe-crit); color: var(--pe-crit); box-shadow: 0 0 8px var(--pe-crit-glow); animation: critpulse .9s ease-in-out infinite; }
+.pe-dot-svc.idle { background: var(--pe-idle); }
+.pe-services-panel.is-density-dots .pe-service-chips { display: none; }
+.pe-services-panel.is-density-dots .pe-service-dots { display: flex; }
+.pe-services-panel.is-filter-attention [data-needs-attention="false"] { display: none; }
+.pe-services-panel.is-filter-attention .pe-services-rail { display: none; }
+.pe-services-filter-empty { display: none; }
+.pe-services-panel.is-filter-attention[data-attention-count="0"] .pe-stack-grid { display: none; }
+.pe-services-panel.is-filter-attention[data-attention-count="0"] .pe-services-filter-empty { display: flex; }
+.pe-services-empty { padding: 30px 20px; flex-direction: column; align-items: center; gap: 14px; text-align: center; opacity: 1; }
+.pe-services-empty img { width: 58px; height: 58px; border-radius: 50%; object-fit: cover; filter: grayscale(.4); }
+.pe-services-empty h3 { color: var(--pe-ink-muted); font-size: 15.5px; letter-spacing: .05em; }
+.pe-services-empty p { max-width: 440px; margin: 7px 0 0; color: var(--pe-ink-label); font-size: 12.5px; }
+.pe-services-setting { color: var(--pe-ink-label); font: 11px var(--pe-font-mono); }
+.pe-services-check { display: flex; width: 50px; height: 50px; align-items: center; justify-content: center;
+  border: 1px dashed var(--pe-border-strong); border-radius: 13px; color: var(--pe-ink-ghost); font-size: 21px; }
+.pe-services-filter-empty h3 { color: var(--pe-ok-ink); }
+.pe-services-empty button { min-height: 44px; font: 700 13px var(--pe-font-display); }
+.pe-stack-expand { display: none; color: var(--pe-accent-ink); }
+
+@media (max-width: 720px) {
+  .pe-stack-grid { grid-template-columns: minmax(100%, 1fr); }
+  .pe-services-spacer { display: none; }
+  .pe-services-controls button { min-height: 44px; }
+  .pe-chip-svc { height: 32px; }
+  .pe-services-panel.is-density-dots .pe-stack-head { cursor: pointer; }
+  .pe-services-panel.is-density-dots .pe-stack-expand { display: inline; }
+  .pe-services-panel.is-density-dots .pe-stack-card.is-expanded {
+    border-color: var(--pe-accent); border-left-color: var(--pe-accent);
+    background: linear-gradient(180deg, var(--pe-accent-bg), var(--pe-panel));
+  }
+  .pe-services-panel.is-density-dots .pe-stack-card.is-expanded .pe-service-dots { display: none; }
+  .pe-services-panel.is-density-dots .pe-stack-card.is-expanded .pe-service-chips { display: flex; }
+  .pe-services-panel.is-density-dots .pe-stack-card.is-single:not(.is-expanded) .pe-service-dots { display: none; }
+  .pe-services-panel.is-density-dots .pe-stack-card.is-single:not(.is-expanded) .pe-single-dot { display: flex; }
+}
+
+/* Service detail and the independently polled reactor detail. */
 .container-detail { position: relative; z-index: 2; max-width: 850px; margin: auto; padding: 24px; display: flex; flex-direction: column; gap: 18px; }
 .container-detail header a { display: inline-flex; min-height: 44px; align-items: center; }
 .container-vitals { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -1719,9 +1807,9 @@ footer p {
   .container-detail { padding: 16px; }
   .container-detail .pe-verdict-orb { width: 48px; height: 48px; }
 }
-.service-row .status-ok, #log-led.status-ok { background: var(--pe-ok); box-shadow: 0 0 8px var(--pe-ok); }
-.service-row .status-warn, #log-led.status-warn { background: var(--pe-warn); box-shadow: 0 0 8px var(--pe-warn); }
-.service-row .status-crit, #log-led.status-crit { background: var(--pe-crit); box-shadow: 0 0 8px var(--pe-crit); }
+#log-led.status-ok { background: var(--pe-ok); box-shadow: 0 0 8px var(--pe-ok); }
+#log-led.status-warn { background: var(--pe-warn); box-shadow: 0 0 8px var(--pe-warn); }
+#log-led.status-crit { background: var(--pe-crit); box-shadow: 0 0 8px var(--pe-crit); }
 #restart[hidden] { display: none; }
 
 /* T31 approval cards and flight recorder. */

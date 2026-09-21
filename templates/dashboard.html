@@ -169,15 +169,99 @@
           {% endif %}
         </section>
 
-        <section class="panel" aria-label="Services">
-          <h2>SERVICES</h2>
-          {% for item in ctx.services %}
-          {% if loop.changed(item.stack) %}<h3>{{ item.stack }}</h3>{% endif %}
-          <a class="grid-row service-row" href="{{ url_for('container_detail', stack=item.stack, service=item.service) }}">
-            <span class="led-dot status-{{ {'healthy': 'ok', 'failing': 'crit'}.get(item.status, 'warn') }}" aria-label="{{ item.status }}"></span>
-            <span>{{ item.service }}</span><span>{{ item.state }}</span>
-          </a>
-          {% else %}<p>Service details are not available in this snapshot. Available after the next full scan.</p>{% endfor %}
+        <section class="panel pe-services-panel" aria-label="Services" data-services-panel
+                 data-attention-count="{{ ctx.services.attention }}">
+          <div class="pe-services-head">
+            <h2>SERVICES</h2>
+            {% if ctx.services.available %}
+            <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} services online</span>
+            <span class="pe-services-spacer"></span>
+            <div class="pe-services-controls" aria-label="Service stack filter">
+              <button type="button" data-services-filter="all" aria-pressed="true">ALL {{ ctx.services.total_stacks }}</button>
+              <button type="button" data-services-filter="attention" aria-pressed="false">ATTENTION {{ ctx.services.attention }}</button>
+            </div>
+            <div class="pe-services-controls pe-density-controls" aria-label="Service density">
+              <button type="button" data-services-density="named" aria-pressed="true">NAMED</button>
+              <button type="button" data-services-density="dots" aria-pressed="false">DOTS</button>
+            </div>
+            {% endif %}
+          </div>
+
+          {% if not ctx.services.available %}
+          <p class="muted-body">Service details are not available in this snapshot. Available after the next full scan.</p>
+          {% elif not ctx.services.total_stacks %}
+          <div class="pe-services-empty pe-card none">
+            <img src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="">
+            <div>
+              <h3>NO COMPOSE STACKS FOUND</h3>
+              <p>The daemon answered, but nothing on this host carries a compose project label.</p>
+            </div>
+            <span class="pe-services-setting">Check the <code>stacks_root</code> config setting that lists stack directories.</span>
+          </div>
+          {% else %}
+            {% if ctx.pipeline_status.state == "running" %}
+            <div class="pe-services-busy"><span class="pe-led warn"></span>RE-READING THE FLEET</div>
+            {% endif %}
+
+            {% if ctx.services.attention %}
+            {% set has_crit = ctx.services.stacks|selectattr('level', 'equalto', 'crit')|list|length %}
+            <div class="pe-services-rail pe-card {{ 'crit' if has_crit else 'warn' }}" data-services-rail>
+              <span class="pe-led {{ 'crit' if has_crit else 'warn' }}"></span>
+              <strong>{{ 'NEEDS YOU NOW' if has_crit else 'WORTH A LOOK' }}</strong>
+              <span>
+                {% set rail = namespace(first=true) %}
+                {% for stack in ctx.services.stacks if stack.level != 'ok' %}
+                  {% if stack.members %}
+                    {% for member in stack.members if member.level != 'ok' %}{% if not rail.first %} · {% endif %}{{ member.service }} {{ member.word }} ({{ stack.name }}){% set rail.first = false %}{% endfor %}
+                  {% else %}{% if not rail.first %} · {% endif %}{{ stack.note }} ({{ stack.name }}){% set rail.first = false %}{% endif %}
+                {% endfor %}
+              </span>
+            </div>
+            {% endif %}
+
+            <div class="pe-stack-grid {{ 'is-busy' if ctx.pipeline_status.state == 'running' }}" data-services-grid>
+              {% for stack in ctx.services.stacks %}
+              <article class="pe-card pe-stack-card {{ stack.level }} {{ 'is-single' if stack.total == 1 }}"
+                       data-stack-name="{{ stack.name }}" data-needs-attention="{{ 'true' if stack.level != 'ok' else 'false' }}">
+                <div class="pe-stack-head" data-stack-head>
+                  <span class="pe-led {{ stack.level }}"></span>
+                  <span class="pe-stack-name">{{ stack.name }}</span>
+                  <span class="pe-stack-spacer"></span>
+                  <span class="pe-single-dot">
+                    {% if stack.total == 1 %}{% set member = stack.members[0] %}<a class="pe-dot-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}" title="{{ member.service }}" aria-label="{{ member.service }}"></a>{% endif %}
+                  </span>
+                  <span class="pe-stack-tally {{ stack.level }}">{{ stack.up }}/{{ stack.total }}</span>
+                  <span class="pe-stack-expand" aria-hidden="true">⌄</span>
+                </div>
+                {% if stack.note %}<div class="pe-stack-note">{{ stack.note }}</div>{% endif %}
+                {% if stack.members %}
+                <div class="pe-service-chips">
+                  {% for member in stack.members %}
+                  <a class="pe-chip-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}">
+                    <span class="pe-led {{ member.level }}"></span><span>{{ member.service }}</span>
+                    {% if member.word %}<strong>{{ member.word|upper }}</strong>{% endif %}
+                  </a>
+                  {% endfor %}
+                </div>
+                <div class="pe-service-dots">
+                  {% for member in stack.members %}
+                  <a class="pe-dot-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}" title="{{ member.service }}" aria-label="{{ member.service }}"></a>
+                  {% endfor %}
+                </div>
+                {% endif %}
+              </article>
+              {% endfor %}
+            </div>
+
+            <div class="pe-services-empty pe-services-filter-empty pe-card none" data-services-filter-empty>
+              <span class="pe-services-check">✓</span>
+              <div>
+                <h3>NOTHING NEEDS ATTENTION</h3>
+                <p>All {{ ctx.services.total }} services across {{ ctx.services.total_stacks }} stacks are online. Last full scan: {{ ctx.health.last_scan or 'never' }}.</p>
+              </div>
+              <button type="button" data-services-show-all>SHOW ALL {{ ctx.services.total_stacks }} STACKS</button>
+            </div>
+          {% endif %}
         </section>
 
         <!-- Hull Diagnostics -->

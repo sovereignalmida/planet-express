@@ -10,6 +10,73 @@
   "use strict";
 
   var TAB_NAMES = ["overview", "backups", "network", "actions", "chat"];
+  var SERVICES_FILTER_KEY = "planetexpress-services-filter";
+  var SERVICES_DENSITY_KEY = "planetexpress-services-density";
+
+  function readStoredChoice(key) {
+    try {
+      return window.localStorage.getItem(key);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function storeChoice(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch (e) {
+      // Storage may be disabled or full; in-memory view state still works.
+    }
+  }
+
+  var storedServicesFilter = readStoredChoice(SERVICES_FILTER_KEY);
+  var storedServicesDensity = readStoredChoice(SERVICES_DENSITY_KEY);
+  var servicesFilter = storedServicesFilter === "attention" ? "attention" : "all";
+  var servicesDensity = storedServicesDensity === "named" || storedServicesDensity === "dots"
+    ? storedServicesDensity
+    : (window.matchMedia("(max-width: 720px)").matches ? "dots" : "named");
+  var expandedServiceStack = null;
+  var narrowViewport = window.matchMedia("(max-width: 720px)");
+
+  function applyServicesState() {
+    var panel = document.querySelector("[data-services-panel]");
+    if (!panel) return;
+    panel.classList.toggle("is-filter-attention", servicesFilter === "attention");
+    panel.classList.toggle("is-density-dots", servicesDensity === "dots");
+    panel.querySelectorAll("[data-services-filter]").forEach(function (btn) {
+      var active = btn.dataset.servicesFilter === servicesFilter;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+    panel.querySelectorAll("[data-services-density]").forEach(function (btn) {
+      var active = btn.dataset.servicesDensity === servicesDensity;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+
+    var expandable = servicesDensity === "dots" && narrowViewport.matches;
+    var expandedStillExists = false;
+    panel.querySelectorAll("[data-stack-name]").forEach(function (card) {
+      var expanded = servicesDensity === "dots" && card.dataset.stackName === expandedServiceStack;
+      card.classList.toggle("is-expanded", expanded);
+      var head = card.querySelector("[data-stack-head]");
+      if (head) {
+        // Only a mobile DOTS card expands; anywhere else the head is plain text, so it
+        // must not advertise a control that does nothing (Codex review, T34).
+        if (expandable) {
+          head.setAttribute("role", "button");
+          head.setAttribute("tabindex", "0");
+          head.setAttribute("aria-expanded", expanded ? "true" : "false");
+        } else {
+          head.removeAttribute("role");
+          head.removeAttribute("tabindex");
+          head.removeAttribute("aria-expanded");
+        }
+      }
+      if (expanded) expandedStillExists = true;
+    });
+    if (expandedServiceStack && !expandedStillExists) expandedServiceStack = null;
+  }
 
   function setActiveTab(name) {
     document.body.classList.toggle("chat-active", name === "chat");
@@ -94,6 +161,49 @@
       });
     });
 
+    document.querySelectorAll("[data-services-filter]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        servicesFilter = btn.dataset.servicesFilter === "attention" ? "attention" : "all";
+        storeChoice(SERVICES_FILTER_KEY, servicesFilter);
+        applyServicesState();
+      });
+    });
+
+    document.querySelectorAll("[data-services-density]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        servicesDensity = btn.dataset.servicesDensity === "dots" ? "dots" : "named";
+        storeChoice(SERVICES_DENSITY_KEY, servicesDensity);
+        applyServicesState();
+      });
+    });
+
+    document.querySelectorAll("[data-services-show-all]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        servicesFilter = "all";
+        storeChoice(SERVICES_FILTER_KEY, servicesFilter);
+        applyServicesState();
+      });
+    });
+
+    document.querySelectorAll("[data-stack-head]").forEach(function (head) {
+      function toggleExpanded(event) {
+        if (event.target.closest("a") || servicesDensity !== "dots" ||
+            !narrowViewport.matches) return false;
+        var card = head.closest("[data-stack-name]");
+        if (!card) return;
+        expandedServiceStack = expandedServiceStack === card.dataset.stackName
+          ? null : card.dataset.stackName;
+        applyServicesState();
+        return true;
+      }
+      head.addEventListener("click", toggleExpanded);
+      head.addEventListener("keydown", function (event) {
+        if ((event.key === "Enter" || event.key === " ") && toggleExpanded(event)) {
+          event.preventDefault();
+        }
+      });
+    });
+
     // Routing matrix: click a node to expand it in place (full rule/service/router
     // id/status). All detail markup is already server-rendered, just visually
     // collapsed -- no refetch, matches the low/medium drawer's pattern.
@@ -111,6 +221,7 @@
     });
 
     buildDeployManifest();
+    applyServicesState();
   }
 
   // Deployment manifest: group the flat update-history list (rendered into a JSON data
@@ -342,6 +453,8 @@
   // URL drift apart. Bound once (not in bindInteractions()) since window itself is
   // never replaced by a refresh swap.
   window.addEventListener("hashchange", applyHashTab);
+  // Crossing the 720px breakpoint changes whether stack heads are expandable controls.
+  if (narrowViewport.addEventListener) narrowViewport.addEventListener("change", applyServicesState);
   bindInteractions();
   pollWhileVisible(refreshDashboard, REFRESH_INTERVAL_MS);
 })();

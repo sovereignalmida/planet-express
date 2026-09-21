@@ -173,6 +173,68 @@ def _render_with_certs(tmp_path, monkeypatch, certs):
     return resp.data.decode()
 
 
+def _render_with_service_snapshot(tmp_path, monkeypatch, mode="full", stacks=None):
+    monitor = tmp_path / "latest_monitor.json"
+    monitor.write_text(json.dumps({
+        "timestamp": "2026-09-21T12:00:00+00:00", "mode": mode,
+        "stack_completeness": stacks or [],
+    }))
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor)
+    for attr in ("STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS",
+                 "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE"):
+        monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
+                        lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
+                        lambda: {"available": False})
+    response = _client().get("/")
+    assert response.status_code == 200
+    return response.data.decode()
+
+
+def test_services_render_stack_cards_worst_first_with_links_and_attention(tmp_path, monkeypatch):
+    html = _render_with_service_snapshot(tmp_path, monkeypatch, stacks=[
+        {"stack": "healthy", "services": {
+            "web": {"status": "healthy", "state": "running(healthy)"},
+        }},
+        {"stack": "broken", "services": {
+            "api": {"status": "failing", "state": "exited(1)"},
+            "worker": {"status": "unknown", "state": "running(starting)"},
+        }},
+    ])
+    assert "running(healthy)" not in html
+    assert html.index('data-stack-name="broken"') < html.index('data-stack-name="healthy"')
+    assert 'href="/containers/broken/api"' in html
+    assert 'href="/containers/broken/worker"' in html
+    assert 'href="/containers/healthy/web"' in html
+    assert "NEEDS YOU NOW" in html
+    assert "api down (broken)" in html
+    assert "worker starting (broken)" in html
+
+
+def test_services_attention_rail_only_renders_for_non_ok_stack(tmp_path, monkeypatch):
+    html = _render_with_service_snapshot(tmp_path, monkeypatch, stacks=[
+        {"stack": "healthy", "services": {
+            "web": {"status": "healthy", "state": "running"},
+        }},
+    ])
+    assert "data-services-rail" not in html
+    assert "NOTHING NEEDS ATTENTION" in html
+    assert "All 1 services across 1 stacks are online." in html
+    assert "Last full scan: 2026-09-21T12:00:00+00:00" in html
+
+
+def test_services_empty_and_unavailable_states_render_honest_copy(tmp_path, monkeypatch):
+    empty = _render_with_service_snapshot(tmp_path, monkeypatch, stacks=[])
+    assert "NO COMPOSE STACKS FOUND" in empty
+    assert "stacks_root" in empty
+
+    unavailable = _render_with_service_snapshot(tmp_path, monkeypatch, mode="status", stacks=[])
+    assert "Service details are not available in this snapshot." in unavailable
+    assert "Available after the next full scan." in unavailable
+    assert "CAN&#39;T REACH DOCKER" not in unavailable
+
+
 def test_cert_attention_count_includes_legacy_status_only_snapshots(tmp_path, monkeypatch):
     html = _render_with_certs(tmp_path, monkeypatch, [
         {"domain": "a.example", "status": "expiring", "days_remaining": 3},

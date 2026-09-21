@@ -708,23 +708,107 @@ def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
             assert f'{len(names)}/{len(names)} JOBS OK' in html
 
 
-def test_services_preserve_snapshot_order(tmp_path, monkeypatch):
+def test_services_roll_up_levels_notes_and_sorting(tmp_path, monkeypatch):
     path = tmp_path / "monitor.json"
     monkeypatch.setattr(config, "STATE_MONITOR", path)
     _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "full",
         "stack_completeness": [
-            {"stack": "zeta", "services": {"second": {"status": "failing", "state": "exited"},
-                                          "first": {"status": "healthy", "state": "running"}}},
-            {"stack": "alpha", "services": {"last": {"status": "unknown", "state": "missing"}}},
-            {"stack": "legacy"}]})
-    assert dashboard_data.build_dashboard_context()["services"] == [
-        {"stack": "zeta", "service": "second", "status": "failing", "state": "exited"},
-        {"stack": "zeta", "service": "first", "status": "healthy", "state": "running"},
-        {"stack": "alpha", "service": "last", "status": "unknown", "state": "missing"}]
+            {"stack": "large-ok", "services": {
+                "web": {"status": "healthy", "state": "running(healthy)"},
+                "worker": {"status": "healthy", "state": "running"},
+            }},
+            {"stack": "zeta-crit", "services": {
+                "replica": {"status": "failing", "state": "running(healthy), exited(2)"},
+                "missing": {"status": "failing", "state": "absent"},
+            }},
+            {"stack": "alpha-crit", "services": {
+                "restart": {"status": "failing", "state": "restarting"},
+            }},
+            {"stack": "warning", "services": {
+                "degraded": {"status": "failing", "state": "running(unhealthy)"},
+                "booting": {"status": "unknown", "state": "running(starting)"},
+            }},
+            {"stack": "paused", "services": {
+                "batch": {"status": "healthy", "state": "exited(0)"},
+            }},
+        ]})
+
+    result = dashboard_data.summarize_services()
+
+    assert result == {
+        "available": True,
+        "stacks": [
+            {"name": "zeta-crit", "up": 0, "total": 2, "level": "crit",
+             "note": "missing down · replica down", "members": [
+                 {"service": "missing", "level": "crit", "word": "down", "state": "absent"},
+                 {"service": "replica", "level": "crit", "word": "down",
+                 "state": "running(healthy), exited(2)"},
+             ]},
+            {"name": "alpha-crit", "up": 0, "total": 1, "level": "crit",
+             "note": "restart down", "members": [
+                 {"service": "restart", "level": "crit", "word": "down", "state": "restarting"},
+             ]},
+            {"name": "warning", "up": 0, "total": 2, "level": "warn",
+             "note": "booting starting · degraded degraded", "members": [
+                 {"service": "booting", "level": "warn", "word": "starting",
+                  "state": "running(starting)"},
+                 {"service": "degraded", "level": "warn", "word": "degraded",
+                  "state": "running(unhealthy)"},
+             ]},
+            {"name": "paused", "up": 0, "total": 1, "level": "idle",
+             "note": "batch paused", "members": [
+                 {"service": "batch", "level": "idle", "word": "paused", "state": "exited(0)"},
+             ]},
+            {"name": "large-ok", "up": 2, "total": 2, "level": "ok", "note": "", "members": [
+                {"service": "web", "level": "ok", "word": "", "state": "running(healthy)"},
+                {"service": "worker", "level": "ok", "word": "", "state": "running"},
+            ]},
+        ],
+        "total_stacks": 5, "up": 2, "total": 8, "attention": 4,
+    }
+
+
+def test_services_sort_ties_by_name_after_level_and_size(tmp_path, monkeypatch):
+    path = tmp_path / "monitor.json"
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "full",
+        "stack_completeness": [
+            {"stack": "zeta", "services": {"svc": {"status": "healthy", "state": "running"}}},
+            {"stack": "alpha", "services": {"svc": {"status": "healthy", "state": "running"}}},
+            {"stack": "bigger", "services": {
+                "one": {"status": "healthy", "state": "running"},
+                "two": {"status": "healthy", "state": "running"},
+            }},
+        ]})
+    assert [stack["name"] for stack in dashboard_data.summarize_services()["stacks"]] == [
+        "bigger", "alpha", "zeta",
+    ]
+
+
+def test_services_unreadable_and_malformed_entries(tmp_path, monkeypatch):
+    path = tmp_path / "monitor.json"
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "full",
+        "stack_completeness": [
+            {"stack": "unreadable", "status": "unknown", "error": "no socket", "services": {}},
+            {"stack": "bad-services", "services": []},
+            {"stack": "bad-member", "services": {"broken": "not a mapping"}},
+        ]})
+    result = dashboard_data.summarize_services()
+    unreadable = next(stack for stack in result["stacks"] if stack["name"] == "unreadable")
+    assert unreadable == {
+        "name": "unreadable", "up": 0, "total": 0, "level": "warn",
+        "note": "state unreadable", "members": [],
+    }
+    assert result["available"] is True
+    assert result["attention"] == 1
 
 
 def test_services_status_snapshot(tmp_path, monkeypatch):
     path = tmp_path / "monitor.json"
     monkeypatch.setattr(config, "STATE_MONITOR", path)
     _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "status"})
-    assert dashboard_data.build_dashboard_context()["services"] == []
+    assert dashboard_data.build_dashboard_context()["services"] == {
+        "available": False, "stacks": [], "total_stacks": 0,
+        "up": 0, "total": 0, "attention": 0,
+    }

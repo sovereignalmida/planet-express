@@ -815,14 +815,113 @@ def build_professor_lines(ctx: dict) -> dict:
     return lines
 
 
-def summarize_services() -> list:
-    monitor = load_monitor()
-    return [
-        {"stack": stack["stack"], "service": service,
-         "status": detail.get("status", "unknown"), "state": detail.get("state", "")}
-        for stack in (monitor.stack_completeness if monitor else [])
-        for service, detail in stack.get("services", {}).items()
+_SERVICE_LEVEL_RANK = {"crit": 0, "warn": 1, "idle": 2, "ok": 3}
+_SERVICE_LEVEL_WORD = {"crit": "down", "warn": "degraded", "idle": "paused", "ok": ""}
+
+
+def _service_component_level(status: str, state: str, *, multi: bool) -> str:
+    """Collapse one observed container state into the Overview card vocabulary.
+
+    A service can have several comma-joined container observations.  Explicit state
+    suffixes let each component retain its own meaning even though Leela stores only
+    the service's aggregate (worst) status alongside them.
+    """
+    normalized = state.strip().lower()
+    if normalized.startswith("running"):
+        # With a comma-joined observation, the aggregate status belongs to the
+        # service, so use each component's explicit suffix to avoid painting a
+        # healthy replica with its failed sibling's status.
+        if multi:
+            if "(healthy)" in normalized or normalized == "running":
+                return "ok"
+            if "(starting)" in normalized or "(unhealthy)" in normalized:
+                return "warn"
+        return "ok" if status == "healthy" else "warn"
+    if status == "healthy":
+        return "idle"
+    if status == "unknown":
+        return "warn"
+    return "crit"
+
+
+def _service_member(service, detail) -> dict | None:
+    if not isinstance(detail, dict):
+        return None
+    service_name = str(service)
+    status = str(detail.get("status", "unknown")).lower()
+    state = str(detail.get("state", ""))
+    components = state.split(",") if state else [""]
+    levels = [
+        _service_component_level(status, component, multi=len(components) > 1)
+        for component in components
     ]
+    level = min(levels, key=_SERVICE_LEVEL_RANK.get)
+    word = "starting" if level == "warn" and status == "unknown" else _SERVICE_LEVEL_WORD[level]
+    return {
+        "service": service_name,
+        "level": level,
+        "word": word,
+        "state": state,
+    }
+
+
+def summarize_services() -> dict:
+    monitor = load_monitor()
+    if not monitor or monitor.mode not in _MODES_WITH_STACK_COMPLETENESS:
+        return {
+            "available": False, "stacks": [], "total_stacks": 0,
+            "up": 0, "total": 0, "attention": 0,
+        }
+
+    stacks = []
+    for raw_stack in monitor.stack_completeness:
+        if not isinstance(raw_stack, dict):
+            continue
+        name = str(raw_stack.get("stack", "?"))
+        raw_services = raw_stack.get("services", {})
+        services = raw_services if isinstance(raw_services, dict) else {}
+        members = [
+            member
+            for service, detail in services.items()
+            if (member := _service_member(service, detail)) is not None
+        ]
+        members.sort(key=lambda member: (
+            _SERVICE_LEVEL_RANK[member["level"]], member["service"]
+        ))
+
+        if raw_stack.get("status") == "unknown" and not members:
+            level = "warn"
+            note = "state unreadable"
+        else:
+            level = min(
+                (member["level"] for member in members),
+                key=_SERVICE_LEVEL_RANK.get,
+                default="ok",
+            )
+            note = " · ".join(
+                f'{member["service"]} {member["word"]}'
+                for member in members if member["level"] != "ok"
+            )
+        stacks.append({
+            "name": name,
+            "up": sum(member["level"] == "ok" for member in members),
+            "total": len(members),
+            "level": level,
+            "note": note,
+            "members": members,
+        })
+
+    stacks.sort(key=lambda stack: (
+        _SERVICE_LEVEL_RANK[stack["level"]], -stack["total"], stack["name"]
+    ))
+    return {
+        "available": True,
+        "stacks": stacks,
+        "total_stacks": len(stacks),
+        "up": sum(stack["up"] for stack in stacks),
+        "total": sum(stack["total"] for stack in stacks),
+        "attention": sum(stack["level"] != "ok" for stack in stacks),
+    }
 
 
 def build_dashboard_context() -> dict:
