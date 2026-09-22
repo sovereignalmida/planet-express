@@ -37,8 +37,14 @@ import config
 from notifier import Decision, Notifier
 from planet_express.core.incidents import scan_id
 from planet_express.core.redact import redact
-from planet_express.core.store import DEFAULT_TTL_SECONDS, IncidentSourceError, Store
-from planet_express.execution import actions, policy
+from planet_express.core.store import (
+    DEFAULT_TTL_SECONDS,
+    IncidentSourceError,
+    PendingPlanConflict,
+    Store,
+)
+from planet_express.execution import actions, engine, policy, runbook as runbooks
+from planet_express.execution.binding import Binder
 from state_models import MonitorSnapshot
 from telegram_client import TelegramClient
 
@@ -73,6 +79,14 @@ class RequestResult:
     capabilities: dict[str, bool]
 
 
+STEP_OUTPUT_MAX_BYTES = 256 * 1024
+
+
+def _bounded_run_argv(argv: list[str], timeout) -> tuple[int, str, str]:
+    rc, out, err, _truncated = bender.run_argv_bounded(argv, timeout, STEP_OUTPUT_MAX_BYTES)
+    return rc, out.strip(), err.strip()
+
+
 def _spawn_daemon(fn: Callable, *args) -> None:
     threading.Thread(target=fn, args=args, daemon=True, name="typed-action").start()
 
@@ -97,11 +111,14 @@ class CommandService:
         resolve_stack_target: Callable | None = None,
         verify_stack_up: Callable | None = None,
         verify_stack_down: Callable | None = None,
+        binder: Binder | None = None,
+        on_failure: Callable[[dict], None] | None = None,
     ):
         self._store = store
         self._notifier = notifier
         self._state = state  # casa_farnsworth.PipelineState (duck-typed to avoid an import cycle)
-        self._run_argv = run_argv or bender.run_argv
+        # Bounded by default: every step's argv goes through the memory-capped runner (design §3).
+        self._run_argv = run_argv or _bounded_run_argv
         self._resolve = resolve_target or actions.resolve_target
         self._verify = verify or actions.verify_after_restart
         self._restart_count = restart_count or actions.restart_count
@@ -120,6 +137,9 @@ class CommandService:
         self._resolve_stack = resolve_stack_target or actions.resolve_stack_target
         self._verify_stack_up = verify_stack_up or actions.verify_stack_up
         self._verify_stack_down = verify_stack_down or actions.verify_stack_down
+        # Proposal-time bindings and pre-step drift checks (slice 5b, design §4.2).
+        self._binder = binder or Binder()
+        self._on_failure = on_failure
         # Store.propose deduplicates rows atomically, but sending the corresponding card
         # is an external side effect. Keep row creation, card delivery and message-id
         # recording in one in-process critical section so two front-end requests cannot
@@ -139,18 +159,28 @@ class CommandService:
         deadline = time.monotonic() + timeout if deadline is None else deadline
         target = None
         target_error = None
+        plan = None
         if action in actions.REGISTRY:
             try:
                 target = self._resolve_for_action(
                     action, stack, service, timeout=self._remaining(deadline)
                 )
+                if expected_container is not None and target.container != expected_container:
+                    target_error = "resolved container does not match the incident resource"
+                elif action in engine.LEGACY_STEP_TYPES:
+                    plan = self._build_runbook(action, target, timeout=self._remaining(deadline))
             except actions.TargetTimeout:
                 return ProposeResult(False, None, False, "host slow, retry")
             except actions.TargetError as e:
                 target_error = str(e)
-            if target is not None and expected_container is not None and target.container != expected_container:
-                target_error = "resolved container does not match the incident resource"
         decision = policy.decide(action, target_error)
+        if decision.allowed and decision.needs_approval:
+            # The stored document gets the runbook policy too; for one-step plans it agrees with
+            # policy.decide, and it is the gate planner runbooks will go through (slice 5b).
+            runbook_decision = policy.decide_runbook(plan, requested_via) if plan else None
+            if runbook_decision is None or not runbook_decision.allowed:
+                reason = runbook_decision.reason if runbook_decision else "no runbook for this action"
+                decision = policy.PolicyDecision(False, False, decision.risk, reason)
         if not decision.allowed:
             try:
                 self._store.record_event(
@@ -198,12 +228,18 @@ class CommandService:
             if incident_id is not None:
                 kwargs = {"incident_id": incident_id, "incident_scan_id": incident_scan_id}
             try:
-                row, created = self._store.propose(
+                row, created = self._store.propose_runbook(
                     action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
                     requested_via=requested_via, requested_by=requested_by, ttl_seconds=self._ttl,
                     timeout=self._remaining(deadline),
+                    plan_json=runbooks.canonical_json(plan), plan_sha256=runbooks.plan_sha256(plan),
+                    origin=requested_via,
                     **kwargs,
                 )
+            except PendingPlanConflict as conflict:
+                # A card for this target is already pending, approved against an earlier binding;
+                # it is the one to act on (or deny) (T38 own-review follow-up).
+                return ProposeResult(True, conflict.approval_id, False, "already awaiting approval")
             except IncidentSourceError as exc:
                 return ProposeResult(False, None, False, str(exc))
             except (actions.TargetTimeout, sqlite3.OperationalError):
@@ -248,6 +284,23 @@ class CommandService:
         finally:
             if not card_handed_off:
                 self._proposal_card_lock.release()
+
+    def _build_runbook(self, action: str, target, *, timeout: float) -> runbooks.Runbook:
+        """Every typed action is a one-step runbook (slice 5b-1): the approved document, with its
+        proposal-time binding, is what the engine runs. Raises TargetError/TargetTimeout."""
+        step_type = engine.LEGACY_STEP_TYPES[action]
+        if isinstance(target, actions.AllStacksTarget):
+            params, binding = {}, self._binder.stack_set(list(target.stacks), timeout=timeout)
+        elif isinstance(target, actions.StackTarget):
+            params, binding = {"stack": target.stack}, self._binder.stack(target.stack, timeout=timeout)
+        else:
+            params = {"stack": target.stack, "service": target.service}
+            binding = self._binder.service(target, timeout=timeout)
+        return runbooks.Runbook.model_validate({
+            "title": actions.action_summary(action, target.as_dict()),
+            "steps": [{"type": step_type, "params": params, "binding": binding}],
+            "artifacts": {},
+        })
 
     def _resolve_for_action(
         self, action: str, stack: str, service: str | None, *, timeout: float,
@@ -456,6 +509,20 @@ class CommandService:
             self._safe_finalize_card(row, decision, ack="Denied.", text=text)
             return DecideResult("denied", text)
 
+        # The approved document must be intact before anything else: after the v5 cutover every
+        # approval carries a plan, so a missing or tampered one is refused for good (slice 5b-1).
+        if self._verified_plan(row) is None:
+            if self._store.consume(approval_id, decision="denied", decided_by="policy", arrived_at=arrived):
+                self._store.record_event(
+                    "approval.refused_no_plan", approval_id=approval_id, attempted_by=decided_by,
+                )
+                text = self._policy_refusal_text(
+                    row, "refused: its approved plan is missing or does not match its fingerprint"
+                )
+                self._safe_finalize_card(row, decision, ack="Refused: invalid plan.", text=text)
+                return DecideResult("refused", text)
+            return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+
         provenance = self._store.get_incident_proposal(approval_id)
 
         # Generic approvals retain the original early policy check. Incident approvals first take
@@ -541,10 +608,9 @@ class CommandService:
                     text = (f"🔴 <b>Restart failed</b> for <code>{_s(row['target_key'])}</code>: "
                             "failed to start")
                 else:
-                    target = json.loads(row["target_json"])
-                    direction = "Up" if row["action"] in actions.UP_ACTIONS else "Down"
-                    label = "every stack" if target.get("scope") == "all" else target["stack"]
-                    text = (f"🔴 <b>{direction} failed</b> for <code>{_s(label)}</code>: "
+                    direction = "Up" if row["action"] in actions.UP_ACTIONS else (
+                        "Down" if row["action"] in actions.DOWN_ACTIONS else "Run")
+                    text = (f"🔴 <b>{direction} failed</b> for <code>{_s(self._row_label(row))}</code>: "
                             "failed to start")
                 self._in_background(lambda: self._notify_quietly(
                     text))
@@ -566,9 +632,15 @@ class CommandService:
         capabilities = spec.capabilities() if spec else {}
         target = None
         target_error = None
+        plan = None
         if spec is not None:
             try:
                 target = self._resolve_for_action(action, stack, service, timeout=timeout)
+                if action in engine.LEGACY_STEP_TYPES:
+                    left = timeout - (self._clock() - arrived)
+                    if left <= 0:
+                        raise actions.TargetTimeout("host slow, retry")
+                    plan = self._build_runbook(action, target, timeout=left)
             except actions.TargetTimeout:
                 return RequestResult("timeout", "host slow, retry", None, None, capabilities)
             except actions.TargetError as e:
@@ -583,6 +655,10 @@ class CommandService:
         if not policy.allows_direct_request(decision.risk):
             return RequestResult("refused", f"direct requests are not allowed for {decision.risk}",
                                  None, None, capabilities)
+        runbook_decision = policy.decide_runbook(plan, origin) if plan is not None else None
+        if runbook_decision is None or not runbook_decision.allowed:
+            reason = runbook_decision.reason if runbook_decision else "no runbook for this action"
+            return RequestResult("refused", reason, None, None, capabilities)
 
         owner = f"act:direct:{secrets.token_hex(6)}"
         if not self._state.try_begin_mutation(owner):
@@ -597,9 +673,11 @@ class CommandService:
             if left <= 0 or not self._proposal_card_lock.acquire(timeout=left):
                 return RequestResult("timeout", "host slow, retry", None, None, capabilities)
             try:
-                result = self._store.create_direct_execution(
+                result = self._store.create_direct_runbook_execution(
                     action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
-                    operator=operator, origin=origin, arrived_at=arrived, deadline=arrived + timeout,
+                    operator=operator, arrived_at=arrived, deadline=arrived + timeout,
+                    plan_json=runbooks.canonical_json(plan), plan_sha256=runbooks.plan_sha256(plan),
+                    origin=origin,
                 )
                 if result is None:
                     return RequestResult("timeout", "host slow, retry", None, None, capabilities)
@@ -636,81 +714,90 @@ class CommandService:
             execution["approval"]["target"] = json.loads(approval["target_json"])
             execution["action"] = approval["action"]
             execution["target"] = execution["approval"]["target"]
-            execution["summary"] = actions.action_summary(approval["action"], execution["target"])
+            execution["summary"] = self._row_summary(approval)
+            execution["steps"] = [
+                {key: step[key] for key in (
+                    "n", "type", "status", "effect", "reason", "started_at", "finished_at",
+                )} | {"label": self._step_label(step, execution["summary"])}
+                for step in self._store.list_steps(execution_id)
+            ]
         return execution
 
+    @staticmethod
+    def _step_label(step: dict, summary: str) -> str:
+        params, kind = step["params"] or {}, step["type"]
+        target = "/".join(params[k] for k in ("stack", "service") if params.get(k))
+        labels = {
+            "service.restart": f"Restart {target}", "service.start": f"Start {target}",
+            "service.stop": f"Stop {target}", "wait": f"Wait {params.get('seconds')}s",
+            "check.container": f"Check {(step['binding'] or {}).get('container', '')} is {params.get('expect')}",
+            "check.log_since_start": "Check the log since start",
+            "read.qbittorrent_session_port": "Read qBittorrent's port",
+            "unit.action": f"{str(params.get('action', '')).capitalize()} {params.get('unit', '')}",
+            "prune.safe": "Prune unused images and networks",
+        }
+        return labels.get(kind) or summary
+
     # ── execution (worker thread) ───────────────────────────────────────────
-    def _run_execution(self, row: dict, execution_id: str, owner: str, decided_by: str) -> None:
-        approved = json.loads(row["target_json"])
-        try:
-            if row["action"] in actions.STACK_ACTIONS:
-                self._run_stack_execution(row, execution_id, approved)
-                return
+    @staticmethod
+    def _row_summary(row: dict) -> str:
+        """A human summary of a stored approval that never raises: startup reconciliation and the
+        dashboard read rows whose action may not be a legacy typed action (planner runbooks, a
+        rehearsal) — an assumption here crashed core at startup on the VM (T39 rehearsal)."""
+        if row.get("action") in engine.LEGACY_STEP_TYPES:
             try:
-                target = self._resolve(approved["stack"], approved["service"], for_mutation=True)
-            except actions.TargetError as e:
-                self._finish(row, execution_id, "failed", f"target no longer valid: {e}")
-                return
-            if target.container != approved["container"]:
-                self._finish(row, execution_id, "failed",
-                             f"container changed since approval ({approved['container']} → {target.container})")
-                return
+                return actions.action_summary(row["action"], json.loads(row["target_json"]))
+            except Exception:  # noqa: BLE001 -- fall through to the plan's own title
+                log.debug("Legacy summary unavailable for %s", row.get("id"))
+        try:
+            return str(json.loads(row["plan_json"])["title"])[:200]
+        except Exception:  # noqa: BLE001
+            return str(row.get("action") or "typed action")
 
-            baseline = self._restart_count(target.container)
-            rc, out, err = self._run_argv(actions.restart_argv(target), timeout=actions.DOCKER_TIMEOUT_SECONDS)
-            if rc != 0:
-                self._finish(row, execution_id, "failed",
-                             f"restart command failed (exit {rc}): {(err or out)[:300]}")
-                return
+    @classmethod
+    def _row_label(cls, row: dict) -> str:
+        try:
+            target = json.loads(row["target_json"]) or {}
+        except Exception:  # noqa: BLE001 -- a label must never raise
+            target = {}
+        if target.get("scope") == "all":
+            return "every stack"
+        return target.get("stack") or cls._row_summary(row)
 
-            self._store.set_execution_status(execution_id, "verifying")
-            ok, reason = self._verify(target.container, baseline)
-            self._finish(row, execution_id, "passed" if ok else "failed", reason)
+    @staticmethod
+    def _verified_plan(row: dict | None) -> runbooks.Runbook | None:
+        if not row or not row.get("plan_json") or not row.get("plan_sha256"):
+            return None
+        try:
+            return runbooks.load_stored_plan(row["plan_json"], row["plan_sha256"])
+        except Exception:  # noqa: BLE001 -- any invalid/tampered document is refused
+            return None
+
+    def _run_execution(self, row: dict, execution_id: str, owner: str, decided_by: str) -> None:
+        try:
+            plan = self._verified_plan(self._store.get_approval(row["id"]))
+            if plan is None:
+                self._finish(row, execution_id, "failed",
+                             "refused: its approved plan is missing or does not match its fingerprint")
+                return
+            runner = engine.RunbookEngine(
+                self,
+                is_abort_requested=lambda: bool(
+                    (self._store.get_execution(execution_id) or {}).get("abort_requested_at")
+                ),
+                on_failure=self._on_failure,
+            )
+            result = runner.run(execution_id, plan, origin=row.get("origin") or row["requested_via"])
+            self._finish(row, execution_id, result.status, result.reason)
         except Exception as e:
             log.exception(f"Typed action {execution_id} crashed")
-            self._finish(row, execution_id, "failed", f"crashed: {str(e)[:200]}")
+            try:
+                engine.settle_crashed_execution(self._store, execution_id)
+            except Exception:
+                log.exception(f"Could not settle the steps of {execution_id}")
+            self._finish(row, execution_id, "failed", f"crashed: {redact(str(e))[:200]}")
         finally:
             self._state.end_mutation(owner)
-
-    def _run_stack_execution(self, row: dict, execution_id: str, approved: dict) -> None:
-        action = row["action"]
-        selector = "all" if action in actions.ALL_STACK_ACTIONS else approved.get("stack")
-        try:
-            target = self._resolve_for_action(
-                action, selector, None, timeout=actions.DOCKER_TIMEOUT_SECONDS,
-                approved_target=approved,
-            )
-        except actions.TargetError as exc:
-            self._finish(row, execution_id, "failed", f"target no longer valid: {exc}")
-            return
-        stacks = list(target.stacks) if isinstance(target, actions.AllStacksTarget) else [target.stack]
-        passed = []
-        for index, stack in enumerate(stacks):
-            rc, out, err = self._run_argv(
-                actions.stack_argv(action, stack), timeout=actions.STACK_VERIFY_TIMEOUT_SECONDS
-            )
-            if rc != 0:
-                # Fail fast with compose's own error, as the restart path does, instead of waiting
-                # out the verifier and reporting only a timeout (own review, T37). Redacted: this
-                # text reaches Telegram and the dashboard.
-                detail = redact((err or out or "").strip())[:300]
-                report = self._stack_report(
-                    passed, stack, f"compose exited {rc}: {detail}", stacks[index + 1:]
-                )
-                self._finish(row, execution_id, "failed", report)
-                return
-            self._store.set_execution_status(execution_id, "verifying")
-            verifier = self._verify_stack_up if action in actions.UP_ACTIONS else self._verify_stack_down
-            ok, reason = verifier(stack)
-            if not ok:
-                not_attempted = stacks[index + 1:]
-                report = self._stack_report(passed, stack, reason, not_attempted)
-                self._finish(row, execution_id, "failed", report)
-                return
-            passed.append(stack)
-            if index + 1 < len(stacks):
-                self._store.set_execution_status(execution_id, "running")
-        self._finish(row, execution_id, "passed", self._stack_report(passed, None, None, []))
 
     @staticmethod
     def _stack_report(passed: list[str], failed: str | None, reason: str | None,
@@ -729,9 +816,9 @@ class CommandService:
         elif row["action"] == actions.RESTART_SERVICE:
             text = f"🔴 <b>Restart failed</b> for <code>{key}</code>: {_s(reason)}"
         else:
-            target = json.loads(row["target_json"])
-            direction = "Up" if row["action"] in actions.UP_ACTIONS else "Down"
-            label = "every stack" if target.get("scope") == "all" else target["stack"]
+            direction = "Up" if row["action"] in actions.UP_ACTIONS else (
+                "Down" if row["action"] in actions.DOWN_ACTIONS else "Run")
+            label = self._row_label(row)
             if status == "passed":
                 text = f"🟢 <b>Verified good</b>: <code>{_s(label)} {direction.lower()}</code>. {_s(reason)}"
             else:
@@ -757,17 +844,17 @@ class CommandService:
     def reconcile_on_startup(self) -> list[dict]:
         """Before polling starts: an execution still running/verifying means core died
         mid-action. Mark it interrupted and say so; the consumed approval is not revived."""
+        try:
+            engine.startup_reconcile(self._store)
+        except Exception:
+            log.exception("Step reconciliation at startup failed")
         interrupted = self._store.interrupt_unfinished("core restarted")
         for r in interrupted:
-            target = r["target"]
-            if r["action"] == actions.RESTART_SERVICE:
-                text = (f"⏻ Restart of <code>{_s(target['stack'])}/{_s(target['service'])}</code> was "
-                        f"<b>interrupted</b>: Planet Express restarted mid-run, so its outcome is unknown. "
-                        f"Check <code>{_s(target['container'])}</code>, then propose it again if still needed.")
-            else:
-                summary = actions.action_summary(r["action"], target)
-                text = (f"⏻ <b>{_s(summary)}</b> was interrupted: Planet Express restarted mid-run, "
-                        "so its outcome is unknown. Check the stack state, then propose it again if needed.")
+            try:
+                text = self._interrupted_text(r)
+            except Exception:
+                log.exception(f"Could not describe interrupted execution {r['id']}")
+                text = f"⏻ Execution <code>{_s(r['id'])}</code> was interrupted: Planet Express restarted mid-run."
             try:
                 self._notifier.notify(text)
             except Exception:  # noqa: BLE001 -- reconciliation must not block core startup
@@ -778,6 +865,19 @@ class CommandService:
             except Exception:  # noqa: BLE001 -- reconciliation must not block core startup
                 log.warning(f"Failed to update card for interrupted execution {r['id']}")
         return interrupted
+
+
+    def _interrupted_text(self, r: dict) -> str:
+        target = r["target"]
+        if r["action"] == actions.RESTART_SERVICE and {"stack", "service", "container"} <= set(target):
+            text = (f"⏻ Restart of <code>{_s(target['stack'])}/{_s(target['service'])}</code> was "
+                    f"<b>interrupted</b>: Planet Express restarted mid-run, so its outcome is unknown. "
+                    f"Check <code>{_s(target['container'])}</code>, then propose it again if still needed.")
+        else:
+            summary = self._row_summary(r)
+            text = (f"⏻ <b>{_s(summary)}</b> was interrupted: Planet Express restarted mid-run, "
+                    "so its outcome is unknown. Check the stack state, then propose it again if needed.")
+        return text
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _card_text(self, row: dict, target, requested_by: str | None) -> str:
@@ -807,8 +907,7 @@ class CommandService:
             if outcome == "denied":
                 return f"❌ Restart of <code>{key}</code> denied by {_s(actor)}."
             return f"✅ Restart of <code>{key}</code> approved by {_s(actor)}. Restarting…"
-        target = json.loads(row["target_json"])
-        summary = _s(actions.action_summary(row["action"], target))
+        summary = _s(CommandService._row_summary(row))
         if outcome == "denied":
             return f"❌ {summary} denied by {_s(actor)}."
         return f"✅ {summary} approved by {_s(actor)}. Starting…"
@@ -817,7 +916,7 @@ class CommandService:
     def _policy_refusal_text(row: dict, reason: str) -> str:
         if row["action"] == actions.RESTART_SERVICE:
             return f"🚫 Restart of <code>{_s(row['target_key'])}</code> {_s(reason)}."
-        summary = actions.action_summary(row["action"], json.loads(row["target_json"]))
+        summary = CommandService._row_summary(row)
         return f"🚫 {_s(summary)} {_s(reason)}."
 
     @staticmethod

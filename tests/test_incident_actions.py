@@ -19,6 +19,7 @@ from planet_express.core.incidents import fingerprint, scan_id
 from planet_express.core.store import IncidentSourceError, Store
 from planet_express.execution import actions
 from state_models import MonitorSnapshot
+from tests.binding_fakes import FakeBinder
 
 
 def observation(condition="failing"):
@@ -151,6 +152,7 @@ class IncidentEnv:
             run_argv=lambda argv, timeout: self.argv.append(argv) or (0, "", ""),
             spawn=lambda fn, *args: fn(*args), restart_count=lambda container: 0,
             verify=lambda container, baseline: (True, "ok"), background=lambda fn: fn(),
+            binder=FakeBinder(),
         )
 
 

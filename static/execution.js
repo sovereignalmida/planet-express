@@ -3,7 +3,7 @@
   const root = document.getElementById("execution");
   const state = { busy: false, timer: null, execution: null };
   const get = id => document.getElementById(id);
-  const terminal = new Set(["passed", "failed", "interrupted"]);
+  const terminal = new Set(["passed", "failed", "interrupted", "aborted", "rolled_back", "rollback_failed"]);
 
   function node(tag, className, text) {
     const item = document.createElement(tag);
@@ -63,9 +63,27 @@
     return row;
   }
 
+  const STEP_KINDS = { pending: "pending", dispatched: "active", passed: "done", failed: "failed",
+    skipped: "pending", aborted: "pending" };
+
+  function renderStepRail(rail, steps) {
+    // Multi-step runbooks (slice 5b): one row per step, with its effect when it did not simply apply.
+    steps.forEach(step => {
+      const effect = step.effect && step.effect !== "applied" && step.status !== "passed"
+        ? " (" + step.effect.replace("_", " ") + ")" : "";
+      const detail = step.status === "dispatched" ? "in progress"
+        : (step.reason || step.status) + effect;
+      rail.append(railItem(step.label, STEP_KINDS[step.status] || "pending", detail));
+    });
+  }
+
   function renderRail(data) {
     const rail = get("execution-rail");
     rail.replaceChildren();
+    if (Array.isArray(data.steps) && data.steps.length > 1) {
+      renderStepRail(rail, data.steps);
+      return;
+    }
     const status = data.status;
     let restartKind = "active";
     let verifyKind = "pending";
@@ -75,7 +93,7 @@
     if (status === "failed") {
       // Stack runs report per stack; a compose command that exited non-zero failed before
       // verification for that stack (T37).
-      const preVerification = /^(target no longer valid|container changed since approval|restart command failed|failed to start|crashed:)/.test(data.reason || "")
+      const preVerification = /^(target no longer valid|container changed since approval|restart command failed|failed to start|crashed:|compose file (of \S+ )?changed since approval|container \S+ was recreated since approval|refused: its approved plan)/.test(data.reason || "")
         || /\(compose exited \d+/.test(data.reason || "");
       restartKind = preVerification ? "failed" : "done";
       verifyKind = preVerification ? "pending" : "failed";
@@ -123,6 +141,7 @@
       passed: ["ok", "VERIFIED GOOD", data.reason || "The service answered its verification checks."],
       failed: ["crit", "EXECUTION FAILED", data.reason || "The action did not pass verification."],
       interrupted: ["execution-interrupted", "WHAT WE KNOW", data.reason || "Contact ended before the host state could be confirmed."],
+      aborted: ["warn", "ABORTED", data.reason || "Stopped by the operator between steps."],
     };
     const treatment = treatments[status] || ["unknown", "UNKNOWN EXECUTION STATE", status];
     get("execution-verdict").className = "pe-verdict " + treatment[0];

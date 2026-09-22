@@ -1696,6 +1696,62 @@ tasks against `ACTION-SCREENS.md`.
     `20260922T140539Z-pre-t38` returned v4 with the rows exactly as captured (the VM's root-owned
     config needs `--skip-config`, as the tool says); re-migrating with the final code was clean and a
     further restart was a no-op.
+- [x] **T39 (P1, CC: ~1 session)** — engine/command service — ✅ done 2026-09-22 — 5b-1b part 1: the
+  runbook engine, and every typed action on it. Scope: `docs/handoff/T39-brief.md`. **Implemented by
+  the coordinator** (operator: "skip codex and do it yourself"); **merged, not deployed** — ships with
+  T40 as the 5b-1 deploy.
+  - `planet_express/execution/engine.py`: per step — abort check, re-resolve and **binding drift**
+    check (compose file sha, container name *and id*, stack set), typed reference substitution from
+    persisted outputs, `pre_state` → consume attempt → mark dispatched → argv (no shell) → effect from
+    host state → verifier → validated outputs → finish. First failure stops; later steps skipped and
+    their attempts released. Executors for the whole 5b-1 catalogue (`service.restart/start/stop`,
+    the five stack types with T37's exact behaviour and report text, `wait` (abortable),
+    `check.container`, `check.log_since_start`, `read.qbittorrent_session_port` (one line only),
+    `unit.action` (sudo allowlist or refused), `prune.safe` (fixed list as argv)). Startup
+    reconciliation: dispatched mutating steps → `unknown`, R0 → `not_applied`, pending → `skipped`,
+    reserved attempts settled.
+  - `planet_express/execution/binding.py` (`Binder`): proposal-time bindings and pre-step drift reads,
+    through the real runner (never an action's argv trail); `stack.up` outputs one container per
+    approved service or fails.
+  - `CommandService`: every propose / direct request / incident proposal builds, validates, hashes and
+    stores a one-step runbook with a server-side origin (`propose_runbook`,
+    `create_direct_runbook_execution`); `policy.decide_runbook` is an additional gate (identical
+    outcomes for one-step plans); `PendingPlanConflict` → "already awaiting approval"; approving
+    re-verifies the stored plan and durably refuses a missing/tampered one
+    (`approval.refused_no_plan`); execution runs the verified plan through the engine; `get_status`
+    carries `steps`; the default runner is now `run_argv_bounded` (256 KiB/stream). Dashboard: a
+    per-step rail for multi-step runs (single-step runs keep today's two-row rail); `aborted` is a
+    terminal state with its own treatment.
+  - **Deviations:** (1) T24 limits stay enforced at proposal time as today; the engine records the
+    per-step attempt ledger (reserve/consume/release) without refusing, because an execution-time
+    re-check would count the execution's own row — whole-runbook limit enforcement lands with planner
+    runbooks (5b-2). (2) The post-failure hook exists but is not wired to Amy: typed actions never
+    triggered an investigation, and wiring it now would add LLM spend to every failed restart; it is
+    wired when planner runbooks replace legacy plans (5b-2). (3) Test environments inject a
+    deterministic `FakeBinder` (`tests/binding_fakes.py`); no existing assertion changed.
+    (4) `resolve_target` is unchanged; the binder does its own `inspect` for the container id.
+  - **VM rehearsal found and fixed a startup crash:** an interrupted execution whose approval is not a
+    legacy action made `reconcile_on_startup` raise `KeyError` and core exit 1 (systemd restarted it).
+    Every stored-row summary/label now falls back to the plan title and never raises; each row is
+    described in its own try; regression test added.
+  - **Review:** the Codex gate was replaced, at the operator's instruction, by the coordinator's own
+    high-effort review (5 findings): the startup crash above; a verified `/up` whose container ids could
+    not be recorded was reported as a crash (now "up and verified, but …", effect applied); the default
+    runner was unbounded (now bounded); an engine crash orphaned step/attempt rows
+    (`settle_crashed_execution`); and — left for T40 — a drifted pending card answers "already awaiting
+    approval" but will be refused for drift when approved (safe; UX friction).
+  - **Verification:** 1,317 tests pass outside the socket sandbox; Ruff, `node --check`,
+    `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-22)** (`tests/homelab/t39-engine.py`, core stopped, real Docker):
+    a five-step `check → stop → wait 3 → start → check healthy` on `slow-start/app` passed with
+    `pre_state` running→stopped recorded and `StartedAt` moved; editing `healthy`'s compose file between
+    approval and execution refused the restart before any argv (`StartedAt` unchanged); an abort during
+    a 30s wait returned in 3.1s and the following restart never ran; `os._exit` right after step 1 was
+    dispatched → the next core start reconciled it (step 1 `failed/unknown`, the rest `skipped`,
+    attempts consumed/released) with 0 restarts after the crash fix. Through the running core: T37's
+    full `/up`/`/down` rehearsal passed unchanged (including real `stack.up` outputs), and a direct
+    restart of `healthy/web` passed ("healthy for 15s", effect applied, stored plan + origin
+    `dashboard-direct`). Journals clean.
 
 ## Reviewer Concerns
 

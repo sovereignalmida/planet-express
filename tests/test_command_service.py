@@ -19,6 +19,7 @@ from notifier import Decision, FakeNotifier
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import DEFAULT_TTL_SECONDS, Store
 from planet_express.execution import actions
+from tests.binding_fakes import FakeBinder
 
 RESTART = actions.RESTART_SERVICE
 TARGET = actions.Target("healthy", "web", "fixture-healthy")
@@ -57,7 +58,7 @@ class Env:
             self.store, self.notifier, self.state,
             run_argv=self._run_argv, resolve_target=self._resolve, verify=self._verify,
             restart_count=lambda container: 3, spawn=self._spawn, background=self._background,
-            clock=self.clock,
+            clock=self.clock, binder=FakeBinder(),
         )
 
     def _resolve(self, stack, service, for_mutation=True, timeout=actions.DOCKER_TIMEOUT_SECONDS):
@@ -955,3 +956,67 @@ def test_stack_verifier_crash_fails_and_releases_lock(env):
     status = env.service.get_status(result.execution_id)
     assert status["status"] == "failed" and "crashed" in status["reason"]
     assert env.state.mutation_owner is None
+
+
+# ── T39: every typed action is a stored, hashed one-step runbook run by the engine ─────────
+def test_proposal_stores_a_verified_plan_with_server_side_origin(env):
+    import json as _json
+
+    from planet_express.execution import runbook as runbooks
+    result = env.propose(via="incident", by="alice")
+    row = env.store.get_approval(result.approval_id)
+    plan = runbooks.load_stored_plan(row["plan_json"], row["plan_sha256"])
+    assert row["origin"] == "incident"
+    assert "origin" not in _json.loads(row["plan_json"])
+    assert [step.type for step in plan.steps] == ["service.restart"]
+    assert plan.steps[0].binding["container"] == "fixture-healthy"
+
+
+def test_tampered_plan_is_refused_and_nothing_runs(env):
+    approval_id = env.propose().approval_id
+    with env.store._write() as conn:
+        conn.execute("UPDATE approvals SET plan_json = replace(plan_json, 'healthy', 'unhealthy') "
+                     "WHERE id = ?", (approval_id,))
+    result = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    assert result.outcome == "refused" and "fingerprint" in result.message
+    assert env.store.get_approval(approval_id)["status"] == "denied"
+    assert env.argv_calls == [] and env.state.mutation_owner is None
+
+
+def test_drifted_pending_card_answers_already_awaiting(env):
+    first = env.propose()
+    env.service._binder.container_ids["fixture-healthy"] = "fedcba987654"  # recreated since
+    again = env.propose()
+    assert again.ok and not again.created and again.approval_id == first.approval_id
+    assert again.reason == "already awaiting approval"
+
+
+def test_status_carries_steps_and_a_recreated_container_is_refused(env):
+    approval_id = env.propose().approval_id
+    env.service._binder.container_ids["fixture-healthy"] = "fedcba987654"
+    result = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    status = env.service.get_status(result.execution_id)
+    assert status["status"] == "failed" and "recreated since approval" in status["reason"]
+    assert [(s["type"], s["status"], s["effect"], s["label"]) for s in status["steps"]] == [
+        ("service.restart", "failed", "not_applied", "Restart healthy/web")]
+    assert env.argv_calls == []
+
+
+def test_startup_and_status_survive_non_legacy_runbook_approvals(env):
+    # T39 VM rehearsal: an interrupted execution of an approval whose action is not a legacy typed
+    # action (planner runbooks from 5b-2; a rehearsal row) crashed core at startup with KeyError.
+    from planet_express.execution import runbook as runbooks
+    plan = runbooks.Runbook.model_validate({"title": "Resync VPN port forward", "artifacts": {},
+                                            "steps": [{"type": "wait", "params": {"seconds": 1},
+                                                       "binding": {}}]})
+    row, _ = env.store.propose_runbook(
+        action="runbook", target_key="vpn", target={"title": plan.title}, risk="R0",
+        requested_via="planner", plan_json=runbooks.canonical_json(plan),
+        plan_sha256=runbooks.plan_sha256(plan), origin="planner",
+    )
+    execution = env.store.approve_and_create_execution(row["id"], decided_by="x", arrived_at=env.clock())
+    assert env.service.get_status(execution["id"])["summary"] == "Resync VPN port forward"
+    fresh = CommandService(env.store, FakeNotifier(), fw.PipelineState(), clock=env.clock)
+    interrupted = fresh.reconcile_on_startup()
+    assert [r["id"] for r in interrupted] == [execution["id"]]
+    assert any("Resync VPN port forward" in n for n in fresh._notifier.notifications)

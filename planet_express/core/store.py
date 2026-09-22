@@ -1176,7 +1176,7 @@ class Store:
         now = self._clock()
         with self._write() as conn:
             rows = conn.execute(
-                "SELECT e.id, e.approval_id, a.action, a.target_json, a.message_id "
+                "SELECT e.id, e.approval_id, a.action, a.target_json, a.plan_json, a.message_id "
                 "FROM executions e JOIN approvals a ON a.id = e.approval_id "
                 "WHERE e.status IN ('running', 'verifying') ORDER BY e.started_at"
             ).fetchall()
@@ -1222,6 +1222,16 @@ class Store:
             value = item.pop(source)
             item[target] = json.loads(value) if value is not None else None
         return item
+
+    def unfinished_steps(self) -> list[dict]:
+        """Pending/dispatched steps of executions that are still running or verifying (startup)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.* FROM execution_steps s JOIN executions e ON e.id = s.execution_id "
+                "WHERE e.status IN ('running','verifying') AND s.status IN ('pending','dispatched') "
+                "ORDER BY s.execution_id, s.n"
+            ).fetchall()
+        return [self._step_row(row) for row in rows]
 
     def list_steps(self, execution_id: str) -> list[dict]:
         with self._connect() as conn:
