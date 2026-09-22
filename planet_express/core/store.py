@@ -30,12 +30,14 @@ from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
 AUTH_MAX_FAILURES = 3
 AUTH_LOCK_SECONDS = 900
 DEFAULT_TTL_SECONDS = 3600  # design v20: an approval card expires after 60 minutes
 
+# Kept as the v4 schema because databases at versions 0-3 are first brought to the
+# old idempotent baseline and then migrated through the explicit v4 -> v5 step.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS incident_reconciliations (
     scan_id TEXT PRIMARY KEY,
@@ -155,7 +157,96 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_kind_ts ON events (kind, ts);
 """
 
-TERMINAL_EXECUTION_STATUSES = ("passed", "failed", "interrupted")
+_EXECUTIONS_V5 = """
+CREATE TABLE executions (
+    id                  TEXT PRIMARY KEY,
+    approval_id         TEXT NOT NULL REFERENCES approvals (id),
+    kind                TEXT NOT NULL DEFAULT 'run' CHECK (kind IN ('run', 'rollback')),
+    parent_execution_id TEXT REFERENCES executions (id),
+    status              TEXT NOT NULL CHECK (status IN ('running', 'verifying', 'passed', 'failed',
+                        'interrupted', 'aborted', 'rolled_back', 'rollback_failed')),
+    started_at          REAL NOT NULL,
+    finished_at         REAL,
+    reason              TEXT,
+    abort_requested_at  REAL,
+    CHECK ((kind = 'run') = (parent_execution_id IS NULL))
+);
+CREATE UNIQUE INDEX executions_one_active_rollback ON executions (parent_execution_id)
+    WHERE kind = 'rollback' AND status IN ('running', 'verifying');
+"""
+
+_RUNBOOK_TABLES_V5 = """
+CREATE TABLE execution_steps (
+    execution_id   TEXT NOT NULL REFERENCES executions (id),
+    n              INTEGER NOT NULL CHECK (n >= 1),
+    type           TEXT NOT NULL,
+    params_json    TEXT NOT NULL,
+    binding_json   TEXT NOT NULL,
+    pre_state_json TEXT,
+    status         TEXT NOT NULL CHECK (status IN ('pending', 'dispatched', 'passed', 'failed',
+                   'skipped', 'aborted')),
+    effect         TEXT CHECK (effect IN ('applied', 'not_applied', 'unknown')),
+    output_json    TEXT,
+    reason         TEXT,
+    started_at     REAL,
+    finished_at    REAL,
+    PRIMARY KEY (execution_id, n)
+);
+
+CREATE TABLE attempts (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT NOT NULL REFERENCES executions (id),
+    step_n       INTEGER NOT NULL,
+    step_type    TEXT NOT NULL,
+    target_key   TEXT NOT NULL,
+    state        TEXT NOT NULL CHECK (state IN ('reserved', 'consumed', 'released')),
+    reserved_at  REAL NOT NULL,
+    settled_at   REAL,
+    UNIQUE (execution_id, step_n)
+);
+CREATE INDEX attempts_pair_time ON attempts (step_type, target_key, reserved_at);
+
+CREATE TABLE rollback_candidates (
+    execution_id    TEXT NOT NULL REFERENCES executions (id),
+    step_n          INTEGER NOT NULL,
+    stack           TEXT NOT NULL,
+    service         TEXT NOT NULL,
+    image_reference TEXT NOT NULL,
+    old_image_id    TEXT NOT NULL,
+    created_at      REAL NOT NULL,
+    expires_at      REAL NOT NULL,
+    closed_at       REAL,
+    PRIMARY KEY (execution_id, step_n)
+);
+"""
+
+_SCHEMA_V5 = (
+    _SCHEMA.replace(
+        "    message_id    INTEGER\n);",
+        "    message_id    INTEGER,\n"
+        "    plan_json     TEXT,\n"
+        "    plan_sha256   TEXT,\n"
+        "    origin        TEXT\n);",
+    ).replace(
+        "CREATE TABLE IF NOT EXISTS executions (\n"
+        "    id          TEXT PRIMARY KEY,\n"
+        "    approval_id TEXT NOT NULL REFERENCES approvals (id),\n"
+        "    status      TEXT NOT NULL\n"
+        "                CHECK (status IN ('running', 'verifying', 'passed', 'failed', 'interrupted')),\n"
+        "    started_at  REAL NOT NULL,\n"
+        "    finished_at REAL,\n"
+        "    reason      TEXT\n"
+        ");",
+        _EXECUTIONS_V5.replace("CREATE TABLE executions", "CREATE TABLE IF NOT EXISTS executions")
+        .replace("CREATE UNIQUE INDEX executions_one_active_rollback", "CREATE UNIQUE INDEX IF NOT EXISTS executions_one_active_rollback"),
+    )
+    + _RUNBOOK_TABLES_V5.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
+    .replace("CREATE INDEX attempts_pair_time", "CREATE INDEX IF NOT EXISTS attempts_pair_time")
+)
+
+TERMINAL_EXECUTION_STATUSES = (
+    "passed", "failed", "interrupted", "aborted", "rolled_back", "rollback_failed",
+)
 _EXECUTION_STATUSES = ("running", "verifying", *TERMINAL_EXECUTION_STATUSES)
 
 
@@ -163,6 +254,26 @@ def _new_id() -> str:
     # 12 hex chars: short enough for Telegram callback_data ("act_ok:<id>" is 19 bytes of
     # a 64-byte limit), random enough that ids never collide in practice.
     return secrets.token_hex(6)
+
+
+def _execute_ddl(conn: sqlite3.Connection, script: str) -> None:
+    """Execute this module's simple semicolon-delimited DDL without executescript.
+
+    sqlite3.executescript() commits an already-open transaction, so the migration
+    must issue each statement itself to remain one atomic BEGIN IMMEDIATE.
+    """
+    for statement in script.split(";"):
+        if statement.strip():
+            conn.execute(statement)
+
+
+class PendingPlanConflict(RuntimeError):
+    """A pending approval for this (action, target) carries a different approved plan (its target
+    drifted since it was proposed). Callers refuse with 'already pending' instead of crashing."""
+
+    def __init__(self, approval_id: str):
+        super().__init__(f"a different request is already pending for this target ({approval_id})")
+        self.approval_id = approval_id
 
 
 class SchemaTooNewError(RuntimeError):
@@ -211,7 +322,7 @@ class Store:
                 "scripts/state_snapshot.py or upgrade the code."
             )
 
-    def init(self) -> None:
+    def init(self) -> dict[str, list[dict]]:
         # A read-only preflight also avoids checkpointing an existing WAL on refusal.
         if self.path.exists():
             with closing(sqlite3.connect(self.path.absolute().as_uri() + "?mode=ro", uri=True)) as conn:
@@ -220,16 +331,145 @@ class Store:
         self.path.parent.chmod(0o700)
         with self._connect() as conn:
             self._check_schema_version(conn)
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            tables = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchone()[0]
+            if not tables:
+                self._create_fresh_v5(conn)
+                cutover = {"expired_approvals": [], "interrupted_executions": []}
+            else:
+                if version < 4:
+                    self._create_v4_baseline(conn)
+                    version = conn.execute("PRAGMA user_version").fetchone()[0]
+                cutover = self._migrate_4_to_5(conn) if version == 4 else {
+                    "expired_approvals": [], "interrupted_executions": [],
+                }
+                if cutover.pop("already", False):
+                    version = SCHEMA_VERSION
+                if version == 5:
+                    # Preserve the old idempotent repair behaviour for a v5 database.
+                    conn.executescript(f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\nCOMMIT;")
             conn.execute("PRAGMA journal_mode = WAL")
-            try:
-                conn.executescript(
-                    f"BEGIN IMMEDIATE;\n{_SCHEMA}\n"
-                    f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+        return cutover
+
+    @staticmethod
+    def _create_v4_baseline(conn: sqlite3.Connection) -> None:
+        """Bring a pre-v4 database to the v4 baseline. Re-reads the version under the write lock and
+        never stamps it down: a concurrent initializer may already have migrated to v5 (Codex
+        review, T38)."""
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("PRAGMA user_version").fetchone()[0] >= 4:
+                conn.execute("ROLLBACK")
+                return
+            _execute_ddl(conn, _SCHEMA)
+            conn.execute("PRAGMA user_version = 4")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+    @staticmethod
+    def _create_fresh_v5(conn: sqlite3.Connection) -> None:
+        try:
+            conn.executescript(
+                f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n"
+                f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
+            )
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+    def _migrate_4_to_5(self, conn: sqlite3.Connection) -> dict[str, list[dict]]:
+        """Transactional v4 -> v5 rebuild and live-row cutover."""
+        conn.execute("PRAGMA foreign_keys = OFF")
+        now = self._clock()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            # Re-read under the write lock: another process may have migrated between our first
+            # read and acquiring it; it must then take the idempotent v5 path (Codex review, T38).
+            if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+                conn.execute("ROLLBACK")
+                return {"expired_approvals": [], "interrupted_executions": [], "already": True}
+            interrupted_rows = conn.execute(
+                "SELECT e.id, e.approval_id, a.action, a.target_json, a.message_id "
+                "FROM executions e JOIN approvals a ON a.id=e.approval_id "
+                "WHERE e.status IN ('running','verifying') ORDER BY e.started_at, e.id"
+            ).fetchall()
+            expired_rows = conn.execute(
+                "SELECT id, action, target_json, message_id FROM approvals "
+                "WHERE status='pending' ORDER BY created_at, id"
+            ).fetchall()
+
+            interruption_reason = "interrupted by the v5 upgrade"
+            expiry_reason = "superseded by the v5 upgrade; propose it again"
+            for row in interrupted_rows:
+                conn.execute(
+                    "UPDATE executions SET status='interrupted', reason=?, finished_at=? WHERE id=?",
+                    (interruption_reason, now, row["id"]),
                 )
-            except BaseException:
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-                raise
+                self._event(
+                    conn, "execution.interrupted", approval_id=row["approval_id"],
+                    execution_id=row["id"], reason=interruption_reason,
+                )
+            for row in expired_rows:
+                conn.execute(
+                    "UPDATE approvals SET status='expired' WHERE id=?",
+                    (row["id"],),
+                )
+                self._event(conn, "approval.expired", approval_id=row["id"], reason=expiry_reason)
+
+            execution_table_ddl, execution_index_ddl = _EXECUTIONS_V5.split(
+                "CREATE UNIQUE INDEX", 1
+            )
+            conn.execute(
+                execution_table_ddl.replace("executions (", "executions_new (", 1).strip()
+            )
+            conn.execute(
+                "INSERT INTO executions_new "
+                "(id, approval_id, kind, parent_execution_id, status, started_at, finished_at, reason) "
+                "SELECT id, approval_id, 'run', NULL, status, started_at, finished_at, reason "
+                "FROM executions"
+            )
+            old_count = conn.execute("SELECT COUNT(*) FROM executions").fetchone()[0]
+            new_count = conn.execute("SELECT COUNT(*) FROM executions_new").fetchone()[0]
+            if old_count != new_count:
+                raise RuntimeError("v5 migration execution copy count mismatch")
+            conn.execute("DROP TABLE executions")
+            conn.execute("ALTER TABLE executions_new RENAME TO executions")
+            conn.execute(("CREATE UNIQUE INDEX" + execution_index_ddl).strip())
+
+            conn.execute("ALTER TABLE approvals ADD COLUMN plan_json TEXT")
+            conn.execute("ALTER TABLE approvals ADD COLUMN plan_sha256 TEXT")
+            conn.execute("ALTER TABLE approvals ADD COLUMN origin TEXT")
+            _execute_ddl(conn, _RUNBOOK_TABLES_V5)
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError(f"foreign key check failed: {len(violations)} row(s)")
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+
+        return {
+            "expired_approvals": [
+                dict(row) | {"target": json.loads(row["target_json"]), "reason": expiry_reason}
+                for row in expired_rows
+            ],
+            "interrupted_executions": [
+                dict(row) | {
+                    "target": json.loads(row["target_json"]), "reason": interruption_reason,
+                }
+                for row in interrupted_rows
+            ],
+        }
 
     # ── events ──────────────────────────────────────────────────────────────
     def _event(
@@ -581,6 +821,9 @@ class Store:
         incident_id: str | None = None,
         incident_scan_id: str | None = None,
         timeout: float = 5,
+        plan_json: str | None = None,
+        plan_sha256: str | None = None,
+        origin: str | None = None,
     ) -> tuple[dict, bool]:
         """Return (approval row, created). A live proposal for the same (action, target)
         is returned as-is instead of creating a second one. Lazy expiry, lookup and
@@ -612,6 +855,15 @@ class Store:
                 (action, target_key),
             ).fetchone()
             if row is not None:
+                if (
+                    (plan_json is None) != (row["plan_json"] is None)
+                    or plan_json is not None and (
+                        row["plan_json"] != plan_json
+                        or row["plan_sha256"] != plan_sha256
+                        or row["origin"] != origin
+                    )
+                ):
+                    raise PendingPlanConflict(row["id"])
                 if incident_id is not None:
                     linked = conn.execute(
                         "SELECT incident_id, scan_id FROM incident_proposals WHERE approval_id=?",
@@ -627,10 +879,11 @@ class Store:
             approval_id = _new_id()
             conn.execute(
                 "INSERT INTO approvals (id, action, target_key, target_json, risk, status, "
-                "requested_via, requested_by, created_at, expires_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+                "requested_via, requested_by, created_at, expires_at, plan_json, plan_sha256, origin) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
                 (approval_id, action, target_key, json.dumps(target, sort_keys=True), risk,
-                 requested_via, requested_by, now, now + ttl_seconds),
+                 requested_via, requested_by, now, now + ttl_seconds,
+                 plan_json, plan_sha256, origin),
             )
             self._event(conn, "proposal.created", approval_id=approval_id, action=action,
                         target=target, risk=risk, requested_via=requested_via,
@@ -642,6 +895,22 @@ class Store:
                 )
             created = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
             return dict(created), True
+
+    def propose_runbook(
+        self, *, action: str, target_key: str, target: dict, risk: str,
+        requested_via: str, plan_json: str, plan_sha256: str, origin: str,
+        requested_by: str | None = None, ttl_seconds: float = DEFAULT_TTL_SECONDS,
+        incident_id: str | None = None, incident_scan_id: str | None = None,
+        timeout: float = 5,
+    ) -> tuple[dict, bool]:
+        if not all(isinstance(value, str) and value for value in (plan_json, plan_sha256, origin)):
+            raise ValueError("runbook plan, hash and origin are required")
+        return self.propose(
+            action=action, target_key=target_key, target=target, risk=risk,
+            requested_via=requested_via, requested_by=requested_by, ttl_seconds=ttl_seconds,
+            incident_id=incident_id, incident_scan_id=incident_scan_id, timeout=timeout,
+            plan_json=plan_json, plan_sha256=plan_sha256, origin=origin,
+        )
 
     def refuse_stale_incident_approval(
         self, approval_id: str, *, attempted_by: str, arrived_at: float, reason: str
@@ -776,6 +1045,8 @@ class Store:
         self, *, action: str, target_key: str, target: dict, risk: str,
         operator: str, arrived_at: float, origin: str = "dashboard-direct",
         deadline: float | None = None,
+        plan_json: str | None = None, plan_sha256: str | None = None,
+        runbook_origin: str | None = None,
     ) -> dict | None:
         """Record an operator confirmation and its execution in one transaction.
 
@@ -800,6 +1071,15 @@ class Store:
             adopted = (
                 pending is not None and pending["incident_approval_id"] is None
                 and json.loads(pending["target_json"]) == target
+                and (
+                    plan_json is None and pending["plan_json"] is None
+                    or plan_json is not None and (
+                        # Same approved plan is what matters; the origin necessarily differs
+                        # (a telegram card adopted by a *-direct request) (Codex review, T38).
+                        pending["plan_json"] == plan_json
+                        and pending["plan_sha256"] == plan_sha256
+                    )
+                )
             )
             if adopted:
                 approval_id = pending["id"]
@@ -811,10 +1091,12 @@ class Store:
                 approval_id = _new_id()
                 conn.execute(
                     "INSERT INTO approvals (id, action, target_key, target_json, risk, status, "
-                    "requested_via, requested_by, created_at, expires_at, decided_by, decided_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?)",
+                    "requested_via, requested_by, created_at, expires_at, decided_by, decided_at, "
+                    "plan_json, plan_sha256, origin) "
+                    "VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (approval_id, action, target_key, json.dumps(target, sort_keys=True), risk,
-                     origin, operator, now, now, operator, now),
+                     origin, operator, now, now, operator, now,
+                     plan_json, plan_sha256, runbook_origin),
                 )
                 self._event(conn, "proposal.created", approval_id=approval_id, action=action,
                             target=target, risk=risk, requested_via=origin, requested_by=operator)
@@ -828,6 +1110,19 @@ class Store:
             approval = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
             execution = conn.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
         return {"approval": dict(approval), "execution": dict(execution), "adopted": adopted}
+
+    def create_direct_runbook_execution(
+        self, *, action: str, target_key: str, target: dict, risk: str,
+        operator: str, arrived_at: float, plan_json: str, plan_sha256: str,
+        origin: str, deadline: float | None = None,
+    ) -> dict | None:
+        if not all(isinstance(value, str) and value for value in (plan_json, plan_sha256, origin)):
+            raise ValueError("runbook plan, hash and origin are required")
+        return self.create_direct_execution(
+            action=action, target_key=target_key, target=target, risk=risk,
+            operator=operator, arrived_at=arrived_at, origin=origin, deadline=deadline,
+            plan_json=plan_json, plan_sha256=plan_sha256, runbook_origin=origin,
+        )
 
     # ── executions ──────────────────────────────────────────────────────────
     def recent_attempts(
@@ -893,6 +1188,234 @@ class Store:
                 self._event(conn, "execution.interrupted", approval_id=r["approval_id"],
                             execution_id=r["id"], reason=reason)
         return [dict(r) | {"target": json.loads(r["target_json"]), "reason": reason} for r in rows]
+
+    # ── runbook execution state (schema v5; engine lands in T39) ───────────
+    def create_steps(self, execution_id: str, steps) -> None:
+        rows = []
+        for n, step in enumerate(steps, start=1):
+            if hasattr(step, "model_dump"):
+                step = step.model_dump(mode="json")
+            if not isinstance(step, dict) or set(step) != {"type", "params", "binding"}:
+                raise ValueError("invalid execution step")
+            rows.append((
+                execution_id, n, step["type"],
+                json.dumps(step["params"], sort_keys=True, separators=(",", ":")),
+                json.dumps(step["binding"], sort_keys=True, separators=(",", ":")),
+            ))
+        with self._write() as conn:
+            conn.executemany(
+                "INSERT INTO execution_steps "
+                "(execution_id,n,type,params_json,binding_json,status) "
+                "VALUES (?,?,?,?,?,'pending')",
+                rows,
+            )
+
+    @staticmethod
+    def _step_row(row) -> dict | None:
+        if row is None:
+            return None
+        item = dict(row)
+        for source, target in (
+            ("params_json", "params"), ("binding_json", "binding"),
+            ("pre_state_json", "pre_state"), ("output_json", "output"),
+        ):
+            value = item.pop(source)
+            item[target] = json.loads(value) if value is not None else None
+        return item
+
+    def list_steps(self, execution_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM execution_steps WHERE execution_id=? ORDER BY n", (execution_id,)
+            ).fetchall()
+        return [self._step_row(row) for row in rows]
+
+    def set_step_pre_state(self, execution_id: str, n: int, pre_state) -> None:
+        encoded = json.dumps(pre_state, sort_keys=True, separators=(",", ":"))
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE execution_steps SET pre_state_json=? "
+                "WHERE execution_id=? AND n=? AND status='pending' AND pre_state_json IS NULL",
+                (encoded, execution_id, n),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("step is not pending or pre-state is already set")
+
+    def mark_step_dispatched(self, execution_id: str, n: int) -> None:
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE execution_steps SET status='dispatched', started_at=? "
+                "WHERE execution_id=? AND n=? AND status='pending'",
+                (self._clock(), execution_id, n),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("step cannot transition to dispatched")
+
+    def finish_step(
+        self, execution_id: str, n: int, *, status: str, effect: str | None = None,
+        output=None, reason: str | None = None,
+    ) -> None:
+        if status not in {"passed", "failed", "skipped", "aborted"}:
+            raise ValueError("invalid terminal step status")
+        if effect not in {None, "applied", "not_applied", "unknown"}:
+            raise ValueError("invalid step effect")
+        # A step refused before dispatch (binding drift, bad reference) is `failed` straight from
+        # `pending`, and by construction changed nothing (own review, T38).
+        if status == "failed" and effect == "not_applied":
+            allowed_from = ("dispatched", "pending")
+        else:
+            allowed_from = {"passed": ("dispatched",), "failed": ("dispatched",),
+                            "skipped": ("pending",), "aborted": ("pending",)}[status]
+        encoded = None if output is None else json.dumps(
+            output, sort_keys=True, separators=(",", ":")
+        )
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE execution_steps SET status=?, effect=?, output_json=?, reason=?, "
+                "finished_at=? WHERE execution_id=? AND n=? AND status IN "
+                f"({','.join('?' for _ in allowed_from)})",
+                (status, effect, encoded, reason, self._clock(), execution_id, n, *allowed_from),
+            ).rowcount
+            if changed != 1:
+                raise ValueError(f"step cannot transition from its current state to {status}")
+
+    def _normalize_attempt_pairs(self, conn, execution_id: str, pairs) -> list[tuple[int, str, str]]:
+        supplied = list(pairs)
+        if all(isinstance(pair, (tuple, list)) and len(pair) == 3 for pair in supplied):
+            stored = {
+                row["n"]: row["type"] for row in conn.execute(
+                    "SELECT n,type FROM execution_steps WHERE execution_id=?", (execution_id,)
+                )
+            }
+            result = []
+            for n, step_type, target in supplied:
+                # Explicit step numbers must name a stored step of that type (Codex review, T38).
+                if type(n) is not int or stored.get(n) != step_type:
+                    raise ValueError(f"attempt ({n}, {step_type!r}) does not match a stored step")
+                result.append((n, str(step_type), str(target)))
+            return result
+        if not all(isinstance(pair, (tuple, list)) and len(pair) == 2 for pair in supplied):
+            raise ValueError("attempt pairs must contain (type,target) or (n,type,target)")
+        steps = conn.execute(
+            "SELECT n,type FROM execution_steps WHERE execution_id=? ORDER BY n", (execution_id,)
+        ).fetchall()
+        result = []
+        position = 0
+        for step_type, target in supplied:
+            while position < len(steps) and steps[position]["type"] != step_type:
+                position += 1
+            if position >= len(steps):
+                # Never guess a step number: a wrong one breaks consume_attempt later or collides on
+                # UNIQUE(execution_id, step_n) (own review, T38). Create the steps first.
+                raise ValueError(f"no stored step of type {step_type!r} for this attempt pair")
+            n = steps[position]["n"]
+            position += 1
+            result.append((n, str(step_type), str(target)))
+        return result
+
+    def reserve_runbook_attempts(
+        self, execution_id: str, pairs, *, window_start: float, cooldown_start: float,
+        max_per_day: int, now: float,
+    ) -> str | None:
+        """Reserve the full runbook multiplicity atomically, or insert nothing."""
+        if type(max_per_day) is not int or max_per_day < 1:
+            raise ValueError("max_per_day must be positive")
+        with self._write() as conn:
+            normalized = self._normalize_attempt_pairs(conn, execution_id, pairs)
+            multiplicity: dict[tuple[str, str], int] = {}
+            for _n, step_type, target in normalized:
+                multiplicity[(step_type, target)] = multiplicity.get((step_type, target), 0) + 1
+            for (step_type, target), requested in multiplicity.items():
+                recent = conn.execute(
+                    "SELECT reserved_at FROM attempts WHERE step_type=? AND target_key=? "
+                    "AND state IN ('reserved','consumed') AND reserved_at>=?",
+                    (step_type, target, min(window_start, cooldown_start)),
+                ).fetchall()
+                cooldown = [row[0] for row in recent if row[0] > cooldown_start]
+                if cooldown:
+                    minutes = int((now - max(cooldown)) // 60)
+                    return f"cooling down: last attempt {minutes}m ago"
+                daily = sum(row[0] >= window_start for row in recent)
+                if daily + requested > max_per_day:
+                    return (
+                        f"attempt cap reached: {daily} in 24h plus {requested} requested "
+                        f"(max {max_per_day})"
+                    )
+            conn.executemany(
+                "INSERT INTO attempts "
+                "(execution_id,step_n,step_type,target_key,state,reserved_at) "
+                "VALUES (?,?,?,?,'reserved',?)",
+                [(execution_id, n, step_type, target, now)
+                 for n, step_type, target in normalized],
+            )
+        return None
+
+    def consume_attempt(self, execution_id: str, step_n: int) -> None:
+        with self._write() as conn:
+            changed = conn.execute(
+                "UPDATE attempts SET state='consumed', settled_at=? "
+                "WHERE execution_id=? AND step_n=? AND state='reserved'",
+                (self._clock(), execution_id, step_n),
+            ).rowcount
+            if changed != 1:
+                raise ValueError("attempt is not reserved")
+
+    def release_attempts(self, execution_id: str, step_ns) -> int:
+        step_ns = list(step_ns)
+        if not step_ns:
+            return 0
+        placeholders = ",".join("?" for _ in step_ns)
+        with self._write() as conn:
+            changed = conn.execute(
+                f"UPDATE attempts SET state='released', settled_at=? WHERE execution_id=? "
+                f"AND step_n IN ({placeholders}) AND state='reserved'",
+                (self._clock(), execution_id, *step_ns),
+            ).rowcount
+        return changed
+
+    def reconcile_reserved_attempts(self) -> dict[str, int]:
+        now = self._clock()
+        with self._write() as conn:
+            consumed = conn.execute(
+                "UPDATE attempts SET state='consumed', settled_at=? WHERE state='reserved' AND "
+                "EXISTS (SELECT 1 FROM execution_steps s WHERE s.execution_id=attempts.execution_id "
+                "AND s.n=attempts.step_n AND (s.status='dispatched' OR s.effect='unknown'))",
+                (now,),
+            ).rowcount
+            released = conn.execute(
+                "UPDATE attempts SET state='released', settled_at=? WHERE state='reserved'",
+                (now,),
+            ).rowcount
+        return {"consumed": consumed, "released": released}
+
+    def open_rollback_candidate(
+        self, execution_id: str, step_n: int, *, stack: str, service: str,
+        image_reference: str, old_image_id: str, expires_at: float,
+    ) -> None:
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO rollback_candidates "
+                "(execution_id,step_n,stack,service,image_reference,old_image_id,created_at,expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (execution_id, step_n, stack, service, image_reference, old_image_id,
+                 self._clock(), expires_at),
+            )
+
+    def close_rollback_candidate(self, execution_id: str, step_n: int) -> bool:
+        with self._write() as conn:
+            return conn.execute(
+                "UPDATE rollback_candidates SET closed_at=? "
+                "WHERE execution_id=? AND step_n=? AND closed_at IS NULL",
+                (self._clock(), execution_id, step_n),
+            ).rowcount == 1
+
+    def any_open_rollback_candidate(self, now: float) -> bool:
+        # Deliberately do not catch sqlite/read errors: prune callers must fail closed.
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM rollback_candidates WHERE closed_at IS NULL AND expires_at>? LIMIT 1",
+                (now,),
+            ).fetchone() is not None
 
     # ── dashboard authentication ────────────────────────────────────────────
     #   3 failures for an operator or an IP within 15 min ──► lock that key until

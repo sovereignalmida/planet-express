@@ -50,16 +50,17 @@ def current_incident(store, monitor_path, timestamp="2026-09-18T12:00:00Z"):
 
 
 def test_schema_three_upgrade_adds_incident_proposals_without_losing_rows(tmp_path):
+    from planet_express.core.store import _SCHEMA
+
     path = tmp_path / "core.db"
-    store = Store(path)
-    store.init()
-    store.record_event("before-upgrade")
     with sqlite3.connect(path) as conn:
+        conn.executescript(_SCHEMA)
+        conn.execute("INSERT INTO events (ts, kind, payload) VALUES (1, 'before-upgrade', '{}')")
         conn.execute("DROP TABLE incident_proposals")
         conn.execute("PRAGMA user_version = 3")
     Store(path).init()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='incident_proposals'"
         ).fetchone()

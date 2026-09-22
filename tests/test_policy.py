@@ -112,3 +112,68 @@ def test_limit_lookback_covers_the_longer_of_cooldown_and_a_day():
 
     assert policy.limit_lookback_seconds(autonomy=AutonomyConfig()) == 86400
     assert policy.limit_lookback_seconds(autonomy=AutonomyConfig(cooldown_seconds=48 * 3600)) == 48 * 3600
+
+
+def _runbook(step_type="service.restart"):
+    from planet_express.execution.runbook import Runbook
+
+    if step_type == "prune.safe":
+        step = {"type": step_type, "params": {}, "binding": {}}
+    else:
+        step = {
+            "type": step_type,
+            "params": {"stack": "media", "service": "sonarr"},
+            "binding": {
+                "compose_path": "/stacks/media/docker-compose.yml",
+                "compose_sha256": "a" * 64,
+                "project": "media",
+                "service": "sonarr",
+                "container": "sonarr",
+                "container_id": "0123456789ab",
+            },
+        }
+    return Runbook.model_validate({"title": "test", "steps": [step], "artifacts": {}})
+
+
+def test_runbook_policy_accepts_every_declared_origin():
+    for origin in policy.RUNBOOK_ORIGINS:
+        runbook = _runbook()
+        decision = policy.decide_runbook(runbook, origin)
+        if origin in policy.DIRECT_RUNBOOK_ORIGINS:
+            assert decision.allowed and not decision.needs_approval and not decision.automatic
+        else:
+            assert decision.allowed
+
+
+def test_runbook_policy_automatic_exception_is_exact():
+    automatic = policy.decide_runbook(_runbook("prune.safe"), "system")
+    assert automatic.allowed and automatic.automatic and not automatic.needs_approval
+    planner = policy.decide_runbook(_runbook("prune.safe"), "planner")
+    assert planner.allowed and planner.needs_approval and not planner.automatic
+    zoidberg = policy.decide_runbook(_runbook("prune.safe"), "zoidberg")
+    assert zoidberg.allowed and zoidberg.needs_approval and not zoidberg.automatic
+
+
+def test_runbook_policy_forbidden_risk_and_unknown_origin():
+    from config_schema import AutonomyConfig
+
+    forbidden = policy.decide_runbook(
+        _runbook("service.restart"), "planner",
+        autonomy=AutonomyConfig(forbidden_risks=["R1", "R4"], direct_request_risks=[]),
+    )
+    assert not forbidden.allowed and forbidden.risk == "R1"
+    unknown = policy.decide_runbook(_runbook(), "model-supplied")
+    assert not unknown.allowed and "unknown origin" in unknown.reason
+
+
+def test_runbook_policy_refuses_unknown_registry_risk(monkeypatch):
+    from planet_express.execution import runbook as module
+
+    original = module.STEP_TYPES["service.restart"]
+    monkeypatch.setitem(module.STEP_TYPES, "service.restart", original.__class__(
+        original.params_model, original.binding_model, "R9", original.rollback,
+        original.outputs, original.reference_fields, original.target,
+    ))
+    decision = policy.decide_runbook(_runbook(), "planner")
+    assert not decision.allowed and decision.risk == "R9"
+    assert "unknown risk class" in decision.reason

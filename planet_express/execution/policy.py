@@ -10,10 +10,15 @@ from dataclasses import dataclass
 
 import config
 from config_schema import AutonomyConfig
-from planet_express.execution import actions
+from planet_express.execution import actions, runbook as runbooks
 
 RISK_LEVELS = ("R0", "R1", "R2", "R3", "R4")
 OPERATOR_ORIGINS = frozenset({"telegram", "telegram-direct", "dashboard", "dashboard-direct"})
+RUNBOOK_ORIGINS = frozenset({
+    "telegram", "telegram-direct", "dashboard", "dashboard-direct", "incident", "chat",
+    "planner", "zoidberg", "system", "install", "amy",
+})
+DIRECT_RUNBOOK_ORIGINS = frozenset({"telegram-direct", "dashboard-direct"})
 
 
 @dataclass(frozen=True)
@@ -22,6 +27,16 @@ class PolicyDecision:
     needs_approval: bool
     risk: str | None
     reason: str
+
+
+@dataclass(frozen=True)
+class RunbookDecision:
+    allowed: bool
+    needs_approval: bool
+    automatic: bool
+    risk: str | None
+    reason: str
+    pairs: list[tuple[str, str]]
 
 
 def decide(
@@ -50,6 +65,59 @@ def decide(
 def allows_direct_request(risk: str, *, autonomy: AutonomyConfig | None = None) -> bool:
     autonomy = config.AUTONOMY if autonomy is None else autonomy
     return risk in autonomy.direct_request_risks
+
+
+def decide_runbook(
+    runbook: runbooks.Runbook, origin: str, *, autonomy: AutonomyConfig | None = None,
+) -> RunbookDecision:
+    """Apply the existing risk policy to a fully validated multi-step runbook."""
+    autonomy = config.AUTONOMY if autonomy is None else autonomy
+    if origin not in RUNBOOK_ORIGINS:
+        return RunbookDecision(False, False, False, None, f"unknown origin {origin!r}", [])
+    unknown = [step.type for step in runbook.steps if step.type not in runbooks.STEP_TYPES]
+    if unknown:
+        return RunbookDecision(
+            False, False, False, None, f"unknown step type {unknown[0]!r}", [],
+        )
+    step_risks = [runbooks.STEP_TYPES[step.type].risk for step in runbook.steps]
+    pairs = runbooks.mutating_pairs(runbook)
+    unknown_risks = [value for value in step_risks if value not in RISK_LEVELS]
+    if unknown_risks:
+        return RunbookDecision(
+            False, False, False, unknown_risks[0],
+            f"unknown risk class {unknown_risks[0]!r}", pairs,
+        )
+    computed_risk = runbooks.risk(runbook)
+    if computed_risk in autonomy.forbidden_risks:
+        return RunbookDecision(
+            False, False, False, computed_risk,
+            f"runbook is {computed_risk}: never allowed", pairs,
+        )
+    if origin in DIRECT_RUNBOOK_ORIGINS:
+        if not allows_direct_request(computed_risk, autonomy=autonomy):
+            return RunbookDecision(
+                False, False, False, computed_risk,
+                f"{computed_risk}: not directly requestable", pairs,
+            )
+        return RunbookDecision(
+            True, False, False, computed_risk, f"{computed_risk}: direct operator request", pairs,
+        )
+    automatic = (
+        origin == "system" and all(step.type == "prune.safe" for step in runbook.steps)
+    ) or (
+        origin == "zoidberg" and all(step.type == "update.canary" for step in runbook.steps)
+    )
+    if automatic:
+        return RunbookDecision(
+            True, False, True, computed_risk, f"{computed_risk}: approved automatic exception", pairs,
+        )
+    if computed_risk == "R0":
+        return RunbookDecision(
+            True, False, True, computed_risk, "R0: runs automatically", pairs,
+        )
+    return RunbookDecision(
+        True, True, False, computed_risk, f"{computed_risk}: needs approval", pairs,
+    )
 
 
 DAY_SECONDS = 86400

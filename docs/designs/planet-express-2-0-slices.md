@@ -1651,6 +1651,52 @@ tasks against `ACTION-SCREENS.md`.
     the running registry carries the five stack actions at D33's risks. Live ingress stacks under the
     rule: `network` and `traefikman`. No stack action exercised live yet.
 
+### Slice 5b multi-step execution (design: `docs/designs/slice-5b-multistep-execution.md`)
+
+- [x] **T38 (P1, CC: ~1 session)** — store/policy — ✅ done 2026-09-22 — 5b-1a: schema v5, the runbook
+  model and runbook policy. Scope: `docs/handoff/T38-brief.md`. **Merged, not deployed** — ships with
+  T39/T40 as one 5b-1 deploy.
+  - **Migration:** `Store.init()` now migrates explicitly by version: fresh → full v5; pre-v4 → the v4
+    baseline (re-read under the write lock, never stamping a migrated database back down) → v4→v5;
+    v4→v5 is one `BEGIN IMMEDIATE` (SQLite table rebuild with foreign keys off): cutover of live rows
+    (running/verifying → `interrupted` "interrupted by the v5 upgrade", pending → `expired` "superseded
+    by the v5 upgrade; propose it again", events for each), `executions` rebuilt with `kind`,
+    `parent_execution_id`, `abort_requested_at` and the new terminal statuses, `approvals` gains
+    `plan_json`/`plan_sha256`/`origin`, new `execution_steps`/`attempts`/`rollback_candidates`,
+    `foreign_key_check` must be empty, then `user_version = 5`. The version is re-read after taking
+    the lock, so a concurrent initializer takes the idempotent path. Core startup edits the cutover
+    cards in the background.
+  - **Store APIs** for T39: step state machine (a never-dispatched step can fail only as
+    `not_applied`), whole-runbook attempt reservation as one cooldown decision (explicit step numbers
+    must match stored steps; no guessing), consume/release/startup reconciliation, rollback
+    candidates with a fail-closed read, runbook approvals (typed `PendingPlanConflict` when a pending
+    card for the target carries a different plan; a direct request adopts an identical pending plan
+    whatever its origin).
+  - **`runbook.py`:** strict models; a document carrying `origin` or any unknown key is refused; the
+    5b-1 catalogue as code; typed earlier-step-only references; canonical JSON + SHA-256 with
+    tamper-refusing load; JSON-safe validated outputs; every stack/service/container/id/unit/path/
+    log-match constrained; binding must name the same target as params (incl. the Compose service).
+  - **`policy.decide_runbook`:** server-side origin from a closed set; automatic only for
+    `zoidberg`+`update.canary` (D34) and `system`+`prune.safe` (D38); everything else non-R0 needs
+    approval; direct origins keep `direct_request_risks`.
+  - **Own review (`/code-review`, 6 findings, all fixed):** outputs weren't JSON-serialisable;
+    pre-dispatch failure unrecordable; plan mismatch raised a bare error; binding/params divergence;
+    guessed step numbers; startup blocked on Telegram card edits.
+  - **Codex review, four rounds (5 findings, all fixed):** container bindings lacked the Compose
+    service; two concurrent-initializer races (v4→v5 and pre-v4 baseline); direct adoption blocked by
+    origin; explicit attempt tuples unchecked. Round 4 clean. (Round 1 was delayed ~2h by the Codex
+    usage limit.)
+  - **Verification:** 1,296 tests pass outside the socket sandbox (one unexplained single failure in
+    one run did not reproduce in four reruns); Ruff and `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-22):** on the old code, a pending R2 proposal (`3e5bd2dce35d`) and a
+    running `/up` (`7d06e059427c`); pushed T38 and SIGKILLed core mid-verification → systemd restarted
+    it on T38 → v5, execution `interrupted` with the upgrade reason, approval `expired`, events
+    written, 33 approvals / 29 executions / 339 events preserved, FK and integrity checks clean.
+    `v2.0.0-7` refuses the v5 database (`SchemaTooNewError`). Restoring snapshot
+    `20260922T140539Z-pre-t38` returned v4 with the rows exactly as captured (the VM's root-owned
+    config needs `--skip-config`, as the tool says); re-migrating with the final code was clean and a
+    further restart was a no-op.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

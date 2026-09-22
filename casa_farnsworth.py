@@ -2317,9 +2317,9 @@ def _start_dashboard_rpc(
         return None
 
 
-def _init_store(store: Store) -> None:
+def _init_store(store: Store) -> dict[str, list[dict]]:
     try:
-        store.init()
+        cutover = store.init()
     except SchemaTooNewError as exc:
         log.critical("%s", exc)
         raise
@@ -2330,6 +2330,44 @@ def _init_store(store: Store) -> None:
     else:
         if deleted:
             log.info("Pruned %d old unlinked events at startup", deleted)
+    return cutover
+
+
+def _update_v5_cutover_cards(cutover: dict[str, list[dict]], notifier: Notifier) -> None:
+    """Best-effort cleanup of cards whose v4 authority was cut over by migration."""
+    for row in cutover.get("expired_approvals", []):
+        if row.get("message_id") is None:
+            continue
+        try:
+            notifier.update_request(
+                row["message_id"],
+                "⏻ Superseded by the Planet Express upgrade — propose it again.",
+            )
+        except Exception:  # noqa: BLE001 -- card cleanup must never block startup
+            log.warning("Failed to update superseded approval card %s", row["id"])
+    for row in cutover.get("interrupted_executions", []):
+        if row.get("message_id") is None:
+            continue
+        target = row["target"]
+        if row["action"] == actions.RESTART_SERVICE:
+            text = (
+                f"⏻ Restart of <code>{TelegramClient.s(target['stack'])}/"
+                f"{TelegramClient.s(target['service'])}</code> was <b>interrupted</b>: "
+                "Planet Express restarted mid-run, so its outcome is unknown. "
+                f"Check <code>{TelegramClient.s(target['container'])}</code>, then propose it "
+                "again if still needed."
+            )
+        else:
+            summary = actions.action_summary(row["action"], target)
+            text = (
+                f"⏻ <b>{TelegramClient.s(summary)}</b> was interrupted: Planet Express "
+                "restarted mid-run, so its outcome is unknown. Check the stack state, then "
+                "propose it again if needed."
+            )
+        try:
+            notifier.update_request(row["message_id"], text)
+        except Exception:  # noqa: BLE001 -- card cleanup must never block startup
+            log.warning("Failed to update v5-interrupted execution card %s", row["id"])
 
 
 def _reexec_core(tg: TelegramClient) -> None:
@@ -2364,7 +2402,7 @@ def run_bot() -> None:
     # Typed actions (landing 1b). Reconcile BEFORE polling starts: an execution left
     # running/verifying means core died mid-action, so it's marked interrupted, not resumed.
     store = Store(config.ACTIONS_DB)
-    _init_store(store)
+    cutover = _init_store(store)
     config_service = build_config_service(
         state,
         tg,
@@ -2374,6 +2412,11 @@ def run_bot() -> None:
     commands = CommandService(store, notifier, state)
     chat = ChatService(store, commands, run_investigation=partial(_run_chat_investigation, commands=commands))
     chat.reconcile_on_startup()
+    # Off the startup path: each edit is a Telegram call with a long timeout (own review, T38).
+    threading.Thread(
+        target=_update_v5_cutover_cards, args=(cutover, notifier),
+        daemon=True, name="v5-cutover-cards",
+    ).start()
     interrupted = commands.reconcile_on_startup()
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")

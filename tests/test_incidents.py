@@ -263,7 +263,7 @@ def test_schema_two_upgrade_preserves_existing_data_atomically(tmp_path):
         conn.execute("INSERT INTO events (ts, kind, payload) VALUES (1, 'old', '{}')")
     Store(path).init()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
         assert conn.execute("SELECT kind FROM events").fetchone()[0] == "old"
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"incidents", "incident_events", "incident_reconciliations"} <= tables
