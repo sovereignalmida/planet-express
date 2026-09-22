@@ -1634,6 +1634,13 @@ tasks against `ACTION-SCREENS.md`.
     full report, and no abort/rollback/resume. **Not exercised on the VM:** the Telegram-originated
     path (no way to send commands as the operator); covered by unit tests. VM operators restored; no
     warnings in either journal.
+  - **Live deployment (2026-09-22):** tagged `v2.0.0-7` at `1c7c84c` and deployed it to
+    `live/deployed`, with the host-only disk-monitoring override replayed as `e7d08f6` and the
+    weekend-handoff note re-applied. Snapshot `20260922T110508Z-pre-v2-0-0-7`; previous code on
+    `live-backup-6` (`d24dc8b`). No schema (still 4), config, unit or ACL change. Both units active under
+    their users with 0 restarts; `/` 302, `/login`, `execution.js`, `approvals.js` 200; journals clean;
+    the running registry carries the five stack actions at D33's risks. Live ingress stacks under the
+    rule: `network` and `traefikman`. No stack action exercised live yet.
 
 ## Reviewer Concerns
 
