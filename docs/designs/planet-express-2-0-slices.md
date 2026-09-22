@@ -475,7 +475,8 @@ on premises that did not survive reading the code.
        only; **D36** legacy plans off by default from 5b-2 behind a config switch removed in 5b-6;
        **D37** no typed remediation → diagnosis only. **D38 (coordinator, behaviour unchanged,
        operator may revert):** automatic in-scan safe prune stays, as the second documented exception
-       to D31. Revision 2 folds in 17 outside-voice findings (design §10).
+       to D31. Design **accepted 2026-09-22 (revision 3.1)** after three outside-voice rounds (17 + 12 + 1
+       findings, all resolved; design §10-§12).
 6. **P5 adapters** for host-specific checks and the hardcoded host paths listed under P5; quarantine; openai-compatible provider; MCP read surface.
 
 **Rollback stops working from slice 2/3 without this (D21, Codex).** `config_schema.py` sets

@@ -1,7 +1,7 @@
 # Slice 5b — multi-step typed execution, and retiring legacy shell plans
 
-Status: **Revision 3** (2026-09-22) — operator decisions D34-D38 taken; outside-voice rounds 1
-(17 findings) and 2 (12 findings) folded in (§10, §11). Parent plan: `docs/designs/planet-express-2-0-slices.md` (slice 5,
+Status: **ACCEPTED — Revision 3.1** (2026-09-22). Operator decisions D34-D38; outside-voice rounds 1
+(17 findings), 2 (12) and 3 (1) folded in (§10-§12). Ready for 5b-1. Parent plan: `docs/designs/planet-express-2-0-slices.md` (slice 5,
 D25). Slice 5a (T37, `v2.0.0-7`) is live.
 
 ## 1. Why this slice exists
@@ -118,10 +118,15 @@ from the `read.qbittorrent_session_port` step's validated output.
   risks and direct-request rules against the computed risk, and T24 limits for every mutating
   `(step_type, target_key)` pair **with its multiplicity in this runbook aggregated** (a runbook that
   restarts the same service twice counts twice). Checked at proposal, at approval and before
-  execution. An **attempt is a dispatch**: immediately before a mutating step's argv, the engine
-  transactionally re-checks and reserves that pair (`reserved`), marking it `consumed` once
-  dispatched or `released` if the step is skipped, aborted or fails its pre-dispatch checks; startup
-  reconciliation settles any `reserved` rows. Steps that never run are never charged. Existing single-action paths become
+  execution. **Reservation is per runbook, not per step:** immediately before the runbook's first
+  mutating step, one transaction re-checks the limits for the runbook's **full per-pair
+  multiplicity** as a single cooldown decision and inserts one `reserved` attempt row per mutating
+  step. A step's own dispatch never re-checks the cooldown against its own runbook's earlier steps
+  (so a recipe that restarts a service twice cannot fail itself half-way); it flips its row to
+  `consumed` just before spawning the argv. Rows of steps that never dispatch (earlier failure,
+  abort, pre-dispatch drift) become `released`. At startup, a `reserved` row whose step is marked
+  `dispatched` or whose outcome is uncertain is conservatively `consumed`; otherwise `released`.
+  Steps that never run are never charged; uncertain ones always are. Existing single-action paths become
   one-step runbooks through the same function (behaviour unchanged).
 - The card lists every step in plain words, the risk, and which steps have a rollback.
 
@@ -303,3 +308,14 @@ Every landing leaves `v2` deployable; each gets a live deploy. `v2.0.0` = 5b-5 l
 | B4 | New-stack rollback could delete a pre-existing dir | Directory removed only if created by the step, same inode, empty (§4.1, §4.6) |
 | B5 | Live v4 approvals/executions unhandled | Migration reconciles/expires them; no execution without a verified plan hash (§6) |
 | B6 | Digest-pinned references aren't taggable | Canary requires a mutable `name:tag`; others ineligible and recorded (§4.5) |
+
+## 12. Outside-voice review, round 3 (Codex, 2026-09-22) — resolution
+
+Round 3 reported one open item and no new high/critical problems.
+
+| # | Finding | Resolution |
+| --- | --- | --- |
+| A5 | Repeated target pairs would fail their own cooldown re-check mid-run; reserve/spawn crash gap undefined | Whole-runbook reservation as one cooldown decision before the first mutation; per-step consume/release; uncertain outcomes conservatively consumed at startup (§4.2) |
+
+The review loop is capped at three rounds (as for the parent plan); 3.1's single change was not
+re-reviewed and is the first thing the 5b-1 Codex gate should examine.
