@@ -468,6 +468,14 @@ on premises that did not survive reading the code.
        be loosened later via `direct_request_risks` (D29-sensitive). Built as T37.
    - **5b:** design the multi-step execution model, then `/install`, canary updates and `/rollback`.
      Legacy shell plans retire at the end of 5b.
+     - Design: `docs/designs/slice-5b-multistep-execution.md` (typed step catalogue, approved-artifact
+       runbooks, per-step engine, six landings 5b-1..5b-6). **DECIDED 2026-09-22 (operator):**
+       **D34** unattended weekly canary updates stay automatic as the one documented exception to D31
+       (pinned digest, automatic inverse, T24 limits); **D35** `/install` writes new LAN-only stacks
+       only; **D36** legacy plans off by default from 5b-2 behind a config switch removed in 5b-6;
+       **D37** no typed remediation → diagnosis only. **D38 (coordinator, behaviour unchanged,
+       operator may revert):** automatic in-scan safe prune stays, as the second documented exception
+       to D31. Revision 2 folds in 17 outside-voice findings (design §10).
 6. **P5 adapters** for host-specific checks and the hardcoded host paths listed under P5; quarantine; openai-compatible provider; MCP read surface.
 
 **Rollback stops working from slice 2/3 without this (D21, Codex).** `config_schema.py` sets
