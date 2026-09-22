@@ -13,7 +13,7 @@ from config_schema import AutonomyConfig
 from planet_express.execution import actions
 
 RISK_LEVELS = ("R0", "R1", "R2", "R3", "R4")
-OPERATOR_ORIGINS = frozenset({"telegram", "dashboard", "dashboard-direct"})
+OPERATOR_ORIGINS = frozenset({"telegram", "telegram-direct", "dashboard", "dashboard-direct"})
 
 
 @dataclass(frozen=True)

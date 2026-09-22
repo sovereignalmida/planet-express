@@ -463,6 +463,131 @@ def test_direct_runs_with_approval_lock_verification_and_fyi(env):
     assert env.notifier.request_updates == env.notifier.approval_requests == []
 
 
+def _stack_service(env, *, up=(True, "up verified"), down=(True, "down verified")):
+    env.service._resolve_stack = lambda action, stack, approved_target=None: (
+        actions.AllStacksTarget(tuple(
+            (approved_target or {"stacks": ["network", "media", "archive"]})["stacks"]
+        ))
+        if action in actions.ALL_STACK_ACTIONS else actions.StackTarget(stack)
+    )
+    env.service._verify_stack_up = lambda stack: up
+    env.service._verify_stack_down = lambda stack: down
+
+
+def test_up_stack_is_telegram_direct_and_audited(env):
+    _stack_service(env)
+    result = env.service.request_action(
+        actions.UP_STACK, "media", operator="@chris", origin="telegram-direct", timeout=4,
+    )
+    assert result.outcome == "started"
+    approval = env.store.get_approval(result.approval_id)
+    assert approval["requested_via"] == "telegram-direct"
+    assert env.argv_calls == [actions.stack_argv(actions.UP_STACK, "media")]
+    status = env.service.get_status(result.execution_id)
+    assert status["action"] == actions.UP_STACK
+    assert status["target"] == {"stack": "media"}
+    assert status["summary"] == "Bring media up"
+
+
+def test_stack_proposals_have_expected_risks(env):
+    _stack_service(env)
+    for action, target, risk in (
+        (actions.DOWN_STACK, "media", "R2"),
+        (actions.UP_ALL, "all", "R2"),
+        (actions.DOWN_ALL, "all", "R3"),
+        (actions.DOWN_INGRESS, "network", "R3"),
+    ):
+        result = env.service.propose(
+            action, target, requested_via="telegram", requested_by="chris",
+        )
+        assert result.ok
+        assert env.store.get_approval(result.approval_id)["risk"] == risk
+
+
+def test_stack_all_stops_after_first_failed_verification(env):
+    _stack_service(env)
+    env.service._verify_stack_up = lambda stack: (
+        (True, "ok") if stack == "network" else (False, "unhealthy")
+    )
+    proposal = env.service.propose(
+        actions.UP_ALL, "all", requested_via="telegram", requested_by="chris",
+    )
+    result = env.service.decide(proposal.approval_id, approve=True, decided_by="chris")
+    assert result.outcome == "started"
+    assert env.argv_calls == [
+        actions.stack_argv(actions.UP_ALL, "network"),
+        actions.stack_argv(actions.UP_ALL, "media"),
+    ]
+    status = env.service.get_status(result.execution_id)
+    assert status["status"] == "failed"
+    assert "passed: network" in status["reason"]
+    assert "failed: media (unhealthy)" in status["reason"]
+    assert "not attempted: archive" in status["reason"]
+
+
+def test_stack_set_change_fails_before_any_command(env):
+    _stack_service(env)
+    proposal = env.service.propose(
+        actions.UP_ALL, "all", requested_via="telegram", requested_by="chris",
+    )
+
+    def changed(action, stack, approved_target=None):
+        if approved_target is not None:
+            raise actions.TargetError("stack set changed since approval")
+        return actions.AllStacksTarget(("network", "media"))
+
+    env.service._resolve_stack = changed
+    result = env.service.decide(proposal.approval_id, approve=True, decided_by="chris")
+    status = env.service.get_status(result.execution_id)
+    assert status["status"] == "failed"
+    assert status["reason"] == "target no longer valid: stack set changed since approval"
+    assert env.argv_calls == []
+
+
+def test_r1_removed_from_direct_risks_can_be_proposed(env, monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    _stack_service(env)
+    monkeypatch.setattr(config, "AUTONOMY", AutonomyConfig(direct_request_risks=[]))
+    direct_result = env.service.request_action(
+        actions.UP_STACK, "media", operator="chris", origin="telegram-direct",
+    )
+    assert direct_result.outcome == "refused"
+    proposal = env.service.propose(
+        actions.UP_STACK, "media", requested_via="telegram", requested_by="chris",
+    )
+    assert proposal.ok and proposal.created
+
+
+def test_stack_policy_is_rechecked_before_execution(env, monkeypatch):
+    import config
+    from config_schema import AutonomyConfig
+
+    _stack_service(env)
+    proposal = env.service.propose(
+        actions.DOWN_STACK, "media", requested_via="telegram", requested_by="chris",
+    )
+    monkeypatch.setattr(
+        config, "AUTONOMY",
+        AutonomyConfig(forbidden_risks=["R2", "R4"], direct_request_risks=["R1"]),
+    )
+    result = env.service.decide(proposal.approval_id, approve=True, decided_by="chris")
+    assert result.outcome == "refused"
+    assert env.store.get_approval(proposal.approval_id)["status"] == "denied"
+    assert env.argv_calls == []
+
+
+def test_stack_action_busy_writes_nothing(env):
+    _stack_service(env)
+    env.state.try_begin_mutation("scan")
+    result = env.service.request_action(
+        actions.UP_STACK, "media", operator="chris", origin="telegram-direct",
+    )
+    assert result.outcome == "busy"
+    assert_no_actions(env)
+
+
 def test_direct_busy_writes_nothing(env):
     env.state.try_begin_mutation('zoidberg')
     result = direct(env)
@@ -796,3 +921,37 @@ def test_deny_still_works_for_a_newly_forbidden_risk(env, monkeypatch):
     monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(forbidden_risks=['R1', 'R4'], direct_request_risks=[]))
     result = env.service.decide(proposed.approval_id, approve=False, decided_by='@chris (1001)')
     assert result.outcome == 'denied'
+
+
+def test_stack_compose_failure_fails_fast_redacted_and_releases_lock(env):
+    # Own review, T37: a failing `docker compose up -d` must fail with compose's error rather
+    # than waiting out verification, and that text reaches Telegram, so it is redacted.
+    _stack_service(env)
+    verified = []
+    env.service._verify_stack_up = lambda stack: verified.append(stack) or (True, "ok")
+    env.argv_result = (1, "", "pull access denied; API_KEY=hunter2secret")
+    result = env.service.request_action(
+        actions.UP_STACK, "media", operator="chris", origin="telegram-direct",
+    )
+    status = env.service.get_status(result.execution_id)
+    assert status["status"] == "failed"
+    assert "compose exited 1" in status["reason"]
+    assert "hunter2secret" not in status["reason"]
+    assert verified == []
+    assert env.state.mutation_owner is None
+
+
+def test_stack_verifier_crash_fails_and_releases_lock(env):
+    _stack_service(env)
+
+    def boom(stack):
+        raise RuntimeError("docker went away")
+
+    env.service._verify_stack_down = boom
+    proposal = env.service.propose(
+        actions.DOWN_STACK, "media", requested_via="telegram", requested_by="chris",
+    )
+    result = env.service.decide(proposal.approval_id, approve=True, decided_by="chris")
+    status = env.service.get_status(result.execution_id)
+    assert status["status"] == "failed" and "crashed" in status["reason"]
+    assert env.state.mutation_owner is None

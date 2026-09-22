@@ -22,7 +22,7 @@ from typing import Any
 import config
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import Store
-from planet_express.execution import actions, policy
+from planet_express.execution import actions
 from telegram_client import TelegramClient
 
 MAX_FRAME = 1024 * 1024
@@ -322,7 +322,22 @@ def build_core_handlers(
                                        timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS))
 
     def request_action(params):
-        _params(params, {"action": 128, "stack": 255, "service": 255, "operator": 32})
+        if not isinstance(params, dict):
+            raise RpcError("Invalid params", "bad_request")
+        action = params.get("action")
+        if action == actions.RESTART_SERVICE:
+            _params(params, {"action": 128, "stack": 255, "service": 255, "operator": 32})
+        elif action in actions.STACK_ACTIONS:
+            expected = {"action", "stack", "operator"}
+            if set(params) == expected:
+                _params(params, {"action": 128, "stack": 255, "operator": 32})
+            elif set(params) == expected | {"service"} and params["service"] is None:
+                _params({key: value for key, value in params.items() if key != "service"},
+                        {"action": 128, "stack": 255, "operator": 32})
+            else:
+                raise RpcError("Invalid params", "bad_request")
+        else:
+            raise RpcError("Invalid action", "bad_request")
         auth_params({"operator": params["operator"]})
         if params["operator"] == "?":
             raise RpcError("Invalid operator", "bad_request")
@@ -353,8 +368,8 @@ def build_core_handlers(
                 # the policy then refuses (Codex review, T30).
                 "paused": target.container in config.PAUSED_CONTAINERS,
                 "vitals": vitals, "facts": facts,
-                "actions": {name: spec.capabilities() for name, spec in actions.REGISTRY.items()
-                            if spec.risk in policy.RISK_LEVELS[1:]}}
+                "actions": {actions.RESTART_SERVICE:
+                            actions.REGISTRY[actions.RESTART_SERVICE].capabilities()}}
 
     def logs(params):
         if not isinstance(params, dict) or set(params) - {"stack", "service", "cursor", "cursor_hashes"}:
@@ -384,6 +399,7 @@ def build_core_handlers(
         item = dict(row)
         item.pop("message_id", None)
         item["target"] = json.loads(item.pop("target_json"))
+        item["summary"] = actions.action_summary(item["action"], item["target"])
         spec = actions.REGISTRY.get(item["action"])
         item["capabilities"] = spec.capabilities() if spec else {}
         if item.get("status") == "denied":
@@ -440,6 +456,9 @@ def build_core_handlers(
             item = dict(row)
             item.pop("message_id", None)
             item["target"] = json.loads(item.pop("target_json"))
+            item["summary"] = actions.action_summary(item["action"], item["target"])
+            spec = actions.REGISTRY.get(item["action"])
+            item["capabilities"] = spec.capabilities() if spec else {}
             result.append(item)
         return result
 

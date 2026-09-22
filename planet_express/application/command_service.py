@@ -36,6 +36,7 @@ import casa_bender as bender
 import config
 from notifier import Decision, Notifier
 from planet_express.core.incidents import scan_id
+from planet_express.core.redact import redact
 from planet_express.core.store import DEFAULT_TTL_SECONDS, IncidentSourceError, Store
 from planet_express.execution import actions, policy
 from state_models import MonitorSnapshot
@@ -93,6 +94,9 @@ class CommandService:
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
         monitor_path: Path | None = None,
         compose_identities: Callable | None = None,
+        resolve_stack_target: Callable | None = None,
+        verify_stack_up: Callable | None = None,
+        verify_stack_down: Callable | None = None,
     ):
         self._store = store
         self._notifier = notifier
@@ -113,6 +117,9 @@ class CommandService:
         self._ttl = ttl_seconds
         self._monitor_path = Path(monitor_path or config.STATE_MONITOR)
         self._compose_identities = compose_identities or actions.container_compose_identities
+        self._resolve_stack = resolve_stack_target or actions.resolve_stack_target
+        self._verify_stack_up = verify_stack_up or actions.verify_stack_up
+        self._verify_stack_down = verify_stack_down or actions.verify_stack_down
         # Store.propose deduplicates rows atomically, but sending the corresponding card
         # is an external side effect. Keep row creation, card delivery and message-id
         # recording in one in-process critical section so two front-end requests cannot
@@ -121,7 +128,8 @@ class CommandService:
 
     # ── propose ─────────────────────────────────────────────────────────────
     def propose(
-        self, action: str, stack: str, service: str, *, requested_via: str, requested_by: str | None,
+        self, action: str, stack: str, service: str | None = None, *, requested_via: str,
+        requested_by: str | None,
         timeout=actions.DOCKER_TIMEOUT_SECONDS,
         incident_id: str | None = None, incident_scan_id: str | None = None,
         expected_container: str | None = None,
@@ -133,8 +141,8 @@ class CommandService:
         target_error = None
         if action in actions.REGISTRY:
             try:
-                target = self._resolve(
-                    stack, service, for_mutation=True, timeout=self._remaining(deadline)
+                target = self._resolve_for_action(
+                    action, stack, service, timeout=self._remaining(deadline)
                 )
             except actions.TargetTimeout:
                 return ProposeResult(False, None, False, "host slow, retry")
@@ -240,6 +248,14 @@ class CommandService:
         finally:
             if not card_handed_off:
                 self._proposal_card_lock.release()
+
+    def _resolve_for_action(
+        self, action: str, stack: str, service: str | None, *, timeout: float,
+        approved_target: dict | None = None,
+    ):
+        if action not in actions.STACK_ACTIONS:
+            return self._resolve(stack, service, for_mutation=True, timeout=timeout)
+        return self._resolve_stack(action, stack, approved_target=approved_target)
 
     # ── incidents ───────────────────────────────────────────────────────────
     @staticmethod
@@ -433,11 +449,10 @@ class CommandService:
         if row["status"] != "pending":
             return self._reply(decision, self._not_pending(row))
 
-        key = row["target_key"]
         if not approve:
             if not self._store.consume(approval_id, decision="denied", decided_by=decided_by, arrived_at=arrived):
                 return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
-            text = f"❌ Restart of <code>{_s(key)}</code> denied by {_s(decided_by)}."
+            text = self._decision_text(row, "denied", decided_by)
             self._safe_finalize_card(row, decision, ack="Denied.", text=text)
             return DecideResult("denied", text)
 
@@ -457,7 +472,7 @@ class CommandService:
                         "approval.refused_by_policy", approval_id=approval_id,
                         reason=current.reason, attempted_by=decided_by,
                     )
-                    text = f"🚫 Restart of <code>{_s(key)}</code> {_s(reason)}."
+                    text = self._policy_refusal_text(row, reason)
                     self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
                     return DecideResult("refused", text)
                 return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
@@ -480,7 +495,7 @@ class CommandService:
                     if self._store.refuse_stale_incident_approval(
                         approval_id, attempted_by=decided_by, arrived_at=arrived, reason=reason,
                     ):
-                        text = f"🚫 Restart of <code>{_s(key)}</code> refused: {_s(reason)}."
+                        text = self._policy_refusal_text(row, f"refused: {reason}")
                         self._safe_finalize_card(row, decision, ack="Refused: stale incident.", text=text)
                         return DecideResult("refused", text)
                     return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
@@ -494,7 +509,7 @@ class CommandService:
                             "approval.refused_by_policy", approval_id=approval_id,
                             reason=current.reason, attempted_by=decided_by,
                         )
-                        text = f"🚫 Restart of <code>{_s(key)}</code> {_s(reason)}."
+                        text = self._policy_refusal_text(row, reason)
                         self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
                         return DecideResult("refused", text)
                     return self._reply(
@@ -506,8 +521,9 @@ class CommandService:
             if execution is None:
                 return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
             execution_id = execution["id"]
-            text = f"✅ Restart of <code>{_s(key)}</code> approved by {_s(decided_by)}. Restarting…"
-            self._safe_finalize_card(row, decision, ack="Approved. Restarting…", text=text)
+            text = self._decision_text(row, "approved", decided_by)
+            ack = "Approved. Restarting…" if row["action"] == actions.RESTART_SERVICE else "Approved. Starting…"
+            self._safe_finalize_card(row, decision, ack=ack, text=text)
             start(row, execution_id, decided_by)
             return DecideResult("started", text, execution_id)
 
@@ -521,9 +537,17 @@ class CommandService:
                 self._spawn(self._run_execution, row, execution_id, owner, decided_by)
             except Exception:
                 self._store.set_execution_status(execution_id, "failed", reason="failed to start")
-                key = _s(row["target_key"])
+                if row["action"] == actions.RESTART_SERVICE:
+                    text = (f"🔴 <b>Restart failed</b> for <code>{_s(row['target_key'])}</code>: "
+                            "failed to start")
+                else:
+                    target = json.loads(row["target_json"])
+                    direction = "Up" if row["action"] in actions.UP_ACTIONS else "Down"
+                    label = "every stack" if target.get("scope") == "all" else target["stack"]
+                    text = (f"🔴 <b>{direction} failed</b> for <code>{_s(label)}</code>: "
+                            "failed to start")
                 self._in_background(lambda: self._notify_quietly(
-                    f"🔴 <b>Restart failed</b> for <code>{key}</code>: failed to start"))
+                    text))
                 raise
             handed_off = True
 
@@ -534,8 +558,8 @@ class CommandService:
                 self._state.end_mutation(owner)
 
     def request_action(
-        self, action: str, stack: str, service: str, *, operator: str,
-        timeout=actions.DOCKER_TIMEOUT_SECONDS,
+        self, action: str, stack: str, service: str | None = None, *, operator: str,
+        origin: str = "dashboard-direct", timeout=actions.DOCKER_TIMEOUT_SECONDS,
     ) -> RequestResult:
         arrived = self._clock()
         spec = actions.REGISTRY.get(action)
@@ -544,7 +568,7 @@ class CommandService:
         target_error = None
         if spec is not None:
             try:
-                target = self._resolve(stack, service, for_mutation=True, timeout=timeout)
+                target = self._resolve_for_action(action, stack, service, timeout=timeout)
             except actions.TargetTimeout:
                 return RequestResult("timeout", "host slow, retry", None, None, capabilities)
             except actions.TargetError as e:
@@ -552,7 +576,7 @@ class CommandService:
         decision = policy.decide(action, target_error)
         if not decision.allowed:
             self._store.record_event("proposal.refused", action=action, stack=stack, service=service,
-                                     reason=decision.reason, requested_via="dashboard-direct", requested_by=operator)
+                                     reason=decision.reason, requested_via=origin, requested_by=operator)
             return RequestResult("refused", decision.reason, None, None, capabilities)
         if not decision.needs_approval:
             return RequestResult("refused", f"{action} is a read, not an action", None, None, capabilities)
@@ -575,20 +599,23 @@ class CommandService:
             try:
                 result = self._store.create_direct_execution(
                     action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
-                    operator=operator, arrived_at=arrived, deadline=arrived + timeout,
+                    operator=operator, origin=origin, arrived_at=arrived, deadline=arrived + timeout,
                 )
                 if result is None:
                     return RequestResult("timeout", "host slow, retry", None, None, capabilities)
                 row, execution = result["approval"], result["execution"]
                 if result["adopted"] and row["message_id"] is not None:
                     self._safe_finalize_card(
-                        row, None, ack="Approved. Restarting…",
-                        text=f"✅ Restart of <code>{_s(target.key)}</code> approved by {_s(operator)} "
-                             "from the dashboard. Restarting…",
+                        row, None,
+                        ack="Approved. Restarting…" if action == actions.RESTART_SERVICE else "Approved. Starting…",
+                        text=self._direct_adopted_text(row, target, operator, origin),
                     )
             finally:
                 self._proposal_card_lock.release()
-            text = f"🛠 {_s(operator)} restarted <code>{_s(target.key)}</code> from the dashboard."
+            if action == actions.RESTART_SERVICE:
+                text = f"🛠 {_s(operator)} restarted <code>{_s(target.key)}</code> from the dashboard."
+            else:
+                text = f"🛠 {_s(operator)} requested {_s(actions.action_summary(action, target.as_dict()))}."
             # Queued before the worker starts, so the outcome message can never land first. A spawn
             # failure queues its own "failed to start" message after it.
             self._in_background(lambda: self._notify_quietly(text))
@@ -607,12 +634,18 @@ class CommandService:
                 )
             }
             execution["approval"]["target"] = json.loads(approval["target_json"])
+            execution["action"] = approval["action"]
+            execution["target"] = execution["approval"]["target"]
+            execution["summary"] = actions.action_summary(approval["action"], execution["target"])
         return execution
 
     # ── execution (worker thread) ───────────────────────────────────────────
     def _run_execution(self, row: dict, execution_id: str, owner: str, decided_by: str) -> None:
         approved = json.loads(row["target_json"])
         try:
+            if row["action"] in actions.STACK_ACTIONS:
+                self._run_stack_execution(row, execution_id, approved)
+                return
             try:
                 target = self._resolve(approved["stack"], approved["service"], for_mutation=True)
             except actions.TargetError as e:
@@ -639,13 +672,70 @@ class CommandService:
         finally:
             self._state.end_mutation(owner)
 
+    def _run_stack_execution(self, row: dict, execution_id: str, approved: dict) -> None:
+        action = row["action"]
+        selector = "all" if action in actions.ALL_STACK_ACTIONS else approved.get("stack")
+        try:
+            target = self._resolve_for_action(
+                action, selector, None, timeout=actions.DOCKER_TIMEOUT_SECONDS,
+                approved_target=approved,
+            )
+        except actions.TargetError as exc:
+            self._finish(row, execution_id, "failed", f"target no longer valid: {exc}")
+            return
+        stacks = list(target.stacks) if isinstance(target, actions.AllStacksTarget) else [target.stack]
+        passed = []
+        for index, stack in enumerate(stacks):
+            rc, out, err = self._run_argv(
+                actions.stack_argv(action, stack), timeout=actions.STACK_VERIFY_TIMEOUT_SECONDS
+            )
+            if rc != 0:
+                # Fail fast with compose's own error, as the restart path does, instead of waiting
+                # out the verifier and reporting only a timeout (own review, T37). Redacted: this
+                # text reaches Telegram and the dashboard.
+                detail = redact((err or out or "").strip())[:300]
+                report = self._stack_report(
+                    passed, stack, f"compose exited {rc}: {detail}", stacks[index + 1:]
+                )
+                self._finish(row, execution_id, "failed", report)
+                return
+            self._store.set_execution_status(execution_id, "verifying")
+            verifier = self._verify_stack_up if action in actions.UP_ACTIONS else self._verify_stack_down
+            ok, reason = verifier(stack)
+            if not ok:
+                not_attempted = stacks[index + 1:]
+                report = self._stack_report(passed, stack, reason, not_attempted)
+                self._finish(row, execution_id, "failed", report)
+                return
+            passed.append(stack)
+            if index + 1 < len(stacks):
+                self._store.set_execution_status(execution_id, "running")
+        self._finish(row, execution_id, "passed", self._stack_report(passed, None, None, []))
+
+    @staticmethod
+    def _stack_report(passed: list[str], failed: str | None, reason: str | None,
+                      not_attempted: list[str]) -> str:
+        parts = ["passed: " + (", ".join(passed) if passed else "none")]
+        if failed is not None:
+            parts.append(f"failed: {failed} ({reason})")
+        parts.append("not attempted: " + (", ".join(not_attempted) if not_attempted else "none"))
+        return "; ".join(parts)
+
     def _finish(self, row: dict, execution_id: str, status: str, reason: str) -> None:
         self._store.set_execution_status(execution_id, status, reason=reason)
         key = _s(row["target_key"])
-        if status == "passed":
+        if row["action"] == actions.RESTART_SERVICE and status == "passed":
             text = f"🟢 <b>Verified good</b>: <code>{key}</code> restarted. {_s(reason)}"
-        else:
+        elif row["action"] == actions.RESTART_SERVICE:
             text = f"🔴 <b>Restart failed</b> for <code>{key}</code>: {_s(reason)}"
+        else:
+            target = json.loads(row["target_json"])
+            direction = "Up" if row["action"] in actions.UP_ACTIONS else "Down"
+            label = "every stack" if target.get("scope") == "all" else target["stack"]
+            if status == "passed":
+                text = f"🟢 <b>Verified good</b>: <code>{_s(label)} {direction.lower()}</code>. {_s(reason)}"
+            else:
+                text = f"🔴 <b>{direction} failed</b> for <code>{_s(label)}</code>: {_s(reason)}"
 
         def deliver():
             try:
@@ -670,9 +760,14 @@ class CommandService:
         interrupted = self._store.interrupt_unfinished("core restarted")
         for r in interrupted:
             target = r["target"]
-            text = (f"⏻ Restart of <code>{_s(target['stack'])}/{_s(target['service'])}</code> was "
-                    f"<b>interrupted</b>: Planet Express restarted mid-run, so its outcome is unknown. "
-                    f"Check <code>{_s(target['container'])}</code>, then propose it again if still needed.")
+            if r["action"] == actions.RESTART_SERVICE:
+                text = (f"⏻ Restart of <code>{_s(target['stack'])}/{_s(target['service'])}</code> was "
+                        f"<b>interrupted</b>: Planet Express restarted mid-run, so its outcome is unknown. "
+                        f"Check <code>{_s(target['container'])}</code>, then propose it again if still needed.")
+            else:
+                summary = actions.action_summary(r["action"], target)
+                text = (f"⏻ <b>{_s(summary)}</b> was interrupted: Planet Express restarted mid-run, "
+                        "so its outcome is unknown. Check the stack state, then propose it again if needed.")
             try:
                 self._notifier.notify(text)
             except Exception:  # noqa: BLE001 -- reconciliation must not block core startup
@@ -685,14 +780,54 @@ class CommandService:
         return interrupted
 
     # ── helpers ─────────────────────────────────────────────────────────────
-    def _card_text(self, row: dict, target: actions.Target, requested_by: str | None) -> str:
+    def _card_text(self, row: dict, target, requested_by: str | None) -> str:
         minutes = int(self._ttl // 60)
+        if row["action"] != actions.RESTART_SERVICE:
+            value = target.as_dict()
+            radius = (f"every stack ({len(value['stacks'])})" if value.get("scope") == "all"
+                      else value["stack"])
+            return (
+                f"🛠 <b>{_s(actions.action_summary(row['action'], value))}</b> "
+                f"<code>{_s(row['id'])}</code>\n"
+                f"Target: <code>{_s(radius)}</code>\n"
+                f"Risk: {_s(row['risk'])}, stack-impacting operation.\n"
+                f"Requested by {_s(requested_by or 'unknown')}. Expires in {minutes} min."
+            )
         return (
             f"🔁 <b>Restart request</b> <code>{_s(row['id'])}</code>\n"
             f"Target: <code>{_s(target.key)}</code> (container <code>{_s(target.container)}</code>)\n"
             f"Risk: {_s(row['risk'])}, service-impacting: the service is unavailable while it restarts.\n"
             f"Requested by {_s(requested_by or 'unknown')}. Expires in {minutes} min."
         )
+
+    @staticmethod
+    def _decision_text(row: dict, outcome: str, actor: str) -> str:
+        key = _s(row["target_key"])
+        if row["action"] == actions.RESTART_SERVICE:
+            if outcome == "denied":
+                return f"❌ Restart of <code>{key}</code> denied by {_s(actor)}."
+            return f"✅ Restart of <code>{key}</code> approved by {_s(actor)}. Restarting…"
+        target = json.loads(row["target_json"])
+        summary = _s(actions.action_summary(row["action"], target))
+        if outcome == "denied":
+            return f"❌ {summary} denied by {_s(actor)}."
+        return f"✅ {summary} approved by {_s(actor)}. Starting…"
+
+    @staticmethod
+    def _policy_refusal_text(row: dict, reason: str) -> str:
+        if row["action"] == actions.RESTART_SERVICE:
+            return f"🚫 Restart of <code>{_s(row['target_key'])}</code> {_s(reason)}."
+        summary = actions.action_summary(row["action"], json.loads(row["target_json"]))
+        return f"🚫 {_s(summary)} {_s(reason)}."
+
+    @staticmethod
+    def _direct_adopted_text(row: dict, target, operator: str, origin: str) -> str:
+        if row["action"] == actions.RESTART_SERVICE:
+            return (f"✅ Restart of <code>{_s(target.key)}</code> approved by {_s(operator)} "
+                    "from the dashboard. Restarting…")
+        source = "Telegram" if origin == "telegram-direct" else "the dashboard"
+        summary = actions.action_summary(row["action"], target.as_dict())
+        return f"✅ {_s(summary)} approved by {_s(operator)} from {source}. Starting…"
 
     @staticmethod
     def _not_pending(row: dict | None) -> DecideResult:

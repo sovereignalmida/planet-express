@@ -256,30 +256,6 @@ def test_patchnow_update_pass_takes_and_releases_lock(monkeypatch):
     assert s.mutation_owner is None
 
 
-def test_stack_op_refuses_while_busy(monkeypatch):
-    monkeypatch.setattr(fw.stackctl, "stack_up", lambda target: pytest.fail("stack_up ran while busy"))
-    s = _state()
-    assert s.try_begin_mutation("plan:p1")
-    n = FakeNotifier()
-
-    fw._run_stack_op(n, "up", "media", s)
-
-    assert any("busy" in m.lower() for m in n.notifications)
-
-
-def test_stack_op_releases_lock_when_stackctl_raises(monkeypatch):
-    def boom(target):
-        raise RuntimeError("compose exploded")
-
-    monkeypatch.setattr(fw.stackctl, "stack_down", boom)
-    s = _state()
-
-    with pytest.raises(RuntimeError):
-        fw._run_stack_op(FakeNotifier(), "down", "media", s)
-
-    assert s.mutation_owner is None
-
-
 def test_safe_prune_skips_while_busy(monkeypatch):
     monkeypatch.setattr(fw, "_root_disk_alert", lambda snap: {"used_pct": 91, "alert": "high"})
     monkeypatch.setattr(fw, "_has_incomplete_stacks", lambda snap: False)
@@ -544,18 +520,6 @@ def _scanning_state():
     s = _state()
     s.transition(fw.PipelineState.RUNNING)
     return s
-
-
-def test_stack_op_refuses_during_a_running_scan(monkeypatch):
-    monkeypatch.setattr(fw.stackctl, "stack_up", lambda target: pytest.fail("changed the host mid-scan"))
-    s = _scanning_state()
-    n = FakeNotifier()
-
-    fw._run_stack_op(n, "up", "media", s)
-
-    assert any("scan running" in m for m in n.notifications)
-    assert s.mutation_owner is None
-    assert s.state == fw.PipelineState.RUNNING
 
 
 def test_diff_approve_refuses_during_a_running_scan(monkeypatch):

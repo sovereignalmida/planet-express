@@ -303,7 +303,10 @@ def test_core_handlers():
     commands.decide.return_value = DecideResult("started", "ok", "e")
     commands.get_status.return_value = {"id": "e", "status": "running"}
     commands.list_incidents.return_value = []
-    store.list_pending.return_value = [{"id": "a", "target_json": '{"stack":"media"}', "message_id": 5}]
+    store.list_pending.return_value = [{
+        "id": "a", "action": "docker.restart_service",
+        "target_json": '{"stack":"media","service":"sonarr"}', "message_id": 5,
+    }]
     handlers = build_core_handlers(commands, store)
     assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
                              "auth.status", "auth.record_failure", "auth.record_success",
@@ -315,7 +318,12 @@ def test_core_handlers():
     params = {"approval_id": "a", "approve": True, "decided_by": "Chris"}
     assert handlers["approval.decide"](params) == asdict(commands.decide.return_value)
     commands.decide.assert_called_once_with(**params, decision=None)
-    assert handlers["proposal.list_pending"]({}) == [{"id": "a", "target": {"stack": "media"}}]
+    assert handlers["proposal.list_pending"]({}) == [{
+        "id": "a", "action": "docker.restart_service",
+        "target": {"stack": "media", "service": "sonarr"},
+        "summary": "Restart media/sonarr",
+        "capabilities": {"abortable": False, "rollbackable": False, "resumable": False},
+    }]
     assert handlers["execution.get_status"]({"execution_id": "e"}) == commands.get_status.return_value
     commands.get_status.assert_called_once_with("e")
     commands.get_status.return_value = None
@@ -744,6 +752,21 @@ def test_action_request_exact_params_and_timeout_result():
     commands.request_action.assert_called_once_with(**params, timeout=4)
 
 
+def test_stack_action_request_exact_params():
+    from planet_express.application.command_service import RequestResult
+
+    commands = Mock()
+    commands.request_action.return_value = RequestResult("started", "ok", "a", "e", {})
+    handler = build_core_handlers(commands, Mock())["action.request"]
+    params = {"action": "compose.up_stack", "stack": "media", "operator": "chris"}
+    assert handler(params) == asdict(commands.request_action.return_value)
+    commands.request_action.assert_called_once_with(**params, timeout=4)
+    for invalid in (params | {"service": "web"}, params | {"extra": True}):
+        with pytest.raises(RpcError) as error:
+            handler(invalid)
+        assert error.value.code == "bad_request"
+
+
 def test_container_handler_shape_and_timeouts(monkeypatch):
     from planet_express.execution import actions
 
@@ -1007,6 +1030,23 @@ def test_approval_reads_direct_expiry_history_and_status(tmp_path):
     with pytest.raises(RpcError) as error:
         handlers['approval.get']({'approval_id': 'missing'})
     assert error.value.code == 'not_found'
+
+
+def test_stack_approval_reads_carry_summary(tmp_path):
+    from planet_express.execution import actions
+
+    store = Store(tmp_path / "core.db", clock=lambda: 100)
+    store.init()
+    row, _ = store.propose(
+        action=actions.UP_ALL, target_key="all",
+        target={"scope": "all", "stacks": ["network", "media"]}, risk="R2",
+        requested_via="telegram", requested_by="chris",
+    )
+    handlers = build_core_handlers(Mock(), store)
+    approval = handlers["approval.get"]({"approval_id": row["id"]})
+    assert approval["action"] == actions.UP_ALL
+    assert approval["summary"] == "Bring every stack up"
+    assert approval["target"] == {"scope": "all", "stacks": ["network", "media"]}
 
 
 def test_approval_reads_preserve_denial_reason_from_audit_events(tmp_path):

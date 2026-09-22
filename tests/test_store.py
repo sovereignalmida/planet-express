@@ -485,6 +485,16 @@ def test_direct_insert_and_new_pending_can_coexist(tmp_path):
     assert store.get_approval(row['id'])['status'] == 'approved'
 
 
+def test_direct_insert_records_the_supplied_origin(tmp_path):
+    store = _store(tmp_path)
+    result = store.create_direct_execution(
+        action="compose.up_stack", target_key="stack:media", target={"stack": "media"},
+        risk="R1", operator="chris", origin="telegram-direct", arrived_at=1_000_000,
+    )
+    assert result["approval"]["requested_via"] == "telegram-direct"
+    assert store.list_events()[0]["payload"]["requested_via"] == "telegram-direct"
+
+
 def test_direct_adopts_pending_with_card(tmp_path):
     store = _store(tmp_path)
     pending, _ = _propose(store)

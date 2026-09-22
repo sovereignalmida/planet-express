@@ -1588,6 +1588,53 @@ tasks against `ACTION-SCREENS.md`.
   `config.js`, `dashboard.js` 200; journals clean. The config file predates the core start, and core
   loaded sha `b68ab75d54a3`, equal to the file: the Config tab reads ACTIVE. No config events yet.
 
+### Slice 5a stack actions
+
+- [x] **T37 (P1, CC: ~1 session)** — actions/command service/farnsworth — ✅ done 2026-09-21 — `/up`
+  and `/down` as typed actions with D33's risk tiers. Scope: `docs/handoff/T37-brief.md`.
+  - `compose.up_stack` R1, `compose.down_stack` R2, `compose.up_all` R2, `compose.down_all` R3,
+    `compose.down_ingress` R3 (stack `network` or a traefik/adguard name); all declare no
+    abort/rollback/resume. Stack targets resolve without Docker; forbidden stacks refuse up only; a
+    plain down of an ingress stack is refused with a pointer to the R3 action (never downgraded).
+    All-stack targets snapshot the ordered list at proposal time and fail before running anything if
+    the set changed. argv only, through `bender.run_argv`.
+  - Verification from container state: up passes when every project container is running and
+    healthy/none for 15s (fails fast on exit, unhealthy, restart increase, zero containers; 180s
+    bound); down passes when the project has no containers; all-stack runs go sequentially and stop
+    at the first failure, reporting passed / failed / not attempted.
+  - `CommandService` dispatches by action for resolution, cards, execution, verification, finish,
+    interruption and `get_status` (now carrying `action`, `target`, `summary`); restart behaviour and
+    its tests unchanged (only added to). New origin `telegram-direct` in `OPERATOR_ORIGINS` (the one
+    policy edit); `create_direct_execution` takes the origin. Farnsworth's `/up` goes operator-direct
+    while policy allows R1, otherwise proposes; R2/R3 always propose; `_run_stack_op` and
+    Farnsworth's `stackctl.stack_up/down` calls are gone (the stackctl CLI is unchanged). Dashboard
+    approvals/execution screens render stack actions by `summary` (no new buttons). No schema change.
+  - **Implementation note:** Codex hit its usage limit before reporting; the diff was complete enough
+    to pass the suite, and was reviewed line by line against the brief before the gate.
+  - **Own review / rehearsal fixes:** the compose command's exit code was discarded, so a failed
+    `up -d` surfaced only as a verification timeout → it now fails fast with compose's redacted error;
+    failure reasons named 64-hex container IDs → verification lists containers by name
+    (`ps --format {{.Name}}`, supported by live Compose 2.39); the execution rail said "waiting" under
+    a failed verification (a T31 bug, restarts too) and misclassified a compose failure → fixed.
+  - **Codex review, two rounds:** unescaped refusal text quoting user input (`/up <x>`) could make
+    Telegram reject the reply (P2 → escaped); the execution verdict still said "Restart command…" for
+    stack runs (P2 → action-specific). Round 2 clean.
+  - **Known limit:** a stack with a one-shot container that exits 0 by design (an init job) fails up
+    verification with `status=exited`. None of the live host's 85 services are one-shot today.
+  - **Verification:** 1,250 tests pass outside the socket sandbox; Ruff, `node --check`,
+    `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-21):** `tests/homelab/t37-rehearsal.sh` over the dashboard RPC as
+    `planetexpress-web`: up `healthy` passed (stable 15s); up `unhealthy` failed ("fixture-unhealthy:
+    healthcheck failing"); up `crash-loop` failed ("status=restarting"); a direct down of `slow-start`
+    was refused ("direct requests are not allowed for R2"), the proposal was R2 and, approved, passed
+    with no containers left; up `slow-start` waited out its slow healthcheck and passed; `up_all` (R2)
+    approved stopped at `crash-loop` with "not attempted: healthy, slow-start, unhealthy"; a plain down
+    of `network` was refused pointing at `compose.down_ingress`. Busy retries covered a scheduled scan
+    at the start. The execution page rendered "Bring every stack up", target "every stack (4)", the
+    full report, and no abort/rollback/resume. **Not exercised on the VM:** the Telegram-originated
+    path (no way to send commands as the operator); covered by unit tests. VM operators restored; no
+    warnings in either journal.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

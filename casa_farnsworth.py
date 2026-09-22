@@ -54,7 +54,7 @@ from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
 from planet_express.core.store import SchemaTooNewError, Store
-from planet_express.execution import actions
+from planet_express.execution import actions, policy
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
 from state_models import MonitorSnapshot, PlanSet, RunStatus
@@ -1214,19 +1214,48 @@ def handle_message(
 
     elif cmd == "/up":
         parts = text.split()
-        target = parts[1].lower() if len(parts) > 1 else None
-        if not target:
-            notifier.notify("Usage: `/up <stack>` or `/up all`")
+        target = parts[1].lower() if len(parts) == 2 else None
+        if not target or commands is None:
+            if commands is None and target:
+                notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
+            else:
+                notifier.notify("Usage: `/up <stack>` or `/up all`")
         else:
-            threading.Thread(target=_run_stack_op, args=(notifier, "up", target, state), daemon=True).start()
+            sender = msg.get("from") or {}
+            requested_by = (
+                f"@{sender['username']} ({sender.get('id')})" if sender.get("username")
+                else str(sender.get("id", "telegram"))
+            )
+            action = actions.UP_ALL if target == "all" else actions.UP_STACK
+            threading.Thread(
+                target=_run_stack_action_request,
+                args=(commands, notifier, action, target, requested_by), daemon=True,
+            ).start()
 
     elif cmd == "/down":
         parts = text.split()
-        target = parts[1].lower() if len(parts) > 1 else None
-        if not target:
-            notifier.notify("Usage: `/down <stack>` or `/down all`")
+        target = parts[1].lower() if len(parts) == 2 else None
+        if not target or commands is None:
+            if commands is None and target:
+                notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
+            else:
+                notifier.notify("Usage: `/down <stack>` or `/down all`")
         else:
-            threading.Thread(target=_run_stack_op, args=(notifier, "down", target, state), daemon=True).start()
+            sender = msg.get("from") or {}
+            requested_by = (
+                f"@{sender['username']} ({sender.get('id')})" if sender.get("username")
+                else str(sender.get("id", "telegram"))
+            )
+            if target == "all":
+                action = actions.DOWN_ALL
+            elif actions.is_ingress_stack(target):
+                action = actions.DOWN_INGRESS
+            else:
+                action = actions.DOWN_STACK
+            threading.Thread(
+                target=_run_stack_action_request,
+                args=(commands, notifier, action, target, requested_by), daemon=True,
+            ).start()
 
     elif cmd == "/restart":
         parts = text.split()
@@ -1370,8 +1399,8 @@ def handle_message(
             "/stacks — List stacks\n"
             "/mounts — Verify NAS mounts are reachable\n"
             "/backups — Enabled Borg backup job status\n"
-            "/up `<stack>`|`all` — Bring a stack (or everything) up\n"
-            "/down `<stack>`|`all` — Bring a stack (or everything) down\n"
+            "/up `<stack>`|`all` — One stack runs immediately (R1); `all` needs approval (R2)\n"
+            "/down `<stack>`|`all` — Needs approval (R2; ingress/all is R3)\n"
             "/restart `<stack>` `<service>` — Propose a verified restart (needs approval)\n"
             "/install `<url>` `<domain>` — Fry resolves a project URL, proposes a new stack (diff-approve)\n"
             "/grant — Show current sudo allowlist scope + how to widen it"
@@ -1504,6 +1533,42 @@ def _run_restart_request(
         )
 
 
+def _run_stack_action_request(
+    commands: CommandService, notifier: Notifier, action: str, target: str, requested_by: str
+) -> None:
+    spec = actions.REGISTRY[action]
+    if policy.allows_direct_request(spec.risk):
+        result = commands.request_action(
+            action, target, operator=requested_by, origin="telegram-direct"
+        )
+        if result.outcome == "started":
+            value = "every stack" if target == "all" else target
+            direction = "up" if action in actions.UP_ACTIONS else "down"
+            notifier.notify(
+                f"🛠 Bringing <code>{TelegramClient.s(value)}</code> {direction}… "
+                f"Execution <code>{TelegramClient.s(result.execution_id)}</code>."
+            )
+        else:
+            # Refusals can quote the operator's own input (e.g. `/up <x>`): escape it, or Telegram's
+            # HTML parser can reject the reply outright (Codex review, T37).
+            notifier.notify(TelegramClient.s(result.message))
+        return
+
+    result = commands.propose(
+        action, target, requested_via="telegram", requested_by=requested_by
+    )
+    if not result.ok:
+        notifier.notify(f"🚫 Request refused: {TelegramClient.s(result.reason)}")
+    elif result.created:
+        notifier.notify(
+            f"Approval card sent (request <code>{TelegramClient.s(result.approval_id)}</code>)."
+        )
+    else:
+        notifier.notify(
+            f"Approval card already pending (request <code>{TelegramClient.s(result.approval_id)}</code>)."
+        )
+
+
 def _run_stacks_list(notifier: Notifier) -> None:
     forbidden = set(config.FORBIDDEN_STACKS)
     lines = []
@@ -1541,38 +1606,6 @@ def _fmt_backups_message(results: list[dict]) -> str:
 def _run_backups_check(notifier: Notifier) -> None:
     results = stackctl.check_backups()
     notifier.notify(_fmt_backups_message(results))
-
-
-def _run_stack_op(notifier: Notifier, verb: str, target: str, state: PipelineState) -> None:
-    owner = f"stack:{verb}:{target}"
-    if not state.try_begin_mutation(owner):
-        notifier.notify(
-            f"⏳ Busy right now ({state.busy_reason}) — `{verb}` `{TelegramClient.s(target)}` "
-            f"not started. Try again shortly."
-        )
-        return
-    try:
-        notifier.notify(f"⏳ `{verb}` `{TelegramClient.s(target)}`...")
-        fn = stackctl.stack_up if verb == "up" else stackctl.stack_down
-        result = fn(target)
-    finally:
-        state.end_mutation(owner)
-
-    if result.get("refused"):
-        notifier.notify(f"🚫 `{TelegramClient.s(target)}` is in FORBIDDEN_STACKS — refusing to start it.")
-        return
-    if result.get("not_found"):
-        notifier.notify(f"⚠️ No stack named `{TelegramClient.s(target)}` found.")
-        return
-
-    lines = []
-    for name, ok, tail in result["results"]:
-        icon = "✅" if ok else "❌"
-        lines.append(f"{icon} {TelegramClient.s(name)}")
-        if not ok and tail:
-            lines.append(f"<code>{TelegramClient.s(tail[:300])}</code>")
-    header = "✅ Done." if result["ok"] else "⚠️ One or more stacks failed."
-    notifier.notify(f"{header}\n" + "\n".join(lines))
 
 
 def _investigate_failure(

@@ -28,11 +28,13 @@
 
   function target(item) {
     const value = item.target || {};
-    return { stack: value.stack || "unknown", service: value.service || "unknown" };
+    return { stack: value.stack || "unknown", service: value.service || null,
+      scope: value.scope, stacks: Array.isArray(value.stacks) ? value.stacks : [] };
   }
 
-  function containerUrl(item) {
+  function targetUrl(item) {
     const value = target(item);
+    if (item.action !== "docker.restart_service") return "/#overview";
     return "/containers/" + encodeURIComponent(value.stack) + "/" + encodeURIComponent(value.service);
   }
 
@@ -56,8 +58,10 @@
   function facts(item) {
     const value = target(item);
     const list = node("dl", "approval-facts");
+    const radius = value.scope === "all" ? "every stack (" + value.stacks.length + ")"
+      : item.action === "docker.restart_service" ? value.stack + "/" + value.service : value.stack;
     const entries = [
-      ["BLAST RADIUS", value.stack + "/" + value.service],
+      ["BLAST RADIUS", radius],
       ["REVERSIBLE", item.capabilities && item.capabilities.rollbackable ? "YES" : "NO"],
     ];
     entries.forEach(([term, detail]) => list.append(node("dt", "", term), node("dd", "", detail)));
@@ -139,8 +143,7 @@
     const card = node("article", "pe-card approval-card pending");
     card.dataset.approvalId = item.id;
     card.append(statusRow(item, "AWAITING AUTHORISATION", "warn"));
-    const value = target(item);
-    card.append(node("h3", "approval-title", "Restart " + value.stack + "/" + value.service));
+    card.append(node("h3", "approval-title", item.summary));
     card.append(node("p", "approval-requested", "Proposed via " + item.requested_via + " by " + (item.requested_by || "unknown") + " · " + date(item.created_at)));
     card.append(facts(item));
     const countdown = node("div", "pe-countdown");
@@ -167,12 +170,11 @@
     const card = node("article", "pe-card approval-card " + status);
     card.dataset.approvalId = item.id;
     card.append(statusRow(item, status === "approved" ? "AUTHORISED" : status.toUpperCase(), level));
-    const value = target(item);
-    card.append(node("h3", "approval-title", "Restart " + value.stack + "/" + value.service));
+    card.append(node("h3", "approval-title", item.summary));
     if (status === "expired") {
       card.append(facts(item));
       const readout = node("p", "approval-requested", "Proposed " + date(item.created_at) + " · lapsed " + date(item.expires_at));
-      card.append(readout, actionLink("RE-PROPOSE", containerUrl(item), true));
+      card.append(readout, actionLink("RE-PROPOSE", targetUrl(item), true));
       return card;
     }
     card.append(attribution(item, status === "denied"));
@@ -181,7 +183,7 @@
     if (status === "approved" && execution && execution.id) {
       actions.append(actionLink("WATCH EXECUTION ↗", "/executions/" + encodeURIComponent(execution.id), true));
     } else if (status === "denied") {
-      actions.append(actionLink("RE-PROPOSE", containerUrl(item), true));
+      actions.append(actionLink("RE-PROPOSE", targetUrl(item), true));
     }
     card.append(actions);
     return card;
@@ -198,7 +200,7 @@
     if (last) {
       well.append(node("p", "", "Last: " + last.status + " plan " + last.id + " by " + (last.decided_by || "system") + "."));
       const execution = last.execution;
-      well.append(actionLink("VIEW LAST ACTIVITY", execution && execution.id ? "/executions/" + encodeURIComponent(execution.id) : containerUrl(last)));
+      well.append(actionLink("VIEW LAST ACTIVITY", execution && execution.id ? "/executions/" + encodeURIComponent(execution.id) : targetUrl(last)));
     } else {
       well.append(node("p", "", "No typed action has been proposed yet."));
     }

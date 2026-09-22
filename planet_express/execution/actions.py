@@ -32,6 +32,8 @@ from planet_express.core.redact import redact
 DOCKER_TIMEOUT_SECONDS = 120
 RPC_DOCKER_TIMEOUT_SECONDS = 4
 DEFAULT_POLL_SECONDS = 5
+VERIFY_TIMEOUT_SECONDS = 90
+VERIFY_STABLE_SECONDS = 15
 
 # Most services have no Docker healthcheck, in which case .State.Health doesn't exist and
 # a bare {{.State.Health.Status}} makes the WHOLE `docker inspect` call fail, not just that
@@ -75,11 +77,11 @@ class HealthReading:
     health: str  # "healthy" | "unhealthy" | "starting" | "none"
 
 
-def read_health(container_name: str) -> HealthReading:
+def read_health(container_name: str, *, timeout=DOCKER_TIMEOUT_SECONDS) -> HealthReading:
     """One `docker inspect` for status, RestartCount and health (with the Health guard)."""
     rc, out, err = bender.run_argv(
         ["docker", "inspect", "--format", _HEALTH_FORMAT, container_name],
-        timeout=DOCKER_TIMEOUT_SECONDS,
+        timeout=timeout,
     )
     if rc != 0:
         return HealthReading(error=err, status="", restart_count=0, health="")
@@ -210,6 +212,30 @@ class Target:
         return {"stack": self.stack, "service": self.service, "container": self.container}
 
 
+@dataclass(frozen=True)
+class StackTarget:
+    stack: str
+
+    @property
+    def key(self) -> str:
+        return f"stack:{self.stack}"
+
+    def as_dict(self) -> dict:
+        return {"stack": self.stack}
+
+
+@dataclass(frozen=True)
+class AllStacksTarget:
+    stacks: tuple[str, ...]
+
+    @property
+    def key(self) -> str:
+        return "all"
+
+    def as_dict(self) -> dict:
+        return {"scope": "all", "stacks": list(self.stacks)}
+
+
 def compose_file(stack: str) -> Path:
     return Path(config.STACKS_ROOT) / stack / "docker-compose.yml"
 
@@ -332,11 +358,180 @@ class ActionSpec:
 
 RESTART_SERVICE = "docker.restart_service"
 STATS_SERVICE = "docker.stats_service"
+UP_STACK = "compose.up_stack"
+DOWN_STACK = "compose.down_stack"
+UP_ALL = "compose.up_all"
+DOWN_ALL = "compose.down_all"
+DOWN_INGRESS = "compose.down_ingress"
 REGISTRY: dict[str, ActionSpec] = {
     RESTART_SERVICE: ActionSpec(RESTART_SERVICE, "R1", "Restart one compose service",
                                 abortable=False, rollbackable=False, resumable=False),
     STATS_SERVICE: ActionSpec(STATS_SERVICE, "R0", "Read CPU and memory for one service"),
+    UP_STACK: ActionSpec(UP_STACK, "R1", "Bring one compose stack up"),
+    DOWN_STACK: ActionSpec(DOWN_STACK, "R2", "Bring one compose stack down"),
+    UP_ALL: ActionSpec(UP_ALL, "R2", "Bring every active compose stack up"),
+    DOWN_ALL: ActionSpec(DOWN_ALL, "R3", "Bring every compose stack down"),
+    DOWN_INGRESS: ActionSpec(DOWN_INGRESS, "R3", "Bring an ingress compose stack down"),
 }
+
+STACK_ACTIONS = frozenset({UP_STACK, DOWN_STACK, UP_ALL, DOWN_ALL, DOWN_INGRESS})
+ALL_STACK_ACTIONS = frozenset({UP_ALL, DOWN_ALL})
+UP_ACTIONS = frozenset({UP_STACK, UP_ALL})
+DOWN_ACTIONS = frozenset({DOWN_STACK, DOWN_ALL, DOWN_INGRESS})
+
+
+def is_ingress_stack(stack: str) -> bool:
+    value = stack.lower()
+    return value == "network" or any(token in value for token in NETWORK_GUARDED_SUBSTRINGS)
+
+
+def _ordered_stack_names(action: str) -> list[str]:
+    if action == UP_ALL:
+        paths = config.active_stack_dirs()
+        return [path.name for path in sorted(paths, key=lambda path: (path.name != "network", path.name))]
+    paths = [path.parent for path in sorted(Path(config.STACKS_ROOT).glob("*/docker-compose.yml"))]
+    return [path.name for path in sorted(paths, key=lambda path: (path.name == "network", path.name))]
+
+
+def resolve_stack_target(
+    action: str, stack: str, *, approved_target: dict | None = None,
+) -> StackTarget | AllStacksTarget:
+    """Resolve a compose stack action without calling Docker.
+
+    All-stack targets retain their proposal-time order. Execution only proceeds when the
+    current set is identical, so a newly added or removed stack cannot be mutated under an
+    approval that did not name it.
+    """
+    if action not in STACK_ACTIONS:
+        raise TargetError(f"unknown stack action {action!r}")
+    if action in ALL_STACK_ACTIONS:
+        if stack != "all":
+            raise TargetError(f"{action} requires the all-stacks target")
+        current = _ordered_stack_names(action)
+        if approved_target is not None:
+            approved = approved_target.get("stacks")
+            if (approved_target.get("scope") != "all" or not isinstance(approved, list)
+                    or any(not isinstance(name, str) for name in approved)):
+                raise TargetError("invalid approved all-stacks target")
+            if set(approved) != set(current):
+                raise TargetError("stack set changed since approval")
+            return AllStacksTarget(tuple(approved))
+        return AllStacksTarget(tuple(current))
+
+    if not isinstance(stack, str) or not _NAME_RE.fullmatch(stack) or ".." in stack:
+        raise TargetError(f"invalid stack name {stack!r}")
+    if stack == "all":
+        raise TargetError(f"{action} requires one stack")
+    if action == UP_STACK and stack in config.FORBIDDEN_STACKS:
+        raise TargetError(f"stack {stack!r} is forbidden")
+    ingress = is_ingress_stack(stack)
+    if action == DOWN_STACK and ingress:
+        raise TargetError(f"stack {stack!r} is ingress; use {DOWN_INGRESS}")
+    if action == DOWN_INGRESS and not ingress:
+        raise TargetError(f"stack {stack!r} is not ingress; use {DOWN_STACK}")
+    if not compose_file(stack).is_file():
+        raise TargetError(f"no stack named {stack!r} under {config.STACKS_ROOT}")
+    return StackTarget(stack)
+
+
+def action_summary(action: str, target: dict) -> str:
+    if action == RESTART_SERVICE:
+        return f"Restart {target['stack']}/{target['service']}"
+    direction = "up" if action in UP_ACTIONS else "down"
+    if target.get("scope") == "all":
+        return f"Bring every stack {direction}"
+    return f"Bring {target['stack']} {direction}"
+
+
+def stack_argv(action: str, stack: str) -> list[str]:
+    if action in UP_ACTIONS:
+        verb = ["up", "-d"]
+    elif action in DOWN_ACTIONS:
+        verb = ["down"]
+    else:
+        raise ValueError(f"not a compose stack action: {action}")
+    return ["docker", "compose", "-f", str(compose_file(stack)), *verb]
+
+
+def stack_container_ids(stack: str, *, timeout=DOCKER_TIMEOUT_SECONDS) -> tuple[int, list[str]]:
+    """The project's containers by NAME (inspectable like IDs, and readable in the failure reasons
+    that reach Telegram and the dashboard; 64-hex IDs were not — VM rehearsal, T37)."""
+    rc, out, _err = bender.run_argv(
+        ["docker", "compose", "-f", str(compose_file(stack)), "ps", "-a", "--format", "{{.Name}}"],
+        timeout=timeout,
+    )
+    return rc, [line.strip() for line in out.splitlines() if line.strip()]
+
+
+STACK_VERIFY_TIMEOUT_SECONDS = 180
+
+
+def verify_stack_up(
+    stack: str, *, timeout: float = STACK_VERIFY_TIMEOUT_SECONDS,
+    poll_seconds: float = DEFAULT_POLL_SECONDS, stable_seconds: float = VERIFY_STABLE_SECONDS,
+    clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+) -> tuple[bool, str]:
+    start = clock()
+    rc, containers = stack_container_ids(stack, timeout=max(0, timeout - (clock() - start)))
+    if rc != 0:
+        return False, "could not list containers after up"
+    if not containers:
+        return False, "no containers started"
+    baselines: dict[str, int] = {}
+    good_since: float | None = None
+    while True:
+        now = clock()
+        all_good = True
+        waiting = []
+        for container in containers:
+            remaining = timeout - (clock() - start)
+            if remaining <= 0:
+                return False, f"not healthy within {int(timeout)}s (verification timed out)"
+            reading = read_health(container, timeout=remaining)
+            if reading.error is not None:
+                return False, f"{container}: inspect failed: {reading.error}"
+            baseline = baselines.setdefault(container, reading.restart_count)
+            if reading.status != "running":
+                return False, f"{container}: status={reading.status}"
+            if reading.health == "unhealthy":
+                return False, f"{container}: healthcheck failing"
+            increase = reading.restart_count - baseline
+            if increase >= 1:
+                return False, f"{container}: restarted {increase}x during verification"
+            if reading.health not in ("healthy", "none"):
+                all_good = False
+                waiting.append(f"{container}={reading.health}")
+        if all_good:
+            good_since = now if good_since is None else good_since
+            if now - good_since >= stable_seconds:
+                return True, f"all {len(containers)} containers stable for {int(now - good_since)}s"
+        else:
+            good_since = None
+        if now - start >= timeout:
+            detail = ", ".join(waiting) or "stability window not reached"
+            return False, f"not healthy within {int(timeout)}s ({detail})"
+        sleep(min(poll_seconds, max(0, timeout - (now - start))))
+
+
+def verify_stack_down(
+    stack: str, *, timeout: float = STACK_VERIFY_TIMEOUT_SECONDS,
+    poll_seconds: float = DEFAULT_POLL_SECONDS, clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[bool, str]:
+    start = clock()
+    while True:
+        remaining = timeout - (clock() - start)
+        if remaining <= 0:
+            return False, f"containers still present after {int(timeout)}s"
+        rc, containers = stack_container_ids(stack, timeout=remaining)
+        if rc != 0:
+            return False, "could not list containers after down"
+        if not containers:
+            return True, "no containers remain"
+        now = clock()
+        if now - start >= timeout:
+            return False, f"containers still present after {int(timeout)}s: {', '.join(containers)}"
+        sleep(min(poll_seconds, max(0, timeout - (now - start))))
 
 
 def restart_argv(target: Target) -> list[str]:
@@ -394,10 +589,6 @@ def restart_count(container_name: str) -> int | None:
 
 
 # ── Verifier (landing 1b) ────────────────────────────────────────────────────────
-VERIFY_TIMEOUT_SECONDS = 90
-VERIFY_STABLE_SECONDS = 15
-
-
 def verify_after_restart(
     container_name: str,
     baseline_restarts: int | None,

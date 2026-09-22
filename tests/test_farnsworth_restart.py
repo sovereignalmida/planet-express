@@ -9,12 +9,18 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 import casa_farnsworth as fw
 from notifier import Decision, FakeNotifier
-from planet_express.application.command_service import DecideResult, ProposeResult
+from planet_express.application.command_service import (
+    DecideResult,
+    ProposeResult,
+    RequestResult,
+)
 
 
 class FakeTg:
@@ -25,15 +31,20 @@ class FakeCommands:
     def __init__(self, propose_result=None):
         self.proposals: list[tuple] = []
         self.decisions: list[tuple] = []
+        self.requests: list[tuple] = []
         self.propose_result = propose_result or ProposeResult(True, "a1b2c3d4e5f6", True, "awaiting approval")
 
-    def propose(self, action, stack, service, *, requested_via, requested_by):
+    def propose(self, action, stack, service=None, *, requested_via, requested_by):
         self.proposals.append((action, stack, service, requested_via, requested_by))
         return self.propose_result
 
     def decide(self, approval_id, *, approve, decided_by, decision=None):
         self.decisions.append((approval_id, approve, decided_by, decision))
         return DecideResult("started", "ok")
+
+    def request_action(self, action, stack, service=None, *, operator, origin):
+        self.requests.append((action, stack, service, operator, origin))
+        return RequestResult("started", "started", "approval", "execution", {})
 
 
 class RecordingThread:
@@ -122,3 +133,65 @@ def test_action_callback_without_command_service_is_acknowledged():
 def test_help_lists_restart(monkeypatch):
     n = _send("/help", FakeCommands(), monkeypatch)
     assert any("/restart `<stack>` `<service>`" in m for m in n.notifications)
+
+
+@pytest.mark.parametrize("text", ["/up", "/up media extra", "/down", "/down media extra"])
+def test_stack_action_usage_errors(monkeypatch, text):
+    commands = FakeCommands()
+    n = _send(text, commands, monkeypatch)
+    assert any("Usage:" in message for message in n.notifications)
+    assert RecordingThread.started == []
+
+
+@pytest.mark.parametrize(("text", "action", "target"), [
+    ("/up media", fw.actions.UP_STACK, "media"),
+    ("/up all", fw.actions.UP_ALL, "all"),
+    ("/down media", fw.actions.DOWN_STACK, "media"),
+    ("/down network", fw.actions.DOWN_INGRESS, "network"),
+    ("/down all", fw.actions.DOWN_ALL, "all"),
+])
+def test_stack_actions_route_to_typed_actions(monkeypatch, text, action, target):
+    commands = FakeCommands()
+    n = _send(text, commands, monkeypatch, sender={"id": 1001, "username": "chris"})
+    assert RecordingThread.started == [
+        (fw._run_stack_action_request, (commands, n, action, target, "@chris (1001)"))
+    ]
+
+
+def test_up_stack_direct_reply_names_execution(monkeypatch):
+    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk: True)
+    commands = FakeCommands()
+    notifier = FakeNotifier()
+    fw._run_stack_action_request(commands, notifier, fw.actions.UP_STACK, "media", "chris")
+    assert commands.requests == [
+        (fw.actions.UP_STACK, "media", None, "chris", "telegram-direct")
+    ]
+    assert any("Bringing <code>media</code> up" in item and "execution" in item
+               for item in notifier.notifications)
+
+
+def test_approval_gated_stack_action_reports_card(monkeypatch):
+    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk: False)
+    commands = FakeCommands()
+    notifier = FakeNotifier()
+    fw._run_stack_action_request(commands, notifier, fw.actions.DOWN_STACK, "media", "chris")
+    assert commands.proposals == [(fw.actions.DOWN_STACK, "media", None, "telegram", "chris")]
+    assert any("Approval card sent" in item for item in notifier.notifications)
+
+
+def test_farnsworth_has_no_stackctl_up_down_calls():
+    source = Path(fw.__file__).read_text()
+    assert "stackctl.stack_up" not in source
+    assert "stackctl.stack_down" not in source
+
+
+def test_direct_refusal_quoting_user_input_is_escaped(monkeypatch):
+    # Codex review, T37: `/up <x>` must not break Telegram's HTML parse of the refusal.
+    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk: True)
+    commands = FakeCommands()
+    commands.request_action = lambda *a, **k: RequestResult(
+        "refused", "target refused: invalid stack name '<x>'", None, None, {}
+    )
+    notifier = FakeNotifier()
+    fw._run_stack_action_request(commands, notifier, fw.actions.UP_STACK, "<x>", "chris")
+    assert notifier.notifications == ["target refused: invalid stack name '&lt;x&gt;'"]

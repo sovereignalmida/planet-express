@@ -48,6 +48,21 @@ def test_restart_action_declares_no_abort_rollback_or_resume():
     assert (spec.abortable, spec.rollbackable, spec.resumable) == (False, False, False)
 
 
+def test_stack_action_risks_and_capabilities():
+    expected = {
+        actions.UP_STACK: "R1", actions.DOWN_STACK: "R2", actions.UP_ALL: "R2",
+        actions.DOWN_ALL: "R3", actions.DOWN_INGRESS: "R3",
+    }
+    for name, risk in expected.items():
+        spec = actions.REGISTRY[name]
+        assert spec.risk == risk
+        assert (spec.abortable, spec.rollbackable, spec.resumable) == (False, False, False)
+
+
+def test_telegram_direct_is_an_operator_origin():
+    assert "telegram-direct" in policy.OPERATOR_ORIGINS
+
+
 def test_only_r1_allows_direct_request():
     for risk in (*policy.RISK_LEVELS, 'R9', '', None):
         assert policy.allows_direct_request(risk) is (risk == 'R1')

@@ -28,12 +28,14 @@
   }
 
   function target(data) {
-    const value = data.approval && data.approval.target || {};
-    return { stack: value.stack || "unknown", service: value.service || "unknown" };
+    const value = data.target || data.approval && data.approval.target || {};
+    return { stack: value.stack || "unknown", service: value.service || null,
+      scope: value.scope, stacks: Array.isArray(value.stacks) ? value.stacks : [] };
   }
 
   function targetUrl(data) {
     const value = target(data);
+    if (data.action !== "docker.restart_service") return "/#overview";
     return "/containers/" + encodeURIComponent(value.stack) + "/" + encodeURIComponent(value.service);
   }
 
@@ -71,7 +73,10 @@
     if (status === "verifying") verifyKind = "active";
     if (status === "passed") verifyKind = "done";
     if (status === "failed") {
-      const preVerification = /^(target no longer valid|container changed since approval|restart command failed|failed to start|crashed:)/.test(data.reason || "");
+      // Stack runs report per stack; a compose command that exited non-zero failed before
+      // verification for that stack (T37).
+      const preVerification = /^(target no longer valid|container changed since approval|restart command failed|failed to start|crashed:)/.test(data.reason || "")
+        || /\(compose exited \d+/.test(data.reason || "");
       restartKind = preVerification ? "failed" : "done";
       verifyKind = preVerification ? "pending" : "failed";
     }
@@ -79,11 +84,13 @@
       restartKind = "pending";
       verifyKind = "pending";
     }
-    rail.append(railItem("Restart " + target(data).stack + "/" + target(data).service, restartKind,
+    const isRestart = data.action === "docker.restart_service";
+    rail.append(railItem(data.summary, restartKind,
       restartKind === "active" ? "command in progress" : restartKind === "done" ? "command finished"
         : restartKind === "failed" ? "command failed" : "completion not confirmed"));
-    rail.append(railItem("Verify the service answers", verifyKind,
-      verifyKind === "active" ? "health checks in progress" : verifyKind === "done" ? data.reason : "waiting"));
+    rail.append(railItem(isRestart ? "Verify the service answers" : "Verify container state", verifyKind,
+      verifyKind === "active" ? "health checks in progress" : verifyKind === "done" ? data.reason
+        : verifyKind === "failed" ? "verification failed" : "waiting"));
   }
 
   function action(label, href, primary) {
@@ -106,9 +113,13 @@
   function render(data) {
     state.execution = data;
     const status = data.status;
+    const isRestart = data.action === "docker.restart_service";
     const treatments = {
-      running: ["warn", "RUNNING", "Restart command is in progress."],
-      verifying: ["execution-verifying", "VERIFYING", "Commands finished. The run isn't done until the service answers."],
+      running: ["warn", "RUNNING", isRestart ? "Restart command is in progress."
+        : (data.summary || "Stack command") + " is in progress."],
+      verifying: ["execution-verifying", "VERIFYING", isRestart
+        ? "Commands finished. The run isn't done until the service answers."
+        : "Compose finished. The run isn't done until the containers reach the expected state."],
       passed: ["ok", "VERIFIED GOOD", data.reason || "The service answered its verification checks."],
       failed: ["crit", "EXECUTION FAILED", data.reason || "The action did not pass verification."],
       interrupted: ["execution-interrupted", "WHAT WE KNOW", data.reason || "Contact ended before the host state could be confirmed."],
@@ -126,7 +137,10 @@
     if (!summary.hidden) {
       get("summary-runtime").textContent = duration(data);
       get("summary-operator").textContent = data.approval && data.approval.decided_by || "unknown";
-      get("summary-target").textContent = target(data).stack + "/" + target(data).service;
+      const value = target(data);
+      get("summary-target").textContent = value.scope === "all"
+        ? "every stack (" + value.stacks.length + ")"
+        : data.action === "docker.restart_service" ? value.stack + "/" + value.service : value.stack;
     }
     renderActions(data);
     get("execution-message").textContent = "";

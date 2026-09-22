@@ -774,7 +774,8 @@ class Store:
 
     def create_direct_execution(
         self, *, action: str, target_key: str, target: dict, risk: str,
-        operator: str, arrived_at: float, deadline: float | None = None,
+        operator: str, arrived_at: float, origin: str = "dashboard-direct",
+        deadline: float | None = None,
     ) -> dict | None:
         """Record an operator confirmation and its execution in one transaction.
 
@@ -811,12 +812,12 @@ class Store:
                 conn.execute(
                     "INSERT INTO approvals (id, action, target_key, target_json, risk, status, "
                     "requested_via, requested_by, created_at, expires_at, decided_by, decided_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'approved', 'dashboard-direct', ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, ?, ?)",
                     (approval_id, action, target_key, json.dumps(target, sort_keys=True), risk,
-                     operator, now, now, operator, now),
+                     origin, operator, now, now, operator, now),
                 )
                 self._event(conn, "proposal.created", approval_id=approval_id, action=action,
-                            target=target, risk=risk, requested_via="dashboard-direct", requested_by=operator)
+                            target=target, risk=risk, requested_via=origin, requested_by=operator)
             execution_id = _new_id()
             conn.execute(
                 "INSERT INTO executions (id, approval_id, status, started_at) VALUES (?, ?, 'running', ?)",
