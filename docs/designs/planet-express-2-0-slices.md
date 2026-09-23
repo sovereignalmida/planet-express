@@ -1807,6 +1807,19 @@ tasks against `ACTION-SCREENS.md`.
     id the binding read already returned. Round 3 clean.
   - Re-rehearsed on the VM afterwards: the five-step bounce, drift refusal, abort during wait, the
     rollback cycle, and T37's full `/up`/`/down` suite all unchanged; journals clean.
+- **Slice 5b-1 live deployment (2026-09-23):** tagged `v2.0.0-8` at `8fbab4c` (T38-T40 + the Codex
+  gate fixes) and deployed it to `live/deployed`, with the host-only disk-monitoring override
+  replayed as `ab08409` and the weekend-handoff note re-applied. Snapshot
+  `20260923T095544Z-pre-v2-0-0-8` (schema 4); previous code on `live-backup-7` (`e7d08f6`).
+  **The v4 -> v5 migration ran on first start**: schema 5, `foreign_key_check` and `integrity_check`
+  clean, both executions and all 26 events preserved, `execution_steps`/`attempts`/
+  `rollback_candidates` created empty; nothing to cut over (no pending approvals, no unfinished
+  executions). Both units active under their users with 0 restarts; `/` 302, `/login` and all four
+  static assets 200; core reported config `b68ab75d54a3` ACTIVE with sensitive edits off; journals
+  clean. The pending legacy plan `p1` (gluetun port-forward repair) survived the upgrade and stays
+  approvable — legacy plans run unchanged until 5b-5. **Rollback from here needs both** the
+  `live-backup-7` checkout and the pre-v5 snapshot restore (v2.0.0-7 refuses a v5 database); the
+  deploy script does both automatically if a post-migration check fails.
 
 ## Reviewer Concerns
 
