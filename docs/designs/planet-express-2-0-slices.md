@@ -1912,6 +1912,17 @@ tasks against `ACTION-SCREENS.md`.
     `Store.reserve_runbook_attempts` now returns an `AttemptRefusal(reason, step_n)` and the engine
     records the failure against the step whose target is actually at its limit. **Round 5 clean.**
 
+- **Slice 5b-2 live deployment (2026-09-23):** tagged `v2.0.0-9` at `fd89587` (T41 + the five
+  Codex rounds) and deployed it to `live/deployed`, with the host-only disk-monitoring override
+  replayed as `0a9f116` and the weekend-handoff note re-applied. Snapshot
+  `20260923T113524Z-pre-v2-0-0-9`; previous code on `live-backup-8` (`ab08409`). No schema or config
+  change: the database stayed at v5 with `foreign_key_check` and `integrity_check` clean and all 2
+  approvals / 2 executions / 26 events intact, so rollback here is code-only. Both units active
+  under their users with 0 restarts, `/` 302, `/login` and all four static assets 200, journals
+  clean. `legacy_plans_enabled` reads False on the host, so **the live planner is now on the typed
+  path** — the next scan proposes runbooks, not shell. The old `state/pending_plan.json` (the
+  gluetun port-forward repair, `p1`) is still on disk and core is idle with no pending approval.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect
