@@ -4,6 +4,7 @@ host call is faked and recorded."""
 
 import os
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -412,3 +413,85 @@ def test_rollback_leaves_a_still_unknown_step_alone(svc):
     svc._read_health = broken
     plan = engine.plan_rollback(svc, "Stop one", svc._store.list_steps(ex))
     assert plan.runbook is None and plan.unknown == ["1. service.stop"] and plan.undo == []
+
+
+# ── Codex review of 5b-1 ───────────────────────────────────────────────────────
+def test_stack_service_set_change_refuses_before_any_argv(svc):
+    # An include:/profile change can move the service set without touching the top-level file.
+    ex = execution(svc)
+    step = {"type": "stack.up", "params": {"stack": "media"}, "binding": FakeBinder().stack("media", timeout=4)}
+    svc._binder.services_by_stack["media"] = ["web", "worker"]  # a service appeared since approval
+    result = engine.RunbookEngine(svc).run(ex, runbook(step), origin="telegram-direct")
+    assert result.status == "failed" and "services of media changed since approval" in result.reason
+    assert svc.argv == []
+    assert steps(svc, ex) == [("stack.up", "failed", "not_applied")]
+
+
+def test_container_only_steps_also_refuse_a_changed_compose_file(svc):
+    ex = execution(svc)
+    step = container_step("check.container", {"expect": "running"})
+    svc._binder.compose_sha = "b" * 64
+    result = engine.RunbookEngine(svc).run(ex, runbook(step), origin="planner")
+    assert result.status == "failed" and "compose file changed since approval" in result.reason
+
+
+def test_unreadable_unit_state_is_never_read_as_stopped(svc, monkeypatch):
+    calls = []
+
+    def unreadable(argv, timeout):
+        calls.append(argv)
+        return (bender.RUN_ARGV_TIMEOUT_EXIT, "", "timed out")
+
+    monkeypatch.setattr(bender, "run_argv", unreadable)
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    ex = execution(svc)
+    rb = runbook({"type": "unit.action", "params": {"action": "stop", "unit": "casa-stacks.service"},
+                  "binding": {"unit": "casa-stacks.service"}})
+    result = engine.RunbookEngine(svc).run(ex, rb, origin="planner")
+    # pre-state unreadable: the step never runs
+    assert result.status == "failed" and "could not read the state" in result.reason
+    assert steps(svc, ex) == [("unit.action", "failed", "not_applied")]
+    assert svc.argv == []
+
+    # and when only the post-check is unreadable, the outcome is unknown, never "stopped"
+    ex2 = execution_for(svc, "media/radarr")
+    states = iter([(0, "active\n", ""), (bender.RUN_ARGV_TIMEOUT_EXIT, "", "timed out")])
+    monkeypatch.setattr(bender, "run_argv", lambda argv, timeout: next(states))
+    result = engine.RunbookEngine(svc).run(ex2, rb, origin="planner")
+    assert result.status == "failed" and "could not read the state" in result.reason
+    assert steps(svc, ex2) == [("unit.action", "failed", "unknown")]
+
+
+def test_all_stack_bindings_share_one_deadline(monkeypatch):
+    from planet_express.execution.binding import Binder
+    seen = []
+    now = [0.0]
+
+    def clock():
+        now[0] += 2.0  # every binding step "takes" 2s
+        return now[0]
+
+    monkeypatch.setattr("planet_express.execution.binding.time.monotonic", clock)
+    monkeypatch.setattr("planet_express.execution.binding._file_sha256", lambda path: "a" * 64)
+
+    def slow(argv, timeout):
+        seen.append(timeout)
+        return (0, "web\n", "")
+
+    binder = Binder(run_argv=slow)
+    with pytest.raises(actions.TargetTimeout):
+        binder.stack_set(["a", "b", "c", "d"], timeout=5)
+    # each stack gets what is LEFT of the one budget, and the set is abandoned when it runs out
+    assert len(seen) < 4 and all(later < earlier for earlier, later in pairwise(seen))
+
+
+def test_container_only_steps_inspect_the_container_once(svc):
+    # Codex review round 2, 5b-1: the binding check already fetched the id.
+    calls = []
+    real = svc._binder.container_id
+    svc._binder.container_id = lambda container, *, timeout: calls.append(container) or real(container, timeout=timeout)
+    ex = execution(svc)
+    result = engine.RunbookEngine(svc).run(
+        ex, runbook(container_step("check.container", {"expect": "running"})), origin="planner")
+    assert result.status == "passed"
+    assert len(calls) == 1

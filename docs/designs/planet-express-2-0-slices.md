@@ -1793,6 +1793,20 @@ tasks against `ACTION-SCREENS.md`.
     it created the child, navigated to it, and ended `rolled_back` with the container running. A
     rollback child interrupted by killing the process was settled by the next core start
     (step `failed/unknown`, execution `interrupted`, 0 restarts). VM operators restored; journals clean.
+- **Codex gate over the whole of 5b-1 (T38-T40), 2026-09-23** (run after the operator's "skip codex"
+  instruction, before the deploy; `codex review --base v2.0.0-7`): **5 findings, all fixed.**
+  - **P1** stack steps compared only the top-level compose hash, so an `include:`/profile change could
+    move the service set under an approval → the bound `services` list is compared before dispatch.
+  - **P1** `systemctl is-active` errors were read as "not active", so an unreadable unit could record
+    a stop as passed/applied → unit state is now fail-closed (pre-state unreadable refuses the step;
+    an unreadable post-check is `failed`/`unknown`, never "stopped").
+  - **P2** container-only steps (`check.*`, `read.*`) skipped the compose-hash drift check → they now
+    run the same binding check as mutating steps.
+  - **P2** all-stack bindings gave each stack the full request timeout → one shared deadline.
+  - **P2** (round 2, my own fix's flaw) that drift check inspected the container twice → it reuses the
+    id the binding read already returned. Round 3 clean.
+  - Re-rehearsed on the VM afterwards: the five-step bounce, drift refusal, abort during wait, the
+    rollback cycle, and T37's full `/up`/`/down` suite all unchanged; journals clean.
 
 ## Reviewer Concerns
 

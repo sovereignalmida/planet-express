@@ -45,6 +45,17 @@ _NO_LIMIT = 10**9
 _STARTED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})")
 
 
+def unit_active(unit: str) -> str:
+    """`systemctl is-active` exits non-zero for inactive/failed units, so only an empty answer or a
+    timeout means the state could not be read — never silently call that "stopped" (Codex review)."""
+    rc, out, err = bender.run_argv(["systemctl", "is-active", unit],
+                                   timeout=actions.DOCKER_TIMEOUT_SECONDS)
+    value = out.strip().splitlines()[-1].strip() if out.strip() else ""
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT or not value:
+        raise actions.TargetError(f"could not read the state of {unit}: {_clip(err) or 'no answer'}")
+    return value
+
+
 def _clip(text: str) -> str:
     return redact((text or "").strip())[:REASON_LIMIT]
 
@@ -304,6 +315,10 @@ class RunbookEngine:
                 return self._refuse(f"target no longer valid: {exc}")
             if stack not in bound or current["compose_sha256"] != bound[stack]["compose_sha256"]:
                 return self._refuse(f"compose file of {stack} changed since approval")
+            # An include: or profile change can move the service set without touching the top-level
+            # file's hash — the approval named these services (Codex review, 5b-1).
+            if list(current["services"]) != list(bound[stack]["services"]):
+                return self._refuse(f"the services of {stack} changed since approval")
         passed = []
         for index, stack in enumerate(stacks):
             dispatch()
@@ -351,11 +366,20 @@ class RunbookEngine:
 
     def _bound_container(self, step) -> tuple[str | None, StepOutcome | None]:
         binding = step.binding
+        # Container-only steps (check.*, read.*) carry the full service binding, so they get the same
+        # drift protection as a mutating step (Codex review, 5b-1).
         try:
-            current_id = self.svc._binder.container_id(binding["container"], timeout=actions.DOCKER_TIMEOUT_SECONDS)
+            current = self.svc._binder.service(
+                actions.Target(binding["project"], binding["service"], binding["container"]),
+                timeout=actions.DOCKER_TIMEOUT_SECONDS,
+            )
         except actions.TargetError as exc:
             return None, self._refuse(f"target no longer valid: {exc}")
-        if current_id != binding["container_id"]:
+        if current["compose_sha256"] != binding["compose_sha256"]:
+            return None, self._refuse("compose file changed since approval")
+        # Binder.service() already inspected the container: one docker call, not two
+        # (Codex review round 2, 5b-1).
+        if current["container_id"] != binding["container_id"]:
             return None, self._refuse(f"container {binding['container']} was recreated since approval")
         return binding["container"], None
 
@@ -415,8 +439,7 @@ class RunbookEngine:
         return StepOutcome("passed", "not_applied", f"port {int(value)}", {"port": int(value)})
 
     def _unit_active(self, unit: str) -> str:
-        _rc, out, _err = bender.run_argv(["systemctl", "is-active", unit], timeout=actions.DOCKER_TIMEOUT_SECONDS)
-        return out.strip() or "unknown"
+        return unit_active(unit)
 
     def _unit_action(self, execution_id, step, params, dispatch) -> StepOutcome:
         action, unit = params["action"], params["unit"]
@@ -424,13 +447,20 @@ class RunbookEngine:
             bender._check_sudo_allowlist(f"sudo systemctl {action} {unit}")
         except bender.SafetyError as exc:
             return self._refuse(f"not in the sudo allowlist: {_clip(str(exc))}")
-        before = self._unit_active(unit)
+        try:
+            before = self._unit_active(unit)
+        except actions.TargetError as exc:
+            return self._refuse(str(exc))
         dispatch({"active": before})
         rc, out, err = self.svc._run_argv(["sudo", "-n", "systemctl", action, unit],
                                           timeout=actions.DOCKER_TIMEOUT_SECONDS)
         if rc != 0:
             return StepOutcome("failed", "unknown", f"systemctl {action} failed (exit {rc}): {_clip(err or out)}")
-        after = self._unit_active(unit)
+        try:
+            after = self._unit_active(unit)
+        except actions.TargetError as exc:
+            # The command ran; we just cannot confirm the result, so the effect is unknown.
+            return StepOutcome("failed", "unknown", str(exc))
         want_active = action in ("start", "restart")
         ok = (after == "active") == want_active
         if action == "restart":
@@ -545,9 +575,10 @@ def _now_effect(svc, row: dict) -> str:
     if row["type"] == "unit.action":
         if "active" not in pre:
             return "unknown"
-        _rc, out, _err = bender.run_argv(["systemctl", "is-active", row["params"]["unit"]],
-                                        timeout=actions.DOCKER_TIMEOUT_SECONDS)
-        now = out.strip() or "unknown"
+        try:
+            now = unit_active(row["params"]["unit"])
+        except actions.TargetError:
+            return "unknown"
         wanted = row["params"]["action"] == "start"
         if (now == "active") == wanted and (pre["active"] == "active") != wanted:
             return "applied"

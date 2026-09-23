@@ -10,6 +10,7 @@ runner: binding is bookkeeping, not an action, and must not appear in an action'
 """
 
 import hashlib
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -81,7 +82,16 @@ class Binder:
         }
 
     def stack_set(self, stacks: list[str], *, timeout: float) -> dict:
-        return {"stacks": [{"stack": stack, **self.stack(stack, timeout=timeout)} for stack in stacks]}
+        """One shared deadline for the whole set: with 15 stacks a per-stack timeout would let a slow
+        host hold an RPC worker for stacks x timeout (Codex review, 5b-1)."""
+        deadline = time.monotonic() + timeout
+        bound = []
+        for stack in stacks:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise actions.TargetTimeout("host slow, retry")
+            bound.append({"stack": stack, **self.stack(stack, timeout=left)})
+        return {"stacks": bound}
 
     def stack_containers(self, stack: str, services: list[str], *, timeout: float) -> list[dict]:
         """`stack.up`'s outputs: exactly one container per approved service (design §4.2 staged
