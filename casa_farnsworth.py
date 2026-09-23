@@ -42,6 +42,7 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
+from planet_express.application import planner
 from planet_express.application.chat_service import (
     MAX_ANSWER_CHARS,
     ChatResult,
@@ -1006,6 +1007,7 @@ def run_pipeline(
     *,
     scheduled: bool = False,
     incident_store: Store | None = None,
+    commands: CommandService | None = None,
 ) -> None:
     """
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
@@ -1080,6 +1082,11 @@ def run_pipeline(
 
         # ── Step 3: Farnsworth plans ─────────────────────────────────────────
         notifier.notify("🧠 *Good news, everyone! Devising plans...*")
+        if not config.LEGACY_PLANS_ENABLED:
+            # Typed runbooks (slice 5b-2): the planner picks catalogue steps, never shell.
+            _propose_typed_plans(notifier, findings, commands, incident_store)
+            state.transition(PipelineState.IDLE)
+            return
         plans_data = plan(findings)
         save_plans(plans_data)
 
@@ -1104,6 +1111,85 @@ def run_pipeline(
         log.exception("Pipeline error")
         state.transition(PipelineState.IDLE)
         notifier.notify(f"🛑 *Pipeline error:* `{str(e)[:200]}`")
+
+
+def _devise_typed_plans(findings: dict) -> str:
+    """One LLM call for typed plans, reusing the diagnostic pre-check (slice 5b-2)."""
+    findings_json = json.dumps(
+        {"findings": findings.get("findings", []),
+         "update_candidates": findings.get("update_candidates", [])},
+        separators=(",", ":"),
+    )
+    diagnostics = _gather_diagnostics(findings_json)
+    user_content = f"Devise action plans for these findings:\n{findings_json}"
+    if diagnostics:
+        log.info(
+            f"Farnsworth's diagnostic pre-check ran {len(diagnostics)} command(s): "
+            + "; ".join(f"{d['command']} (exit {d['exit_code']})" for d in diagnostics)
+        )
+        user_content += "\n\n" + _format_diagnostic_evidence(diagnostics)
+    return llm.complete(planner.PLAN_RUNBOOK_PROMPT, user_content, MAX_TOKENS, tier="small").strip()
+
+
+def _propose_typed_plans(
+    notifier: Notifier, findings: dict, commands: CommandService | None, store: Store | None,
+) -> None:
+    """Turn the planner's intent into approved-by-the-operator runbooks. A plan the catalogue cannot
+    express is reported as a diagnosis and recorded, never sent as a card (D37, slice 5b-2)."""
+    if commands is None:
+        notifier.notify("⚠️ Typed actions are unavailable (command service not started); no plans.")
+        return
+
+    def refused(reason: str, title: str = "") -> None:
+        log.warning(f"Planner refusal: {reason}")
+        if store is not None:
+            try:
+                store.record_event("planner.refused", reason=redact(reason)[:300], title=title[:120])
+            except Exception:  # noqa: BLE001 -- the operator is told either way
+                log.warning("Could not record a planner refusal")
+
+    try:
+        raw = _devise_typed_plans(findings)
+        plans, needs_human = planner.parse_plans(raw)
+    except planner.PlanRefused as exc:
+        refused(str(exc))
+        notifier.notify(f"🧠 No plan: {TelegramClient.s(str(exc))}. The findings above still stand.")
+        return
+    except Exception as e:
+        log.exception("Typed planning crashed")
+        notifier.notify(f"🛑 *Planning failed:* `{TelegramClient.s(str(e)[:200])}`")
+        return
+
+    builder = planner.RunbookBuilder(binder=commands.binder)
+    proposed, refusals = 0, []
+    for item in plans:
+        title = str(item.get("title") or "")[:120]
+        try:
+            typed = builder.build(item)
+        except planner.PlanRefused as exc:
+            refused(str(exc), title)
+            refusals.append(f"{title or 'untitled'}: {exc}")
+            continue
+        result = commands.propose_plan(
+            typed.runbook, requested_by="Farnsworth", finding_ids=typed.finding_ids,
+        )
+        if result.ok:
+            proposed += 1
+        else:
+            refused(result.reason, title)
+            refusals.append(f"{title or 'untitled'}: {result.reason}")
+
+    lines = []
+    if not proposed:
+        lines.append("🧠 _No typed remediation for these findings._")
+    for note in needs_human:
+        why = TelegramClient.s(str(note.get("why", ""))[:200])
+        if why:
+            lines.append(f"🙋 Needs a human: {why}")
+    for refusal in refusals[:5]:
+        lines.append(f"🚫 {TelegramClient.s(refusal[:200])}")
+    if lines:
+        notifier.notify("\n".join(lines))
 
 
 def _send_status_report(notifier: Notifier, snapshot: dict, mode: str) -> None:
@@ -1162,7 +1248,7 @@ def handle_message(
         threading.Thread(
             target=run_pipeline,
             args=(notifier, state, "full"),
-            kwargs={"incident_store": incident_store},
+            kwargs={"incident_store": incident_store, "commands": commands},
             daemon=True,
         ).start()
 
@@ -2195,7 +2281,8 @@ def _wait_for_maintenance(state: PipelineState, sleep=time.sleep) -> None:
     log.info("Scheduled pipeline maintenance wait ended")
 
 
-def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Store | None = None) -> None:
+def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Store | None = None,
+                   commands: CommandService | None = None) -> None:
     """Background thread — runs full pipeline every PIPELINE_INTERVAL_HOURS hours."""
     log.info(f"Scheduler started — pipeline runs every {PIPELINE_INTERVAL_HOURS}h")
     time.sleep(60)  # brief delay on startup before first scheduled run
@@ -2204,7 +2291,8 @@ def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Sto
             _wait_for_maintenance(state)
             log.info("Scheduled pipeline run starting")
             run_pipeline(
-                notifier, state, mode="full", scheduled=True, incident_store=incident_store
+                notifier, state, mode="full", scheduled=True, incident_store=incident_store,
+                commands=commands,
             )
         except Exception:
             log.exception("Scheduled pipeline error")
@@ -2466,7 +2554,7 @@ def run_bot() -> None:
 
     # Start background schedulers
     sched = threading.Thread(
-        target=scheduler_loop, args=(notifier, state, store), daemon=True, name="scheduler"
+        target=scheduler_loop, args=(notifier, state, store, commands), daemon=True, name="scheduler"
     )
     sched.start()
 

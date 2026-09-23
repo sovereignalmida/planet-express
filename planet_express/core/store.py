@@ -29,6 +29,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 SCHEMA_VERSION = 5
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
@@ -265,6 +266,13 @@ def _execute_ddl(conn: sqlite3.Connection, script: str) -> None:
     for statement in script.split(";"):
         if statement.strip():
             conn.execute(statement)
+
+
+class AttemptRefusal(NamedTuple):
+    """Why a runbook's attempts could not be reserved, and the step that caused it."""
+
+    reason: str
+    step_n: int
 
 
 class PendingPlanConflict(RuntimeError):
@@ -1126,18 +1134,37 @@ class Store:
 
     # ── executions ──────────────────────────────────────────────────────────
     def recent_attempts(
-        self, action: str, target_key: str, since: float, *, timeout: float = 5
+        self, action: str, target_key: str, since: float, *, timeout: float = 5,
+        without_attempt_rows: bool = False,
     ) -> list[float]:
-        """Execution starts for this action and target, including operator executions."""
+        """Execution starts for this action and target, including operator executions.
+
+        `without_attempt_rows` skips executions the `attempts` ledger already counts, so a caller
+        reading both sources for one target does not count a post-v5 execution twice (Codex, T41).
+        """
+        extra = ("AND NOT EXISTS (SELECT 1 FROM attempts t WHERE t.execution_id = e.id) "
+                 if without_attempt_rows else "")
         with self._connect(timeout=timeout) as conn:
             rows = conn.execute(
                 "SELECT e.started_at FROM executions e "
                 "JOIN approvals a ON a.id = e.approval_id "
                 "WHERE a.action = ? AND a.target_key = ? AND e.started_at >= ? "
+                f"{extra}"
                 "ORDER BY e.started_at",
                 (action, target_key, since),
             ).fetchall()
         return [row["started_at"] for row in rows]
+
+    def recent_pair_attempts(self, step_type: str, target_key: str, since: float,
+                             *, timeout: float = 5) -> list[float]:
+        """Attempt times for one (step type, target) pair — T24 accounting for runbooks (5b-2)."""
+        with self._connect(timeout=timeout) as conn:
+            rows = conn.execute(
+                "SELECT reserved_at FROM attempts WHERE step_type=? AND target_key=? "
+                "AND state IN ('reserved','consumed') AND reserved_at>=? ORDER BY reserved_at",
+                (step_type, target_key, since),
+            ).fetchall()
+        return [row["reserved_at"] for row in rows]
 
     def create_execution(self, approval_id: str) -> dict:
         execution_id = _new_id()
@@ -1390,15 +1417,21 @@ class Store:
     def reserve_runbook_attempts(
         self, execution_id: str, pairs, *, window_start: float, cooldown_start: float,
         max_per_day: int, now: float,
-    ) -> str | None:
-        """Reserve the full runbook multiplicity atomically, or insert nothing."""
+    ) -> "AttemptRefusal | None":
+        """Reserve the full runbook multiplicity atomically, or insert nothing.
+
+        A refusal names the first step of the pair that caused it, so the run is recorded against
+        the step actually at fault rather than step 1 (Codex, T41).
+        """
         if type(max_per_day) is not int or max_per_day < 1:
             raise ValueError("max_per_day must be positive")
         with self._write() as conn:
             normalized = self._normalize_attempt_pairs(conn, execution_id, pairs)
             multiplicity: dict[tuple[str, str], int] = {}
-            for _n, step_type, target in normalized:
+            first_step: dict[tuple[str, str], int] = {}
+            for n, step_type, target in normalized:
                 multiplicity[(step_type, target)] = multiplicity.get((step_type, target), 0) + 1
+                first_step.setdefault((step_type, target), n)
             for (step_type, target), requested in multiplicity.items():
                 recent = conn.execute(
                     "SELECT reserved_at FROM attempts WHERE step_type=? AND target_key=? "
@@ -1408,12 +1441,14 @@ class Store:
                 cooldown = [row[0] for row in recent if row[0] > cooldown_start]
                 if cooldown:
                     minutes = int((now - max(cooldown)) // 60)
-                    return f"cooling down: last attempt {minutes}m ago"
+                    return AttemptRefusal(f"cooling down: last attempt {minutes}m ago",
+                                          first_step[(step_type, target)])
                 daily = sum(row[0] >= window_start for row in recent)
                 if daily + requested > max_per_day:
-                    return (
+                    return AttemptRefusal(
                         f"attempt cap reached: {daily} in 24h plus {requested} requested "
-                        f"(max {max_per_day})"
+                        f"(max {max_per_day})",
+                        first_step[(step_type, target)],
                     )
             conn.executemany(
                 "INSERT INTO attempts "

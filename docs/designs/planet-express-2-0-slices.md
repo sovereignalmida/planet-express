@@ -1821,6 +1821,97 @@ tasks against `ACTION-SCREENS.md`.
   `live-backup-7` checkout and the pre-v5 snapshot restore (v2.0.0-7 refuses a v5 database); the
   deploy script does both automatically if a post-migration check fails.
 
+- [x] **T41 (P1, CC: ~1 session)** — typed planner — ✅ done 2026-09-23 — slice 5b-2: the planner
+  chooses catalogue steps instead of writing shell. Scope: `docs/handoff/T41-brief.md`.
+  **Implemented by the coordinator.**
+  - **`planet_express/application/planner.py`**: `PLAN_RUNBOOK_PROMPT` (the step catalogue and the
+    output schema, no commands anywhere), `RunbookBuilder` and `parse_plans`. The model returns
+    *intent*; every binding, risk, verifier and rollback semantic comes from code. Anything it
+    cannot express raises `PlanRefused` with a reason.
+  - **Bindings are never taken from the model.** When a step names a container, its stack/service
+    come from Docker's own compose labels and overwrite whatever the model said, so a model cannot
+    mislabel a container into another stack. Targeting params a step does not itself take (a
+    `check.container` handed a stack/service) are used for the binding and then dropped from the
+    document. `stack.up_all`, `stack.down_all`, `stack.down_ingress` and `compose.write` are not
+    available to the planner at all.
+  - **Recipes**: `vpn.resync_port_forward` (`dead_forward` | `sync_mismatch`) is the gluetun / GSP /
+    qBittorrent port-forward repair as code — it was prose in the old prompt. It expands to the full
+    sequence, ending with `read.qbittorrent_session_port` and a `check.log_since_start` that consumes
+    that step's output by step number.
+  - **`CommandService.propose_plan`** runs a planner runbook through the same path every typed action
+    uses: `policy.decide_runbook`, the T24 per-(step type, target) attempt limits
+    (`Store.recent_pair_attempts`, plus pre-5b `service.restart` attempts so the upgrade does not
+    reset a cooldown), dedup on the plan, one approval card listing the steps and which of them are
+    reversible. `CommandService.binder` is public so a caller's runbook carries bindings the engine
+    recognises.
+  - **`_current_policy`** — a runbook approval is re-judged as a runbook at decision time. Before
+    this, `decide()` ran `policy.decide("runbook")`, an unknown action, and refused every planner
+    plan at approval.
+  - **Refusals are recorded, never pasted**: `planner.refused` events (redacted reason + title) and a
+    Telegram message carrying the model's own `needs_human` explanation. No "run these commands
+    yourself" card (D37). The refusal log is what gets reviewed before 5b-5.
+  - **`legacy_plans_enabled: false`** (D36): `run_pipeline` takes the typed path by default and the
+    old `plan()` / `pending_plan.json` path only behind the switch, which 5b-5 deletes. Pending
+    legacy plans proposed before the upgrade still run.
+  - **Verification:** 1,374 tests pass (`tests/test_planner_runbooks.py` 24 new,
+    `tests/test_typed_pipeline.py` 5 new, 7 new `propose_plan` tests, 3 new engine limit tests);
+    Ruff clean.
+  - **Test VM rehearsal (2026-09-23)** (`tests/homelab/t41-planner.py`, core stopped): a two-step
+    plan for `unhealthy/web` became one R1 card whose stored plan verified, and approving it ran both
+    steps through the engine against real Docker (`check.container` passed, the restart failed
+    verification because that fixture is unhealthy on purpose — correct). The VPN recipe, pointed at
+    the fixture containers, expanded to its seven steps with real bindings. A `shell` step was
+    refused ("unknown step type 'shell'"), recorded, and reported with the model's `needs_human`
+    line and no card. Repeating the restart plan inside the cooldown was refused by the T24 limits
+    ("cooling down: last attempt 0m ago, cooldown 30m") — the pair accounting works on runbooks.
+    With `legacy_plans_enabled` on, the same pipeline wrote `pending_plan.json`, sent the old card
+    and created no typed approval. Re-running the recipe while its card was still pending deduped
+    onto that card instead of raising a second one. After the round-2 fixes, an `overlap` case was
+    added and run: two *different* plans for the same service each got a card, the first execution
+    passed and the second was refused at reservation ("cooling down: last attempt 0m ago") without
+    dispatching anything — the P1 fix, live — with the refusal recorded against the restart step and
+    the leading `wait` merely skipped (the round-4 fix). Every case was re-run after each round of fixes; core
+    was restarted on the new code afterwards and came up clean.
+  - **Found by the rehearsal:** an invalid step (a `check.container` without `expect`) escaped as a
+    pydantic `ValidationError` and took the whole planning run down with "Planning failed"; it is now
+    a per-plan `PlanRefused` with a readable reason, so one bad plan no longer loses the others.
+  - **Codex gate (`codex review --uncommitted`): 3 findings, all fixed.**
+    - **P1** a runbook's own repeats bypassed the T24 daily cap: proposal collapsed identical pairs
+      and counted only history, while the engine reserves a runbook's attempts without a cap, so
+      four restarts of one service passed a cap of three and all four ran. `policy.limit_refusal`
+      now takes `requested` and proposal counts the runbook's multiplicity.
+    - **P2** a model answering with a non-object `params` raised `TypeError`/`AttributeError` inside
+      the builder, so the run reported a generic failure and recorded no `planner.refused` → it is a
+      typed refusal.
+    - **P2** a `unit.action` step outside `sudo_allowlist` became a card that could only fail after
+      approval → the builder makes the same allowlist check the engine does and refuses first.
+  - **Codex gate round 2: 5 findings, all fixed.**
+    - **P1** planner `stack.up`/`stack.down` bound a stack directly, skipping
+      `actions.resolve_stack_target` — so a forbidden stack, or ingress on the R1 `stack.down` path,
+      could reach a card. Stack steps now go through that resolver first.
+    - **P1** two *different* plans could each hold a card for the same service (target keys are plan
+      hashes), and nothing re-checked the limits when the second was approved: the engine reserved
+      attempts with no cap. The engine now reserves with the real cooldown and daily cap for
+      non-operator origins, atomically, and fails the execution before any step runs. Operator
+      origins still reserve without a cap, unchanged.
+    - **P2** `_legacy_attempts` double-counted: a post-v5 restart is in both the `attempts` ledger
+      and the approvals/executions join → `recent_attempts(..., without_attempt_rows=True)`.
+    - **P2/P2** `"finding_ids": 1`, a non-string `type` and a non-string `recipe` raised `TypeError`
+      outside the per-plan refusal handler, losing every other plan in the response → typed
+      refusals.
+  - **Codex gate round 3: 2 findings, both fixed.**
+    - **P1** the shared stack resolver only refuses a forbidden stack on the way *up* and only
+      guards ingress on the way *down*, so `stack.down ai` and `stack.up network` still reached a
+      card. The planner now applies its own, stricter exclusions first: no forbidden stack in either
+      direction, and ingress is not the planner's to move at all.
+    - **P2** a plan of nothing but R0 reads was stored pending and carded even though
+      `decide_runbook` says it needs no approval → it is refused as "diagnostic only: no step to
+      approve", which is what D37 asks for anyway.
+  - **Codex gate round 4: 1 finding, fixed.** A reservation refusal marked step 1 failed and the
+    rest skipped, so a plan starting with a `wait` blamed the wait for a restart's cooldown.
+    `Store.reserve_runbook_attempts` now returns an `AttemptRefusal(reason, step_n)` and the engine
+    records the failure against the step whose target is actually at its limit. **Round 5 clean.**
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

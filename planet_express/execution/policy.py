@@ -131,15 +131,23 @@ def limit_lookback_seconds(*, autonomy: AutonomyConfig | None = None) -> float:
 
 
 def limit_refusal(
-    attempts: list[float], now: float, *, autonomy: AutonomyConfig | None = None,
+    attempts: list[float], now: float, *, requested: int = 1,
+    autonomy: AutonomyConfig | None = None,
 ) -> str | None:
-    """Check cooldown first, then the rolling 24-hour attempt cap."""
+    """Check cooldown first, then the rolling 24-hour attempt cap.
+
+    `requested` is how many attempts on this pair the caller is about to make: a runbook that
+    restarts one service four times asks for four, and the cap counts all four (Codex, T41) —
+    otherwise the plan is approved and the engine, which reserves without a cap, runs them all.
+    """
     autonomy = config.AUTONOMY if autonomy is None else autonomy
     if attempts and now - max(attempts) < autonomy.cooldown_seconds:
         minutes = int((now - max(attempts)) // 60)
         cooldown = autonomy.cooldown_seconds // 60
         return f"cooling down: last attempt {minutes}m ago, cooldown {cooldown}m"
     count = sum(attempt >= now - DAY_SECONDS for attempt in attempts)
-    if count >= autonomy.max_attempts_per_day:
-        return f"attempt cap reached: {count} in 24h (max {autonomy.max_attempts_per_day})"
+    if count + requested > autonomy.max_attempts_per_day:
+        extra = f" plus {requested} requested" if requested > 1 else ""
+        return (f"attempt cap reached: {count} in 24h{extra} "
+                f"(max {autonomy.max_attempts_per_day})")
     return None

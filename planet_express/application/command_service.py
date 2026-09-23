@@ -26,6 +26,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from collections import Counter
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -318,6 +319,101 @@ class CommandService:
             if not card_handed_off:
                 self._proposal_card_lock.release()
 
+    # ── planner runbooks (slice 5b-2) ───────────────────────────────────────
+    @property
+    def binder(self) -> Binder:
+        """The same binder the service uses, so a caller's runbook carries bindings the engine
+        will recognise (slice 5b-2)."""
+        return self._binder
+
+    def propose_plan(
+        self, runbook: runbooks.Runbook, *, requested_by: str | None = None,
+        finding_ids: list | None = None, origin: str = "planner",
+    ) -> ProposeResult:
+        """Propose a multi-step plan the planner (or Amy) chose from the catalogue. The document is
+        already validated with server-built bindings; policy, T24 limits, dedup, the card and the
+        approval path are the same ones every typed action uses."""
+        decision = policy.decide_runbook(runbook, origin)
+        plan_sha = runbooks.plan_sha256(runbook)
+        if decision.allowed and not decision.needs_approval:
+            # Every step is R0: there is nothing to approve, and a diagnosis is not a card (D37).
+            reason = "diagnostic only: no step to approve"
+            self._store.record_event("proposal.refused", action="runbook", reason=reason,
+                                     requested_via=origin, requested_by=requested_by,
+                                     title=runbook.title)
+            return ProposeResult(False, None, False, reason)
+        if not decision.allowed:
+            self._store.record_event("proposal.refused", action="runbook", reason=decision.reason,
+                                     requested_via=origin, requested_by=requested_by,
+                                     title=runbook.title)
+            return ProposeResult(False, None, False, decision.reason)
+        if origin not in policy.OPERATOR_ORIGINS:
+            now = self._clock()
+            since = now - policy.limit_lookback_seconds()
+            for pair, requested in Counter(decision.pairs).items():
+                step_type, target_key = pair
+                reason = policy.limit_refusal(
+                    self._store.recent_pair_attempts(step_type, target_key, since)
+                    + self._legacy_attempts(step_type, target_key, since), now,
+                    requested=requested,
+                )
+                if reason is not None:
+                    reason = f"{step_type} {target_key}: {reason}"
+                    self._store.record_event(
+                        "proposal.refused", action="runbook", reason=reason, requested_via=origin,
+                        requested_by=requested_by, title=runbook.title,
+                    )
+                    return ProposeResult(False, None, False, reason)
+        with self._proposal_card_lock:
+            try:
+                row, created = self._store.propose_runbook(
+                    action="runbook", target_key=f"plan:{plan_sha[:16]}",
+                    target={"title": runbook.title, "finding_ids": list(finding_ids or [])},
+                    risk=decision.risk, requested_via=origin, requested_by=requested_by,
+                    ttl_seconds=self._ttl, plan_json=runbooks.canonical_json(runbook),
+                    plan_sha256=plan_sha, origin=origin,
+                )
+            except PendingPlanConflict as conflict:
+                # target_key carries this plan's own hash, so a conflict means the identical plan is
+                # already pending under a truncated-hash collision — point at that card, never
+                # supersede an operator's pending approval with a different plan.
+                return ProposeResult(True, conflict.approval_id, False, "already awaiting approval")
+            if created or row["message_id"] is None:
+                try:
+                    message_id = self._notifier.request_approval(
+                        self._plan_card_text(row, runbook, requested_by), row["id"], "action")
+                    self._store.set_message_id(row["id"], message_id)
+                except Exception:  # noqa: BLE001 -- Telegram errors can carry the bot token
+                    log.warning(f"Failed to send the plan card for {row['id']}")
+                    self._store.record_event("proposal.card_failed", approval_id=row["id"])
+                    return ProposeResult(False, row["id"], created,
+                                         "could not send the approval card; propose it again")
+                return ProposeResult(True, row["id"], created, "awaiting approval")
+            return ProposeResult(True, row["id"], False, "already awaiting approval")
+
+    def _legacy_attempts(self, step_type: str, target_key: str, since: float) -> list:
+        """Pre-5b executions counted for the same target, so the upgrade does not reset a cooldown.
+
+        Only executions the attempts ledger does not already hold: a post-v5 restart is recorded in
+        both places and would otherwise count twice (Codex, T41)."""
+        if step_type != "service.restart":
+            return []
+        return self._store.recent_attempts(actions.RESTART_SERVICE, target_key, since,
+                                           without_attempt_rows=True)
+
+    def _plan_card_text(self, row: dict, runbook: runbooks.Runbook, requested_by: str | None) -> str:
+        minutes = int(self._ttl // 60)
+        lines = [f"🛠 <b>{_s(runbook.title)}</b> <code>{_s(row['id'])}</code>",
+                 f"Risk: {_s(row['risk'])}, {len(runbook.steps)} step(s):"]
+        for n, step in enumerate(runbook.steps, start=1):
+            row_like = {"type": step.type, "params": step.params, "binding": step.binding}
+            lines.append(f"  {n}. {_s(self._step_label(row_like, runbook.title))}")
+        reversible = [str(n) for n, step in enumerate(runbook.steps, start=1)
+                      if runbooks.rollback_kind(step) == "conditional"]
+        lines.append("Reversible steps: " + (", ".join(reversible) if reversible else "none"))
+        lines.append(f"Proposed by {_s(requested_by or 'Farnsworth')}. Expires in {minutes} min.")
+        return "\n".join(lines)
+
     def _build_runbook(self, action: str, target, *, timeout: float) -> runbooks.Runbook:
         """Every typed action is a one-step runbook (slice 5b-1): the approved document, with its
         proposal-time binding, is what the engine runs. Raises TargetError/TargetTimeout."""
@@ -562,7 +658,7 @@ class CommandService:
         # the scan/mutation lock and validate their evidence below, so stale evidence always gets
         # the incident-specific durable refusal required by T33.
         if provenance is None:
-            current = policy.decide(row["action"])
+            current = self._current_policy(row)
             if not current.allowed:
                 reason = f"refused by current policy: {current.reason}"
                 if self._store.consume(
@@ -599,7 +695,7 @@ class CommandService:
                         self._safe_finalize_card(row, decision, ack="Refused: stale incident.", text=text)
                         return DecideResult("refused", text)
                     return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
-                current = policy.decide(row["action"])
+                current = self._current_policy(row)
                 if not current.allowed:
                     reason = f"refused by current policy: {current.reason}"
                     if self._store.consume(
@@ -909,6 +1005,16 @@ class CommandService:
         return labels.get(kind) or summary
 
     # ── execution (worker thread) ───────────────────────────────────────────
+    def _current_policy(self, row: dict):
+        """Re-check today's policy before consuming an approval (T24). A runbook approval is judged
+        as a runbook — its action name ("runbook") is not in the legacy registry (slice 5b-2)."""
+        plan = self._verified_plan(row)
+        if plan is not None and row["action"] not in actions.REGISTRY:
+            decision = policy.decide_runbook(plan, row.get("origin") or row["requested_via"])
+            return policy.PolicyDecision(decision.allowed, decision.needs_approval, decision.risk,
+                                         decision.reason)
+        return policy.decide(row["action"])
+
     @staticmethod
     def _row_summary(row: dict) -> str:
         """A human summary of a stored approval that never raises: startup reconciliation and the

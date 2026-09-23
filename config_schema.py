@@ -74,6 +74,9 @@ class PlanetExpressConfig(BaseModel):
     forbidden_stacks: list[str] = []
     paused_containers: list[str] = []
     backup_jobs: list[Literal["daily", "weekly"]] = ["daily", "weekly"]
+    # D36: the planner emits typed runbooks (slice 5b-2). The old LLM-written shell plans stay
+    # available behind this switch during the transition and are deleted in 5b-5.
+    legacy_plans_enabled: bool = False
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
     # /install only ever writes a LAN-only Traefik router (no auth of its own) —

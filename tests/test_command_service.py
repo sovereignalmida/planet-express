@@ -1119,3 +1119,133 @@ def test_rollback_respects_a_risk_the_operator_has_since_forbidden(env, monkeypa
     assert env.argv_calls == []
     assert env.state.mutation_owner is None
     assert env.store.rollbacks_of(parent["id"]) == []
+
+
+# ── 5b-2: planner runbooks ─────────────────────────────────────────────────────
+def _plan(env, *services):
+    from planet_express.execution import runbook as runbooks
+    steps = [{"type": "service.restart", "params": {"stack": "healthy", "service": s},
+              "binding": env.service._binder.service(actions.Target("healthy", s, f"fixture-{s}"), timeout=4)}
+             for s in services]
+    return runbooks.Runbook.model_validate({"title": "Fix things", "steps": steps, "artifacts": {}})
+
+
+def test_propose_plan_stores_the_plan_sends_one_card_and_dedups(env):
+    from planet_express.execution import runbook as runbooks
+    plan = _plan(env, "web")
+    first = env.service.propose_plan(plan, requested_by="Farnsworth", finding_ids=["f1"])
+    again = env.service.propose_plan(plan, requested_by="Farnsworth", finding_ids=["f1"])
+    assert first.ok and first.created and again.ok and not again.created
+    assert again.approval_id == first.approval_id
+    row = env.store.get_approval(first.approval_id)
+    assert (row["action"], row["requested_via"], row["origin"], row["risk"]) == (
+        "runbook", "planner", "planner", "R1")
+    assert row["target_key"].startswith("plan:")
+    assert runbooks.load_stored_plan(row["plan_json"], row["plan_sha256"]).title == "Fix things"
+    assert len(env.notifier.approval_requests) == 1
+    card = env.notifier.approval_requests[0][0]
+    assert "Fix things" in card and "Restart healthy/web" in card and "Reversible steps: none" in card
+
+
+def test_propose_plan_counts_repeats_inside_one_runbook_against_the_cap(env, monkeypatch):
+    """The engine reserves a runbook's attempts without a cap, so the whole multiplicity has to be
+    checked here: three restarts of one service must not slip past a cap of two (Codex, T41)."""
+    import config as config_module
+    from config_schema import AutonomyConfig
+    from planet_express.execution import runbook as runbooks
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=0, max_attempts_per_day=2))
+    step = {"type": "service.restart", "params": {"stack": "healthy", "service": "web"},
+            "binding": env.service._binder.service(
+                actions.Target("healthy", "web", "fixture-web"), timeout=4)}
+    three = runbooks.Runbook.model_validate(
+        {"title": "Restart it thrice", "steps": [step, step, step], "artifacts": {}})
+    result = env.service.propose_plan(three, requested_by="Farnsworth")
+    assert not result.ok
+    assert "attempt cap reached" in result.reason and "3 requested" in result.reason
+    assert env.notifier.approval_requests == []
+    two = runbooks.Runbook.model_validate(
+        {"title": "Restart it twice", "steps": [step, step], "artifacts": {}})
+    assert env.service.propose_plan(two, requested_by="Farnsworth").ok
+
+
+def test_propose_plan_applies_t24_limits_per_target_for_the_planner(env, monkeypatch):
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=1800, max_attempts_per_day=3))
+    # a recent attempt against healthy/web, recorded the way the engine records them
+    approval, _ = env.store.propose(action=RESTART, target_key="other/x",
+                                    target={"stack": "other", "service": "x", "container": "c"},
+                                    risk="R1", requested_via="telegram", requested_by="t")
+    execution = env.store.approve_and_create_execution(approval["id"], decided_by="t",
+                                                       arrived_at=env.clock())
+    env.store.create_steps(execution["id"], [{"type": "service.restart",
+                                              "params": {"stack": "healthy", "service": "web"},
+                                              "binding": {}}])
+    env.store.reserve_runbook_attempts(execution["id"], [(1, "service.restart", "healthy/web")],
+                                       window_start=0, cooldown_start=0,
+                                       max_per_day=9, now=env.clock())
+    result = env.service.propose_plan(_plan(env, "web"), requested_by="Farnsworth")
+    assert not result.ok and "cooling down" in result.reason and "healthy/web" in result.reason
+    assert env.notifier.approval_requests == []
+    assert any(event["kind"] == "proposal.refused" for event in env.store.list_events())
+
+
+def test_propose_plan_refuses_a_forbidden_risk_and_records_it(env, monkeypatch):
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(forbidden_risks=["R1", "R4"], direct_request_risks=[]))
+    result = env.service.propose_plan(_plan(env, "web"), requested_by="Farnsworth")
+    assert not result.ok and "never allowed" in result.reason
+    assert env.notifier.approval_requests == []
+
+
+def test_an_approved_planner_runbook_runs_every_step_through_the_engine(env):
+    # resolve each service to its own container, as the real resolver does
+    env.service._resolve = lambda stack, service, for_mutation=True, timeout=None: actions.Target(
+        stack, service, f"fixture-{service}")
+    plan = _plan(env, "web", "api")
+    proposal = env.service.propose_plan(plan, requested_by="Farnsworth")
+    result = env.service.decide(proposal.approval_id, approve=True, decided_by="chris",
+                                decision=_tap(proposal.approval_id))
+    assert result.outcome == "started"
+    status = env.service.get_status(result.execution_id)
+    assert status["status"] == "passed"
+    assert [s["label"] for s in status["steps"]] == ["Restart healthy/web", "Restart healthy/api"]
+    assert len(env.argv_calls) == 2
+
+
+def test_legacy_restart_history_is_not_counted_twice(env, monkeypatch):
+    """A post-v5 restart is in both the attempts ledger and the executions join; counting both
+    would hit the daily cap at half the real number of restarts (Codex, T41)."""
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=0, max_attempts_per_day=2))
+    approval, _ = env.store.propose(
+        action=RESTART, target_key="healthy/web",
+        target={"stack": "healthy", "service": "web", "container": "fixture-web"},
+        risk="R1", requested_via="telegram", requested_by="t")
+    execution = env.store.approve_and_create_execution(approval["id"], decided_by="t",
+                                                       arrived_at=env.clock())
+    env.store.create_steps(execution["id"], [{"type": "service.restart",
+                                              "params": {"stack": "healthy", "service": "web"},
+                                              "binding": {}}])
+    env.store.reserve_runbook_attempts(execution["id"], [(1, "service.restart", "healthy/web")],
+                                       window_start=0, cooldown_start=0, max_per_day=9,
+                                       now=env.clock())
+    # one real restart, so one of two attempts is used: a second plan still fits
+    assert env.service.propose_plan(_plan(env, "web"), requested_by="Farnsworth").ok
+
+
+def test_a_plan_with_only_reads_is_a_diagnosis_not_a_card(env):
+    from planet_express.execution import runbook as runbooks
+    plan = runbooks.Runbook.model_validate({"title": "Have a look", "artifacts": {}, "steps": [
+        {"type": "check.container", "params": {"expect": "running"},
+         "binding": env.service._binder.service(
+             actions.Target("healthy", "web", "fixture-web"), timeout=4)}]})
+    result = env.service.propose_plan(plan, requested_by="Farnsworth")
+    assert not result.ok and "diagnostic only" in result.reason
+    assert env.notifier.approval_requests == [] and env.store.list_pending() == []

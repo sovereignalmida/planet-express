@@ -211,7 +211,7 @@ def test_attempt_reservation_multiplicity_consume_release_and_reconcile(tmp_path
     refusal = store.reserve_runbook_attempts(
         execution2["id"], pairs, window_start=0, cooldown_start=50, max_per_day=3, now=100,
     )
-    assert "cooling down" in refusal
+    assert "cooling down" in refusal.reason and refusal.step_n == 1
     with sqlite3.connect(store.path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM attempts WHERE execution_id=?",
                             (execution2["id"],)).fetchone()[0] == 0

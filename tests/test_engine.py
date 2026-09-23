@@ -495,3 +495,48 @@ def test_container_only_steps_inspect_the_container_once(svc):
         ex, runbook(container_step("check.container", {"expect": "running"})), origin="planner")
     assert result.status == "passed"
     assert len(calls) == 1
+
+
+def test_a_non_operator_run_is_refused_at_reservation_when_the_target_is_cooling_down(svc, monkeypatch):
+    """Two different plans can each hold a card for the same target, so the limits are re-checked
+    atomically where the attempts are reserved (Codex, T41)."""
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=1800, max_attempts_per_day=3))
+    first = execution(svc)
+    assert engine.RunbookEngine(svc).run(first, runbook(service_step("service.restart")),
+                                         origin="planner").status == "passed"
+    second = execution(svc)
+    result = engine.RunbookEngine(svc).run(second, runbook(service_step("service.restart")),
+                                           origin="planner")
+    assert result.status == "failed" and "cooling down" in result.reason
+    assert steps(svc, second) == [("service.restart", "failed", "not_applied")]
+    assert svc.argv == [svc.argv[0]]  # the second run never reached a command
+
+
+def test_an_operator_run_still_reserves_without_a_cap(svc, monkeypatch):
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=1800, max_attempts_per_day=1))
+    for _ in range(3):
+        ex = execution(svc)
+        assert engine.RunbookEngine(svc).run(ex, runbook(service_step("service.restart")),
+                                             origin="telegram").status == "passed"
+
+
+def test_a_reservation_refusal_blames_the_step_whose_target_is_at_its_limit(svc, monkeypatch):
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=1800, max_attempts_per_day=3))
+    first = execution(svc)
+    engine.RunbookEngine(svc).run(first, runbook(service_step("service.restart")), origin="planner")
+    second = execution(svc)
+    rb = runbook({"type": "wait", "params": {"seconds": 1}, "binding": {}},
+                 service_step("service.restart"))
+    result = engine.RunbookEngine(svc).run(second, rb, origin="planner")
+    assert result.status == "failed"
+    assert steps(svc, second) == [("wait", "skipped", None),
+                                  ("service.restart", "failed", "not_applied")]

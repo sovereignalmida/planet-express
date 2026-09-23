@@ -21,8 +21,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import casa_bender as bender
+import config
 from planet_express.core.redact import redact
-from planet_express.execution import actions, runbook as runbooks
+from planet_express.execution import actions, policy, runbook as runbooks
 
 log = logging.getLogger("planetexpress.engine")
 
@@ -115,14 +116,29 @@ class RunbookEngine:
             for n, step in enumerate(runbook.steps, start=1)
             if runbooks.STEP_TYPES[step.type].risk != "R0"
         ]
-        # Limits stay enforced at proposal time (T24's existing path); the reservation here is the
-        # per-step attempt ledger the design's per-runbook limits will read (T39 deviation, see plan).
+        # Proposal checks the limits too, but two different plans can each hold a card for the same
+        # target, so the binding check has to happen again — atomically — where the attempts are
+        # actually reserved (Codex, T41). Operator origins reserve without a cap, as they always have.
         now = self.svc._clock()
         if mutating:
-            store.reserve_runbook_attempts(
-                execution_id, mutating, window_start=now - 86400, cooldown_start=now + 1,
-                max_per_day=_NO_LIMIT, now=now,
+            enforced = origin not in policy.OPERATOR_ORIGINS
+            autonomy = config.AUTONOMY
+            refusal = store.reserve_runbook_attempts(
+                execution_id, mutating,
+                window_start=now - policy.DAY_SECONDS,
+                cooldown_start=(now - autonomy.cooldown_seconds) if enforced else now + 1,
+                max_per_day=autonomy.max_attempts_per_day if enforced else _NO_LIMIT, now=now,
             )
+            if refusal is not None:
+                # Blame the step whose target is at its limit, not whatever step happens to be
+                # first: the steps around it were never evaluated either (Codex, T41).
+                store.finish_step(execution_id, refusal.step_n, status="failed",
+                                  effect="not_applied", reason=f"refused: {refusal.reason}")
+                for n in range(1, len(runbook.steps) + 1):
+                    if n != refusal.step_n:
+                        store.finish_step(execution_id, n, status="skipped",
+                                          reason=f"not run: {refusal.reason}")
+                return EngineResult("failed", refusal.reason, [])
         mutating_ns = {n for n, _type, _key in mutating}
         results = []
         for n, step in enumerate(runbook.steps, start=1):
