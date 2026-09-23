@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import difflib
 import json
 import logging
 import os
@@ -42,7 +43,7 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
-from planet_express.application import planner
+from planet_express.application import compose_plans, planner
 from planet_express.application.chat_service import (
     MAX_ANSWER_CHARS,
     ChatResult,
@@ -1451,7 +1452,8 @@ def handle_message(
             # silently make the resulting diff impossible to approve.
             stack_name = (re.sub(r"[^a-z0-9-]", "", domain.split(".")[0].lower()) or "newstack")[:20]
             threading.Thread(
-                target=_run_install, args=(notifier, stack_name, url, domain), daemon=True
+                target=_run_install, args=(notifier, stack_name, url, domain, commands),
+                daemon=True
             ).start()
 
     elif cmd == "/grant":
@@ -1767,6 +1769,110 @@ def _run_backups_check(notifier: Notifier) -> None:
     notifier.notify(_fmt_backups_message(results))
 
 
+def _propose_compose_runbook(
+    notifier: Notifier, commands: CommandService | None, build, *, origin: str, requested_by: str,
+    summary: str, diff_text: str | None = None,
+) -> bool:
+    """Send one approval covering a compose write and bringing the stack up (slice 5b-4).
+
+    `build` is the `compose_plans` call that produces the runbook; everything it refuses is
+    reported and recorded rather than silently dropped.
+    """
+    s = TelegramClient.s
+    if commands is None:
+        notifier.notify("⚠️ Typed actions are unavailable; the compose edit was not proposed.")
+        return False
+    try:
+        runbook = build()
+    except compose_plans.ComposePlanRefused as exc:
+        log.warning(f"Compose edit refused ({origin}): {exc}")
+        commands.record_event("compose.refused", reason=redact(str(exc))[:300],
+                              requested_via=origin, title=summary[:120])
+        notifier.notify(f"⚠️ That compose edit can't be proposed: {s(str(exc))}")
+        return False
+    except Exception as exc:  # a malformed artifact must not take the thread down
+        log.exception(f"Building a compose runbook crashed ({origin})")
+        notifier.notify(f"🛑 Could not turn that compose edit into a plan: `{s(str(exc)[:200])}`")
+        return False
+
+    result = commands.propose_plan(runbook, requested_by=requested_by, origin=origin)
+    if not result.ok:
+        notifier.notify(f"⚠️ That compose edit wasn't proposed: {s(result.reason)}")
+        return False
+    if diff_text:
+        # The card lists the steps; the diff is what the operator actually reads before approving.
+        notifier.notify(TelegramClient.fmt_diff(summary, "proposed change", diff_text))
+    return True
+
+
+def _compose_diff_text(current: str, proposed: str, label: str) -> str:
+    return "".join(difflib.unified_diff(
+        current.splitlines(keepends=True), proposed.splitlines(keepends=True),
+        fromfile=f"{label} (current)", tofile=f"{label} (proposed)",
+    ))
+
+
+def _investigate_typed_failure(notifier: Notifier, commands: CommandService, event: dict) -> None:
+    """The engine's post-failure hook (design §4.4): Amy diagnoses a failed typed run, and any
+    compose edit she proposes becomes its own runbook with its own approval (slice 5b-4).
+
+    The legacy path's equivalent is `_investigate_failure`; both send the same diagnosis, but this
+    one hands the edit to the engine instead of the diff file.
+    """
+    s = TelegramClient.s
+    binding = event.get("binding") or {}
+    container = binding.get("container")
+    stack, service = binding.get("project"), binding.get("service")
+    if not container or not stack or not service:
+        log.info("Typed failure has no container to investigate; skipping Amy")
+        return
+    try:
+        block = bender.read_service_block(stack, service)
+        current_yaml = block[1] if block else None
+        _rc, logs, _err = bender.run_argv(["docker", "logs", container, "--tail", "100"],
+                                          timeout=bender.COMMAND_TIMEOUT_SECONDS)
+        logs = redact(logs)
+        step_detail = redact(
+            f"step {event.get('failed_step')} ({event.get('type')}) — {event.get('reason', '')}")
+        diagnosis = amy.diagnose(
+            stack=stack, service=service, container_name=container,
+            reason=event.get("reason", ""),
+            logs_tail=f"{logs[-2000:]}\n\n[Output of the failing step]\n{step_detail}",
+            current_service_yaml=current_yaml,
+        )
+    except Exception as exc:  # the hook is best-effort and never changes the run's outcome
+        log.exception(f"Amy's investigation of {container} crashed")
+        notifier.notify(f"🛑 Amy's investigation of {s(container)} crashed: `{s(str(exc)[:200])}`")
+        return
+
+    notifier.notify(TelegramClient.fmt_diagnosis(stack, container, diagnosis))
+    remediation = diagnosis.get("proposed_remediation") or {}
+    if not remediation.get("requires_compose_edit"):
+        return
+    proposed_yaml = remediation.get("proposed_service_yaml")
+    if not (proposed_yaml and block):
+        notifier.notify(
+            f"📝 Amy says this needs a compose-file edit: "
+            f"{s(remediation.get('compose_edit_description', '(no description given)'))}\n\n"
+            f"She didn't have enough to propose an exact one, so that edit needs a human."
+        )
+        return
+    current_content, current_block = block
+    new_content = current_content.replace(current_block, proposed_yaml, 1)
+    if new_content == current_content:
+        notifier.notify("📝 Amy's proposed block is identical to the current one; nothing to change.")
+        return
+    _propose_compose_runbook(
+        notifier, commands,
+        lambda: compose_plans.edit_runbook(stack, new_content, current_content=current_content,
+                                           restart=[service]),
+        origin="amy", requested_by="Amy",
+        summary=remediation.get("summary", f"Compose edit for {stack}/{service}"),
+        diff_text=_compose_diff_text(current_content, new_content,
+                                     f"{stack}/docker-compose.yml"),
+    )
+
+
 def _investigate_failure(
     notifier: Notifier, container: str, reason: str, failed_step_detail: str | None = None
 ) -> None:
@@ -1854,7 +1960,8 @@ def _investigate_failure(
         )
 
 
-def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str) -> None:
+def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str,
+                 commands: CommandService | None = None) -> None:
     """Onboard a new stack from a URL. Fry resolves the project's real deployment
     requirements; this function synthesizes a standalone compose file matching the
     Navidrome precedent (container_name CASA_<NAME>, casaproxy network, LAN-only
@@ -1870,7 +1977,7 @@ def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str) -> 
         return
 
     try:
-        _process_fry_resolution(notifier, stack_name, url, domain, req)
+        _process_fry_resolution(notifier, stack_name, url, domain, req, commands)
     except Exception as e:
         # Fry's output is model-generated JSON — even though it matched the schema well
         # enough to parse, a field can still be the wrong shape (e.g. a string where a
@@ -1883,7 +1990,8 @@ def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str) -> 
         )
 
 
-def _process_fry_resolution(notifier: Notifier, stack_name: str, url: str, domain: str, req: dict) -> None:
+def _process_fry_resolution(notifier: Notifier, stack_name: str, url: str, domain: str,
+                            req: dict, commands: CommandService | None = None) -> None:
     s = TelegramClient.s
 
     # Fry's JSON is model-generated, not schema-enforced. Validate the shape of every
@@ -2203,6 +2311,16 @@ def _process_fry_resolution(notifier: Notifier, stack_name: str, url: str, domai
         )
         return
 
+    if not config.LEGACY_PLANS_ENABLED:
+        # One approval covers writing the file and bringing the stack up (slice 5b-4, D35).
+        _propose_compose_runbook(
+            notifier, commands,
+            lambda: compose_plans.install_runbook(stack_name, new_content, domain=domain),
+            origin="install", requested_by="Fry",
+            summary=f"Install {stack_name} from {url}",
+            diff_text=_compose_diff_text("", new_content, f"{stack_name}/docker-compose.yml"),
+        )
+        return
     try:
         diff = bender.propose_compose_diff(
             stack_name, new_content,
@@ -2579,7 +2697,13 @@ def run_bot() -> None:
         store,
         sensitive_edits_enabled=_sensitive_config_edits_enabled(os.environ),
     )
-    commands = CommandService(store, notifier, state)
+    def amy_hook(event: dict) -> None:
+        """The engine's post-failure hook (design §4.4): Amy investigates a failed typed run off
+        the execution thread, and any compose edit she proposes gets its own approval (5b-4)."""
+        threading.Thread(target=_investigate_typed_failure, args=(notifier, commands, event),
+                         daemon=True, name="amy-investigation").start()
+
+    commands = CommandService(store, notifier, state, on_failure=amy_hook)
     chat = ChatService(store, commands, run_investigation=partial(_run_chat_investigation, commands=commands))
     chat.reconcile_on_startup()
     # Off the startup path: each edit is a Telegram call with a long timeout (own review, T38).

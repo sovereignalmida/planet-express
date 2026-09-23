@@ -324,3 +324,30 @@ def test_an_interrupted_rollback_is_never_called_not_applied(svc):
     assert (step["status"], step["effect"]) == ("failed", "unknown")
     assert "never watched" in step["reason"]
     assert len(open_candidates(svc)) == 1
+
+
+def test_settling_an_engine_crash_keeps_the_canary_window_open(svc):
+    """`settle_crashed_execution` is the in-process twin of startup reconciliation, and it has to
+    protect the image the same way (Codex, T42 round 7)."""
+    from planet_express.core.store import INDEFINITE_EXPIRY
+
+    ex = execution(svc)
+    plan = runbooks.Runbook.model_validate(
+        {"title": "t", "steps": [canary_step(svc)], "artifacts": {}})
+    svc._store.create_steps(ex, plan.steps)
+    svc._store.reserve_runbook_attempts(ex, [(1, "update.canary", "media/sonarr")],
+                                        window_start=0, cooldown_start=0, max_per_day=9, now=1)
+    svc._store.set_step_pre_state(ex, 1, {"phase": "deploying", "container": CONTAINER,
+                                          "running_image_id": OLD, "image_reference": REFERENCE})
+    svc._store.open_rollback_candidate(ex, 1, stack="media", service="sonarr",
+                                       image_reference=REFERENCE, old_image_id=OLD,
+                                       expires_at=svc._clock() + 900)
+    svc._store.mark_step_dispatched(ex, 1)
+    assert svc._store.close_rollback_candidate(ex, 1)      # closed just before the crash
+
+    engine.settle_crashed_execution(svc._store, ex)
+
+    step = svc._store.list_steps(ex)[0]
+    assert (step["status"], step["effect"]) == ("failed", "unknown")
+    held = open_candidates(svc)
+    assert len(held) == 1 and held[0]["expires_at"] >= INDEFINITE_EXPIRY

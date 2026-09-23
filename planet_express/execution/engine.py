@@ -19,11 +19,12 @@ import shlex
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import casa_bender as bender
 import config
 from planet_express.core.redact import redact
-from planet_express.execution import actions, policy, runbook as runbooks
+from planet_express.execution import actions, compose_files, policy, runbook as runbooks
 
 log = logging.getLogger("planetexpress.engine")
 
@@ -118,10 +119,12 @@ class RunbookEngine:
     def run(self, execution_id: str, runbook: runbooks.Runbook, *, origin: str) -> EngineResult:
         store = self.svc._store
         store.create_steps(execution_id, runbook.steps)
+        # The same rule the proposal-time limits use: R0 changes nothing, and a step type marked
+        # `limited=False` is a mutation the attempt ledger deliberately does not count (T43).
         mutating = [
             (n, step.type, runbooks._target_key(step, runbooks.STEP_TYPES[step.type]))
             for n, step in enumerate(runbook.steps, start=1)
-            if runbooks.STEP_TYPES[step.type].risk != "R0"
+            if runbooks.STEP_TYPES[step.type].risk != "R0" and runbooks.STEP_TYPES[step.type].limited
         ]
         # Proposal checks the limits too, but two different plans can each hold a card for the same
         # target, so the binding check has to happen again — atomically — where the attempts are
@@ -246,8 +249,11 @@ class RunbookEngine:
             "read.qbittorrent_session_port": self._read_qbit_port,
             "unit.action": self._unit_action,
             "update.canary": self._canary,
+            "compose.restore": self._compose_restore,
             "prune.safe": self._prune,
         }.get(step.type)
+        if step.type == "compose.write":
+            return self._compose_write(execution_id, step, params, dispatch, runbook)
         if step.type in STACK_STEP_ACTIONS:
             return self._stack(execution_id, step, dispatch)
         if handler is None:
@@ -502,6 +508,74 @@ class RunbookEngine:
             effect = "applied" if (before == "active") != (after == "active") else "not_applied"
         return StepOutcome("passed" if ok else "failed", effect, f"{unit} is {after}")
 
+    # ── compose writes (slice 5b-4, design §4.6) ────────────────────────────
+    def _compose_write(self, execution_id, step, params, dispatch, runbook) -> StepOutcome:
+        content = runbook.artifacts.get(params["content_sha256"])
+        if content is None:
+            return self._refuse("the approved content is missing from the runbook")
+        path = Path(step.binding["compose_path"])
+        expected = compose_files.compose_path_for(config.STACKS_ROOT, params["stack"])
+        if path != expected:
+            return self._refuse(f"binding path {path} is not {params['stack']}'s compose file")
+        try:
+            compose_files.check_path(config.STACKS_ROOT, path)
+            current = compose_files.read_current(path)
+        except compose_files.ComposeWriteError as exc:
+            return self._refuse(str(exc))
+
+        # Recorded before the write, so an interrupted step can still be undone by hand: where the
+        # backup will be, what was there, and whether the directory is this step's to remove.
+        suffix = f".bak.{execution_id}.{dispatch.n}"
+        dispatch({
+            "phase": "writing", "compose_path": str(path), "content_sha256": params["content_sha256"],
+            "previous_sha256": compose_files.sha256_text(current) if current is not None else None,
+            "backup_path": str(path.with_name(path.name + suffix)) if current is not None else None,
+            "directory_existed": path.parent.exists(),
+        })
+        try:
+            record = compose_files.write_compose(
+                path, content, stacks_root=config.STACKS_ROOT,
+                expected_sha256=params.get("expected_old_sha256"),
+                expect_absent=bool(params.get("expected_absent")), backup_suffix=suffix,
+            )
+        except compose_files.ComposeWriteError as exc:
+            return StepOutcome("failed", "not_applied", str(exc))
+        except OSError as exc:
+            return StepOutcome("failed", "unknown", f"the write failed: {_clip(str(exc))}")
+        self.svc._store.note_step_progress(execution_id, dispatch.n, {
+            "phase": "written", "backup_path": record.backup_path,
+            "created_file": record.created_file, "created_directory": record.created_directory,
+            "directory_inode": record.directory_inode,
+        })
+        what = "created" if record.created_file else "updated"
+        return StepOutcome(
+            "passed", "applied", f"{what} {params['stack']}/{compose_files.COMPOSE_FILENAME}",
+            {"compose_path": str(path), "compose_sha256": params["content_sha256"]},
+        )
+
+    def _compose_restore(self, execution_id, step, params, dispatch) -> StepOutcome:
+        binding = step.binding
+        path = Path(binding["compose_path"])
+        record = compose_files.WriteRecord(
+            backup_path=binding.get("backup_path"), previous_sha256=binding.get("previous_sha256"),
+            created_file=bool(binding.get("created_file")),
+            created_directory=bool(binding.get("created_directory")),
+            directory_inode=binding.get("directory_inode"),
+        )
+        try:
+            compose_files.check_path(config.STACKS_ROOT, path)
+        except compose_files.ComposeWriteError as exc:
+            return self._refuse(str(exc))
+        dispatch({"restoring": str(path)})
+        try:
+            message = compose_files.restore(path, record, stacks_root=config.STACKS_ROOT,
+                                            written_sha256=binding["written_sha256"])
+        except compose_files.ComposeWriteError as exc:
+            return StepOutcome("failed", "not_applied", str(exc))
+        except OSError as exc:
+            return StepOutcome("failed", "unknown", f"the restore failed: {_clip(str(exc))}")
+        return StepOutcome("passed", "applied", message)
+
     # ── canary updates (slice 5b-3, design §4.5) ────────────────────────────
     def _image_id(self, argv, *, allow_missing: bool = False) -> tuple[str | None, str | None]:
         """(image id, error). A missing image is only ever `None, None` where the caller says so."""
@@ -666,6 +740,10 @@ def settle_crashed_execution(store, execution_id: str) -> None:
             effect = "not_applied" if spec is not None and spec.risk == "R0" else "unknown"
             store.finish_step(execution_id, row["n"], status="failed", effect=effect,
                               reason="the engine stopped unexpectedly")
+            if row["type"] == "update.canary" and effect == "unknown":
+                # The step may have closed its window just before the crash: an unknown update's
+                # old image must survive every prune until a human settles it (Codex, T42 round 7).
+                store.hold_rollback_candidate(execution_id, row["n"])
         elif row["status"] == "pending":
             store.finish_step(execution_id, row["n"], status="skipped",
                               reason="not run: the engine stopped unexpectedly")
@@ -798,6 +876,23 @@ def _now_effect(svc, row: dict) -> str:
         if (now == "active") == wanted and (pre["active"] == "active") != wanted:
             return "applied"
         return "not_applied" if now == pre["active"] else "unknown"
+    if row["type"] == "compose.write":
+        # The file itself answers it: the approved content is there, the previous content is there,
+        # or someone else has been editing and neither claim is safe (slice 5b-4).
+        path = (pre.get("compose_path") or (row["binding"] or {}).get("compose_path"))
+        wanted = (row["params"] or {}).get("content_sha256")
+        if not path or not wanted:
+            return "unknown"
+        try:
+            current = compose_files.read_current(Path(path))
+        except compose_files.ComposeWriteError:
+            return "unknown"
+        if current is None:
+            return "not_applied" if pre.get("previous_sha256") is None else "unknown"
+        digest = compose_files.sha256_text(current)
+        if digest == wanted:
+            return "applied"
+        return "not_applied" if digest == pre.get("previous_sha256") else "unknown"
     return "unknown"
 
 
@@ -820,7 +915,21 @@ def plan_rollback(svc, title: str, step_rows: list[dict]) -> RollbackPlan:
             unknown.append(label)
             continue
         params = row["params"] or {}
-        if row["type"] in _INVERSE_SERVICE:
+        if row["type"] == "compose.write":
+            pre = row["pre_state"] or {}
+            binding = {
+                "compose_path": pre.get("compose_path") or (row["binding"] or {})["compose_path"],
+                "project": params["stack"],
+                "written_sha256": params["content_sha256"],
+                "backup_path": pre.get("backup_path"),
+                "previous_sha256": pre.get("previous_sha256"),
+                "created_file": bool(pre.get("created_file")),
+                "created_directory": bool(pre.get("created_directory")),
+                "directory_inode": pre.get("directory_inode"),
+            }
+            steps.append({"type": "compose.restore", "params": {"stack": params["stack"]},
+                          "binding": binding})
+        elif row["type"] in _INVERSE_SERVICE:
             target = svc._resolve(params["stack"], params["service"], for_mutation=True)
             steps.append({"type": _INVERSE_SERVICE[row["type"]], "params": dict(params),
                           "binding": svc._binder.service(target, timeout=actions.DOCKER_TIMEOUT_SECONDS)})

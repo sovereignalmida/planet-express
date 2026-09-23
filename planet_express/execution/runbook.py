@@ -80,6 +80,34 @@ class CheckLogParams(StrictModel):
     port: PortNumber | Reference | None = None
 
 
+class ComposeWriteParams(StrictModel):
+    """One compose file, written by content hash. The content itself is a runbook artifact, so the
+    approved document carries exactly what will be written (design §4.6)."""
+
+    stack: Name
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Exactly one of these: what the file must currently be for the write to happen at all.
+    expected_old_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    expected_absent: bool | None = None
+
+    @model_validator(mode="after")
+    def one_expectation(self) -> ComposeWriteParams:
+        edit = self.expected_old_sha256 is not None
+        create = self.expected_absent is not None
+        if edit == create:
+            raise ValueError("compose.write needs exactly one of expected_old_sha256 or expected_absent")
+        if create and self.expected_absent is not True:
+            raise ValueError("expected_absent is only meaningful as true")
+        return self
+
+
+class ComposeRestoreParams(StrictModel):
+    """The inverse of one `compose.write`. Never proposed by anyone: `engine.plan_rollback` builds
+    it from what that step recorded, with a server-built binding (design §4.6)."""
+
+    stack: Name
+
+
 class UnitActionParams(StrictModel):
     action: Literal["start", "stop", "restart"]
     unit: UnitName
@@ -119,9 +147,32 @@ class UnitBinding(StrictModel):
     unit: UnitName
 
 
+class ComposeRestoreBinding(StrictModel):
+    """Everything the restore needs, as the write recorded it."""
+
+    compose_path: AbsolutePath
+    project: Name
+    written_sha256: Sha256
+    backup_path: AbsolutePath | None = None
+    previous_sha256: Sha256 | None = None
+    created_file: bool = False
+    created_directory: bool = False
+    directory_inode: int | None = None
+
+
+class ComposeWriteBinding(StrictModel):
+    """Where the write lands, resolved at proposal time with no symlink anywhere on the path, and
+    whether the stack directory existed then — the inverse needs that to know what it created."""
+
+    compose_path: AbsolutePath
+    project: Name
+    directory_existed: bool
+
+
 # An image id as Docker prints it, normalised to bare hex before it is stored (Zoidberg's
 # _normalize_image_id: `compose images -q` prints bare hex, `image inspect` prints sha256:<hex>).
 ImageId = Annotated[str, Field(pattern=r"^[0-9a-f]{12,64}$")]
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 # A canonical mutable reference, `name:tag`, optionally registry- and namespace-qualified. A
 # digest-pinned reference (`repo@sha256:…`) has no tag to move and is deliberately not matched:
 # those services are ineligible for a canary update (design §4.5).
@@ -158,6 +209,11 @@ class StepType:
     reference_fields: dict[str, Any]
     target: str
     rollback_by_action: dict[str, RollbackKind] | None = None
+    # T24's cooldown and daily cap exist to damp an agent *repeating* a mutation against the same
+    # target. A compare-and-swap file write is not that: it is R3, always operator-approved, and a
+    # stale repeat cannot apply at all because its expectation no longer holds. Counting it would
+    # only block a second, legitimate edit of the same stack (found in the T43 VM rehearsal).
+    limited: bool = True
 
     def rollback_for(self, params: dict[str, Any]) -> RollbackKind:
         if self.rollback_by_action is None:
@@ -195,6 +251,16 @@ STEP_TYPES: dict[str, StepType] = {
         ServiceParams, ServiceBinding, "R2", "automatic",
         {"image_reference": ImageReference, "old_image_id": ImageId, "new_image_id": ImageId},
         {}, "service",
+    ),
+    # R3: writing a compose file is as consequential as a unit action, and it is the only step that
+    # changes what a stack *is* rather than what it is doing (design §4.6).
+    "compose.write": StepType(
+        ComposeWriteParams, ComposeWriteBinding, "R3", "conditional",
+        {"compose_path": AbsolutePath, "compose_sha256": Sha256}, {}, "stack", limited=False,
+    ),
+    # The inverse of compose.write. R3 like the write itself: it changes the same file.
+    "compose.restore": StepType(
+        ComposeRestoreParams, ComposeRestoreBinding, "R3", "none", {}, {}, "stack", limited=False,
     ),
     "prune.safe": StepType(Empty, Empty, "R2", "none", {}, {}, "global"),
 }
@@ -342,9 +408,12 @@ def _target_key(step: Step, spec: StepType) -> str:
 
 
 def mutating_pairs(runbook: Runbook) -> list[tuple[str, str]]:
+    """The (step type, target) pairs T24's limits count. R0 steps change nothing, and step types
+    marked `limited=False` are mutations whose repetition is not the hazard those limits exist for
+    (see `StepType.limited`)."""
     result = []
     for step in runbook.steps:
         spec = STEP_TYPES[step.type]
-        if spec.risk != "R0":
+        if spec.risk != "R0" and spec.limited:
             result.append((step.type, _target_key(step, spec)))
     return result

@@ -1075,6 +1075,12 @@ class CommandService:
             "read.qbittorrent_session_port": "Read qBittorrent's port",
             "unit.action": f"{str(params.get('action', '')).capitalize()} {params.get('unit', '')}",
             "prune.safe": "Prune unused images and networks",
+            "update.canary": f"Update {target} to the current image",
+            "compose.write": ("Create" if params.get("expected_absent") else "Update")
+                             + f" {params.get('stack')}/docker-compose.yml",
+            "compose.restore": f"Undo the compose write in {params.get('stack')}",
+            "stack.up": f"Bring {params.get('stack')} up",
+            "stack.down": f"Take {params.get('stack')} down",
         }
         return labels.get(kind) or summary
 

@@ -2010,6 +2010,11 @@ tasks against `ACTION-SCREENS.md`.
       `failed_no_rollback` — telling the operator there was no image to go back to when the window
       is open and holding exactly that image. It is now `interrupted`, and the message says the
       image is held back until they settle it.
+  - **Codex gate round 7 (run against the commit, after a usage-limit pause): 1 finding, fixed.**
+    `settle_crashed_execution` — the in-process twin of startup reconciliation — settled a
+    dispatched canary step as `unknown` without reopening its rollback window, so a crash between
+    closing the window and recording the step left the image unprotected. It now holds the window
+    the same way reconciliation does.
   - **Verification:** 1,419 tests pass (`tests/test_canary.py` 11 new, `tests/test_prune_gate.py` 6
     new, `tests/test_zoidberg_typed.py` 8 new, 4 new `run_automatic` tests); Ruff clean. The
     `test_zoidberg_image_ids` regression now pins the **engine** path as well, since that is where
