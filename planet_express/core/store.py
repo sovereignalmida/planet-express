@@ -855,12 +855,12 @@ class Store:
                 (action, target_key),
             ).fetchone()
             if row is not None:
+                # The same plan proposed from another front end (telegram then dashboard) is the
+                # same request: dedup on the plan, never on its origin (T40).
                 if (
                     (plan_json is None) != (row["plan_json"] is None)
                     or plan_json is not None and (
-                        row["plan_json"] != plan_json
-                        or row["plan_sha256"] != plan_sha256
-                        or row["origin"] != origin
+                        row["plan_json"] != plan_json or row["plan_sha256"] != plan_sha256
                     )
                 ):
                     raise PendingPlanConflict(row["id"])
@@ -1164,6 +1164,70 @@ class Store:
             )
             self._event(conn, f"execution.{status}", approval_id=row["approval_id"],
                         execution_id=execution_id, reason=reason)
+
+    # ── abort / rollback (slice 5b-1, T40) ──────────────────────────────────
+    def request_abort(self, execution_id: str, *, operator: str) -> str:
+        """Flag a running execution for abort. Returns requested | already | not_running | unknown.
+        The engine honours it between steps and during `wait`; a dispatched argv is never killed."""
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT approval_id, status, abort_requested_at FROM executions WHERE id = ?",
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                return "unknown"
+            if row["status"] not in ("running", "verifying"):
+                return "not_running"
+            if row["abort_requested_at"] is not None:
+                return "already"
+            conn.execute("UPDATE executions SET abort_requested_at = ? WHERE id = ?",
+                         (self._clock(), execution_id))
+            self._event(conn, "execution.abort_requested", approval_id=row["approval_id"],
+                        execution_id=execution_id, operator=operator)
+        return "requested"
+
+    def create_rollback_execution(self, parent_id: str, *, operator: str) -> dict | None:
+        """A rollback child of a terminal execution, under the parent's approval (design §6). Returns
+        None if another rollback of this parent is already active (the partial unique index)."""
+        execution_id = _new_id()
+        try:
+            with self._write() as conn:
+                parent = conn.execute(
+                    "SELECT approval_id, kind FROM executions WHERE id = ?", (parent_id,)
+                ).fetchone()
+                if parent is None or parent["kind"] != "run":
+                    raise ValueError("only a run execution can be rolled back")
+                conn.execute(
+                    "INSERT INTO executions (id, approval_id, kind, parent_execution_id, status, started_at) "
+                    "VALUES (?, ?, 'rollback', ?, 'running', ?)",
+                    (execution_id, parent["approval_id"], parent_id, self._clock()),
+                )
+                self._event(conn, "execution.rollback_started", approval_id=parent["approval_id"],
+                            execution_id=execution_id, parent_execution_id=parent_id, operator=operator)
+                row = conn.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
+        except sqlite3.IntegrityError:
+            return None
+        return dict(row)
+
+    def rollbacks_of(self, parent_id: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM executions WHERE parent_execution_id = ? ORDER BY started_at",
+                (parent_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def supersede_pending(self, approval_id: str, *, reason: str) -> dict | None:
+        """Expire a pending approval that a newer request replaces (its target drifted). Returns the
+        row as it was (for its card), or None if it was no longer pending."""
+        with self._write() as conn:
+            row = conn.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+            if row is None or row["status"] != "pending":
+                return None
+            conn.execute("UPDATE approvals SET status = 'expired' WHERE id = ? AND status = 'pending'",
+                         (approval_id,))
+            self._event(conn, "approval.superseded", approval_id=approval_id, reason=reason)
+        return dict(row)
 
     def get_execution(self, execution_id: str) -> dict | None:
         with self._connect() as conn:

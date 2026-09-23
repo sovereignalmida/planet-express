@@ -6,8 +6,11 @@ its behavior is covered in tests/test_command_service.py.
 
 import os
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
+from unittest.mock import Mock
 
 import pytest
 
@@ -195,3 +198,50 @@ def test_direct_refusal_quoting_user_input_is_escaped(monkeypatch):
     notifier = FakeNotifier()
     fw._run_stack_action_request(commands, notifier, fw.actions.UP_STACK, "<x>", "chris")
     assert notifier.notifications == ["target refused: invalid stack name '&lt;x&gt;'"]
+
+
+# ── T40: Telegram abort / rollback of a typed execution ────────────────────────
+def test_abort_and_execution_rollback_route_to_the_command_service(monkeypatch):
+    calls = []
+
+    class Commands:
+        def abort(self, execution_id, *, operator):
+            calls.append(("abort", execution_id, operator))
+            return SimpleNamespace(message="Abort requested.")
+
+        def rollback(self, execution_id, *, operator):
+            calls.append(("rollback", execution_id, operator))
+            return SimpleNamespace(message="Rolling back.")
+
+    notifier = FakeNotifier()
+    fw._run_execution_control(Commands(), notifier, "abort", "a" * 12, "@chris (1)")
+    fw._run_execution_control(Commands(), notifier, "rollback", "b" * 12, "@chris (1)")
+    assert calls == [("abort", "a" * 12, "@chris (1)"), ("rollback", "b" * 12, "@chris (1)")]
+    assert notifier.notifications == ["Abort requested.", "Rolling back."]
+
+
+def test_legacy_plan_ids_still_use_the_legacy_rollback(monkeypatch):
+    # A 12-hex id is a typed execution; anything else (p1, …) stays on the legacy plan path
+    # until slice 5b-5 retires it.
+    seen = []
+    controls = []
+    monkeypatch.setattr(fw, "_do_rollback", lambda tg, notifier, state, plan_id: seen.append(plan_id))
+    monkeypatch.setattr(fw, "_run_execution_control",
+                        lambda commands, notifier, control, target, operator: controls.append((control, target)))
+    tg = Mock()
+    tg.chat_id = "42"
+    notifier = FakeNotifier()
+
+    def send(text):
+        fw.handle_message({"message": {"text": text, "chat": {"id": 42}, "from": {"id": 1}}},
+                          tg, notifier, fw.PipelineState(), commands=Mock())
+
+    send("/rollback p1")
+    send("/rollback " + "a" * 12)
+    send("/abort " + "b" * 12)
+    for _ in range(50):
+        if len(controls) >= 2:
+            break
+        time.sleep(0.02)
+    assert seen == ["p1"]
+    assert sorted(controls) == [("abort", "b" * 12), ("rollback", "a" * 12)]

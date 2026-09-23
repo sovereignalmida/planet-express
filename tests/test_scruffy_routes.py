@@ -1086,3 +1086,36 @@ def test_config_reload_watch_only_runs_under_gunicorn(monkeypatch):
     assert calls == []                        # test client / dev server: never signal a parent
     client.get("/login", environ_base={"SERVER_SOFTWARE": "gunicorn/26.0"})
     assert calls == [1]
+
+
+# ── T40: abort and rollback controls ───────────────────────────────────────────
+@pytest.mark.parametrize("kind", ["abort", "rollback"])
+def test_execution_controls_use_the_session_operator_and_require_csrf(chat_client, kind):
+    client, rpc, _, _ = chat_client
+    rpc.results[f"execution.{kind}"] = {"outcome": "requested", "message": "ok",
+                                        "execution_id": "a" * 12, "report": None}
+    token = csrf(client)
+    rpc.calls.clear()
+
+    no_token = client.post(f"/api/executions/aaaaaaaaaaaa/{kind}")
+    assert no_token.status_code == 400 and not rpc.calls
+
+    response = client.post(f"/api/executions/aaaaaaaaaaaa/{kind}",
+                           data={"csrf_token": token, "operator": "someone-else"})
+    assert response.status_code == 200 and response.get_json()["outcome"] == "requested"
+    method, params = rpc.calls[-1]
+    assert method == f"execution.{kind}"
+    assert params["execution_id"] == "a" * 12
+    assert params["operator"] == "alice"  # the session operator, never the one in the form
+
+
+@pytest.mark.parametrize("kind", ["abort", "rollback"])
+def test_execution_controls_reject_a_bad_id_and_surface_core_failures(chat_client, kind):
+    client, rpc, _, _ = chat_client
+    token = csrf(client)
+    rpc.calls.clear()
+    bad = client.post(f"/api/executions/not-an-id/{kind}", data={"csrf_token": token})
+    assert bad.status_code == 400 and set(bad.get_json()) == {"error"} and not rpc.calls
+    rpc.results[f"execution.{kind}"] = RpcError("core is down", "internal")
+    down = client.post(f"/api/executions/aaaaaaaaaaaa/{kind}", data={"csrf_token": token})
+    assert down.status_code == 503 and set(down.get_json()) == {"error"}

@@ -1,7 +1,8 @@
 (function () {
   "use strict";
   const root = document.getElementById("execution");
-  const state = { busy: false, timer: null, execution: null };
+  const state = { busy: false, timer: null, execution: null, control: false };
+  const csrf = () => (document.querySelector('meta[name="csrf-token"]') || {}).content || "";
   const get = id => document.getElementById(id);
   const terminal = new Set(["passed", "failed", "interrupted", "aborted", "rolled_back", "rollback_failed"]);
 
@@ -111,6 +112,38 @@
         : verifyKind === "failed" ? "verification failed" : "waiting"));
   }
 
+  async function control(kind, confirmText) {
+    if (state.control || !window.confirm(confirmText)) return;
+    state.control = true;
+    renderActions(state.execution);
+    try {
+      const response = await fetch(location.pathname.replace("/executions/", "/api/executions/") + "/" + kind,
+        { method: "POST", body: new URLSearchParams({ csrf_token: csrf() }), cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "host slow, retry");
+      get("execution-note").textContent = data.message || "";
+      // A rollback runs as its own execution: follow it.
+      if (kind === "rollback" && data.outcome === "started" && data.execution_id) {
+        window.location.assign("/executions/" + encodeURIComponent(data.execution_id));
+        return;
+      }
+      await poll();
+    } catch (error) {
+      get("execution-note").textContent = error.message;
+    } finally {
+      state.control = false;
+      renderActions(state.execution);
+    }
+  }
+
+  function controlButton(label, kind, confirmText, primary) {
+    const button = node("button", "pe-btn" + (primary ? " primary" : ""), label);
+    button.type = "button";
+    button.disabled = state.control;
+    button.addEventListener("click", () => control(kind, confirmText));
+    return button;
+  }
+
   function action(label, href, primary) {
     const link = node("a", "pe-btn" + (primary ? " primary" : ""), label);
     link.href = href;
@@ -120,12 +153,32 @@
   function renderActions(data) {
     const actions = get("execution-actions");
     actions.replaceChildren();
-    if (data.status === "passed" || data.status === "failed") {
+    if (!data) return;
+    const caps = data.capabilities || {};
+    const preview = data.rollback_preview || {};
+    // Only controls this run can actually honour (slice 5b-1): ABORT while steps remain, ROLL BACK
+    // when some applied step has a true inverse. Never abort/rollback/resume otherwise.
+    if (caps.abortable) {
+      actions.append(controlButton("ABORT", "abort",
+        "Stop this run before its next step? The step already running finishes.", false));
+    }
+    if (caps.rollbackable) {
+      const undo = (preview.undo || []).length;
+      const unknown = (preview.unknown || []).length;
+      actions.append(controlButton(
+        "ROLL BACK", "rollback",
+        "Undo " + undo + " step(s) that changed the host?" +
+        (unknown ? " " + unknown + " step(s) with an unknown outcome are left alone." : ""), false));
+    }
+    if (data.status === "passed" || data.status === "failed" || data.status === "rolled_back"
+        || data.status === "rollback_failed" || data.status === "aborted") {
       actions.append(action("DONE", targetUrl(data), true));
     } else if (data.status === "interrupted") {
       actions.append(action("RE-SCAN THE HOST", "/#overview", true), action("RE-PROPOSE", targetUrl(data), false));
     }
-    // Add future controls only when both a capability and its matching endpoint exist.
+    (data.rollbacks || []).forEach(child => {
+      actions.append(action("VIEW ROLLBACK (" + child.status + ")", "/executions/" + encodeURIComponent(child.id), false));
+    });
   }
 
   function render(data) {
@@ -142,6 +195,8 @@
       failed: ["crit", "EXECUTION FAILED", data.reason || "The action did not pass verification."],
       interrupted: ["execution-interrupted", "WHAT WE KNOW", data.reason || "Contact ended before the host state could be confirmed."],
       aborted: ["warn", "ABORTED", data.reason || "Stopped by the operator between steps."],
+      rolled_back: ["ok", "ROLLED BACK", data.reason || "The steps that changed the host were undone."],
+      rollback_failed: ["crit", "ROLLBACK DID NOT FINISH", data.reason || "Check the host."],
     };
     const treatment = treatments[status] || ["unknown", "UNKNOWN EXECUTION STATE", status];
     get("execution-verdict").className = "pe-verdict " + treatment[0];

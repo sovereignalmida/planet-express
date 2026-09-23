@@ -48,6 +48,7 @@ class Env:
         self.argv_calls: list[list[str]] = []
         self.argv_result = (0, "", "")
         self.verify_result = (True, "healthy for 15s")
+        self.container_running = True
         self.verify_calls: list[tuple] = []
         self.lock_owner_during_run: list = []
         self.spawned: list[tuple] = []
@@ -58,6 +59,7 @@ class Env:
             self.store, self.notifier, self.state,
             run_argv=self._run_argv, resolve_target=self._resolve, verify=self._verify,
             restart_count=lambda container: 3, spawn=self._spawn, background=self._background,
+            read_health=self._read_health,
             clock=self.clock, binder=FakeBinder(),
         )
 
@@ -75,6 +77,13 @@ class Env:
     def _verify(self, container, baseline):
         self.verify_calls.append((container, baseline))
         return self.verify_result
+
+    def _read_health(self, container):
+        # Engine steps (start/stop, checks) read host state; the fake keeps it off the host.
+        return actions.HealthReading(
+            error=None, status="running" if self.container_running else "exited",
+            restart_count=0, health="healthy",
+        )
 
     def _background(self, fn):
         self.background_jobs.append(fn)
@@ -983,12 +992,16 @@ def test_tampered_plan_is_refused_and_nothing_runs(env):
     assert env.argv_calls == [] and env.state.mutation_owner is None
 
 
-def test_drifted_pending_card_answers_already_awaiting(env):
+def test_drifted_pending_card_is_superseded_by_the_newer_request(env):
+    # T40: the old card was approved against a binding that no longer exists and would be refused
+    # for drift; the newer request replaces it and its card says so.
     first = env.propose()
     env.service._binder.container_ids["fixture-healthy"] = "fedcba987654"  # recreated since
     again = env.propose()
-    assert again.ok and not again.created and again.approval_id == first.approval_id
-    assert again.reason == "already awaiting approval"
+    assert again.ok and again.created and again.approval_id != first.approval_id
+    assert env.store.get_approval(first.approval_id)["status"] == "expired"
+    assert any("superseded" in text.lower() for _id, text in env.notifier.request_updates)
+    assert env.store.get_approval(again.approval_id)["status"] == "pending"
 
 
 def test_status_carries_steps_and_a_recreated_container_is_refused(env):
@@ -1020,3 +1033,89 @@ def test_startup_and_status_survive_non_legacy_runbook_approvals(env):
     interrupted = fresh.reconcile_on_startup()
     assert [r["id"] for r in interrupted] == [execution["id"]]
     assert any("Resync VPN port forward" in n for n in fresh._notifier.notifications)
+
+
+# ── T40: abort and rollback controls ───────────────────────────────────────────
+def test_abort_flags_a_running_execution_and_reports_honestly(env):
+    env.run_spawned_immediately = False
+    approval_id = env.propose().approval_id
+    started = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    result = env.service.abort(started.execution_id, operator="chris")
+    assert result.outcome == "requested" and "before its next step" in result.message
+    assert env.service.abort(started.execution_id, operator="chris").outcome == "already"
+    assert env.service.abort("0" * 12, operator="chris").outcome == "unknown"
+    env.store.set_execution_status(started.execution_id, "failed", reason="done")
+    assert env.service.abort(started.execution_id, operator="chris").outcome == "not_running"
+
+
+def test_rollback_undoes_a_stop_and_marks_the_parent_rolled_back(env):
+    from planet_express.execution import runbook as runbooks
+    plan = runbooks.Runbook.model_validate({"title": "Stop healthy/web", "artifacts": {}, "steps": [
+        {"type": "service.stop", "params": {"stack": "healthy", "service": "web"},
+         "binding": env.service._binder.service(TARGET, timeout=4)}]})
+    row, _ = env.store.propose_runbook(
+        action=RESTART, target_key="healthy/web", target=TARGET.as_dict(), risk="R1",
+        requested_via="telegram", requested_by="t", plan_json=runbooks.canonical_json(plan),
+        plan_sha256=runbooks.plan_sha256(plan), origin="telegram")
+    parent = env.store.approve_and_create_execution(row["id"], decided_by="x", arrived_at=env.clock())
+    env.store.create_steps(parent["id"], plan.steps)
+    env.store.set_step_pre_state(parent["id"], 1, {"running": True})
+    env.store.mark_step_dispatched(parent["id"], 1)
+    env.store.finish_step(parent["id"], 1, status="passed", effect="applied", reason="stopped")
+    env.store.set_execution_status(parent["id"], "passed", reason="stopped")
+
+    status = env.service.get_status(parent["id"])
+    assert status["capabilities"]["rollbackable"] and not status["capabilities"]["abortable"]
+
+    result = env.service.rollback(parent["id"], operator="chris")
+    assert result.outcome == "started" and result.report["undo"] == ["1. service.stop"]
+    child = env.store.get_execution(result.execution_id)
+    assert child["kind"] == "rollback" and child["parent_execution_id"] == parent["id"]
+    assert child["status"] == "passed"
+    assert env.store.get_execution(parent["id"])["status"] == "rolled_back"
+    assert env.argv_calls[-1][-2:] == ["start", "web"]  # the inverse ran
+    assert env.state.mutation_owner is None
+    # and it cannot be rolled back twice, nor can the child itself be rolled back
+    assert env.service.rollback(parent["id"], operator="chris").outcome == "already"
+    assert env.service.rollback(result.execution_id, operator="chris").outcome == "refused"
+
+
+def test_rollback_of_an_unfinished_run_is_refused_and_nothing_to_undo_is_said_plainly(env):
+    env.run_spawned_immediately = False
+    approval_id = env.propose().approval_id
+    started = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    assert env.service.rollback(started.execution_id, operator="chris").outcome == "refused"
+    env.store.set_execution_status(started.execution_id, "failed", reason="boom")
+    env.state.end_mutation(f"act:{approval_id}")  # its worker was never run in this test
+    result = env.service.rollback(started.execution_id, operator="chris")
+    assert result.outcome == "nothing_to_undo" and "Nothing to undo" in result.message
+    assert env.state.mutation_owner is None
+
+
+def test_rollback_respects_a_risk_the_operator_has_since_forbidden(env, monkeypatch):
+    # Own review, T40: the approval authorises undoing what it did, but not a forbidden risk class.
+    import config as config_module
+    from config_schema import AutonomyConfig
+    from planet_express.execution import runbook as runbooks
+    plan = runbooks.Runbook.model_validate({"title": "Stop healthy/web", "artifacts": {}, "steps": [
+        {"type": "service.stop", "params": {"stack": "healthy", "service": "web"},
+         "binding": env.service._binder.service(TARGET, timeout=4)}]})
+    row, _ = env.store.propose_runbook(
+        action=RESTART, target_key="healthy/web", target=TARGET.as_dict(), risk="R1",
+        requested_via="telegram", requested_by="t", plan_json=runbooks.canonical_json(plan),
+        plan_sha256=runbooks.plan_sha256(plan), origin="telegram")
+    parent = env.store.approve_and_create_execution(row["id"], decided_by="x", arrived_at=env.clock())
+    env.store.create_steps(parent["id"], plan.steps)
+    env.store.set_step_pre_state(parent["id"], 1, {"running": True})
+    env.store.mark_step_dispatched(parent["id"], 1)
+    env.store.finish_step(parent["id"], 1, status="passed", effect="applied", reason="stopped")
+    env.store.set_execution_status(parent["id"], "passed", reason="stopped")
+
+    # service.start is R1; forbid R1 and the undo must be refused, with the lock released.
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(forbidden_risks=["R1", "R4"], direct_request_risks=[]))
+    result = env.service.rollback(parent["id"], operator="chris")
+    assert result.outcome == "refused" and "current policy forbids" in result.message
+    assert env.argv_calls == []
+    assert env.state.mutation_owner is None
+    assert env.store.rollbacks_of(parent["id"]) == []

@@ -87,6 +87,15 @@ def _bounded_run_argv(argv: list[str], timeout) -> tuple[int, str, str]:
     return rc, out.strip(), err.strip()
 
 
+@dataclass(frozen=True)
+class ControlResult:
+    """Abort / rollback outcome (slice 5b-1, T40)."""
+    outcome: str  # requested | already | not_running | unknown | started | nothing_to_undo | busy | refused
+    message: str
+    execution_id: str | None = None
+    report: dict | None = None
+
+
 def _spawn_daemon(fn: Callable, *args) -> None:
     threading.Thread(target=fn, args=args, daemon=True, name="typed-action").start()
 
@@ -101,6 +110,7 @@ class CommandService:
         run_argv: Callable | None = None,
         resolve_target: Callable | None = None,
         verify: Callable | None = None,
+        read_health: Callable | None = None,
         restart_count: Callable | None = None,
         spawn: Callable | None = None,
         background: Callable[[Callable[[], None]], object] | None = None,
@@ -121,6 +131,7 @@ class CommandService:
         self._run_argv = run_argv or _bounded_run_argv
         self._resolve = resolve_target or actions.resolve_target
         self._verify = verify or actions.verify_after_restart
+        self._read_health = read_health or actions.read_health
         self._restart_count = restart_count or actions.restart_count
         self._spawn = spawn or _spawn_daemon
         # Telegram side effects an RPC reply must not wait on: each can take Telegram's 35s HTTP
@@ -237,9 +248,31 @@ class CommandService:
                     **kwargs,
                 )
             except PendingPlanConflict as conflict:
-                # A card for this target is already pending, approved against an earlier binding;
-                # it is the one to act on (or deny) (T38 own-review follow-up).
-                return ProposeResult(True, conflict.approval_id, False, "already awaiting approval")
+                # The pending card was proposed against an earlier binding (compose edited, container
+                # recreated) and would be refused for drift if approved. The newer request replaces
+                # it instead of pointing the operator at a dead card (T39 review, T40).
+                superseded = self._store.supersede_pending(
+                    conflict.approval_id, reason="target changed; replaced by a newer request",
+                )
+                if superseded is not None and superseded.get("message_id") is not None:
+                    text = self._policy_refusal_text(
+                        superseded, "superseded: its target changed, and a newer request replaces it"
+                    )
+                    self._in_background(lambda: self._update_card_quietly(superseded["message_id"], text))
+                try:
+                    row, created = self._store.propose_runbook(
+                        action=action, target_key=target.key, target=target.as_dict(), risk=decision.risk,
+                        requested_via=requested_via, requested_by=requested_by, ttl_seconds=self._ttl,
+                        timeout=self._remaining(deadline),
+                        plan_json=runbooks.canonical_json(plan), plan_sha256=runbooks.plan_sha256(plan),
+                        origin=requested_via, **kwargs,
+                    )
+                except PendingPlanConflict as again:
+                    return ProposeResult(True, again.approval_id, False, "already awaiting approval")
+                except IncidentSourceError as exc:
+                    return ProposeResult(False, None, False, str(exc))
+                except (actions.TargetTimeout, sqlite3.OperationalError):
+                    return ProposeResult(False, None, False, "host slow, retry")
             except IncidentSourceError as exc:
                 return ProposeResult(False, None, False, str(exc))
             except (actions.TargetTimeout, sqlite3.OperationalError):
@@ -700,12 +733,149 @@ class CommandService:
             start(row, execution["id"], operator)
             return RequestResult("started", text, row["id"], execution["id"], capabilities)
 
+    # ── abort / rollback (slice 5b-1, T40; design §4.4) ─────────────────────
+    def abort(self, execution_id: str, *, operator: str) -> ControlResult:
+        """Stop a running execution before its next step (and during a `wait`). A command already
+        running is never killed: a half-applied compose change is worse than finishing it."""
+        outcome = self._store.request_abort(execution_id, operator=operator)
+        messages = {
+            "requested": "Abort requested: the run stops before its next step; the current step finishes.",
+            "already": "Abort was already requested.",
+            "not_running": "That run has already finished.",
+            "unknown": "Unknown execution.",
+        }
+        return ControlResult(outcome, messages[outcome], execution_id)
+
+    def rollback(self, execution_id: str, *, operator: str) -> ControlResult:
+        """Reverse, newest first, every step of a finished run that changed the host and has a true
+        inverse. Unknown outcomes are re-checked and otherwise left alone; steps with no inverse are
+        listed. Runs as a child execution of the same approval, under the mutation lock."""
+        parent = self._store.get_execution(execution_id)
+        if parent is None:
+            return ControlResult("unknown", "Unknown execution.")
+        if parent["kind"] != "run":
+            return ControlResult("refused", "A rollback cannot itself be rolled back.")
+        if parent["status"] not in engine.TERMINAL_RUN_STATUSES:
+            return ControlResult("refused", "That run is still going; abort it first, then roll it back.")
+        children = self._store.rollbacks_of(execution_id)
+        if any(child["status"] in ("running", "verifying") for child in children):
+            return ControlResult("already", "A rollback of this run is already in progress.",
+                                 children[-1]["id"])
+        if any(child["status"] == "passed" for child in children):
+            return ControlResult("already", "This run was already rolled back.", children[-1]["id"])
+
+        approval = self._store.get_approval(parent["approval_id"])
+        owner = f"rollback:{execution_id}"
+        if not self._state.try_begin_mutation(owner):
+            return ControlResult("busy", f"Busy right now ({self._state.busy_reason}).")
+        handed_off = False
+        try:
+            try:
+                plan = engine.plan_rollback(self, self._row_summary(approval),
+                                            self._store.list_steps(execution_id))
+            except actions.TargetError as exc:
+                return ControlResult("refused", f"Cannot roll back: {redact(str(exc))[:200]}")
+            report = {"undo": plan.undo, "not_reversible": plan.not_reversible, "unknown": plan.unknown}
+            if plan.runbook is None:
+                return ControlResult("nothing_to_undo", self._rollback_summary("Nothing to undo", report),
+                                     execution_id, report)
+            # The original approval authorises undoing what it did, but a risk the operator has since
+            # forbidden must still not run (own review, T40).
+            risk = runbooks.risk(plan.runbook)
+            if risk in config.AUTONOMY.forbidden_risks:
+                return ControlResult(
+                    "refused", f"Rolling this back needs {risk}, which current policy forbids.",
+                    execution_id, report,
+                )
+            child = self._store.create_rollback_execution(execution_id, operator=operator)
+            if child is None:
+                return ControlResult("already", "A rollback of this run is already in progress.")
+            text = self._rollback_summary(
+                f"↩️ {_s(operator)} is rolling back {_s(self._row_summary(approval))}", report)
+            self._in_background(lambda: self._notify_quietly(text))
+            try:
+                self._spawn(self._run_rollback, approval, parent, child["id"], plan.runbook, owner)
+            except Exception:
+                self._store.set_execution_status(child["id"], "failed", reason="failed to start")
+                self._in_background(lambda: self._notify_quietly(
+                    f"🔴 <b>Rollback failed to start</b>: {_s(self._row_summary(approval))}"))
+                raise
+            handed_off = True
+            return ControlResult("started", text, child["id"], report)
+        finally:
+            if not handed_off:
+                self._state.end_mutation(owner)
+
+    def _run_rollback(self, approval: dict, parent: dict, child_id: str, runbook, owner: str) -> None:
+        """Worker thread: the rollback child holds the lock until it finishes."""
+        try:
+            result = engine.RunbookEngine(
+                self,
+                is_abort_requested=lambda: bool(
+                    (self._store.get_execution(child_id) or {}).get("abort_requested_at")
+                ),
+            ).run(child_id, runbook, origin="rollback")
+            self._store.set_execution_status(child_id, result.status, reason=result.reason)
+            self._store.set_execution_status(
+                parent["id"], "rolled_back" if result.status == "passed" else "rollback_failed",
+                reason=parent["reason"],
+            )
+            done = ("🟢 <b>Rolled back</b>" if result.status == "passed"
+                    else "🔴 <b>Rollback did not finish</b>")
+            self._in_background(lambda: self._notify_quietly(
+                f"{done}: {_s(self._row_summary(approval))}. {_s(result.reason)}"))
+        except Exception as exc:
+            log.exception(f"Rollback {child_id} crashed")
+            try:
+                engine.settle_crashed_execution(self._store, child_id)
+                self._store.set_execution_status(
+                    child_id, "failed", reason=f"crashed: {redact(str(exc))[:200]}")
+                self._store.set_execution_status(parent["id"], "rollback_failed", reason=parent["reason"])
+            except Exception:
+                log.exception(f"Could not record the rollback crash of {child_id}")
+        finally:
+            self._state.end_mutation(owner)
+
+    @staticmethod
+    def _rollback_summary(head: str, report: dict) -> str:
+        parts = [head + "."]
+        if report["undo"]:
+            parts.append("Undoing: " + ", ".join(report["undo"]) + ".")
+        if report["not_reversible"]:
+            parts.append("Not reversible (left as is): " + ", ".join(report["not_reversible"]) + ".")
+        if report["unknown"]:
+            parts.append("Outcome still unknown — check by hand: " + ", ".join(report["unknown"]) + ".")
+        return " ".join(parts)
+
     def get_status(self, execution_id: str) -> dict | None:
         execution = self._store.get_execution(execution_id)
         if execution is not None:
             approval = self._store.get_approval(execution["approval_id"])
             spec = actions.REGISTRY.get(approval["action"])
-            execution["capabilities"] = spec.capabilities() if spec else {}
+            steps = self._store.list_steps(execution_id)
+            preview = engine.rollback_preview(steps)
+            children = self._store.rollbacks_of(execution_id) if execution["kind"] == "run" else []
+            rolled_back = [c for c in children if c["status"] in ("running", "verifying", "passed")]
+            # Controls come from what this plan can actually do, not from fixed per-action flags:
+            # ABORT only while steps remain, ROLL BACK only when something is genuinely undoable.
+            abortable = (
+                execution["status"] in ("running", "verifying")
+                and execution["abort_requested_at"] is None
+                and any(step["status"] in ("pending", "dispatched") for step in steps)
+            )
+            rollbackable = (
+                execution["kind"] == "run"
+                and execution["status"] in engine.TERMINAL_RUN_STATUSES
+                and bool(preview["undo"] or preview["unknown"])
+                and not rolled_back
+            )
+            execution["capabilities"] = (spec.capabilities() if spec else {}) | {
+                "abortable": abortable, "rollbackable": rollbackable, "resumable": False,
+            }
+            execution["rollback_preview"] = preview
+            execution["rollbacks"] = [
+                {"id": c["id"], "status": c["status"], "reason": c["reason"]} for c in children
+            ]
             execution["approval"] = {
                 key: approval[key] for key in (
                     "id", "action", "risk", "requested_via", "requested_by", "decided_by", "decided_at"
@@ -719,7 +889,7 @@ class CommandService:
                 {key: step[key] for key in (
                     "n", "type", "status", "effect", "reason", "started_at", "finished_at",
                 )} | {"label": self._step_label(step, execution["summary"])}
-                for step in self._store.list_steps(execution_id)
+                for step in steps
             ]
         return execution
 
@@ -975,6 +1145,12 @@ class CommandService:
             self._notifier.notify(text)
         except Exception:  # noqa: BLE001 -- notification errors can contain credentials
             log.warning("Failed to send a dashboard action notification")
+
+    def _update_card_quietly(self, message_id: int, text: str) -> None:
+        try:
+            self._notifier.update_request(message_id, text)
+        except Exception:  # noqa: BLE001 -- never log the error text: it can carry the bot token
+            log.warning(f"Failed to update approval card {message_id}")
 
     def _in_background(self, fn: Callable[[], None]) -> None:
         try:

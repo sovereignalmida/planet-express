@@ -467,6 +467,19 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             "incident_id": incident_id, "operator": g.operator,
         }))
 
+    @app.post("/api/executions/<execution_id>/abort")
+    def execution_abort(execution_id):
+        return jsonify(core("execution.abort", _execution_control(execution_id)))
+
+    @app.post("/api/executions/<execution_id>/rollback")
+    def execution_rollback(execution_id):
+        return jsonify(core("execution.rollback", _execution_control(execution_id)))
+
+    def _execution_control(execution_id):
+        if re.fullmatch(r"[0-9a-f]{12}", execution_id) is None:
+            raise RpcError("Invalid execution ID", "bad_request")
+        return {"execution_id": execution_id, "operator": g.operator}
+
     @app.get("/executions/<execution_id>")
     def execution_page(execution_id):
         return render_template("execution.html", execution_id=execution_id)

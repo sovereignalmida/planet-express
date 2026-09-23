@@ -1178,11 +1178,33 @@ def handle_message(
 
     elif cmd == "/rollback":
         parts = text.split()
-        plan_id = parts[1] if len(parts) > 1 else None
-        if plan_id:
-            _do_rollback(tg, notifier, state, plan_id)
+        target_id = parts[1] if len(parts) == 2 else None
+        if not target_id:
+            notifier.notify("Usage: `/rollback <execution_id>` (or a legacy `<plan_id>`)")
+        elif commands is not None and re.fullmatch(r"[0-9a-f]{12}", target_id):
+            # A typed execution (slice 5b) rolls back its own applied steps; legacy plan ids keep
+            # the old path until slice 5b-5 retires them.
+            threading.Thread(
+                target=_run_execution_control,
+                args=(commands, notifier, "rollback", target_id, _telegram_operator(msg)),
+                daemon=True,
+            ).start()
         else:
-            notifier.notify("Usage: `/rollback <plan_id>`")
+            _do_rollback(tg, notifier, state, target_id)
+
+    elif cmd == "/abort":
+        parts = text.split()
+        target_id = parts[1] if len(parts) == 2 else None
+        if commands is None:
+            notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
+        elif not target_id or re.fullmatch(r"[0-9a-f]{12}", target_id) is None:
+            notifier.notify("Usage: `/abort <execution_id>`")
+        else:
+            threading.Thread(
+                target=_run_execution_control,
+                args=(commands, notifier, "abort", target_id, _telegram_operator(msg)),
+                daemon=True,
+            ).start()
 
     elif cmd == "/skip":
         parts = text.split()
@@ -1402,6 +1424,7 @@ def handle_message(
             "/up `<stack>`|`all` — One stack runs immediately (R1); `all` needs approval (R2)\n"
             "/down `<stack>`|`all` — Needs approval (R2; ingress/all is R3)\n"
             "/restart `<stack>` `<service>` — Propose a verified restart (needs approval)\n"
+            "/abort `<execution_id>` — Stop a running action before its next step\n"
             "/install `<url>` `<domain>` — Fry resolves a project URL, proposes a new stack (diff-approve)\n"
             "/grant — Show current sudo allowlist scope + how to widen it"
         )
@@ -1531,6 +1554,21 @@ def _run_restart_request(
             f"ℹ️ A restart of {where} is already awaiting approval "
             f"(request <code>{TelegramClient.s(result.approval_id)}</code>)."
         )
+
+
+def _telegram_operator(msg: dict) -> str:
+    sender = msg.get("from") or {}
+    return (f"@{sender['username']} ({sender.get('id')})" if sender.get("username")
+            else str(sender.get("id", "telegram")))
+
+
+def _run_execution_control(
+    commands: CommandService, notifier: Notifier, control: str, execution_id: str, operator: str
+) -> None:
+    result = (commands.abort if control == "abort" else commands.rollback)(
+        execution_id, operator=operator
+    )
+    notifier.notify(TelegramClient.s(result.message))
 
 
 def _run_stack_action_request(

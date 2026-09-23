@@ -473,6 +473,24 @@ def build_core_handlers(
             raise RpcError("Execution not found", "not_found")
         return result
 
+    def _control_params(params):
+        if not isinstance(params, dict) or set(params) != {"execution_id", "operator"}:
+            raise RpcError("Invalid params", "bad_request")
+        value = params["execution_id"]
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{12}", value) is None:
+            raise RpcError("Invalid execution id", "bad_request")
+        auth_params({"operator": params["operator"]})
+        if params["operator"] == "?":
+            raise RpcError("Invalid operator", "bad_request")
+
+    def execution_abort(params):
+        _control_params(params)
+        return asdict(commands.abort(params["execution_id"], operator=params["operator"]))
+
+    def execution_rollback(params):
+        _control_params(params)
+        return asdict(commands.rollback(params["execution_id"], operator=params["operator"]))
+
     def incident_params(params, *, item=False, operator=False):
         expected = {"incident_id"} if item else {"status", "limit"}
         if operator:
@@ -648,6 +666,7 @@ def build_core_handlers(
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
+            "execution.abort": execution_abort, "execution.rollback": execution_rollback,
             "incident.list": incident_list, "incident.get": incident_get,
             "incident.propose": incident_propose,
             "auth.status": auth_status, "auth.record_failure": auth_failure,

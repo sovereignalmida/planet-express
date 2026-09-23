@@ -1752,6 +1752,47 @@ tasks against `ACTION-SCREENS.md`.
     full `/up`/`/down` rehearsal passed unchanged (including real `stack.up` outputs), and a direct
     restart of `healthy/web` passed ("healthy for 15s", effect applied, stored plan + origin
     `dashboard-direct`). Journals clean.
+- [x] **T40 (P1, CC: ~1 session)** — controls — ✅ done 2026-09-22 — 5b-1b part 2: abort and rollback,
+  and the drifted-card fix. **Implemented by the coordinator**; completes 5b-1 (deploy next).
+  - **Abort**: `executions.abort_requested_at` set by `Store.request_abort`
+    (requested | already | not_running | unknown); the engine honours it between steps and inside
+    `wait`, never killing a dispatched argv. Terminal state `aborted`.
+  - **Rollback**: `engine.plan_rollback` walks the steps newest-first and reverses only **true**
+    inverses (`service.start↔stop`, `unit.action start↔stop`) whose recorded `pre_state` shows the
+    step changed something. A step left `unknown` is **re-reconciled against fresh host state** and,
+    if still unknown, excluded and reported (design §11 A2) — never guessed. Steps with no inverse
+    (restart, up/down, prune) are listed as not reversible. It runs as a child execution of the same
+    approval (`kind='rollback'`, `parent_execution_id`), under the mutation lock, one at a time
+    (partial unique index); the parent then reads `rolled_back` / `rollback_failed`.
+    `Store.rollbacks_of` and `engine.rollback_preview` (stored rows only, no host reads) feed the UI.
+  - **Controls come from the plan**, not from fixed per-action flags: `capabilities.abortable` only
+    while steps remain and no abort is pending, `capabilities.rollbackable` only when something is
+    genuinely undoable and no rollback exists. Restart/up/down still render no abort or rollback.
+  - **Surfaces**: `execution.abort` / `execution.rollback` RPC (operator validated),
+    `POST /api/executions/<id>/{abort,rollback}` (CSRF, operator from the device token only), ABORT
+    and ROLL BACK buttons on the execution screen (confirm first, then follow the rollback's own
+    execution), `rolled_back`/`rollback_failed` treatments, and Telegram `/abort <execution>` and
+    `/rollback <execution>`; `/rollback <plan_id>` keeps the legacy path until 5b-5.
+  - **Drifted-card fix (T39 review item):** a newer request now **supersedes** a pending card whose
+    binding drifted (card updated "superseded: its target changed…") instead of pointing the operator
+    at a card that would be refused. Dedup compares the plan, never its origin, so the same request
+    from another front end still dedups.
+  - **Own review (Codex gate skipped at the operator's instruction):** a rollback executed typed
+    steps without consulting policy — a risk class the operator has since forbidden is now refused
+    before any child execution is created. Noted, not changed: building the rollback plan holds the
+    mutation lock while it reads host state, so a dashboard call can time out while the rollback
+    still starts (the child then appears under the parent's rollbacks).
+  - **Verification:** 1,330 tests pass outside the socket sandbox; Ruff, `node --check`,
+    `git diff --check` clean.
+  - **Test VM rehearsal (2026-09-22)** (`tests/homelab/t40-controls.py` + the browser): stopping
+    `slow-start/app` then rolling it back ran `service.start`, the child passed ("healthy for 15s"),
+    the parent became `rolled_back`, the container ran again and a second rollback answered `already`;
+    `[wait 30, restart healthy/web]` aborted 3s in returned `aborted by the operator during wait` with
+    the restart step `aborted` and `healthy/web` untouched (`abort` → requested, then already, then
+    not_running). In the dashboard, the finished stop offered ROLL BACK (and no ABORT), and clicking
+    it created the child, navigated to it, and ended `rolled_back` with the container running. A
+    rollback child interrupted by killing the process was settled by the next core start
+    (step `failed/unknown`, execution `interrupted`, 0 restarts). VM operators restored; journals clean.
 
 ## Reviewer Concerns
 

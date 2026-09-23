@@ -350,3 +350,65 @@ def test_default_runner_is_bounded(monkeypatch):
     monkeypatch.setattr(bender, "run_argv_bounded", bounded)
     assert cs._bounded_run_argv(["docker", "ps"], 5) == (0, "out", "err")
     assert seen["max_bytes"] == cs.STEP_OUTPUT_MAX_BYTES
+
+
+# ── rollback planning (T40) ────────────────────────────────────────────────────
+def _rows(svc, ex, rb):
+    svc._store.create_steps(ex, rb.steps)
+    return svc._store.list_steps(ex)
+
+
+def test_rollback_plans_inverses_newest_first_and_lists_the_rest(svc):
+    ex = execution(svc)
+    rb = runbook(service_step("service.stop"), service_step("service.restart", service="radarr"),
+                 service_step("service.start", service="web"))
+    _rows(svc, ex, rb)
+    svc._store.set_step_pre_state(ex, 1, {"running": True})
+    svc._store.mark_step_dispatched(ex, 1)
+    svc._store.finish_step(ex, 1, status="passed", effect="applied", reason="stopped")
+    svc._store.mark_step_dispatched(ex, 2)
+    svc._store.finish_step(ex, 2, status="passed", effect="applied", reason="restarted")
+    svc._store.set_step_pre_state(ex, 3, {"running": False})
+    svc._store.mark_step_dispatched(ex, 3)
+    svc._store.finish_step(ex, 3, status="passed", effect="applied", reason="started")
+
+    plan = engine.plan_rollback(svc, "Bounce media", svc._store.list_steps(ex))
+    assert [step.type for step in plan.runbook.steps] == ["service.stop", "service.start"]
+    assert [step.params["service"] for step in plan.runbook.steps] == ["web", "sonarr"]
+    assert plan.undo == ["3. service.start", "1. service.stop"]
+    assert plan.not_reversible == ["2. service.restart"]
+    assert plan.unknown == []
+    assert engine.rollback_preview(svc._store.list_steps(ex)) == {
+        "undo": [3, 1], "unknown": [], "not_reversible": [2]}
+
+
+def test_rollback_rechecks_unknown_steps_against_the_host(svc):
+    ex = execution(svc)
+    rb = runbook(service_step("service.stop"), service_step("service.stop", service="radarr"))
+    _rows(svc, ex, rb)
+    for n, service in ((1, "sonarr"), (2, "radarr")):
+        svc._store.set_step_pre_state(ex, n, {"running": True})
+        svc._store.mark_step_dispatched(ex, n)
+        svc._store.finish_step(ex, n, status="failed", effect="unknown", reason="core died")
+    svc.running = {"media-sonarr-1": False, "media-radarr-1": True}  # one really stopped, one not
+
+    plan = engine.plan_rollback(svc, "Stop two", svc._store.list_steps(ex))
+    # sonarr is stopped, so its stop was applied and is undone; radarr still runs: not applied.
+    assert [step.params["service"] for step in plan.runbook.steps] == ["sonarr"]
+    assert plan.unknown == []
+
+
+def test_rollback_leaves_a_still_unknown_step_alone(svc):
+    ex = execution(svc)
+    rb = runbook(service_step("service.stop"))
+    _rows(svc, ex, rb)
+    svc._store.set_step_pre_state(ex, 1, {"running": True})
+    svc._store.mark_step_dispatched(ex, 1)
+    svc._store.finish_step(ex, 1, status="failed", effect="unknown", reason="core died")
+
+    def broken(container):
+        return Reading(status="", error="inspect failed")
+
+    svc._read_health = broken
+    plan = engine.plan_rollback(svc, "Stop one", svc._store.list_steps(ex))
+    assert plan.runbook is None and plan.unknown == ["1. service.stop"] and plan.undo == []

@@ -308,7 +308,7 @@ def test_core_handlers():
         "target_json": '{"stack":"media","service":"sonarr"}', "message_id": 5,
     }]
     handlers = build_core_handlers(commands, store)
-    assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status",
+    assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status", "execution.abort", "execution.rollback",
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
                              "incident.list", "incident.get", "incident.propose"}

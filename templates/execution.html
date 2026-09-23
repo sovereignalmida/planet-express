@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>Planet Express — Execution {{ execution_id }}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -34,6 +35,7 @@
         <dt>TARGET</dt><dd id="summary-target">—</dd>
       </dl>
     </section>
+    <p id="execution-note" class="pe-note" role="status"></p>
     <div id="execution-actions" class="execution-actions"></div>
   </main>
   <script src="{{ url_for('static', filename='execution.js') }}"></script>

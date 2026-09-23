@@ -253,7 +253,7 @@ class RunbookEngine:
         return StepOutcome("passed" if ok else "failed", "applied", reason)
 
     def _health(self, container):
-        return getattr(self.svc, "_read_health", actions.read_health)(container)
+        return self.svc._read_health(container)
 
     def _service_start_stop(self, execution_id, step, params, dispatch) -> StepOutcome:
         target, refused = self._bound_target(step)
@@ -492,3 +492,100 @@ def startup_reconcile(store) -> dict:
             settled["skipped"] += 1
     settled.update(store.reconcile_reserved_attempts())
     return settled
+
+
+# ── rollback planning (slice 5b-1, T40; design §4.4) ────────────────────────────
+_INVERSE_SERVICE = {"service.start": "service.stop", "service.stop": "service.start"}
+_INVERSE_UNIT = {"start": "stop", "stop": "start"}
+# A run is rollback-eligible once it is terminal; `rolled_back`/`rollback_failed` are terminal too,
+# so a second attempt is answered by the child-execution checks, not "it is still going" (T40).
+TERMINAL_RUN_STATUSES = ("passed", "failed", "aborted", "interrupted", "rolled_back", "rollback_failed")
+
+
+@dataclass
+class RollbackPlan:
+    runbook: runbooks.Runbook | None
+    undo: list          # labels of the steps that will be reversed (in rollback order)
+    not_reversible: list  # applied steps with no inverse (restart, up/down, prune, …)
+    unknown: list       # steps whose effect is still unknown after a fresh check: left alone
+
+
+def _is_conditional(row: dict) -> bool:
+    spec = runbooks.STEP_TYPES.get(row["type"])
+    return spec is not None and spec.rollback_for(row["params"] or {}) == "conditional"
+
+
+def rollback_preview(step_rows: list[dict]) -> dict:
+    """What a rollback would consider, from stored rows only (no host reads) — cheap enough for the
+    dashboard's 2s status poll. `unknown` steps are re-checked against the host at rollback time."""
+    undo, unknown, not_reversible = [], [], []
+    for row in reversed(step_rows):
+        spec = runbooks.STEP_TYPES.get(row["type"])
+        if spec is None or spec.risk == "R0" or row["effect"] in (None, "not_applied"):
+            continue
+        target = unknown if row["effect"] == "unknown" and _is_conditional(row) else (
+            undo if _is_conditional(row) else not_reversible)
+        target.append(row["n"])
+    return {"undo": undo, "unknown": unknown, "not_reversible": not_reversible}
+
+
+def _now_effect(svc, row: dict) -> str:
+    """Re-reconcile an `unknown` conditional step against fresh host state (design §11 A2)."""
+    pre = row["pre_state"] or {}
+    if row["type"] in _INVERSE_SERVICE:
+        container = (row["binding"] or {}).get("container")
+        reading = svc._read_health(container) if container else None
+        if reading is None or reading.error is not None or "running" not in pre:
+            return "unknown"
+        running_now = reading.status == "running"
+        wanted = row["type"] == "service.start"
+        if running_now == wanted and pre["running"] != wanted:
+            return "applied"
+        return "not_applied" if running_now == pre["running"] else "unknown"
+    if row["type"] == "unit.action":
+        if "active" not in pre:
+            return "unknown"
+        _rc, out, _err = bender.run_argv(["systemctl", "is-active", row["params"]["unit"]],
+                                        timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        now = out.strip() or "unknown"
+        wanted = row["params"]["action"] == "start"
+        if (now == "active") == wanted and (pre["active"] == "active") != wanted:
+            return "applied"
+        return "not_applied" if now == pre["active"] else "unknown"
+    return "unknown"
+
+
+def plan_rollback(svc, title: str, step_rows: list[dict]) -> RollbackPlan:
+    """Inverse steps, newest first, for every conditional step that changed the host. Built with
+    fresh bindings (the authority is the original approval plus the operator's rollback request)."""
+    steps, undo, not_reversible, unknown = [], [], [], []
+    for row in reversed(step_rows):
+        spec = runbooks.STEP_TYPES.get(row["type"])
+        if spec is None or spec.risk == "R0" or row["effect"] in (None, "not_applied"):
+            continue
+        label = f"{row['n']}. {row['type']}"
+        if not _is_conditional(row):
+            not_reversible.append(label)
+            continue
+        effect = row["effect"] if row["effect"] != "unknown" else _now_effect(svc, row)
+        if effect == "not_applied":
+            continue
+        if effect != "applied":
+            unknown.append(label)
+            continue
+        params = row["params"] or {}
+        if row["type"] in _INVERSE_SERVICE:
+            target = svc._resolve(params["stack"], params["service"], for_mutation=True)
+            steps.append({"type": _INVERSE_SERVICE[row["type"]], "params": dict(params),
+                          "binding": svc._binder.service(target, timeout=actions.DOCKER_TIMEOUT_SECONDS)})
+        else:
+            inverse = _INVERSE_UNIT[params["action"]]
+            steps.append({"type": "unit.action", "params": {"action": inverse, "unit": params["unit"]},
+                          "binding": {"unit": params["unit"]}})
+        undo.append(label)
+    runbook = None
+    if steps:
+        runbook = runbooks.Runbook.model_validate(
+            {"title": f"Roll back: {title}"[:200], "steps": steps, "artifacts": {}}
+        )
+    return RollbackPlan(runbook, undo, not_reversible, unknown)
