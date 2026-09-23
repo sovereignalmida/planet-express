@@ -311,7 +311,8 @@ def test_core_handlers():
     assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status", "execution.abort", "execution.rollback",
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
-                             "incident.list", "incident.get", "incident.propose"}
+                             "incident.list", "incident.get", "incident.propose",
+                             "canary.candidates"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
@@ -1110,3 +1111,29 @@ def test_logs_remaining_budget_and_success(monkeypatch):
     spent[0] = 4
     assert handler({'stack': 's', 'service': 's'}) == {'ok': False, 'error': 'timeout'}
     logs.assert_not_called()
+
+
+def test_canary_candidates_reports_open_windows_for_the_dashboard(tmp_path):
+    """The dashboard's user cannot open the core database, so these rows only reach it here."""
+    from planet_express.core.store import INDEFINITE_EXPIRY, Store
+
+    store = Store(tmp_path / "db.sqlite")
+    store.init()
+    approval, _ = store.propose(action="docker.restart_service", target_key="media/sonarr",
+                                target={"stack": "media", "service": "sonarr", "container": "c"},
+                                risk="R1", requested_via="telegram", requested_by="t")
+    execution = store.approve_and_create_execution(approval["id"], decided_by="t", arrived_at=1)
+    store.create_steps(execution["id"], [{"type": "update.canary",
+                                          "params": {"stack": "media", "service": "sonarr"},
+                                          "binding": {}}])
+    store.open_rollback_candidate(execution["id"], 1, stack="media", service="sonarr",
+                                  image_reference="nginx:1.27", old_image_id="a" * 64,
+                                  expires_at=INDEFINITE_EXPIRY)
+
+    handlers = build_core_handlers(Mock(), store)
+    rows = handlers["canary.candidates"]({})
+
+    assert [r["service"] for r in rows] == ["sonarr"]
+    assert rows[0]["expires_at"] == "when a human closes it"   # a failed inverse, held open
+    with pytest.raises(RpcError):
+        handlers["canary.candidates"]({"unexpected": 1})

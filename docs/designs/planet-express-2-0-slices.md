@@ -1923,6 +1923,112 @@ tasks against `ACTION-SCREENS.md`.
   path** — the next scan proposes runbooks, not shell. The old `state/pending_plan.json` (the
   gluetun port-forward repair, `p1`) is still on disk and core is idle with no pending approval.
 
+- [x] **T42 (P1, CC: ~1 session)** — typed canary and prune — slice 5b-3: `update.canary` on the
+  engine, with Zoidberg and safe prune routed through it. Scope: `docs/handoff/T42-brief.md`.
+  **Implemented by the coordinator.**
+  - **`update.canary` (R2, rollback `automatic`)**: two phases in one step (design §4.5). Phase 1
+    records `pre_state` (compose sha, image reference, the running container's image id, what the
+    reference pointed at), opens a **rollback-candidate row** and pulls. Phase 2 refuses if the
+    compose sha or the reference moved, tags the pulled image id onto the exact reference,
+    `up -d --pull never`, requires the container's image id to equal it, then runs the canary watch.
+    Eligibility is the reference itself: a digest-pinned or build-only service is refused before
+    anything is pulled.
+  - **The inverse is the step's own**, not an operator control: on a failed deploy or a failed
+    watch it retags the **recorded old** image id and brings the service back on it, and the step
+    reports `failed/not_applied` with both image ids. A failed inverse is `failed/unknown` and
+    **leaves its rollback window open**, so prune stays blocked until a human sorts it out.
+  - **Crash recovery** (`startup_reconcile`, now given the service so it can look at the host): a
+    step left mid-update is settled by comparing the container's current image with the one
+    recorded before the pull — still the old image is `not_applied` (and the window closes), the
+    new one is `unknown` (it was never watched, so it is never claimed as passed).
+  - **`CommandService.run_automatic`** is the one door for unattended runs: `policy.decide_runbook`
+    grants `automatic` only for a server-assigned origin paired with its own step type
+    (`zoidberg`/`update.canary`, `system`/`prune.safe`), then T24 limits per pair, then a direct
+    runbook execution with no card. The caller keeps the mutation lock, as it does today.
+  - **Zoidberg** builds one runbook per eligible service and derives its status vocabulary from the
+    step row rather than from ad-hoc shell results; the weekly window, `/patchnow`, the inter-service
+    delay, the update history and the Telegram rollback message (with Amy's escalation) are
+    unchanged. `--dry-run` stays a read-only report; a `--force`d CLI pass builds its own command
+    service, because the engine is now the only way to update.
+  - **Safe prune** runs as a `prune.safe` runbook, origin `system`, with today's gates **plus** a
+    rollback-candidate gate that reads the database and **fails closed**: the old JSON gate caught
+    its own errors and answered "nothing pending", so a malformed file let a prune delete the image
+    a rollback needed. The dashboard's OPEN ROLLBACK CANDIDATES panel reads the same rows.
+  - **Deleted now, not in 5b-5:** Zoidberg's hand-rolled `_rollback` and the
+    `rollback_candidates.json` writers. Nothing called them once the engine owned the window, and
+    leaving a second writer for the same state is exactly the drift this slice removes. The file
+    itself and its loader go with the rest in 5b-5.
+  - **Codex gate round 1: 1 finding, fixed.** Eligibility was checked inside the step, so a
+    digest-pinned or build-only service still got a runbook and a failed execution, and the
+    `canary.ineligible` event the brief requires was never written. Zoidberg now checks the
+    reference **before** building anything and records the refusal; the engine keeps its own check,
+    because a reference can move between the decision and the step.
+  - **Codex gate round 2: 3 findings, all fixed.**
+    - **P1** the automatic inverse only checked that the old image id was assigned, so an old image
+      that crash-loops on restore was recorded as a successful rollback, closed its window and sent
+      a reassuring message. The restore is now watched too (`CANARY_ROLLBACK_WATCH_SECONDS`), and a
+      failed watch is a failed rollback.
+    - **P1** a window deliberately left open after a failed inverse still expired on the ordinary
+      15-minute grace period, after which the prune gate stopped seeing it and could remove the only
+      image that could restore the service. `Store.hold_rollback_candidate` now pins those rows open
+      until a human closes them.
+    - **P2** the dashboard cannot open the core's database (`scripts/web_access.py` denies
+      `planetexpress-web` the `data/` directory), so reading the rows there would have left the panel
+      permanently empty. They come over a new `canary.candidates` RPC instead, like Traefik and
+      AdGuard; core being unavailable empties that one panel and never 500s the page.
+  - **Codex gate round 3: 3 findings, all fixed** (two were the round-2 fix not applied widely
+    enough).
+    - **P1** a crash-reconciled `unknown` canary kept its ordinary 15-minute expiry, so the image
+      the unverified service needs became pruneable → reconciliation pins it open.
+    - **P1** the same for any exception after dispatch: the window is now closed or pinned in the
+      step's `finally`, so no post-dispatch path can leave it merely expiring.
+    - **P2** a prune whose command exited non-zero still sent the "Safe prune ran automatically"
+      message → a failed run says so and repeats the reason.
+  - **Codex gate round 4: 2 findings, both fixed.**
+    - **P2** phase 2 re-checked the compose sha and the reference but not the container id, so a
+      container recreated during a minutes-long pull would have been deployed onto → the full
+      bound-target check runs again before the deploy.
+    - **P2** `is_canary_reference` had no length bound while the step's output model capped the
+      reference at 255, so a long but valid reference could deploy, pass its watch and then fail
+      output validation — recorded as a crash. Both now share `IMAGE_REFERENCE_MAX`.
+  - **Codex gate round 5: 2 findings, both fixed.**
+    - **P1** closing the window and recording the step are two writes: a crash between them left a
+      closed row under an unfinished step, and reconciliation could not put the protection back
+      because `hold_rollback_candidate` only touched open rows. It now **reopens** as well, which is
+      safe because reconciliation only ever sees steps that never reached a terminal state.
+    - **P2** an interrupted *rollback* looked exactly like an update that never deployed (the old
+      image is running either way), so it was settled `not_applied` even though the restore had
+      never been watched. The step now records a phase as it goes (`deploying`, `rolling_back`) and
+      an interrupted rollback stays `unknown`.
+  - **Codex gate round 6: 2 findings, both fixed.**
+    - **P1 (a cutover gap, not another crash window):** the upgrade can land while the *previous*
+      updater's window is still open in `state/rollback_candidates.json`, which nothing imports —
+      the first post-upgrade prune under disk pressure could have removed the image an interrupted
+      service needs. The gate honours that file again until its entries expire (fail-closed on a
+      file it cannot read); the file and this branch go in 5b-5.
+    - **P2** an unexpected failure after dispatch has no outputs, and Zoidberg read that as
+      `failed_no_rollback` — telling the operator there was no image to go back to when the window
+      is open and holding exactly that image. It is now `interrupted`, and the message says the
+      image is held back until they settle it.
+  - **Verification:** 1,419 tests pass (`tests/test_canary.py` 11 new, `tests/test_prune_gate.py` 6
+    new, `tests/test_zoidberg_typed.py` 8 new, 4 new `run_automatic` tests); Ruff clean. The
+    `test_zoidberg_image_ids` regression now pins the **engine** path as well, since that is where
+    the `sha256:` prefix mismatch would recur.
+  - **Test VM rehearsal (2026-09-23)** (`tests/homelab/t42-canary.sh` + `t42-canary.py`, core
+    stopped): a local registry serving `canary:good`, `canary:good2` and a crashing `canary:bad`,
+    with the `canary` fixture stack on `:latest`. Already-current → `no_change`, nothing recreated.
+    `:latest` moved to `good2` → `updated`, the container's image id changed and the window closed.
+    `:latest` moved to the crashing image → the watch caught `status=restarting`, the inverse put
+    `good2` back, the container ran again, the window closed and the Telegram message kept today's
+    shape. A prune attempted while a window was open was refused without reaching the engine.
+    Killed right after the pull (`pull_dispatched`, window open) → the next reconciliation read the
+    host, found the old image still running, settled the step `failed/not_applied` and closed the
+    window. After the Codex fix, the stack was re-pointed at a digest (`canary@sha256:…`): the pass
+    answered `skipped`, wrote one `canary.ineligible` event and created **no execution at all**.
+    After round 2, a `holdopen` case was added: with the inverse made to fail, the pass reported
+    `rollback_failed`, the Telegram message said "needs manual attention now", and the window was
+    pinned open — the prune gate still saw it with the clock pushed a day forward.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

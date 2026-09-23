@@ -119,6 +119,25 @@ class UnitBinding(StrictModel):
     unit: UnitName
 
 
+# An image id as Docker prints it, normalised to bare hex before it is stored (Zoidberg's
+# _normalize_image_id: `compose images -q` prints bare hex, `image inspect` prints sha256:<hex>).
+ImageId = Annotated[str, Field(pattern=r"^[0-9a-f]{12,64}$")]
+# A canonical mutable reference, `name:tag`, optionally registry- and namespace-qualified. A
+# digest-pinned reference (`repo@sha256:…`) has no tag to move and is deliberately not matched:
+# those services are ineligible for a canary update (design §4.5).
+# 512 is the same bound `actions.is_canary_reference` applies: Docker's own 255-character limit is
+# on the repository name alone, so a registry-qualified reference with a long tag can legitimately
+# be longer. The two must agree, or a deploy that succeeded would fail output validation and be
+# recorded as a crash (Codex, T42).
+IMAGE_REFERENCE_MAX = 512
+ImageReference = Annotated[
+    str,
+    Field(min_length=3, max_length=IMAGE_REFERENCE_MAX,
+          pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$"),
+    AfterValidator(_no_dotdot),
+]
+
+
 class StackServiceOutput(StrictModel):
     project: Name
     service: Name
@@ -169,6 +188,13 @@ STEP_TYPES: dict[str, StepType] = {
     "unit.action": StepType(
         UnitActionParams, UnitBinding, "R3", "none", {}, {}, "unit",
         {"start": "conditional", "stop": "conditional"},
+    ),
+    # D34: automatic under the weekly canary window, with the inverse built into the step itself
+    # (retag the recorded old image and bring the service back) rather than offered as a control.
+    "update.canary": StepType(
+        ServiceParams, ServiceBinding, "R2", "automatic",
+        {"image_reference": ImageReference, "old_image_id": ImageId, "new_image_id": ImageId},
+        {}, "service",
     ),
     "prune.safe": StepType(Empty, Empty, "R2", "none", {}, {}, "global"),
 }

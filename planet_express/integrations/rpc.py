@@ -21,7 +21,7 @@ from typing import Any
 
 import config
 from planet_express.application.command_service import CommandService
-from planet_express.core.store import Store
+from planet_express.core.store import INDEFINITE_EXPIRY, Store
 from planet_express.execution import actions
 from telegram_client import TelegramClient
 
@@ -627,6 +627,23 @@ def build_core_handlers(
         _params(params, {})
         return chat.quota()
 
+    def _iso(epoch: float) -> str:
+        return datetime.fromtimestamp(epoch, timezone.utc).astimezone().isoformat(timespec="seconds")
+
+    def canary_candidates(params):
+        """Open canary rollback windows, for the dashboard panel. The dashboard runs as
+        `planetexpress-web`, which `scripts/web_access.py` denies access to the core's `data/`
+        directory, so these rows can only reach it through here (Codex, T42)."""
+        _params(params, {})
+        return [
+            {"stack": row["stack"], "service": row["service"],
+             "old_image_id": row["old_image_id"], "image_reference": row["image_reference"],
+             "recorded_at": _iso(row["created_at"]),
+             "expires_at": "when a human closes it" if row["expires_at"] >= INDEFINITE_EXPIRY
+                           else _iso(row["expires_at"])}
+            for row in store.open_rollback_candidates(time.time())
+        ]
+
     def config_get(params):
         _params(params, {})
         try:
@@ -671,7 +688,8 @@ def build_core_handlers(
             "incident.propose": incident_propose,
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
-            "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked}
+            "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked,
+            "canary.candidates": canary_candidates}
 
     if chat is not None:
         handlers.update({"chat.ask": chat_ask, "chat.get": chat_get, "chat.quota": chat_quota})

@@ -511,23 +511,11 @@ def test_summarize_containers_filters_to_issues_only(tmp_path, monkeypatch):
     assert result["issues"][0]["name"] == "CASA_BAD"
 
 
-def test_summarize_rollback_candidates_excludes_expired(tmp_path, monkeypatch):
-    now = datetime.now(timezone.utc)
-    path = tmp_path / "rollback_candidates.json"
-    _write(path, {
-        "candidates": [
-            {"stack": "services", "service": "expired_one", "old_image_id": "sha256:1",
-             "recorded_at": (now - timedelta(hours=2)).isoformat(),
-             "expires_at": (now - timedelta(hours=1)).isoformat()},
-            {"stack": "services", "service": "still_open", "old_image_id": "sha256:2",
-             "recorded_at": now.isoformat(),
-             "expires_at": (now + timedelta(hours=1)).isoformat()},
-        ],
-    })
-    monkeypatch.setattr(config, "ROLLBACK_CANDIDATES_FILE", path)
-    result = dashboard_data.summarize_rollback_candidates()
-    assert len(result) == 1
-    assert result[0]["service"] == "still_open"
+def test_rollback_candidates_are_not_read_from_the_dashboard_process():
+    """They live in the core's database, which this process is denied (`scripts/web_access.py`);
+    `casa_scruffy.index()` fetches them over the `canary.candidates` RPC instead (slice 5b-3)."""
+    assert dashboard_data.summarize_rollback_candidates() == []
+    assert dashboard_data.build_dashboard_context()["rollback_candidates"] == []
 
 
 def test_summarize_update_history_newest_first_and_capped(tmp_path, monkeypatch):

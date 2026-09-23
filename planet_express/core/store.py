@@ -268,6 +268,11 @@ def _execute_ddl(conn: sqlite3.Connection, script: str) -> None:
             conn.execute(statement)
 
 
+# Year 2100: a rollback window that must not lapse on its own (a failed automatic inverse). The
+# column is NOT NULL, so "no expiry" is spelled as a date no deployment will reach.
+INDEFINITE_EXPIRY = 4_102_444_800.0
+
+
 class AttemptRefusal(NamedTuple):
     """Why a runbook's attempts could not be reserved, and the step that caused it."""
 
@@ -1342,6 +1347,23 @@ class Store:
             if changed != 1:
                 raise ValueError("step is not pending or pre-state is already set")
 
+    def note_step_progress(self, execution_id: str, n: int, patch: dict) -> None:
+        """Merge into a **dispatched** step's pre-state. The two-phase canary records what it
+        learned between its phases (the pulled image id, the phase marker) so an interrupted
+        update can be reconciled from host state instead of guessed at (slice 5b-3, design §4.5).
+        A step that never dispatched is untouched — its pre-state is the approval's record."""
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT pre_state_json FROM execution_steps "
+                "WHERE execution_id=? AND n=? AND status='dispatched'", (execution_id, n),
+            ).fetchone()
+            if row is None:
+                raise ValueError("step is not dispatched")
+            current = json.loads(row["pre_state_json"]) if row["pre_state_json"] else {}
+            merged = json.dumps(current | patch, sort_keys=True, separators=(",", ":"))
+            conn.execute("UPDATE execution_steps SET pre_state_json=? WHERE execution_id=? AND n=?",
+                         (merged, execution_id, n))
+
     def mark_step_dispatched(self, execution_id: str, n: int) -> None:
         with self._write() as conn:
             changed = conn.execute(
@@ -1510,6 +1532,22 @@ class Store:
                  self._clock(), expires_at),
             )
 
+    def hold_rollback_candidate(self, execution_id: str, step_n: int) -> bool:
+        """Pin a window open indefinitely, **reopening it if it was already closed**: the service is
+        in an unknown state and the old image must survive every prune until a human settles it.
+
+        The reopen matters because closing the window and recording the step are two writes: a crash
+        between them leaves a closed row under an unfinished step, and startup reconciliation must
+        be able to put the protection back (Codex, T42). Only a failed inverse and reconciliation
+        call this, and reconciliation only ever sees steps that never reached a terminal state.
+        """
+        with self._write() as conn:
+            return conn.execute(
+                "UPDATE rollback_candidates SET expires_at=?, closed_at=NULL "
+                "WHERE execution_id=? AND step_n=?",
+                (INDEFINITE_EXPIRY, execution_id, step_n),
+            ).rowcount == 1
+
     def close_rollback_candidate(self, execution_id: str, step_n: int) -> bool:
         with self._write() as conn:
             return conn.execute(
@@ -1517,6 +1555,15 @@ class Store:
                 "WHERE execution_id=? AND step_n=? AND closed_at IS NULL",
                 (self._clock(), execution_id, step_n),
             ).rowcount == 1
+
+    def open_rollback_candidates(self, now: float) -> list[dict]:
+        """The windows still holding an image back from a prune, for the dashboard (slice 5b-3)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM rollback_candidates WHERE closed_at IS NULL AND expires_at>? "
+                "ORDER BY created_at", (now,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def any_open_rollback_candidate(self, now: float) -> bool:
         # Deliberately do not catch sqlite/read errors: prune callers must fail closed.

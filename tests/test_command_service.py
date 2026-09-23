@@ -1249,3 +1249,70 @@ def test_a_plan_with_only_reads_is_a_diagnosis_not_a_card(env):
     result = env.service.propose_plan(plan, requested_by="Farnsworth")
     assert not result.ok and "diagnostic only" in result.reason
     assert env.notifier.approval_requests == [] and env.store.list_pending() == []
+
+
+# ── unattended runs (slice 5b-3: D34 canary, D38 safe prune) ────────────────────
+def _canary_runbook(env, service="web"):
+    from planet_express.execution import runbook as runbooks
+    binding = env.service._binder.service(
+        actions.Target("healthy", service, f"fixture-{service}"), timeout=4)
+    return runbooks.Runbook.model_validate(
+        {"title": f"Canary update healthy/{service}", "artifacts": {},
+         "steps": [{"type": "update.canary", "params": {"stack": "healthy", "service": service},
+                    "binding": binding}]})
+
+
+def test_run_automatic_refuses_a_step_type_its_origin_does_not_own(env):
+    from planet_express.execution import runbook as runbooks
+    prune = runbooks.Runbook.model_validate(
+        {"title": "Prune", "artifacts": {}, "steps": [{"type": "prune.safe", "params": {},
+                                                       "binding": {}}]})
+    # the right step, the wrong origin
+    assert env.service.run_automatic(prune, origin="zoidberg", target_key="prune:safe").outcome == "refused"
+    # the right origin, the wrong step
+    result = env.service.run_automatic(_canary_runbook(env), origin="system", target_key="x")
+    assert result.outcome == "refused"
+    assert [e["kind"] for e in env.store.list_events()].count("automatic.refused") == 2
+
+
+def test_run_automatic_refuses_an_operator_origin_outright(env):
+    result = env.service.run_automatic(_canary_runbook(env), origin="telegram", target_key="x")
+    assert result.outcome == "refused"
+    assert env.store.list_pending() == []
+
+
+def test_run_automatic_applies_t24_limits_per_service(env, monkeypatch):
+    import config as config_module
+    from config_schema import AutonomyConfig
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=1800, max_attempts_per_day=3))
+    # a canary attempt against healthy/web a moment ago, recorded the way the engine records them
+    approval, _ = env.store.propose(action=RESTART, target_key="other/x",
+                                    target={"stack": "other", "service": "x", "container": "c"},
+                                    risk="R1", requested_via="telegram", requested_by="t")
+    execution = env.store.approve_and_create_execution(approval["id"], decided_by="t",
+                                                       arrived_at=env.clock())
+    env.store.create_steps(execution["id"], [{"type": "update.canary",
+                                              "params": {"stack": "healthy", "service": "web"},
+                                              "binding": {}}])
+    env.store.reserve_runbook_attempts(execution["id"], [(1, "update.canary", "healthy/web")],
+                                       window_start=0, cooldown_start=0, max_per_day=9,
+                                       now=env.clock())
+    result = env.service.run_automatic(_canary_runbook(env), origin="zoidberg",
+                                       target_key="healthy/web")
+    assert result.outcome == "refused" and "cooling down" in result.reason
+    # another service is unaffected
+    assert env.service.run_automatic(_canary_runbook(env, "api"), origin="zoidberg",
+                                     target_key="healthy/api").outcome != "refused"
+
+
+def test_run_automatic_creates_an_execution_without_a_card(env, monkeypatch):
+    monkeypatch.setattr(env.service, "_run_argv", lambda argv, timeout=None: (1, "", "nope"))
+    result = env.service.run_automatic(_canary_runbook(env), origin="zoidberg",
+                                       target_key="healthy/web")
+    assert result.execution_id is not None
+    assert env.notifier.approval_requests == [] and env.store.list_pending() == []
+    execution = env.store.get_execution(result.execution_id)
+    assert execution["status"] == "failed"
+    approval = env.store.get_approval(execution["approval_id"])
+    assert (approval["origin"], approval["status"]) == ("zoidberg", "approved")

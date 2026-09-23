@@ -1119,3 +1119,29 @@ def test_execution_controls_reject_a_bad_id_and_surface_core_failures(chat_clien
     rpc.results[f"execution.{kind}"] = RpcError("core is down", "internal")
     down = client.post(f"/api/executions/aaaaaaaaaaaa/{kind}", data={"csrf_token": token})
     assert down.status_code == 503 and set(down.get_json()) == {"error"}
+
+
+def test_index_shows_open_canary_windows_from_core(tmp_path, monkeypatch):
+    """The dashboard cannot open the core database, so the panel is fed over RPC (slice 5b-3)."""
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    # FakeRpc treats a list as a queue of responses, so the row list is queued as one response
+    rpc.results["canary.candidates"] = [[
+        {"stack": "media", "service": "sonarr", "old_image_id": "a" * 64,
+         "image_reference": "nginx:1.27", "recorded_at": "2026-09-23T12:00:00+01:00",
+         "expires_at": "when a human closes it"},
+    ]]
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert ("canary.candidates", {}) in rpc.calls
+    assert b"OPEN ROLLBACK CANDIDATES" in resp.data and b"sonarr" in resp.data
+    assert b"when a human closes it" in resp.data
+
+
+def test_index_still_renders_when_core_cannot_answer(tmp_path, monkeypatch):
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    rpc.results["canary.candidates"] = OSError("core is down")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"OPEN ROLLBACK CANDIDATES" not in resp.data

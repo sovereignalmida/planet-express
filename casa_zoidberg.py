@@ -24,14 +24,14 @@ import shlex
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import casa_amy as amy
 import casa_bender as bender
 import config
-from planet_express.execution import actions
-from state_models import RollbackCandidates, UpdateHistory
+from planet_express.execution import actions, runbook as runbooks
+from state_models import UpdateHistory
 from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.zoidberg")
@@ -55,11 +55,8 @@ EXCLUDE_SERVICES = config.EXCLUDE_SERVICES
 PULL_TIMEOUT_SECONDS = 300
 CANARY_WATCH_SECONDS = 90
 CANARY_POLL_INTERVAL_SECONDS = 5
-ROLLBACK_WATCH_SECONDS = 30
-ROLLBACK_CANDIDATE_GRACE_MINUTES = 15
 INTER_SERVICE_DELAY_SECONDS = 20
 
-ROLLBACK_CANDIDATES_FILE = config.ROLLBACK_CANDIDATES_FILE
 UPDATE_HISTORY_FILE = config.UPDATE_HISTORY_FILE
 
 
@@ -148,46 +145,6 @@ def local_image_id(image_ref: str) -> str | None:
     return _normalize_image_id(out)
 
 
-# ── Rollback-candidate bookkeeping (also read by Farnsworth's safe-prune gate) ──
-def _load_rollback_candidates() -> dict:
-    if not ROLLBACK_CANDIDATES_FILE.exists():
-        return {"candidates": []}
-    try:
-        return json.loads(ROLLBACK_CANDIDATES_FILE.read_text())
-    except Exception:  # noqa: BLE001
-        return {"candidates": []}
-
-
-def _save_rollback_candidates(data: dict) -> None:
-    config.ensure_dirs()
-    ROLLBACK_CANDIDATES_FILE.write_text(RollbackCandidates(**data).model_dump_json(indent=2))
-
-
-def _add_rollback_candidate(stack: str, service: str, old_image_id: str) -> None:
-    data = _load_rollback_candidates()
-    now = datetime.now(timezone.utc)
-    # Drop expired entries while we're here rather than letting the file grow forever.
-    data["candidates"] = [
-        c for c in data.get("candidates", [])
-        if datetime.fromisoformat(c["expires_at"]) > now
-    ]
-    data["candidates"].append({
-        "stack": stack, "service": service, "old_image_id": old_image_id,
-        "recorded_at": now.isoformat(),
-        "expires_at": (now + timedelta(minutes=ROLLBACK_CANDIDATE_GRACE_MINUTES)).isoformat(),
-    })
-    _save_rollback_candidates(data)
-
-
-def _clear_rollback_candidate(stack: str, service: str) -> None:
-    data = _load_rollback_candidates()
-    data["candidates"] = [
-        c for c in data.get("candidates", [])
-        if not (c["stack"] == stack and c["service"] == service)
-    ]
-    _save_rollback_candidates(data)
-
-
 def _log_update_history(entry: dict) -> None:
     config.ensure_dirs()
     entries = []
@@ -226,87 +183,6 @@ def _watch_until_stable(container_name: str, seconds: int) -> tuple[bool, str]:
     )
 
 
-# ── Rollback ───────────────────────────────────────────────────────────────────
-def _rollback(stack_dir: Path, service: str, old_id: str | None,
-              tg: TelegramClient | None, reason: str) -> dict:
-    stack_name = stack_dir.name
-
-    if not old_id:
-        msg = (
-            f"🛑 *{stack_name}/{service} update failed* ({reason}) and there's no previous "
-            f"image ID to roll back to — needs manual attention."
-        )
-        log.error(msg)
-        if tg:
-            tg.send(msg)
-        return {"stack": stack_name, "service": service, "status": "failed_no_rollback", "reason": reason}
-
-    log.warning(f"{stack_name}/{service}: rolling back to {old_id} ({reason})")
-    _, logs_out, _ = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml logs --tail 50 {service}"
-    )
-
-    new_id = service_image_id(stack_dir, service)
-    image_repo = None
-    if new_id:
-        _, repo_out, _ = _run(
-            "docker inspect --format "
-            + shlex.quote("{{if .RepoTags}}{{index .RepoTags 0}}{{end}}")
-            + f" {new_id}"
-        )
-        image_repo = repo_out.strip() if repo_out and ":" in repo_out else None
-
-    rolled_back_ok = False
-    if image_repo:
-        plan_ctx = {"id": f"zoidberg-rollback-{stack_name}-{service}"}
-        try:
-            bender._safety_check(f"docker tag {old_id} {image_repo}", plan=plan_ctx)
-            exit_code, _, _err = bender._run_command(f"docker tag {old_id} {image_repo}")
-            if exit_code == 0:
-                bender._safety_check(
-                    f"docker compose -f {stack_dir}/docker-compose.yml up -d {service}",
-                    plan=plan_ctx,
-                )
-                exit_code, _, _err = bender._run_command(
-                    f"docker compose -f {stack_dir}/docker-compose.yml up -d {service}"
-                )
-                if exit_code == 0:
-                    container_name = _container_name_for(stack_dir, service)
-                    if container_name:
-                        rolled_back_ok, _ = _watch_until_stable(container_name, ROLLBACK_WATCH_SECONDS)
-        except bender.SafetyError as e:
-            log.error(f"Rollback safety check blocked {stack_name}/{service}: {e}")
-
-    _clear_rollback_candidate(stack_name, service)
-    _log_update_history({
-        "ts": datetime.now(timezone.utc).isoformat(), "stack": stack_name, "service": service,
-        "old_id": old_id, "new_id": new_id,
-        "status": "rolled_back" if rolled_back_ok else "rollback_failed",
-        "reason": reason,
-    })
-
-    status_line = (
-        "rolled back to the previous image successfully" if rolled_back_ok
-        else "⚠️ rollback ALSO failed — needs manual attention now"
-    )
-    msg = (
-        f"🩺 *Zoidberg: {stack_name}/{service} update failed*\n"
-        f"Reason: {TelegramClient.s(reason)}\n"
-        f"Action: {status_line}\n"
-        f"Recent logs:\n`{TelegramClient.s(logs_out[-800:])}`"
-    )
-    log.warning(msg.replace("\n", " | "))
-    if tg:
-        tg.send(msg)
-        _investigate_update_failure(stack_name, service, reason, logs_out, tg)
-
-    return {
-        "stack": stack_name, "service": service,
-        "status": "rolled_back" if rolled_back_ok else "rollback_failed",
-        "reason": reason,
-    }
-
-
 def _investigate_update_failure(
     stack_name: str, service: str, reason: str, logs_tail: str, tg: TelegramClient
 ) -> None:
@@ -334,80 +210,144 @@ def _investigate_update_failure(
         )
 
 
+# ── Typed canary update (slice 5b-3) ────────────────────────────────────────────
+def _classify(step: dict | None, result) -> tuple[str, str]:
+    """(status, reason) in Zoidberg's own vocabulary, from the engine's step row.
+
+    Deterministic, not reason-matching: `update.canary` records its outputs only once it has
+    actually deployed something, so their presence separates "the update was tried and undone"
+    from "it was refused before anything moved".
+    """
+    if result.outcome == "refused" or step is None:
+        return "skipped", result.reason
+    deployed = bool(step.get("output"))
+    if step["status"] == "passed":
+        return ("updated", step["reason"]) if step["effect"] == "applied" else ("no_change", step["reason"])
+    if step["effect"] == "unknown":
+        # No outputs means the step never got as far as reporting them — an unexpected failure
+        # after dispatch, not "there was no image to go back to": the rollback window is open and
+        # holds that image (Codex, T42).
+        return ("rollback_failed" if deployed else "interrupted"), step["reason"]
+    if deployed:
+        return "rolled_back", step["reason"]
+    if step["reason"].startswith("pull failed"):
+        return "pull_failed", step["reason"]
+    return "skipped", step["reason"]
+
+
+def _typed_canary(stack_dir: Path, service: str, tg: TelegramClient | None, commands) -> dict:
+    """One service, one `update.canary` runbook, run on the engine under D34."""
+    stack_name = stack_dir.name
+    base = {"stack": stack_name, "service": service}
+    # Eligibility first: a digest-pinned or build-only service has no tag to move, so it is refused
+    # here — recorded, with no execution created for something that could never run (Codex, T42).
+    reference = service_image_ref(stack_dir, service)
+    if not actions.is_canary_reference(reference):
+        reason = (f"{reference} is not a canary-eligible image reference" if reference
+                  else "no image reference (build-only service)")
+        log.info(f"{stack_name}/{service}: {reason}")
+        commands.record_event("canary.ineligible", stack=stack_name, service=service,
+                              reason=reason, requested_via="zoidberg")
+        return base | {"status": "skipped", "reason": reason}
+    try:
+        target = actions.resolve_target(stack_name, service, for_mutation=True)
+        binding = commands.binder.service(target, timeout=actions.DOCKER_TIMEOUT_SECONDS)
+    except actions.TargetError as exc:
+        log.warning(f"{stack_name}/{service}: not updatable — {exc}")
+        commands.record_event("canary.ineligible", stack=stack_name, service=service,
+                              reason=str(exc), requested_via="zoidberg")
+        return base | {"status": "skipped", "reason": str(exc)}
+
+    runbook = runbooks.Runbook.model_validate({
+        "title": f"Canary update {stack_name}/{service}",
+        "steps": [{"type": "update.canary", "params": {"stack": stack_name, "service": service},
+                   "binding": binding}],
+        "artifacts": {},
+    })
+    result = commands.run_automatic(runbook, origin="zoidberg",
+                                    target_key=f"{stack_name}/{service}")
+    step = (result.steps or [None])[0]
+    status, reason = _classify(step, result)
+    outputs = (step or {}).get("output") or {}
+    entry = base | {"status": status, "reason": reason,
+                    "old_id": outputs.get("old_image_id"), "new_id": outputs.get("new_image_id")}
+
+    if status in ("updated", "rolled_back", "rollback_failed", "interrupted"):
+        _log_update_history({"ts": datetime.now(timezone.utc).isoformat(), **base,
+                             "old_id": entry["old_id"], "new_id": entry["new_id"],
+                             "status": status, "reason": reason})
+    if status == "updated":
+        log.info(f"{stack_name}/{service}: {reason}")
+    elif status in ("rolled_back", "rollback_failed", "interrupted"):
+        _report_failed_update(stack_dir, service, tg, status, reason)
+    else:
+        log.info(f"{stack_name}/{service}: {status} — {reason}")
+    return entry
+
+
+def _report_failed_update(stack_dir: Path, service: str, tg: TelegramClient | None,
+                          status: str, reason: str) -> None:
+    """Today's rollback message and Amy escalation, unchanged in shape."""
+    stack_name = stack_dir.name
+    _, logs_out, _ = _run(
+        f"docker compose -f {stack_dir}/docker-compose.yml logs --tail 50 {service}")
+    action = {
+        "rolled_back": "rolled back to the previous image successfully",
+        "rollback_failed": "⚠️ rollback ALSO failed — needs manual attention now",
+        "interrupted": "⚠️ the update did not finish and its outcome is unknown — its rollback "
+                       "image is held back from pruning until you settle it",
+    }[status]
+    msg = (
+        f"🩺 *Zoidberg: {stack_name}/{service} update failed*\n"
+        f"Reason: {TelegramClient.s(reason)}\n"
+        f"Action: {action}\n"
+        f"Recent logs:\n`{TelegramClient.s(logs_out[-800:])}`"
+    )
+    log.warning(msg.replace("\n", " | "))
+    if tg:
+        tg.send(msg)
+        _investigate_update_failure(stack_name, service, reason, logs_out, tg)
+
+
 # ── Core canary update for one service ──────────────────────────────────────────
 def canary_update_service(
-    stack_dir: Path, service: str, tg: TelegramClient | None, dry_run: bool = False
+    stack_dir: Path, service: str, tg: TelegramClient | None, dry_run: bool = False,
+    commands=None,
 ) -> dict:
+    """Update one service. A real pass runs the typed `update.canary` step on the engine (D34);
+    `--dry-run` stays a read-only report and never recreates anything."""
+    if not dry_run:
+        if commands is None:
+            raise ValueError("a real canary pass needs the command service (slice 5b-3)")
+        return _typed_canary(stack_dir, service, tg, commands)
+
     stack_name = stack_dir.name
-    # The rollback target is what's actually RUNNING right now, captured before we touch
-    # anything — not what the tag happens to resolve to (those can differ, see
-    # local_image_id's docstring).
+    # The rollback target is what's actually RUNNING right now — not what the tag happens to
+    # resolve to (those can differ, see local_image_id's docstring).
     old_id = service_image_id(stack_dir, service)
     image_ref = service_image_ref(stack_dir, service)
-
-    exit_code, out, err = _run(
+    exit_code, _out, err = _run(
         f"docker compose -f {stack_dir}/docker-compose.yml pull {service}",
         timeout=PULL_TIMEOUT_SECONDS,
     )
     if exit_code != 0:
         log.warning(f"{stack_name}/{service}: pull failed — {err}")
         return {"stack": stack_name, "service": service, "status": "pull_failed", "reason": err}
-
     if not image_ref:
         log.warning(f"{stack_name}/{service}: could not resolve image reference")
         return {"stack": stack_name, "service": service, "status": "unknown_no_image_ref"}
-
     new_id = local_image_id(image_ref)
     if not new_id or new_id == old_id:
         return {"stack": stack_name, "service": service, "status": "no_change"}
-
-    if dry_run:
-        return {
-            "stack": stack_name, "service": service, "status": "update_available_dry_run",
-            "old_id": old_id, "new_id": new_id,
-        }
-
-    log.info(f"{stack_name}/{service}: new image available ({old_id} -> {new_id}), recreating...")
-    if old_id:
-        _add_rollback_candidate(stack_name, service, old_id)
-
-    plan_ctx = {"id": f"zoidberg-update-{stack_name}-{service}"}
-    up_cmd = f"docker compose -f {stack_dir}/docker-compose.yml up -d {service}"
-    try:
-        bender._safety_check(up_cmd, plan=plan_ctx)
-    except bender.SafetyError as e:
-        log.warning(f"{stack_name}/{service}: update skipped, safety check blocked it — {e}")
-        _clear_rollback_candidate(stack_name, service)
-        return {"stack": stack_name, "service": service, "status": "skipped_safety_block", "reason": str(e)}
-
-    exit_code, out, err = bender._run_command(up_cmd)
-    bender._log_step(f"zoidberg-update-{stack_name}", {"n": 1, "command": up_cmd}, exit_code, out, err)
-
-    if exit_code != 0:
-        log.warning(f"{stack_name}/{service}: up -d failed immediately — {err}")
-        return _rollback(stack_dir, service, old_id, tg, reason=f"up -d failed: {err[:200]}")
-
-    container_name = _container_name_for(stack_dir, service)
-    if not container_name:
-        log.warning(f"{stack_name}/{service}: could not resolve container name to watch")
-        _clear_rollback_candidate(stack_name, service)
-        return {"stack": stack_name, "service": service, "status": "unknown_no_container_name"}
-
-    stable, reason = _watch_until_stable(container_name, CANARY_WATCH_SECONDS)
-    if stable:
-        _clear_rollback_candidate(stack_name, service)
-        _log_update_history({
-            "ts": datetime.now(timezone.utc).isoformat(), "stack": stack_name, "service": service,
-            "old_id": old_id, "new_id": new_id, "status": "updated",
-        })
-        log.info(f"{stack_name}/{service}: update stable after {CANARY_WATCH_SECONDS}s")
-        return {"stack": stack_name, "service": service, "status": "updated", "old_id": old_id, "new_id": new_id}
-
-    return _rollback(stack_dir, service, old_id, tg, reason=reason)
+    return {
+        "stack": stack_name, "service": service, "status": "update_available_dry_run",
+        "old_id": old_id, "new_id": new_id,
+    }
 
 
 # ── Full pass ────────────────────────────────────────────────────────────────────
-def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False) -> list[dict]:
+def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False,
+                    commands=None) -> list[dict]:
     results = []
     stacks = eligible_stacks()
     log.info(f"Zoidberg update pass starting — {len(stacks)} eligible stack(s)")
@@ -415,7 +355,8 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False) -> 
         services = stack_services(stack_dir)
         for service in services:
             try:
-                result = canary_update_service(stack_dir, service, tg, dry_run=dry_run)
+                result = canary_update_service(stack_dir, service, tg, dry_run=dry_run,
+                                               commands=commands)
             except Exception as e:
                 log.exception(f"Zoidberg update crashed for {stack_dir.name}/{service}")
                 result = {"stack": stack_dir.name, "service": service, "status": "error", "reason": str(e)}
@@ -424,12 +365,38 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False) -> 
                 time.sleep(INTER_SERVICE_DELAY_SECONDS)
 
     updated = [r for r in results if r["status"] == "updated"]
-    rolled_back = [r for r in results if r["status"] in ("rolled_back", "rollback_failed", "failed_no_rollback")]
+    rolled_back = [r for r in results
+                   if r["status"] in ("rolled_back", "rollback_failed", "interrupted")]
     log.info(
         f"Zoidberg update pass complete — {len(updated)} updated cleanly, "
         f"{len(rolled_back)} needed rollback, {len(results)} services checked total"
     )
     return results
+
+
+class _CliState:
+    """The CLI holds no host-mutation lock — it refuses to run at all while core is up (see
+    main()), so there is no second mutator to coordinate with."""
+
+    busy_reason = "cli"
+    mutation_owner = None
+
+    def try_begin_mutation(self, owner, **_):
+        return True
+
+    def end_mutation(self, owner, **_):
+        return None
+
+
+def _cli_command_service():
+    """A command service for a `--force`d CLI pass: the engine path is the only way to update."""
+    from notifier import FakeNotifier
+    from planet_express.application.command_service import CommandService
+    from planet_express.core.store import Store
+
+    store = Store(config.ACTIONS_DB)
+    store.init()
+    return CommandService(store, FakeNotifier(), _CliState())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -452,7 +419,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     config.ensure_dirs()
-    out = run_update_pass(tg=None, dry_run=args.dry_run)
+    out = run_update_pass(tg=None, dry_run=args.dry_run,
+                          commands=None if args.dry_run else _cli_command_service())
     print(json.dumps(out, indent=2))
     return 0
 

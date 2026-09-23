@@ -274,12 +274,10 @@ def summarize_update_history(limit: int = 20) -> list[dict]:
 
 
 def summarize_rollback_candidates() -> list[dict]:
-    candidates = load_rollback_candidates()
-    if not candidates:
-        return []
-    now = datetime.now(timezone.utc).isoformat()
-    unexpired = [c for c in candidates.candidates if c.expires_at > now]
-    return [c.model_dump() for c in unexpired]
+    """Nothing here: the open canary rollback windows live in the core's database, which the
+    dashboard's user is denied (`scripts/web_access.py`). `casa_scruffy.index()` fetches them over
+    the `canary.candidates` RPC, the same way it fetches Traefik and AdGuard (Codex, T42)."""
+    return []
 
 
 def summarize_pending_plan() -> dict | None:

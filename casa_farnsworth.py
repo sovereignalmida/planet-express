@@ -55,7 +55,7 @@ from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
 from planet_express.core.store import SchemaTooNewError, Store
-from planet_express.execution import actions, policy
+from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
 from state_models import MonitorSnapshot, PlanSet, RunStatus
@@ -938,25 +938,38 @@ def _safe_to_prune(snapshot: dict) -> bool:
     return not any(_container_blocks_prune(c) for c in containers)
 
 
-def _has_active_rollback_candidates() -> bool:
-    """Reserved for the canary auto-update rollout: when an update pulls a new image, the
-    previous image ID gets recorded here until its grace period passes, so safe-prune
-    won't remove the one thing a rollback would need. File may not exist yet — that's
-    fine, it just means nothing is currently pending."""
+def _has_active_rollback_candidates(commands: CommandService) -> bool:
+    """A canary update keeps the image it would roll back to until its grace period passes, so a
+    prune must never remove it. The rows are in the database (slice 5b-3); this **fails closed** —
+    an unreadable table counts as an open window, where the old JSON file was caught and treated as
+    "nothing pending", which is exactly backwards for a safety gate."""
+    try:
+        if commands._store.any_open_rollback_candidate(time.time()):
+            return True
+    except Exception:  # unreadable means unknown means do not prune
+        log.exception("Could not read the rollback-candidate window; refusing to prune")
+        return True
+    return _legacy_rollback_window_open()
+
+
+def _legacy_rollback_window_open() -> bool:
+    """The upgrade can land while the *previous* updater's window is still open: its entry is in
+    `state/rollback_candidates.json` and nothing imports it (Codex, T42). Honour the file until its
+    windows expire — it is never written again, so this and the file itself go in 5b-5."""
     if not ROLLBACK_CANDIDATES_FILE.exists():
         return False
     try:
         data = json.loads(ROLLBACK_CANDIDATES_FILE.read_text())
         now = datetime.now(timezone.utc)
-        return any(
-            datetime.fromisoformat(c["expires_at"]) > now
-            for c in data.get("candidates", [])
-        )
-    except Exception:  # noqa: BLE001
-        return False
+        return any(datetime.fromisoformat(c["expires_at"]) > now
+                   for c in data.get("candidates", []))
+    except Exception:  # a file that cannot be read may still be protecting an image
+        log.exception("Could not read the legacy rollback-candidate file; refusing to prune")
+        return True
 
 
-def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState") -> None:
+def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState",
+                         commands: CommandService | None = None) -> None:
     """Prune Docker images/networks when root disk pressure is real AND every container
     is in a known-safe state. Skips entirely (logs why, no Telegram noise) if disk is
     fine, if anything is unhealthy/crash-looping/unrecognized, if a whole stack is
@@ -973,7 +986,10 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
     if not _safe_to_prune(snapshot):
         log.info("Safe-prune skipped: at least one container isn't in a known-safe state")
         return
-    if _has_active_rollback_candidates():
+    if commands is None:
+        log.info("Safe-prune skipped: typed execution is unavailable (command service not started)")
+        return
+    if _has_active_rollback_candidates(commands):
         log.info("Safe-prune skipped: an update rollback window is still open")
         return
 
@@ -987,15 +1003,33 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         log.info(
             f"Root disk at {disk_alert['used_pct']}% and all containers healthy — running safe prune"
         )
-        result = bender.run_safe_prune()
+        # D38: automatic, but as a typed runbook on the engine like everything else (slice 5b-3).
+        runbook = runbooks.Runbook.model_validate(
+            {"title": "Safe prune", "steps": [{"type": "prune.safe", "params": {}, "binding": {}}],
+             "artifacts": {}}
+        )
+        result = commands.run_automatic(runbook, origin="system", target_key="prune:safe")
     finally:
         state.end_mutation(owner)
+    if result.outcome == "refused":
+        log.warning(f"Safe-prune refused: {result.reason}")
+        return
+    if result.outcome != "passed":
+        # A prune command exited non-zero, or the engine refused the run: say so rather than
+        # reporting a cleanup that did not happen (Codex, T42).
+        log.warning(f"Safe-prune did not complete: {result.reason}")
+        notifier.notify(
+            f"🧹 *Safe prune did not complete*\n"
+            f"Root disk is at {disk_alert['used_pct']}% ({disk_alert.get('alert', '')}).\n"
+            f"{TelegramClient.s(result.reason)}"
+        )
+        return
     notifier.notify(
         f"🧹 *Safe prune ran automatically*\n"
         f"Root disk was at {disk_alert['used_pct']}% ({disk_alert.get('alert', '')}). "
         f"Every container was running cleanly or a known one-shot job, so this only "
         f"removed images/networks not attached to anything.\n"
-        f"{TelegramClient.s(result.get('summary', ''))}"
+        f"{TelegramClient.s(result.reason)}"
     )
 
 
@@ -1056,7 +1090,7 @@ def run_pipeline(
 
         if mode == "full":
             try:
-                maybe_run_safe_prune(snapshot, notifier, state)
+                maybe_run_safe_prune(snapshot, notifier, state, commands)
             except Exception:
                 log.exception("Safe-prune check failed (non-fatal)")
 
@@ -1309,7 +1343,8 @@ def handle_message(
                 "🩺 *Zoidberg starting a canary update pass now...*\n"
                 "Silent per-service unless something needs a rollback — that'll page you."
             )
-            threading.Thread(target=_run_update_pass, args=(tg, notifier, state), daemon=True).start()
+            threading.Thread(target=_run_update_pass, args=(tg, notifier, state, commands),
+                             daemon=True).start()
 
     elif cmd == "/stacks":
         threading.Thread(target=_run_stacks_list, args=(notifier,), daemon=True).start()
@@ -2299,7 +2334,8 @@ def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Sto
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)
 
 
-def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineState) -> None:
+def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineState,
+                     commands: CommandService | None = None) -> None:
     """Zoidberg's canary update pass (/patchnow). Doesn't touch PipelineState's _state —
     it's silent-on-success by design, Telegram only speaks up on rollback, so there's no
     "plan awaiting approval" step — but it does hold the host-mutation lock for its whole
@@ -2312,7 +2348,10 @@ def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineStat
         )
         return
     try:
-        zoidberg.run_update_pass(tg=tg)
+        if commands is None:
+            notifier.notify("⚠️ Typed execution is unavailable; the canary pass did not start.")
+            return
+        zoidberg.run_update_pass(tg=tg, commands=commands)
     except Exception as e:
         log.exception("Zoidberg update pass crashed")
         notifier.notify(f"🛑 *Zoidberg update pass crashed:* `{str(e)[:200]}`")
@@ -2337,7 +2376,8 @@ UPDATE_BUSY_RETRY_SECONDS = 300
 UPDATE_BUSY_MAX_WAIT_SECONDS = 3600
 
 
-def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, sleep=time.sleep) -> str:
+def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, sleep=time.sleep,
+                               commands: CommandService | None = None) -> str:
     """One weekly-window attempt at Zoidberg's update pass. Returns "ran", "failed" or
     "skipped".
 
@@ -2363,8 +2403,11 @@ def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, 
         sleep(UPDATE_BUSY_RETRY_SECONDS)
         waited += UPDATE_BUSY_RETRY_SECONDS
     try:
+        if commands is None:
+            log.warning("Scheduled update pass skipped: typed execution is unavailable")
+            return "skipped"
         log.info("Scheduled canary update pass starting")
-        zoidberg.run_update_pass(tg=tg)
+        zoidberg.run_update_pass(tg=tg, commands=commands)
         return "ran"
     except Exception:
         log.exception("Scheduled update pass error")
@@ -2373,7 +2416,8 @@ def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, 
         state.end_mutation(owner)
 
 
-def update_scheduler_loop(tg: TelegramClient, state: PipelineState) -> None:
+def update_scheduler_loop(tg: TelegramClient, state: PipelineState,
+                          commands: CommandService | None = None) -> None:
     """Background thread — runs Zoidberg's canary update pass weekly. Separate cadence
     from the 6h monitor cycle on purpose: pulling/restarting every service every 6h would
     be excessive churn for something that's supposed to be routine maintenance."""
@@ -2385,7 +2429,7 @@ def update_scheduler_loop(tg: TelegramClient, state: PipelineState) -> None:
         delay = _seconds_until_next_update_window()
         log.info(f"Next canary update pass in {delay / 3600:.1f}h")
         time.sleep(delay)
-        _run_scheduled_update_pass(tg, state)
+        _run_scheduled_update_pass(tg, state, commands=commands)
         time.sleep(3600)  # clear the target window before recomputing next week's delay
 
 
@@ -2559,7 +2603,8 @@ def run_bot() -> None:
     sched.start()
 
     update_sched = threading.Thread(
-        target=update_scheduler_loop, args=(tg, state), daemon=True, name="update-scheduler"
+        target=update_scheduler_loop, args=(tg, state, commands), daemon=True,
+        name="update-scheduler",
     )
     update_sched.start()
 

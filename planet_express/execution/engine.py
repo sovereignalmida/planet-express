@@ -43,6 +43,12 @@ REASON_LIMIT = 300
 LOG_CAPTURE_BYTES = 1024 * 1024
 QBIT_CONFIG = "/config/qBittorrent/qBittorrent.conf"
 _NO_LIMIT = 10**9
+# Canary timings: the watch and the grace window Zoidberg has used since the feature shipped.
+CANARY_WATCH_SECONDS = 90
+CANARY_PULL_TIMEOUT_SECONDS = 600
+CANARY_ROLLBACK_WATCH_SECONDS = 30
+CANARY_CANDIDATE_GRACE_SECONDS = 15 * 60
+
 _STARTED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})")
 
 
@@ -81,6 +87,7 @@ class _Dispatch:
 
     def __init__(self, engine, execution_id: str, n: int, mutating: bool):
         self._engine, self._execution_id, self._n, self._mutating = engine, execution_id, n, mutating
+        self.n = n          # executors that record their own rows (the canary candidate) need it
         self.done = False
 
     def __call__(self, pre_state: dict | None = None) -> None:
@@ -162,8 +169,17 @@ class RunbookEngine:
                 self._abandon(execution_id, runbook, n + 1, "aborted", "aborted by the operator")
                 return EngineResult("aborted", outcome.reason, results)
             output = None
-            if outcome.status == "passed" and runbooks.STEP_TYPES[step.type].outputs:
-                output = runbooks.validate_outputs(step.type, outcome.output or {})
+            if runbooks.STEP_TYPES[step.type].outputs and (
+                    outcome.status == "passed" or outcome.output is not None):
+                try:
+                    output = runbooks.validate_outputs(step.type, outcome.output or {})
+                except ValueError:
+                    # A passing step must produce what it declares; a failed one records whatever
+                    # it managed to learn, and a partial record is dropped rather than raised
+                    # (a canary that deployed and rolled back still reports both image ids).
+                    if outcome.status == "passed":
+                        raise
+                    log.warning(f"Step {n} of {execution_id} reported unusable outputs")
             if not dispatch.done:
                 if outcome.status == "passed":
                     dispatch()  # a step that never reached argv (e.g. a pure check) still passes
@@ -229,6 +245,7 @@ class RunbookEngine:
             "check.log_since_start": self._check_log,
             "read.qbittorrent_session_port": self._read_qbit_port,
             "unit.action": self._unit_action,
+            "update.canary": self._canary,
             "prune.safe": self._prune,
         }.get(step.type)
         if step.type in STACK_STEP_ACTIONS:
@@ -485,6 +502,147 @@ class RunbookEngine:
             effect = "applied" if (before == "active") != (after == "active") else "not_applied"
         return StepOutcome("passed" if ok else "failed", effect, f"{unit} is {after}")
 
+    # ── canary updates (slice 5b-3, design §4.5) ────────────────────────────
+    def _image_id(self, argv, *, allow_missing: bool = False) -> tuple[str | None, str | None]:
+        """(image id, error). A missing image is only ever `None, None` where the caller says so."""
+        rc, out, err = self.svc._run_argv(argv, timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        if rc != 0 or not out.strip():
+            if allow_missing and rc != 0:
+                return None, None
+            return None, _clip(err or out or "no image id")
+        return actions.normalize_image_id(out.strip().splitlines()[0]), None
+
+    def _canary(self, execution_id, step, params, dispatch) -> StepOutcome:
+        """Two-phase, per design §4.5: resolve and pull, then deploy that exact image, with an
+        automatic inverse back to the image that was running if anything goes wrong."""
+        target, refused = self._bound_target(step)
+        if refused:
+            return refused
+        stack, service, container = target.stack, target.service, target.container
+
+        rc, out, err = self.svc._run_argv(
+            actions.compose_config_images_argv(stack, service), timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        if rc != 0 or not out.strip():
+            return self._refuse(f"cannot resolve the image reference: {_clip(err or out)}")
+        reference = out.strip().splitlines()[0]
+        if not actions.is_canary_reference(reference):
+            # Digest-pinned or build-only: there is no mutable tag to move (design §4.5).
+            return self._refuse(f"{reference} is not a canary-eligible image reference")
+        running_id, error = self._image_id(actions.compose_images_argv(stack, service))
+        if error is not None:
+            return self._refuse(f"cannot read the running image: {error}")
+        before_id, _missing = self._image_id(actions.image_id_argv(reference), allow_missing=True)
+
+        pre_state = {"phase": "pull_dispatched", "compose_sha256": step.binding["compose_sha256"],
+                     "image_reference": reference, "running_image_id": running_id,
+                     "reference_image_id": before_id, "container": container}
+        # The window opens before the pull, so a prune can never remove the image this step would
+        # roll back to — and it closes again if the step never actually dispatched.
+        self.svc._store.open_rollback_candidate(
+            execution_id, dispatch.n, stack=stack, service=service, image_reference=reference,
+            old_image_id=running_id,
+            expires_at=self.svc._clock() + CANARY_CANDIDATE_GRACE_SECONDS,
+        )
+        try:
+            dispatch(pre_state)
+        except Exception:
+            self.svc._store.close_rollback_candidate(execution_id, dispatch.n)
+            raise
+        closed = False
+        try:
+            rc, out, err = self.svc._run_argv(
+                actions.compose_pull_argv(stack, service), timeout=CANARY_PULL_TIMEOUT_SECONDS)
+            if rc != 0:
+                closed = True  # nothing was deployed, so nothing needs a rollback window
+                return StepOutcome("failed", "not_applied", f"pull failed: {_clip(err or out)}")
+            new_id, error = self._image_id(actions.image_id_argv(reference))
+            if error is not None:
+                closed = True
+                return StepOutcome("failed", "not_applied", f"cannot read the pulled image: {error}")
+            self.svc._store.note_step_progress(
+                execution_id, dispatch.n, {"phase": "pulled", "pulled_image_id": new_id})
+            if new_id == running_id:
+                closed = True
+                # A passing step still reports what it looked at: nothing moved, and the card and
+                # the history say which image that was.
+                return StepOutcome("passed", "not_applied", f"already on the current {reference}",
+                                   {"image_reference": reference, "old_image_id": running_id,
+                                    "new_image_id": new_id})
+
+            # Phase 2 deploys exactly what phase 1 resolved: refuse if anything moved under us.
+            # A pull can take minutes, which is plenty of time for the container to be recreated.
+            drifted = self._canary_drift(step, target, reference)
+            if drifted is not None:
+                closed = True
+                return StepOutcome("failed", "not_applied", drifted)
+            outcome = self._canary_deploy(execution_id, dispatch.n, target, reference,
+                                          running_id, new_id)
+            closed = outcome.effect != "unknown"
+            return outcome
+        finally:
+            # Any exit that is not a clean "nothing is in flight" — a failed inverse, or a crash
+            # anywhere after dispatch — must outlive the ordinary grace period, or the next prune
+            # removes the only image that can restore the service (Codex, T42).
+            if closed:
+                self.svc._store.close_rollback_candidate(execution_id, dispatch.n)
+            else:
+                self.svc._store.hold_rollback_candidate(execution_id, dispatch.n)
+
+    def _canary_drift(self, step, target, reference: str) -> str | None:
+        """The full bound-target check again (compose file, container name **and id**), plus the
+        image reference the pull resolved against (Codex, T42)."""
+        _target, refused = self._bound_target(step)
+        if refused is not None:
+            return f"{refused.reason} during the update"
+        rc, out, _err = self.svc._run_argv(
+            actions.compose_config_images_argv(target.stack, target.service),
+            timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        if rc != 0 or out.strip().splitlines()[:1] != [reference]:
+            return "the image reference changed during the update"
+        return None
+
+    def _canary_deploy(self, execution_id, step_n, target, reference, old_id, new_id) -> StepOutcome:
+        outputs = {"image_reference": reference, "old_image_id": old_id, "new_image_id": new_id}
+        self.svc._store.note_step_progress(execution_id, step_n, {"phase": "deploying"})
+        failure = self._canary_up(target, new_id, reference)
+        if failure is None:
+            self.svc._store.set_execution_status(execution_id, "verifying")
+            stable, reason = self.svc._watch(target.container, CANARY_WATCH_SECONDS)
+            if stable:
+                return StepOutcome("passed", "applied",
+                                   f"{reference}: {old_id[:12]} → {new_id[:12]}, {reason}", outputs)
+            failure = f"canary watch failed: {reason}"
+        # Automatic inverse: put the image that was running back on the same reference — and watch
+        # it too. An old image that crash-loops on restore is not a successful rollback, and saying
+        # so would close the window that protects it (Codex, T42).
+        self.svc._store.note_step_progress(execution_id, step_n, {"phase": "rolling_back"})
+        undone = self._canary_up(target, old_id, reference)
+        if undone is None:
+            stable, reason = self.svc._watch(target.container, CANARY_ROLLBACK_WATCH_SECONDS)
+            if stable:
+                return StepOutcome("failed", "not_applied",
+                                   f"{failure}; rolled back to {old_id[:12]}", outputs)
+            undone = f"the restored image is not stable: {reason}"
+        return StepOutcome("failed", "unknown", f"{failure}; rollback also failed: {undone}", outputs)
+
+    def _canary_up(self, target, image_id: str, reference: str) -> str | None:
+        """Point the reference at this exact image and recreate the service on it. None = done."""
+        rc, out, err = self.svc._run_argv(actions.tag_argv(image_id, reference),
+                                          timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        if rc != 0:
+            return f"tagging {image_id[:12]} failed: {_clip(err or out)}"
+        rc, out, err = self.svc._run_argv(
+            actions.compose_up_pinned_argv(target.stack, target.service),
+            timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        if rc != 0:
+            return f"up -d failed: {_clip(err or out)}"
+        deployed, error = self._image_id(actions.container_image_id_argv(target.container))
+        if error is not None:
+            return f"cannot read the deployed image: {error}"
+        if deployed != image_id:
+            return f"container runs {deployed[:12]}, expected {image_id[:12]}"
+        return None
+
     def _prune(self, execution_id, step, params, dispatch) -> StepOutcome:
         dispatch()
         reports, all_ok, any_ok = [], True, False
@@ -521,16 +679,57 @@ def settle_crashed_execution(store, execution_id: str) -> None:
         )
 
 
-def startup_reconcile(store) -> dict:
+def _reconcile_canary(svc, row: dict) -> tuple[str, str]:
+    """A canary step interrupted mid-flight: what is the service actually running now?
+
+    Comparing the container's image with the one recorded before the pull answers it without
+    guessing — still the old image means the deploy never happened; the new one means it did but
+    was never watched, so the outcome stays `unknown` and its rollback window stays open
+    (design §4.5).
+    """
+    pre = row.get("pre_state") or {}
+    container, old_id = pre.get("container"), pre.get("running_image_id")
+    if svc is None or not container or not old_id:
+        return "unknown", "interrupted: Planet Express restarted mid-update"
+    rc, out, _err = svc._run_argv(actions.container_image_id_argv(container),
+                                  timeout=actions.DOCKER_TIMEOUT_SECONDS)
+    if rc != 0 or not out.strip():
+        return "unknown", "interrupted mid-update; the container could not be inspected"
+    current = actions.normalize_image_id(out.strip().splitlines()[0])
+    if pre.get("phase") == "rolling_back":
+        # The old image being back does not mean the rollback is good: the normal path only calls
+        # it rolled back after a 30-second watch that never ran here (Codex, T42).
+        return "unknown", "interrupted while rolling back; the restored image was never watched"
+    if current == old_id:
+        return "not_applied", f"interrupted before the new image was deployed ({old_id[:12]} still running)"
+    pulled = pre.get("pulled_image_id")
+    if pulled and current == pulled:
+        return "unknown", f"interrupted after deploying {pulled[:12]}; it was never watched"
+    return "unknown", f"interrupted mid-update; the container now runs {current[:12]}"
+
+
+def startup_reconcile(store, svc=None) -> dict:
     """Core restarted: dispatched steps of unfinished executions have an unknown outcome (R0 steps
     changed nothing); their pending steps never ran. Reserved attempts are then settled."""
     settled = {"unknown": 0, "not_applied": 0, "skipped": 0}
     for row in store.unfinished_steps():
         if row["status"] == "dispatched":
             spec = runbooks.STEP_TYPES.get(row["type"])
-            effect = "not_applied" if spec is not None and spec.risk == "R0" else "unknown"
+            reason = "interrupted: Planet Express restarted mid-step"
+            if row["type"] == "update.canary":
+                effect, reason = _reconcile_canary(svc, row)
+            else:
+                effect = "not_applied" if spec is not None and spec.risk == "R0" else "unknown"
             store.finish_step(row["execution_id"], row["n"], status="failed", effect=effect,
-                              reason="interrupted: Planet Express restarted mid-step")
+                              reason=reason)
+            if row["type"] == "update.canary":
+                if effect == "not_applied":
+                    # Nothing was deployed, so nothing needs the image kept back from a prune.
+                    store.close_rollback_candidate(row["execution_id"], row["n"])
+                else:
+                    # The service is in an unverified state; the old image has to survive every
+                    # prune until a human settles it, not just for the grace period (Codex, T42).
+                    store.hold_rollback_candidate(row["execution_id"], row["n"])
             settled[effect] += 1
         else:
             store.finish_step(row["execution_id"], row["n"], status="skipped",

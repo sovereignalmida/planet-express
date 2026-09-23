@@ -50,21 +50,45 @@ def _fake_docker(running_id: str, local_id: str, calls: list):
 
 
 def test_same_image_with_and_without_sha256_prefix_is_no_change(monkeypatch):
+    """The dry-run report, which still reads the ids itself."""
     calls = []
     monkeypatch.setattr("subprocess.run", _fake_docker(HEX, f"sha256:{HEX}", calls))
 
-    result = zoidberg.canary_update_service(STACK, "web", tg=None)
+    result = zoidberg.canary_update_service(STACK, "web", tg=None, dry_run=True)
 
     assert result["status"] == "no_change"
     assert not any("up" in c and "-d" in c for c in calls), "an unchanged service must not be recreated"
 
 
-def test_a_genuinely_different_image_is_still_detected(monkeypatch):
-    calls = []
-    monkeypatch.setattr("subprocess.run", _fake_docker(HEX, f"sha256:{OTHER_HEX}", calls))
+def test_the_typed_canary_step_normalizes_both_sides_too(tmp_path):
+    """The same regression where a real pass now lives: `update.canary` on the engine compares
+    `compose images -q` (bare hex) with `image inspect` (`sha256:<hex>`), so it must normalise both
+    or every service looks updated again (slice 5b-3)."""
+    from planet_express.execution import engine, runbook as runbooks
+    from tests.canary_fakes import CanarySvc, canary_step, execution
 
-    result = zoidberg.canary_update_service(STACK, "web", tg=None, dry_run=True)
+    svc = CanarySvc(tmp_path, running=HEX, pulled=HEX)
+    ex = execution(svc)
+    plan = runbooks.Runbook.model_validate(
+        {"title": "t", "steps": [canary_step(svc)], "artifacts": {}})
+    result = engine.RunbookEngine(svc).run(ex, plan, origin="zoidberg")
 
-    assert result["status"] == "update_available_dry_run"
-    assert result["old_id"] == HEX
-    assert result["new_id"] == OTHER_HEX
+    step = svc._store.list_steps(ex)[0]
+    assert result.status == "passed" and step["effect"] == "not_applied"
+    assert not any("up -d" in " ".join(argv) for argv in svc.argv)
+    assert step["output"]["old_image_id"] == step["output"]["new_image_id"] == HEX
+
+
+def test_a_different_image_is_still_seen_as_an_update(tmp_path):
+    from planet_express.execution import engine, runbook as runbooks
+    from tests.canary_fakes import CanarySvc, canary_step, execution
+
+    svc = CanarySvc(tmp_path, running=HEX, pulled=OTHER_HEX)
+    ex = execution(svc)
+    plan = runbooks.Runbook.model_validate(
+        {"title": "t", "steps": [canary_step(svc)], "artifacts": {}})
+    assert engine.RunbookEngine(svc).run(ex, plan, origin="zoidberg").status == "passed"
+    step = svc._store.list_steps(ex)[0]
+    assert step["effect"] == "applied"
+    assert step["output"] == {"image_reference": "nginx:1.27-alpine",
+                              "old_image_id": HEX, "new_image_id": OTHER_HEX}

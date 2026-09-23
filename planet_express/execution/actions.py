@@ -24,6 +24,7 @@ from pathlib import Path
 import casa_bender as bender
 import config
 from planet_express.core.redact import redact
+from planet_express.execution.runbook import IMAGE_REFERENCE_MAX
 
 # Same as casa_zoidberg._run()'s default, which these checks used before the extraction.
 # A shorter value turns a slow or remote daemon into a "missing/unhealthy" verdict and a
@@ -536,6 +537,61 @@ def verify_stack_down(
 
 def restart_argv(target: Target) -> list[str]:
     return ["docker", "compose", "-f", str(compose_file(target.stack)), "restart", target.service]
+
+
+# ── canary image references (slice 5b-3) ────────────────────────────────────────
+def normalize_image_id(image_id: str) -> str:
+    """`compose images -q` prints bare hex; `image inspect --format {{.Id}}` prints `sha256:<hex>`.
+    Compared raw they never match, and every service then looks updated (Zoidberg, live)."""
+    return image_id.strip().removeprefix("sha256:")
+
+
+def compose_images_argv(stack: str, service: str) -> list[str]:
+    """The image id the RUNNING container for this service uses — the rollback target."""
+    return ["docker", "compose", "-f", str(compose_file(stack)), "images", "-q", service]
+
+
+def compose_config_images_argv(stack: str, service: str) -> list[str]:
+    """The image reference this service resolves to per its compose config (not what runs)."""
+    return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--images", service]
+
+
+def image_id_argv(reference: str) -> list[str]:
+    """What a reference currently resolves to in the local image cache."""
+    return ["docker", "image", "inspect", "--format", "{{.Id}}", reference]
+
+
+def container_image_id_argv(container: str) -> list[str]:
+    return ["docker", "inspect", "--format", "{{.Image}}", container]
+
+
+# A canary update needs a canonical **mutable** reference: `name:tag`, optionally registry- and
+# namespace-qualified. `repo@sha256:…` pins a digest (there is no tag to move) and a build-only
+# service has no reference at all — both are ineligible (design §4.5).
+CANARY_REFERENCE_RE = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$")
+
+
+def is_canary_reference(reference: str | None) -> bool:
+    """Eligible **and** storable: the same bound the step's output model applies, so a reference
+    this accepts can never fail validation after a successful deploy (Codex, T42)."""
+    return (bool(reference) and 3 <= len(reference) <= IMAGE_REFERENCE_MAX
+            and ".." not in reference and bool(CANARY_REFERENCE_RE.fullmatch(reference)))
+
+
+def compose_pull_argv(stack: str, service: str) -> list[str]:
+    return ["docker", "compose", "-f", str(compose_file(stack)), "pull", service]
+
+
+def compose_up_pinned_argv(stack: str, service: str) -> list[str]:
+    """Recreate one service from the image the reference already points to locally — never a fresh
+    pull, so phase 2 deploys exactly the image phase 1 resolved (design §4.5)."""
+    return ["docker", "compose", "-f", str(compose_file(stack)), "up", "-d", "--pull", "never",
+            service]
+
+
+def tag_argv(image_id: str, reference: str) -> list[str]:
+    return ["docker", "tag", image_id, reference]
 
 
 STATS_FORMAT = "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"

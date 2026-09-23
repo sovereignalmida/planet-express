@@ -31,6 +31,9 @@ from notifier import Decision, FakeNotifier
 AWAITING = fw.PipelineState.AWAITING_APPROVAL
 
 
+COMMANDS = object()   # the canary pass is stubbed out; only the lock is under test
+
+
 def _state():
     return fw.PipelineState()
 
@@ -239,7 +242,7 @@ def test_patchnow_update_pass_refuses_while_busy(monkeypatch):
     assert s.try_begin_mutation("plan:p1")
     n = FakeNotifier()
 
-    fw._run_update_pass(None, n, s)
+    fw._run_update_pass(None, n, s, COMMANDS)
 
     assert any("busy" in m.lower() for m in n.notifications)
     assert s.mutation_owner == "plan:p1"
@@ -250,7 +253,7 @@ def test_patchnow_update_pass_takes_and_releases_lock(monkeypatch):
     seen = {}
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: seen.setdefault("owner", s.mutation_owner))
 
-    fw._run_update_pass(None, FakeNotifier(), s)
+    fw._run_update_pass(None, FakeNotifier(), s, COMMANDS)
 
     assert seen["owner"] == "zoidberg-patchnow"
     assert s.mutation_owner is None
@@ -290,7 +293,8 @@ def test_scheduled_update_runs_immediately_when_free(monkeypatch):
     ran = []
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: ran.append(s.mutation_owner))
 
-    result = fw._run_scheduled_update_pass("tg", s, sleep=lambda _s: pytest.fail("should not wait"))
+    result = fw._run_scheduled_update_pass(
+        "tg", s, sleep=lambda _s: pytest.fail("should not wait"), commands=COMMANDS)
 
     assert result == "ran"
     assert ran == ["zoidberg-weekly"]
@@ -304,7 +308,7 @@ def test_scheduled_update_retries_every_5_minutes_then_skips(monkeypatch, caplog
     sleeps = []
 
     with caplog.at_level(logging.WARNING, logger="planetexpress.farnsworth"):
-        result = fw._run_scheduled_update_pass(None, s, sleep=sleeps.append)
+        result = fw._run_scheduled_update_pass(None, s, sleep=sleeps.append, commands=COMMANDS)
 
     assert result == "skipped"
     assert sleeps == [300] * 12, "attempts at 0, 5, ... 60 minutes"
@@ -325,7 +329,7 @@ def test_scheduled_update_runs_once_the_lock_frees(monkeypatch):
     ran = []
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: ran.append(True))
 
-    assert fw._run_scheduled_update_pass(None, s, sleep=sleep) == "ran"
+    assert fw._run_scheduled_update_pass(None, s, sleep=sleep, commands=COMMANDS) == "ran"
     assert sleeps == [300, 300]
     assert ran == [True]
 
@@ -337,7 +341,7 @@ def test_scheduled_update_releases_lock_when_the_pass_raises(monkeypatch):
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", boom)
     s = _state()
 
-    assert fw._run_scheduled_update_pass(None, s, sleep=lambda _s: None) == "failed"
+    assert fw._run_scheduled_update_pass(None, s, sleep=lambda _s: None, commands=COMMANDS) == "failed"
     assert s.mutation_owner is None
 
 
@@ -443,7 +447,7 @@ def test_scheduled_update_waits_while_a_scan_is_running(monkeypatch):
     ran = []
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: ran.append(True))
 
-    assert fw._run_scheduled_update_pass(None, s, sleep=sleep) == "ran"
+    assert fw._run_scheduled_update_pass(None, s, sleep=sleep, commands=COMMANDS) == "ran"
     assert sleeps == [300]
     assert ran == [True]
     assert s.mutation_owner is None
@@ -554,7 +558,7 @@ def test_patchnow_refuses_during_a_running_scan(monkeypatch):
     s = _scanning_state()
     n = FakeNotifier()
 
-    fw._run_update_pass(None, n, s)
+    fw._run_update_pass(None, n, s, COMMANDS)
 
     assert any("scan running" in m for m in n.notifications)
     assert s.mutation_owner is None
@@ -571,17 +575,31 @@ def test_rollback_refuses_during_a_running_scan(monkeypatch):
     assert any("scan running" in m for m in n.notifications)
 
 
+class _PruneCommands:
+    """Safe prune runs as a typed `prune.safe` runbook now (slice 5b-3); this records who held the
+    mutation lock when the engine was asked to run it."""
+
+    def __init__(self, state, ran):
+        self._state, self._ran = state, ran
+
+    def run_automatic(self, runbook, *, origin, target_key, operator=None):
+        from planet_express.application.command_service import AutomaticResult
+        self._ran.append(self._state.mutation_owner)
+        assert [step.type for step in runbook.steps] == ["prune.safe"]
+        assert (origin, target_key) == ("system", "prune:safe")
+        return AutomaticResult("passed", "freed 1.2GB", "e1", [])
+
+
 def test_safe_prune_still_runs_inside_its_own_scan(monkeypatch):
     monkeypatch.setattr(fw, "_root_disk_alert", lambda snap: {"used_pct": 91, "alert": "high"})
     monkeypatch.setattr(fw, "_has_incomplete_stacks", lambda snap: False)
     monkeypatch.setattr(fw, "_safe_to_prune", lambda snap: True)
-    monkeypatch.setattr(fw, "_has_active_rollback_candidates", lambda: False)
+    monkeypatch.setattr(fw, "_has_active_rollback_candidates", lambda commands: False)
     s = _scanning_state()
     ran = []
-    monkeypatch.setattr(fw.bender, "run_safe_prune", lambda: ran.append(s.mutation_owner) or {"summary": "freed 1.2GB"})
     n = FakeNotifier()
 
-    fw.maybe_run_safe_prune({}, n, s)
+    fw.maybe_run_safe_prune({}, n, s, _PruneCommands(s, ran))
 
     assert ran == ["safe-prune"]
     assert s.mutation_owner is None
@@ -783,7 +801,7 @@ def test_weekly_update_waits_through_maintenance(monkeypatch, caplog):
 
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kwargs: calls.append(s.mutation_owner))
     with caplog.at_level(logging.INFO):
-        assert fw._run_scheduled_update_pass(None, s, sleep=sleep) == "ran"
+        assert fw._run_scheduled_update_pass(None, s, sleep=sleep, commands=COMMANDS) == "ran"
     assert "maintenance: backup" in caplog.text
     assert calls == ["zoidberg-weekly"] and s.mutation_owner is None
 

@@ -92,7 +92,7 @@ def test_zoidberg_dry_run_is_allowed_while_core_is_active(monkeypatch):
     monkeypatch.setattr(zoidberg, "run_update_pass", lambda **kw: calls.append(kw) or [])
     monkeypatch.setattr(zoidberg.config, "ensure_dirs", lambda: None)
     assert zoidberg.main(["--dry-run"]) == 0
-    assert calls == [{"tg": None, "dry_run": True}]
+    assert calls == [{"tg": None, "dry_run": True, "commands": None}]  # a dry run touches nothing
 
 
 def test_zoidberg_force_runs_a_real_pass_while_core_is_active(monkeypatch):
@@ -101,4 +101,6 @@ def test_zoidberg_force_runs_a_real_pass_while_core_is_active(monkeypatch):
     monkeypatch.setattr(zoidberg, "run_update_pass", lambda **kw: calls.append(kw) or [])
     monkeypatch.setattr(zoidberg.config, "ensure_dirs", lambda: None)
     assert zoidberg.main(["--force"]) == 0
-    assert calls == [{"tg": None, "dry_run": False}]
+    # a real pass runs on the engine, so it gets a command service of its own (slice 5b-3)
+    assert [(c["tg"], c["dry_run"]) for c in calls] == [(None, False)]
+    assert calls[0]["commands"] is not None

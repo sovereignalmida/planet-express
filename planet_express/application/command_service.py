@@ -97,6 +97,15 @@ class ControlResult:
     report: dict | None = None
 
 
+@dataclass(frozen=True)
+class AutomaticResult:
+    """One unattended runbook (D34 canary, D38 safe prune): it either ran or it was refused."""
+    outcome: str  # passed | failed | refused
+    reason: str
+    execution_id: str | None = None
+    steps: list | None = None
+
+
 def _spawn_daemon(fn: Callable, *args) -> None:
     threading.Thread(target=fn, args=args, daemon=True, name="typed-action").start()
 
@@ -112,6 +121,7 @@ class CommandService:
         resolve_target: Callable | None = None,
         verify: Callable | None = None,
         read_health: Callable | None = None,
+        watch: Callable | None = None,
         restart_count: Callable | None = None,
         spawn: Callable | None = None,
         background: Callable[[Callable[[], None]], object] | None = None,
@@ -133,6 +143,7 @@ class CommandService:
         self._resolve = resolve_target or actions.resolve_target
         self._verify = verify or actions.verify_after_restart
         self._read_health = read_health or actions.read_health
+        self._watch = watch or actions.watch_until_stable
         self._restart_count = restart_count or actions.restart_count
         self._spawn = spawn or _spawn_daemon
         # Telegram side effects an RPC reply must not wait on: each can take Telegram's 35s HTTP
@@ -829,6 +840,69 @@ class CommandService:
             start(row, execution["id"], operator)
             return RequestResult("started", text, row["id"], execution["id"], capabilities)
 
+    # ── unattended runs (slice 5b-3; D34 canary, D38 safe prune) ───────────
+    def record_event(self, kind: str, **fields) -> None:
+        """Audit trail for callers that decide something before a runbook exists (Zoidberg's
+        eligibility check), so a refusal is recorded even when nothing was ever executed."""
+        try:
+            self._store.record_event(kind, **fields)
+        except Exception:  # noqa: BLE001 -- an audit line never breaks the pass it describes
+            log.warning(f"Could not record a {kind} event")
+
+
+    def run_automatic(
+        self, runbook: runbooks.Runbook, *, origin: str, target_key: str,
+        operator: str | None = None,
+    ) -> AutomaticResult:
+        """Run a runbook with no card, synchronously, for the two documented exceptions to D31.
+
+        `policy.decide_runbook` is the gate: it grants `automatic` only for a server-assigned origin
+        paired with its own step type (`zoidberg`/`update.canary`, `system`/`prune.safe`), so
+        nothing else can reach this path. The caller owns the mutation lock, as it does today.
+        """
+        decision = policy.decide_runbook(runbook, origin)
+        if not decision.allowed or not decision.automatic:
+            reason = decision.reason if not decision.allowed else (
+                f"{origin} may not run this runbook without approval")
+            self._store.record_event("automatic.refused", action="runbook", reason=reason,
+                                     requested_via=origin, title=runbook.title)
+            return AutomaticResult("refused", reason)
+        now = self._clock()
+        since = now - policy.limit_lookback_seconds()
+        for pair, requested in Counter(decision.pairs).items():
+            step_type, pair_key = pair
+            limit = policy.limit_refusal(
+                self._store.recent_pair_attempts(step_type, pair_key, since)
+                + self._legacy_attempts(step_type, pair_key, since), now, requested=requested)
+            if limit is not None:
+                reason = f"{step_type} {pair_key}: {limit}"
+                self._store.record_event("automatic.refused", action="runbook", reason=reason,
+                                         requested_via=origin, title=runbook.title)
+                return AutomaticResult("refused", reason)
+        result = self._store.create_direct_runbook_execution(
+            action="runbook", target_key=target_key,
+            target={"title": runbook.title}, risk=decision.risk,
+            operator=operator or origin, arrived_at=now,
+            plan_json=runbooks.canonical_json(runbook),
+            plan_sha256=runbooks.plan_sha256(runbook), origin=origin,
+        )
+        if result is None:
+            return AutomaticResult("refused", "host slow, retry")
+        execution_id = result["execution"]["id"]
+        try:
+            outcome = engine.RunbookEngine(self, on_failure=self._on_failure).run(
+                execution_id, runbook, origin=origin)
+            status, reason = outcome.status, outcome.reason
+        except Exception as exc:
+            log.exception(f"Automatic runbook {execution_id} crashed")
+            try:
+                engine.settle_crashed_execution(self._store, execution_id)
+            except Exception:
+                log.exception(f"Could not settle the steps of {execution_id}")
+            status, reason = "failed", f"crashed: {redact(str(exc))[:200]}"
+        self._store.set_execution_status(execution_id, status, reason=reason)
+        return AutomaticResult(status, reason, execution_id, self._store.list_steps(execution_id))
+
     # ── abort / rollback (slice 5b-1, T40; design §4.4) ─────────────────────
     def abort(self, execution_id: str, *, operator: str) -> ControlResult:
         """Stop a running execution before its next step (and during a `wait`). A command already
@@ -1121,7 +1195,7 @@ class CommandService:
         """Before polling starts: an execution still running/verifying means core died
         mid-action. Mark it interrupted and say so; the consumed approval is not revived."""
         try:
-            engine.startup_reconcile(self._store)
+            engine.startup_reconcile(self._store, self)
         except Exception:
             log.exception("Step reconciliation at startup failed")
         interrupted = self._store.interrupt_unfinished("core restarted")

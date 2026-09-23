@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from flask import (
     Flask,
     abort,
+    current_app,
     g,
     jsonify,
     redirect,
@@ -486,7 +487,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
 
     app.add_template_filter(extract_host)
     app.add_template_filter(_extra_host_count, "extra_host_count")
-    app.add_url_rule("/", view_func=index)
+    app.add_url_rule("/", "index", partial(index, core))
     app.add_url_rule("/api/widget", view_func=widget)
     return app
 
@@ -524,12 +525,20 @@ def _extra_host_count(rule: str) -> int:
     return max(len(_HOST_RULE_RE.findall(rule or "")) - 1, 0)
 
 
-def index():
+def index(core=None):
     # Live network pollers merged in separately from build_dashboard_context()'s
     # file-based state -- keeps the file-vs-live-HTTP boundary explicit here, in the
     # one route allowed to do this kind of I/O, rather than folding it into
     # dashboard_data.py's zero-I/O contract.
     ctx = dashboard_data.build_dashboard_context()
+    if core is not None:
+        try:
+            # The open canary rollback windows live in the core's database, which this process is
+            # denied (web_access.py); core hands them over instead (Codex, T42). Core being down
+            # empties one panel, it never 500s the page.
+            ctx["rollback_candidates"] = core("canary.candidates", {})
+        except Exception:  # noqa: BLE001 -- see above
+            current_app.logger.warning("Could not read the canary rollback windows from core")
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
     ctx["telegram_bot_username"] = config.telegram_bot_username()
