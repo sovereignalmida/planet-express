@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-24
+
+Every change to the host is now a typed step in an approved runbook. There is no shell.
+
+### Changed
+- **Typed execution replaces LLM-written shell plans.** A plan used to be a list of shell command
+  strings an LLM wrote, run through `subprocess` with `shell=True` and vetted by a pattern-matching
+  `_safety_check()`. A plan is now a **runbook**: a list of steps chosen from a fixed catalogue,
+  each with a schema-validated parameter model, a risk class, a verifier and — where one exists —
+  an inverse. A model chooses which step to run; it never writes what runs.
+- **Every step is bound to its target when proposed and re-checked before it acts.** A compose file
+  edited, a container recreated, or a stack's service set changed between approval and execution
+  fails the step without running it, rather than acting on something else.
+- **Outcomes come from the host, not from exit codes.** A restart is "verified good" only after the
+  container is healthy; a stop only after it is really stopped; a compose write only after the file
+  holds the approved content.
+- **Approvals moved into the database** with the plan and its fingerprint, so a card cannot be
+  replayed, a stale card cannot be approved, and the dashboard and Telegram see the same thing.
+- **Bender's role narrowed** to the argv runner and the sudo allowlist. It no longer executes plans.
+
+### Added
+- **Multi-step runbooks** with per-step state, plus **ABORT** (between steps and during a wait,
+  never killing a dispatched command) and **ROLL BACK**, which reverses only steps whose recorded
+  pre-state proves they changed something, and reports the ones it cannot reverse.
+- **`update.canary`** — the weekly canary as a two-phase typed step: resolve and pull, then deploy
+  exactly that image, verify the container is running it, and watch it. A failed deploy or watch
+  retags the previous image and watches that too. Its rollback window lives in the database, and a
+  failed inverse pins the window open so a prune can never remove the image needed to recover.
+- **`compose.write`** — compose edits as compare-and-swap writes: no symlink on any path component,
+  temp file, fsync, mode/owner/ACL preserved, atomic rename. `/install` and Amy's edits are one
+  approval covering the write *and* bringing the stack up. The undo proves the file is the one the
+  step wrote (device + inode, re-checked immediately before deleting) rather than trusting content.
+- **Incident history**, a **config editor** with compare-and-swap saves, and a **chat** interface,
+  all behind the same approval model.
+- **A throwaway VM rehearsal harness** (`tests/homelab/`) with fixture stacks and a local registry,
+  used before every deployment.
+
+### Removed
+- `_run_command()`, `shell=True`, `_safety_check()` and its forbidden-command list, the plan
+  executor and its CLI, the compose diff-approval flow, `/skip`, the `legacy_plans_enabled` switch,
+  `state/pending_plan.json`, `state/pending_diffs.json` and `state/rollback_candidates.json`.
+  A plan or diff left pending by the old flow is announced once at startup and retired, not run.
+
+### Fixed
+- An operator's **rollback could be refused by a cooldown** — the attempt limits applied to the undo
+  as well as the action, and you always roll back something that just happened.
+- A read-only diagnostic naming a forbidden stack stayed refused; that rule was moved out of the
+  deleted `_safety_check()` rather than lost with it.
+
 ## [1.1.0] - 2026-07-23
 
 ### Added
