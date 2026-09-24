@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-09-24
+
+### Changed
+- **The Actions tab holds only what wants a decision.** It used to open with four full-width cards
+  of canary update history — each with a timeline, each reading "all clean" — while the approve and
+  deny buttons sat below the fold. Actions now shows, in the order they ask something of you:
+  Flight Authorisation, the Incident Console, and open canary rollback windows. Open windows stay
+  here on purpose: one means an update is still in flight or its automatic inverse failed and is
+  waiting for a human.
+- **New History tab** for the deployment manifest — what already happened, and the one thing on the
+  old tab you could never act on. It keeps its 60-second refresh: the panel sits outside
+  `#dashboard-live` (it has to follow the docks, which must stay outside it so a snapshot swap
+  cannot wipe an in-flight decision), so the refresh swaps it by id instead.
+
 ## [2.0.2] - 2026-09-24
 
 ### Fixed
