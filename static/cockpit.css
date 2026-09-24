@@ -1674,7 +1674,11 @@ footer p {
 .pe-logout { margin: 0; }
 .pe-logout button { min-height: 44px; cursor: pointer; }
 
-/* Chat is a persistent sibling of the replaceable dashboard snapshot. */
+/* Tabs whose panels are persistent siblings of the replaceable dashboard snapshot: the live
+   region's grid has no content for them, so it is hidden rather than left standing empty.
+   DETACHED_TABS in dashboard.js is the list; these two per-tab rules predate it and are kept
+   because config.js toggles .config-active on a path of its own. */
+.detached-tab #dashboard-live > .body-grid { display: none; }
 .chat-active #dashboard-live > .body-grid { display: none; }
 #chat-panel { padding: 22px 26px 40px; position: relative; z-index: 2; }
 #chat-form { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin-top: 18px; }

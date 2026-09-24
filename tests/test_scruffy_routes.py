@@ -1159,3 +1159,19 @@ def test_index_still_renders_when_core_cannot_answer(tmp_path, monkeypatch):
     resp = client.get("/")
     assert resp.status_code == 200
     assert b"OPEN ROLLBACK CANDIDATES" not in resp.data
+
+
+def test_every_detached_tab_hides_the_empty_live_grid():
+    """A tab whose panel is a sibling of #dashboard-live leaves the live region's main column with
+    nothing in it. Without hiding that grid the tab opens with a screen of empty space above its
+    content — which is exactly what happened when the manifest moved to History."""
+    root = Path(__file__).resolve().parent.parent
+    script = (root / "static" / "dashboard.js").read_text()
+    css = (root / "static" / "cockpit.css").read_text()
+    html = (root / "templates" / "dashboard.html").read_text()
+
+    detached = set(re.search(r"var DETACHED_TABS = \[(.*?)\];", script).group(1).replace('"', "").replace(" ", "").split(","))
+    outside = set(re.findall(r'data-tab-panel="([a-z]+)"', html.split('</div>\n\n  <!-- Both docks')[-1]))
+
+    assert outside <= detached, f"these tabs render outside the live grid but are not detached: {outside - detached}"
+    assert ".detached-tab #dashboard-live > .body-grid { display: none; }" in css

@@ -10,6 +10,12 @@
   "use strict";
 
   var TAB_NAMES = ["overview", "backups", "network", "actions", "history", "chat", "config"];
+  // Tabs whose panels live OUTSIDE #dashboard-live, as siblings of it. The live region's
+  // two-column grid has nothing to put in its main column for these, so it must be hidden or the
+  // tab opens with a screen of empty space above its content and the sidebar stranded beside it.
+  // Add a tab here the moment its panel moves out of the snapshot region — forgetting to is what
+  // made Actions and History open blank when the deployment manifest left the live grid.
+  var DETACHED_TABS = ["actions", "history", "chat", "config"];
   var SERVICES_FILTER_KEY = "planetexpress-services-filter";
   var SERVICES_DENSITY_KEY = "planetexpress-services-density";
 
@@ -80,6 +86,7 @@
 
   function setActiveTab(name) {
     document.body.classList.toggle("chat-active", name === "chat");
+    document.body.classList.toggle("detached-tab", DETACHED_TABS.indexOf(name) !== -1);
     document.querySelectorAll(".tab").forEach(function (btn) {
       btn.classList.toggle("active", btn.dataset.tab === name);
     });
