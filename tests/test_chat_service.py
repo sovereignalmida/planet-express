@@ -143,3 +143,37 @@ def test_worker_maps_failed_result(store):
     ticket = ask(chat)
     row = chat.get(ticket['ticket_id'], operator='chris')
     assert row['status'] == 'failed' and row['error'] == result.error and row['evidence'] == result.evidence
+
+
+# ── what the chat prompt promises the model it can do ───────────────────────────
+def test_the_lookup_the_prompt_recommends_is_actually_permitted():
+    """The prompt tells the model to list every container with its compose labels, because
+    `--filter name=` misses constantly here (containers are CASA_TA, the service is tubearchivist).
+    If the read-only allowlist ever stopped permitting that command, the advice would send the
+    model into a refusal loop."""
+    import re
+
+    import casa_bender as bender
+    import casa_farnsworth as fw
+
+    recommended = re.search(r"^  (docker ps -a --format .*)$", fw.CHAT_SYSTEM_PROMPT, re.MULTILINE)
+    assert recommended, "the prompt no longer shows the model how to resolve a name"
+    bender._check_readonly_diagnostic(recommended.group(1))      # raises if it would be refused
+
+
+def test_the_prompt_tells_the_model_nobody_can_answer_it():
+    """Chat has no memory between questions and the operator's reply is a new investigation, so a
+    model that ends with a question asks into the void — and the transcript UI makes it look like
+    a conversation, which is what invites the dead-end reply."""
+    import casa_farnsworth as fw
+
+    prompt = fw.CHAT_SYSTEM_PROMPT.lower()
+    assert "cannot reply" in prompt
+    assert "do not end with a question" in prompt
+    assert "does not exist" in prompt or "never report that something does not exist" in prompt
+
+
+def test_the_prompt_forbids_concluding_absence_from_a_filtered_search():
+    import casa_farnsworth as fw
+
+    assert "fact about your search, not about the host" in fw.CHAT_SYSTEM_PROMPT

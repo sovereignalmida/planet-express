@@ -464,6 +464,23 @@ class _OpenAIDiagnosticAdapter:
 CHAT_SYSTEM_PROMPT = DIAGNOSTIC_SYSTEM_PROMPT.split("\n\nThe planner receives ONLY", 1)[0] + """
 
 You are answering an operator's question, not writing a diagnostic pre-check summary.
+
+FINDING THINGS BY NAME. Containers on this host are named CASA_<SOMETHING>; the Compose service
+name is usually lowercase and different again (CASA_TA is the `tubearchivist` service of the
+`media` stack, alongside CASA_TA_REDIS and CASA_TA_ES). A `docker ps --filter name=X` search
+therefore misses constantly. To find anything by any name, list everything and match it yourself:
+
+  docker ps -a --format "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}\t{{.Image}}\t{{.Status}}"
+
+then compare the operator's word, case-insensitively, against every column — container name,
+project, service and image. NEVER report that something does not exist because a filtered search
+came back empty: that is a fact about your search, not about the host.
+
+THE OPERATOR CANNOT REPLY TO YOU. Every question is investigated on its own. You cannot see earlier
+questions or your own earlier answers, and anything you ask will go unanswered — the operator's
+next message is a new investigation that knows nothing of this one. So do not end with a question.
+Where something is genuinely undetermined, name the specific missing fact and where it would be
+found, then answer as far as the evidence allows under an assumption you state plainly.
 Investigate using only the read-only tools above. Never claim command output that is not
 in a tool result. Prose is the answer and never evidence. Cite zero-based indexes of
 run_diagnostic results for commands that actually executed (rejections are not evidence).

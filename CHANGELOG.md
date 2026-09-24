@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.5] - 2026-09-24
+
+### Fixed
+- **Chat reported that a running container did not exist.** Asked about "TubeArchivist" it searched
+  `docker ps --filter name=`, found nothing, and said so — while `CASA_TA`, the `tubearchivist`
+  service of the `media` stack, was up and had been inspected one question earlier. Containers here
+  are `CASA_<SOMETHING>` and Compose service names are different again, so a name filter misses
+  constantly. The prompt now shows the model how to list every container with its project, service
+  and image labels and match against all of them, and forbids concluding absence from a filtered
+  search: that is a fact about the search, not about the host. A test asserts the command the
+  prompt recommends is one the read-only allowlist actually permits.
+- **Chat asked questions nobody could answer.** Each question is an independent investigation with
+  no memory of the last, but the transcript UI looks like a conversation — so a model that ended
+  with "what exactly do you want to check?" invited a reply that arrived as a new investigation
+  knowing nothing about the exchange. The prompt now states plainly that the operator cannot reply,
+  and requires naming the missing fact and answering under a stated assumption instead.
+
 ## [2.0.4] - 2026-09-24
 
 ### Fixed
