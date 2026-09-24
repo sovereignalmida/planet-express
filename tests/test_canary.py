@@ -351,3 +351,26 @@ def test_settling_an_engine_crash_keeps_the_canary_window_open(svc):
     assert (step["status"], step["effect"]) == ("failed", "unknown")
     held = open_candidates(svc)
     assert len(held) == 1 and held[0]["expires_at"] >= INDEFINITE_EXPIRY
+
+
+def test_a_rollback_is_never_refused_by_a_cooldown(svc, monkeypatch):
+    """You always roll back something that just happened, so a per-target cooldown would refuse
+    exactly the runs that most need to work (found in the T44 VM rehearsal)."""
+    import config as config_module
+    from config_schema import AutonomyConfig
+    from tests.canary_fakes import canary_step
+    monkeypatch.setattr(config_module, "AUTONOMY",
+                        AutonomyConfig(cooldown_seconds=1800, max_attempts_per_day=1))
+    first = execution(svc)
+    plan = runbooks.Runbook.model_validate(
+        {"title": "t", "steps": [canary_step(svc)], "artifacts": {}})
+    assert engine.RunbookEngine(svc).run(first, plan, origin="zoidberg").status == "passed"
+
+    # the same target again, as a planner would: refused
+    svc.pulled = "3" * 64
+    blocked = execution(svc)
+    assert engine.RunbookEngine(svc).run(blocked, plan, origin="planner").status == "failed"
+
+    # ...but an operator's undo runs
+    undo = execution(svc)
+    assert engine.RunbookEngine(svc).run(undo, plan, origin="rollback").status == "passed"

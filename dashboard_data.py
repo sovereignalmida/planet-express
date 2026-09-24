@@ -25,8 +25,6 @@ import config
 from state_models import (
     Findings,
     MonitorSnapshot,
-    PlanSet,
-    RollbackCandidates,
     RunStatus,
     UpdateHistory,
 )
@@ -61,16 +59,8 @@ def load_findings() -> Findings | None:
     return _load(config.STATE_FINDINGS, Findings)
 
 
-def load_plan() -> PlanSet | None:
-    return _load(config.STATE_PLAN, PlanSet)
-
-
 def load_status() -> RunStatus | None:
     return _load(config.STATE_STATUS, RunStatus)
-
-
-def load_rollback_candidates() -> RollbackCandidates | None:
-    return _load(config.ROLLBACK_CANDIDATES_FILE, RollbackCandidates)
 
 
 def load_update_history() -> UpdateHistory | None:
@@ -278,42 +268,6 @@ def summarize_rollback_candidates() -> list[dict]:
     dashboard's user is denied (`scripts/web_access.py`). `casa_scruffy.index()` fetches them over
     the `canary.candidates` RPC, the same way it fetches Traefik and AdGuard (Codex, T42)."""
     return []
-
-
-def summarize_pending_plan() -> dict | None:
-    """pending_plan.json is never deleted after a plan is approved/executed or
-    cancelled (confirmed: no unlink() of it anywhere in casa_farnsworth.py) -- an
-    independent Codex review caught that checking only "does this file have plans in
-    it" kept showing an already-resolved plan as pending indefinitely, until the next
-    scheduled run happened to overwrite it. RunStatus.state/pending_plan_id is the one
-    live signal that's actually authoritative for "is this still genuinely awaiting
-    approval right now" -- PipelineState.transition() updates it the moment a plan is
-    approved, cancelled, or finishes executing. Only show a plan that RunStatus still
-    says is pending."""
-    plan_set = load_plan()
-    if not plan_set or not plan_set.plans:
-        return None
-
-    status = load_status()
-    if not status or status.state != "awaiting_approval" or not status.pending_plan_id:
-        return None
-
-    live_plans = [p for p in plan_set.plans if p.get("id") == status.pending_plan_id]
-    if not live_plans:
-        return None
-
-    plans = [
-        {
-            "id": p.get("id"),
-            "priority": p.get("priority"),
-            "title": p.get("title"),
-            "step_count": len(p.get("steps", [])),
-            "fix_steps": [s.get("description", "") for s in p.get("steps", []) if s.get("description")],
-            "rollback_steps": [s.get("description", "") for s in p.get("rollback", []) if s.get("description")],
-        }
-        for p in live_plans
-    ]
-    return {"planned_at": plan_set.planned_at, "plans": plans}
 
 
 _MEM_SIZE_RE = re.compile(r"^([\d.]+)([KMGT]?)i?B?$", re.IGNORECASE)
@@ -803,13 +757,6 @@ def build_professor_lines(ctx: dict) -> dict:
     if scanning:
         override = "Scanning the entire ship! Hold your hydrogen — this'll only take a moment, unless it takes several."
         lines = {k: override for k in lines}
-    elif ctx["pending_plan"]:
-        plan_id = pipeline_status.get("pending_plan_id") or "?"
-        lines["overview"] = (
-            f"Good news, everyone! Well — mostly. I've drawn up plan {plan_id} for "
-            "the situation. Do have a look in the sidebar."
-        )
-
     return lines
 
 
@@ -934,7 +881,6 @@ def build_dashboard_context() -> dict:
         "disk": summarize_disk(),
         "update_history": summarize_update_history(),
         "rollback_candidates": summarize_rollback_candidates(),
-        "pending_plan": summarize_pending_plan(),
         "system_and_backups": summarize_system_and_backups(),
         "certs": summarize_certs(),
     }

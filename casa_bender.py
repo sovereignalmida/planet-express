@@ -12,7 +12,6 @@ Usage:
 """
 
 import argparse
-import difflib
 import fnmatch
 import json
 import logging
@@ -22,14 +21,10 @@ import shlex
 import subprocess
 import sys
 import threading
-import time
-import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 
 import config
 from planet_express.core.redact import redact
-from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.bender")
 
@@ -41,50 +36,23 @@ NETWORK_GUARD_TOKENS = ["CASA_TRAEFIK", "CASA_ADGUARD", "adguard", "traefik"]
 # imported here rather than kept as a local copy that could drift.
 FORBIDDEN_STACKS = config.FORBIDDEN_STACKS
 
-# These commands are never allowed regardless of plan content
-# NOTE: bare "format" was removed 2026-07-04 — it's matched as a plain substring, so it
-# also blocked every `docker inspect --format '...'` call (a harmless, read-only Go-template
-# flag that Farnsworth's own plan template requires in every restart-verification step —
-# meaning it blocked essentially every plan). mkfs/fdisk/parted/dd/shred below already cover
-# real disk-destruction risk.
-FORBIDDEN_COMMANDS = [
-    "docker system prune",
-    "rm -rf",
-    "dd if=",
-    "> /dev/",
-    "mkfs",
-    "fdisk",
-    "parted",
-    "shred",
-]
-
 COMMAND_TIMEOUT_SECONDS = 120
 
-# Config-declared allowlist of sudo-scoped systemctl actions — single source of truth
-# in config.py, same pattern as FORBIDDEN_STACKS above. Empty by default; a fresh
-# install grants nothing until the operator declares it (and grants it at the OS
-# level via sudoers.d) explicitly.
+# Config-declared allowlist of sudo-scoped systemctl actions — single source of truth in config.py,
+# same pattern as FORBIDDEN_STACKS above. Empty by default; a fresh install grants nothing until the
+# operator declares it (and grants it at the OS level via sudoers.d) explicitly.
 SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
 
-# Anything other than `sudo systemctl <action> <unit>` was never a legitimate use of
-# the sudo grant this project asks for (docker needs no sudo — direct socket access).
-# Deliberately requires a literal, bare `sudo` -- an earlier version of this regex
-# tolerated an arbitrary-path prefix (`\S*/`) to allow /usr/bin/sudo, but `\S` also
-# matches shell metacharacters: `$(sudo mount -a)/sudo systemctl restart
-# casa-stacks.service` satisfied that prefix, letting the whole string through
-# _check_sudo_allowlist while the shell (shell=True) still executed the embedded
-# `sudo mount -a` via command substitution -- an independent Codex review caught
-# this before it shipped. Real plans only ever generate bare `sudo`; there is no
-# real need to tolerate a path-prefixed spelling, so it's simply not supported.
+# Anything other than `sudo systemctl <action> <unit>` was never a legitimate use of the sudo grant
+# this project asks for (docker needs no sudo — direct socket access).
 #
-# The unit-name group is deliberately a strict systemd-unit-name character class
-# (letters, digits, `_.@:-`), NOT `\S+` -- a second Codex-caught bug: `\S+` has no
-# literal whitespace but still matches e.g. `$(sudo${IFS}mount${IFS}-a)data.mount`,
-# which both satisfies this regex AND passes fnmatch("*.mount") since it happens to
-# end in ".mount" -- while the shell still executes the embedded command
-# substitution. A strict character class rejects `$`, `(`, `)`, `{`, `}`, backticks,
-# etc. outright, so no disguised-as-a-unit-name payload can ever reach fnmatch/the
-# exact-match check at all.
+# Deliberately requires a literal, bare `sudo`, and a strict systemd-unit-name character class for
+# the unit. Both were Codex findings from the days when a plan step was a shell string: with
+# `shell=True`, `$(sudo mount -a)/sudo systemctl restart casa-stacks.service` satisfied a
+# path-prefix-tolerant regex, and `$(sudo${IFS}mount${IFS}-a)data.mount` satisfied a `\S+` unit
+# group *and* `fnmatch("*.mount")`, while the shell executed the embedded command substitution.
+# There is no shell left to exploit (slice 5b-5) — this stays strict anyway, because the allowlist
+# is the thing that decides what `sudo` may do, and it should not depend on how it is called.
 _SUDO_SYSTEMCTL_RE = re.compile(
     r"^sudo\s+systemctl\s+(start|stop|restart)\s+([A-Za-z0-9_.@:-]+)$", re.IGNORECASE
 )
@@ -148,11 +116,10 @@ def _check_sudo_allowlist(command: str) -> None:
     -- fail closed on anything not declared, rather than trying to blocklist every bad
     sudo invocation individually.
 
-    Deliberately checks for the word `sudo` *anywhere* in the segment, not just at the
-    start -- a shell wrapper like `env sudo mount -a` or `sh -c 'sudo mount -a'` still
-    invokes real sudo (subprocess.run uses shell=True), and would silently bypass a
-    prefix-only check by never technically "starting with sudo" (a real gap an
-    independent Codex review caught before this shipped)."""
+    Deliberately checks for the word `sudo` *anywhere* in the segment, not just at the start --
+    a wrapper like `env sudo mount -a` or `sh -c 'sudo mount -a'` would bypass a prefix-only check
+    by never technically "starting with sudo" (a real gap an independent Codex review caught before
+    it shipped, back when these strings reached a shell)."""
     for segment in _split_command_segments(command):
         if not re.search(r"\bsudo\b", segment, re.IGNORECASE):
             continue
@@ -174,76 +141,12 @@ def _check_sudo_allowlist(command: str) -> None:
             )
 
 
-def _safety_check(command: str, plan: dict) -> None:
-    """Raise SafetyError if the command violates any constraint."""
-    cmd_lower = command.lower()
-
-    # Absolute forbidden commands
-    for bad in FORBIDDEN_COMMANDS:
-        if bad.lower() in cmd_lower:
-            raise SafetyError(f"Forbidden command pattern detected: '{bad}'")
-
-    # Forbidden stacks — use word boundary matching to avoid false positives
-    # e.g. 'ai' must NOT match '--tail', 'clawbot' must NOT match 'clawbot-adjacent'
-    for stack in FORBIDDEN_STACKS:
-        if re.search(rf"\b{re.escape(stack)}\b", command, re.IGNORECASE):
-            raise SafetyError(f"Forbidden stack referenced: '{stack}'")
-
-    # Sudo scope — code-enforced, independent of whatever the plan's LLM-generated
-    # command claims to need.
-    _check_sudo_allowlist(command)
-
-    # Network stack guard
-    needs_net_confirm = any(tok in command for tok in NETWORK_GUARD_TOKENS)
-    if needs_net_confirm and not plan.get("requires_network_confirm", False):
-        raise SafetyError(
-            "Command touches network stack (Traefik/AdGuard) but plan does not have "
-            "requires_network_confirm: true. Refusing to execute."
-        )
-
-
-# ── Step success evaluation ───────────────────────────────────────────────────
-def _step_succeeded(command: str, exit_code: int) -> bool:
-    """Whether a step's exit code counts as success. `systemctl status` follows the
-    LSB init-script convention where the exit code encodes the unit's *state*
-    (0=running, 1/2=dead, 3=not running, 4=unknown) rather than whether the command
-    itself ran correctly — so a status check on an already-known-inactive unit (exactly
-    what Hermes asks Bender to investigate) would always report "step failed" even
-    though the diagnostic worked perfectly. `systemctl is-active`/`is-enabled` are
-    deliberately excluded from this — plans use those as real boolean success checks
-    (e.g. verifying a restart worked), where exit 0 genuinely means success."""
-    if re.search(r"\bsystemctl\s+status\b", command):
-        return 0 <= exit_code <= 4
-    return exit_code == 0
-
-
-# ── Command runner ────────────────────────────────────────────────────────────
-def _run_command(command: str) -> tuple[int, str, str]:
-    """Run a shell command, return (exit_code, stdout, stderr)."""
-    try:
-        result = subprocess.run(
-            command,
-            shell=True,       # needed for compound commands (&&, pipes)
-            capture_output=True,
-            text=True,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-            env=None,         # inherit environment
-            check=False,      # returncode inspected by the caller, not raised
-        )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
-    except subprocess.TimeoutExpired:
-        return 1, "", f"Command timed out after {COMMAND_TIMEOUT_SECONDS}s"
-    except Exception as e:  # noqa: BLE001
-        return 1, "", str(e)
-
-
 # ── Argv runner (typed actions + verifier) ────────────────────────────────────
-# The runner every typed action and the verifier go through. Unlike _run_command
-# (shell=True, kept only for legacy LLM-written plans until slice 5 retires them), the
-# command is an argv list that never passes through a shell, so no part of it can be
-# reinterpreted as `&&`, `$(...)` or a redirect. The child also gets a minimal
-# environment: casa-planetexpress's own environment carries the LLM API key and the
-# Telegram bot token, and nothing Bender runs needs either.
+# The runner everything goes through — there is no other way to run a command in this project
+# since slice 5b-5. The command is an argv list that never passes through a shell, so no part of it
+# can be reinterpreted as `&&`, `$(...)` or a redirect. The child also gets a minimal environment:
+# casa-planetexpress's own environment carries the LLM API key and the Telegram bot token, and
+# nothing Bender runs needs either.
 RUN_ARGV_TIMEOUT_EXIT = 124  # same convention as coreutils timeout(1)
 # Non-secret variables only. The Docker ones are connection settings the docker CLI
 # needs to reach the same daemon the shell=True commands always inherited: a custom
@@ -508,10 +411,15 @@ def _flag_value(tokens: list[str], flag_names: tuple[str, ...]) -> str | None:
 
 
 def _check_readonly_diagnostic(command: str) -> None:
-    """Raise DiagnosticNotAllowed unless every segment of `command` starts with an
-    allowlisted read-only prefix. Segment-split first (same helper _safety_check
-    uses for the same reason) so a compound command can't smuggle a mutating
-    command past a check that only looked at the first segment."""
+    """Raise DiagnosticNotAllowed unless every segment of `command` starts with an allowlisted
+    read-only prefix and names no forbidden stack. Segment-split first, so a compound command
+    cannot smuggle something past a check that only looked at the first segment.
+
+    The forbidden-stack rule used to live in `_safety_check`, which slice 5b-5 deleted along with
+    the shell executor. It is kept here deliberately: "never touch these stacks" was always meant
+    to include not reading their logs, and losing it silently with the pattern list would have been
+    a policy change smuggled in as a refactor.
+    """
     if _DIAGNOSTIC_SHELL_METACHAR_RE.search(command):
         raise DiagnosticNotAllowed(
             f"Diagnostic command contains shell redirection/substitution/background "
@@ -519,6 +427,9 @@ def _check_readonly_diagnostic(command: str) -> None:
         )
     for segment in _split_command_segments(command):
         seg_lower = segment.lower()
+        for stack in FORBIDDEN_STACKS:
+            if re.search(rf"\b{re.escape(stack)}\b", segment, re.IGNORECASE):
+                raise DiagnosticNotAllowed(f"Forbidden stack referenced: '{stack}'")
         if not any(seg_lower.startswith(prefix) for prefix in READONLY_DIAGNOSTIC_PREFIXES):
             raise DiagnosticNotAllowed(
                 f"Diagnostic command not in the read-only allowlist: '{segment}'"
@@ -615,13 +526,14 @@ def _check_readonly_diagnostic(command: str) -> None:
 
 
 def run_diagnostic(command: str) -> tuple[int, str, str]:
-    """Run a single read-only diagnostic command for Farnsworth's pre-planning tool
-    loop. Enforces the read-only allowlist AND the normal _safety_check (forbidden
-    commands/stacks, sudo scope) as defense in depth, then executes and logs it
-    exactly like a real plan step. Raises SafetyError (never runs the command) if
-    either check fails -- callers decide how to surface that to the model."""
+    """Run a single read-only diagnostic command for Farnsworth's pre-planning tool loop.
+
+    Its guard is the read-only allowlist — an allowlist, and so strictly stronger than the pattern
+    blocklist that used to back it up — plus the sudo scope check. Raises SafetyError (never runs
+    the command) if either fails; callers decide how to surface that to the model.
+    """
     _check_readonly_diagnostic(command)
-    _safety_check(command, plan={})
+    _check_sudo_allowlist(command)
     argv = shlex.split(command)
     if not argv:
         raise DiagnosticNotAllowed("Diagnostic command must not be empty")
@@ -637,67 +549,15 @@ def run_diagnostic(command: str) -> tuple[int, str, str]:
 # ── Safe prune ─────────────────────────────────────────────────────────────────
 # Called only by Farnsworth's maybe_run_safe_prune(), which has already verified disk
 # pressure is real and every container is in a known-safe state. Deliberately narrow:
-# only image/network prune, never "docker system prune" (that string stays in
-# FORBIDDEN_COMMANDS above and this still runs it through the same _safety_check).
+# only image/network prune, never "docker system prune". Argv, not command strings: there is no
+# shell left to split them (slice 5b-5).
 SAFE_PRUNE_STEPS = [
-    ("image prune", "docker image prune -a -f"),
-    ("network prune", "docker network prune -f"),
+    ("image prune", ["docker", "image", "prune", "-a", "-f"]),
+    ("network prune", ["docker", "network", "prune", "-f"]),
 ]
 
 
-def run_safe_prune() -> dict:
-    """Run the whitelisted prune commands, logging each like a normal plan step.
-    Does not itself decide whether pruning is safe — that's the caller's job."""
-    results = []
-    for label, cmd in SAFE_PRUNE_STEPS:
-        _safety_check(cmd, plan={})
-        exit_code, stdout, stderr = _run_command(cmd)
-        # Redact here, not just in _log_step: the slices below go into the returned
-        # summary, which Farnsworth sends to TELEGRAM. A secret in a chat message cannot
-        # be unsent, so that boundary needs it more than the log file does.
-        stdout, stderr = redact(stdout), redact(stderr)
-        _log_step("safe-prune", {"n": label, "command": cmd}, exit_code, stdout, stderr)
-        results.append({
-            "step": label, "command": cmd, "exit_code": exit_code,
-            "stdout": stdout[:500], "stderr": stderr[:300],
-        })
-        log.info(f"Safe-prune {label}: exit {exit_code} — {stdout[:200]}")
-
-    summary = "\n".join(
-        f"{r['step']}: {r['stdout'] or ('failed: ' + r['stderr'] if r['exit_code'] else 'no change')}"
-        for r in results
-    )
-    return {"results": results, "summary": summary}
-
-
-# ── Supervised compose-file diffs (Phase 4) ────────────────────────────────────
-# Bender's only file-editing capability, and deliberately narrow: only
-# ~/stacks/*/docker-compose.yml files, never .env (secrets stay human-only). A
-# proposed diff is never applied automatically — it needs its own Telegram
-# approval, separate from the approval that runs the resulting plan. Always
-# backed up before writing.
 STACKS_ROOT = config.STACKS_ROOT
-PENDING_DIFFS_FILE = config.STATE_DIR / "pending_diffs.json"
-# Every propose/discard/apply call does a read-modify-write of the same file. Each
-# Telegram command runs in its own daemon thread, so without this lock two concurrent
-# calls (e.g. two /install proposals) could race and silently drop one's write.
-# Reentrant because apply_pending_diff() calls get_pending_diff()/discard_pending_diff()
-# (each of which also acquires this lock) from within its own held critical section.
-_PENDING_DIFFS_LOCK = threading.RLock()
-
-
-def _load_pending_diffs() -> dict:
-    if not PENDING_DIFFS_FILE.exists():
-        return {}
-    try:
-        return json.loads(PENDING_DIFFS_FILE.read_text())
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _save_pending_diffs(pending: dict) -> None:
-    config.ensure_dirs()
-    PENDING_DIFFS_FILE.write_text(json.dumps(pending, indent=2))
 
 
 def read_service_block(stack_name: str, service_key: str) -> tuple[str, str] | None:
@@ -731,428 +591,22 @@ def read_service_block(stack_name: str, service_key: str) -> tuple[str, str] | N
     return content, "".join(lines[start:end])
 
 
-def propose_compose_diff(stack_name: str, new_content: str, reason: str, is_new_stack: bool = False) -> dict:
-    """Propose a diff to a stack's docker-compose.yml. Writes nothing to the real
-    file — only records the proposal and returns a unified diff for a human to
-    review in Telegram. Raises SafetyError for forbidden stacks or any path that
-    isn't exactly stacks/<name>/docker-compose.yml.
-
-    is_new_stack must be explicitly passed True by a caller that intends to onboard a
-    brand-new stack (Fry) — it is NOT inferred from the file's absence. Defaulting to
-    False preserves the original behavior for ordinary compose edits (Amy): if the file
-    is missing when an edit was expected, that's raised as an error, not silently
-    reinterpreted as "create a new stack" (e.g. if the file was deleted between Amy
-    reading the current block and proposing her edit)."""
-    if stack_name in FORBIDDEN_STACKS:
-        raise SafetyError(f"Refusing to propose a diff for forbidden stack '{stack_name}'")
-
-    compose_path = STACKS_ROOT / stack_name / "docker-compose.yml"
-    if is_new_stack:
-        if compose_path.is_file():
-            raise SafetyError(
-                f"'{compose_path}' already exists — refusing to treat this as a new-stack "
-                f"proposal; propose an edit against the current file instead"
-            )
-    elif not compose_path.is_file():
-        raise SafetyError(f"No docker-compose.yml for stack '{stack_name}' at {compose_path}")
-
-    # Only enforced for brand-new stacks (onboarding): existing stacks (Amy's normal
-    # compose-edit flow) may legitimately have names with characters this doesn't allow
-    # (underscores, uppercase, etc) — those are still safe because they already resolve
-    # to a real, existing path under STACKS_ROOT, checked below regardless. A new-stack
-    # name has no existing path to anchor it, so it's restricted to a safe character set
-    # up front rather than trusting callers (e.g. a Telegram-derived domain slug) to have
-    # already sanitized it.
-    if is_new_stack and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", stack_name):
-        raise SafetyError(f"Invalid stack name '{stack_name}' — must be lowercase alphanumeric/hyphen only")
-
-    # Belt-and-suspenders regardless of new vs. existing: if STACKS_ROOT/<stack_name> is
-    # ever a symlink to somewhere else, resolve() would follow it — verify the real,
-    # resolved destination is still under STACKS_ROOT before trusting it as the target of
-    # a diff that apply_pending_diff will later write to.
-    resolved_root = STACKS_ROOT.resolve()
-    resolved_target = compose_path.parent.resolve()
-    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
-        raise SafetyError(f"Stack directory for '{stack_name}' resolves outside STACKS_ROOT — refusing")
-
-    old_content = compose_path.read_text() if not is_new_stack else ""
-    if old_content == new_content:
-        raise SafetyError("Proposed content is identical to the current file — nothing to diff")
-
-    diff_text = "".join(difflib.unified_diff(
-        old_content.splitlines(keepends=True),
-        new_content.splitlines(keepends=True),
-        fromfile=f"{stack_name}/docker-compose.yml (current)",
-        tofile=f"{stack_name}/docker-compose.yml (proposed)",
-    ))
-
-    with _PENDING_DIFFS_LOCK:
-        diff_id = f"diff-{stack_name}-{int(time.time())}"
-        pending = _load_pending_diffs()
-        if diff_id in pending:
-            # Two proposals for the same stack within the same second — make the ID
-            # unique rather than let the second silently overwrite the first. A short
-            # fixed-length (4 hex char) suffix, not a thread ident (which can run to 15+
-            # digits) — diff_id is embedded verbatim in a Telegram inline-button
-            # callback_data ("approve_diff:<diff_id>"), capped at 64 bytes total.
-            diff_id = f"{diff_id}-{uuid.uuid4().hex[:4]}"
-        pending[diff_id] = {
-            "stack": stack_name,
-            "compose_path": str(compose_path),
-            "new_content": new_content,
-            "reason": reason,
-            "diff_text": diff_text,
-            "is_new_stack": is_new_stack,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        _save_pending_diffs(pending)
-    log.info(f"Proposed diff {diff_id} for {stack_name}/docker-compose.yml: {reason}")
-    return {"diff_id": diff_id, "diff_text": diff_text, "stack": stack_name}
-
-
-def get_pending_diff(diff_id: str) -> dict | None:
-    with _PENDING_DIFFS_LOCK:
-        return _load_pending_diffs().get(diff_id)
-
-
-def discard_pending_diff(diff_id: str) -> None:
-    with _PENDING_DIFFS_LOCK:
-        pending = _load_pending_diffs()
-        pending.pop(diff_id, None)
-        _save_pending_diffs(pending)
-
-
-def apply_pending_diff(diff_id: str) -> dict:
-    """Apply a previously-approved diff: back up the current file (.yml.bak.<ts>),
-    then write the new content. Does not restart anything — that's still a
-    separate, normal plan-approval step afterward."""
-    with _PENDING_DIFFS_LOCK:
-        return _apply_pending_diff_locked(diff_id)
-
-
-def _apply_pending_diff_locked(diff_id: str) -> dict:
-    entry = get_pending_diff(diff_id)
-    if not entry:
-        raise SafetyError(f"No pending diff found for '{diff_id}' (already applied or expired?)")
-
-    compose_path = Path(entry["compose_path"])
-
-    # Re-check containment at apply time, not just at proposal time: the proposal-time
-    # check in propose_compose_diff() only proves the path was safe THEN. Between propose
-    # and approve, STACKS_ROOT/<stack>/ could be replaced with a symlink pointing outside
-    # STACKS_ROOT — is_file() would still read False for a symlinked dir with no compose
-    # file inside it, and mkdir(exist_ok=True) doesn't care that the directory entry is a
-    # symlink, so without this the write below would silently land outside STACKS_ROOT.
-    resolved_root = STACKS_ROOT.resolve()
-    resolved_target = compose_path.parent.resolve()
-    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
-        raise SafetyError(f"'{compose_path.parent}' resolves outside STACKS_ROOT — refusing to apply")
-
-    # compose_path itself could be a (possibly broken) symlink even when its parent
-    # directory is fine — is_file() reads False for a broken symlink, so the new-stack
-    # branch below would treat it as absent, and write_text() follows the link and
-    # creates the real target wherever it points. Checking is_symlink() directly (rather
-    # than relying on resolve(), which by design still "succeeds" for a broken link)
-    # catches this even when the link's target doesn't exist yet to resolve.
-    if compose_path.is_symlink():
-        raise SafetyError(f"'{compose_path}' is a symlink — refusing to write through it")
-
-    # entry["is_new_stack"] records whether the file was absent at proposal time. If it's
-    # since appeared (another process/manual edit between propose and approve), applying
-    # this stale new-stack proposal would silently clobber whatever showed up — refuse
-    # instead of overwriting an unrelated, possibly manually-created file.
-    if entry.get("is_new_stack") and compose_path.is_file():
-        raise SafetyError(
-            f"'{compose_path}' now exists but this diff was proposed when it was absent — "
-            f"refusing to overwrite; discard this diff and re-propose against the current file"
-        )
-
-    # The mirror image of the check above: this was an ordinary edit of an existing file
-    # (is_new_stack False/absent from older entries), but the file has since disappeared
-    # (deleted, stack removed). Falling through to the "create it fresh" branch below
-    # would silently resurrect a removed stack with no backup and no history — refuse
-    # instead of treating a vanished existing file the same as a genuine new stack.
-    if not entry.get("is_new_stack") and not compose_path.is_file():
-        raise SafetyError(
-            f"'{compose_path}' no longer exists but this diff was proposed as an edit to an "
-            f"existing file — refusing to recreate it; discard this diff and re-propose if the "
-            f"stack is meant to exist"
-        )
-
-    backup_path = None
-    if compose_path.is_file():
-        backup_path = compose_path.with_name(
-            compose_path.name + f".bak.{datetime.now().astimezone().strftime('%Y%m%d_%H%M%S')}"
-        )
-        backup_path.write_text(compose_path.read_text())
-    else:
-        compose_path.parent.mkdir(parents=True, exist_ok=True)
-    compose_path.write_text(entry["new_content"])
-    discard_pending_diff(diff_id)
-
-    log.info(f"Applied diff {diff_id} to {compose_path} (backup: {backup_path})")
-    return {
-        "diff_id": diff_id,
-        "compose_path": str(compose_path),
-        "backup_path": str(backup_path) if backup_path else None,
-    }
-
-
-# ── Core execute function ─────────────────────────────────────────────────────
-def execute(
-    plan: dict,
-    tg: TelegramClient | None = None,
-) -> dict:
-    """
-    Execute all steps in an approved plan.
-    Streams per-step status to Telegram if tg is provided.
-    Returns execution result dict.
-
-    Stops on first failure and asks user whether to continue or rollback.
-    """
-    plan_id = plan["id"]
-    steps   = plan.get("steps", [])
-    total   = len(steps)
-
-    log.info(f"Bender starting execution of plan {plan_id} ({total} steps)")
-
-    results = []
-    errors  = []
-
-    for step in steps:
-        n           = step["n"]
-        description = step.get("description", "")
-        command     = step.get("command", "")
-
-        log.info(f"Plan {plan_id} step {n}/{total}: {command}")
-
-        # Safety check before every step
-        try:
-            _safety_check(command, plan)
-        except SudoScopeError as e:
-            msg = str(e)
-            log.error(f"Sudo scope block on step {n}: {msg}")
-            config.ensure_dirs()
-            config.LAST_SUDO_BLOCK_FILE.write_text(json.dumps({
-                "plan_id": plan_id,
-                "step": n,
-                "command": e.command,
-                "action": e.action,
-                "unit": e.unit,
-                "blocked_at": datetime.now(timezone.utc).isoformat(),
-            }))
-            # len(results), not n - 1: plan steps come straight from unvalidated LLM
-            # JSON (PlanSet uses extra="allow"), so a malformed/non-contiguous `n`
-            # shouldn't be trusted for "how many steps actually ran" -- results only
-            # grows once per completed iteration, so its length before this append is
-            # the real count regardless of what the step claims n is.
-            steps_ran = len(results)
-            if tg:
-                rollback_note = (
-                    f"\n\n⚠️ {steps_ran} earlier step(s) already ran before this block — "
-                    f"the plan is partially applied. Reply /rollback {plan_id} to roll "
-                    f"back or /skip {plan_id} to leave it as-is."
-                    if steps_ran > 0 else ""
-                )
-                tg.send(
-                    f"🔒 *Plan #{plan_id} step {n} needs sudo outside current scope*\n"
-                    f"`{TelegramClient.s(e.command)}`\n\n"
-                    f"Not in Bender's declared sudo allowlist. Approving here couldn't "
-                    f"run it anyway — the OS sudo grant doesn't cover it either, so it "
-                    f"would just hang on a password prompt until timeout. Run it "
-                    f"yourself if you want it applied. Remaining steps were not run."
-                    f"{rollback_note}\n\n"
-                    f"To permanently allow this, send `/grant` for the exact lines to "
-                    f"add to config.yaml and sudoers.d."
-                )
-            results.append({
-                "n": n, "command": command,
-                "exit_code": -1, "stdout_summary": "",
-                "error": f"SUDO_SCOPE_BLOCK: {msg}",
-            })
-            return {
-                "plan_id": plan_id,
-                "steps_completed": steps_ran,
-                "steps_total": total,
-                "results": results,
-                "final_status": "blocked_sudo",
-                "errors": [f"Step {n}: sudo scope block"],
-            }
-        except SafetyError as e:
-            msg = str(e)
-            log.error(f"Safety check failed on step {n}: {msg}")
-            if tg:
-                tg.send(
-                    f"🛑 *Safety block on step {n}*\n"
-                    f"`{TelegramClient.s(msg)}`\n"
-                    f"Execution halted. No further steps will run."
-                )
-            results.append({
-                "n": n, "command": command,
-                "exit_code": -1, "stdout_summary": "",
-                "error": f"SAFETY_BLOCK: {msg}",
-            })
-            return {
-                "plan_id": plan_id,
-                "steps_completed": n - 1,
-                "steps_total": total,
-                "results": results,
-                "final_status": "failed",
-                "errors": [f"Step {n}: safety block"],
-            }
-
-        # Execute
-        exit_code, stdout, stderr = _run_command(command)
-        # Redact before anything derived from these strings escapes. _log_step redacts its
-        # own arguments, but stdout_summary/error_summary below bypass it entirely and
-        # reach Telegram (fmt_step_status, fmt_failed), the journal, and — via the step
-        # result's stdout_summary — Amy's prompt. Redaction is idempotent, so _log_step
-        # redacting again costs nothing.
-        stdout, stderr = redact(stdout), redact(stderr)
-        stdout_summary = stdout[:500] if stdout else ""
-
-        _log_step(plan_id, step, exit_code, stdout, stderr)
-
-        ok = _step_succeeded(command, exit_code)
-        # Many failures (e.g. a probe script that echoes its diagnosis and exits 1)
-        # signal via stdout with empty stderr — fall back to stdout so that message
-        # isn't silently dropped from the error summary shown to the user/Amy.
-        error_summary = (stderr or stdout)[:300] if not ok else ""
-
-        # Telegram step update
-        if tg:
-            msg = TelegramClient.fmt_step_status(
-                plan_id, n, total, description, ok, error_summary
-            )
-            tg.send(msg)
-
-        step_result = {
-            "n": n,
-            "command": command,
-            "exit_code": exit_code,
-            "stdout_summary": stdout_summary,
-        }
-        if not ok:
-            step_result["error"] = error_summary or f"exit code {exit_code}"
-            errors.append(f"Step {n}: {error_summary or f'exit {exit_code}'}")
-
-        results.append(step_result)
-
-        if not ok:
-            log.error(f"Step {n} failed (exit {exit_code}): {error_summary}")
-            if tg:
-                tg.send(TelegramClient.fmt_failed(
-                    plan_id, n, description, error_summary or f"exit code {exit_code}"
-                ))
-            # Stop on failure — Farnsworth awaits user decision
-            return {
-                "plan_id": plan_id,
-                "steps_completed": n - 1,
-                "steps_total": total,
-                "results": results,
-                "final_status": "failed",
-                "errors": errors,
-            }
-
-        log.info(f"Step {n} OK")
-
-    log.info(f"Plan {plan_id} complete — all {total} steps succeeded")
-    return {
-        "plan_id": plan_id,
-        "steps_completed": total,
-        "steps_total": total,
-        "results": results,
-        "final_status": "success",
-        "errors": errors,
-    }
-
-
-def execute_rollback(
-    plan: dict,
-    tg: TelegramClient | None = None,
-) -> dict:
-    """Execute rollback steps for a plan."""
-    plan_id  = plan["id"]
-    rollback = plan.get("rollback", [])
-    total    = len(rollback)
-
-    log.info(f"Bender executing rollback for plan {plan_id} ({total} steps)")
-
-    results = []
-    errors  = []
-
-    for step in rollback:
-        n       = step["n"]
-        command = step.get("command", "")
-
-        log.info(f"Rollback {plan_id} step {n}/{total}: {command}")
-
-        try:
-            _safety_check(command, plan)
-        except SafetyError as e:
-            log.error(f"Safety check failed on rollback step {n}: {e}")
-            errors.append(f"Rollback step {n}: safety block")
-            continue
-
-        exit_code, stdout, stderr = _run_command(command)
-        ok = _step_succeeded(command, exit_code)
-
-        if tg:
-            tg.send(
-                f"↩️ Rollback step {n}/{total}: "
-                f"{'✅' if ok else '❌'} `{TelegramClient.s(step.get('description', command[:60]))}`"
-            )
-
-        _log_step(f"{plan_id}-rollback", step, exit_code, stdout, stderr)
-        results.append({"n": n, "command": command, "exit_code": exit_code})
-        if not ok:
-            errors.append(f"Rollback step {n}: exit {exit_code}")
-
-    return {
-        "plan_id": plan_id,
-        "steps_completed": len(results),
-        "steps_total": total,
-        "results": results,
-        "final_status": "rolled_back" if not errors else "partial_rollback",
-        "errors": errors,
-    }
-
-
 # ── CLI entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
     parser = argparse.ArgumentParser(description="Bender — Planet Express executor")
-    parser.add_argument("plan_file", help="Path to plan JSON file")
-    parser.add_argument("--rollback", action="store_true", help="Execute rollback steps")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
+    parser.add_argument("--diagnostic", metavar="COMMAND",
+                        help="run one read-only diagnostic command through the allowlist")
     args = parser.parse_args()
 
-    plan_path = Path(args.plan_file)
-    if not plan_path.exists():
-        print(f"Plan file not found: {plan_path}", file=sys.stderr)
-        sys.exit(1)
-
-    plan_data = json.loads(plan_path.read_text())
-
-    # If the file contains a plans array, pick the first one
-    if "plans" in plan_data and isinstance(plan_data["plans"], list):
-        if not plan_data["plans"]:
-            print("No plans in file.", file=sys.stderr)
-            sys.exit(0)
-        plan_data = plan_data["plans"][0]
-
-    if args.dry_run:
-        section = plan_data.get("rollback" if args.rollback else "steps", [])
-        print(f"DRY RUN — {'rollback' if args.rollback else 'execution'} steps for plan {plan_data['id']}:")
-        for step in section:
-            print(f"  Step {step['n']}: {step['command']}")
-        sys.exit(0)
-
-    if args.rollback:
-        result = execute_rollback(plan_data)
-    else:
-        result = execute(plan_data)
-
-    print(json.dumps(result, indent=2))
-    sys.exit(0 if result["final_status"] in ("success", "rolled_back") else 1)
+    if not args.diagnostic:
+        parser.error("nothing to run here: a mutation is a typed step in an approved runbook, run "
+                     "by the engine (docs/designs/slice-5b-multistep-execution.md)")
+    try:
+        exit_code, stdout, stderr = run_diagnostic(args.diagnostic)
+    except SafetyError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
+    print(json.dumps({"exit_code": exit_code, "stdout": stdout, "stderr": stderr}, indent=2))
+    sys.exit(0 if exit_code == 0 else 1)

@@ -81,8 +81,7 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     # The single most important case per the design principle: a fresh install with
     # no pipeline run yet must never 500 -- it should render a "waiting" placeholder.
     for attr in (
-        "STATE_MONITOR", "STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS",
-        "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE",
+        "STATE_MONITOR", "STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE",
     ):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
 
@@ -106,9 +105,7 @@ def test_index_renders_real_findings(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(config, "STATE_FINDINGS", findings_path)
     monkeypatch.setattr(config, "STATE_MONITOR", tmp_path / "nope.json")
-    monkeypatch.setattr(config, "STATE_PLAN", tmp_path / "nope.json")
     monkeypatch.setattr(config, "STATE_STATUS", tmp_path / "nope.json")
-    monkeypatch.setattr(config, "ROLLBACK_CANDIDATES_FILE", tmp_path / "nope.json")
     monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", tmp_path / "nope.json")
 
     resp = _client().get("/")
@@ -120,8 +117,7 @@ def test_index_renders_real_findings(tmp_path, monkeypatch):
 
 def test_widget_with_no_state_returns_200_unknown(tmp_path, monkeypatch):
     for attr in (
-        "STATE_MONITOR", "STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS",
-        "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE",
+        "STATE_MONITOR", "STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE",
     ):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
 
@@ -146,9 +142,7 @@ def test_widget_with_real_findings(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr(config, "STATE_FINDINGS", findings_path)
     monkeypatch.setattr(config, "STATE_MONITOR", tmp_path / "nope.json")
-    monkeypatch.setattr(config, "STATE_PLAN", tmp_path / "nope.json")
     monkeypatch.setattr(config, "STATE_STATUS", tmp_path / "nope.json")
-    monkeypatch.setattr(config, "ROLLBACK_CANDIDATES_FILE", tmp_path / "nope.json")
     monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", tmp_path / "nope.json")
 
     resp = _client().get("/api/widget")
@@ -164,7 +158,7 @@ def _render_with_certs(tmp_path, monkeypatch, certs):
     monitor = tmp_path / "latest_monitor.json"
     monitor.write_text(json.dumps({"timestamp": "2026-09-15T12:00:00+00:00", "mode": "full", "certs": certs}))
     monkeypatch.setattr(config, "STATE_MONITOR", monitor)
-    for attr in ("STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS", "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE"):
+    for attr in ("STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE"):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers", lambda: {"available": False, "routers": []})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats", lambda: {"available": False})
@@ -180,8 +174,7 @@ def _render_with_service_snapshot(tmp_path, monkeypatch, mode="full", stacks=Non
         "stack_completeness": stacks or [],
     }))
     monkeypatch.setattr(config, "STATE_MONITOR", monitor)
-    for attr in ("STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS",
-                 "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE"):
+    for attr in ("STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE"):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})

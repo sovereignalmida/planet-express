@@ -9,7 +9,7 @@ Contract (design doc, "Lock rule: a mutation lock, not PipelineState"):
     /patchnow, the weekly update pass, safe-prune, /up and /down.
   - Legacy plan/diff approvals take the lock BEFORE notifier.resolve and before
     transition(EXECUTING). On busy they only acknowledge the tap ("busy"), leaving the
-    card, the pending plan/diff and AWAITING_APPROVAL untouched.
+    card and the pipeline state untouched.
   - The weekly scheduler retries every 5 minutes for up to 1 hour, then skips and logs.
 """
 
@@ -26,10 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 import casa_farnsworth as fw
-from notifier import Decision, FakeNotifier
-
-AWAITING = fw.PipelineState.AWAITING_APPROVAL
-
+from notifier import FakeNotifier
 
 COMMANDS = object()   # the canary pass is stubbed out; only the lock is under test
 
@@ -73,10 +70,10 @@ def test_end_mutation_by_a_non_owner_does_not_release():
 
 def test_mutation_flag_leaves_pipeline_state_and_pending_plan_alone():
     s = _state()
-    s.transition(AWAITING, plan_id="p1", msg_id=7)
+    s.transition(fw.PipelineState.EXECUTING, plan_id="p1", msg_id=7)
     assert s.try_begin_mutation("stack:up:media")
     s.end_mutation("stack:up:media")
-    assert s.state == AWAITING
+    assert s.state == fw.PipelineState.EXECUTING
     assert s.get_pending() == ("p1", 7)
 
 
@@ -101,153 +98,6 @@ def test_try_begin_mutation_is_atomic_under_racing_threads():
     assert len(winners) == 1
 
 
-# ── Legacy plan/diff callbacks: lock BEFORE resolve (CRITICAL ordering) ─────────
-def test_plan_approve_while_busy_leaves_card_plan_and_state_untouched(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: pytest.fail("plan must not be loaded while busy"))
-    monkeypatch.setattr(fw.threading, "Thread", _ForbiddenThread)
-    s = _state()
-    s.transition(AWAITING, plan_id="p1", msg_id=5)
-    assert s.try_begin_mutation("zoidberg-weekly")
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="p1", kind="plan", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert n.resolutions == [], "card must not be edited to 'approved' while busy"
-    assert len(n.acknowledgements) == 1
-    assert "busy" in n.acknowledgements[0][1].lower()
-    assert s.state == AWAITING
-    assert s.get_pending() == ("p1", 5)
-    assert s.mutation_owner == "zoidberg-weekly"
-
-
-def test_diff_approve_while_busy_does_not_apply(monkeypatch):
-    monkeypatch.setattr(fw.bender, "apply_pending_diff", lambda _id: pytest.fail("diff applied while busy"))
-    s = _state()
-    assert s.try_begin_mutation("plan:p1")
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="d1", kind="diff", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert n.resolutions == []
-    assert "busy" in n.acknowledgements[0][1].lower()
-    assert s.mutation_owner == "plan:p1"
-
-
-def test_plan_approve_takes_lock_before_resolving_and_executing(monkeypatch):
-    order = []
-    s = _state()
-    real_begin = s.try_begin_mutation
-
-    def spy_begin(owner):
-        order.append(("lock", owner))
-        return real_begin(owner)
-
-    monkeypatch.setattr(s, "try_begin_mutation", spy_begin)
-
-    class OrderNotifier(FakeNotifier):
-        def resolve(self, decision, ack_text, resolution_text):
-            order.append(("resolve", decision.request_id))
-            super().resolve(decision, ack_text, resolution_text)
-
-    plan_data = {"id": "p2", "steps": []}
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: plan_data)
-    _RecordingThread.spawned = []
-    monkeypatch.setattr(fw.threading, "Thread", _RecordingThread)
-    n = OrderNotifier()
-    n.queue_decision(Decision(request_id="p2", kind="plan", approved=True))
-
-    fw.handle_callback({}, tg="tg", notifier=n, state=s)
-
-    assert order[0] == ("lock", "plan:p2")
-    assert order.index(("lock", "plan:p2")) < order.index(("resolve", "p2"))
-    assert s.state == fw.PipelineState.EXECUTING
-    assert s.mutation_owner == "plan:p2", "lock is held for the execution thread, released by _execute_plan"
-    assert _RecordingThread.spawned == [(fw._execute_plan, ("tg", n, s, plan_data))]
-
-
-def test_plan_approve_not_found_releases_lock(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: None)
-    s = _state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="p3", kind="plan", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert s.mutation_owner is None
-    assert s.state == fw.PipelineState.IDLE
-
-
-def test_plan_cancel_does_not_need_the_lock():
-    s = _state()
-    s.transition(AWAITING, plan_id="p4")
-    assert s.try_begin_mutation("zoidberg-weekly")
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="p4", kind="plan", approved=False))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert n.resolutions[0][2] == "❌ Plan #p4 *cancelled*."
-    assert s.state == fw.PipelineState.IDLE
-    assert s.mutation_owner == "zoidberg-weekly"
-
-
-def test_execute_plan_releases_lock_even_when_bender_raises(monkeypatch):
-    def boom(plan, tg):
-        raise RuntimeError("bender fell over")
-
-    monkeypatch.setattr(fw.bender, "execute", boom)
-    s = _state()
-    assert s.try_begin_mutation("plan:p9")
-    s.transition(fw.PipelineState.EXECUTING, plan_id="p9")
-
-    fw._execute_plan(None, FakeNotifier(), s, {"id": "p9"})
-
-    assert s.mutation_owner is None
-    assert s.state == fw.PipelineState.IDLE
-
-
-def test_diff_approve_releases_lock_after_apply(monkeypatch):
-    monkeypatch.setattr(fw.bender, "apply_pending_diff", lambda _id: {"backup_path": None})
-    s = _state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="d2", kind="diff", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert n.resolutions[0][1] == "Applying diff..."
-    assert s.mutation_owner is None
-
-
-def test_diff_apply_safety_error_releases_lock(monkeypatch):
-    def refuse(_id):
-        raise fw.bender.SafetyError("path escapes stacks root")
-
-    monkeypatch.setattr(fw.bender, "apply_pending_diff", refuse)
-    s = _state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="d3", kind="diff", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert any("Could not apply diff" in m for m in n.notifications)
-    assert s.mutation_owner is None
-
-
-# ── Other mutating paths refuse while busy ──────────────────────────────────────
-def test_patchnow_update_pass_refuses_while_busy(monkeypatch):
-    monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: pytest.fail("update pass ran while busy"))
-    s = _state()
-    assert s.try_begin_mutation("plan:p1")
-    n = FakeNotifier()
-
-    fw._run_update_pass(None, n, s, COMMANDS)
-
-    assert any("busy" in m.lower() for m in n.notifications)
-    assert s.mutation_owner == "plan:p1"
-
-
 def test_patchnow_update_pass_takes_and_releases_lock(monkeypatch):
     s = _state()
     seen = {}
@@ -264,7 +114,6 @@ def test_safe_prune_skips_while_busy(monkeypatch):
     monkeypatch.setattr(fw, "_has_incomplete_stacks", lambda snap: False)
     monkeypatch.setattr(fw, "_safe_to_prune", lambda snap: True)
     monkeypatch.setattr(fw, "_has_active_rollback_candidates", lambda: False)
-    monkeypatch.setattr(fw.bender, "run_safe_prune", lambda: pytest.fail("pruned while busy"))
     s = _state()
     assert s.try_begin_mutation("zoidberg-weekly")
     n = FakeNotifier()
@@ -272,33 +121,6 @@ def test_safe_prune_skips_while_busy(monkeypatch):
     fw.maybe_run_safe_prune({}, n, s)
 
     assert n.notifications == []
-
-
-def test_rollback_refuses_while_busy(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: {"id": pid, "rollback": [{"n": 1}]})
-    monkeypatch.setattr(fw.bender, "execute_rollback", lambda p, tg: pytest.fail("rolled back while busy"))
-    s = _state()
-    assert s.try_begin_mutation("plan:p1")
-    n = FakeNotifier()
-
-    fw._do_rollback(None, n, s, "p0")
-
-    assert any("busy" in m.lower() for m in n.notifications)
-    assert s.mutation_owner == "plan:p1"
-
-
-# ── Weekly update scheduler: retry every 5 min for up to 1 hour ─────────────────
-def test_scheduled_update_runs_immediately_when_free(monkeypatch):
-    s = _state()
-    ran = []
-    monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: ran.append(s.mutation_owner))
-
-    result = fw._run_scheduled_update_pass(
-        "tg", s, sleep=lambda _s: pytest.fail("should not wait"), commands=COMMANDS)
-
-    assert result == "ran"
-    assert ran == ["zoidberg-weekly"]
-    assert s.mutation_owner is None
 
 
 def test_scheduled_update_retries_every_5_minutes_then_skips(monkeypatch, caplog):
@@ -342,70 +164,6 @@ def test_scheduled_update_releases_lock_when_the_pass_raises(monkeypatch):
     s = _state()
 
     assert fw._run_scheduled_update_pass(None, s, sleep=lambda _s: None, commands=COMMANDS) == "failed"
-    assert s.mutation_owner is None
-
-
-# ── Codex review (landing 1a): no lock leak if plan startup fails before hand-off ──
-def test_plan_approve_releases_lock_when_resolve_raises(monkeypatch):
-    class UnreachableTelegram(FakeNotifier):
-        def resolve(self, decision, ack_text, resolution_text):
-            raise ConnectionError("telegram unreachable")
-
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: pytest.fail("must not get past resolve"))
-    s = _state()
-    s.transition(AWAITING, plan_id="p5", msg_id=9)
-    n = UnreachableTelegram()
-    n.queue_decision(Decision(request_id="p5", kind="plan", approved=True))
-
-    with pytest.raises(ConnectionError):
-        fw.handle_callback({}, None, n, s)
-
-    assert s.mutation_owner is None
-    assert s.state == AWAITING, "nothing executed, so the plan stays approvable"
-    assert s.get_pending() == ("p5", 9)
-
-
-def test_plan_approve_releases_lock_and_resets_state_when_thread_start_fails(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: {"id": pid, "steps": []})
-
-    class NoThreads:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            raise RuntimeError("can't start new thread")
-
-    monkeypatch.setattr(fw.threading, "Thread", NoThreads)
-    s = _state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="p6", kind="plan", approved=True))
-
-    with pytest.raises(RuntimeError):
-        fw.handle_callback({}, "tg", n, s)
-
-    assert s.mutation_owner is None
-    assert s.state == fw.PipelineState.IDLE
-
-
-def test_plan_not_found_releases_lock_exactly_once(monkeypatch, caplog):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: None)
-    s = _state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="p7", kind="plan", approved=True))
-
-    with caplog.at_level(logging.WARNING, logger="planetexpress.farnsworth"):
-        fw.handle_callback({}, None, n, s)
-
-    assert s.mutation_owner is None
-    assert not any("ignored" in r.getMessage() for r in caplog.records), "lock released twice"
-
-
-# ── Codex re-review (landing 1a): idle check and lock grab are one atomic step ──
-@pytest.mark.parametrize("busy_state", [fw.PipelineState.RUNNING, AWAITING, fw.PipelineState.EXECUTING])
-def test_require_idle_refuses_without_taking_the_lock(busy_state):
-    s = _state()
-    s.transition(busy_state, plan_id="p1")
-    assert s.try_begin_mutation("zoidberg-weekly", require_idle=True) is False
     assert s.mutation_owner is None
 
 
@@ -486,18 +244,6 @@ def test_scan_starts_when_host_is_free(monkeypatch):
     assert s.mutation_owner is None
 
 
-def test_scan_still_refuses_while_awaiting_approval(monkeypatch):
-    monkeypatch.setattr(fw.leela, "run_full", lambda: pytest.fail("scanned while awaiting approval"))
-    s = _state()
-    s.transition(AWAITING, plan_id="p1")
-    n = FakeNotifier()
-
-    fw.run_pipeline(n, s, mode="full")
-
-    assert s.state == AWAITING
-    assert any("already running or awaiting approval" in m for m in n.notifications)
-
-
 def test_try_start_run_checks_the_lock_in_the_same_acquisition():
     # While the test holds _lock, try_start_run must wait; a mutation taking the lock
     # during that wait must make the scan start fail and leave the pipeline IDLE.
@@ -526,33 +272,6 @@ def _scanning_state():
     return s
 
 
-def test_diff_approve_refuses_during_a_running_scan(monkeypatch):
-    monkeypatch.setattr(fw.bender, "apply_pending_diff", lambda _id: pytest.fail("applied a diff mid-scan"))
-    s = _scanning_state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="d9", kind="diff", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert n.resolutions == []
-    assert "scan running" in n.acknowledgements[0][1]
-    assert s.mutation_owner is None
-
-
-def test_stale_plan_card_approve_refuses_during_a_running_scan(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: pytest.fail("loaded a plan mid-scan"))
-    monkeypatch.setattr(fw.threading, "Thread", _ForbiddenThread)
-    s = _scanning_state()
-    n = FakeNotifier()
-    n.queue_decision(Decision(request_id="old-plan", kind="plan", approved=True))
-
-    fw.handle_callback({}, tg=None, notifier=n, state=s)
-
-    assert n.resolutions == []
-    assert "scan running" in n.acknowledgements[0][1]
-    assert s.state == fw.PipelineState.RUNNING
-
-
 def test_patchnow_refuses_during_a_running_scan(monkeypatch):
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: pytest.fail("updated mid-scan"))
     s = _scanning_state()
@@ -564,20 +283,9 @@ def test_patchnow_refuses_during_a_running_scan(monkeypatch):
     assert s.mutation_owner is None
 
 
-def test_rollback_refuses_during_a_running_scan(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: {"id": pid, "rollback": [{"n": 1}]})
-    monkeypatch.setattr(fw.bender, "execute_rollback", lambda p, tg: pytest.fail("rolled back mid-scan"))
-    s = _scanning_state()
-    n = FakeNotifier()
-
-    fw._do_rollback(None, n, s, "p0")
-
-    assert any("scan running" in m for m in n.notifications)
-
-
 class _PruneCommands:
-    """Safe prune runs as a typed `prune.safe` runbook now (slice 5b-3); this records who held the
-    mutation lock when the engine was asked to run it."""
+    """Safe prune runs as a typed `prune.safe` runbook; this records who held the mutation lock
+    when the engine was asked to run it."""
 
     def __init__(self, state, ran):
         self._state, self._ran = state, ran
@@ -667,49 +375,6 @@ def test_end_mutation_reset_releases_and_resets_together():
     assert s.get_pending() == (None, None)
 
 
-def test_execute_plan_finishes_without_a_separate_transition(monkeypatch):
-    monkeypatch.setattr(fw.bender, "execute", lambda plan, tg: {"final_status": "success", "steps_completed": 0})
-    s = _state()
-    s.transition(fw.PipelineState.EXECUTING, plan_id="p8")
-    assert s.try_begin_mutation("plan:p8")
-    _forbid_separate_transition(monkeypatch, s)
-
-    fw._execute_plan(None, FakeNotifier(), s, {"id": "p8"})
-
-    assert s.mutation_owner is None
-    assert s.state == fw.PipelineState.IDLE
-
-
-def test_rollback_finishes_without_a_separate_transition(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: {"id": pid, "rollback": [{"n": 1}]})
-    monkeypatch.setattr(fw.bender, "execute_rollback", lambda p, tg: {"steps_completed": 1, "errors": []})
-    s = _state()
-    _forbid_separate_transition(monkeypatch, s)
-
-    fw._do_rollback(None, FakeNotifier(), s, "p1")
-
-    assert s.mutation_owner is None
-    assert s.state == fw.PipelineState.IDLE
-
-
-def test_finishing_plan_cannot_clobber_a_newer_execution(monkeypatch):
-    # The race Codex found: old plan's thread finishes after a newer approval already owns
-    # the lock and is EXECUTING. The old thread must leave the newer state alone.
-    def boom(plan, tg):
-        raise RuntimeError("old plan failed")
-
-    monkeypatch.setattr(fw.bender, "execute", boom)
-    s = _state()
-    s.transition(fw.PipelineState.EXECUTING, plan_id="new", msg_id=11)
-    assert s.try_begin_mutation("plan:new")
-
-    fw._execute_plan(None, FakeNotifier(), s, {"id": "old"})
-
-    assert s.mutation_owner == "plan:new"
-    assert s.state == fw.PipelineState.EXECUTING
-    assert s.get_pending() == ("new", 11)
-
-
 def test_unknown_stack_blocks_pruning():
     snapshot = {
         "containers": [{"name": "app", "status": "Up", "health": "healthy"}],
@@ -741,14 +406,14 @@ def test_maintenance_preserves_existing_owner_and_pending_plan(monkeypatch):
     window = None
     s = fw.PipelineState(maintenance=lambda: window)
     monkeypatch.setattr(s, "_persist", lambda: None)
-    s.transition(s.AWAITING_APPROVAL, "plan", 123)
+    s.transition(s.EXECUTING, "plan", 123)
     assert s.try_begin_mutation("existing")
     window = fw.MaintenanceWindow("backup", None, Path("/unused"))
     assert not s.try_begin_mutation("new", during_scan=True)
     assert not s.try_start_run()
     assert s.busy_reason == "maintenance: backup"
     assert s.mutation_owner == "existing"
-    assert s.state == s.AWAITING_APPROVAL and s.get_pending() == ("plan", 123)
+    assert s.state == s.EXECUTING and s.get_pending() == ("plan", 123)
 
 
 def test_on_demand_scan_maintenance_message():

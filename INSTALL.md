@@ -86,7 +86,7 @@ By default Bender (the executor) can run `docker compose`/`docker` commands but 
 privileged at all — `sudo_allowlist` in `config.yaml` is empty until you declare something.
 If you opt in during the wizard, it's scoped to exactly `sudo systemctl <start|stop|restart>
 <unit>` for the specific unit names/glob patterns you declared — nothing else. This is
-enforced twice: once in code (`casa_bender.py`'s `_safety_check()`, independent of whatever a
+enforced twice: once in code (`casa_bender.py`'s `_check_sudo_allowlist()`, independent of whatever a
 generated remediation plan claims it needs) and once by the OS-level `NOPASSWD` sudoers.d
 grant itself. Skipping this step is safe — Planet Express still monitors, diagnoses, and
 proposes remediations, it just can't execute anything that needs `sudo`.

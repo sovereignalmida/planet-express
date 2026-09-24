@@ -74,9 +74,11 @@ class PlanetExpressConfig(BaseModel):
     forbidden_stacks: list[str] = []
     paused_containers: list[str] = []
     backup_jobs: list[Literal["daily", "weekly"]] = ["daily", "weekly"]
-    # D36: the planner emits typed runbooks (slice 5b-2). The old LLM-written shell plans stay
-    # available behind this switch during the transition and are deleted in 5b-5.
-    legacy_plans_enabled: bool = False
+    # Retired in slice 5b-5 with the shell planner it switched on. Still *accepted* so a host that
+    # set it explicitly starts after the upgrade instead of failing config validation before it can
+    # even say why — `extra="forbid"` would otherwise stop core dead on a key that used to be
+    # valid (Codex, T44). Ignored, warned about once at load, and removable at leisure.
+    legacy_plans_enabled: bool | None = None
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
     # /install only ever writes a LAN-only Traefik router (no auth of its own) —
@@ -94,7 +96,7 @@ class PlanetExpressConfig(BaseModel):
         # mixed-case config value (e.g. "CasaLan.com") doesn't reject every valid request.
         return v.lower()
     # Empty by default -- a fresh install grants zero sudo actions until the operator
-    # explicitly declares them here. Enforced in casa_bender.py's _safety_check(),
+    # explicitly declares them here. Enforced in casa_bender.py's _check_sudo_allowlist(),
     # independent of whatever a plan's LLM-generated commands claim to need.
     sudo_allowlist: SudoAllowlist = SudoAllowlist()
 

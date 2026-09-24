@@ -17,15 +17,31 @@ Run one of:
 Read every finding it reports and either fix it or tell the user explicitly why it's being left
 as-is — don't silently drop findings. Both reviews stay in the loop; they catch different things.
 
-This gate is most load-bearing on execution safety. The sudo scope is code-enforced:
-`_check_sudo_allowlist()` in `casa_bender.py` fails closed on any `sudo` that isn't a declared
-`sudo systemctl start|stop|restart <unit>` grant. The boundary that is still NOT enforced by
-structure is legacy LLM-written plans: their steps are shell strings run by `_run_command()` with
-`shell=True`, guarded only by `_safety_check()`'s pattern checks, until Planet Express 2.0 (slice 5)
-replaces them with typed actions that run through `run_argv()` (argv, no shell, minimal
-environment). Changes to any of these (the pattern checks, the sudo allowlist, `run_argv()`, or
-the host-mutation lock in `casa_farnsworth.py`'s `PipelineState`) are exactly the class of
-"unenforced safety boundary" bug an independent second reviewer exists to catch.
+This gate is most load-bearing on execution safety. **There is no shell.** Since Planet Express 2.0
+(slice 5b-5), every change to the host is a typed step in an approved runbook: its parameters are
+validated by a per-type model, its target is bound at proposal time and re-checked immediately
+before it acts, it runs as argv through `run_argv()` with a minimal environment, and its outcome is
+decided by reading host state rather than by an exit code. `_run_command()`, `shell=True` and
+`_safety_check()`'s pattern list are gone, along with the LLM-written shell plans they existed to
+contain. An LLM now chooses *which* typed step to run; it never writes what runs.
+
+What that leaves worth a second reviewer's attention:
+
+- **The step catalogue** (`planet_express/execution/runbook.py`). Adding a step type adds a
+  capability. Its params model, risk class, verifier and inverse are the entire contract.
+- **The sudo scope**, still code-enforced: `_check_sudo_allowlist()` fails closed on any `sudo`
+  that is not a declared `sudo systemctl start|stop|restart <unit>` grant.
+- **Policy and limits** (`planet_express/execution/policy.py`): which risk classes need approval,
+  which origins may run something unattended (only `zoidberg`/`update.canary` and
+  `system`/`prune.safe`), and the T24 attempt limits.
+- **`compose.write`** (`planet_express/execution/compose_files.py`): the one step that writes a
+  file. Its compare-and-swap, its symlink refusals, and the device+inode evidence its inverse uses
+  before deleting anything.
+- **The host-mutation lock** in `casa_farnsworth.py`'s `PipelineState`, which still serialises
+  every mutation against every scan.
+
+A change to any of those is exactly the class of bug an independent second reviewer exists to
+catch, and none of them fails safe by accident — they fail safe because someone checked.
 
 ## Project shape
 

@@ -114,7 +114,6 @@ def test_new_proposal_sends_no_extra_message():
 
 
 def test_action_callback_goes_to_command_service_only(monkeypatch):
-    monkeypatch.setattr(fw, "load_pending_plan", lambda pid: (_ for _ in ()).throw(AssertionError("legacy path")))
     commands = FakeCommands()
     n = FakeNotifier()
     tap = Decision(request_id="a1b2c3d4e5f6", kind="action", approved=True, decided_by="@chris (1001)")
@@ -220,12 +219,10 @@ def test_abort_and_execution_rollback_route_to_the_command_service(monkeypatch):
     assert notifier.notifications == ["Abort requested.", "Rolling back."]
 
 
-def test_legacy_plan_ids_still_use_the_legacy_rollback(monkeypatch):
-    # A 12-hex id is a typed execution; anything else (p1, …) stays on the legacy plan path
-    # until slice 5b-5 retires it.
-    seen = []
+def test_rollback_and_abort_only_ever_mean_an_execution(monkeypatch):
+    """A 12-hex id is a typed execution. Anything else used to fall through to the shell-plan
+    rollback; that path is gone (slice 5b-5), so it is refused with the usage line instead."""
     controls = []
-    monkeypatch.setattr(fw, "_do_rollback", lambda tg, notifier, state, plan_id: seen.append(plan_id))
     monkeypatch.setattr(fw, "_run_execution_control",
                         lambda commands, notifier, control, target, operator: controls.append((control, target)))
     tg = Mock()
@@ -243,5 +240,5 @@ def test_legacy_plan_ids_still_use_the_legacy_rollback(monkeypatch):
         if len(controls) >= 2:
             break
         time.sleep(0.02)
-    assert seen == ["p1"]
     assert sorted(controls) == [("abort", "b" * 12), ("rollback", "a" * 12)]
+    assert any("execution_id" in m for m in notifier.notifications)  # p1 got the usage line

@@ -60,7 +60,6 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STACKS_ROOT", root)
     monkeypatch.setattr(config, "LAN_ONLY_DOMAIN", "casalan.com")
     monkeypatch.setattr(config, "FORBIDDEN_STACKS", ["ai"])
-    monkeypatch.setattr(config, "LEGACY_PLANS_ENABLED", False)
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
     return root
 
@@ -78,18 +77,6 @@ def test_install_proposes_one_runbook_for_the_write_and_the_start(host):
     # the diff travels with the card, so it is handed to propose_plan rather than sent separately
     assert preface and "docker-compose.yml" in preface
     assert not any("docker-compose.yml" in message for message in notifier.notifications)
-
-
-def test_install_keeps_the_legacy_diff_path_behind_the_switch(host, monkeypatch):
-    monkeypatch.setattr(config, "LEGACY_PLANS_ENABLED", True)
-    proposed = []
-    monkeypatch.setattr(fw.bender, "propose_compose_diff",
-                        lambda *a, **k: proposed.append(a) or {"diff_id": "d1", "diff_text": "--- a"})
-    commands, notifier = Commands(), FakeNotifier()
-    fw._process_fry_resolution(notifier, "app", "https://example.com/app", "app.casalan.com",
-                               RESOLUTION, commands)
-    assert commands.proposed == [] and len(proposed) == 1
-    assert notifier.approval_requests and notifier.approval_requests[0][2] == "diff"
 
 
 def test_a_refused_install_is_recorded_and_explained(host, monkeypatch):
@@ -183,3 +170,6 @@ def test_a_refused_proposal_never_shows_a_diff_for_a_change_on_no_offer(host, am
     text = "\n".join(notifier.notifications)
     assert "cooling down" in text
     assert "docker-compose.yml" not in text and "---" not in text
+
+
+# The legacy diff-approval path behind `legacy_plans_enabled` is gone (slice 5b-5).

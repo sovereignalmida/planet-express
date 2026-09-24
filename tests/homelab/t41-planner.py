@@ -14,7 +14,6 @@ the policy/T24 path, the stored plan, and the refusal log. Cases:
              approving it runs the real container through the engine.
   `recipe`   the vpn.resync_port_forward recipe expands to its five steps with real bindings.
   `refused`  a plan the catalogue cannot express writes planner.refused and sends no card.
-  `legacy`   with legacy_plans_enabled the pipeline takes the old path instead (no typed cards).
 """
 
 import sys
@@ -130,35 +129,6 @@ def case_refused():
     assert not cards, "a plan outside the catalogue must never become a card"
 
 
-def case_legacy():
-    """With the switch on, the pipeline must take the old path: pending_plan.json, no typed card.
-
-    Hermes and the planner are stubbed so this exercises the branch, not the LLM."""
-    config.LEGACY_PLANS_ENABLED = True
-    legacy = {"planned_at": "2026-09-23T00:00:00+00:00",
-              "plans": [{"id": "p1", "priority": "high", "title": "Restart it",
-                         "finding_ids": ["f1"], "estimated_downtime": "10s",
-                         "steps": [{"n": 1, "description": "restart the container",
-                                    "command": "docker restart fixture-unhealthy"}],
-                         "rollback": []}]}
-    fw.hermes.analyze = lambda snapshot: FINDINGS
-    fw.hermes.save_findings = lambda findings: None
-    fw.plan = lambda findings: legacy
-    try:
-        store, service = setup()
-        notifier = FakeNotifier()
-        state = fw.PipelineState()
-        before = time.time()
-        config.STATE_PLAN.unlink(missing_ok=True)
-        fw.run_pipeline(notifier, state, "full", incident_store=store, commands=service)
-        typed = [row for row in pending(store)
-                 if row["created_at"] >= before and row["action"] == "runbook"]
-        print(f"== legacy: pipeline ended {state.state}, typed cards: {len(typed)} (want 0); "
-              f"pending_plan.json written: {config.STATE_PLAN.exists()}")
-    finally:
-        config.LEGACY_PLANS_ENABLED = False
-
-
 def case_overlap():
     """Two different plans for the same service each get a card (their keys are plan hashes), so the
     limits have to hold where the attempts are reserved: the second run must refuse (Codex, T41)."""
@@ -196,7 +166,6 @@ if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     reset_attempts()
     for name, case in (("typed", case_typed), ("recipe", case_recipe),
-                       ("refused", case_refused), ("overlap", case_overlap),
-                       ("legacy", case_legacy)):
+                       ("refused", case_refused), ("overlap", case_overlap)):
         if which in (name, "all"):
             case()

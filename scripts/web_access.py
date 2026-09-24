@@ -95,7 +95,7 @@ def plan_web_access(install_dir, run_user, web_user="planetexpress-web",
         ["setfacl", "-R", "-m", f"u:{web_user}:rX", state],
         ["setfacl", "-d", "-m", f"u:{web_user}:rX", state],
         # Existing snapshots are world-readable and rewritten in place, so the core unit's
-        # UMask alone would never remove that; pending_diffs.json holds compose contents.
+        # UMask alone would never remove that; the store holds approved compose contents.
         ["chmod", "-R", "o-rwx", state],
     ])
 

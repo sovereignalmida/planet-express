@@ -12,8 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from state_models import (
     Findings,
     MonitorSnapshot,
-    PlanSet,
-    RollbackCandidates,
     RunStatus,
     UpdateHistory,
 )
@@ -78,17 +76,9 @@ def test_findings_tolerates_llm_parse_error_extras():
     assert reloaded.model_extra.get("_parse_error") == "some LLM hiccup"
 
 
-def test_plan_set_roundtrip():
-    data = {
-        "planned_at": "2026-07-15T14:37:15+00:00",
-        "plans": [{"id": "p1", "priority": "medium", "title": "test", "steps": [], "rollback": []}],
-        "expires_at": "2026-07-16T14:37:15+00:00",
-    }
-    _instance, reloaded = _roundtrip(PlanSet, data)
-    assert reloaded.plans[0]["id"] == "p1"
-
-
 def test_run_status_roundtrip():
+    # "awaiting_approval" is no longer a state anything enters, but a status file written before
+    # slice 5b-5 still has to load (the dashboard reads it on the first render after an upgrade).
     data = {
         "state": "awaiting_approval",
         "pending_plan_id": "p1",
@@ -99,16 +89,9 @@ def test_run_status_roundtrip():
     assert reloaded.pending_msg_id == 397
 
 
-def test_rollback_candidates_roundtrip():
-    data = {
-        "candidates": [{
-            "stack": "services", "service": "dozzle", "old_image_id": "sha256:abc",
-            "recorded_at": "2026-07-15T00:00:00+00:00",
-            "expires_at": "2026-07-15T00:15:00+00:00",
-        }],
-    }
-    _instance, reloaded = _roundtrip(RollbackCandidates, data)
-    assert reloaded.candidates[0].stack == "services"
+# PlanSet and RollbackCandidates were the shapes of state/pending_plan.json and
+# state/rollback_candidates.json. Both files went in slice 5b-5: a plan is an approval row and a
+# canary rollback window is a rollback_candidates table row.
 
 
 def test_update_history_roundtrip_and_reason_optional():

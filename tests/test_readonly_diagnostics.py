@@ -54,8 +54,8 @@ def test_denies_sudo_smuggled_via_compound_command(monkeypatch):
 
 
 def test_denies_forbidden_stack_reference(monkeypatch):
-    # Defense in depth: even a read-only-shaped command against a forbidden stack
-    # must still be rejected by the normal _safety_check pass.
+    # "Never touch these stacks" has always included not reading their logs. The rule moved into
+    # _check_readonly_diagnostic when slice 5b-5 deleted _safety_check; it did not go away.
     monkeypatch.setattr(bender, "FORBIDDEN_STACKS", ["clawbot"])
     monkeypatch.setattr(bender, "run_argv", lambda argv, timeout=None: (0, "", ""))
     monkeypatch.setattr(bender, "_log_step", lambda *a, **k: None)

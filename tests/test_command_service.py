@@ -169,10 +169,10 @@ def test_unknown_action_never_resolves_a_target(env):
 
 
 def test_proposing_does_not_touch_pipeline_state(env):
-    env.state.transition(fw.PipelineState.AWAITING_APPROVAL, plan_id="legacy", msg_id=4)
+    env.state.transition(fw.PipelineState.EXECUTING, plan_id="other", msg_id=4)
     env.propose()
-    assert env.state.state == fw.PipelineState.AWAITING_APPROVAL
-    assert env.state.get_pending() == ("legacy", 4)
+    assert env.state.state == fw.PipelineState.EXECUTING
+    assert env.state.get_pending() == ("other", 4)
 
 
 # ── approve: happy path ─────────────────────────────────────────────────────────
@@ -194,15 +194,17 @@ def test_approve_runs_restart_under_the_lock_then_verifies(env):
     assert env.notifier.request_updates[-1][0] == 1  # card updated with the outcome
 
 
-def test_approve_while_legacy_plan_awaits_leaves_that_plan_pending(env):
-    env.state.transition(fw.PipelineState.AWAITING_APPROVAL, plan_id="legacy", msg_id=8)
+def test_approve_leaves_the_pipeline_state_alone(env):
+    """Approvals live in the store; the pipeline state is about scans, and a typed action must not
+    disturb whatever it says."""
+    env.state.transition(fw.PipelineState.EXECUTING, plan_id="other", msg_id=8)
     approval_id = env.propose().approval_id
 
     result = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
 
     assert result.outcome == "started"
-    assert env.state.state == fw.PipelineState.AWAITING_APPROVAL
-    assert env.state.get_pending() == ("legacy", 8)
+    assert env.state.state == fw.PipelineState.EXECUTING
+    assert env.state.get_pending() == ("other", 8)
 
 
 def test_dashboard_decision_updates_the_card_instead_of_resolving_a_tap(env):

@@ -95,23 +95,4 @@ def test_unparseable_planner_output_never_takes_the_pipeline_down(monkeypatch, s
     assert [e["kind"] for e in store.list_events()] == ["planner.refused"]
 
 
-def test_the_switch_chooses_between_typed_and_legacy_planning(monkeypatch, tmp_path):
-    import config as config_module
-    calls = []
-    monkeypatch.setattr(fw, "_propose_typed_plans",
-                        lambda notifier, findings, commands, store: calls.append("typed"))
-    monkeypatch.setattr(fw, "plan", lambda findings: (calls.append("legacy"), {"plans": []})[1])
-    monkeypatch.setattr(fw, "save_plans", lambda plans: None)
-    monkeypatch.setattr(fw.leela, "run_full", lambda: {"timestamp": "2026-09-23T00:00:00+00:00"})
-    monkeypatch.setattr(fw.hermes, "analyze", lambda snapshot: FINDINGS)
-    monkeypatch.setattr(fw.hermes, "save_findings", lambda findings: None)
-    monkeypatch.setattr(fw, "maybe_run_safe_prune", lambda *a, **k: None)
-    monkeypatch.setattr(config_module, "STATE_MONITOR", tmp_path / "monitor.json")
-
-    for enabled, expected in ((False, "typed"), (True, "legacy")):
-        calls.clear()
-        monkeypatch.setattr(config_module, "LEGACY_PLANS_ENABLED", enabled)
-        state = fw.PipelineState()
-        fw.run_pipeline(FakeNotifier(), state, "full", commands=Commands())
-        assert calls == [expected]
-        assert state.state == fw.PipelineState.IDLE
+# `legacy_plans_enabled` is gone (D36, slice 5b-5): there is one planning path, and it is typed.

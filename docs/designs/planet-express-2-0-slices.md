@@ -2150,6 +2150,66 @@ tasks against `ACTION-SCREENS.md`.
     against `6e50cd8` the next morning instead, fixing forward. The lesson is the obvious one: stage
     the files a commit is about, never `git add -A` in a tree that holds another landing's work.
 
+- [x] **T44 (P1, CC: ~1 session)** — delete the legacy execution path — slice 5b-5: **Planet
+  Express 2.0**. Scope: `docs/handoff/T44-brief.md`. **Implemented by the coordinator.**
+  - **What is gone:** `_run_command` (`shell=True`), `_safety_check` and `FORBIDDEN_COMMANDS`,
+    `execute`/`execute_rollback` and the plan-running CLI, `run_safe_prune`, the whole pending-diffs
+    family, `plan()`/`save_plans()`/`load_pending_plan()`, `_execute_plan`/`_do_rollback`, the
+    legacy `_investigate_failure`, the `plan` and `diff` approval callbacks,
+    `PipelineState.AWAITING_APPROVAL`, `legacy_plans_enabled`, `PlanSet`/`RollbackCandidate(s)`,
+    `state/pending_plan.json`, `state/pending_diffs.json`, `state/rollback_candidates.json`, and
+    the dashboard's pending-plan panels. **1,897 lines deleted, 263 added**; `casa_bender.py` went
+    from 1,158 lines to 568.
+  - **What was deliberately kept:** `run_argv`/`run_argv_bounded`, `_check_sudo_allowlist` and its
+    strict regexes, `SafetyError`/`SudoScopeError`, `read_service_block`, `core_service_active`,
+    `_log_step`, and the read-only diagnostic allowlist. `SAFE_PRUNE_STEPS` became argv lists —
+    there is no shell left to split strings for.
+  - **A policy that nearly went out with the plumbing:** `run_diagnostic` lost `_safety_check`, and
+    with it the rule that a read-only command may not name a forbidden stack. "Never touch these
+    stacks" has always meant not reading their logs either, so that check moved into
+    `_check_readonly_diagnostic` rather than disappearing in a refactor.
+  - **The upgrade path is the dangerous part of a deletion**, so it is explicit: a pending plan or
+    compose diff is announced once at startup and its file renamed to `.retired` (the last record
+    of what was proposed); a card of either kind answers "no longer approvable" instead of having a
+    button that does nothing; a stale `awaiting_approval` status is normalised to idle; and a
+    `config.yaml` that still sets `legacy_plans_enabled` is **accepted and warned about** rather
+    than refused, because failing config validation would stop core before it could explain itself.
+  - **Found by the VM rehearsal, and the most consequential fix in this landing:** an operator's
+    **rollback was being refused by a cooldown**. Rollback children run as origin `rollback`, which
+    5b-3 had made subject to the T24 limits — and you always roll back something that just
+    happened, so the safety valve was exactly the run most likely to be blocked. There is now a
+    `LIMIT_EXEMPT_ORIGINS` set (operator origins plus `rollback`); a rollback's *risk* is still
+    checked, and its steps are still the inverses of an approval that already existed.
+  - **`CLAUDE.md`'s "unenforced boundary" paragraph is rewritten**, which was the point of the
+    slice: there is no shell, an LLM chooses which typed step to run and never writes what runs,
+    and the second-review gate is re-pointed at what is now load-bearing — the step catalogue, the
+    sudo scope, policy and limits, `compose.write`, and the host-mutation lock.
+  - **`tests/test_no_shell.py`** keeps it gone: the deleted names, an AST walk for `shell=True` in
+    every product module, and a check that only the argv runners touch `subprocess`. Reintroducing
+    the shell means deleting that test first, in a diff someone has to justify.
+  - **Codex gate: 5 findings over two rounds, all fixed.** Round 1 was entirely about the upgrade
+    boundary — a `config.yaml` still setting `legacy_plans_enabled` would have failed validation and
+    stopped core **before it could explain itself**; the migration retired pending plans but not
+    pending diffs (the live host has one); and a stale `awaiting_approval` status would have left
+    the dashboard showing a state nothing can enter. Round 2 found two more:
+    - **P1** `/skip` still forced the pipeline to IDLE. With no pending plans left to clear, its
+      only remaining effect was to lie about a running scan — and let a second scan or a mutation
+      start alongside it. It now explains where DENY, `/abort` and `/rollback` went instead, and
+      touches no state.
+    - **P2** the retirement notice was sent *after* the file was renamed, so a Telegram outage at
+      startup would lose it permanently. Told first, renamed second: a repeated message is a
+      nuisance, a dropped one means the operator never learns their pending work is gone.
+
+    Round 3 clean. Worth naming: **every finding across both rounds was about the upgrade boundary
+    or a leftover command**, never about the deleted code. Removing 1,897 lines was the easy part;
+    what needed the scrutiny was what happens to a host that still has the old world on disk.
+  - **Verification:** 1,483 tests pass; Ruff and `node --check` clean.
+  - **Test VM rehearsal:** core started with a full pre-upgrade state planted (a pending plan, a
+    pending compose diff, an `awaiting_approval` status file and `legacy_plans_enabled: true` in
+    config.yaml) — it started, warned about the obsolete key, retired both files, normalised the
+    status, and came up clean. The T39 engine, T40 controls and T41 planner rehearsals were re-run
+    on the deleted-path build and behave as before.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

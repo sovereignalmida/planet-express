@@ -3,7 +3,7 @@ casa_farnsworth.py — Farnsworth: Orchestrator, Planner & Telegram Bot
 "Good news, everyone! I've devised a plan that's only 12% likely to destroy the server."
 
 Runs as a persistent service. Does three things:
-  1. Long-polls Telegram for commands (/check, /status, /updates, /rollback, /skip)
+  1. Long-polls Telegram for commands (/check, /status, /updates, /abort, /rollback)
   2. Handles ✅/❌ inline button callbacks — triggers Bender on approval
   3. Runs a background scheduler (every 6h by default) for the full pipeline
 
@@ -59,7 +59,7 @@ from planet_express.core.store import SchemaTooNewError, Store
 from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
-from state_models import MonitorSnapshot, PlanSet, RunStatus
+from state_models import MonitorSnapshot, RunStatus
 from telegram_client import TelegramClient
 
 log = logging.getLogger("planetexpress.farnsworth")
@@ -604,8 +604,10 @@ class PipelineState:
 
     IDLE = "idle"
     RUNNING = "running"
-    AWAITING_APPROVAL = "awaiting_approval"
     EXECUTING = "executing"
+    # "awaiting_approval" was the state a shell plan sat in while its card waited. Approvals live
+    # in the store now and a typed action never parks the pipeline, so nothing can enter it — a
+    # status file written before the upgrade may still say it, and is read as idle (slice 5b-5).
 
     def __init__(self, maintenance: Callable[[], MaintenanceWindow | None] = active_window):
         self.maintenance = maintenance
@@ -613,9 +615,8 @@ class PipelineState:
         self._state = self.IDLE
         self._pending_plan_id: str | None = None
         self._pending_msg_id: int | None = None
-        # Host-mutation lock, deliberately separate from _state: a legacy plan can sit in
-        # AWAITING_APPROVAL for hours, and returning _state to IDLE clears the pending
-        # plan, so reusing _state would either block every mutation or lose that plan.
+        # Host-mutation lock, deliberately separate from _state: a scan and a mutation are
+        # different things, and one must be able to refuse the other without either owning _state.
         self._mutation_owner: str | None = None
 
     @property
@@ -629,7 +630,7 @@ class PipelineState:
             self._state = new_state
             if new_state == self.IDLE:
                 # Returning to idle always means no plan is pending anymore -- callers
-                # that forget to clear these (e.g. /skip, error paths) previously left
+                # that forget to clear these (error paths) previously left
                 # a stale pending_plan_id behind, which showed up as a dashboard pill
                 # for a plan that was no longer awaiting approval.
                 self._pending_plan_id = None
@@ -646,10 +647,9 @@ class PipelineState:
             return self._pending_plan_id, self._pending_msg_id
 
     # ── Host-mutation lock ────────────────────────────────────────────────────
-    # Every path that changes the host takes this for its whole duration: legacy plan
-    # execution, diff apply, rollback, /patchnow, the weekly update pass, safe-prune,
-    # /up and /down. Check-and-set happens under one acquisition of _lock, so two
-    # callers can never both see it free.
+    # Every path that changes the host takes this for its whole duration: a typed execution,
+    # /patchnow, the weekly update pass, safe-prune, /up and /down. Check-and-set happens under one
+    # acquisition of _lock, so two callers can never both see it free.
     #
     #   try_begin_mutation(owner) ── True ──► mutate ──► end_mutation(owner) (in finally)
     #            │
@@ -827,69 +827,7 @@ def _plan_batch(
         return []
 
 
-def plan(findings: dict) -> dict:
-    """Good news, everyone — Farnsworth has a plan."""
-    result = {
-        "planned_at": datetime.now(timezone.utc).isoformat(),
-        "plans": [],
-    }
-    if not findings.get("findings"):
-        return result
-
-    parse_errors: list = []
-    plans = _plan_batch(
-        findings["findings"], parse_errors, findings.get("update_candidates", [])
-    )
-    # Each split retry is an independent LLM call, so a plan's "id" (e.g. "p1") is
-    # only unique within its own sub-batch — concatenating sub-batches can produce
-    # duplicate ids, which would break the id-based lookups downstream
-    # (load_pending_plan(), /rollback <id>, dashboard_data.summarize_pending_plan()).
-    # Renumber once, here, after all sub-batches are merged.
-    for i, p in enumerate(plans, start=1):
-        p["id"] = f"p{i}"
-    result["plans"] = plans
-    if parse_errors:
-        result["_parse_errors"] = parse_errors
-    log.info(f"Farnsworth devised {len(result['plans'])} plan(s)")
-    return result
-
-
-def save_plans(plans: dict) -> None:
-    config.ensure_dirs()
-    # Add expiry timestamp
-    plans["expires_at"] = (
-        datetime.now(timezone.utc) + timedelta(hours=PLAN_EXPIRY_HOURS)
-    ).isoformat()
-    config.STATE_PLAN.write_text(PlanSet(**plans).model_dump_json(indent=2))
-
-
-def load_pending_plan(plan_id: str) -> dict | None:
-    if not config.STATE_PLAN.exists():
-        return None
-    try:
-        data = json.loads(config.STATE_PLAN.read_text())
-        # Check expiry
-        expires_at = data.get("expires_at")
-        if expires_at:
-            exp = datetime.fromisoformat(expires_at)
-            if datetime.now(timezone.utc) > exp:
-                log.info("Pending plan has expired")
-                return None
-        for p in data.get("plans", []):
-            if p["id"] == plan_id:
-                return p
-    except Exception as e:  # noqa: BLE001
-        log.warning(f"Failed to load pending plan: {e}")
-    return None
-
-
-# ── Safe prune (space pressure + stack health gated) ──────────────────────────
-# Root disk filling up from Docker image/layer buildup was a recurring real problem
-# (monthly or worse) before this existed. Auto-runs, never needs approval — by
-# construction it only removes images/networks Docker itself considers unused by any
-# container, running or stopped, so nothing currently in service is ever at risk.
 DISK_PRUNE_THRESHOLD_PCT = 80
-ROLLBACK_CANDIDATES_FILE = config.ROLLBACK_CANDIDATES_FILE
 
 
 def _root_disk_alert(snapshot: dict) -> dict | None:
@@ -941,31 +879,14 @@ def _safe_to_prune(snapshot: dict) -> bool:
 
 def _has_active_rollback_candidates(commands: CommandService) -> bool:
     """A canary update keeps the image it would roll back to until its grace period passes, so a
-    prune must never remove it. The rows are in the database (slice 5b-3); this **fails closed** —
-    an unreadable table counts as an open window, where the old JSON file was caught and treated as
-    "nothing pending", which is exactly backwards for a safety gate."""
+    prune must never remove it. The rows are in the database; this **fails closed** — an unreadable
+    table counts as an open window, where the JSON file this replaced was caught and treated as
+    "nothing pending", which is exactly backwards for a safety gate. The bridge that honoured that
+    file during the 5b-3 upgrade is gone with it (slice 5b-5)."""
     try:
-        if commands._store.any_open_rollback_candidate(time.time()):
-            return True
+        return commands._store.any_open_rollback_candidate(time.time())
     except Exception:  # unreadable means unknown means do not prune
         log.exception("Could not read the rollback-candidate window; refusing to prune")
-        return True
-    return _legacy_rollback_window_open()
-
-
-def _legacy_rollback_window_open() -> bool:
-    """The upgrade can land while the *previous* updater's window is still open: its entry is in
-    `state/rollback_candidates.json` and nothing imports it (Codex, T42). Honour the file until its
-    windows expire — it is never written again, so this and the file itself go in 5b-5."""
-    if not ROLLBACK_CANDIDATES_FILE.exists():
-        return False
-    try:
-        data = json.loads(ROLLBACK_CANDIDATES_FILE.read_text())
-        now = datetime.now(timezone.utc)
-        return any(datetime.fromisoformat(c["expires_at"]) > now
-                   for c in data.get("candidates", []))
-    except Exception:  # a file that cannot be read may still be protecting an image
-        log.exception("Could not read the legacy rollback-candidate file; refusing to prune")
         return True
 
 
@@ -1117,30 +1038,10 @@ def run_pipeline(
 
         # ── Step 3: Farnsworth plans ─────────────────────────────────────────
         notifier.notify("🧠 *Good news, everyone! Devising plans...*")
-        if not config.LEGACY_PLANS_ENABLED:
-            # Typed runbooks (slice 5b-2): the planner picks catalogue steps, never shell.
-            _propose_typed_plans(notifier, findings, commands, incident_store)
-            state.transition(PipelineState.IDLE)
-            return
-        plans_data = plan(findings)
-        save_plans(plans_data)
-
-        if not plans_data.get("plans"):
-            notifier.notify("_No actionable plans generated._")
-            state.transition(PipelineState.IDLE)
-            return
-
-        # ── Step 4: Send plans to Telegram for approval ──────────────────────
-        for p in plans_data["plans"]:
-            plan_msg = TelegramClient.fmt_plan(p)
-            msg_id = notifier.request_approval(plan_msg, p["id"], "plan")
-            state.transition(
-                PipelineState.AWAITING_APPROVAL,
-                plan_id=p["id"],
-                msg_id=msg_id,
-            )
-            # One plan at a time — pause after first, handle others after execution
-            break
+        # The planner picks catalogue steps, never shell (slice 5b-2); there is no other path.
+        _propose_typed_plans(notifier, findings, commands, incident_store)
+        state.transition(PipelineState.IDLE)
+        return
 
     except Exception as e:
         log.exception("Pipeline error")
@@ -1300,18 +1201,16 @@ def handle_message(
     elif cmd == "/rollback":
         parts = text.split()
         target_id = parts[1] if len(parts) == 2 else None
-        if not target_id:
-            notifier.notify("Usage: `/rollback <execution_id>` (or a legacy `<plan_id>`)")
-        elif commands is not None and re.fullmatch(r"[0-9a-f]{12}", target_id):
-            # A typed execution (slice 5b) rolls back its own applied steps; legacy plan ids keep
-            # the old path until slice 5b-5 retires them.
+        if not target_id or not re.fullmatch(r"[0-9a-f]{12}", target_id):
+            notifier.notify("Usage: `/rollback <execution_id>` — the id on the execution card.")
+        elif commands is None:
+            notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
+        else:
             threading.Thread(
                 target=_run_execution_control,
                 args=(commands, notifier, "rollback", target_id, _telegram_operator(msg)),
                 daemon=True,
             ).start()
-        else:
-            _do_rollback(tg, notifier, state, target_id)
 
     elif cmd == "/abort":
         parts = text.split()
@@ -1328,10 +1227,15 @@ def handle_message(
             ).start()
 
     elif cmd == "/skip":
-        parts = text.split()
-        plan_id = parts[1] if len(parts) > 1 else None
-        notifier.notify(f"⏭️ Skip noted for plan `{plan_id or '?'}`. Manual follow-up required.")
-        state.transition(PipelineState.IDLE)
+        # Skipping meant "drop the plan waiting for approval and go back to idle". There are no
+        # plans waiting on the pipeline any more — an approval lives in the store, and its card's
+        # DENY is how you decline it. Forcing IDLE here would only ever mislead about a scan that
+        # is still running, and let a second scan or a mutation start alongside it (Codex, T44).
+        notifier.notify(
+            "⏭️ `/skip` is gone with the old plan flow. Decline a proposal with its card's "
+            "<b>DENY</b>, stop a running one with `/abort <execution>`, and undo a finished one "
+            "with `/rollback <execution>`."
+        )
 
     elif cmd == "/state":
         notifier.notify(f"Current state: `{state.state}`")
@@ -1539,7 +1443,7 @@ def handle_message(
             "/updates — Image staleness check\n"
             "/patchnow — Run a canary auto-update pass now (normally weekly)\n"
             "/rollback `<id>` — Roll back a plan\n"
-            "/skip `<id>` — Mark plan skipped\n"
+
             "/state — Current pipeline state\n"
             "/stacks — List stacks\n"
             "/mounts — Verify NAS mounts are reachable\n"
@@ -1582,85 +1486,17 @@ def handle_callback(
         )
         return
 
-    if decision.kind == "plan" and decision.approved:
-        # Lock BEFORE resolving the card or touching PipelineState. Previously the card
-        # said "Bender is on it" before anything was checked; while the host is busy the
-        # tap is now only acknowledged, and the card, the pending plan and
-        # AWAITING_APPROVAL stay untouched so the plan can be approved again later.
-        # _execute_plan releases the lock in its finally.
-        owner = f"plan:{decision.request_id}"
-        if not state.try_begin_mutation(owner):
-            notifier.acknowledge(decision, _busy_text(state))
-            return
-        # Until the execution thread has actually started, releasing the lock is this
-        # function's job: if resolve() (Telegram unreachable), the plan load, the state
-        # transition or Thread.start() raises, the poll loop swallows the exception and a
-        # leaked lock would report "busy" for every later mutation until a restart.
-        handed_off = False
-        try:
-            notifier.resolve(
-                decision, "Good news, everyone! Executing...",
-                f"✅ Plan #{decision.request_id} *approved*. Bender is on it.",
-            )
-            p = load_pending_plan(decision.request_id)
-            if not p:
-                notifier.notify(f"⚠️ Plan `{decision.request_id}` not found or expired.")
-                state.transition(PipelineState.IDLE)
-                return
-            state.transition(PipelineState.EXECUTING, plan_id=decision.request_id)
-            try:
-                threading.Thread(
-                    target=_execute_plan, args=(tg, notifier, state, p), daemon=True
-                ).start()
-            except Exception:
-                state.transition(PipelineState.IDLE)
-                raise
-            handed_off = True
-        finally:
-            if not handed_off:
-                state.end_mutation(owner)
-
-    elif decision.kind == "plan" and not decision.approved:
+    if decision.kind in ("plan", "diff"):
+        # Slice 5b-5 deleted the shell-plan and diff-approval paths. A card of either kind can only
+        # be one left over from before the upgrade, and there is nothing behind its buttons now.
         notifier.resolve(
-            decision, "Plan cancelled.",
-            f"❌ Plan #{decision.request_id} *cancelled*.",
+            decision, "No longer approvable.",
+            f"⚠️ This {decision.kind} card predates the upgrade to typed runbooks and can no longer "
+            f"be approved. Ask for the same thing again and it comes back as a plan with its own "
+            f"steps, its own verification and its own undo.",
         )
-        state.transition(PipelineState.IDLE)
-        log.info(f"Plan {decision.request_id} cancelled by user")
-
-    elif decision.kind == "diff" and decision.approved:
-        owner = f"diff:{decision.request_id}"
-        if not state.try_begin_mutation(owner):
-            notifier.acknowledge(decision, _busy_text(state))
-            return
-        try:
-            notifier.resolve(
-                decision, "Applying diff...",
-                f"✅ Diff `{decision.request_id}` <b>applied</b>.",
-            )
-            try:
-                result = bender.apply_pending_diff(decision.request_id)
-                if result["backup_path"]:
-                    backup_line = f"Backup saved at <code>{TelegramClient.s(result['backup_path'])}</code>."
-                else:
-                    backup_line = "New file — no prior version to back up."
-                notifier.notify(
-                    f"📝 Applied. {backup_line}\n"
-                    f"This only wrote the file — nothing has restarted. Run the normal update/restart "
-                    f"plan (or /check) to pick up the change."
-                )
-            except bender.SafetyError as e:
-                notifier.notify(f"⚠️ Could not apply diff `{decision.request_id}`: {TelegramClient.s(str(e))}")
-        finally:
-            state.end_mutation(owner)
-
-    elif decision.kind == "diff" and not decision.approved:
-        notifier.resolve(
-            decision, "Diff discarded.",
-            f"❌ Diff `{decision.request_id}` <b>discarded</b>.",
-        )
-        bender.discard_pending_diff(decision.request_id)
-        log.info(f"Diff {decision.request_id} discarded by user")
+        log.info(f"Ignored a pre-upgrade {decision.kind} card ({decision.request_id})")
+        return
 
 
 def _run_restart_request(
@@ -1873,93 +1709,6 @@ def _investigate_typed_failure(notifier: Notifier, commands: CommandService, eve
         diff_text=_compose_diff_text(current_content, new_content,
                                      f"{stack}/docker-compose.yml"),
     )
-
-
-def _investigate_failure(
-    notifier: Notifier, container: str, reason: str, failed_step_detail: str | None = None
-) -> None:
-    """Escalate to Amy after a plan step or Zoidberg update has already failed once.
-    Never executes anything — sends a diagnosis, and a separate diff proposal with
-    its own approval if a compose-file edit looks necessary.
-
-    failed_step_detail, when the caller has it, is the actual failing plan step's own
-    command + stdout/stderr — a generic `docker logs` tail of the container's app
-    process often shows nothing wrong (e.g. a health check probe vs. an exec-based
-    mount check), so without this Amy is stuck diagnosing blind."""
-    try:
-        # argv, not a shell string: `container` can come from an LLM-written plan.
-        stack_guess, service_guess = actions.container_compose_labels(container)
-
-        current_service_yaml = None
-        block = bender.read_service_block(stack_guess, service_guess)
-        if block:
-            _, current_service_yaml = block
-
-        _, container_logs, _ = bender.run_argv(
-            ["docker", "logs", container, "--tail", "100"],
-            timeout=bender.COMMAND_TIMEOUT_SECONDS,
-        )
-        # Both of these reach an external provider via amy.diagnose() below, on a path
-        # that goes through neither _run_diagnostic_tool nor _log_step — the two places
-        # redaction was wired into. A `docker logs` tail is exactly where a token shows
-        # up, and this runs unattended after a failure (found reviewing T18).
-        container_logs = redact(container_logs)
-        if failed_step_detail:
-            failed_step_detail = redact(failed_step_detail)
-        logs_tail = container_logs
-        if failed_step_detail:
-            # amy.diagnose() bounds the prompt with logs_tail[-4000:], so the failing
-            # step's own output — the most load-bearing evidence here — goes last and
-            # the (less reliable) container logs are capped up front, or a long docker
-            # logs tail would push the failed-step detail out of the window entirely.
-            logs_tail = (
-                f"[Container's own docker logs tail — may look clean if the failure "
-                f"was in an exec/probe step rather than the app process]\n{container_logs[-2000:]}\n\n"
-                f"[Output of the failing plan step itself]\n{failed_step_detail}"
-            )
-        diagnosis = amy.diagnose(
-            stack=stack_guess,
-            service=service_guess,
-            container_name=container,
-            reason=reason,
-            logs_tail=logs_tail,
-            current_service_yaml=current_service_yaml,
-        )
-    except Exception as e:
-        log.exception(f"Amy investigation crashed for {container}")
-        notifier.notify(f"🛑 Amy's investigation of {container} crashed: `{str(e)[:200]}`")
-        return
-
-    notifier.notify(TelegramClient.fmt_diagnosis(stack_guess, container, diagnosis))
-
-    remediation = diagnosis.get("proposed_remediation", {})
-    if not remediation.get("requires_compose_edit"):
-        return
-
-    proposed_yaml = remediation.get("proposed_service_yaml")
-    if proposed_yaml and block:
-        full_content, current_block = block
-        new_content = full_content.replace(current_block, proposed_yaml, 1)
-        try:
-            diff = bender.propose_compose_diff(
-                stack_guess, new_content,
-                reason=f"Amy's diagnosis for {container}: {remediation.get('summary', '')}",
-            )
-            notifier.request_approval(
-                TelegramClient.fmt_diff(stack_guess, remediation.get("summary", ""), diff["diff_text"]),
-                diff["diff_id"], "diff",
-            )
-        except bender.SafetyError as e:
-            notifier.notify(f"⚠️ Amy proposed a compose edit but it couldn't be turned into a diff: {TelegramClient.s(str(e))}")
-    else:
-        # No concrete YAML (Amy wasn't given the block, or chose not to propose one) —
-        # fall back to the human-readable description only.
-        notifier.notify(
-            f"📝 Amy says this needs a compose-file edit: "
-            f"{TelegramClient.s(remediation.get('compose_edit_description', '(no description given)'))}\n\n"
-            f"She didn't have enough to propose an exact diff — that edit still needs to be made "
-            f"by hand and proposed through the normal diff-approval flow."
-        )
 
 
 def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str,
@@ -2313,114 +2062,16 @@ def _process_fry_resolution(notifier: Notifier, stack_name: str, url: str, domai
         )
         return
 
-    if not config.LEGACY_PLANS_ENABLED:
-        # One approval covers writing the file and bringing the stack up (slice 5b-4, D35).
-        _propose_compose_runbook(
-            notifier, commands,
-            lambda: compose_plans.install_runbook(stack_name, new_content, domain=domain),
-            origin="install", requested_by="Fry",
-            summary=f"Install {stack_name} from {url}",
-            diff_text=_compose_diff_text("", new_content, f"{stack_name}/docker-compose.yml"),
-        )
-        return
-    try:
-        diff = bender.propose_compose_diff(
-            stack_name, new_content,
-            reason=f"Fry onboarding {url} as {domain}",
-            is_new_stack=True,
-        )
-        notifier.request_approval(
-            TelegramClient.fmt_diff(stack_name, f"New stack onboarded from {url}", diff["diff_text"]),
-            diff["diff_id"], "diff",
-        )
-    except bender.SafetyError as e:
-        notifier.notify(f"⚠️ Could not turn Fry's resolution into a diff: {s(str(e))}")
+    # One approval covers writing the file and bringing the stack up (slice 5b-4, D35).
+    _propose_compose_runbook(
+        notifier, commands,
+        lambda: compose_plans.install_runbook(stack_name, new_content, domain=domain),
+        origin="install", requested_by="Fry",
+        summary=f"Install {stack_name} from {url}",
+        diff_text=_compose_diff_text("", new_content, f"{stack_name}/docker-compose.yml"),
+    )
 
 
-def _execute_plan(tg: TelegramClient, notifier: Notifier, state: PipelineState, plan_data: dict) -> None:
-    try:
-        result = bender.execute(plan_data, tg)
-        if result["final_status"] == "success":
-            notifier.notify(TelegramClient.fmt_complete(
-                plan_data["id"],
-                result["steps_completed"],
-                result.get("errors", []),
-            ))
-        elif result["final_status"] == "blocked_sudo" and result["steps_completed"] == 0:
-            # Bender already sent a detailed message with the literal blocked
-            # command, and nothing ran before the block — not a real runtime
-            # failure, so skip the generic notify and don't wake up Amy over it.
-            # If earlier steps DID run first, fall through to the normal failure
-            # path below: the plan is partially applied and needs the same
-            # rollback-guidance/investigation treatment as any other failure.
-            pass
-        else:
-            notifier.notify(
-                f"⚠️ Plan #{plan_data['id']} finished with status: `{result['final_status']}`"
-            )
-            container = plan_data.get("container")
-            if container:
-                failed_step_detail = None
-                steps = result.get("results") or []
-                if steps:
-                    failed_step = steps[-1]
-                    # bender's "error" is already stderr-with-a-stdout-fallback (see
-                    # error_summary in casa_bender.py execute()), so it isn't reliably
-                    # "the stderr" — label it generically. Only tack on stdout_summary
-                    # separately when it has content "error" doesn't already cover, to
-                    # avoid duplicating the same text under two mislabeled headers.
-                    step_error = failed_step.get("error") or ""
-                    step_stdout = failed_step.get("stdout_summary") or ""
-                    lines = []
-                    if step_error:
-                        lines.append(f"error_summary: {step_error}")
-                    if step_stdout and step_stdout not in step_error:
-                        lines.append(f"stdout: {step_stdout}")
-                    output = "\n".join(lines) or "(empty)"
-                    failed_step_detail = (
-                        f"command: {failed_step.get('command', '')}\n"
-                        f"exit_code: {failed_step.get('exit_code')}\n"
-                        f"output:\n{output}"
-                    )
-                threading.Thread(
-                    target=_investigate_failure,
-                    args=(notifier, container, f"plan {plan_data['id']} failed: {result.get('errors')}"),
-                    kwargs={"failed_step_detail": failed_step_detail},
-                    daemon=True,
-                ).start()
-    except Exception as e:
-        log.exception("Bender execution error")
-        notifier.notify(f"🛑 Bender crashed: `{str(e)[:200]}`")
-    finally:
-        # Taken by handle_callback before this thread started. Release and return to IDLE
-        # atomically, so a newer approval can't slip in between and be overwritten.
-        state.end_mutation(f"plan:{plan_data['id']}", reset_to_idle=True)
-
-
-def _do_rollback(tg: TelegramClient, notifier: Notifier, state: PipelineState, plan_id: str) -> None:
-    p = load_pending_plan(plan_id)
-    if not p or not p.get("rollback"):
-        notifier.notify(f"⚠️ No rollback steps found for plan `{plan_id}`.")
-        return
-    owner = f"rollback:{plan_id}"
-    if not state.try_begin_mutation(owner):
-        notifier.notify(
-            f"⏳ Busy right now ({state.busy_reason}) — rollback of plan `{plan_id}` not started. "
-            f"Try again shortly."
-        )
-        return
-    try:
-        notifier.notify(f"↩️ *Rolling back plan #{plan_id}...*")
-        result = bender.execute_rollback(p, tg)
-        notifier.notify(
-            f"Rollback complete. Steps executed: {result['steps_completed']}. "
-            f"Errors: {result.get('errors', [])}"
-        )
-    finally:
-        state.end_mutation(owner, reset_to_idle=True)
-
-
-# ── Scheduler ─────────────────────────────────────────────────────────────────
 MAINTENANCE_POLL_SECONDS = 60
 
 
@@ -2623,6 +2274,78 @@ def _init_store(store: Store) -> dict[str, list[dict]]:
     return cutover
 
 
+def _retire_legacy_state(notifier: Notifier) -> None:
+    """Say once, at startup, what the upgrade dropped, and take it out of the way.
+
+    A plan or a compose diff left pending by the shell planner cannot be run any more: its card's
+    buttons answer "no longer approvable" (see handle_callback), but an operator who left one
+    waiting deserves to be told without having to tap it. Each file is renamed rather than deleted
+    — it is the last record of what was proposed — and a status file still claiming
+    `awaiting_approval` is normalised, or the dashboard would keep showing a state nothing can
+    enter (slice 5b-5; Codex, T44).
+    """
+    for filename, kind, describe in (
+        ("pending_plan.json", "plan", lambda data: [
+            str(p.get("title") or p.get("id") or "?") for p in (data.get("plans") or [])]),
+        ("pending_diffs.json", "compose diff", lambda data: [
+            f"{entry.get('stack', '?')} ({entry.get('reason', 'no reason recorded')})"
+            for entry in (data.values() if isinstance(data, dict) else [])
+            if isinstance(entry, dict)]),
+    ):
+        _retire_one(config.STATE_DIR / filename, kind, describe, notifier)
+    _normalise_stale_status()
+
+
+def _retire_one(path: Path, kind: str, describe, notifier: Notifier) -> None:
+    if not path.exists():
+        return
+    titles = []
+    try:
+        titles = describe(json.loads(path.read_text()))
+    except Exception:  # noqa: BLE001 -- a file we cannot read is still a file we are retiring
+        log.warning(f"Could not read the legacy {kind} file while retiring it")
+    if titles:
+        # Told first, renamed second. If Telegram is down the file stays put and the next start
+        # tries again — a repeated message is a nuisance, a dropped one means the operator never
+        # learns their pending work is gone (Codex, T44).
+        listed = "\n".join(f"• {TelegramClient.s(title)}" for title in titles[:5])
+        notifier.notify(
+            f"📋 <b>A pending {TelegramClient.s(kind)} from before the upgrade was dropped</b>\n"
+            f"{listed}\n\nPlans are typed runbooks now — steps, verification and an undo, instead "
+            f"of shell commands and a separate diff approval. Ask for the same thing again and it "
+            f"comes back in that form."
+        )
+    retired = path.with_suffix(".json.retired")
+    try:
+        path.rename(retired)
+    except OSError:
+        log.warning(f"Could not rename the legacy {kind} file")
+        return
+    log.info(f"Retired the legacy {kind} file ({len(titles)} entr(ies)) to {retired.name}")
+
+
+def _normalise_stale_status() -> None:
+    """`awaiting_approval` was the shell planner's "a card is waiting" state. Nothing enters it now,
+    so a status file still saying it would leave the dashboard showing a state that cannot exist
+    until the next transition happens to overwrite it (Codex, T44)."""
+    path = config.STATE_STATUS
+    if not path.exists():
+        return
+    try:
+        status = json.loads(path.read_text())
+    except Exception:  # noqa: BLE001 -- an unreadable status file is rewritten by the next transition
+        return
+    if status.get("state") != "awaiting_approval":
+        return
+    status.update({"state": PipelineState.IDLE, "pending_plan_id": None, "pending_msg_id": None,
+                   "updated_at": datetime.now(timezone.utc).isoformat()})
+    try:
+        path.write_text(json.dumps(status, indent=2))
+        log.info("Normalised a pre-upgrade 'awaiting_approval' run status to idle")
+    except OSError:
+        log.warning("Could not normalise the pre-upgrade run status")
+
+
 def _update_v5_cutover_cards(cutover: dict[str, list[dict]], notifier: Notifier) -> None:
     """Best-effort cleanup of cards whose v4 authority was cut over by migration."""
     for row in cutover.get("expired_approvals", []):
@@ -2713,6 +2436,7 @@ def run_bot() -> None:
         target=_update_v5_cutover_cards, args=(cutover, notifier),
         daemon=True, name="v5-cutover-cards",
     ).start()
+    _retire_legacy_state(notifier)
     interrupted = commands.reconcile_on_startup()
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
@@ -2778,18 +2502,8 @@ if __name__ == "__main__":
     )
 
     parser = argparse.ArgumentParser(description="Farnsworth — Planet Express orchestrator")
-    parser.add_argument("--plan", action="store_true", help="Plan-only: read findings, print plans, exit")
     parser.add_argument("--debug", action="store_true")
-    args = parser.parse_args()
+    parser.parse_args()
 
-    if args.plan:
-        # Standalone planning mode for testing
-        if not config.STATE_FINDINGS.exists():
-            print("No findings file found. Run casa_hermes.py first.", file=sys.stderr)
-            sys.exit(1)
-        findings = json.loads(config.STATE_FINDINGS.read_text())
-        plans = plan(findings)
-        print(json.dumps(plans, indent=2))
-    else:
-        config.ensure_dirs()
-        run_bot()
+    config.ensure_dirs()
+    run_bot()

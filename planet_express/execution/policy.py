@@ -19,6 +19,12 @@ RUNBOOK_ORIGINS = frozenset({
     "planner", "zoidberg", "system", "install", "amy",
 })
 DIRECT_RUNBOOK_ORIGINS = frozenset({"telegram-direct", "dashboard-direct"})
+# Origins whose runs are not counted by T24's attempt limits. Operator origins, because a human
+# asking for something is the gate the limits stand in for — and `rollback`, because an undo is the
+# safety valve: you always roll back something that just happened, so a cooldown on the target
+# would refuse exactly the runs that most need to work. A rollback's *risk* is still checked
+# (CommandService.rollback), and its steps are the inverses of an approval that already existed.
+LIMIT_EXEMPT_ORIGINS = OPERATOR_ORIGINS | frozenset({"rollback"})
 
 
 @dataclass(frozen=True)

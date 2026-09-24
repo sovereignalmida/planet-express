@@ -104,7 +104,6 @@
   // Dismissal only lasts for this browser session and only for the plan ID dismissed --
   // a refresh (or a real reload) should keep a dismissed plan hidden, but a *different*
   // plan ID (new pending plan) should always show up regardless of a past dismissal.
-  var DISMISS_KEY = "planetexpress-dismissed-plan-id";
 
   // Everything in here binds to DOM nodes -- must re-run after every refresh swap
   // (fresh nodes from the fetched HTML have no listeners of their own yet).
@@ -133,23 +132,6 @@
         if (counter) counter.textContent = "showing " + shown + " of " + total;
       });
     }
-
-    document.querySelectorAll(".plan-card").forEach(function (card) {
-      if (card.dataset.planId && card.dataset.planId === sessionStorage.getItem(DISMISS_KEY)) {
-        card.classList.add("hidden");
-      }
-    });
-
-    document.querySelectorAll(".btn-dismiss").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var card = btn.closest(".plan-card");
-        if (!card) return;
-        card.classList.add("hidden");
-        if (card.dataset.planId) {
-          sessionStorage.setItem(DISMISS_KEY, card.dataset.planId);
-        }
-      });
-    });
 
     // Hull Diagnostics low/medium drawer -- one folded disclosure instead of two, so
     // routine lows/mediums can never bury a real signal. Client-side only, same data

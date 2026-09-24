@@ -6,6 +6,7 @@ one place.
 """
 
 import os
+import sys
 from pathlib import Path
 
 from config_io import ConfigError, load_config_file_with_sha256
@@ -48,12 +49,10 @@ RPC_PEER_USERS = [
 
 STATE_MONITOR   = STATE_DIR / "latest_monitor.json"
 STATE_FINDINGS  = STATE_DIR / "latest_findings.json"
-STATE_PLAN      = STATE_DIR / "pending_plan.json"
 STATE_STATUS    = STATE_DIR / "run_status.json"
 # Single source of truth -- used to live as two independently-defined copies in
 # casa_farnsworth.py and casa_zoidberg.py (same path, same drift risk as the old
 # FORBIDDEN_STACKS duplication).
-ROLLBACK_CANDIDATES_FILE = STATE_DIR / "rollback_candidates.json"
 UPDATE_HISTORY_FILE      = STATE_DIR / "update_history.json"
 LAST_SUDO_BLOCK_FILE     = STATE_DIR / "last_sudo_block.json"
 
@@ -82,6 +81,12 @@ def _load_config() -> tuple[PlanetExpressConfig, str]:
 
 _cfg, CONFIG_SHA256 = _load_config()  # sha of the bytes this process is running on (T35)
 
+if _cfg.legacy_plans_enabled is not None:
+    # Accepted so an upgraded host still starts, then said out loud once: leaving it set silently
+    # would look like it still did something (slice 5b-5).
+    print("[config] 'legacy_plans_enabled' is obsolete and ignored: shell plans were removed in "
+          "Planet Express 2.0. You can delete the key from config.yaml.", file=sys.stderr)
+
 STACKS_ROOT = _cfg.stacks_root
 FORBIDDEN_STACKS = _cfg.forbidden_stacks
 PAUSED_CONTAINERS = _cfg.paused_containers
@@ -91,7 +96,6 @@ SUDO_ALLOWLIST = _cfg.sudo_allowlist
 LAN_ONLY_DOMAIN = _cfg.lan_only_domain
 AUTONOMY = _cfg.autonomy
 BACKUP_JOBS = _cfg.backup_jobs
-LEGACY_PLANS_ENABLED = _cfg.legacy_plans_enabled
 
 
 def active_stack_dirs() -> list[Path]:

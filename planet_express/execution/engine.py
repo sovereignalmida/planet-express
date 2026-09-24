@@ -15,7 +15,6 @@ Executors reach the host only through the service's ports (`svc._run_argv`, `svc
 
 import logging
 import re
-import shlex
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -131,7 +130,7 @@ class RunbookEngine:
         # actually reserved (Codex, T41). Operator origins reserve without a cap, as they always have.
         now = self.svc._clock()
         if mutating:
-            enforced = origin not in policy.OPERATOR_ORIGINS
+            enforced = origin not in policy.LIMIT_EXEMPT_ORIGINS
             autonomy = config.AUTONOMY
             refusal = store.reserve_runbook_attempts(
                 execution_id, mutating,
@@ -723,9 +722,9 @@ class RunbookEngine:
     def _prune(self, execution_id, step, params, dispatch) -> StepOutcome:
         dispatch()
         reports, all_ok, any_ok = [], True, False
-        for label, command in bender.SAFE_PRUNE_STEPS:
+        for label, argv in bender.SAFE_PRUNE_STEPS:
             rc, _out, err, _truncated = bender.run_argv_bounded(
-                shlex.split(command), timeout=bender.COMMAND_TIMEOUT_SECONDS, max_bytes=64 * 1024,
+                list(argv), timeout=bender.COMMAND_TIMEOUT_SECONDS, max_bytes=64 * 1024,
             )
             all_ok &= rc == 0
             any_ok |= rc == 0

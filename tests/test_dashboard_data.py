@@ -532,83 +532,12 @@ def test_summarize_update_history_newest_first_and_capped(tmp_path, monkeypatch)
     assert result[0]["service"] == "svc5"  # newest first
 
 
-def test_summarize_pending_plan_none_when_no_plans(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "STATE_PLAN", tmp_path / "nope.json")
-    assert dashboard_data.summarize_pending_plan() is None
-
-
-def test_summarize_pending_plan_hides_step_commands(tmp_path, monkeypatch):
-    plan_path = tmp_path / "pending_plan.json"
-    _write(plan_path, {
-        "planned_at": "2026-07-15T14:37:15+00:00",
-        "plans": [{"id": "p1", "priority": "medium", "title": "test",
-                   "steps": [{"command": "sudo systemctl restart x"}, {"command": "echo done"}],
-                   "rollback": []}],
-    })
-    monkeypatch.setattr(config, "STATE_PLAN", plan_path)
-    status_path = tmp_path / "run_status.json"
-    _write(status_path, {
-        "state": "awaiting_approval", "pending_plan_id": "p1", "updated_at": "2026-07-15T14:37:20+00:00",
-    })
-    monkeypatch.setattr(config, "STATE_STATUS", status_path)
-
-    result = dashboard_data.summarize_pending_plan()
-    assert result["plans"][0]["step_count"] == 2
-    assert result["plans"][0]["fix_steps"] == []
-    assert "command" not in json.dumps(result)  # step commands never surface here
-
-
-def test_summarize_pending_plan_forwards_descriptions_never_commands(tmp_path, monkeypatch):
-    plan_path = tmp_path / "pending_plan.json"
-    _write(plan_path, {
-        "planned_at": "2026-07-15T14:37:15+00:00",
-        "plans": [{"id": "p1", "priority": "high", "title": "test",
-                   "steps": [
-                       {"command": "sudo systemctl restart x", "description": "Restart x"},
-                       {"command": "echo done", "description": "Confirm done"},
-                   ],
-                   "rollback": [
-                       {"command": "sudo systemctl stop x", "description": "Stop x"},
-                   ]}],
-    })
-    monkeypatch.setattr(config, "STATE_PLAN", plan_path)
-    status_path = tmp_path / "run_status.json"
-    _write(status_path, {
-        "state": "awaiting_approval", "pending_plan_id": "p1", "updated_at": "2026-07-15T14:37:20+00:00",
-    })
-    monkeypatch.setattr(config, "STATE_STATUS", status_path)
-
-    result = dashboard_data.summarize_pending_plan()
-    plan = result["plans"][0]
-    assert plan["fix_steps"] == ["Restart x", "Confirm done"]
-    assert plan["rollback_steps"] == ["Stop x"]
-    assert "command" not in json.dumps(result)
-    assert "sudo systemctl" not in json.dumps(result)
-
-
-def test_summarize_pending_plan_hidden_once_run_status_moves_on(tmp_path, monkeypatch):
-    # pending_plan.json is never deleted after resolution -- RunStatus is the only
-    # live signal that a plan is still genuinely pending, not just "the file still
-    # has an old plan in it."
-    plan_path = tmp_path / "pending_plan.json"
-    _write(plan_path, {
-        "planned_at": "2026-07-15T14:37:15+00:00",
-        "plans": [{"id": "p1", "priority": "medium", "title": "test", "steps": [], "rollback": []}],
-    })
-    monkeypatch.setattr(config, "STATE_PLAN", plan_path)
-    status_path = tmp_path / "run_status.json"
-    _write(status_path, {"state": "idle", "pending_plan_id": None, "updated_at": "2026-07-15T15:00:00+00:00"})
-    monkeypatch.setattr(config, "STATE_STATUS", status_path)
-
-    assert dashboard_data.summarize_pending_plan() is None
-
-
 # ── build_dashboard_context() ─────────────────────────────────────────────────────
 
 def test_build_dashboard_context_never_raises_with_no_state(tmp_path, monkeypatch):
     for attr in (
-        "STATE_MONITOR", "STATE_FINDINGS", "STATE_PLAN", "STATE_STATUS",
-        "ROLLBACK_CANDIDATES_FILE", "UPDATE_HISTORY_FILE",
+        "STATE_MONITOR", "STATE_FINDINGS", "STATE_STATUS",
+        "UPDATE_HISTORY_FILE",
     ):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
 
@@ -617,7 +546,6 @@ def test_build_dashboard_context_never_raises_with_no_state(tmp_path, monkeypatc
     assert ctx["health"]["state_available"] is False
     assert ctx["findings"]["list"] == []
     assert ctx["containers"]["total"] == 0
-    assert ctx["pending_plan"] is None
     assert ctx["update_history"] == []
     assert ctx["rollback_candidates"] == []
 
@@ -659,8 +587,7 @@ def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
     from casa_scruffy import _extra_host_count, extract_host
 
     monkeypatch.setattr(config, 'BACKUP_JOBS', ['weekly'])
-    for constant in ('STATE_MONITOR', 'STATE_FINDINGS', 'STATE_STATUS', 'STATE_PLAN',
-                     'UPDATE_HISTORY_FILE', 'ROLLBACK_CANDIDATES_FILE'):
+    for constant in ('STATE_MONITOR', 'STATE_FINDINGS', 'STATE_STATUS', 'UPDATE_HISTORY_FILE'):
         monkeypatch.setattr(config, constant, tmp_path / constant)
     app = Flask(__name__, template_folder=str(Path(__file__).resolve().parent.parent / 'templates'))
     app.add_url_rule('/logout', endpoint='logout', view_func=lambda: '', methods=['POST'])
@@ -800,3 +727,7 @@ def test_services_status_snapshot(tmp_path, monkeypatch):
         "available": False, "stacks": [], "total_stacks": 0,
         "up": 0, "total": 0, "attention": 0,
     }
+
+
+# The pending-plan panel went with the shell planner in slice 5b-5: a proposal is an approval in
+# the store, shown on the actions screen, not a plan file summarised here.

@@ -41,10 +41,6 @@
           <span class="led-dot status-{{ ctx.health.status }}"></span>
           <span class="pipeline-label">pipeline</span>
           <span class="pipeline-state">{{ ctx.pipeline_status.state }}</span>
-          {% if ctx.pipeline_status.state == "awaiting_approval" and ctx.pipeline_status.pending_plan_id %}
-          <span class="pipeline-plan-label">· pending plan</span>
-          <span class="plan-pill">{{ ctx.pipeline_status.pending_plan_id }}</span>
-          {% endif %}
         </div>
         <div class="lastscan">last scan: {{ ctx.health.last_scan or "never" }}</div>
       </div>
@@ -65,12 +61,6 @@
       <span class="beacon-dot {{ 'amber' if ctx.pipeline_status.state == 'awaiting_approval' else '' }}"></span>
       PIPELINE {{ ctx.pipeline_status.state|upper }}
     </span>
-    {% if ctx.pipeline_status.state == "awaiting_approval" and ctx.pipeline_status.pending_plan_id %}
-    <span class="beacon-item">
-      <span class="beacon-dot amber"></span>
-      PLAN {{ ctx.pipeline_status.pending_plan_id }} PENDING
-    </span>
-    {% endif %}
     <span class="beacon-item">
       <span class="beacon-dot teal"></span>
       SENSORS NOMINAL
@@ -526,12 +516,6 @@
             </div>
             {% endfor %}
           </div>
-          {% if ctx.pending_plan %}
-          <div class="dashed-footer">
-            <span class="dot-amber"></span>
-            plan <span style="color: var(--amber);">{{ ctx.pipeline_status.pending_plan_id }}</span> pending — persists in both the collected and awaiting states.
-          </div>
-          {% endif %}
         </section>
 
         <section class="panel">
@@ -800,42 +784,6 @@
         </div>
       </section>
 
-      {% if ctx.pending_plan %}
-      <section class="panel panel-amber plan-card" data-plan-id="{{ ctx.pipeline_status.pending_plan_id }}">
-        <div class="sidebar-head">
-          <span class="led-dot" style="background: var(--amber); box-shadow: 0 0 8px var(--amber);"></span>
-          <span class="title">PLAN {{ ctx.pipeline_status.pending_plan_id }} · PENDING</span>
-        </div>
-        <div class="sidebar-body">
-          {% for p in ctx.pending_plan.plans %}
-          <div class="plan-eyebrow">{{ p.priority|upper if p.priority else 'PLAN' }} · DIAGNOSIS</div>
-          <p class="plan-diagnosis">{{ p.title }} <span class="hl">({{ p.step_count }} step{{ '' if p.step_count == 1 else 's' }})</span></p>
-          {% if p.fix_steps %}
-          <div class="plan-eyebrow">PROPOSED FIX</div>
-          <ul class="plan-fix-list">
-            {% for step in p.fix_steps %}
-            <li>{{ step }}</li>
-            {% endfor %}
-          </ul>
-          {% else %}
-          <p class="muted-body" style="margin-bottom: 14px; font-size: 11.5px;">Full step commands live in the Telegram approval flow, not shown here.</p>
-          {% endif %}
-          {% endfor %}
-
-          <div class="plan-actions">
-            {% if ctx.telegram_bot_username %}
-            <a href="https://t.me/{{ ctx.telegram_bot_username }}" target="_blank" rel="noopener noreferrer" class="btn-approve">Approve via Telegram ✈</a>
-            {% else %}
-            <div class="btn-approve" style="opacity: .55; cursor: default;" title="Set TELEGRAM_BOT_USERNAME in /etc/planetexpress-dashboard.env to enable this link">Approve via Telegram (bot not configured)</div>
-            {% endif %}
-            <div class="plan-actions-row">
-              <button type="button" class="btn-dismiss">Dismiss</button>
-              <div class="btn-soon">Execute here <span class="soon-badge">SOON</span></div>
-            </div>
-          </div>
-        </div>
-      </section>
-      {% endif %}
     </aside>
   </div>
   </div>

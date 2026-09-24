@@ -7,10 +7,10 @@ validated, versioned contract so a future consumer (the read-only dashboard) can
 detect a shape change via schema_version instead of a silent KeyError, not an
 exhaustive schema of every nested dict.
 
-Findings/PlanSet come from LLM output and use extra="allow" -- Hermes/Farnsworth
+Findings comes from LLM output and uses extra="allow" -- Hermes
 already have documented fallback paths for malformed LLM JSON, and machine-generated
 content should tolerate shape drift rather than crash the pipeline. MonitorSnapshot/
-RunStatus/RollbackCandidates/UpdateHistory are internally-produced and stay strict.
+RunStatus/UpdateHistory are internally-produced and stay strict.
 """
 
 from typing import Literal
@@ -51,40 +51,16 @@ class Findings(BaseModel):
     update_candidates: list[dict] = []
 
 
-class PlanSet(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    schema_version: int = 1
-    planned_at: str
-    plans: list[dict] = []
-    expires_at: str | None = None
-
-
 class RunStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = 1
     state: str
+    # Kept as the pipeline's "what is it busy with" fields: a typed execution puts its id here
+    # while it runs. The shell-plan meaning ("a plan card is waiting") went in slice 5b-5.
     pending_plan_id: str | None = None
     pending_msg_id: int | None = None
     updated_at: str
-
-
-class RollbackCandidate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    stack: str
-    service: str
-    old_image_id: str
-    recorded_at: str
-    expires_at: str
-
-
-class RollbackCandidates(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = 1
-    candidates: list[RollbackCandidate] = []
 
 
 class UpdateHistoryEntry(BaseModel):

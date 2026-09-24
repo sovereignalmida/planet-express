@@ -266,7 +266,7 @@ class TelegramClient:
     @staticmethod
     def fmt_diff(stack: str, reason: str, diff_text: str) -> str:
         """Telegram messages cap at 4096 chars — truncate long diffs rather than
-        fail to send; the full diff is always still on disk in pending_diffs.json."""
+        fail to send; the approved content is always still in the runbook the card points at."""
         s = TelegramClient.s
         max_diff_chars = 3200
         truncated = len(diff_text) > max_diff_chars
