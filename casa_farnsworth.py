@@ -1442,8 +1442,7 @@ def handle_message(
             "/status — Quick health snapshot\n"
             "/updates — Image staleness check\n"
             "/patchnow — Run a canary auto-update pass now (normally weekly)\n"
-            "/rollback `<id>` — Roll back a plan\n"
-
+            "/rollback `<execution_id>` — Undo what a finished run applied\n"
             "/state — Current pipeline state\n"
             "/stacks — List stacks\n"
             "/mounts — Verify NAS mounts are reachable\n"
@@ -1452,7 +1451,8 @@ def handle_message(
             "/down `<stack>`|`all` — Needs approval (R2; ingress/all is R3)\n"
             "/restart `<stack>` `<service>` — Propose a verified restart (needs approval)\n"
             "/abort `<execution_id>` — Stop a running action before its next step\n"
-            "/install `<url>` `<domain>` — Fry resolves a project URL, proposes a new stack (diff-approve)\n"
+            "/install `<url>` `<domain>` — Fry resolves a project URL and proposes a new LAN-only "
+            "stack: one approval writes the compose file and brings it up\n"
             "/grant — Show current sudo allowlist scope + how to widen it"
         )
 
@@ -1716,7 +1716,7 @@ def _run_install(notifier: Notifier, stack_name: str, url: str, domain: str,
     """Onboard a new stack from a URL. Fry resolves the project's real deployment
     requirements; this function synthesizes a standalone compose file matching the
     Navidrome precedent (container_name CASA_<NAME>, casaproxy network, LAN-only
-    Traefik router) and proposes it through Bender's existing diff-approve flow.
+    Traefik router) and proposes it as a runbook: one approval covering the write and the start.
     Never writes anything itself — same "human approves the diff" contract as
     _investigate_failure."""
     s = TelegramClient.s

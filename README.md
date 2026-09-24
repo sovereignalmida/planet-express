@@ -74,8 +74,32 @@ safe-prune (only when disk pressure is real, every container is in a known-safe 
 canary rollback window is open). That exemption is keyed to those two step types and to an origin
 assigned by server code — never to anything a model wrote.
 
-![Scruffy dashboard](docs/screenshots/dashboard.png)
-![Telegram approval flow](docs/screenshots/telegram-approval.png)
+![The Overview tab: fleet status, every stack's services, and the ship's computer commentary](docs/screenshots/PlanetExpressDashMain.png)
+
+*The Overview tab. 85 containers across 14 stacks, each one's health collected by Leela on a
+schedule — no LLM involved in gathering any of it.*
+
+### The rest of the dashboard
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/PlanetExpressDashActions.png"><img src="docs/screenshots/PlanetExpressDashActions.png" alt="Actions tab"></a><br><sub><b>Actions</b> — approvals waiting on you, and what recent runs did step by step.</sub></td>
+<td width="50%"><a href="docs/screenshots/PlanetExpressDashConfig.png"><img src="docs/screenshots/PlanetExpressDashConfig.png" alt="Config tab"></a><br><sub><b>Config</b> — edit config.yaml with a compare-and-swap save. Sensitive keys are locked and can only be unlocked on the host, never from here.</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/PlanetExpressDashBackups.png"><img src="docs/screenshots/PlanetExpressDashBackups.png" alt="Backups tab"></a><br><sub><b>Backups</b> — Borg job status and the certificate vault.</sub></td>
+<td width="50%"><a href="docs/screenshots/PlanetExpressDashNetwork.png"><img src="docs/screenshots/PlanetExpressDashNetwork.png" alt="Network tab"></a><br><sub><b>Network</b> — live Traefik routers and AdGuard stats, polled with short timeouts that degrade rather than fail.</sub></td>
+</tr>
+</table>
+
+### Telegram
+
+<img src="docs/screenshots/PlanetExpressTelegram.png" alt="Telegram conversation with Farnsworth" width="420">
+
+Farnsworth reports scans, asks for approval before anything runs, and answers `/help`. The notice
+at the top of that conversation is the 2.0 upgrade doing what it should: a plan left pending by the
+old shell-command flow can't be run any more, so it says so once, names what it was, and retires it
+rather than leaving a button that quietly does nothing.
 
 ## What's tested, what isn't
 
