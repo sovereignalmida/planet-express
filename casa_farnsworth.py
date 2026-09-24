@@ -313,6 +313,27 @@ DIAGNOSTIC_TOOL_SCHEMA = {
 # back. The model's text is logged for debugging and never forwarded.
 
 
+# A diagnostic's output is bounded before it reaches the model, because it is re-sent with every
+# turn of the tool loop. The bound is not the hazard — silence about it is: handed the first 2,000
+# characters of a 40,000-character `docker ps` with no marker, a model reported that the missing
+# containers did not exist and told the operator to go looking for a problem that wasn't there
+# (found reviewing a real chat transcript, 2026-09-24).
+DIAGNOSTIC_STDOUT_CHARS = 8000
+DIAGNOSTIC_STDERR_CHARS = 2000
+
+
+def _clip_for_model(text: str, limit: int) -> str:
+    """Bound `text`, and say so in-band when it is cut, in words aimed at the reader — which here
+    is a model deciding whether it has seen everything."""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + (
+        f"\n[TRUNCATED — showing the first {limit} of {len(text)} characters. This is a partial "
+        f"view: do not conclude anything is absent from it. Re-run with a narrower command "
+        f"(--filter, --format, grep, head) if you need the rest.]"
+    )
+
+
 def _run_diagnostic_tool(command: str, evidence: list) -> str:
     """Execute one diagnostic tool call via Bender's read-only allowlist. Never
     raises — a rejected or failed command becomes visible tool output (so the
@@ -328,8 +349,8 @@ def _run_diagnostic_tool(command: str, evidence: list) -> str:
     record = {
         "command": redact(command),
         "exit_code": exit_code,
-        "stdout": redact(stdout)[:2000],
-        "stderr": redact(stderr)[:1000],
+        "stdout": _clip_for_model(redact(stdout), DIAGNOSTIC_STDOUT_CHARS),
+        "stderr": _clip_for_model(redact(stderr), DIAGNOSTIC_STDERR_CHARS),
     }
     evidence.append(record)
     return json.dumps({k: record[k] for k in ("exit_code", "stdout", "stderr")})

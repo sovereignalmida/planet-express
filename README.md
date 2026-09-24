@@ -74,10 +74,10 @@ safe-prune (only when disk pressure is real, every container is in a known-safe 
 canary rollback window is open). That exemption is keyed to those two step types and to an origin
 assigned by server code — never to anything a model wrote.
 
-![The Overview tab: fleet status, every stack's services, and the ship's computer commentary](docs/screenshots/PlanetExpressDashMain.png)
+![Fleet status: 85 of 85 containers healthy across 14 complete stacks](docs/screenshots/PlanetExpressFleetStatus.png)
 
-*The Overview tab. 85 containers across 14 stacks, each one's health collected by Leela on a
-schedule — no LLM involved in gathering any of it.*
+*Fleet status on the Overview tab. Every container's health is collected by Leela on a schedule —
+no LLM involved in gathering any of it.*
 
 ### The rest of the dashboard
 

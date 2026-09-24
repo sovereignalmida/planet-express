@@ -378,3 +378,32 @@ def test_evidence_literal_across_slice_boundary(monkeypatch):
     output = farnsworth._run_diagnostic_tool("docker ps", evidence)
     assert "split" not in output
     assert "split" not in json.dumps(evidence)
+
+
+# ── truncation has to announce itself ───────────────────────────────────────────
+def test_a_clipped_diagnostic_tells_the_model_it_is_partial(monkeypatch):
+    """Handed the first 2,000 characters of a 40,000-character `docker ps` with no marker, a model
+    reported that the containers it could not see did not exist, and told the operator so. The
+    bound is fine; the silence was not (real chat transcript, 2026-09-24)."""
+    evidence = []
+    long_output = "\n".join(f"CASA_CONTAINER_{n}   up 4 days (healthy)" for n in range(2000))
+    monkeypatch.setattr(farnsworth.bender, "run_diagnostic",
+                        lambda command: (0, long_output, ""))
+
+    result = farnsworth._run_diagnostic_tool("docker ps", evidence)
+
+    assert "TRUNCATED" in result and "partial view" in result
+    assert str(len(long_output)) in result          # says how much it did not show
+    assert "do not conclude anything is absent" in result.lower()
+    assert evidence[0]["stdout"].endswith("]")      # the operator sees the same marker
+
+
+def test_output_that_fits_is_passed_through_untouched(monkeypatch):
+    evidence = []
+    monkeypatch.setattr(farnsworth.bender, "run_diagnostic",
+                        lambda command: (0, "CASA_ONE up 4 days", ""))
+
+    result = farnsworth._run_diagnostic_tool("docker ps", evidence)
+
+    assert "TRUNCATED" not in result
+    assert evidence[0]["stdout"] == "CASA_ONE up 4 days"
