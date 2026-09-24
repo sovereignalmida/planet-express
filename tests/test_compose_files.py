@@ -179,3 +179,28 @@ def test_a_missing_backup_refuses_rather_than_guessing(root):
     with pytest.raises(cf.ComposeWriteError, match="backup"):
         cf.restore(path, record, stacks_root=root, written_sha256=cf.sha256_text(NEW))
     assert path.read_text() == NEW
+
+
+def test_the_recorded_identity_is_the_file_we_renamed_not_whatever_is_there_now(root, monkeypatch):
+    """A writer replacing the path between our rename and the record must not get its own file
+    recorded as ours — that file would later be deleted by the inverse (Codex, T43)."""
+    path = stack(root)
+    theirs = {}
+    real_replace = os.replace
+
+    def replace_then_theirs(src, dst):
+        real_replace(src, dst)
+        other = Path(dst).with_name("theirs")
+        other.write_text(NEW)
+        real_replace(other, dst)                # same bytes, different file
+        theirs["ino"] = Path(dst).stat().st_ino
+
+    monkeypatch.setattr(os, "replace", replace_then_theirs)
+    record = write(root, path, NEW, expected_sha256=cf.sha256_text(OLD))
+    assert record.staged_file["ino"] != theirs["ino"]
+
+    monkeypatch.undo()
+    with pytest.raises(cf.ComposeWriteError, match="no longer the file this step wrote"):
+        cf.restore(path, cf.WriteRecord(None, None, True, False, None, record.staged_file),
+                   stacks_root=root, written_sha256=cf.sha256_text(NEW))
+    assert path.exists()

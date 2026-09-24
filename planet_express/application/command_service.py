@@ -339,7 +339,7 @@ class CommandService:
 
     def propose_plan(
         self, runbook: runbooks.Runbook, *, requested_by: str | None = None,
-        finding_ids: list | None = None, origin: str = "planner",
+        finding_ids: list | None = None, origin: str = "planner", preface: str | None = None,
     ) -> ProposeResult:
         """Propose a multi-step plan the planner (or Amy) chose from the catalogue. The document is
         already validated with server-built bindings; policy, T24 limits, dedup, the card and the
@@ -391,12 +391,23 @@ class CommandService:
                 return ProposeResult(True, conflict.approval_id, False, "already awaiting approval")
             if created or row["message_id"] is None:
                 try:
+                    if preface:
+                        # Sent here and nowhere else: the operator reads this (a compose diff) and
+                        # then the card's buttons appear under it. A refused or deduplicated
+                        # proposal never reaches this point, so it never shows a change that is not
+                        # actually on offer (Codex, T43).
+                        self._notifier.notify(preface)
                     message_id = self._notifier.request_approval(
                         self._plan_card_text(row, runbook, requested_by), row["id"], "action")
                     self._store.set_message_id(row["id"], message_id)
                 except Exception:  # noqa: BLE001 -- Telegram errors can carry the bot token
                     log.warning(f"Failed to send the plan card for {row['id']}")
                     self._store.record_event("proposal.card_failed", approval_id=row["id"])
+                    if preface:
+                        # The operator has already seen the change; do not leave it looking like
+                        # something they can approve (Codex, T43).
+                        self._notify_quietly("⚠️ That change was <b>not</b> proposed — its approval "
+                                             "card could not be sent. Nothing is awaiting you.")
                     return ProposeResult(False, row["id"], created,
                                          "could not send the approval card; propose it again")
                 return ProposeResult(True, row["id"], created, "awaiting approval")

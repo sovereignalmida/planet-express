@@ -44,8 +44,9 @@ class Commands:
         self.events = []
         self.result = SimpleNamespace(ok=ok, reason=reason, approval_id="a" * 12, created=True)
 
-    def propose_plan(self, runbook, *, requested_by=None, finding_ids=None, origin="planner"):
-        self.proposed.append((runbook, origin, requested_by))
+    def propose_plan(self, runbook, *, requested_by=None, finding_ids=None, origin="planner",
+                     preface=None):
+        self.proposed.append((runbook, origin, requested_by, preface))
         return self.result
 
     def record_event(self, kind, **fields):
@@ -69,12 +70,14 @@ def test_install_proposes_one_runbook_for_the_write_and_the_start(host):
     fw._process_fry_resolution(notifier, "app", "https://example.com/app", "app.casalan.com",
                                RESOLUTION, commands)
     assert len(commands.proposed) == 1
-    runbook, origin, requested_by = commands.proposed[0]
+    runbook, origin, requested_by, preface = commands.proposed[0]
     assert [s.type for s in runbook.steps] == ["compose.write", "stack.up"]
     assert (origin, requested_by) == ("install", "Fry")
     assert runbook.steps[0].params["expected_absent"] is True
     assert "app.casalan.com" in next(iter(runbook.artifacts.values()))
-    assert any("docker-compose.yml" in message for message in notifier.notifications)
+    # the diff travels with the card, so it is handed to propose_plan rather than sent separately
+    assert preface and "docker-compose.yml" in preface
+    assert not any("docker-compose.yml" in message for message in notifier.notifications)
 
 
 def test_install_keeps_the_legacy_diff_path_behind_the_switch(host, monkeypatch):
@@ -129,9 +132,10 @@ def test_amys_compose_edit_becomes_its_own_runbook(host, amy):
     commands, notifier = Commands(), FakeNotifier()
     fw._investigate_typed_failure(notifier, commands, EVENT)
     assert len(commands.proposed) == 1
-    runbook, origin, requested_by = commands.proposed[0]
+    runbook, origin, requested_by, preface = commands.proposed[0]
     assert [s.type for s in runbook.steps] == ["compose.write", "stack.up"]
     assert (origin, requested_by) == ("amy", "Amy")
+    assert preface and "docker-compose.yml" in preface
     assert runbook.steps[0].params["expected_old_sha256"] == cf.sha256_text(
         cf.compose_path_for(host, "media").read_text())
     assert "nginx:1.28-alpine" in next(iter(runbook.artifacts.values()))
@@ -168,3 +172,14 @@ def test_amys_crash_never_escapes_the_hook(host, amy, monkeypatch):
     commands, notifier = Commands(), FakeNotifier()
     fw._investigate_typed_failure(notifier, commands, EVENT)
     assert any("crashed" in m for m in notifier.notifications)
+
+
+def test_a_refused_proposal_never_shows_a_diff_for_a_change_on_no_offer(host, amy):
+    """The diff is handed to `propose_plan`, which sends it only immediately before a card it is
+    actually going to deliver — a refusal shows the reason and nothing else (Codex, T43)."""
+    commands = Commands(ok=False, reason="cooling down: last attempt 2m ago")
+    notifier = FakeNotifier()
+    fw._investigate_typed_failure(notifier, commands, EVENT)
+    text = "\n".join(notifier.notifications)
+    assert "cooling down" in text
+    assert "docker-compose.yml" not in text and "---" not in text

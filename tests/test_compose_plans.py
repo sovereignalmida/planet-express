@@ -128,7 +128,7 @@ def test_an_edit_may_not_name_a_service_the_file_does_not_declare(host):
     existing(host)
     new = CONTENT.replace("nginx:1.27-alpine", "nginx:1.28-alpine")
     with pytest.raises(cp.ComposePlanRefused, match="not a service"):
-        cp.edit_runbook("media", new, current_content=CONTENT, restart=["ghost"])
+        cp.edit_runbook("media", new, current_content=CONTENT, expect=["ghost"])
 
 
 def test_an_edit_may_keep_a_public_router_it_did_not_write(host):

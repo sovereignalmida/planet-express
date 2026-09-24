@@ -147,6 +147,14 @@ class UnitBinding(StrictModel):
     unit: UnitName
 
 
+class FileIdentity(StrictModel):
+    """A file's identity on this host: device and inode. Content is not identity — two files can
+    hold the same bytes (design §4.6, Codex T43)."""
+
+    dev: int = Field(ge=0)
+    ino: int = Field(ge=0)
+
+
 class ComposeRestoreBinding(StrictModel):
     """Everything the restore needs, as the write recorded it."""
 
@@ -158,6 +166,10 @@ class ComposeRestoreBinding(StrictModel):
     created_file: bool = False
     created_directory: bool = False
     directory_inode: int | None = None
+    # Carried so the delete can re-check it at the moment of deleting, not only when the plan was
+    # built: an approval sits between the two, and another writer can replace the file in that
+    # window (Codex, T43).
+    staged_file: FileIdentity | None = None
 
 
 class ComposeWriteBinding(StrictModel):

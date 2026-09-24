@@ -537,6 +537,8 @@ class RunbookEngine:
                 path, content, stacks_root=config.STACKS_ROOT,
                 expected_sha256=params.get("expected_old_sha256"),
                 expect_absent=bool(params.get("expected_absent")), backup_suffix=suffix,
+                on_staged=lambda identity: self.svc._store.note_step_progress(
+                    execution_id, dispatch.n, {"phase": "staged", "staged_file": identity}),
             )
         except compose_files.ComposeWriteError as exc:
             return StepOutcome("failed", "not_applied", str(exc))
@@ -545,7 +547,7 @@ class RunbookEngine:
         self.svc._store.note_step_progress(execution_id, dispatch.n, {
             "phase": "written", "backup_path": record.backup_path,
             "created_file": record.created_file, "created_directory": record.created_directory,
-            "directory_inode": record.directory_inode,
+            "directory_inode": record.directory_inode, "staged_file": record.staged_file,
         })
         what = "created" if record.created_file else "updated"
         return StepOutcome(
@@ -561,6 +563,7 @@ class RunbookEngine:
             created_file=bool(binding.get("created_file")),
             created_directory=bool(binding.get("created_directory")),
             directory_inode=binding.get("directory_inode"),
+            staged_file=binding.get("staged_file"),
         )
         try:
             compose_files.check_path(config.STACKS_ROOT, path)
@@ -852,6 +855,20 @@ def rollback_preview(step_rows: list[dict]) -> dict:
     return {"undo": undo, "unknown": unknown, "not_reversible": not_reversible}
 
 
+def _is_the_staged_file(pre: dict) -> bool:
+    """Is the file at this path the one the interrupted write staged? Its device and inode say so
+    or they do not; a file with the same content but a different identity is somebody else's
+    (Codex, T43)."""
+    staged, path = pre.get("staged_file"), pre.get("compose_path")
+    if not isinstance(staged, dict) or not path:
+        return False
+    try:
+        current = Path(path).stat()
+    except OSError:
+        return False
+    return (current.st_dev, current.st_ino) == (staged.get("dev"), staged.get("ino"))
+
+
 def _now_effect(svc, row: dict) -> str:
     """Re-reconcile an `unknown` conditional step against fresh host state (design §11 A2)."""
     pre = row["pre_state"] or {}
@@ -917,15 +934,32 @@ def plan_rollback(svc, title: str, step_rows: list[dict]) -> RollbackPlan:
         params = row["params"] or {}
         if row["type"] == "compose.write":
             pre = row["pre_state"] or {}
+            # "This step created the file" is only ever claimed on evidence that the step's own
+            # write landed: the record it wrote afterwards, or — if it was interrupted before that —
+            # the file at this path still carrying the inode of the one it staged for the rename.
+            # No inference from the pre-write look or from the approval's expectation: a concurrent
+            # writer can falsify both, and the cost of being wrong is deleting someone else's file
+            # (Codex, T43).
+            created_file = bool(pre.get("created_file"))
+            if "created_file" not in pre and pre.get("previous_sha256") is None:
+                created_file = _is_the_staged_file(pre)
+            staged_file = pre.get("staged_file") if created_file else None
+            if "created_directory" in pre:
+                created_directory = bool(pre["created_directory"])
+            else:
+                created_directory = created_file and pre.get("directory_existed") is False
             binding = {
                 "compose_path": pre.get("compose_path") or (row["binding"] or {})["compose_path"],
                 "project": params["stack"],
                 "written_sha256": params["content_sha256"],
                 "backup_path": pre.get("backup_path"),
                 "previous_sha256": pre.get("previous_sha256"),
-                "created_file": bool(pre.get("created_file")),
-                "created_directory": bool(pre.get("created_directory")),
+                "created_file": created_file,
+                "created_directory": created_directory,
+                # Unknown after an interrupted write: `restore` then keeps the directory and only
+                # removes the file, which is the conservative half of the inverse.
                 "directory_inode": pre.get("directory_inode"),
+                "staged_file": staged_file,
             }
             steps.append({"type": "compose.restore", "params": {"stack": params["stack"]},
                           "binding": binding})

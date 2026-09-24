@@ -1316,3 +1316,36 @@ def test_run_automatic_creates_an_execution_without_a_card(env, monkeypatch):
     assert execution["status"] == "failed"
     approval = env.store.get_approval(execution["approval_id"])
     assert (approval["origin"], approval["status"]) == ("zoidberg", "approved")
+
+
+def test_propose_plan_sends_its_preface_immediately_before_the_card(env):
+    """A compose diff has to reach the operator with the buttons that approve it, and never when
+    the proposal is refused or deduplicated (Codex, T43)."""
+    order = []
+    env.notifier.notify = lambda message: order.append(("notify", message))
+    original = env.notifier.request_approval
+    env.notifier.request_approval = lambda text, key, kind: (
+        order.append(("card", key)), original(text, key, kind))[1]
+
+    plan = _plan(env, "web")
+    first = env.service.propose_plan(plan, requested_by="Amy", origin="amy", preface="THE DIFF")
+    assert first.ok and [kind for kind, _ in order] == ["notify", "card"]
+    assert order[0][1] == "THE DIFF"
+
+    # the identical plan dedups: no second card, so no second diff
+    order.clear()
+    again = env.service.propose_plan(plan, requested_by="Amy", origin="amy", preface="THE DIFF")
+    assert again.ok and not again.created and order == []
+
+
+def test_a_preface_whose_card_cannot_be_sent_says_so(env, monkeypatch):
+    """The operator has already seen the change; it must not be left looking approvable."""
+    said = []
+    monkeypatch.setattr(env.notifier, "notify", lambda message: said.append(message))
+    monkeypatch.setattr(env.notifier, "request_approval",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("telegram is down")))
+    result = env.service.propose_plan(_plan(env, "web"), requested_by="Amy", origin="amy",
+                                      preface="THE DIFF")
+    assert not result.ok
+    assert said[0] == "THE DIFF"
+    assert "not</b> proposed" in said[1] and "Nothing is awaiting you" in said[1]

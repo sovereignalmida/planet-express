@@ -141,15 +141,17 @@ def install_runbook(stack: str, content: str, *, domain: str, lan_only_domain: s
     })
 
 
-def edit_runbook(stack: str, content: str, *, current_content: str, restart: list[str] | None = None,
-                 binder=None, resolve_target=None, title: str | None = None) -> runbooks.Runbook:
-    """Amy's compose edit: write the file, then apply it — `stack.up` recreates what changed, and
-    the named services are checked afterwards."""
+def edit_runbook(stack: str, content: str, *, current_content: str, expect: list[str] | None = None,
+                 title: str | None = None) -> runbooks.Runbook:
+    """Amy's compose edit: write the file, then `stack.up`, which recreates whatever the edit
+    changed. `expect` names services the caller believes the edit is about; they are checked
+    against the proposed file so an edit that silently drops or renames the service it was supposed
+    to fix is refused here rather than discovered afterwards."""
     path = _check_target(stack, new_stack=False)
     if content == current_content:
         raise ComposePlanRefused("the proposed content is identical to the current file")
     services = parse_services(content)
-    for name in restart or []:
+    for name in expect or []:
         if name not in services:
             raise ComposePlanRefused(f"{name} is not a service in the proposed file")
     steps = [

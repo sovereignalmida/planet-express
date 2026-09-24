@@ -2034,6 +2034,122 @@ tasks against `ACTION-SCREENS.md`.
     `rollback_failed`, the Telegram message said "needs manual attention now", and the window was
     pinned open — the prune gate still saw it with the clock pushed a day forward.
 
+- [x] **T43 (P1, CC: ~1 session)** — typed compose writes — slice 5b-4: `compose.write` with
+  staged bindings, and `/install` and Amy's edits as runbooks. Scope: `docs/handoff/T43-brief.md`.
+  **Implemented by the coordinator.** Note the process failure recorded under the `v2.0.0-10`
+  deployment below: this landing's code shipped inside that tag before its gate had run, and the
+  gate was run against the deployed commit the next morning instead.
+  - **`compose.write` (R3, conditional inverse)** takes `{stack, content_sha256}` plus exactly one
+    of `expected_old_sha256` or `expected_absent`; the content itself is a runbook artifact, so the
+    approved document carries exactly what will be written. `planet_express/execution/compose_files.py`
+    does the write: compare-and-swap against that expectation, **no symlink on any path component**
+    (checked component by component — `resolve()` "succeeds" for a broken link, which is how a
+    write escapes `stacks_root`), temp file, fsync, mode/owner/ACL of the file being replaced,
+    rename, directory fsync. `.env` is never written and a non-compose filename is refused.
+  - **`compose.restore`** is its inverse, built by `plan_rollback` from what the write recorded:
+    restore the backup for an edit, or remove a created file — and the directory only if this step
+    created it, it is the same inode, and it is empty. Either way only while the file still holds
+    exactly what the step wrote, so a human edit since then is never silently reverted.
+  - **Staged bindings (§4.2):** a new stack has nothing on disk to bind at proposal time, so the
+    `stack.up` step binds to the **artifact's** fingerprint and the service names parsed from it.
+    At execution the engine re-reads the file and compares it against exactly that, so a write that
+    landed something else fails the next step. **Deviation:** the design also called for a
+    `check.container` after `stack.up` bound to that step's outputs; that needs binding-level
+    references (not just param references) and `stack.up`'s own verification already covers the
+    same ground, so it is not built. Recorded rather than quietly dropped.
+  - **Flows:** `/install` builds `[compose.write(expected_absent), stack.up]` and Amy's edit builds
+    `[compose.write(expected_old_sha256), stack.up]` — **one approval covering the write and the
+    start**, where the old flow needed a diff approval and then an unrelated second approval. Both
+    refuse on the *parsed artifact*: forbidden stacks, the ingress stack, symlinks, the new-stack
+    name charset, and D35's LAN-only rule (including a second host smuggled into a Traefik rule).
+    The diff is handed to `propose_plan`, which sends it immediately before the card it is actually
+    going to deliver. The legacy `propose_compose_diff` path stays behind `legacy_plans_enabled`.
+  - **Amy is wired to the engine's post-failure hook** (unused in production until now): a failed
+    typed run gets her diagnosis, and any compose edit she proposes becomes its own runbook with
+    its own approval.
+  - **T24 limits learned the difference between a mutation and a repeat:** `StepType.limited`. A
+    compare-and-swap write cannot repeat (its expectation no longer holds) and is always
+    operator-approved, and counting it only blocked a second legitimate edit of the same stack —
+    found in the VM rehearsal, where an install and an edit minutes apart refused each other.
+  - **Codex gate (run against the already-deployed commit, then against the fixes): 4 findings,
+    all fixed.**
+    - **P2** the approval card reached the operator before the diff, so an R3 compose write could be
+      approved before its content was visible. (Found independently at the same time.)
+    - **P2** the first fix sent the diff *before* knowing the proposal was accepted, so a refused or
+      deduplicated plan showed a change that was not on offer → the diff is now handed to
+      `propose_plan`, which emits it immediately before a card it will actually deliver.
+    - **P2** a crash between `os.replace()` and the progress write left only the pre-write record,
+      and the rollback defaulted `created_file` to false: undoing an interrupted **new-stack** write
+      would hunt for a backup that never existed and fail.
+    - **P2** the first version of that fix trusted the approval's `expected_absent` as proof of
+      creation — so a create that found a file already there (drift) and crashed before rejecting it
+      would have been "rolled back" by deleting a file it never wrote.
+    - **P1** and the round of that argument which actually ends it: *any* inference from the
+      pre-write observation can be falsified by a concurrent writer, so the step now records the
+      **inode of the file it stages for the rename**, before the rename. "This step created the
+      file" is claimed only on the record the write left, or on that inode still being the one at
+      the path — evidence, not inference. A file another writer created with identical content has
+      a different identity and is never touched; with no evidence either way the inverse refuses.
+    - **P2** an inode number alone is not a durable identity — it can collide across filesystems and
+      be reused after a delete — so the record is the **device and inode** of the staged file.
+      *Partially accepted:* the review also asked for ctime, which cannot work here, because
+      `rename` updates ctime by definition and a value read before the rename could never match the
+      file afterwards. The residual window is an inode reused at the same path, on the same device,
+      by a file whose content also matches the approved artifact, for a step interrupted between
+      its rename and its next write — and it is written down here rather than left implicit.
+    - **P1** the identity was checked when the rollback **plan** was built, with an operator
+      approval sitting between that and the delete. Another writer can replace the path in that
+      window with the same approved bytes, and the content check would have accepted it. The staged
+      identity is now carried in the `compose.restore` binding and re-checked **immediately before
+      the unlink** — the same "verify at the moment of acting" rule the engine's drift checks
+      follow. A completed write records the landed file's identity too, so both paths are covered.
+    - **P1** that record was then re-derived by stat-ing the shared path after the rename, so a
+      writer replacing the file in that instant would have had *its* file recorded as ours (and
+      later deleted). The record now carries the identity captured from the temp file we renamed.
+    - **P2** a diff shown ahead of a card whose delivery then failed left the operator with a change
+      that looked approvable → that case now says "not proposed, nothing is awaiting you".
+    - **Declined, with reason:** the same review asked for the identity check and the `unlink` to be
+      made *indivisible*. They cannot be, on this platform: POSIX has no "unlink this inode" (Linux
+      has no `funlinkat`), and a writer using `rename` does not participate in any lock this process
+      could take. The check sits as close to the unlink as the platform allows, and the residual —
+      an uncooperative writer replacing the file with the approved bytes inside a stat/unlink gap,
+      during an approved rollback — is recorded here rather than papered over with a lock that
+      would not hold.
+  - **Where the gate stopped, and why:** seven rounds, all on one question — *did this step create
+    this file?* Each answer was narrowed by the next round: the approval's intent, then the
+    pre-write look, then device+inode as evidence, then that evidence re-checked at the moment of
+    deleting, then captured rather than re-derived. The remaining scenarios all require a
+    concurrent uncooperative writer racing an approved rollback on the same path, which is the
+    point at which further rounds buy wording rather than safety.
+  - **Verification:** 1,482 tests pass (`tests/test_compose_files.py` 18, `test_compose_write_step.py`
+    13, `test_compose_plans.py` 21, `test_compose_flows.py` 9, plus `propose_plan` preface tests);
+    Ruff clean.
+  - **Test VM rehearsal** (`tests/homelab/t43-compose.py`): a brand-new LAN-only stack installed end
+    to end (write then up, container running, mode 0644); an edit applied with its backup kept; a
+    file edited between approval and execution **refused without writing**, leaving the human's line
+    intact; rollback restoring an edit, and removing a created stack *with* the directory it
+    created; and a kill between the write and the start reconciled to `compose.write applied` /
+    `stack.up unknown`, with the rollback preview offering to undo only the write.
+
+- **Slice 5b-3 live deployment (2026-09-23):** tagged `v2.0.0-10` at `6e50cd8` and deployed it to
+  `live/deployed`, with the host-only disk-monitoring override replayed as `726b0d8`. Snapshot
+  `20260923T220252Z-pre-v2-0-0-10`; previous code on `live-backup-9` (`0a9f116`). No schema or
+  config change: the database stayed at v5 with `foreign_key_check` and `integrity_check` clean and
+  all 2 approvals / 2 executions / 26 events intact, so rollback is code-only. Both units active
+  with 0 restarts, `/` 302, `/login` and the static assets 200, journals clean. The scheduled scan
+  a minute later completed cleanly (85 healthy containers, 0 findings), as did the 05:04 scan the
+  next morning; no canary or compose events, no new executions.
+  - **Process failure, recorded deliberately:** the commit tagged as `v2.0.0-10` was made with
+    `git add -A` while **slice 5b-4 was in progress in the same tree**, so that commit — labelled as
+    the one-line canary crash fix — also carries the whole of T43 (`compose_files.py`,
+    `compose_plans.py`, the `compose.write`/`compose.restore` steps, the `/install` typed branch,
+    the Amy failure hook, the T24 `limited` change). **Un-gated 5b-4 code therefore shipped to the
+    live host**: it had the full test suite and a VM rehearsal behind it, but not the Codex gate the
+    standing process requires before landing. Nothing rolled back — the new paths are unreachable
+    without `/install` or a failed typed execution, and neither had occurred — and the gate was run
+    against `6e50cd8` the next morning instead, fixing forward. The lesson is the obvious one: stage
+    the files a commit is about, never `git add -A` in a tree that holds another landing's work.
+
 ## Reviewer Concerns
 
 Three adversarial review rounds found 29 issues. 28 were fixed in this doc; one was an incorrect

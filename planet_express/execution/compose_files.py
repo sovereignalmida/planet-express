@@ -74,11 +74,12 @@ class WriteRecord:
     created_file: bool
     created_directory: bool
     directory_inode: int | None
+    staged_file: dict | None = None   # {"dev", "ino"} of the file this write put at the path
 
 
 def write_compose(
     path: Path, content: str, *, stacks_root: Path, expected_sha256: str | None,
-    expect_absent: bool, backup_suffix: str,
+    expect_absent: bool, backup_suffix: str, on_staged=None,
 ) -> WriteRecord:
     """Compare-and-swap one compose file, atomically. Raises ComposeWriteError, having written
     nothing, if the expectation no longer holds."""
@@ -110,6 +111,7 @@ def write_compose(
         shutil.copy2(path, backup_path)     # copy2 keeps mode and times; the backup is the inverse
 
     descriptor, temporary = tempfile.mkstemp(dir=str(directory), prefix=".compose-", suffix=".tmp")
+    identity = None
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(content)
@@ -126,6 +128,24 @@ def write_compose(
             _copy_acl(path, Path(temporary))
         else:
             os.chmod(temporary, 0o644)
+        if on_staged is not None:
+            # The identity of the file we are about to rename into place, persisted *before* the
+            # rename. It is the only durable proof that a later file at this path is the one this
+            # step wrote: a file another actor created has a different one, whatever its content
+            # (Codex, T43). Everything else — the pre-write look, the approval's expectation — is
+            # an inference a concurrent writer can falsify.
+            #
+            # Device **and** inode: an inode number alone can collide across filesystems. Not
+            # ctime: `rename` updates it by definition, so a value read here could never match the
+            # file afterwards. The residual window is an inode reused at this same path, on the
+            # same device, by a file whose content also matches the approved artifact — and only
+            # for a step interrupted between the rename and its next write.
+            staged = os.stat(temporary)
+            identity = {"dev": staged.st_dev, "ino": staged.st_ino}
+            on_staged(identity)
+        if identity is None:
+            staged = os.stat(temporary)
+            identity = {"dev": staged.st_dev, "ino": staged.st_ino}
         os.replace(temporary, path)
         temporary = None
     finally:
@@ -138,6 +158,11 @@ def write_compose(
         created_file=current is None,
         created_directory=created_directory,
         directory_inode=directory.stat().st_ino,
+        # The identity of the file *we* renamed into place, not whatever a re-stat of the shared
+        # path would find: a concurrent writer replacing it between the rename and here would
+        # otherwise have its own file recorded as ours, and later deleted by the inverse
+        # (Codex, T43).
+        staged_file=identity,
     )
 
 
@@ -153,6 +178,20 @@ def restore(path: Path, record: WriteRecord, *, stacks_root: Path, written_sha25
         raise ComposeWriteError(f"{path} has changed since the step wrote it")
 
     if record.created_file:
+        if record.staged_file is not None:
+            # Re-checked here, as close to the unlink as the platform allows, because the plan was
+            # built before the operator approved it and another writer can replace a file in that
+            # window. Content matching is not enough: it is the same bytes, not the same file.
+            #
+            # This is a check, not a lock. POSIX has no "unlink this inode" (Linux has no
+            # `funlinkat`), and an uncooperative writer using `rename` does not participate in any
+            # lock we could take, so a replacement landing between this stat and the unlink cannot
+            # be excluded — only narrowed to that gap (Codex, T43; see the plan's residual note).
+            current_identity = path.stat()
+            if (current_identity.st_dev, current_identity.st_ino) != (
+                    record.staged_file.get("dev"), record.staged_file.get("ino")):
+                raise ComposeWriteError(
+                    f"{path} is no longer the file this step wrote; refusing to remove it")
         path.unlink()
         _fsync_directory(path.parent)
         removed = "removed the file this step created"

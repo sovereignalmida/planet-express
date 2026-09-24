@@ -112,7 +112,7 @@ def case_edit():
     print("== edit: change the image and bring it up again")
     store, svc = service()
     current = compose_path().read_text()
-    runbook = compose_plans.edit_runbook(STACK, CHANGED, current_content=current, restart=["app"])
+    runbook = compose_plans.edit_runbook(STACK, CHANGED, current_content=current, expect=["app"])
     approve_and_run(store, svc, runbook, origin="amy")
     print(f"  file now matches the proposal: {compose_path().read_text() == CHANGED}")
     backups = sorted(p.name for p in compose_path().parent.glob("*.bak.*"))

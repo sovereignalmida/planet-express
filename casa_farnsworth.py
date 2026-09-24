@@ -1795,13 +1795,15 @@ def _propose_compose_runbook(
         notifier.notify(f"🛑 Could not turn that compose edit into a plan: `{s(str(exc)[:200])}`")
         return False
 
-    result = commands.propose_plan(runbook, requested_by=requested_by, origin=origin)
+    # The diff goes with the card, not before it: `propose_plan` sends it immediately ahead of the
+    # approval buttons, and only when a card is actually going out (Codex, T43).
+    result = commands.propose_plan(
+        runbook, requested_by=requested_by, origin=origin,
+        preface=TelegramClient.fmt_diff(summary, "proposed change", diff_text) if diff_text else None,
+    )
     if not result.ok:
         notifier.notify(f"⚠️ That compose edit wasn't proposed: {s(result.reason)}")
         return False
-    if diff_text:
-        # The card lists the steps; the diff is what the operator actually reads before approving.
-        notifier.notify(TelegramClient.fmt_diff(summary, "proposed change", diff_text))
     return True
 
 
@@ -1865,7 +1867,7 @@ def _investigate_typed_failure(notifier: Notifier, commands: CommandService, eve
     _propose_compose_runbook(
         notifier, commands,
         lambda: compose_plans.edit_runbook(stack, new_content, current_content=current_content,
-                                           restart=[service]),
+                                           expect=[service]),
         origin="amy", requested_by="Amy",
         summary=remediation.get("summary", f"Compose edit for {stack}/{service}"),
         diff_text=_compose_diff_text(current_content, new_content,
