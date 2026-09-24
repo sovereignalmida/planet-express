@@ -5,6 +5,7 @@ test_dashboard_data.py.
 """
 import json
 import os
+import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
@@ -1000,17 +1001,37 @@ def test_config_rpc_errors_are_always_503_json(chat_client, path):
     assert b"secret" not in response.data and b"<html" not in response.data
 
 
-def test_approvals_panel_survives_dashboard_snapshot_refresh(tmp_path, monkeypatch):
+def test_actions_holds_only_what_needs_a_decision(tmp_path, monkeypatch):
+    """Authorisation first (it wants one now), incidents second (something is wrong), open rollback
+    windows third (a canary may still need settling). The update history is not on this tab at all
+    — it is the one thing here you could never act on, so it moved to History."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    actions_panels = re.findall(r'data-tab-panel="actions" id="([a-z-]+)"', html)
+    assert actions_panels == ["approval-panel", "incident-panel", "rollback-candidates-panel"]
+    assert 'data-tab-panel="history" id="manifest-panel"' in html
+    assert 'data-tab="history"' in html          # and it has a tab of its own to live on
+
+
+def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):
+    """The 60-second swap replaces #dashboard-live's contents; a decision in flight must not be
+    inside it."""
     html = _render_with_certs(tmp_path, monkeypatch, [])
     live_start = html.index('id="dashboard-live"')
-    incident = html.index('id="incident-panel"')
     approval = html.index('id="approval-panel"')
-    chat = html.index('id="chat-panel"')
-    assert live_start < incident < approval < chat
-    # The closing snapshot wrapper immediately precedes the documented persistent mount.
-    assert "outside #dashboard-live" in html[incident - 250:incident]
+    incident = html.index('id="incident-panel"')
+    assert live_start < approval < incident
+    assert "outside #dashboard-live" in html[approval - 400:approval]
     assert "incidents.js" in html
     assert "approvals.js" in html
+
+
+def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp_path, monkeypatch):
+    """It renders below the docks, so it cannot live inside #dashboard-live — the refresh has to
+    swap it by id instead, or it would be the one panel that silently stopped updating."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    assert 'id="manifest-panel"' in html
+    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
+    assert 'getElementById("manifest-panel")' in script
 
 
 def test_config_panel_is_persistent_and_loaded_by_javascript(tmp_path, monkeypatch):

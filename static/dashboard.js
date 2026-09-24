@@ -9,7 +9,7 @@
 (function () {
   "use strict";
 
-  var TAB_NAMES = ["overview", "backups", "network", "actions", "chat", "config"];
+  var TAB_NAMES = ["overview", "backups", "network", "actions", "history", "chat", "config"];
   var SERVICES_FILTER_KEY = "planetexpress-services-filter";
   var SERVICES_DENSITY_KEY = "planetexpress-services-density";
 
@@ -415,10 +415,17 @@
       })
       .then(function (html) {
         if (html === null) return;
-        var freshLive = new DOMParser().parseFromString(html, "text/html").getElementById("dashboard-live");
+        var fresh = new DOMParser().parseFromString(html, "text/html");
+        var freshLive = fresh.getElementById("dashboard-live");
         var currentLive = document.getElementById("dashboard-live");
         if (!freshLive || !currentLive) return;
         currentLive.innerHTML = freshLive.innerHTML;
+        // The deployment manifest sits outside #dashboard-live so it can render below the two
+        // docks, which have to stay outside it. Swap it by id here, or it would be the one panel
+        // on the page that silently stopped updating.
+        var freshManifest = fresh.getElementById("manifest-panel");
+        var currentManifest = document.getElementById("manifest-panel");
+        if (freshManifest && currentManifest) currentManifest.innerHTML = freshManifest.innerHTML;
         applyHashTab();
         bindInteractions();
         return true;

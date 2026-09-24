@@ -74,6 +74,7 @@
     <button class="tab" data-tab="backups" type="button">Backups</button>
     <button class="tab" data-tab="network" type="button">Network</button>
     <button class="tab" data-tab="actions" type="button">Actions</button>
+    <button class="tab" data-tab="history" type="button">History</button>
     <button class="tab" data-tab="chat" type="button">Chat</button>
     <button class="tab" data-tab="config" type="button">Config</button>
     <div class="tabs-spacer"></div>
@@ -666,40 +667,6 @@
       </div>
 
       <!-- ═══ ACTIONS ═══ -->
-      <div class="tab-panel" data-tab-panel="actions">
-        <section class="panel">
-          <div class="panel-head-row">
-            <h3>DEPLOYMENT MANIFEST</h3>
-            {% if ctx.update_history %}
-            <span class="panel-head-note">most recent run</span>
-            <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
-            {% endif %}
-          </div>
-          {% if ctx.update_history %}
-          <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
-          <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
-          {% else %}
-          <p class="muted-body">No update history yet.</p>
-          {% endif %}
-        </section>
-
-        {% if ctx.rollback_candidates %}
-        <section class="panel">
-          <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
-          <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
-            <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span>
-          </div>
-          {% for r in ctx.rollback_candidates %}
-          <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
-            <span class="cell-mono cell-dim">{{ r.stack }}</span>
-            <span class="cell-mono cell-service">{{ r.service }}</span>
-            <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
-            <span class="cell-mono cell-when">{{ r.expires_at }}</span>
-          </div>
-          {% endfor %}
-        </section>
-        {% endif %}
-      </div>
     </main>
 
     <!-- ═══ SIDEBAR ═══ -->
@@ -788,8 +755,21 @@
   </div>
   </div>
 
-  <!-- Kept outside #dashboard-live: its 60-second snapshot swap must not reset a
-       countdown or replace a decision that is still in flight. -->
+  <!-- Both docks are kept outside #dashboard-live: its 60-second snapshot swap must not reset a
+       countdown or replace a decision that is still in flight. Authorisation leads, because it is
+       the only one of the three asking the operator for something. -->
+  <div class="tab-panel approval-dock" data-tab-panel="actions" id="approval-panel"
+       data-api="/api/approvals">
+    <section class="panel">
+      <div class="panel-head-row">
+        <h2>FLIGHT AUTHORISATION</h2>
+        <span class="panel-head-note">typed actions</span>
+      </div>
+      <p id="approval-message" role="status">Loading approvals…</p>
+      <div id="approval-cards" class="approval-cards" aria-live="polite"></div>
+    </section>
+  </div>
+
   <div class="tab-panel incident-dock" data-tab-panel="actions" id="incident-panel"
        data-api="/api/incidents">
     <section class="panel">
@@ -802,15 +782,55 @@
     </section>
   </div>
 
-  <div class="tab-panel approval-dock" data-tab-panel="actions" id="approval-panel"
-       data-api="/api/approvals">
+  <!-- Kept outside #dashboard-live so it can sit below the two docks, which must stay outside
+       it (a refresh must not wipe an in-flight decision). The refresh swaps this panel by id
+       instead, so it still updates every 60s.  Order on the Actions tab: authorisation first
+       (what needs you now), incidents second (what is wrong), manifest last (what already
+       happened). -->
+
+  <!-- Stays on Actions: an open window means a canary update is either still in flight or
+       its automatic rollback failed and is waiting for a human. That is a thing that needs
+       you, not history. -->
+  <div class="tab-panel" data-tab-panel="actions" id="rollback-candidates-panel">
+    {% if ctx.rollback_candidates %}
+    <section class="panel">
+      <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
+      <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+        <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span>
+      </div>
+      {% for r in ctx.rollback_candidates %}
+      <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+        <span class="cell-mono cell-dim">{{ r.stack }}</span>
+        <span class="cell-mono cell-service">{{ r.service }}</span>
+        <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
+        <span class="cell-mono cell-when">{{ r.expires_at }}</span>
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+  </div>
+
+  <!-- History: what already happened. It left the Actions tab because nothing here is ever
+       clickable — Actions is for things that want a decision from you, and a log of clean canary
+       runs was the largest thing on that tab while being the only thing you could not act on.
+       Kept outside #dashboard-live (the docks have to be, and this follows them in the DOM), so
+       the 60-second refresh swaps it by id instead. -->
+  <div class="tab-panel" data-tab-panel="history" id="manifest-panel">
     <section class="panel">
       <div class="panel-head-row">
-        <h2>FLIGHT AUTHORISATION</h2>
-        <span class="panel-head-note">typed actions</span>
+        <h3>DEPLOYMENT MANIFEST</h3>
+        {% if ctx.update_history %}
+        <span class="panel-head-note">most recent run</span>
+        <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
+        {% endif %}
       </div>
-      <p id="approval-message" role="status">Loading approvals…</p>
-      <div id="approval-cards" class="approval-cards" aria-live="polite"></div>
+      {% if ctx.update_history %}
+      <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
+      <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
+      {% else %}
+      <p class="muted-body">No canary update has run yet. Zoidberg's weekly pass records each one
+      here: which stack, which services, and whether they came up clean.</p>
+      {% endif %}
     </section>
   </div>
 

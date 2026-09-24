@@ -42,9 +42,11 @@ Six roles (yes, they're Futurama-named — see below), plus the execution engine
 Plus a canary auto-updater (**Zoidberg**) that updates one service at a time, watches it, and rolls
 back automatically if it doesn't come up healthy.
 
-There's also a web dashboard (**Scruffy**) with Overview, Backups, Network, Actions and Config
-tabs — fleet/container health, Borg backup and cert status, live Traefik router and AdGuard stats,
-incident history, and a live view of each execution's steps with ABORT and ROLL BACK — plus a
+There's also a web dashboard (**Scruffy**) with Overview, Backups, Network, Actions, History, Chat
+and Config tabs — fleet/container health, Borg backup and cert status, live Traefik router and
+AdGuard stats, and a live view of each execution's steps with ABORT and ROLL BACK. **Actions holds
+only what wants a decision from you** — approvals, open incidents, and canary rollback windows that
+may still need settling; anything you can merely read about went to History. Plus a
 `/api/widget` JSON endpoint for embedding that status in a [Homepage](https://gethomepage.dev)
 dashboard. It runs as its own unix user that cannot read the core's database; everything it shows
 or requests goes over an RPC socket, and every mutation still needs the same approval a Telegram
@@ -83,7 +85,7 @@ no LLM involved in gathering any of it.*
 
 <table>
 <tr>
-<td width="50%"><a href="docs/screenshots/PlanetExpressDashActions.png"><img src="docs/screenshots/PlanetExpressDashActions.png" alt="Actions tab"></a><br><sub><b>Actions</b> — approvals waiting on you, and what recent runs did step by step.</sub></td>
+<td width="50%"><a href="docs/screenshots/PlanetExpressDashActions.png"><img src="docs/screenshots/PlanetExpressDashActions.png" alt="Actions tab"></a><br><sub><b>Actions</b> — only what wants a decision: approvals, open incidents, and canary rollback windows still to settle.</sub></td>
 <td width="50%"><a href="docs/screenshots/PlanetExpressDashConfig.png"><img src="docs/screenshots/PlanetExpressDashConfig.png" alt="Config tab"></a><br><sub><b>Config</b> — edit config.yaml with a compare-and-swap save. Sensitive keys are locked and can only be unlocked on the host, never from here.</sub></td>
 </tr>
 <tr>
