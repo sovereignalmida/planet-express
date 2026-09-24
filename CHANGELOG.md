@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-09-24
+
+### Fixed
+- **Actions and History opened with a screen of empty space.** A tab whose panel is a sibling of
+  the replaceable dashboard snapshot leaves the live region's two-column grid with nothing in its
+  main column, so it stood at the height of the sidebar with the real content below the fold. Chat
+  and Config had each solved this with their own rule — a per-tab fix a new detached tab silently
+  does not get. One list, one rule, and a test that reads the detached tabs out of the template so
+  the next one cannot be forgotten.
+
 ## [2.0.3] - 2026-09-24
 
 ### Changed
