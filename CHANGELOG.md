@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-09-24
+
+### Fixed
+- **A truncated diagnostic no longer reads as a complete one.** Tool output is bounded before it
+  reaches the model, because it is re-sent every turn of the loop. Handed the first 2,000 characters
+  of a 40,000-character `docker ps` with no marker, the model reported that the containers it could
+  not see did not exist and told the operator to investigate a container that was running fine.
+  Truncation now says so in-band, gives the full size, and states that absence cannot be concluded
+  from a partial view; the cap is 8,000 characters. Affects chat investigations and the planner's
+  diagnostic pre-check, which share the path.
+- `/help` still described `/rollback` as taking a plan id and `/install` as diff-approve. Both have
+  been wrong since the 2.0 rework: rollback takes an execution id and undoes what a run applied,
+  and `/install` is one approval covering the compose write and bringing the stack up.
+
 ## [2.0.0] - 2026-09-24
 
 Every change to the host is now a typed step in an approved runbook. There is no shell.
