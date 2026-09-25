@@ -9,13 +9,13 @@
 (function () {
   "use strict";
 
-  var TAB_NAMES = ["overview", "backups", "network", "actions", "history", "chat", "config"];
+  var TAB_NAMES = ["overview", "backups", "network", "actions", "history", "chat", "config", "crew"];
   // Tabs whose panels live OUTSIDE #dashboard-live, as siblings of it. The live region's
-  // two-column grid has nothing to put in its main column for these, so it must be hidden or the
-  // tab opens with a screen of empty space above its content and the sidebar stranded beside it.
+  // main column has nothing to show for these, so it must be hidden or the tab opens with a
+  // screen of empty space above its persistent content.
   // Add a tab here the moment its panel moves out of the snapshot region — forgetting to is what
   // made Actions and History open blank when the deployment manifest left the live grid.
-  var DETACHED_TABS = ["actions", "history", "chat", "config"];
+  var DETACHED_TABS = ["actions", "history", "chat", "config", "crew"];
   var SERVICES_FILTER_KEY = "planetexpress-services-filter";
   var SERVICES_DENSITY_KEY = "planetexpress-services-density";
 
@@ -92,9 +92,6 @@
     });
     document.querySelectorAll(".tab-panel").forEach(function (panel) {
       panel.classList.toggle("active", panel.dataset.tabPanel === name);
-    });
-    document.querySelectorAll(".speech-line").forEach(function (line) {
-      line.classList.toggle("hidden", line.dataset.tabLine !== name);
     });
   }
 
@@ -433,6 +430,13 @@
         var freshManifest = fresh.getElementById("manifest-panel");
         var currentManifest = document.getElementById("manifest-panel");
         if (freshManifest && currentManifest) currentManifest.innerHTML = freshManifest.innerHTML;
+        // Same treatment for the Crew tab's ship's-computer log: it sits outside the live
+        // region because nothing in it holds operator state, but its lines come straight out
+        // of build_professor_lines() and would otherwise contradict a dashboard that has
+        // since re-scanned.
+        var freshCrew = fresh.getElementById("crew-panel");
+        var currentCrew = document.getElementById("crew-panel");
+        if (freshCrew && currentCrew) currentCrew.innerHTML = freshCrew.innerHTML;
         applyHashTab();
         bindInteractions();
         return true;

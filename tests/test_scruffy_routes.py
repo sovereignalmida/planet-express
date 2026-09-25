@@ -91,6 +91,8 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     assert b"waiting for the first scheduled run" in resp.data
     assert b"cockpit.css" in resp.data
     assert b"dashboard.css" not in resp.data
+    assert b"lamp-rail" not in resp.data
+    assert b"osc-gauge" not in resp.data
 
 
 def test_index_renders_real_findings(tmp_path, monkeypatch):
@@ -1034,6 +1036,25 @@ def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp
     assert 'getElementById("manifest-panel")' in script
 
 
+def test_the_crew_log_is_still_refreshed_even_though_it_left_the_live_region(tmp_path, monkeypatch):
+    """The crew cards are static, but the ship's computer log beside them is professor_lines,
+    derived from the current scan. Outside #dashboard-live it would freeze at page-load state
+    and start contradicting the rest of the dashboard, so the refresh swaps it by id."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    assert 'id="crew-panel"' in html
+    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
+    assert 'getElementById("crew-panel")' in script
+
+
+def test_the_header_still_wraps_on_a_narrow_screen(tmp_path, monkeypatch):
+    """The 54px single row only fits on a wide screen. Collapsing the header without a wrapping
+    fallback pushed the tabs and both buttons off the right edge on a phone."""
+    css = (Path(__file__).resolve().parent.parent / "static" / "cockpit.css").read_text()
+    narrow = css[css.index("@media (max-width: 1180px)"):]
+    assert "flex-wrap: wrap" in narrow
+    assert "overflow-x: auto" in narrow
+
+
 def test_config_panel_is_persistent_and_loaded_by_javascript(tmp_path, monkeypatch):
     html = _render_with_certs(tmp_path, monkeypatch, [])
     class ConfigParser(HTMLParser):
@@ -1171,7 +1192,11 @@ def test_every_detached_tab_hides_the_empty_live_grid():
     html = (root / "templates" / "dashboard.html").read_text()
 
     detached = set(re.search(r"var DETACHED_TABS = \[(.*?)\];", script).group(1).replace('"', "").replace(" ", "").split(","))
+    tabs = set(re.search(r"var TAB_NAMES = \[(.*?)\];", script).group(1).replace('"', "").replace(" ", "").split(","))
     outside = set(re.findall(r'data-tab-panel="([a-z]+)"', html.split('</div>\n\n  <!-- Both docks')[-1]))
 
+    assert "crew" in tabs
+    assert "crew" in outside
+    assert "crew" in detached
     assert outside <= detached, f"these tabs render outside the live grid but are not detached: {outside - detached}"
     assert ".detached-tab #dashboard-live > .body-grid { display: none; }" in css

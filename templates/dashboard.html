@@ -16,70 +16,38 @@
 
   <div id="dashboard-live">
   <header class="topbar">
-    <div class="brand">
-      <div class="logo">
-        <img src="{{ url_for('static', filename='logo.png') }}" alt="Planet Express">
-        <span class="dot"></span>
-      </div>
-      <div>
-        <div class="wordmark">PLANET&nbsp;EXPRESS</div>
-        <div class="tagline">SHIP COMPUTER v3000 · crew replaceable, containers aren't</div>
-      </div>
+    <img class="header-logo" src="{{ url_for('static', filename='logo.png') }}" alt="Planet Express">
+    <div class="header-brand">
+      <span class="wordmark">PLANET EXPRESS</span>
+      <span class="tagline">casalan.com · ship computer</span>
     </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="overview" type="button">Overview</button>
+      <button class="tab" data-tab="backups" type="button">Backups</button>
+      <button class="tab" data-tab="network" type="button">Network</button>
+      <button class="tab" data-tab="actions" type="button">Actions</button>
+      <button class="tab" data-tab="history" type="button">History</button>
+      <button class="tab" data-tab="chat" type="button">Chat</button>
+      <button class="tab" data-tab="config" type="button">Config</button>
+      <button class="tab" data-tab="crew" type="button">Crew</button>
+    </nav>
 
     <div class="topbar-spacer"></div>
-
-    <div class="topbar-right">
-      <div class="osc-gauge" aria-hidden="true">
-        <svg viewBox="0 0 132 58" preserveAspectRatio="none">
-          <polyline class="osc-wave" points="0,44 10,44 16,20 22,50 28,30 34,44 44,44 50,14 56,44 66,44 72,34 78,44 88,44 94,24 100,44 110,44 116,38 122,44 132,44"></polyline>
-        </svg>
-        <span class="osc-label">LOAD {{ ctx.system_and_backups.system.get('uptime_parsed', {}).get('load1', '—') if ctx.system_and_backups.available else '----' }}</span>
-      </div>
-      <div class="pipeline-block">
-        <div class="pipeline-line">
-          <span class="led-dot status-{{ ctx.health.status }}"></span>
-          <span class="pipeline-label">pipeline</span>
-          <span class="pipeline-state">{{ ctx.pipeline_status.state }}</span>
-        </div>
-        <div class="lastscan">last scan: {{ ctx.health.last_scan or "never" }}</div>
-      </div>
-      <form class="pe-logout" method="post" action="{{ url_for('logout') }}">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="refresh-btn" type="submit">LOG OUT</button>
-      </form>
-      <a class="refresh-btn" href="/"><span>↻</span> SCAN</a>
+    <div class="header-status">
+      <span class="led-dot status-{{ ctx.health.status }}"></span>
+      <span>pipeline {{ ctx.pipeline_status.state }} · scanned {{ ctx.health.last_scan or "never" }}</span>
     </div>
+    <a class="refresh-btn scan-btn" href="/">SCAN ✈</a>
+    <form class="pe-logout" method="post" action="{{ url_for('logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="refresh-btn logout-btn" type="submit">LOG OUT</button>
+    </form>
   </header>
 
   {% if ctx.pipeline_status.state == "running" %}
   <div class="scanbar"><div class="scanbar-fill"></div></div>
   {% endif %}
-
-  <div class="lamp-rail">
-    <span class="beacon-item">
-      <span class="beacon-dot {{ 'amber' if ctx.pipeline_status.state == 'awaiting_approval' else '' }}"></span>
-      PIPELINE {{ ctx.pipeline_status.state|upper }}
-    </span>
-    <span class="beacon-item">
-      <span class="beacon-dot teal"></span>
-      SENSORS NOMINAL
-    </span>
-    <div class="lamp-rail-spacer"></div>
-    <span>last scan {{ ctx.health.last_scan or "never" }}</span>
-  </div>
-
-  <nav class="tabs">
-    <button class="tab active" data-tab="overview" type="button">Overview</button>
-    <button class="tab" data-tab="backups" type="button">Backups</button>
-    <button class="tab" data-tab="network" type="button">Network</button>
-    <button class="tab" data-tab="actions" type="button">Actions</button>
-    <button class="tab" data-tab="history" type="button">History</button>
-    <button class="tab" data-tab="chat" type="button">Chat</button>
-    <button class="tab" data-tab="config" type="button">Config</button>
-    <div class="tabs-spacer"></div>
-    <div class="readonly-chip">AUTHENTICATED OPERATOR</div>
-  </nav>
 
   {% if not ctx.health.state_available %}
   <div style="padding: 18px 26px 0; position: relative; z-index: 2;">
@@ -669,89 +637,6 @@
       <!-- ═══ ACTIONS ═══ -->
     </main>
 
-    <!-- ═══ SIDEBAR ═══ -->
-    <aside class="aside">
-      <section class="panel panel-cyan">
-        <div class="sidebar-head">
-          <span class="led-dot" style="background: var(--cyan); box-shadow: 0 0 8px var(--cyan);"></span>
-          <span class="title">SHIP'S COMPUTER</span>
-        </div>
-        <div class="sidebar-body">
-          <div class="agent-row">
-            <div class="avatar"><img src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Prof. Farnsworth"></div>
-            <div>
-              <div class="agent-name">Prof. Farnsworth</div>
-              <div class="agent-sub">agent · online · slightly worried</div>
-            </div>
-          </div>
-          <div class="speech">
-            <span class="speech-line" data-tab-line="overview">{{ ctx.professor_lines.overview }}</span>
-            <span class="speech-line hidden" data-tab-line="backups">{{ ctx.professor_lines.backups }}</span>
-            <span class="speech-line hidden" data-tab-line="network">{{ ctx.professor_lines.network }}</span>
-            <span class="speech-line hidden" data-tab-line="actions">{{ ctx.professor_lines.actions }}</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel panel-cyan">
-        <div class="sidebar-head">
-          <span class="led-dot" style="background: var(--cyan); box-shadow: 0 0 8px var(--cyan);"></span>
-          <span class="title">CREW</span>
-        </div>
-        <div class="sidebar-body crew-list">
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-leela"><img src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela"></div>
-            <div>
-              <div class="agent-name">Leela</div>
-              <div class="agent-sub">system monitor</div>
-            </div>
-          </div>
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-hermes"><img src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad"></div>
-            <div>
-              <div class="agent-name">Hermes</div>
-              <div class="agent-sub">issue analyzer</div>
-            </div>
-          </div>
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-bender"><img src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender"></div>
-            <div>
-              <div class="agent-name">Bender</div>
-              <div class="agent-sub">action executor</div>
-            </div>
-          </div>
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-zoidberg"><img src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg"></div>
-            <div>
-              <div class="agent-name">Dr. Zoidberg</div>
-              <div class="agent-sub">canary-tested auto-patcher</div>
-            </div>
-          </div>
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-amy"><img src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong"></div>
-            <div>
-              <div class="agent-name">Amy</div>
-              <div class="agent-sub">diagnostician &amp; researcher</div>
-            </div>
-          </div>
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-fry"><img src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry"></div>
-            <div>
-              <div class="agent-name">Fry</div>
-              <div class="agent-sub">onboarding</div>
-            </div>
-          </div>
-          <div class="crew-row">
-            <div class="avatar avatar-sm ring-scruffy"><img src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy"></div>
-            <div>
-              <div class="agent-name">Scruffy</div>
-              <div class="agent-sub">this dashboard · observes and does nothing</div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-    </aside>
   </div>
   </div>
 
@@ -915,6 +800,59 @@
         </div>
       </div>
     </dialog>
+  </div>
+
+  <!-- Outside #dashboard-live because the crew cards are static and the live region's grid has
+       nothing to put in its main column here. The ship's computer log below IS live, though —
+       professor_lines are derived from the current scan — so refreshDashboard() swaps this
+       panel by id, the same way it swaps the deployment manifest. -->
+  <div class="tab-panel crew-dock" data-tab-panel="crew" id="crew-panel">
+    <section class="panel crew-layout">
+      <div class="crew-cards">
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Professor Farnsworth">
+          <div class="crew-copy"><h3>Farnsworth</h3><div class="crew-role">ship's computer</div><p>Plans the work, with cautiously good news.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela">
+          <div class="crew-copy"><h3>Leela</h3><div class="crew-role">system monitor</div><p>Watches every container.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad">
+          <div class="crew-copy"><h3>Hermes</h3><div class="crew-role">issue analyzer</div><p>Files the findings.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender">
+          <div class="crew-copy"><h3>Bender</h3><div class="crew-role">action executor</div><p>Runs the approved steps.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg">
+          <div class="crew-copy"><h3>Zoidberg</h3><div class="crew-role">canary-tested auto-patcher</div><p>Updates one thing at a time.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong">
+          <div class="crew-copy"><h3>Amy</h3><div class="crew-role">diagnostician &amp; researcher</div><p>Investigates without touching anything.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry">
+          <div class="crew-copy"><h3>Fry</h3><div class="crew-role">onboarding</div><p>Gets the first run off the ground.</p></div>
+        </article>
+        <article class="crew-card">
+          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy">
+          <div class="crew-copy"><h3>Scruffy</h3><div class="crew-role">this dashboard</div><p>Observes and does nothing.</p></div>
+        </article>
+      </div>
+
+      <aside class="computer-log" aria-labelledby="computer-log-title">
+        <h2 id="computer-log-title">SHIP'S COMPUTER LOG</h2>
+        <ul>
+          <li><span>› overview</span>{{ ctx.professor_lines.overview }}</li>
+          <li><span>› backups</span>{{ ctx.professor_lines.backups }}</li>
+          <li><span>› network</span>{{ ctx.professor_lines.network }}</li>
+          <li><span>› actions</span>{{ ctx.professor_lines.actions }}</li>
+        </ul>
+      </aside>
+    </section>
   </div>
 
   <footer>
