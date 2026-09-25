@@ -150,7 +150,37 @@ presentation-only change with no host-mutation surface.
 | Slice | Codex rounds | Findings fixed | Declined | Status |
 | --- | --- | --- | --- | --- |
 | T45.1 | 1 | 2 | 0 | landed `7e47063` |
-| T45.2 | 6 (7th cut short by an API usage limit) | 13 + 2 found by my own review | 0 | landed `5f638fd`, **owes a final `codex review --commit 5f638fd`** |
+| T45.2 | 7 | 15 + 3 from my own review | 0 | landed `5f638fd`, gate fixes in `347d89d` |
+| T45.3 | 1 | 4 + 1 from my own review | 1 | landed `e02f926`, gate fixes in `347d89d` |
+| T45.4 | 1 | 4 | 0 | landed `5e971e6`, gate fixes in `347d89d` |
+| (gate fixes) | 1 | 1 | 0 | landed `422743b` |
+| T45.5 | 1 | 0 | 0 | landed `422743b`, clean first pass |
+
+Declined, with the reason: the AdGuard chip reads `LIVE`, not `LIVE · 2 RESOLVERS`.
+We do not collect a resolver count and inventing one would be fabricated data.
+
+## T45.6 — fold verification
+
+Measured at 1440×900 against live-state fixtures, as the bottom of the lowest visible
+element in each tab's active panel:
+
+| Tab | Bottom (px) |
+| --- | --- |
+| Actions | 359 |
+| History | 401 |
+| Backups | 468 |
+| Network | 523 |
+| Crew | 529 |
+| Overview | 591 |
+| Config | 870 |
+| Chat | 878 |
+
+All eight above the 900px fold. Chat and Config sit close to it by design: their
+columns are sized to `100dvh - 104px`, so they fill the viewport rather than exceed it.
+
+Mobile, at 375×812: every two-column grid collapses to one, the Overview tiles are
+`repeat(2, 1fr)` with FLEET spanning both, and no tab scrolls horizontally
+(`document.scrollWidth == 375` on all eight).
 
 Every T45.2 finding was one shape: a summary tile claiming the host is healthier
 than it is. Two causes recur and are worth checking first in every later slice:
