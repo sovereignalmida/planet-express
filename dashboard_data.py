@@ -136,6 +136,7 @@ def summarize_findings() -> dict:
         return {
             "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "list": [],
             "top": [], "medium_list": [], "low_list": [], "analyzed_at": None,
+            "available": False,
         }
 
     counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -155,7 +156,7 @@ def summarize_findings() -> dict:
     return {
         "counts": counts, "list": ranked, "top": top,
         "medium_list": medium_list, "low_list": low_list,
-        "analyzed_at": findings.analyzed_at,
+        "analyzed_at": findings.analyzed_at, "available": True,
     }
 
 
@@ -237,11 +238,34 @@ def summarize_stack_completeness() -> dict:
     }
 
 
+def _disk_level(used_pct) -> str:
+    """The disk row of DATA-CONTRACT.md's status table: < 75% ok, 75-89 warn, 90-94 high,
+    >= 95 crit, unreadable none. The first Overview pass carried the old bar's 60/80
+    thresholds forward, which painted a 63%-full mount amber -- eleven mounts of routine
+    amber is how a real 91% stops being noticed."""
+    if not isinstance(used_pct, (int, float)):
+        return "none"
+    if used_pct >= 95:
+        return "crit"
+    if used_pct >= 90:
+        return "high"
+    if used_pct >= 75:
+        return "warn"
+    return "ok"
+
+
 def summarize_disk() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_DISK:
         return {"list": [], "available": False}
-    return {"list": monitor.disk, "available": True}
+    return {
+        "list": sorted(
+            (mount | {"level": _disk_level(mount.get("used_pct"))} for mount in monitor.disk),
+            key=lambda mount: mount.get("used_pct") if isinstance(mount.get("used_pct"), (int, float)) else -1,
+            reverse=True,
+        ),
+        "available": True,
+    }
 
 
 # Real casa_zoidberg.py status vocabulary, not the "stable"/"success" values the
@@ -638,6 +662,222 @@ def summarize_certs() -> dict:
     return {"list": monitor.certs, "available": True}
 
 
+_OVERVIEW_LEVEL_RANK = {"none": -1, "ok": 0, "warn": 1, "high": 2, "crit": 3}
+# Both tables are DATA-CONTRACT.md's status mapping, not a second opinion on it. "expiring"
+# is crit there (the LED even pulses); calling it "high" on the Overview would have made the
+# tile read less severe than the Backups tab it summarises.
+_BACKUP_FRESHNESS_LEVEL = {"fresh": "ok", "stale": "warn", "overdue": "crit", "failed": "crit"}
+_CERT_TIER_LEVEL = {"valid": "ok", "renew_soon": "warn", "expiring": "crit", "expired": "crit"}
+
+
+def _hull_hero(total_findings: int, pending: int, plans_known: bool) -> str:
+    if total_findings:
+        return f"{total_findings} FINDING{'' if total_findings == 1 else 'S'}"
+    if pending:
+        return f"{pending} PLAN{'' if pending == 1 else 'S'} WAITING"
+    return "ALL NOMINAL" if plans_known else "NO FINDINGS"
+
+
+def _cert_tier_level(cert: dict) -> str:
+    """An error row from check_certs() carries kind="error" and no tier at all; it is a
+    certificate we could not read, which is a crit, not a shrug."""
+    if cert.get("kind") == "error" or cert.get("error"):
+        return "crit"
+    return _CERT_TIER_LEVEL.get(cert.get("tier") or cert.get("status"), "warn")
+
+
+def _overview_worst(*levels: str) -> str:
+    return max(levels, key=lambda level: _OVERVIEW_LEVEL_RANK.get(level, -1), default="none")
+
+
+def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
+    """Collapse existing dashboard summaries into the five above-the-fold readouts.
+
+    ``routers`` and ``adguard`` are explicit arguments because they are live route
+    inputs.  This function only shapes values already collected by its caller.
+    """
+    mode = ctx.get("health", {}).get("last_scan_mode") or "?"
+    tiles = {}
+
+    containers = ctx.get("containers", {})
+    services = ctx.get("services", {})
+    if not containers.get("available"):
+        tiles["fleet"] = {
+            "level": "none", "hero": "—", "sub": f"mode {mode} did not collect containers",
+            "note": "containers ›", "total": 0, "cells": [],
+        }
+    else:
+        # Two things this tile must not do. It must not vanish after a "status" scan, which
+        # collects containers but not stack completeness -- only the stack count in the corner
+        # depends on services. And it must not go amber for PAUSED_CONTAINERS, which are
+        # stopped on purpose and are not counted as unhealthy, or "85 of 85 healthy" renders
+        # as a warning about itself.
+        level = "crit" if containers.get("down") else "warn" if containers.get("degraded") else "ok"
+        tiles["fleet"] = {
+            "level": level, "hero": str(containers.get("healthy", 0)),
+            "sub": f"/ {containers.get('total', 0)} healthy",
+            "note": f"{services.get('total_stacks', 0)} stacks" if services.get("available") else "stacks —",
+            "total": containers.get("total", 0), "cells": containers.get("cells", []),
+        }
+
+    findings = ctx.get("findings", {})
+    # Approvals live in core's store, not in the run-status file: pending_plan_id was the
+    # retired shell planner's signal and is now always null. The route supplies the real count
+    # from proposal.list_pending and leaves the key absent when core could not be reached --
+    # which makes the plan count unknown, never zero, and never takes the findings with it.
+    pending = ctx.get("pending_approvals")
+    plans_known = isinstance(pending, int)
+    pending = pending if plans_known else 0
+    if not findings.get("available"):
+        # Findings and approvals come from different places. An approval genuinely waiting for
+        # the operator is the most actionable thing this tile can carry, so a missing findings
+        # snapshot must not swallow it -- the CRIT/HIGH pills go to "?" instead of pretending
+        # to be zero.
+        tiles["hull"] = {
+            "level": "warn" if pending else "none",
+            "hero": _hull_hero(0, pending, plans_known) if pending else "—",
+            "sub": f"mode {mode} has no findings analysis",
+            "note": "actions ›", "critical": "?", "high": "?",
+            "plans": pending if plans_known else "?",
+            "show_pills": bool(pending),
+        }
+    else:
+        counts = findings.get("counts", {})
+        # Not sum(counts.values()): summarize_findings() deliberately keeps a finding with an
+        # unrecognised severity in "top" rather than hiding it, and it lands in none of the four
+        # buckets. Counting only the buckets turned such a finding into ALL NOMINAL while Hull
+        # Diagnostics was displaying it.
+        counted = sum(counts.values())
+        total_findings = max(len(findings.get("list", [])), counted)
+        unknown_severity = total_findings - counted
+        if counts.get("critical"):
+            level = "crit"
+        elif counts.get("high") or unknown_severity > 0:
+            level = "high"
+        elif counts.get("medium") or counts.get("low") or pending:
+            level = "warn"
+        else:
+            level = "ok"
+        tiles["hull"] = {
+            "level": level,
+            # "ALL NOMINAL" is a claim about the whole hull. With core unreachable we only know
+            # the findings are clean, so say exactly that and let the PLANS pill show "?" --
+            # overclaiming here is how an operator stops reading the tile. And with no findings
+            # but approvals waiting, the thing that wants you is the approval, not a "0".
+            "hero": _hull_hero(total_findings, pending, plans_known),
+            "sub": f"{counts.get('critical', 0)} CRIT · {counts.get('high', 0)} HIGH · {pending} PLANS",
+            "note": "actions ›", "critical": counts.get("critical", 0),
+            "high": counts.get("high", 0), "plans": pending if plans_known else "?",
+            "show_pills": True,
+        }
+
+    system_and_backups = ctx.get("system_and_backups", {})
+    certs = ctx.get("certs", {})
+    backups = system_and_backups.get("backups", {}) if system_and_backups.get("available") else {}
+    # The hero is the newest snapshot, but the LEVEL is the worst job on the host. Reading
+    # severity off one job is how a failed daily hides behind a fresh weekly -- the Backups
+    # tab's own verdict already takes the worst, and the tile has to agree with it.
+    newest = min(
+        (job for job in backups.values() if isinstance(job, dict)),
+        key=lambda job: job.get("age_hours") if isinstance(job.get("age_hours"), (int, float)) else float("inf"),
+        default=None,
+    )
+    # Jobs and certificates are separate sensors and fail separately -- the same shape as
+    # traefik/adguard above and uptime/memory below. Requiring both meant an unreadable cert
+    # list could hide a failed backup, which is the one thing this tile exists to show.
+    live_certs = [c for c in certs.get("list", []) if not c.get("note")] if certs.get("available") else []
+    cert_levels = [_cert_tier_level(cert) for cert in live_certs]
+    if newest is None and not live_certs:
+        tiles["backups"] = {
+            "level": "none", "hero": "—", "sub": f"mode {mode} did not collect backups",
+            "note": "backups ›", "next": "—", "cert_count": 0, "soonest": "—",
+        }
+    else:
+        job_levels = [
+            _BACKUP_FRESHNESS_LEVEL.get(job.get("freshness"), "warn")
+            for job in backups.values() if isinstance(job, dict)
+        ]
+        known_days = [
+            c.get("days_left", c.get("days_remaining")) for c in live_certs
+            if c.get("days_left", c.get("days_remaining")) is not None
+        ]
+        soonest = min(known_days) if known_days else None
+        level = _overview_worst(*job_levels, *cert_levels)
+        newest = newest or {}
+        # systemd stamps the completion time even when the run produced nothing, so for a
+        # failed job age_human is "since we last tried", not "since we last had a backup".
+        # The Backups tab already makes that distinction; the tile has to as well.
+        tiles["backups"] = {
+            "level": level, "hero": newest.get("age_human") or "—",
+            "sub": "since last attempt" if newest.get("freshness") == "failed" else "since snapshot",
+            "note": "backups ›", "next": newest.get("next_human") or "—",
+            "cert_count": len(live_certs) if certs.get("available") else "—",
+            "soonest": f"{soonest}d" if soonest is not None else "—",
+        }
+
+    # AdGuard is an optional component: plenty of installs never run it, and it can be down
+    # while Traefik is fine. Its absence may grey out its own two numbers, never the router
+    # count -- a disabled router must not be replaced by a neutral "unavailable" tile.
+    if not routers.get("available"):
+        tiles["network"] = {
+            "level": "none", "hero": "—", "sub": "traefik api unreachable",
+            "note": "network ›", "detail": "", "blocked_pct": "—", "avg_ms": "—",
+        }
+    else:
+        router_list = routers.get("routers", [])
+        routers_up = sum(router.get("status") == "enabled" for router in router_list)
+        router_level = "ok" if routers_up == len(router_list) else "crit"
+        if adguard.get("available"):
+            queries = adguard.get("num_dns_queries") or 0
+            blocked = adguard.get("num_blocked_filtering") or 0
+            blocked_pct = round(blocked / queries * 100, 1) if queries else 0
+            avg = adguard.get("avg_processing_time")
+            avg_ms = round(avg * 1000) if isinstance(avg, (int, float)) else "—"
+            detail = f"adguard {blocked_pct}% blocked · {avg_ms}ms"
+        else:
+            blocked_pct = avg_ms = "—"
+            detail = "adguard not configured" if not adguard.get("configured") else "adguard unavailable"
+        tiles["network"] = {
+            "level": router_level, "hero": str(routers_up), "sub": "routers up",
+            "note": "network ›", "detail": detail,
+            "blocked_pct": blocked_pct, "avg_ms": avg_ms,
+        }
+
+    if not system_and_backups.get("available"):
+        tiles["system"] = {
+            "level": "none", "hero": "—", "sub": f"mode {mode} did not collect system data",
+            "note": "up —", "load5": "—", "load15": "—", "memory": {}, "show_memory": False,
+        }
+    else:
+        # `uptime` and `free -h` are separately parsed outputs and fail separately. Gating the
+        # tile's level on both meant an unparseable uptime line quietly hid a 94%-full memory
+        # bar behind "no system metrics" -- the one number on this tile worth an alarm.
+        system = system_and_backups.get("system", {})
+        uptime = system.get("uptime_parsed", {})
+        memory = system.get("memory", {})
+        memory_pct = memory.get("used_pct")
+        show_memory = isinstance(memory_pct, (int, float))
+        if not show_memory:
+            level = "none"
+        elif memory_pct >= 90:
+            level = "crit"
+        elif memory_pct >= 80:
+            level = "high"
+        elif memory_pct >= 70:
+            level = "warn"
+        else:
+            level = "ok"
+        tiles["system"] = {
+            "level": level, "hero": uptime.get("load1") or "—",
+            "sub": "load" if uptime else "load unreadable",
+            "note": f"up {uptime.get('up_human') or '—'}",
+            "load5": uptime.get("load5") or "—", "load15": uptime.get("load15") or "—",
+            "memory": memory, "show_memory": show_memory,
+        }
+
+    return tiles
+
+
 def build_professor_lines(ctx: dict) -> dict:
     """"Ship's Computer" sidebar copy -- one line per tab, plus overrides for the
     scanning and plan-approved states, all generated from the real ctx dict rather
@@ -871,7 +1111,7 @@ def summarize_services() -> dict:
 
 def build_dashboard_context() -> dict:
     """Single entry point the Flask route calls."""
-    return {
+    ctx = {
         "health": summarize_health(),
         "findings": summarize_findings(),
         "pipeline_status": summarize_pipeline_status(),
@@ -884,3 +1124,9 @@ def build_dashboard_context() -> dict:
         "system_and_backups": summarize_system_and_backups(),
         "certs": summarize_certs(),
     }
+    # Live network values are intentionally unavailable here; the route replaces
+    # these placeholders after its explicit Traefik/AdGuard fetches.
+    ctx["overview_tiles"] = summarize_overview_tiles(
+        ctx, {"available": False, "routers": []}, {"available": False}
+    )
+    return ctx

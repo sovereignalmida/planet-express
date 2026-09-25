@@ -539,8 +539,18 @@ def index(core=None):
             ctx["rollback_candidates"] = core("canary.candidates", {})
         except Exception:  # noqa: BLE001 -- see above
             current_app.logger.warning("Could not read the canary rollback windows from core")
+        try:
+            # The Hull tile's PLANS count. RunStatus.pending_plan_id was the shell planner's
+            # signal and nothing writes it any more, so reading it would have reported "0 plans"
+            # with approvals genuinely waiting. Same source as /api/approvals.
+            ctx["pending_approvals"] = len(core("proposal.list_pending", {}) or [])
+        except Exception:  # noqa: BLE001 -- see above
+            current_app.logger.warning("Could not read pending approvals from core")
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
+    ctx["overview_tiles"] = dashboard_data.summarize_overview_tiles(
+        ctx, ctx["traefik"], ctx["adguard"]
+    )
     ctx["telegram_bot_username"] = config.telegram_bot_username()
     ctx["professor_lines"] = dashboard_data.build_professor_lines(ctx)
     return render_template("dashboard.html", ctx=ctx)

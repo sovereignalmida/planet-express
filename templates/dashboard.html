@@ -62,336 +62,132 @@
 
       <!-- ═══ OVERVIEW ═══ -->
       <div class="tab-panel active" data-tab-panel="overview">
+        {% set tiles = ctx.overview_tiles %}
+        <section class="overview-tiles" aria-label="System summary">
+          {% set fleet = tiles.fleet %}
+          {# Inert, like SYSTEM: Overview is already the tab you are on, and a control that
+             does nothing is worse than no control -- keyboard users reach it for no reason. #}
+          <div class="overview-tile {{ fleet.level }}">
+            <span class="overview-tile-head"><span>FLEET</span><span>{{ fleet.note }}</span></span>
+            <span class="overview-tile-line">
+              <span class="overview-tile-hero">{{ fleet.hero }}</span><span class="overview-tile-sub">{{ fleet.sub }}</span>
+            </span>
+            {% if fleet.cells %}<span class="overview-fleet-dots" aria-label="{{ fleet.total }} containers">
+              {% for state in fleet.cells %}<span class="overview-dot {{ state }}"></span>{% endfor %}
+            </span>{% endif %}
+          </div>
 
-        <!-- Fleet health hero -->
-        <section class="panel panel-green">
-          <div class="fleet-label">FLEET&nbsp;STATUS</div>
-          {% if ctx.containers.available %}
-          <div class="fleet-row">
-            <div>
-              <div class="fleet-eyebrow">CONTAINERS &amp; STACKS</div>
-              <div class="fleet-count">
-                <span class="fleet-num {{ 'crit' if ctx.containers.down else ('warn' if ctx.containers.degraded else '') }}">{{ ctx.containers.healthy }}</span>
-                <span class="fleet-total">/ {{ ctx.containers.total }}</span>
-                <span class="fleet-suffix">containers healthy</span>
-              </div>
-              <div class="fleet-sub">{{ ctx.containers.online }} online · {{ ctx.containers.degraded }} degraded · {{ ctx.containers.down }} down{% if ctx.containers.paused %} · {{ ctx.containers.paused }} paused{% endif %}</div>
-            </div>
-            <div class="fleet-matrix-wrap">
-              <div class="fleet-matrix">
-                {% for state in ctx.containers.cells %}
-                <span class="fleet-cell {{ 'degraded' if state == 'degraded' else ('down' if state == 'down' else ('paused' if state == 'paused' else '')) }}" style="animation-delay: {{ '%.2f'|format((loop.index0 % 9) * 0.18) }}s;"></span>
-                {% endfor %}
-              </div>
-              <div class="reactor-legend">
-                <span class="reactor-legend-item"><span class="reactor-legend-swatch online"></span>online</span>
-                <span class="reactor-legend-item"><span class="reactor-legend-swatch degraded"></span>degraded</span>
-                <span class="reactor-legend-item"><span class="reactor-legend-swatch down"></span>down</span>
-                <span class="reactor-legend-item"><span class="reactor-legend-swatch paused"></span>paused</span>
-              </div>
-            </div>
+          {% set hull = tiles.hull %}
+          <button class="overview-tile overview-hull-tile {{ hull.level }}" type="button" data-tile-tab="actions">
+            <span class="overview-tile-head"><span>HULL</span><span>{{ hull.note }}</span></span>
+            <span class="overview-tile-hero">{{ hull.hero }}</span>
+            {% if not hull.show_pills %}<span class="overview-tile-sub">{{ hull.sub }}</span>{% else %}
+            <span class="overview-hull-pills">
+              <span>{{ hull.critical }} CRIT</span><span>{{ hull.high }} HIGH</span><span>{{ hull.plans }} PLANS</span>
+            </span>{% endif %}
+          </button>
+
+          {% set backup = tiles.backups %}
+          <button class="overview-tile {{ backup.level }}" type="button" data-tile-tab="backups">
+            <span class="overview-tile-head"><span>BACKUPS</span><span>{{ backup.note }}</span></span>
+            <span class="overview-tile-line">
+              <span class="overview-tile-hero">{{ backup.hero }}</span><span class="overview-tile-sub">{{ backup.sub }}</span>
+            </span>
+            {% if backup.level != 'none' %}<span class="overview-tile-detail">next {{ backup.next }} · {{ backup.cert_count }} certs · soonest {{ backup.soonest }}</span>{% endif %}
+          </button>
+
+          {% set network = tiles.network %}
+          <button class="overview-tile {{ network.level }}" type="button" data-tile-tab="network">
+            <span class="overview-tile-head"><span>NETWORK</span><span>{{ network.note }}</span></span>
+            <span class="overview-tile-line">
+              <span class="overview-tile-hero">{{ network.hero }}</span><span class="overview-tile-sub">{{ network.sub }}</span>
+            </span>
+            {% if network.detail %}<span class="overview-tile-detail">{{ network.detail }}</span>{% endif %}
+          </button>
+
+          {% set system_tile = tiles.system %}
+          <div class="overview-tile {{ system_tile.level }}">
+            <span class="overview-tile-head"><span>SYSTEM</span><span>{{ system_tile.note }}</span></span>
+            <span class="overview-tile-line">
+              <span class="overview-tile-hero">{{ system_tile.hero }}</span><span class="overview-tile-sub">{{ system_tile.sub }}{% if system_tile.load5 != '—' %} · {{ system_tile.load5 }} · {{ system_tile.load15 }}{% endif %}</span>
+            </span>
+            {% if system_tile.show_memory %}<span class="overview-memory">
+              <span>MEM</span><span class="overview-memory-track"><span style="width: {{ system_tile.memory.get('used_pct', 0) }}%"></span></span>
+              <span>{{ system_tile.memory.get('used', '—') }} / {{ system_tile.memory.get('total', '—') }}</span>
+            </span>{% endif %}
           </div>
-          <div class="fleet-footer">
-            {% if ctx.stack_completeness.available %}
-            Stack completeness: <span class="mono-inline">{{ ctx.stack_completeness.complete }}/{{ ctx.stack_completeness.total }} stacks complete</span>
-            {% else %}
-            Stack completeness: <span class="mono-inline">not available until the next full scan.</span>
-            {% endif %}
-          </div>
-          {% if ctx.containers.issues %}
-          <div class="grid-head cols-findings" style="grid-template-columns: 1fr 2fr; margin-top: 14px;">
-            <span>CONTAINER</span><span>ISSUE</span>
-          </div>
-          {% for c in ctx.containers.issues %}
-          <div class="grid-row alert-row" style="grid-template-columns: 1fr 2fr;">
-            <span class="cell-mono cell-service">{{ c.get('name', '?') }}</span>
-            <span class="cell-text2">{{ c.get('issue', '') }}</span>
-          </div>
-          {% endfor %}
-          {% endif %}
-          {% if ctx.stack_completeness.incomplete %}
-          <div class="grid-head cols-updates" style="grid-template-columns: 1.6fr 1fr 1fr 1fr; margin-top: 14px;">
-            <span>STACK</span><span>PRESENT</span><span>EXPECTED</span><span>MISSING</span>
-          </div>
-          {% for s in ctx.stack_completeness.incomplete %}
-          <div class="grid-row" style="grid-template-columns: 1.6fr 1fr 1fr 1fr;">
-            <span class="cell-mono cell-service">{{ s.get('stack', '?') }}</span>
-            <span class="cell-mono">{{ s.get('present_count', '?') }}</span>
-            <span class="cell-mono">{{ s.get('expected_count', '?') }}</span>
-            <span class="cell-mono cell-dim">{{ s.get('missing_services', [])|join(', ') }}</span>
-          </div>
-          {% endfor %}
-          {% endif %}
-          {% else %}
-          <div class="fleet-eyebrow">CONTAINERS &amp; STACKS</div>
-          <p class="muted-body">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-            container data. Available after the next full scan.</p>
-          {% endif %}
         </section>
 
-        <section class="panel pe-services-panel" aria-label="Services" data-services-panel
-                 data-attention-count="{{ ctx.services.attention }}">
-          <div class="pe-services-head">
-            <h2>SERVICES</h2>
-            {% if ctx.services.available %}
-            <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} services online</span>
-            <span class="pe-services-spacer"></span>
-            <div class="pe-services-controls" aria-label="Service stack filter">
-              <button type="button" data-services-filter="all" aria-pressed="true">ALL {{ ctx.services.total_stacks }}</button>
-              <button type="button" data-services-filter="attention" aria-pressed="false">ATTENTION {{ ctx.services.attention }}</button>
+        <div class="overview-control-grid">
+          <section class="panel pe-services-panel overview-services is-density-dots" aria-label="Services" data-services-panel
+                   data-attention-count="{{ ctx.services.attention }}">
+            <div class="pe-services-head">
+              <h2>SERVICES</h2>
+              {% if ctx.services.available %}
+              <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} online · worst first</span>
+              <span class="pe-services-spacer"></span>
+              <span class="overview-attention">ATTENTION {{ ctx.services.attention }}</span>
+              {% endif %}
             </div>
-            <div class="pe-services-controls pe-density-controls" aria-label="Service density">
-              <button type="button" data-services-density="named" aria-pressed="true">NAMED</button>
-              <button type="button" data-services-density="dots" aria-pressed="false">DOTS</button>
-            </div>
-            {% endif %}
-          </div>
-
-          {% if not ctx.services.available %}
-          <p class="muted-body">Service details are not available in this snapshot. Available after the next full scan.</p>
-          {% elif not ctx.services.total_stacks %}
-          <div class="pe-services-empty pe-card none">
-            <img src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="">
-            <div>
-              <h3>NO COMPOSE STACKS FOUND</h3>
-              <p>The daemon answered, but nothing on this host carries a compose project label.</p>
-            </div>
-            <span class="pe-services-setting">Check the <code>stacks_root</code> config setting that lists stack directories.</span>
-          </div>
-          {% else %}
-            {% if ctx.pipeline_status.state == "running" %}
-            <div class="pe-services-busy"><span class="pe-led warn"></span>RE-READING THE FLEET</div>
-            {% endif %}
-
-            {% if ctx.services.attention %}
-            {% set has_crit = ctx.services.stacks|selectattr('level', 'equalto', 'crit')|list|length %}
-            <div class="pe-services-rail pe-card {{ 'crit' if has_crit else 'warn' }}" data-services-rail>
-              <span class="pe-led {{ 'crit' if has_crit else 'warn' }}"></span>
-              <strong>{{ 'NEEDS YOU NOW' if has_crit else 'WORTH A LOOK' }}</strong>
-              <span>
-                {% set rail = namespace(first=true) %}
-                {% for stack in ctx.services.stacks if stack.level != 'ok' %}
-                  {% if stack.members %}
-                    {% for member in stack.members if member.level != 'ok' %}{% if not rail.first %} · {% endif %}{{ member.service }} {{ member.word }} ({{ stack.name }}){% set rail.first = false %}{% endfor %}
-                  {% else %}{% if not rail.first %} · {% endif %}{{ stack.note }} ({{ stack.name }}){% set rail.first = false %}{% endif %}
-                {% endfor %}
-              </span>
-            </div>
-            {% endif %}
-
-            <div class="pe-stack-grid {{ 'is-busy' if ctx.pipeline_status.state == 'running' }}" data-services-grid>
+            {% if not ctx.services.available %}
+            <p class="muted-body">Service details need a full scan; mode {{ ctx.health.last_scan_mode or "?" }} did not collect them.</p>
+            {% elif not ctx.services.total_stacks %}
+            <p class="muted-body">No compose stacks found.</p>
+            {% else %}
+            <div class="pe-stack-grid" data-services-grid>
               {% for stack in ctx.services.stacks %}
-              <article class="pe-card pe-stack-card {{ stack.level }} {{ 'is-single' if stack.total == 1 }}"
-                       data-stack-name="{{ stack.name }}" data-needs-attention="{{ 'true' if stack.level != 'ok' else 'false' }}">
-                <div class="pe-stack-head" data-stack-head>
-                  <span class="pe-led {{ stack.level }}"></span>
-                  <span class="pe-stack-name">{{ stack.name }}</span>
-                  <span class="pe-stack-spacer"></span>
-                  <span class="pe-single-dot">
-                    {% if stack.total == 1 %}{% set member = stack.members[0] %}<a class="pe-dot-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}" title="{{ member.service }}" aria-label="{{ member.service }}"></a>{% endif %}
-                  </span>
+              <article class="pe-card pe-stack-card {{ stack.level }}" data-stack-name="{{ stack.name }}">
+                <div class="pe-stack-head">
+                  <span class="pe-stack-name">{{ stack.name }}</span><span class="pe-stack-spacer"></span>
                   <span class="pe-stack-tally {{ stack.level }}">{{ stack.up }}/{{ stack.total }}</span>
-                  <span class="pe-stack-expand" aria-hidden="true">⌄</span>
                 </div>
-                {% if stack.note %}<div class="pe-stack-note">{{ stack.note }}</div>{% endif %}
                 {% if stack.members %}
-                <div class="pe-service-chips">
-                  {% for member in stack.members %}
-                  <a class="pe-chip-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}">
-                    <span class="pe-led {{ member.level }}"></span><span>{{ member.service }}</span>
-                    {% if member.word %}<strong>{{ member.word|upper }}</strong>{% endif %}
-                  </a>
-                  {% endfor %}
-                </div>
                 <div class="pe-service-dots">
-                  {% for member in stack.members %}
-                  <a class="pe-dot-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}" title="{{ member.service }}" aria-label="{{ member.service }}"></a>
-                  {% endfor %}
+                  {% for member in stack.members %}<a class="pe-dot-svc {{ member.level }}" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}" title="{{ member.service }}" aria-label="{{ member.service }}"></a>{% endfor %}
                 </div>
+                {% else %}
+                {# No parseable members means no dots and nothing to drill into. summarize_services()
+                   already wrote why; without it the card is an unexplained 0/0. #}
+                <p class="pe-stack-note">{{ stack.note or "no services reported" }}</p>
                 {% endif %}
               </article>
               {% endfor %}
             </div>
+            {% endif %}
+          </section>
 
-            <div class="pe-services-empty pe-services-filter-empty pe-card none" data-services-filter-empty>
-              <span class="pe-services-check">✓</span>
-              <div>
-                <h3>NOTHING NEEDS ATTENTION</h3>
-                <p>All {{ ctx.services.total }} services across {{ ctx.services.total_stacks }} stacks are online. Last full scan: {{ ctx.health.last_scan or 'never' }}.</p>
+          <div class="overview-side">
+            <section class="panel overview-disk">
+              <div class="overview-panel-head"><h3>DISK</h3><span>{{ ctx.disk.list|length }} mounts · fullest first</span></div>
+              {% if ctx.disk.available %}
+                {# An unreadable used_pct is not 0%. Coercing it to zero drew an empty bar,
+                   which reads as "this filesystem is completely free". #}
+                {% for d in ctx.disk.list %}{% set pct = d.get('used_pct') %}
+                <div class="overview-disk-row">
+                  <span title="{{ d.get('source', '?') }}">{{ d.get('mount', '?') }}</span>
+                  <span class="overview-disk-track">{% if d.level != 'none' %}<span class="{{ d.level }}" style="width: {{ pct }}%"></span>{% endif %}</span>
+                  <span class="{{ d.level }}">{{ (pct ~ '%') if d.level != 'none' else '—' }}</span>
+                </div>{% endfor %}
+              {% else %}<p class="muted-body">Mode {{ ctx.health.last_scan_mode or "?" }} did not collect disk data.</p>{% endif %}
+            </section>
+
+            <section class="panel overview-errors">
+              <div class="overview-panel-head"><h3>RECENT ERRORS</h3><span></span>
+                {% if ctx.system_and_backups.available and not ctx.system_and_backups.system.get('recent_errors') %}<span>none in the last hour</span>{% endif %}
               </div>
-              <button type="button" data-services-show-all>SHOW ALL {{ ctx.services.total_stacks }} STACKS</button>
-            </div>
-          {% endif %}
-        </section>
+              {% if ctx.system_and_backups.available and ctx.system_and_backups.system.get('recent_errors') %}
+              {% set sys = ctx.system_and_backups.system %}<p class="errors-diagnosis">{{ sys.diagnosis }}</p>
+              <div class="errors-terminal">{% for e in sys.parsed_errors[:8] %}<div class="errors-terminal-line"><span class="ts">{{ e.ts }}</span> <span class="host">{{ e.host }}</span> <span class="proc">{{ e.proc }}</span> <span class="msg">{{ e.msg }}</span></div>{% endfor %}</div>
+              {% elif not ctx.system_and_backups.available %}<p class="muted-body">Mode {{ ctx.health.last_scan_mode or "?" }} did not collect system errors.</p>{% endif %}
+            </section>
 
-        <!-- Hull Diagnostics -->
-        {% set fc = ctx.findings.counts %}
-        {% if fc.critical %}{% set worst = 'crit' %}
-        {% elif fc.high %}{% set worst = 'high' %}
-        {% elif fc.medium %}{% set worst = 'medium' %}
-        {% elif fc.low %}{% set worst = 'low' %}
-        {% else %}{% set worst = 'none' %}
-        {% endif %}
-        {% set hull_copy = {
-          'crit': ('⚠', 'CRITICAL FAULT', fc.critical|string ~ ' critical fault' ~ ('' if fc.critical == 1 else 's') ~ ' — immediate action required'),
-          'high': ('⚠', 'HIGH ALERT', fc.high|string ~ ' high-severity finding' ~ ('' if fc.high == 1 else 's') ~ ' need attention'),
-          'medium': ('!', 'CAUTION', fc.medium|string ~ ' finding' ~ ('' if fc.medium == 1 else 's') ~ ' worth a look'),
-          'low': ('i', 'MINOR NOTES', fc.low|string ~ ' low-severity note' ~ ('' if fc.low == 1 else 's') ~ ' — informational, non-blocking'),
-          'none': ('✓', 'ALL SYSTEMS NOMINAL', 'No open findings.'),
-        } %}
-        <section class="panel">
-          <h3 style="margin-bottom: 14px;">HULL DIAGNOSTICS</h3>
-          <div class="alarm-banner {{ worst }}">
-            <div class="alarm-orb">{{ hull_copy[worst][0] }}</div>
-            <div class="alarm-text">
-              <p class="alarm-title">{{ hull_copy[worst][1] }}</p>
-              <p class="alarm-sub">{{ hull_copy[worst][2] }}</p>
-            </div>
-            <div class="alarm-chips">
-              <span class="alarm-chip crit {{ 'zero' if not fc.critical }}">CRIT {{ fc.critical }}</span>
-              <span class="alarm-chip high {{ 'zero' if not fc.high }}">HIGH {{ fc.high }}</span>
-              <span class="alarm-chip med {{ 'zero' if not fc.medium }}">MED {{ fc.medium }}</span>
-              <span class="alarm-chip low {{ 'zero' if not fc.low }}">LOW {{ fc.low }}</span>
-            </div>
+            <aside class="overview-professor">
+              <img src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Professor Farnsworth">
+              <p>{{ ctx.professor_lines.overview }}</p>
+            </aside>
           </div>
+        </div>
 
-          {% if ctx.findings.top %}
-          <div class="hull-cards">
-            {% for f in ctx.findings.top %}
-            <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}">
-              <span class="hull-dot"></span>
-              <div class="hull-card-body">
-                <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
-                <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div>
-                <p class="hull-card-desc">{{ f.get('description', '') }}</p>
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-          {% endif %}
-
-          {% set drawer_items = (ctx.findings.medium_list or []) + (ctx.findings.low_list or []) %}
-          {% if drawer_items %}
-          <div class="hull-drawer" data-hull-drawer>
-            <button type="button" class="hull-drawer-toggle" data-hull-drawer-toggle>
-              <span class="hull-drawer-caret">▸</span>
-              {{ drawer_items|length }} low-severity note{{ '' if drawer_items|length == 1 else 's' }} · informational · non-blocking
-            </button>
-            <div class="hull-drawer-body">
-              {% for f in drawer_items %}
-              <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}" style="margin-bottom: 8px;">
-                <span class="hull-dot"></span>
-                <div class="hull-card-body">
-                  <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
-                  <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div>
-                  <p class="hull-card-desc">{{ f.get('description', '') }}</p>
-                </div>
-              </div>
-              {% endfor %}
-            </div>
-          </div>
-          {% endif %}
-        </section>
-
-        <!-- Disk -->
-        <section class="panel">
-          <h3 style="margin-bottom: 14px;">DISK</h3>
-          {% if ctx.disk.available %}
-          <div class="grid-head cols-disk">
-            <span>MOUNT</span><span>SOURCE</span><span>USED</span>
-          </div>
-          {% for d in ctx.disk.list %}
-          {% set pct = d.get('used_pct', 0) or 0 %}
-          <div class="grid-row cols-disk {{ 'alert-row' if d.get('alert') else '' }}">
-            <span class="cell-mount">{{ d.get('mount', '?') }}</span>
-            <span class="cell-source">{{ d.get('source', '?') }}</span>
-            <div class="disk-bar-row">
-              <div class="disk-bar-track">
-                <div class="disk-bar-fill {{ 'high' if pct >= 80 else ('mid' if pct >= 60 else 'low') }}" style="width: {{ pct }}%;"></div>
-              </div>
-              <span class="disk-pct">{{ pct }}%</span>
-            </div>
-          </div>
-          {% endfor %}
-          {% else %}
-          <p class="muted-body">Not available — last scan (mode: {{ ctx.health.last_scan_mode or "?" }}) didn't collect
-            disk data. Available after the next full or status scan.</p>
-          {% endif %}
-        </section>
-
-        <!-- System -->
-        {% if ctx.system_and_backups.available %}
-        {% set sys = ctx.system_and_backups.system %}
-        {% set mem = sys.get('memory', {}) %}
-        {% set up = sys.get('uptime_parsed', {}) %}
-        <section class="panel">
-          <div class="panel-head-row">
-            <h3>SYSTEM</h3>
-            <span class="system-online-chip"><span class="dot-sm-green"></span>{{ sys.get('hostname', '?') }}</span>
-          </div>
-
-          <div class="stat-tiles">
-            <div class="stat-tile">
-              <div class="stat-tile-eyebrow">UPTIME</div>
-              <div class="stat-tile-value">{{ up.get('up_human', '?') }}</div>
-              <div class="stat-tile-sub">{{ ('since ' ~ up.since) if up.get('since') else '' }}</div>
-            </div>
-            <div class="stat-tile">
-              <div class="stat-tile-eyebrow">LOAD AVG</div>
-              <div class="stat-tile-value" style="color: var(--green-text);">{{ up.get('load1', '?') }} <span class="dim">/ {{ up.get('load5', '?') }} / {{ up.get('load15', '?') }}</span></div>
-              <div class="stat-tile-sub">1m &middot; 5m &middot; 15m</div>
-            </div>
-            <div class="stat-tile">
-              <div class="stat-tile-eyebrow">SESSIONS</div>
-              <div class="stat-tile-value">{{ up.get('users', '?') }} <span class="dim">user{{ '' if up.get('users') == '1' else 's' }}</span></div>
-              <div class="stat-tile-sub">{{ ('local time ' ~ up.now) if up.get('now') else '' }}</div>
-            </div>
-          </div>
-
-          <div class="mem-label-row">
-            <span class="system-stat-label" style="margin: 0;">MEMORY</span>
-            <span class="mono-inline" style="font-size: 12px;">{{ mem.get('used', '?') }} <span style="color: var(--faint);">used / {{ mem.get('total', '?') }} total &middot; {{ mem.get('available', '?') }} available</span></span>
-          </div>
-          <div class="mem-bar">
-            <div class="mem-bar-used" style="width: {{ mem.get('used_pct') or 0 }}%;"></div>
-            <div class="mem-bar-buffcache" style="width: {{ mem.get('buff_cache_pct') or 0 }}%;"></div>
-          </div>
-          <div class="mem-legend">
-            <span class="mem-legend-item"><span class="mem-swatch used"></span>used {{ mem.get('used', '?') }}</span>
-            <span class="mem-legend-item"><span class="mem-swatch buffcache"></span>buff/cache {{ mem.get('buff_cache', '?') }}</span>
-            <span class="mem-legend-item"><span class="mem-swatch free"></span>free {{ mem.get('free', '?') }}</span>
-            <span>shared {{ mem.get('shared', '?') }}</span>
-          </div>
-        </section>
-
-        <section class="panel errors-panel">
-          <div class="panel-head-row" style="margin-bottom: 6px;">
-            <h3>RECENT ERRORS</h3>
-            <span class="errors-count-pill">{{ sys.get('recent_error_count', 0) }}</span>
-          </div>
-          {% if sys.get('recent_errors') %}
-          <p class="errors-diagnosis">{{ sys.diagnosis }}</p>
-          <div class="errors-terminal">
-            {% for e in sys.parsed_errors[:8] %}
-            <div class="errors-terminal-line"><span class="ts">{{ e.ts }}</span> <span class="host">{{ e.host }}</span> <span class="proc">{{ e.proc }}</span> <span class="msg">{{ e.msg }}</span></div>
-            {% endfor %}
-          </div>
-          {% if sys.get('recent_error_count', 0) > 8 %}
-          <p class="muted-body" style="margin-top: 8px;">+{{ sys.get('recent_error_count', 0) - 8 }} more in the last hour.</p>
-          {% endif %}
-          {% else %}
-          <p class="muted-body">No errors in the last hour.</p>
-          {% endif %}
-        </section>
-        {% else %}
-        <section class="panel">
-          <div class="panel-head-row">
-            <h3>SYSTEM</h3>
-            <span class="status-chip">SENSOR OFFLINE</span>
-          </div>
-          <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span> didn't collect system data. Available after the next full scan.</p>
-        </section>
-        {% endif %}
       </div>
 
       <!-- ═══ BACKUPS ═══ -->
@@ -667,6 +463,50 @@
     </section>
   </div>
 
+  <div class="tab-panel action-hull-dock" data-tab-panel="actions" id="hull-diagnostics-panel">
+    {% set fc = ctx.findings.counts %}
+    {% if fc.critical %}{% set worst = 'crit' %}
+    {% elif fc.high %}{% set worst = 'high' %}
+    {% elif fc.medium %}{% set worst = 'medium' %}
+    {% elif fc.low %}{% set worst = 'low' %}
+    {% else %}{% set worst = 'none' %}{% endif %}
+    {% set hull_copy = {
+      'crit': ('⚠', 'CRITICAL FAULT', fc.critical|string ~ ' critical fault' ~ ('' if fc.critical == 1 else 's') ~ ' — immediate action required'),
+      'high': ('⚠', 'HIGH ALERT', fc.high|string ~ ' high-severity finding' ~ ('' if fc.high == 1 else 's') ~ ' need attention'),
+      'medium': ('!', 'CAUTION', fc.medium|string ~ ' finding' ~ ('' if fc.medium == 1 else 's') ~ ' worth a look'),
+      'low': ('i', 'MINOR NOTES', fc.low|string ~ ' low-severity note' ~ ('' if fc.low == 1 else 's') ~ ' — informational, non-blocking'),
+      'none': ('✓', 'ALL SYSTEMS NOMINAL', 'No open findings.'),
+    } %}
+    <section class="panel">
+      <h3 class="action-hull-title">HULL DIAGNOSTICS</h3>
+      {% if ctx.findings.available %}
+      <div class="alarm-banner {{ worst }}">
+        <div class="alarm-orb">{{ hull_copy[worst][0] }}</div>
+        <div class="alarm-text"><p class="alarm-title">{{ hull_copy[worst][1] }}</p><p class="alarm-sub">{{ hull_copy[worst][2] }}</p></div>
+        <div class="alarm-chips">
+          <span class="alarm-chip crit {{ 'zero' if not fc.critical }}">CRIT {{ fc.critical }}</span>
+          <span class="alarm-chip high {{ 'zero' if not fc.high }}">HIGH {{ fc.high }}</span>
+          <span class="alarm-chip med {{ 'zero' if not fc.medium }}">MED {{ fc.medium }}</span>
+          <span class="alarm-chip low {{ 'zero' if not fc.low }}">LOW {{ fc.low }}</span>
+        </div>
+      </div>
+      {% if ctx.findings.top %}<div class="hull-cards">{% for f in ctx.findings.top %}
+        <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}"><span class="hull-dot"></span><div class="hull-card-body">
+          <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
+          <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p>
+        </div></div>
+      {% endfor %}</div>{% endif %}
+      {% set drawer_items = (ctx.findings.medium_list or []) + (ctx.findings.low_list or []) %}
+      {% if drawer_items %}<details class="hull-drawer">
+        <summary class="hull-drawer-toggle"><span class="hull-drawer-caret">▸</span>{{ drawer_items|length }} low-severity note{{ '' if drawer_items|length == 1 else 's' }} · informational · non-blocking</summary>
+        <div class="hull-drawer-body">{% for f in drawer_items %}<div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }} action-hull-note">
+          <span class="hull-dot"></span><div class="hull-card-body"><span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span><div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p></div>
+        </div>{% endfor %}</div>
+      </details>{% endif %}
+      {% else %}<p class="muted-body">No findings analysis is available yet. Run a full scan to collect it.</p>{% endif %}
+    </section>
+  </div>
+
   <!-- Kept outside #dashboard-live so it can sit below the two docks, which must stay outside
        it (a refresh must not wipe an in-flight decision). The refresh swaps this panel by id
        instead, so it still updates every 60s.  Order on the Actions tab: authorisation first
@@ -808,39 +648,61 @@
        panel by id, the same way it swaps the deployment manifest. -->
   <div class="tab-panel crew-dock" data-tab-panel="crew" id="crew-panel">
     <section class="panel crew-layout">
-      <div class="crew-cards">
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Professor Farnsworth">
-          <div class="crew-copy"><h3>Farnsworth</h3><div class="crew-role">ship's computer</div><p>Plans the work, with cautiously good news.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela">
-          <div class="crew-copy"><h3>Leela</h3><div class="crew-role">system monitor</div><p>Watches every container.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad">
-          <div class="crew-copy"><h3>Hermes</h3><div class="crew-role">issue analyzer</div><p>Files the findings.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender">
-          <div class="crew-copy"><h3>Bender</h3><div class="crew-role">action executor</div><p>Runs the approved steps.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg">
-          <div class="crew-copy"><h3>Zoidberg</h3><div class="crew-role">canary-tested auto-patcher</div><p>Updates one thing at a time.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong">
-          <div class="crew-copy"><h3>Amy</h3><div class="crew-role">diagnostician &amp; researcher</div><p>Investigates without touching anything.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry">
-          <div class="crew-copy"><h3>Fry</h3><div class="crew-role">onboarding</div><p>Gets the first run off the ground.</p></div>
-        </article>
-        <article class="crew-card">
-          <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy">
-          <div class="crew-copy"><h3>Scruffy</h3><div class="crew-role">this dashboard</div><p>Observes and does nothing.</p></div>
-        </article>
+      <div class="crew-main">
+        <div class="crew-head">
+          <h2>CREW</h2>
+          <span>8 aboard · who does what</span>
+        </div>
+        <div class="crew-cards">
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/farnsworth.png') }}" alt="Professor Farnsworth">
+            <h3>Prof. Farnsworth</h3>
+            <div class="crew-role">ship's computer</div>
+            <p>Narrates the state of the ship. Knows everything, worries anyway.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="Leela">
+            <h3>Leela</h3>
+            <div class="crew-role">system monitor</div>
+            <p>Watches the fleet and writes the plans.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/hermes.png') }}" alt="Hermes Conrad">
+            <h3>Hermes</h3>
+            <div class="crew-role">plan analyst</div>
+            <p>Checks every plan before anyone gets asked to approve it.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/bender.png') }}" alt="Bender">
+            <h3>Bender</h3>
+            <div class="crew-role">action executor</div>
+            <p>Runs authorised plans. Only authorised ones.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/zoidberg.png') }}" alt="Dr. Zoidberg">
+            <h3>Dr. Zoidberg</h3>
+            <div class="crew-role">canary updates</div>
+            <p>Pulls new images, tests them, rolls back if they bite.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/amy.png') }}" alt="Amy Wong">
+            <h3>Amy</h3>
+            <div class="crew-role">diagnostician</div>
+            <p>Digs through logs and evidence for chat answers.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/fry.png') }}" alt="Fry">
+            <h3>Fry</h3>
+            <div class="crew-role">onboarding</div>
+            <p>Walks new stacks aboard and learns their names.</p>
+          </article>
+          <article class="crew-card">
+            <img class="crew-portrait" src="{{ url_for('static', filename='characters/futurama/scruffy.png') }}" alt="Scruffy">
+            <h3>Scruffy</h3>
+            <div class="crew-role">this dashboard</div>
+            <p>Observes. Does nothing. Proudly.</p>
+          </article>
+        </div>
       </div>
 
       <aside class="computer-log" aria-labelledby="computer-log-title">

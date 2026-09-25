@@ -203,9 +203,7 @@ def test_services_render_stack_cards_worst_first_with_links_and_attention(tmp_pa
     assert 'href="/containers/broken/api"' in html
     assert 'href="/containers/broken/worker"' in html
     assert 'href="/containers/healthy/web"' in html
-    assert "NEEDS YOU NOW" in html
-    assert "api down (broken)" in html
-    assert "worker starting (broken)" in html
+    assert "ATTENTION 1" in html
 
 
 def test_services_attention_rail_only_renders_for_non_ok_stack(tmp_path, monkeypatch):
@@ -215,19 +213,16 @@ def test_services_attention_rail_only_renders_for_non_ok_stack(tmp_path, monkeyp
         }},
     ])
     assert "data-services-rail" not in html
-    assert "NOTHING NEEDS ATTENTION" in html
-    assert "All 1 services across 1 stacks are online." in html
-    assert "Last full scan: 2026-09-21T12:00:00+00:00" in html
+    assert "ATTENTION 0" in html
+    assert "1 stacks · 1 of 1 online · worst first" in html
 
 
 def test_services_empty_and_unavailable_states_render_honest_copy(tmp_path, monkeypatch):
     empty = _render_with_service_snapshot(tmp_path, monkeypatch, stacks=[])
-    assert "NO COMPOSE STACKS FOUND" in empty
-    assert "stacks_root" in empty
+    assert "No compose stacks found." in empty
 
     unavailable = _render_with_service_snapshot(tmp_path, monkeypatch, mode="status", stacks=[])
-    assert "Service details are not available in this snapshot." in unavailable
-    assert "Available after the next full scan." in unavailable
+    assert "Service details need a full scan" in unavailable
     assert "CAN&#39;T REACH DOCKER" not in unavailable
 
 
@@ -1003,15 +998,48 @@ def test_config_rpc_errors_are_always_503_json(chat_client, path):
     assert b"secret" not in response.data and b"<html" not in response.data
 
 
-def test_actions_holds_only_what_needs_a_decision(tmp_path, monkeypatch):
+def test_actions_holds_decisions_incidents_and_hull_diagnostics(tmp_path, monkeypatch):
     """Authorisation first (it wants one now), incidents second (something is wrong), open rollback
     windows third (a canary may still need settling). The update history is not on this tab at all
     — it is the one thing here you could never act on, so it moved to History."""
     html = _render_with_certs(tmp_path, monkeypatch, [])
     actions_panels = re.findall(r'data-tab-panel="actions" id="([a-z-]+)"', html)
-    assert actions_panels == ["approval-panel", "incident-panel", "rollback-candidates-panel"]
+    assert actions_panels == [
+        "approval-panel", "incident-panel", "hull-diagnostics-panel",
+        "rollback-candidates-panel",
+    ]
     assert 'data-tab-panel="history" id="manifest-panel"' in html
     assert 'data-tab="history"' in html          # and it has a tab of its own to live on
+
+
+def test_overview_replaces_full_width_hull_and_system_with_tiles(tmp_path, monkeypatch):
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    overview = html[html.index('data-tab-panel="overview"'):html.index('data-tab-panel="backups"')]
+    assert 'data-tile-tab="actions"' in overview
+    assert 'class="overview-tile none"' in overview
+    assert "panel-green" not in overview
+    assert "stat-tiles" not in overview
+    assert 'data-tab-panel="actions" id="hull-diagnostics-panel"' in html
+
+
+def test_a_stack_with_no_readable_members_still_says_why(tmp_path, monkeypatch):
+    """summarize_services() marks it warn with note="state unreadable". A dots-only card has
+    no dots to draw for it and nothing to drill into, so without the note it is a bare 0/0."""
+    html = _render_with_service_snapshot(tmp_path, monkeypatch, stacks=[
+        {"stack": "mystery", "status": "unknown", "services": {}},
+    ])
+    assert "state unreadable" in html
+
+
+def test_the_fleet_and_system_tiles_are_not_clickable_controls(tmp_path, monkeypatch):
+    """Both summarise the tab you are already on. A button that re-selects it is a no-op
+    control that keyboard users still have to tab through."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    overview = html[html.index('data-tab-panel="overview"'):html.index('data-tab-panel="backups"')]
+    tiles = overview[overview.index('class="overview-tiles"'):overview.index("overview-control-grid")]
+    assert 'data-tile-tab="overview"' not in tiles
+    for target in ("actions", "backups", "network"):
+        assert f'data-tile-tab="{target}"' in tiles
 
 
 def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):

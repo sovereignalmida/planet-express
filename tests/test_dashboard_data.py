@@ -170,6 +170,257 @@ def test_summarize_disk_unavailable_after_updates_mode_run(tmp_path, monkeypatch
     assert dashboard_data.summarize_disk() == {"list": [], "available": False}
 
 
+def test_summarize_disk_sorts_fullest_mount_first(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": "2026-07-15T14:36:53+00:00", "mode": "status",
+        "disk": [
+            {"mount": "/small", "used_pct": 12},
+            {"mount": "/full", "used_pct": 91},
+            {"mount": "/middle", "used_pct": 54},
+        ],
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    assert [d["used_pct"] for d in dashboard_data.summarize_disk()["list"]] == [91, 54, 12]
+
+
+def _unavailable_overview_context():
+    return {
+        "health": {"last_scan_mode": "updates"},
+        "containers": {"available": False},
+        "services": {"total_stacks": 0},
+        "findings": {"available": False},
+        "pipeline_status": {},
+        "system_and_backups": {"available": False},
+        "certs": {"available": False, "list": []},
+    }
+
+
+def test_unavailable_fleet_tile_is_not_a_false_zero():
+    tiles = dashboard_data.summarize_overview_tiles(
+        _unavailable_overview_context(), {"available": False}, {"available": False}
+    )
+    assert tiles["fleet"]["level"] == "none"
+    assert tiles["fleet"]["hero"] == "—" and tiles["fleet"]["sub"]
+
+
+def test_unavailable_hull_tile_is_not_a_false_all_clear():
+    tiles = dashboard_data.summarize_overview_tiles(
+        _unavailable_overview_context(), {"available": False}, {"available": False}
+    )
+    assert tiles["hull"]["level"] == "none"
+    assert tiles["hull"]["hero"] == "—" and tiles["hull"]["sub"]
+
+
+def test_unavailable_backup_tile_is_not_a_false_zero():
+    tiles = dashboard_data.summarize_overview_tiles(
+        _unavailable_overview_context(), {"available": False}, {"available": False}
+    )
+    assert tiles["backups"]["level"] == "none"
+    assert tiles["backups"]["hero"] == "—" and tiles["backups"]["sub"]
+
+
+def test_unavailable_network_tile_is_not_a_false_zero():
+    tiles = dashboard_data.summarize_overview_tiles(
+        _unavailable_overview_context(), {"available": False}, {"available": False}
+    )
+    assert tiles["network"]["level"] == "none"
+    assert tiles["network"]["hero"] == "—" and tiles["network"]["sub"]
+
+
+def test_unavailable_system_tile_is_not_a_false_zero():
+    tiles = dashboard_data.summarize_overview_tiles(
+        _unavailable_overview_context(), {"available": False}, {"available": False}
+    )
+    assert tiles["system"]["level"] == "none"
+    assert tiles["system"]["hero"] == "—" and tiles["system"]["sub"]
+
+
+# ── T45.2 review: every one of these was a tile reporting healthier than the host ────
+def _healthy_overview_context(**overrides):
+    ctx = {
+        "health": {"last_scan_mode": "full"},
+        "containers": {"available": True, "healthy": 2, "total": 2, "down": 0,
+                       "degraded": 0, "paused": 0, "cells": ["online", "online"]},
+        "services": {"available": True, "total_stacks": 1},
+        "findings": {"available": True, "list": [],
+                     "counts": {"critical": 0, "high": 0, "medium": 0, "low": 0}},
+        "pipeline_status": {"state": "idle", "pending_plan_id": None},
+        "system_and_backups": {"available": True, "system": {}, "backups": {
+            "weekly": {"freshness": "fresh", "age_hours": 12.0, "age_human": "12h",
+                       "next_human": "in 6d"},
+        }},
+        "certs": {"available": True, "list": [{"tier": "valid", "days_left": 400}]},
+    }
+    ctx.update(overrides)
+    return ctx
+
+
+def test_a_failed_daily_is_not_hidden_behind_a_fresh_weekly():
+    """The tile takes the worst job, the hero takes the newest. Reading severity off one
+    job let a failed daily render green next to a healthy weekly."""
+    ctx = _healthy_overview_context()
+    ctx["system_and_backups"]["backups"]["daily"] = {
+        "freshness": "failed", "age_hours": 30.0, "age_human": "30h", "next_human": "in 1h"}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["backups"]["level"] == "crit"
+    assert tiles["backups"]["hero"] == "12h"   # newest snapshot, not the failed one
+
+
+def test_an_expiring_certificate_is_crit_on_the_tile_as_it_is_on_the_tab():
+    ctx = _healthy_overview_context()
+    ctx["certs"]["list"] = [{"tier": "expiring", "days_left": 4}]
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["backups"]["level"] == "crit"
+
+
+def test_an_unreadable_certificate_row_is_crit_not_a_shrug():
+    ctx = _healthy_overview_context()
+    ctx["certs"]["list"] = [{"kind": "error", "error": "could not parse"}]
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["backups"]["level"] == "crit"
+
+
+def test_router_health_survives_adguard_being_absent():
+    """AdGuard is optional. Gating the router count on it replaced a genuinely down router
+    with a neutral 'unavailable' tile."""
+    routers = {"available": True, "routers": [
+        {"status": "enabled"}, {"status": "disabled"}]}
+    tiles = dashboard_data.summarize_overview_tiles(
+        _healthy_overview_context(), routers, {"available": False, "configured": False})
+    assert tiles["network"]["level"] == "crit"
+    assert tiles["network"]["hero"] == "1"
+    assert "adguard" in tiles["network"]["detail"]
+
+
+def test_an_unreadable_run_status_does_not_hide_a_critical_finding():
+    """findings and run_status are separate files. An unknown pipeline means the pending-plan
+    count is unknown, not that the findings are."""
+    ctx = _healthy_overview_context()
+    ctx["findings"]["counts"]["critical"] = 1
+    ctx["pipeline_status"] = {"state": "unknown", "pending_plan_id": None}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["hull"]["level"] == "crit"
+    assert tiles["hull"]["critical"] == 1
+    assert tiles["hull"]["plans"] == "?"
+
+
+def test_disk_rows_use_the_documented_ramp_not_the_old_bar_thresholds(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-07-15T14:36:53+00:00", "mode": "full", "disk": [
+        {"mount": "/a", "used_pct": 63}, {"mount": "/b", "used_pct": 80},
+        {"mount": "/c", "used_pct": 92}, {"mount": "/d", "used_pct": 97},
+        {"mount": "/e", "used_pct": None},
+    ]})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    levels = {d["mount"]: d["level"] for d in dashboard_data.summarize_disk()["list"]}
+    assert levels == {"/a": "ok", "/b": "warn", "/c": "high", "/d": "crit", "/e": "none"}
+
+
+def test_an_unreadable_cert_list_does_not_hide_a_failed_backup():
+    """Jobs and certificates are separate sensors. Requiring both let an unreadable cert list
+    blank the one thing this tile exists to show."""
+    ctx = _healthy_overview_context()
+    ctx["certs"] = {"available": False, "list": []}
+    ctx["system_and_backups"]["backups"] = {
+        "weekly": {"freshness": "failed", "age_hours": 3.0, "age_human": "3h", "next_human": "in 4d"}}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["backups"]["level"] == "crit"
+    assert tiles["backups"]["cert_count"] == "—"
+
+
+def test_a_missing_findings_snapshot_does_not_swallow_a_pending_approval():
+    """Findings and approvals come from different sources. An approval waiting on the
+    operator is the most actionable thing this tile carries."""
+    ctx = _healthy_overview_context()
+    ctx["findings"] = {"available": False, "list": [], "counts": {}}
+    ctx["pending_approvals"] = 1
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["hull"]["hero"] == "1 PLAN WAITING"
+    assert tiles["hull"]["level"] == "warn"
+    assert tiles["hull"]["show_pills"] is True
+    # ...and it must not invent a clean bill of health for the counts it cannot see.
+    assert tiles["hull"]["critical"] == "?" and tiles["hull"]["high"] == "?"
+
+
+def test_an_unreadable_uptime_does_not_hide_memory_pressure():
+    """uptime and free -h are separately parsed and fail separately. Gating the tile on both
+    hid a 94%-full memory bar behind "no system metrics"."""
+    ctx = _healthy_overview_context()
+    ctx["system_and_backups"]["system"] = {"uptime_parsed": {}, "memory": {"used_pct": 94}}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["system"]["level"] == "crit"
+    assert tiles["system"]["show_memory"] is True
+
+
+def test_paused_containers_do_not_tint_a_healthy_fleet():
+    """PAUSED_CONTAINERS are stopped on purpose and are not counted as unhealthy, so letting
+    them raise the level rendered "85 of 85 healthy" as a warning."""
+    ctx = _healthy_overview_context()
+    ctx["containers"]["paused"] = 2
+    ctx["containers"]["cells"] = ["online", "online", "paused", "paused"]
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["fleet"]["level"] == "ok"
+
+
+def test_pending_approvals_come_from_core_not_the_retired_run_status_field():
+    """RunStatus.pending_plan_id was the shell planner's signal; nothing writes it now, so
+    reading it reported "0 PLANS" with approvals genuinely waiting."""
+    ctx = _healthy_overview_context()
+    ctx["pending_approvals"] = 2
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["hull"]["plans"] == 2
+    assert tiles["hull"]["hero"] == "2 PLANS WAITING"
+    assert tiles["hull"]["level"] == "warn"
+
+
+def test_an_unreachable_core_marks_the_plan_count_unknown_not_zero():
+    tiles = dashboard_data.summarize_overview_tiles(
+        _healthy_overview_context(), {"available": False}, {"available": False})
+    assert tiles["hull"]["plans"] == "?"
+    assert tiles["hull"]["hero"] == "NO FINDINGS"
+
+
+def test_a_finding_with_an_unrecognised_severity_is_not_all_nominal():
+    """summarize_findings() keeps it in "top" on purpose; counting only the four known
+    buckets turned it into a green tile while Hull Diagnostics displayed it."""
+    ctx = _healthy_overview_context()
+    ctx["pending_approvals"] = 0
+    ctx["findings"]["list"] = [{"id": "f1", "severity": "URGENT"}]
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["hull"]["hero"] == "1 FINDING"
+    assert tiles["hull"]["level"] == "high"
+
+
+def test_a_status_scan_still_reports_the_fleet():
+    """status mode collects containers but not stack completeness. Gating the tile on
+    services made a perfectly good fleet reading vanish after one."""
+    ctx = _healthy_overview_context()
+    ctx["services"] = {"available": False, "total_stacks": 0}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["fleet"]["level"] == "ok"
+    assert tiles["fleet"]["hero"] == "2"
+    assert tiles["fleet"]["note"] == "stacks —"
+
+
+def test_clean_findings_with_an_unknown_plan_count_is_not_all_nominal():
+    ctx = _healthy_overview_context()
+    ctx["pipeline_status"] = {"state": "unknown", "pending_plan_id": None}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["hull"]["hero"] == "NO FINDINGS"
+    assert tiles["hull"]["plans"] == "?"
+
+
+def test_a_failed_jobs_age_is_labelled_an_attempt_not_a_snapshot():
+    """systemd stamps the completion time even when the run produced nothing."""
+    ctx = _healthy_overview_context()
+    ctx["system_and_backups"]["backups"] = {
+        "weekly": {"freshness": "failed", "age_hours": 3.0, "age_human": "3h", "next_human": "in 4d"}}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["backups"]["sub"] == "since last attempt"
+    assert tiles["backups"]["level"] == "crit"
+
+
 def test_summarize_system_and_backups_unavailable_outside_full_mode(tmp_path, monkeypatch):
     path = tmp_path / "latest_monitor.json"
     _write(path, {"timestamp": "2026-07-15T14:36:53+00:00", "mode": "status"})
