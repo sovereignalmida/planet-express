@@ -8,6 +8,11 @@
   const state = {
     loading: false, submitting: new Set(), poller: null, revision: 0,
     refreshPending: false, notice: "",
+    // Which half of the console you are looking at. Operator state, so it survives the
+    // 15-second reload -- re-applied on every render, not just on click.
+    status: "open",
+    counts: { open: 0, resolved: 0 },
+    items: { open: [], resolved: [] },
   };
   const csrf = () => document.querySelector('meta[name="csrf-token"]').content;
 
@@ -59,35 +64,117 @@
     }
   }
 
-  function render(item) {
-    const card = node("article", "pe-card incident-card " + (item.status || "open"));
-    card.dataset.incidentId = item.id;
-    const head = node("div", "incident-head");
-    head.append(node("span", "incident-severity severity-" + (item.severity || "none").toLowerCase(), item.severity || "INFO"),
-      node("span", "incident-state", item.source_current ? "CURRENT" : "STALE"),
-      node("span", "approval-plan", "INCIDENT " + item.id));
-    card.append(head, node("h3", "incident-title", item.summary),
-      node("p", "incident-resource", item.kind + " · " + item.resource));
+  function shortDate(value) {
+    if (typeof value !== "number") return "unknown";
+    const d = new Date(value * 1000);
+    return (d.getMonth() + 1) + "/" + d.getDate() + " " +
+      String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
 
+  // A row, not a card. Six incidents as a 3x2 card grid filled the tab; as rows they are a
+  // list you can scan, and the evidence that used to be on every card face opens on click.
+  function renderRow(item) {
+    const row = node("div", "incident-row " + (item.status || "open"));
+    row.dataset.incidentId = item.id;
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.setAttribute("aria-expanded", "false");
+
+    row.append(node("span", "incident-severity severity-" + (item.severity || "none").toLowerCase(),
+                    item.severity || "INFO"));
+
+    const middle = node("div", "incident-row-main");
+    middle.append(node("div", "incident-row-title", item.summary),
+                  node("div", "incident-row-where", item.kind + " · " + item.resource));
+    row.append(middle);
+    row.append(node("span", "incident-row-when",
+                    shortDate(item.first_seen) + " → " + shortDate(item.last_seen)));
+    row.append(node("span", "incident-row-tick", item.status === "resolved" ? "✓" : "•"));
+
+    const detail = node("div", "incident-detail");
     const facts = node("dl", "incident-facts");
     [["OCCURRENCES", item.occurrences], ["FIRST SEEN", date(item.first_seen)],
-      ["LAST SEEN", date(item.last_seen)]].forEach(([term, value]) => {
+      ["LAST SEEN", date(item.last_seen)],
+      ["SOURCE", item.source_current ? "current" : "stale"]].forEach(([term, value]) => {
       facts.append(node("dt", "", term), node("dd", "", value));
     });
-    card.append(facts);
+    detail.append(facts);
 
     const hint = item.hint || {};
     const callout = node("div", "incident-hint " + (hint.state || "unknown"));
-    callout.append(node("strong", "", (hint.agent || "Crew") + ": "), node("span", "", hint.message || "No hint available."));
-    card.append(callout);
+    callout.append(node("strong", "", (hint.agent || "Crew") + ": "),
+                   node("span", "", hint.message || "No hint available."));
+    detail.append(callout);
     if (hint.state === "proposal_available") {
       const button = node("button", "pe-btn primary", "PROPOSE RESTART");
       button.type = "button";
       button.disabled = state.submitting.has(item.id);
-      button.addEventListener("click", () => propose(item, button));
-      card.append(button);
+      // Without this the click bubbles to the row and collapses the detail the operator is
+      // reading, right as the proposal lands.
+      button.addEventListener("click", event => { event.stopPropagation(); propose(item, button); });
+      detail.append(button);
     }
-    return card;
+
+    function toggle(event) {
+      if (event.target.closest("button")) return;
+      const open = row.classList.toggle("is-open");
+      row.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(event); }
+    });
+
+    const wrap = node("div", "incident-entry");
+    wrap.append(row, detail);
+    return wrap;
+  }
+
+  function applyFilter() {
+    root.querySelectorAll("[data-incident-status]").forEach(button => {
+      const active = button.dataset.incidentStatus === state.status;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      const count = state.counts[button.dataset.incidentStatus] || 0;
+      button.textContent = button.dataset.incidentStatus.toUpperCase() + " " + count;
+    });
+    const summary = document.getElementById("incident-count");
+    if (summary) {
+      summary.textContent = state.counts.open + " open · " + state.counts.resolved +
+        " resolved this week";
+    }
+
+    const items = state.items[state.status] || [];
+    cards.replaceChildren();
+    if (!items.length) {
+      cards.append(node("p", "muted-body", state.status === "open"
+        ? "Nothing open. Leela files one the moment something goes wrong."
+        : "No incidents resolved this week."));
+    } else {
+      items.forEach(item => cards.append(renderRow(item)));
+    }
+    renderRollup(items);
+  }
+
+  // Leela's one-line rollup, only when two or more incidents actually share a root cause.
+  // An empty line under every list would be noise; this exists to say "these are one thing".
+  function renderRollup(items) {
+    const rollup = document.getElementById("incident-rollup");
+    const text = document.getElementById("incident-rollup-text");
+    if (!rollup || !text) return;
+    const byKind = {};
+    items.forEach(item => { byKind[item.kind] = (byKind[item.kind] || 0) + 1; });
+    let top = null;
+    Object.keys(byKind).forEach(kind => {
+      if (!top || byKind[kind] > byKind[top]) top = kind;
+    });
+    if (!top || byKind[top] < 2) {
+      rollup.hidden = true;
+      return;
+    }
+    rollup.hidden = false;
+    text.textContent = byKind[top] + " of " + items.length + " are " + top +
+      " — same root cause. Click any row for evidence.";
   }
 
   async function load(force) {
@@ -104,10 +191,11 @@
         request(root.dataset.api + "?status=resolved&limit=10"),
       ]);
       if (revision !== state.revision || state.submitting.size) return;
-      cards.replaceChildren();
-      const items = [...(Array.isArray(open) ? open : []), ...(Array.isArray(resolved) ? resolved : [])];
-      if (!items.length) cards.append(node("p", "muted-body", "No incidents recorded yet."));
-      items.forEach(item => cards.append(render(item)));
+      state.items.open = Array.isArray(open) ? open : [];
+      state.items.resolved = Array.isArray(resolved) ? resolved : [];
+      state.counts.open = state.items.open.length;
+      state.counts.resolved = state.items.resolved.length;
+      applyFilter();
       message.textContent = state.notice;
     } catch (error) {
       message.textContent = error.message;
@@ -127,6 +215,13 @@
       state.poller = setInterval(load, 15000);
     }
   }
+
+  root.querySelectorAll("[data-incident-status]").forEach(button => {
+    button.addEventListener("click", () => {
+      state.status = button.dataset.incidentStatus;
+      applyFilter();
+    });
+  });
 
   document.addEventListener("visibilitychange", visibility);
   visibility();

@@ -998,18 +998,31 @@ def test_config_rpc_errors_are_always_503_json(chat_client, path):
     assert b"secret" not in response.data and b"<html" not in response.data
 
 
-def test_actions_holds_decisions_incidents_and_hull_diagnostics(tmp_path, monkeypatch):
-    """Authorisation first (it wants one now), incidents second (something is wrong), open rollback
-    windows third (a canary may still need settling). The update history is not on this tab at all
-    — it is the one thing here you could never act on, so it moved to History."""
+def test_actions_splits_what_wants_you_from_what_is_wrong(tmp_path, monkeypatch):
+    """Left column: things asking for a decision -- a plan to authorise, an open rollback
+    window. Right column: things that are wrong -- incidents, then hull findings. The update
+    history is not on this tab at all; it is the one thing here you could never act on."""
     html = _render_with_certs(tmp_path, monkeypatch, [])
-    actions_panels = re.findall(r'data-tab-panel="actions" id="([a-z-]+)"', html)
-    assert actions_panels == [
-        "approval-panel", "incident-panel", "hull-diagnostics-panel",
-        "rollback-candidates-panel",
-    ]
+    dock = html[html.index('data-tab-panel="actions"'):html.index('data-tab-panel="history"')]
+    columns = re.findall(r'<div class="actions-col">(.*?)\n      </div>', dock, re.DOTALL)
+    assert len(columns) == 2
+    assert re.findall(r'id="([a-z-]+-panel|rollback-candidates-panel)"', columns[0]) == [
+        "approval-panel", "rollback-candidates-panel"]
+    assert re.findall(r'id="([a-z-]+-panel)"', columns[1]) == [
+        "incident-panel", "hull-diagnostics-panel"]
     assert 'data-tab-panel="history" id="manifest-panel"' in html
     assert 'data-tab="history"' in html          # and it has a tab of its own to live on
+
+
+def test_the_actions_panels_are_not_themselves_tab_panels(tmp_path, monkeypatch):
+    """They are children of one tab-panel now. Leaving the class on them would have
+    setActiveTab() toggling .active on the column contents too."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    for panel in ("approval-panel", "incident-panel", "hull-diagnostics-panel",
+                  "rollback-candidates-panel"):
+        opening = re.search(rf'<div[^>]*id="{panel}"', html).group(0)
+        assert "tab-panel" not in opening, panel
+        assert "data-tab-panel" not in opening, panel
 
 
 def test_overview_replaces_full_width_hull_and_system_with_tiles(tmp_path, monkeypatch):
@@ -1019,7 +1032,9 @@ def test_overview_replaces_full_width_hull_and_system_with_tiles(tmp_path, monke
     assert 'class="overview-tile none"' in overview
     assert "panel-green" not in overview
     assert "stat-tiles" not in overview
-    assert 'data-tab-panel="actions" id="hull-diagnostics-panel"' in html
+    # It moved to Actions, which is where the HULL tile's "actions ›" leads.
+    dock = html[html.index('data-tab-panel="actions"'):html.index('data-tab-panel="history"')]
+    assert 'id="hull-diagnostics-panel"' in dock
 
 
 def test_static_assets_are_versioned_so_a_cached_one_cannot_outlive_a_deploy(tmp_path, monkeypatch):
@@ -1063,11 +1078,12 @@ def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):
     """The 60-second swap replaces #dashboard-live's contents; a decision in flight must not be
     inside it."""
     html = _render_with_certs(tmp_path, monkeypatch, [])
-    live_start = html.index('id="dashboard-live"')
-    approval = html.index('id="approval-panel"')
-    incident = html.index('id="incident-panel"')
-    assert live_start < approval < incident
-    assert "outside #dashboard-live" in html[approval - 400:approval]
+    # Everything below this marker is a sibling of the live region, never a child.
+    detached = html[html.index("PANELS OUTSIDE #dashboard-live"):]
+    for panel in ("approval-panel", "incident-panel", "hull-diagnostics-panel",
+                  "rollback-candidates-panel", "manifest-panel", "chat-panel",
+                  "config-panel", "crew-panel"):
+        assert f'id="{panel}"' in detached, panel
     assert "incidents.js" in html
     assert "approvals.js" in html
 
@@ -1079,6 +1095,39 @@ def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp
     assert 'id="manifest-panel"' in html
     script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
     assert 'getElementById("manifest-panel")' in script
+
+
+def test_history_renders_run_cards_beside_a_detail_pane(tmp_path, monkeypatch):
+    history = tmp_path / "update_history.json"
+    history.write_text(json.dumps({"entries": [
+        {"ts": "2026-09-06T06:29:23+00:00", "stack": "tgbot", "service": "renderd",
+         "status": "updated"},
+    ]}))
+    monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", history)
+    monitor = tmp_path / "latest_monitor.json"
+    monitor.write_text(json.dumps({"timestamp": "2026-09-15T12:00:00+00:00", "mode": "full"}))
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor)
+    for attr in ("STATE_FINDINGS", "STATE_STATUS"):
+        monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
+                        lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
+                        lambda: {"available": False})
+    html = _client().get("/").data.decode()
+    assert 'class="history-split"' in html
+    assert 'id="deploy-manifest"' in html and 'id="run-detail"' in html
+
+
+def test_the_selected_run_survives_a_manifest_rebuild(tmp_path, monkeypatch):
+    """manifest-panel's innerHTML is replaced every 60 seconds. A selection held inside
+    buildDeployManifest() would reset to the newest run under the operator every minute, and
+    an index would point at a different run once a new one lands at the top."""
+    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
+    declaration = re.search(r"^  var selectedRunKey = null;", script, re.MULTILINE)
+    assert declaration, "selectedRunKey must live at module scope, not inside the builder"
+    assert declaration.start() < script.index("function buildDeployManifest")
+    # Identity, not position.
+    assert 'function runKey(run) { return (run.stack || "unknown") + "@" + run.entries[0].ts; }' in script
 
 
 def test_the_crew_log_is_still_refreshed_even_though_it_left_the_live_region(tmp_path, monkeypatch):
@@ -1238,7 +1287,8 @@ def test_every_detached_tab_hides_the_empty_live_grid():
 
     detached = set(re.search(r"var DETACHED_TABS = \[(.*?)\];", script).group(1).replace('"', "").replace(" ", "").split(","))
     tabs = set(re.search(r"var TAB_NAMES = \[(.*?)\];", script).group(1).replace('"', "").replace(" ", "").split(","))
-    outside = set(re.findall(r'data-tab-panel="([a-z]+)"', html.split('</div>\n\n  <!-- Both docks')[-1]))
+    outside = set(re.findall(r'data-tab-panel="([a-z]+)"',
+                             html.split("PANELS OUTSIDE #dashboard-live")[-1]))
 
     assert "crew" in tabs
     assert "crew" in outside

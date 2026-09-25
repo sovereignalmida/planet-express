@@ -446,127 +446,146 @@
   </div>
   </div>
 
-  <!-- Both docks are kept outside #dashboard-live: its 60-second snapshot swap must not reset a
-       countdown or replace a decision that is still in flight. Authorisation leads, because it is
-       the only one of the three asking the operator for something. -->
-  <div class="tab-panel approval-dock" data-tab-panel="actions" id="approval-panel"
-       data-api="/api/approvals">
-    <section class="panel">
-      <div class="panel-head-row">
-        <h2>FLIGHT AUTHORISATION</h2>
-        <span class="panel-head-note">typed actions</span>
-      </div>
-      <p id="approval-message" role="status">Loading approvals…</p>
-      <div id="approval-cards" class="approval-cards" aria-live="polite"></div>
-    </section>
-  </div>
+  <!-- ═══════════════ PANELS OUTSIDE #dashboard-live ═══════════════
+       Everything from here down is a sibling of the live region, not a child of it. The
+       60-second snapshot swap replaces #dashboard-live's innerHTML wholesale, which would
+       reset an approval countdown, discard a half-typed config draft, or replace a decision
+       that is still in flight. Anything holding operator state lives out here; anything out
+       here that also shows live data is swapped by id in refreshDashboard() instead.
 
-  <div class="tab-panel incident-dock" data-tab-panel="actions" id="incident-panel"
-       data-api="/api/incidents">
-    <section class="panel">
-      <div class="panel-head-row">
-        <h2>INCIDENT CONSOLE</h2>
-        <span class="panel-head-note">reconciled evidence</span>
-      </div>
-      <p id="incident-message" role="status">Loading incidents…</p>
-      <div id="incident-cards" class="incident-cards" aria-live="polite"></div>
-    </section>
-  </div>
+       Actions is one tab-panel with two columns rather than four stacked siblings. Left is
+       what wants a decision from you: a plan to authorise, or an open rollback window, which
+       means a canary is either still in flight or its automatic rollback failed and is
+       waiting for a human. Right is what is wrong: reconciled incidents, then the hull
+       findings the Overview HULL tile points at. -->
+  <div class="tab-panel actions-dock" data-tab-panel="actions">
+    <div class="actions-split">
 
-  <div class="tab-panel action-hull-dock" data-tab-panel="actions" id="hull-diagnostics-panel">
-    {% set fc = ctx.findings.counts %}
-    {% if fc.critical %}{% set worst = 'crit' %}
-    {% elif fc.high %}{% set worst = 'high' %}
-    {% elif fc.medium %}{% set worst = 'medium' %}
-    {% elif fc.low %}{% set worst = 'low' %}
-    {% else %}{% set worst = 'none' %}{% endif %}
-    {% set hull_copy = {
-      'crit': ('⚠', 'CRITICAL FAULT', fc.critical|string ~ ' critical fault' ~ ('' if fc.critical == 1 else 's') ~ ' — immediate action required'),
-      'high': ('⚠', 'HIGH ALERT', fc.high|string ~ ' high-severity finding' ~ ('' if fc.high == 1 else 's') ~ ' need attention'),
-      'medium': ('!', 'CAUTION', fc.medium|string ~ ' finding' ~ ('' if fc.medium == 1 else 's') ~ ' worth a look'),
-      'low': ('i', 'MINOR NOTES', fc.low|string ~ ' low-severity note' ~ ('' if fc.low == 1 else 's') ~ ' — informational, non-blocking'),
-      'none': ('✓', 'ALL SYSTEMS NOMINAL', 'No open findings.'),
-    } %}
-    <section class="panel">
-      <h3 class="action-hull-title">HULL DIAGNOSTICS</h3>
-      {% if ctx.findings.available %}
-      <div class="alarm-banner {{ worst }}">
-        <div class="alarm-orb">{{ hull_copy[worst][0] }}</div>
-        <div class="alarm-text"><p class="alarm-title">{{ hull_copy[worst][1] }}</p><p class="alarm-sub">{{ hull_copy[worst][2] }}</p></div>
-        <div class="alarm-chips">
-          <span class="alarm-chip crit {{ 'zero' if not fc.critical }}">CRIT {{ fc.critical }}</span>
-          <span class="alarm-chip high {{ 'zero' if not fc.high }}">HIGH {{ fc.high }}</span>
-          <span class="alarm-chip med {{ 'zero' if not fc.medium }}">MED {{ fc.medium }}</span>
-          <span class="alarm-chip low {{ 'zero' if not fc.low }}">LOW {{ fc.low }}</span>
+      <div class="actions-col">
+        <div class="approval-dock" id="approval-panel" data-api="/api/approvals">
+          <section class="panel">
+            <div class="panel-head-row">
+              <h2>FLIGHT AUTHORISATION</h2>
+              <span class="panel-head-note" id="approval-count">typed actions</span>
+            </div>
+            <p id="approval-message" role="status">Loading approvals…</p>
+            <div id="approval-cards" class="approval-cards" aria-live="polite"></div>
+          </section>
+        </div>
+
+        <div id="rollback-candidates-panel">
+          {% if ctx.rollback_candidates %}
+          <section class="panel">
+            <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
+            <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+              <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span>
+            </div>
+            {% for r in ctx.rollback_candidates %}
+            <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+              <span class="cell-mono cell-dim">{{ r.stack }}</span>
+              <span class="cell-mono cell-service">{{ r.service }}</span>
+              <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
+              <span class="cell-mono cell-when">{{ r.expires_at }}</span>
+            </div>
+            {% endfor %}
+          </section>
+          {% endif %}
         </div>
       </div>
-      {% if ctx.findings.top %}<div class="hull-cards">{% for f in ctx.findings.top %}
-        <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}"><span class="hull-dot"></span><div class="hull-card-body">
-          <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
-          <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p>
-        </div></div>
-      {% endfor %}</div>{% endif %}
-      {% set drawer_items = (ctx.findings.medium_list or []) + (ctx.findings.low_list or []) %}
-      {% if drawer_items %}<details class="hull-drawer">
-        <summary class="hull-drawer-toggle"><span class="hull-drawer-caret">▸</span>{{ drawer_items|length }} low-severity note{{ '' if drawer_items|length == 1 else 's' }} · informational · non-blocking</summary>
-        <div class="hull-drawer-body">{% for f in drawer_items %}<div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }} action-hull-note">
-          <span class="hull-dot"></span><div class="hull-card-body"><span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span><div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p></div>
-        </div>{% endfor %}</div>
-      </details>{% endif %}
-      {% else %}<p class="muted-body">No findings analysis is available yet. Run a full scan to collect it.</p>{% endif %}
-    </section>
+
+      <div class="actions-col">
+        <div class="incident-dock" id="incident-panel" data-api="/api/incidents">
+          <section class="panel">
+            <div class="panel-head-row">
+              <h2>INCIDENT CONSOLE</h2>
+              <span class="panel-head-note" id="incident-count">reconciled evidence</span>
+              <div class="tabs-spacer"></div>
+              <div class="incident-filter" role="group" aria-label="Incident status">
+                <button class="incident-filter-btn is-active" type="button" data-incident-status="open" aria-pressed="true">OPEN</button>
+                <button class="incident-filter-btn" type="button" data-incident-status="resolved" aria-pressed="false">RESOLVED</button>
+              </div>
+            </div>
+            <p id="incident-message" role="status">Loading incidents…</p>
+            <div id="incident-cards" class="incident-cards" aria-live="polite"></div>
+            <div class="incident-rollup" id="incident-rollup" hidden>
+              <img src="{{ url_for('static', filename='characters/futurama/leela.png') }}" alt="">
+              <span id="incident-rollup-text"></span>
+            </div>
+          </section>
+        </div>
+
+        <div class="action-hull-dock" id="hull-diagnostics-panel">
+          {% set fc = ctx.findings.counts %}
+          {% if fc.critical %}{% set worst = 'crit' %}
+          {% elif fc.high %}{% set worst = 'high' %}
+          {% elif fc.medium %}{% set worst = 'medium' %}
+          {% elif fc.low %}{% set worst = 'low' %}
+          {% else %}{% set worst = 'none' %}{% endif %}
+          {% set hull_copy = {
+            'crit': ('⚠', 'CRITICAL FAULT', fc.critical|string ~ ' critical fault' ~ ('' if fc.critical == 1 else 's') ~ ' — immediate action required'),
+            'high': ('⚠', 'HIGH ALERT', fc.high|string ~ ' high-severity finding' ~ ('' if fc.high == 1 else 's') ~ ' need attention'),
+            'medium': ('!', 'CAUTION', fc.medium|string ~ ' finding' ~ ('' if fc.medium == 1 else 's') ~ ' worth a look'),
+            'low': ('i', 'MINOR NOTES', fc.low|string ~ ' low-severity note' ~ ('' if fc.low == 1 else 's') ~ ' — informational, non-blocking'),
+            'none': ('✓', 'ALL SYSTEMS NOMINAL', 'No open findings.'),
+          } %}
+          <section class="panel">
+            <h3 class="action-hull-title">HULL DIAGNOSTICS</h3>
+            {% if ctx.findings.available %}
+            <div class="alarm-banner {{ worst }}">
+              <div class="alarm-orb">{{ hull_copy[worst][0] }}</div>
+              <div class="alarm-text"><p class="alarm-title">{{ hull_copy[worst][1] }}</p><p class="alarm-sub">{{ hull_copy[worst][2] }}</p></div>
+              <div class="alarm-chips">
+                <span class="alarm-chip crit {{ 'zero' if not fc.critical }}">CRIT {{ fc.critical }}</span>
+                <span class="alarm-chip high {{ 'zero' if not fc.high }}">HIGH {{ fc.high }}</span>
+                <span class="alarm-chip med {{ 'zero' if not fc.medium }}">MED {{ fc.medium }}</span>
+                <span class="alarm-chip low {{ 'zero' if not fc.low }}">LOW {{ fc.low }}</span>
+              </div>
+            </div>
+            {% if ctx.findings.top %}<div class="hull-cards">{% for f in ctx.findings.top %}
+              <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}"><span class="hull-dot"></span><div class="hull-card-body">
+                <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
+                <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p>
+              </div></div>
+            {% endfor %}</div>{% endif %}
+            {% set drawer_items = (ctx.findings.medium_list or []) + (ctx.findings.low_list or []) %}
+            {% if drawer_items %}<details class="hull-drawer">
+              <summary class="hull-drawer-toggle"><span class="hull-drawer-caret">▸</span>{{ drawer_items|length }} low-severity note{{ '' if drawer_items|length == 1 else 's' }} · informational · non-blocking</summary>
+              <div class="hull-drawer-body">{% for f in drawer_items %}<div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }} action-hull-note">
+                <span class="hull-dot"></span><div class="hull-card-body"><span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span><div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p></div>
+              </div>{% endfor %}</div>
+            </details>{% endif %}
+            {% else %}<p class="muted-body">No findings analysis is available yet. Run a full scan to collect it.</p>{% endif %}
+          </section>
+        </div>
+      </div>
+
+    </div>
   </div>
 
-  <!-- Kept outside #dashboard-live so it can sit below the two docks, which must stay outside
-       it (a refresh must not wipe an in-flight decision). The refresh swaps this panel by id
-       instead, so it still updates every 60s.  Order on the Actions tab: authorisation first
-       (what needs you now), incidents second (what is wrong), manifest last (what already
-       happened). -->
-
-  <!-- Stays on Actions: an open window means a canary update is either still in flight or
-       its automatic rollback failed and is waiting for a human. That is a thing that needs
-       you, not history. -->
-  <div class="tab-panel" data-tab-panel="actions" id="rollback-candidates-panel">
-    {% if ctx.rollback_candidates %}
+  <!-- History: what already happened. It left the Actions tab because nothing here is ever a
+       decision — Actions is for things that want one from you, and a log of clean canary runs
+       was the largest thing on that tab while being the only thing you could not act on.
+       Outside #dashboard-live with the rest, so refreshDashboard() swaps it by id. -->
+  <div class="tab-panel history-dock" data-tab-panel="history" id="manifest-panel">
+    {% if ctx.update_history %}
+    <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
+    <div class="history-split">
+      <section class="history-runs">
+        <div class="panel-head-row">
+          <h3>DEPLOYMENT MANIFEST</h3>
+          <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
+        </div>
+        <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
+      </section>
+      <aside class="history-detail" id="run-detail" aria-live="polite"></aside>
+    </div>
+    {% else %}
     <section class="panel">
-      <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
-      <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
-        <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span>
-      </div>
-      {% for r in ctx.rollback_candidates %}
-      <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
-        <span class="cell-mono cell-dim">{{ r.stack }}</span>
-        <span class="cell-mono cell-service">{{ r.service }}</span>
-        <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
-        <span class="cell-mono cell-when">{{ r.expires_at }}</span>
-      </div>
-      {% endfor %}
-    </section>
-    {% endif %}
-  </div>
-
-  <!-- History: what already happened. It left the Actions tab because nothing here is ever
-       clickable — Actions is for things that want a decision from you, and a log of clean canary
-       runs was the largest thing on that tab while being the only thing you could not act on.
-       Kept outside #dashboard-live (the docks have to be, and this follows them in the DOM), so
-       the 60-second refresh swaps it by id instead. -->
-  <div class="tab-panel" data-tab-panel="history" id="manifest-panel">
-    <section class="panel">
-      <div class="panel-head-row">
-        <h3>DEPLOYMENT MANIFEST</h3>
-        {% if ctx.update_history %}
-        <span class="panel-head-note">most recent run</span>
-        <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
-        {% endif %}
-      </div>
-      {% if ctx.update_history %}
-      <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
-      <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
-      {% else %}
+      <div class="panel-head-row"><h3>DEPLOYMENT MANIFEST</h3></div>
       <p class="muted-body">No canary update has run yet. Zoidberg's weekly pass records each one
       here: which stack, which services, and whether they came up clean.</p>
-      {% endif %}
     </section>
+    {% endif %}
   </div>
 
   <div class="tab-panel" data-tab-panel="chat" id="chat-panel">

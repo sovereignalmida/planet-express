@@ -193,19 +193,49 @@
     return item.status === "pending" ? pendingCard(item) : resolvedCard(item);
   }
 
-  function emptyCard(last) {
-    const card = node("article", "pe-card approval-card empty");
-    const well = node("div", "pe-empty");
-    well.append(node("div", "pe-empty-glyph", "✈"), node("h3", "", "NOTHING TO AUTHORISE"));
-    if (last) {
-      well.append(node("p", "", "Last: " + last.status + " plan " + last.id + " by " + (last.decided_by || "system") + "."));
-      const execution = last.execution;
-      well.append(actionLink("VIEW LAST ACTIVITY", execution && execution.id ? "/executions/" + encodeURIComponent(execution.id) : targetUrl(last)));
-    } else {
-      well.append(node("p", "", "No typed action has been proposed yet."));
+  // Nothing pending is the normal state of this panel, so it gets a compact strip rather
+  // than a panel-sized blank. The recent decisions below it carry the "what happened" that
+  // the old empty card was trying to squeeze in.
+  function emptyStrip() {
+    const strip = node("div", "approval-empty");
+    const portrait = document.createElement("img");
+    portrait.src = "/static/characters/futurama/bender.png";
+    portrait.alt = "";
+    const copy = node("div", "approval-empty-copy");
+    copy.append(node("div", "approval-empty-title", "NOTHING TO AUTHORISE"),
+                node("div", "approval-empty-sub", "Plans land here the moment one is proposed."));
+    strip.append(portrait, copy);
+    return strip;
+  }
+
+  // A decision already made is a one-line receipt, not a card: title, who and when, outcome.
+  // The full record is still one click away behind the chevron.
+  function renderRecentRow(item) {
+    const execution = item.execution || {};
+    const passed = item.status === "approved" && execution.state !== "failed";
+    const row = node("div", "approval-recent " + (passed ? "ok" : "crit"));
+    row.append(node("span", "approval-recent-led"));
+
+    const middle = node("div", "approval-recent-main");
+    middle.append(node("div", "approval-recent-title", item.title || ("Plan " + item.id)));
+    const steps = Array.isArray(item.steps) ? item.steps.length : item.step_count;
+    const parts = [item.decided_by || "system"];
+    if (item.decided_at) parts.push(new Date(item.decided_at * 1000).toLocaleDateString());
+    if (steps) parts.push(steps + " step" + (steps === 1 ? "" : "s"));
+    middle.append(node("div", "approval-recent-meta", parts.join(" · ")));
+    row.append(middle);
+
+    row.append(node("span", "approval-recent-badge", passed ? "PASSED" : item.status.toUpperCase()));
+    const href = execution.id ? "/executions/" + encodeURIComponent(execution.id) : targetUrl(item);
+    if (href) {
+      const link = document.createElement("a");
+      link.className = "approval-recent-more";
+      link.href = href;
+      link.textContent = "›";
+      link.setAttribute("aria-label", "Open " + (item.title || item.id));
+      row.append(link);
     }
-    card.append(well);
-    return card;
+    return row;
   }
 
   function updateCountdowns() {
@@ -224,9 +254,14 @@
       cards.replaceChildren();
       const pending = Array.isArray(data.pending) ? data.pending : [];
       const recent = Array.isArray(data.recent) ? data.recent : [];
-      if (!pending.length) cards.append(emptyCard(recent[0]));
+      if (!pending.length) cards.append(emptyStrip());
       pending.forEach(item => cards.append(renderCard(item)));
-      recent.forEach(item => cards.append(renderCard(item)));
+      if (recent.length) {
+        cards.append(node("div", "approval-recent-label", "RECENTLY AUTHORISED"));
+        recent.forEach(item => cards.append(renderRecentRow(item)));
+      }
+      const count = document.getElementById("approval-count");
+      if (count) count.textContent = pending.length + " pending";
       message.textContent = "";
       updateCountdowns();
     } catch (error) {

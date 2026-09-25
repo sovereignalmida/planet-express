@@ -118,6 +118,11 @@
     buildDeployManifest();
   }
 
+  // Which run the detail pane is showing. Module-level, because manifest-panel's innerHTML is
+  // replaced every 60 seconds and a selection held inside buildDeployManifest() would reset to
+  // the newest run under the operator every minute.
+  var selectedRunKey = null;
+
   // Deployment manifest: group the flat update-history list (rendered into a JSON data
   // island, not fetched) into "runs" -- a batch update writes many entries seconds
   // apart, so cluster by stack + a small time-proximity gap and render a run card +
@@ -206,77 +211,119 @@
       ));
     }
 
+    // Selection is held by identity, not by index: the list grows at the top, so an index
+    // would quietly point at a different run after the next canary pass.
+    function runKey(run) { return (run.stack || "unknown") + "@" + run.entries[0].ts; }
+
+    var detailEl = document.getElementById("run-detail");
+    var selected = runs.find(function (run) { return runKey(run) === selectedRunKey; }) || runs[0];
+    selectedRunKey = runKey(selected);
+
+    function renderDetail(run) {
+      if (!detailEl) return;
+      var alerts = run.entries.filter(function (e) { return e.is_alert; }).length;
+      var startMs = new Date(run.entries[0].ts).getTime();
+      var endMs = new Date(run.entries[run.entries.length - 1].ts).getTime();
+      var startDT = fmtDateTime(run.entries[0].ts);
+      var endDT = fmtDateTime(run.entries[run.entries.length - 1].ts);
+
+      detailEl.innerHTML = "";
+      var head = el("div", "run-detail-head");
+      head.appendChild(el("span", "run-detail-eyebrow", "RUN DETAIL"));
+      head.appendChild(el("div", "pe-spacer"));
+      head.appendChild(el("span", "run-detail-badge" + (alerts ? " alert" : ""), alertLabel(alerts).toUpperCase()));
+      detailEl.appendChild(head);
+
+      detailEl.appendChild(el("div", "run-detail-title", (run.stack || "unknown") + " · batch update"));
+      var endLabel = endDT.date !== startDT.date ? (endDT.date + " " + endDT.time) : endDT.time;
+      detailEl.appendChild(el("div", "run-detail-range",
+        startDT.date + " · " + startDT.time + " → " + endLabel + (endDT.tz ? " " + endDT.tz : "")));
+
+      var stats = el("div", "run-detail-stats");
+      [["SERVICES", String(run.entries.length), ""],
+       ["DURATION", fmtSpan(Math.max(endMs - startMs, 0)), ""],
+       ["CANARY", alerts ? "alerts" : "pass", alerts ? "alert" : "ok"]].forEach(function (cell) {
+        var well = el("div", "run-detail-well");
+        well.appendChild(el("div", "run-detail-well-label", cell[0]));
+        well.appendChild(el("div", "run-detail-well-value " + cell[2], cell[1]));
+        stats.appendChild(well);
+      });
+      detailEl.appendChild(stats);
+
+      detailEl.appendChild(el("div", "run-detail-eyebrow", "TIMELINE"));
+      var list = el("div", "run-timeline");
+      run.entries.forEach(function (e) {
+        var row = el("div", "run-timeline-row" + (e.is_alert ? " alert" : ""));
+        row.appendChild(el("span", "run-timeline-tick", e.is_alert ? "✗" : "✓"));
+        row.appendChild(el("span", "run-timeline-service", e.service));
+        row.appendChild(el("span", "run-timeline-time", fmtDateTime(e.ts).time));
+        list.appendChild(row);
+      });
+      detailEl.appendChild(list);
+
+      var note = el("div", "run-detail-note");
+      var portrait = document.createElement("img");
+      portrait.src = "/static/characters/futurama/zoidberg.png";
+      portrait.alt = "";
+      note.appendChild(portrait);
+      note.appendChild(el("span", "", "canary-tested by zoidberg · pulled, restarted, healthchecked"));
+      detailEl.appendChild(note);
+    }
+
+    function select(run) {
+      selectedRunKey = runKey(run);
+      manifestEl.querySelectorAll("[data-run-key]").forEach(function (card) {
+        var active = card.dataset.runKey === selectedRunKey;
+        card.classList.toggle("is-selected", active);
+        card.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      renderDetail(run);
+    }
+
     manifestEl.innerHTML = "";
     runs.forEach(function (run) {
       var first = run.entries[0];
       var lastEntry = run.entries[run.entries.length - 1];
       var hasAlert = run.entries.some(function (e) { return e.is_alert; });
-      var startMs = new Date(first.ts).getTime();
-      var endMs = new Date(lastEntry.ts).getTime();
-      var span = Math.max(endMs - startMs, 0);
+      var span = Math.max(new Date(lastEntry.ts).getTime() - new Date(first.ts).getTime(), 0);
       var startDT = fmtDateTime(first.ts);
-      var endDT = fmtDateTime(lastEntry.ts);
 
-      var card = el("div", "deploy-run" + (hasAlert ? " alert" : ""));
+      var card = document.createElement("button");
+      card.type = "button";
+      card.className = "deploy-run" + (hasAlert ? " alert" : "");
+      card.dataset.runKey = runKey(run);
+      card.setAttribute("aria-pressed", "false");
 
       var head = el("div", "deploy-run-head");
-      head.appendChild(el("div", "deploy-glyph", "↑"));
-      var titleWrap = el("div");
-      var title = el("div", "deploy-run-title");
-      var stackB = document.createElement("b");
-      stackB.textContent = run.stack || "unknown";
-      title.appendChild(stackB);
-      title.appendChild(document.createTextNode(" stack · batch update"));
-      titleWrap.appendChild(title);
-      var endLabel = endDT.date !== startDT.date ? (endDT.date + " " + endDT.time) : endDT.time;
-      titleWrap.appendChild(el(
-        "div", "deploy-run-sub",
-        startDT.date + " · " + startDT.time + " → " + endLabel + (endDT.tz ? " " + endDT.tz : "") + " · " + fmtSpan(span)
-      ));
-      head.appendChild(titleWrap);
-      var countWrap = el("div", "deploy-run-count");
-      countWrap.appendChild(el("div", "n", String(run.entries.length)));
-      countWrap.appendChild(el("div", "lbl", "svcs"));
-      head.appendChild(countWrap);
+      head.appendChild(el("span", "deploy-run-led"));
+      head.appendChild(el("span", "deploy-run-stack", run.stack || "unknown"));
+      head.appendChild(el("div", "pe-spacer"));
+      head.appendChild(el("span", "deploy-run-date", startDT.date));
       card.appendChild(head);
 
-      var timeline = el("div", "deploy-timeline");
-      timeline.appendChild(el("div", "deploy-timeline-track"));
+      var figures = el("div", "deploy-run-figures");
+      figures.appendChild(el("span", "deploy-run-n", String(run.entries.length)));
+      figures.appendChild(el("span", "deploy-run-n-label",
+        run.entries.length === 1 ? "SERVICE" : "SERVICES"));
+      figures.appendChild(el("div", "pe-spacer"));
+      figures.appendChild(el("span", "deploy-run-span", fmtSpan(span)));
+      card.appendChild(figures);
+
+      // One bar per service instead of a dot floating in 2,000px of timeline. At a glance
+      // the bar count is the run size and a red bar is the one that went wrong.
+      var bars = el("div", "deploy-run-bars");
       run.entries.forEach(function (e) {
-        var t = new Date(e.ts).getTime();
-        var pct = span > 0 && !isNaN(t) ? ((t - startMs) / span) * 100 : 50;
-        var node = el("div", "deploy-timeline-node" + (e.is_alert ? " bad" : ""));
-        node.style.left = pct + "%";
-        node.title = e.service + " · " + fmtDateTime(e.ts).time;
-        timeline.appendChild(node);
+        var bar = el("span", "deploy-run-bar" + (e.is_alert ? " alert" : ""));
+        bar.title = e.service + " · " + fmtDateTime(e.ts).time;
+        bars.appendChild(bar);
       });
-      timeline.appendChild(el("span", "deploy-timeline-end tl-start", startDT.time));
-      timeline.appendChild(el("span", "deploy-timeline-end tl-end", endDT.time));
-      card.appendChild(timeline);
+      card.appendChild(bars);
 
-      var gaps = [];
-      for (var i = 1; i < run.entries.length; i++) {
-        var g = new Date(run.entries[i].ts).getTime() - new Date(run.entries[i - 1].ts).getTime();
-        if (!isNaN(g)) gaps.push(g);
-      }
-      var avgGap = gaps.length ? gaps.reduce(function (a, b) { return a + b; }, 0) / gaps.length : 0;
-      var runAlerts = run.entries.filter(function (e) { return e.is_alert; }).length;
-      card.appendChild(el(
-        "div", "deploy-timeline-caption",
-        (gaps.length ? "every " + fmtInterval(avgGap) + " · " : "") + alertLabel(runAlerts)
-      ));
-
-      var chips = el("div", "chip-board");
-      run.entries.forEach(function (e) {
-        var chip = el("div", "deploy-chip" + (e.is_alert ? " bad" : ""));
-        chip.appendChild(el("span", "svc", (e.is_alert ? "✗ " : "✓ ") + e.service));
-        chip.appendChild(el("span", "t", fmtDateTime(e.ts).time));
-        chips.appendChild(chip);
-      });
-      card.appendChild(chips);
-
+      card.addEventListener("click", function () { select(run); });
       manifestEl.appendChild(card);
     });
+
+    select(selected);
   }
 
   var REFRESH_INTERVAL_MS = 60000;
