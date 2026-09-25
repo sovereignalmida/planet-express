@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#03060b;}
+  a{color:#5fd6e8;text-decoration:none;}
+  a:hover{color:#8fe6f5;}
+  @keyframes beacon{0%,100%{opacity:1}50%{opacity:.25}}
+  @keyframes critpulse{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#03060b;font-family:'Space Grotesk',sans-serif;color:#eef4fa;padding:30px 36px 70px;">
+<div style="display:flex;flex-direction:column;gap:18px;width:1440px;">
+
+  <div style="display:flex;align-items:flex-end;gap:24px;">
+    <div style="flex:1;display:flex;flex-direction:column;gap:7px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.16em;color:#5f7391;">v2.1 · LAYOUT PASS · 1440 × 900 · EVERYTHING ABOVE THE DASHED LINE</div>
+      <h1 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:30px;letter-spacing:.02em;">{{ tabTitle }}</h1>
+      <p style="margin:0;max-width:980px;font-size:14px;line-height:1.6;color:#8fa3ba;text-wrap:pretty;">{{ tabNote }}</p>
+    </div>
+    <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4f6684;text-align:right;line-height:1.6;">click the tabs inside the frame<br>overview tiles click through too</div>
+  </div>
+
+  <!-- ═════════ FRAME ═════════ -->
+  <div style="position:relative;width:1440px;min-height:900px;border-radius:14px;border:1px solid #24384c;background:#060b13;overflow:hidden;display:flex;flex-direction:column;">
+    <div aria-hidden="true" style="position:absolute;left:0;right:0;top:900px;border-top:1px dashed rgba(245,184,32,.55);pointer-events:none;z-index:5;"></div>
+    <div aria-hidden="true" style="position:absolute;right:12px;top:884px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#f5c94a;z-index:5;">FOLD · 900</div>
+
+    <!-- header: one row -->
+    <header style="display:flex;align-items:center;gap:18px;height:54px;padding:0 18px;border-bottom:1px solid #1c2c44;background:linear-gradient(180deg,#0b1422,#080f1b);flex:none;">
+      <img src="static/logo.png" alt="Planet Express" style="height:28px;width:auto;">
+      <div style="display:flex;flex-direction:column;gap:1px;">
+        <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;">PLANET EXPRESS</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;letter-spacing:.06em;">casalan.com · ship computer</span>
+      </div>
+      <nav style="display:flex;gap:4px;margin-left:14px;">
+        <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="8">
+          <button type="button" onClick="{{ t.go }}" style="font-family:'Chakra Petch',sans-serif;font-weight:600;font-size:12px;letter-spacing:.07em;border-radius:7px;padding:0 13px;height:32px;cursor:pointer;display:flex;align-items:center;gap:7px;background:{{ t.bg }};border:1px solid {{ t.bd }};color:{{ t.fg }};">{{ t.label }}<sc-if value="{{ t.hasBadge }}" hint-placeholder-val="{{ false }}"><span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:#f5c94a;">{{ t.badge }}</span></sc-if></button>
+        </sc-for>
+      </nav>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">
+        <span style="width:7px;height:7px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 7px #6fcf5f;"></span>pipeline idle · scanned 4m ago
+      </div>
+      <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11.5px;letter-spacing:.08em;color:#8fe6f5;background:rgba(53,197,216,.1);border:1px solid rgba(53,197,216,.45);border-radius:7px;height:32px;padding:0 14px;cursor:pointer;">SCAN ✈</button>
+      <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:11.5px;letter-spacing:.08em;color:#7f95a8;background:#08101c;border:1px solid #24384c;border-radius:7px;height:32px;padding:0 12px;cursor:pointer;">LOG OUT</button>
+    </header>
+
+    <main style="flex:1;padding:14px 18px 18px;display:flex;flex-direction:column;gap:12px;">
+
+      <!-- ░░░░░ OVERVIEW ░░░░░ -->
+      <sc-if value="{{ isOverview }}" hint-placeholder-val="{{ true }}">
+        <div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;">
+          <button type="button" onClick="{{ goOverview }}" style="text-align:left;cursor:pointer;border-radius:12px;border:1px solid #1c4a3a;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1d18,#0a1420);padding:12px 14px;display:flex;flex-direction:column;gap:7px;color:inherit;font:inherit;">
+            <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#4f6684;">FLEET</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#8fe6a0;">14 stacks</span></div>
+            <div style="display:flex;align-items:baseline;gap:6px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:28px;line-height:1;color:#8fe6a0;">85</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">/ 85 healthy</span></div>
+            <div style="display:flex;flex-wrap:wrap;gap:2px;">
+              <sc-for list="{{ fleetDots }}" as="d" hint-placeholder-count="85"><span style="width:5px;height:5px;border-radius:1.5px;background:#6fcf5f;"></span></sc-for>
+            </div>
+          </button>
+          <button type="button" onClick="{{ goActions }}" style="text-align:left;cursor:pointer;border-radius:12px;border:1px solid #1c4a3a;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1d18,#0a1420);padding:12px 14px;display:flex;flex-direction:column;gap:7px;color:inherit;font:inherit;">
+            <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#4f6684;">HULL</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#5f7391;">actions ›</span></div>
+            <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;line-height:1.15;color:#8fe6a0;letter-spacing:.04em;">ALL NOMINAL</div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;border:1px solid #24384c;border-radius:20px;padding:1px 7px;">0 CRIT</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;border:1px solid #24384c;border-radius:20px;padding:1px 7px;">0 HIGH</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;border:1px solid #24384c;border-radius:20px;padding:1px 7px;">0 PLANS</span>
+            </div>
+          </button>
+          <button type="button" onClick="{{ goBackups }}" style="text-align:left;cursor:pointer;border-radius:12px;border:1px solid #1c4a3a;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1d18,#0a1420);padding:12px 14px;display:flex;flex-direction:column;gap:7px;color:inherit;font:inherit;">
+            <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#4f6684;">BACKUPS</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#5f7391;">backups ›</span></div>
+            <div style="display:flex;align-items:baseline;gap:6px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:28px;line-height:1;color:#8fe6a0;">5d 8h</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">since snapshot</span></div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#7f95a8;">next in 1d 15h · 2 certs · soonest 542d</div>
+          </button>
+          <button type="button" onClick="{{ goNetwork }}" style="text-align:left;cursor:pointer;border-radius:12px;border:1px solid #1c4a3a;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1d18,#0a1420);padding:12px 14px;display:flex;flex-direction:column;gap:7px;color:inherit;font:inherit;">
+            <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#4f6684;">NETWORK</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#5f7391;">network ›</span></div>
+            <div style="display:flex;align-items:baseline;gap:6px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:28px;line-height:1;color:#8fe6a0;">78</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">routers up</span></div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#7f95a8;">adguard 22.4% blocked · 41ms</div>
+          </button>
+          <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0c1524,#0a1420);padding:12px 14px;display:flex;flex-direction:column;gap:7px;">
+            <div style="display:flex;align-items:center;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#4f6684;">SYSTEM</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#5f7391;">up 15d 14h</span></div>
+            <div style="display:flex;align-items:baseline;gap:6px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:28px;line-height:1;color:#eef4fa;">4.50</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">load · 4.28 · 4.17</span></div>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">MEM</span>
+              <div style="flex:1;height:4px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:63%;background:#6fcf5f;border-radius:20px;"></div></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#7f95a8;">9.4 / 15G</span>
+            </div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:12px;align-items:start;">
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:13px 14px;display:flex;flex-direction:column;gap:11px;">
+            <div style="display:flex;align-items:center;gap:11px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">SERVICES</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">14 stacks · 85 of 85 online · worst first</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#5f7391;border:1px solid #24384c;border-radius:6px;padding:4px 9px;">ATTENTION 0</span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(168px,1fr));gap:7px;align-items:start;">
+              <sc-for list="{{ stacks }}" as="s" hint-placeholder-count="14">
+                <div style="border-radius:9px;border:1px solid #1c2c44;border-left:2px solid #3f8f5a;background:#08101c;padding:8px 10px;display:flex;flex-direction:column;gap:7px;cursor:pointer;">
+                  <div style="display:flex;align-items:center;gap:7px;">
+                    <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12.5px;color:#cfe6ee;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ s.name }}</span>
+                    <div style="flex:1"></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#8fe6a0;">{{ s.tally }}</span>
+                  </div>
+                  <div style="display:flex;flex-wrap:wrap;gap:3px;">
+                    <sc-for list="{{ s.dots }}" as="d" hint-placeholder-count="4"><span style="width:8px;height:8px;border-radius:2px;background:#6fcf5f;"></span></sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </section>
+
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:13px 14px;display:flex;flex-direction:column;gap:9px;">
+              <div style="display:flex;align-items:center;gap:10px;">
+                <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">DISK</h2>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">11 mounts · fullest first</span>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <sc-for list="{{ disks }}" as="k" hint-placeholder-count="11">
+                  <div style="display:grid;grid-template-columns:128px minmax(0,1fr) 34px;align-items:center;gap:9px;">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#9fb3c8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ k.mount }}</span>
+                    <div style="height:4px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;border-radius:20px;width:{{ k.w }};background:{{ k.c }};"></div></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;text-align:right;color:{{ k.fg }};">{{ k.pct }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </section>
+            <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:11px 14px;display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">RECENT ERRORS</h2>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">none in the last hour</span>
+            </section>
+            <section style="border-radius:12px;border:1px dashed #24384c;background:#08101c;padding:11px 13px;display:flex;align-items:center;gap:11px;">
+              <img src="static/characters/futurama/farnsworth.png" alt="" style="width:30px;height:30px;border-radius:50%;object-fit:cover;flex:none;background:#0c1524;">
+              <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.5;color:#7fe3a5;">Good news, everyone. All 85 containers are alive — a personal best.</p>
+            </section>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ░░░░░ BACKUPS ░░░░░ -->
+      <sc-if value="{{ isBackups }}" hint-placeholder-val="{{ false }}">
+        <div style="border-radius:12px;border:1px solid #1c4a3a;background:linear-gradient(180deg,#101d16,#0a1420);padding:13px 16px;display:flex;align-items:center;gap:14px;">
+          <div style="width:40px;height:40px;border-radius:11px;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-size:19px;font-weight:700;color:#04140f;background:#6fcf5f;box-shadow:0 0 18px rgba(111,207,95,.5);">✓</div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;letter-spacing:.06em;color:#8fe6a0;">DATA IS SAFE</div>
+            <div style="font-size:12.5px;color:#9fb3c8;margin-top:2px;">1 borg job succeeded on schedule. Newest snapshot 5d 8h ago. 2 certs live, soonest expiry in 542d.</div>
+          </div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;border-radius:20px;padding:3px 10px;color:#8fe6a0;background:rgba(111,207,95,.1);border:1px solid rgba(111,207,95,.35);">1/1 JOBS OK</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;border-radius:20px;padding:3px 10px;color:#8fe6a0;background:rgba(111,207,95,.1);border:1px solid rgba(111,207,95,.35);">TIMER ARMED</span>
+        </div>
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:start;">
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:13px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">COLD STORAGE · BORG</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#8fe6a0;border:1px solid rgba(111,207,95,.3);border-radius:6px;padding:2px 7px;">COLLECTED</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">daily disabled on purpose · 2026-09-17</span>
+            </div>
+            <div style="border-radius:12px;border:1px solid #24384c;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1f2b,#0a1420);padding:14px 16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;">
+              <div style="display:flex;flex-direction:column;gap:9px;">
+                <div style="display:flex;align-items:center;gap:8px;"><span style="width:8px;height:8px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 8px #6fcf5f;"></span><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:17px;color:#cfe6ee;">WEEKLY</span><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">every 7d</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.1em;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:1px 8px;">FRESH</span></div>
+                <div style="display:flex;align-items:baseline;gap:8px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:30px;line-height:1;color:#8fe6a0;">5d 8h</span><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">SINCE SNAPSHOT</span></div>
+                <div style="height:4px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:76%;background:#6fcf5f;border-radius:20px;"></div></div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">76% through the 7d window</div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:8px;justify-content:center;border-left:1px dashed #1c3344;padding-left:18px;">
+                <div style="display:flex;justify-content:space-between;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">NEXT RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#cfe6ee;">in 1d 15h</span></div>
+                <div style="display:flex;justify-content:space-between;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">RESULT</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8fe6a0;">success · exit 0</span></div>
+                <div style="display:flex;justify-content:space-between;gap:8px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">LAST RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#7f95a8;">Sun 09-20 02:53</span></div>
+              </div>
+            </div>
+          </section>
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:13px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">CERTIFICATE VAULT</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#8fe6a0;border:1px solid rgba(111,207,95,.3);border-radius:6px;padding:2px 7px;">COLLECTED</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">traefik file provider</span>
+            </div>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">
+              <div style="border-radius:11px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:rgba(111,207,95,.04);padding:12px 14px;display:flex;flex-direction:column;gap:8px;">
+                <div style="display:flex;align-items:center;gap:8px;"><span style="width:7px;height:7px;border-radius:50%;background:#8fe6a0;"></span><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13.5px;color:#eef4fa;">*.casalan.com</span></div>
+                <div style="display:flex;align-items:baseline;gap:7px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:24px;line-height:1;color:#8fe6a0;">542d</span><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">UNTIL EXPIRY</span></div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">casalan internal CA · wildcard</div>
+              </div>
+              <div style="border-radius:11px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:rgba(111,207,95,.04);padding:12px 14px;display:flex;flex-direction:column;gap:8px;">
+                <div style="display:flex;align-items:center;gap:8px;"><span style="width:7px;height:7px;border-radius:50%;background:#8fe6a0;"></span><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13.5px;color:#eef4fa;">*.casaalmida.com</span></div>
+                <div style="display:flex;align-items:baseline;gap:7px;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:24px;line-height:1;color:#8fe6a0;">4849d</span><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">UNTIL EXPIRY</span></div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">cloudflare-origin · 2 SANs</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ░░░░░ NETWORK ░░░░░ -->
+      <sc-if value="{{ isNetwork }}" hint-placeholder-val="{{ false }}">
+        <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:13px 16px;display:grid;grid-template-columns:150px repeat(3,minmax(0,1fr)) minmax(0,1.6fr);gap:18px;align-items:center;">
+          <div style="display:flex;flex-direction:column;gap:5px;">
+            <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">ADGUARD</h2>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#8fe6a0;border:1px solid rgba(111,207,95,.3);border-radius:6px;padding:2px 7px;align-self:flex-start;">LIVE · 2 RESOLVERS</span>
+          </div>
+          <div><div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#4f6684;">QUERIES · 24H</div><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:24px;color:#eef4fa;margin-top:3px;">35,591</div></div>
+          <div><div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#4f6684;">BLOCKED</div><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:24px;color:#8fe6a0;margin-top:3px;">7,982 <span style="font-size:13px;color:#5f7391;">22.4%</span></div></div>
+          <div><div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#4f6684;">AVG RESPONSE</div><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:24px;color:#eef4fa;margin-top:3px;">41<span style="font-size:13px;color:#5f7391;">ms</span></div></div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <div style="display:flex;justify-content:space-between;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;"><span>ALLOWED</span><span>BLOCKED</span></div>
+            <div style="height:6px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;display:flex;"><div style="height:100%;width:77.6%;background:#35c5d8;opacity:.55;"></div><div style="height:100%;flex:1;background:#6fcf5f;"></div></div>
+          </div>
+        </section>
+        <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:13px 16px;display:flex;flex-direction:column;gap:12px;">
+          <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap;">
+            <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">ROUTING MATRIX</h2>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">{{ routerSummary }}</span>
+            <div style="flex:1"></div>
+            <div style="display:flex;align-items:center;gap:12px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">
+              <span>docker = untagged</span>
+              <span style="display:flex;align-items:center;gap:5px;"><span style="font-weight:700;color:#b59cf0;">FILE</span>file provider</span>
+              <span style="display:flex;align-items:center;gap:5px;"><span style="font-weight:700;color:#f5c94a;">EXT</span>external</span>
+              <span style="display:flex;align-items:center;gap:5px;"><span style="font-weight:700;color:#5fd6e8;">+LAN</span>LAN twin merged</span>
+            </div>
+            <div style="height:30px;width:200px;border-radius:7px;border:1px solid #24384c;background:#08101c;display:flex;align-items:center;padding:0 10px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4f6684;">filter routers…</div>
+          </div>
+          <sc-for list="{{ zones }}" as="z" hint-placeholder-count="4">
+            <div style="display:grid;grid-template-columns:150px minmax(0,1fr);gap:14px;padding-top:11px;border-top:1px dashed #16233a;">
+              <div style="display:flex;flex-direction:column;gap:3px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#cfe6ee;">{{ z.name }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">{{ z.count }}</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                <sc-for list="{{ z.items }}" as="r" hint-placeholder-count="8">
+                  <span style="display:flex;align-items:center;gap:6px;height:24px;padding:0 9px 0 7px;border-radius:6px;border:1px solid #1c3344;background:#08101c;cursor:pointer;">
+                    <span style="width:5px;height:5px;border-radius:50%;background:#6fcf5f;"></span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#9fb3c8;white-space:nowrap;">{{ r.name }}</span>
+                    <sc-if value="{{ r.hasTag }}" hint-placeholder-val="{{ false }}"><span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;letter-spacing:.06em;color:{{ r.tagFg }};">{{ r.tag }}</span></sc-if>
+                    <sc-if value="{{ r.lan }}" hint-placeholder-val="{{ false }}"><span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;letter-spacing:.06em;color:#5fd6e8;">+LAN</span></sc-if>
+                  </span>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </section>
+      </sc-if>
+
+      <!-- ░░░░░ ACTIONS ░░░░░ -->
+      <sc-if value="{{ isActions }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);gap:12px;align-items:start;">
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">FLIGHT AUTHORISATION</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">0 pending</span>
+            </div>
+            <div style="border-radius:11px;border:1px dashed #24384c;background:#08101c;padding:16px;display:flex;align-items:center;gap:14px;">
+              <img src="static/characters/futurama/bender.png" alt="" style="width:44px;height:44px;border-radius:50%;object-fit:cover;flex:none;filter:grayscale(.35);background:#0c1524;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.05em;color:#8fa3ba;">NOTHING TO AUTHORISE</div>
+                <div style="font-size:12px;color:#6f849e;margin-top:3px;">Plans land here the moment Leela proposes one.</div>
+              </div>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;">RECENTLY AUTHORISED</div>
+            <sc-for list="{{ approvals }}" as="a" hint-placeholder-count="2">
+              <div style="border-radius:11px;border:1px solid #1c4a3a;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1d18,#0a1420);padding:12px 14px;display:flex;align-items:center;gap:12px;">
+                <span style="width:8px;height:8px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 8px #6fcf5f;flex:none;"></span>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;color:#eef4fa;">{{ a.title }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;margin-top:2px;">{{ a.meta }}</div>
+                </div>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.1em;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 8px;">PASSED</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#5fd6e8;">›</span>
+              </div>
+            </sc-for>
+          </section>
+
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:11px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">INCIDENT CONSOLE</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">0 open · 6 resolved this week</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#7f95a8;border:1px solid #24384c;border-radius:6px;padding:4px 9px;">OPEN 0</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#8fe6f5;border:1px solid #35c5d8;background:rgba(53,197,216,.12);border-radius:6px;padding:4px 9px;">RESOLVED 6</span>
+            </div>
+            <div style="display:flex;flex-direction:column;border-radius:10px;border:1px solid #16233a;overflow:hidden;">
+              <sc-for list="{{ incidents }}" as="i" hint-placeholder-count="6">
+                <div style="display:grid;grid-template-columns:62px minmax(0,1fr) 150px 22px;gap:12px;align-items:center;padding:11px 13px;background:#08101c;border-bottom:1px solid #16233a;cursor:pointer;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.08em;border-radius:20px;padding:2px 0;text-align:center;color:{{ i.sevFg }};border:1px solid {{ i.sevBd }};">{{ i.sev }}</span>
+                  <div style="min-width:0;">
+                    <div style="font-size:12.5px;color:#cfe6ee;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ i.title }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ i.where }}</div>
+                  </div>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;text-align:right;">{{ i.when }}</span>
+                  <span style="font-size:12px;color:#8fe6a0;text-align:right;">✓</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <img src="static/characters/futurama/leela.png" alt="" style="width:24px;height:24px;border-radius:50%;object-fit:cover;background:#0c1524;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">4 of 6 were stale NFS handles — same root cause. Click any row for evidence.</span>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ░░░░░ HISTORY ░░░░░ -->
+      <sc-if value="{{ isHistory }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:12px;align-items:start;">
+          <section style="display:flex;flex-direction:column;gap:11px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">DEPLOYMENT MANIFEST</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">7 runs · 21 services · all clean</span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;">
+              <sc-for list="{{ runs }}" as="r" hint-placeholder-count="7">
+                <button type="button" onClick="{{ r.pick }}" style="text-align:left;cursor:pointer;color:inherit;font:inherit;border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:9px;background:{{ r.bg }};border:1px solid {{ r.bd }};border-left:3px solid {{ r.line }};">
+                  <div style="display:flex;align-items:center;gap:8px;">
+                    <span style="width:7px;height:7px;border-radius:50%;background:#6fcf5f;flex:none;"></span>
+                    <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;color:#eef4fa;">{{ r.stack }}</span>
+                    <div style="flex:1"></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">{{ r.date }}</span>
+                  </div>
+                  <div style="display:flex;align-items:baseline;gap:7px;">
+                    <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:22px;line-height:1;color:#8fe6a0;">{{ r.n }}</span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">{{ r.nLabel }}</span>
+                    <div style="flex:1"></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#7f95a8;">{{ r.dur }}</span>
+                  </div>
+                  <div style="display:flex;gap:3px;">
+                    <sc-for list="{{ r.svcs }}" as="v" hint-placeholder-count="3"><span style="flex:1;max-width:28px;height:4px;border-radius:2px;background:#6fcf5f;"></span></sc-for>
+                  </div>
+                </button>
+              </sc-for>
+            </div>
+          </section>
+
+          <aside style="border-radius:12px;border:1px solid #35c5d8;background:linear-gradient(180deg,rgba(53,197,216,.06),#0c1524);padding:15px 17px;display:flex;flex-direction:column;gap:13px;">
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.12em;color:#5fd6e8;">RUN DETAIL</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.1em;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 8px;">ALL CLEAN</span>
+            </div>
+            <div>
+              <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:20px;color:#eef4fa;">{{ sel.stack }} · batch update</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;margin-top:3px;">{{ sel.full }}</div>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;">
+              <div style="border-radius:9px;border:1px solid #16233a;background:#08101c;padding:9px 11px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;">SERVICES</div><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:18px;color:#eef4fa;margin-top:2px;">{{ sel.n }}</div></div>
+              <div style="border-radius:9px;border:1px solid #16233a;background:#08101c;padding:9px 11px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;">DURATION</div><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:18px;color:#eef4fa;margin-top:2px;">{{ sel.dur }}</div></div>
+              <div style="border-radius:9px;border:1px solid #16233a;background:#08101c;padding:9px 11px;"><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#4f6684;">CANARY</div><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:18px;color:#8fe6a0;margin-top:2px;">pass</div></div>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;">TIMELINE</div>
+            <div style="display:flex;flex-direction:column;">
+              <sc-for list="{{ sel.svcs }}" as="v" hint-placeholder-count="3">
+                <div style="display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:10px;align-items:center;padding:7px 0;border-bottom:1px dashed #16233a;">
+                  <span style="width:16px;height:16px;border-radius:50%;background:rgba(111,207,95,.15);border:1px solid rgba(111,207,95,.5);display:flex;align-items:center;justify-content:center;font-size:9px;color:#8fe6a0;">✓</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#cfe6ee;">{{ v.name }}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">{{ v.t }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;border-radius:10px;border:1px dashed #24384c;background:#08101c;padding:10px 12px;">
+              <img src="static/characters/futurama/zoidberg.png" alt="" style="width:26px;height:26px;border-radius:50%;object-fit:cover;flex:none;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">canary-tested by zoidberg · pulled, restarted, healthchecked</span>
+            </div>
+          </aside>
+        </div>
+      </sc-if>
+
+      <!-- ░░░░░ CHAT ░░░░░ -->
+      <sc-if value="{{ isChat }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:400px minmax(0,1fr);gap:12px;align-items:stretch;min-height:790px;">
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">ASK THE SHIP</h2>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">3 of 100 calls today</span>
+            </div>
+            <p style="margin:0;font-size:12px;line-height:1.55;color:#7f95a8;">Read-only checks. It can propose a plan, never run one.</p>
+            <div style="height:150px;border-radius:10px;border:1px solid #35c5d8;background:rgba(53,197,216,.04);padding:12px;font-size:13px;color:#4f6684;">Why is immich slow this morning?</div>
+            <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.08em;color:#8fe6a0;background:rgba(111,207,95,.12);border:1px solid rgba(111,207,95,.45);border-radius:9px;height:42px;cursor:pointer;">ASK ⏎</button>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;margin-top:6px;">EARLIER TODAY</div>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              <div style="border-radius:9px;border:1px solid #35c5d8;background:rgba(53,197,216,.08);padding:10px 12px;"><div style="font-size:12.5px;color:#eef4fa;">What's happening with tube archivist</div><div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;margin-top:3px;">10:14 · 2 checks · healthy</div></div>
+              <div style="border-radius:9px;border:1px solid #1c2c44;background:#08101c;padding:10px 12px;"><div style="font-size:12.5px;color:#9fb3c8;">Is gluten forwarding a port again?</div><div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;margin-top:3px;">08:02 · 3 checks · yes</div></div>
+              <div style="border-radius:9px;border:1px solid #1c2c44;background:#08101c;padding:10px 12px;"><div style="font-size:12.5px;color:#9fb3c8;">Which mounts have stale handles?</div><div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;margin-top:3px;">07:40 · 4 checks · proposed plan</div></div>
+            </div>
+          </section>
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 22px;display:flex;flex-direction:column;gap:14px;">
+            <div style="display:flex;align-items:center;gap:11px;">
+              <img src="static/characters/futurama/farnsworth.png" alt="" style="width:34px;height:34px;border-radius:50%;object-fit:cover;flex:none;background:#08101c;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:17px;color:#eef4fa;">What's happening with tube archivist</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;margin-top:2px;">answered 10:14 · 2 read-only checks</div>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.1em;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 9px;">HEALTHY</span>
+            </div>
+            <div style="border-radius:10px;border:1px solid #1c4a3a;background:rgba(111,207,95,.05);padding:12px 14px;font-size:13.5px;line-height:1.6;color:#cfe6ee;text-wrap:pretty;">It's running and healthy — up 2 hours. The "odd" log lines are the scheduler's hourly restart, not a crash.</div>
+            <div style="display:flex;flex-direction:column;gap:10px;font-size:13px;line-height:1.7;color:#9fb3c8;max-width:760px;">
+              <p style="margin:0;text-wrap:pretty;">In the last ~200 log lines it starts cleanly, connects to Redis and Elasticsearch, and runs its index and schedule checks.</p>
+              <p style="margin:0;text-wrap:pretty;">What looks off is normal: it starts Celery beat, logs "Killing beat process after 3600 seconds" and restarts it. That's the hourly cycle, with no error around it.</p>
+              <p style="margin:0;text-wrap:pretty;">If downloads are missing, the likelier cause is a task backlog, or something older than the 200 lines checked.</p>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;margin-top:4px;">EVIDENCE · 2 CHECKS</div>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;">
+              <div style="border-radius:10px;border:1px solid #16233a;background:#08101c;padding:11px 13px;display:flex;flex-direction:column;gap:5px;"><div style="display:flex;align-items:center;gap:8px;"><span style="font-size:11px;color:#8fe6a0;">✓</span><span style="font-size:12.5px;color:#cfe6ee;">Container list</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">exit 0 ›</span></div><div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">CASA_TA · Up 2 hours (healthy)</div></div>
+              <div style="border-radius:10px;border:1px solid #16233a;background:#08101c;padding:11px 13px;display:flex;flex-direction:column;gap:5px;"><div style="display:flex;align-items:center;gap:8px;"><span style="font-size:11px;color:#8fe6a0;">✓</span><span style="font-size:12.5px;color:#cfe6ee;">Last 200 log lines</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#5f7391;">exit 0 ›</span></div><div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">0 errors · 1 hourly beat restart</div></div>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ░░░░░ CONFIG ░░░░░ -->
+      <sc-if value="{{ isConfig }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:400px minmax(0,1fr);gap:12px;align-items:stretch;min-height:790px;">
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <div style="border-radius:12px;border:1px solid #1c4a3a;background:linear-gradient(180deg,#101d16,#0a1420);padding:13px 15px;display:flex;align-items:center;gap:12px;">
+              <div style="width:36px;height:36px;border-radius:10px;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-size:17px;font-weight:700;color:#04140f;background:#6fcf5f;">✓</div>
+              <div style="min-width:0;"><div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;letter-spacing:.06em;color:#8fe6a0;">ACTIVE</div><div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#7f95a8;margin-top:2px;">core loaded b88ab75c84a3</div></div>
+            </div>
+            <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:12px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">WHAT MAY CHANGE HERE</h2>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5fd6e8;word-break:break-all;">/home/casaroot/apps/planetexpress/config.yaml</div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#8fe6a0;">EDITABLE HERE</span>
+                <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#8fe6a0;border:1px solid rgba(111,207,95,.35);border-radius:20px;padding:2px 9px;">backup_jobs</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#8fe6a0;border:1px solid rgba(111,207,95,.35);border-radius:20px;padding:2px 9px;">exclude_services</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#8fe6a0;border:1px solid rgba(111,207,95,.35);border-radius:20px;padding:2px 9px;">paused_containers</span>
+                </div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#ff6a5a;">LOCKED · SENSITIVE</span>
+                <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#ff6a5a;border:1px solid rgba(239,60,46,.4);border-radius:20px;padding:2px 9px;">forbidden_stacks</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#ff6a5a;border:1px solid rgba(239,60,46,.4);border-radius:20px;padding:2px 9px;">sudo_allowlist</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#ff6a5a;border:1px solid rgba(239,60,46,.4);border-radius:20px;padding:2px 9px;">autostop</span>
+                </div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#5f7391;">EVERYTHING ELSE</span>
+                <span style="font-size:12px;color:#7f95a8;">Edit on the host.</span>
+              </div>
+              <p style="margin:0;font-size:11.5px;line-height:1.55;color:#5f7391;text-wrap:pretty;border-top:1px dashed #16233a;padding-top:10px;">Sensitive edits need <span style="font-family:'JetBrains Mono',monospace;color:#9fb3c8;">PE_ALLOW_SENSITIVE_CONFIG_EDITS=1</span> on the host and a core restart. You can't switch this on from the dashboard.</p>
+            </section>
+            <section style="border-radius:12px;border:1px solid rgba(239,60,46,.4);border-left:3px solid #ef3c2e;background:rgba(239,60,46,.06);padding:13px 15px;display:flex;flex-direction:column;gap:8px;">
+              <div style="display:flex;align-items:center;gap:9px;"><span style="width:7px;height:7px;border-radius:50%;background:#ff6a5a;"></span><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13.5px;letter-spacing:.06em;color:#ff6a5a;">LAST CHECK REFUSED</span><div style="flex:1"></div><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#8a6560;">nothing written</span></div>
+              <div style="font-size:12px;color:#e8b3ac;">Your draft touches <span style="font-family:'JetBrains Mono',monospace;">forbidden_stacks</span>, which is locked.</div>
+            </section>
+          </div>
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;display:flex;flex-direction:column;overflow:hidden;">
+            <div style="display:flex;align-items:center;gap:10px;padding:11px 15px;border-bottom:1px solid #16233a;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">CONFIG.YAML</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#f5c94a;border:1px solid rgba(245,184,32,.35);border-radius:6px;padding:2px 7px;">1 UNSAVED CHANGE</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;">54 lines</span>
+            </div>
+            <div style="flex:1;background:#03130f;padding:12px 0;overflow:hidden;display:flex;flex-direction:column;">
+              <sc-for list="{{ yaml }}" as="y" hint-placeholder-count="30">
+                <div style="display:grid;grid-template-columns:44px minmax(0,1fr);font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.7;background:{{ y.bg }};">
+                  <span style="text-align:right;padding-right:12px;color:#2f5a48;">{{ y.n }}</span>
+                  <span style="white-space:pre;overflow:hidden;text-overflow:ellipsis;color:{{ y.c }};">{{ y.t }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;padding:11px 15px;border-top:1px solid #16233a;background:#080f1b;">
+              <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.07em;color:#8fe6f5;background:rgba(53,197,216,.1);border:1px solid rgba(53,197,216,.45);border-radius:8px;height:36px;padding:0 16px;cursor:pointer;">CHECK</button>
+              <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.07em;color:#7f95a8;background:#08101c;border:1px solid #24384c;border-radius:8px;height:36px;padding:0 16px;cursor:pointer;">REVERT</button>
+              <div style="flex:1"></div>
+              <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.07em;color:#5f7391;background:#08101c;border:1px solid #24384c;border-radius:8px;height:36px;padding:0 16px;cursor:not-allowed;opacity:.6;">REVIEW CHANGES</button>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ░░░░░ CREW ░░░░░ -->
+      <sc-if value="{{ isCrew }}" hint-placeholder-val="{{ false }}">
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;align-items:start;">
+          <section style="display:flex;flex-direction:column;gap:11px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">CREW</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;">8 aboard · who does what</span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;">
+              <sc-for list="{{ crew }}" as="m" hint-placeholder-count="8">
+                <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:16px 14px;display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;">
+                  <img src="{{ m.img }}" alt="" style="width:68px;height:68px;border-radius:50%;object-fit:cover;background:#08101c;box-shadow:0 0 0 2px #1c2c44;">
+                  <div>
+                    <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;">{{ m.name }}</div>
+                    <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5fd6e8;margin-top:3px;">{{ m.role }}</div>
+                  </div>
+                  <p style="margin:0;font-size:11.5px;line-height:1.5;color:#7f95a8;text-wrap:pretty;">{{ m.does }}</p>
+                </div>
+              </sc-for>
+            </div>
+          </section>
+          <section style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+            <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.11em;">SHIP'S COMPUTER LOG</h2>
+            <sc-for list="{{ quips }}" as="q" hint-placeholder-count="4">
+              <div style="border-radius:9px;border:1px solid #1c4a3a;background:#03130f;padding:10px 12px;display:flex;flex-direction:column;gap:4px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f9c76;">{{ q.tab }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.55;color:#7fe3a5;">{{ q.text }}</span>
+              </div>
+            </sc-for>
+          </section>
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1520}}">
+const TABS = [
+  ['overview','Overview'],['backups','Backups'],['network','Network'],['actions','Actions'],
+  ['history','History'],['chat','Chat'],['config','Config'],['crew','Crew'],
+];
+const NOTES = {
+  overview: ['OVERVIEW · CONTROL PANEL', 'Five summary tiles answer "am I OK?" in one row, and each one opens its tab. Services become 14 compact stack tiles, sorted worst-first. Disk turns into a sidebar sorted fullest-first. The crew box moves to its own tab. Everything now fits in about 560px, not 2,000.'],
+  backups: ['BACKUPS · SIDE BY SIDE', 'Borg and the cert vault sit next to each other under one verdict strip. The weekly pod spreads out sideways (hero on the left, readout on the right) so there\'s no empty panel stretching the full width.'],
+  network: ['NETWORK · ADGUARD FIRST, CALMER MATRIX', 'AdGuard goes on top as a single stat strip. The matrix loses the hostname line and the "docker" tag on every pill, since docker is the default. Routers are grouped by domain and LAN twins are merged, so 78 routers become 73 name pills in four labelled rows.'],
+  actions: ['ACTIONS · TWO COLUMNS', 'Authorisation sits on the left, incidents on the right. Resolved incidents become compact rows instead of a 3×2 grid of tall cards, and Leela sums up the shared root cause underneath.'],
+  history: ['HISTORY · CARDS → DETAIL', 'Each run is a card: stack, date, service count and a bar for each service. Click one and the detail pane on the right shows the timeline. No more full-width rows with a lone dot in the middle.'],
+  chat: ['CHAT · INPUT LEFT, ANSWER RIGHT', 'The question box and recent questions sit in a fixed left column; the answer fills the right. The answer starts with a one-line verdict, then the reasoning. Evidence is two check cards with the command folded away.'],
+  config: ['CONFIG · RULES LEFT, EDITOR RIGHT', 'What you\'re allowed to change and the last check result sit on the left, and the YAML editor gets the full height on the right. The locked keys stay visible next to the file you\'re editing.'],
+  crew: ['CREW · ITS OWN TAB', 'The crew and Farnsworth\'s commentary get their own tab, so they stop taking a column on every other one. They get space to say what each of them does.'],
+};
+const STACKS = [['services',30],['media',23],['network',9],['subwave',5],['airwave',4],['audiomuse',3],['pinepods',3],['vikunja',2],['dockge',1],['linktool',1],['navidrome',1],['traefikman',1],['transmute',1],['vikunja-mcp',1]];
+const DISKS = [['/',74],['/home',47],['/casa_scratch',1],['/casamedia',56],['/casamedia_nfs',56],['/urphotos_nfs',61],['/immichPhotos_nfs',63],['/erugo_nfs',56],['/erugo',56],['/immichPhotos',61],['/urphotos',61]];
+const R = 'actual|d|c adguard|d|c adguard-secondary|f|c adventurelog|d|c adventurelog-api|d|c airwave|d|c airwave-api|d|c airwave-tv|d|c audio|d|c audiomuse|d|c bazarr|d|c beszel|d|c billarr|d|c ca-portal|d|c dockge|d|c dozzle|d|c homepage|d|c immich|d|c immichtools|d|c jellyfin|f|c kara|d|c lidarr|d|c linktool|d|c lubelogger|d|c mealie|d|c miniflux|d|c musicassistant|f|c opnsense|f|c pdf|d|c pinepods|d|c planetexpress|f|c planka|d|c plex|f|c porta|d|c prowlarr|d|c purgarr|d|c qbit|f|c radarr|d|c sabnzbd|d|c searxng|d|c seerr|d|c solar|f|c sonarr|d|c speedtest|d|c tracearr|d|c traefik|d|c traefikman|d|c transmute|d|c|l trilium|d|c tubearchivist|d|c unraid|f|c vikunja|d|c wiki|d|c freshrss|d|c gitea|d|c grafana|d|c karakeep|d|c paperless|d|c vaultwarden|d|c uptime|d|c erugo|d|a stirling|d|a navidrome|d|a|l overseerr|d|a subwave-api|d|a|l subwave-stream|d|a|l subwave-web|d|a|l vikunja-mcp|d|a blog|d|x sovereign|d|x api|e|i dashboard|e|i web-to-mobsec|e|i';
+const ZONES = [['c','casalan.com'],['a','casaalmida.com'],['x','chrisalmida.com'],['i','internal / external']];
+const RUNS = [
+  ['airwave','Sep 17','Sep 17 2026 · 16:41 → 16:42 BST','1m',[['tvweb','16:41:55']]],
+  ['services','Sep 6','Sep 6 2026 · 07:02 → 07:16 BST','14m',[['lubelogger','07:02:28'],['postgres','07:04:12'],['wiki-go','07:06:10'],['bentopdf','07:08:02'],['beszel-agent','07:09:57'],['mealie2','07:12:16'],['planka','07:14:19'],['web','07:16:21']]],
+  ['subwave','Sep 6','Sep 6 2026 · 07:18 → 07:27 BST','9m',[['analyzer','07:18:49'],['broadcast','07:20:48'],['docker-socket-proxy','07:22:33'],['controller','07:25:28'],['web','07:27:38']]],
+  ['tgbot','Sep 6','Sep 6 2026 · 07:29 → 07:31 BST','2m',[['mongodb','07:29:23'],['supportbot','07:31:14']]],
+  ['transmute','Sep 6','Sep 6 2026 · 07:32 → 07:33 BST','<1m',[['transmute','07:33:07']]],
+  ['vikunja','Sep 6','Sep 6 2026 · 07:35 → 07:37 BST','2m',[['db','07:35:21'],['vikunja','07:37:04']]],
+  ['vikunja-mcp','Sep 6','Sep 6 2026 · 07:38 → 07:38 BST','<1m',[['vikunja-mcp','07:38:55']]],
+];
+const YAML = [
+  ['# Migrated from hardcoded config.py values on this host, 2026-07-15.','m'],
+  ['stacks_root: /home/casaroot/stacks','k'],
+  ['forbidden_stacks:','k'],['  - clawbot','v'],['  - ai','v'],['  - pinepods','x'],
+  ['paused_containers:','k'],['  - CASA_ADGUARD','v'],
+  ['mounts:','k'],['  casamedia.mount: /casamedia','v'],['  casa_scratch.mount: /casa_scratch','v'],['  erugo.automount: /erugo','v'],['  immichPhotos.automount: /immichPhotos','v'],['  urphotos.automount: /urphotos','v'],['  casamedia_nfs.automount: /casamedia_nfs','v'],['  urphotos_nfs.automount: /urphotos_nfs','v'],
+  ['exclude_services:','k'],['  - stack: services','v'],['    service: backend','v'],['  - stack: services','v'],['    service: frontend','v'],
+  ['# Declared 2026-07-28: both are build-only services with no image:','m'],['# fallback, so zoidberg\'s canary update has nothing to resolve.','m'],
+  ['  - stack: linktool','v'],['    service: utm-gen','v'],
+  ['sudo_allowlist:','k'],['  units:','v'],['    - unit: casa-stacks.service','v'],['      actions: [start, stop, restart]','v'],['  globs:','v'],['    - glob: "*.mount"','v'],['      actions: [start, stop]','v'],
+  ['','v'],['# Daily borg backup is disabled on purpose (2026-09-17); only weekly runs.','m'],['backup_jobs: [weekly]','k'],
+];
+const CREW = [
+  ['farnsworth','Prof. Farnsworth','ship\'s computer','Narrates the state of the ship. Knows everything, worries anyway.'],
+  ['leela','Leela','system monitor','Watches the fleet and writes the plans.'],
+  ['hermes','Hermes','plan analyst','Checks every plan before anyone gets asked to approve it.'],
+  ['bender','Bender','action executor','Runs authorised plans. Only authorised ones.'],
+  ['zoidberg','Dr. Zoidberg','canary updates','Pulls new images, tests them, rolls back if they bite.'],
+  ['amy','Amy','diagnostician','Digs through logs and evidence for chat answers.'],
+  ['fry','Fry','onboarding','Walks new stacks aboard and learns their names.'],
+  ['scruffy','Scruffy','this dashboard','Observes. Does nothing. Proudly.'],
+];
+const QUIPS = [
+  ['overview','Good news, everyone. All 85 of 85 containers are alive and well — a personal best.'],
+  ['backups','All 1 backup job reporting success. Borg is doing its job; I\'m doing mine, which is worrying about it anyway.'],
+  ['network','78 routers, all reported enabled. AdGuard blocked 7,982 of 35,591 queries, for what it\'s worth.'],
+  ['actions','Six incidents, six resolved. Four were the same stale NFS handle wearing different hats.'],
+];
+
+class Component extends DCLogic {
+  state = { tab: 'overview', run: 1 };
+  go = (t) => () => this.setState({ tab: t });
+
+  renderVals() {
+    const { tab, run } = this.state;
+    const tabs = TABS.map(([id, label]) => {
+      const on = id === tab;
+      return { label, go: this.go(id), hasBadge: false, badge: '',
+        bg: on ? 'rgba(53,197,216,.12)' : 'transparent', bd: on ? '#35c5d8' : 'transparent', fg: on ? '#8fe6f5' : '#7f95a8' };
+    });
+
+    const stacks = STACKS.map(([name, n]) => ({ name, tally: n + '/' + n, dots: Array.from({ length: n }, (_, i) => i) }));
+    const disks = [...DISKS].sort((a, b) => b[1] - a[1]).map(([mount, p]) => {
+      const c = p >= 90 ? '#ef3c2e' : p >= 75 ? '#f5b820' : '#6fcf5f';
+      return { mount, pct: p + '%', w: Math.max(p, 2) + '%', c, fg: p >= 70 ? '#cfe6ee' : '#7f95a8' };
+    });
+
+    const routers = R.split(' ').map(s => { const [name, p, z, l] = s.split('|'); return { name, p, z, lan: l === 'l' }; });
+    const lanCount = routers.filter(r => r.lan).length;
+    const zones = ZONES.map(([k, name]) => {
+      const items = routers.filter(r => r.z === k).map(r => ({
+        name: r.name, lan: r.lan,
+        hasTag: r.p !== 'd', tag: r.p === 'f' ? 'FILE' : 'EXT', tagFg: r.p === 'f' ? '#b59cf0' : '#f5c94a',
+      }));
+      const tot = items.length + items.filter(i => i.lan).length;
+      return { name, items, count: tot + ' router' + (tot === 1 ? '' : 's') };
+    });
+
+    const runs = RUNS.map(([stack, date, full, dur, svcs], i) => {
+      const on = i === run;
+      return { stack, date, dur, n: svcs.length, nLabel: svcs.length === 1 ? 'SERVICE' : 'SERVICES', svcs,
+        pick: () => this.setState({ run: i }),
+        bg: on ? 'linear-gradient(180deg,rgba(53,197,216,.08),#0c1524)' : '#0c1524',
+        bd: on ? '#35c5d8' : '#1c2c44', line: on ? '#35c5d8' : '#3f8f5a' };
+    });
+    const r = RUNS[run];
+    const sel = { stack: r[0], full: r[2], dur: r[3], n: r[4].length, svcs: r[4].map(([name, t]) => ({ name, t })) };
+
+    const yaml = YAML.map(([t, k], i) => ({
+      n: i + 1, t: t || ' ',
+      c: k === 'm' ? '#4f9c76' : k === 'k' ? '#8fe6a0' : k === 'x' ? '#ff6a5a' : '#7fe3a5',
+      bg: k === 'x' ? 'rgba(239,60,46,.1)' : 'transparent',
+    }));
+
+    const [tabTitle, tabNote] = NOTES[tab];
+    return {
+      tabs, tabTitle, tabNote,
+      isOverview: tab === 'overview', isBackups: tab === 'backups', isNetwork: tab === 'network',
+      isActions: tab === 'actions', isHistory: tab === 'history', isChat: tab === 'chat',
+      isConfig: tab === 'config', isCrew: tab === 'crew',
+      goOverview: this.go('overview'), goBackups: this.go('backups'), goNetwork: this.go('network'), goActions: this.go('actions'),
+      fleetDots: Array.from({ length: 85 }, (_, i) => i),
+      stacks, disks, zones,
+      routerSummary: (routers.length + lanCount) + ' routers · ' + routers.length + ' names · ' + lanCount + ' LAN twins merged · all up',
+      approvals: [
+        { title: 'Bring network up', meta: 'authorised by @LIFEonBTC · 9/22 · 3 steps' },
+        { title: 'Bring pinepods up', meta: 'authorised by @LIFEonBTC · 9/22 · 2 steps' },
+      ],
+      incidents: [
+        { sev: 'HIGH', sevFg: '#f4ad63', sevBd: 'rgba(240,134,74,.4)', title: "stat: can't stat '/opt/pinepods/downloads': stale file handle", where: 'CASA_PINEPODS · /opt/pinepods/downloads', when: '9/22 → 9/25 10:18' },
+        { sev: 'HIGH', sevFg: '#f4ad63', sevBd: 'rgba(240,134,74,.4)', title: "stat: can't stat '/podcasts': stale file handle", where: 'CASA_ABS · /podcasts', when: '9/22 → 9/25 10:18' },
+        { sev: 'HIGH', sevFg: '#f4ad63', sevBd: 'rgba(240,134,74,.4)', title: 'gluetun reports no forwarded port — port forwarding is dead', where: 'vpn_port_forwarding · gluetun', when: '9/23 → 9/25 10:18' },
+        { sev: 'HIGH', sevFg: '#f4ad63', sevBd: 'rgba(240,134,74,.4)', title: "stat: cannot stat '/youtube': stale file handle", where: 'CASA_TA · /youtube', when: '9/19 → 9/25 10:18' },
+        { sev: 'MED', sevFg: '#f5c94a', sevBd: 'rgba(245,184,32,.4)', title: 'stack is unknown', where: 'stack_completeness · audio', when: '9/20 → 9/25 10:18' },
+        { sev: 'HIGH', sevFg: '#f4ad63', sevBd: 'rgba(240,134,74,.4)', title: "stat: cannot stat '/immichPhotos/f1/chris': stale file handle", where: 'CASA_IMMICH_SERVER · /immichPhotos', when: '9/20 → 9/25 10:18' },
+      ],
+      runs, sel, yaml,
+      crew: CREW.map(([k, name, role, does]) => ({ img: 'static/characters/futurama/' + k + '.png', name, role, does })),
+      quips: QUIPS.map(([tab, text]) => ({ tab: '› ' + tab, text })),
+    };
+  }
+}
+</script>
+</body>
+</html>

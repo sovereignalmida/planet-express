@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#04080e;}
+  a{color:#5fd6e8;text-decoration:none;}
+  a:hover{color:#8fe6f5;}
+  @keyframes beacon{0%,100%{opacity:1}50%{opacity:.25}}
+  @keyframes critpulse{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#04080e;font-family:'Space Grotesk',sans-serif;color:#eef4fa;padding:34px 36px 80px;">
+<div style="display:flex;flex-direction:column;gap:38px;max-width:1500px;">
+
+  <header style="display:flex;flex-direction:column;gap:10px;border-bottom:1px solid #1c2c44;padding-bottom:22px;">
+    <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.16em;color:#5f7391;">OVERVIEW · SERVICES PANEL · 88 CONTAINERS / 15 STACKS</div>
+    <h1 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:34px;letter-spacing:.02em;">STACK CARDS</h1>
+    <p style="margin:0;max-width:850px;font-size:14.5px;line-height:1.65;color:#8fa3ba;text-wrap:pretty;">The flat list is 88 rows and roughly 3,900px of scroll, and its widest element — <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">running(healthy)</span>, repeated 88 times — is the one that carries no information. The unit of the panel should be the <b style="color:#eef4fa;">stack</b>, not the container: 15 cards that size to their contents, problems floated to the top, and a status word only where the status isn't green.</p>
+  </header>
+
+  <!-- ░░░░░░░░ CONTROLS ░░░░░░░░ -->
+  <section style="display:flex;flex-direction:column;gap:14px;">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.11em;">SERVICES</h2>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">{{ summary }}</span>
+      <div style="flex:1;min-width:20px;"></div>
+
+      <div style="display:flex;gap:6px;">
+        <button type="button" onClick="{{ setAll }}" style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.08em;border-radius:6px;padding:7px 12px;cursor:pointer;min-height:34px;background:{{ allBg }};border:1px solid {{ allBd }};color:{{ allFg }};">ALL 15</button>
+        <button type="button" onClick="{{ setAttn }}" style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.08em;border-radius:6px;padding:7px 12px;cursor:pointer;min-height:34px;background:{{ attnBg }};border:1px solid {{ attnBd }};color:{{ attnFg }};">{{ attnLabel }}</button>
+      </div>
+
+      <div style="display:flex;gap:6px;border-left:1px solid #1c2c44;padding-left:12px;">
+        <button type="button" onClick="{{ setNamed }}" style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.08em;border-radius:6px;padding:7px 12px;cursor:pointer;min-height:34px;background:{{ namedBg }};border:1px solid {{ namedBd }};color:{{ namedFg }};">NAMED</button>
+        <button type="button" onClick="{{ setDots }}" style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.08em;border-radius:6px;padding:7px 12px;cursor:pointer;min-height:34px;background:{{ dotsBg }};border:1px solid {{ dotsBd }};color:{{ dotsFg }};">DOTS</button>
+      </div>
+
+      <button type="button" onClick="{{ toggleScenario }}" style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.08em;border-radius:6px;padding:7px 12px;cursor:pointer;min-height:34px;background:#08101c;border:1px dashed #24384c;color:#7f95a8;">DEMO: {{ scenarioLabel }}</button>
+    </div>
+
+    <!-- attention rail: only present when something is wrong -->
+    <sc-if value="{{ hasTrouble }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;gap:13px;border-radius:12px;border:1px solid rgba(239,60,46,.35);border-left:3px solid #ef3c2e;background:rgba(239,60,46,.06);padding:13px 16px;flex-wrap:wrap;">
+        <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#ff6a5a;box-shadow:0 0 9px #ff6a5a;animation:critpulse .9s ease-in-out infinite;"></span>
+        <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13.5px;letter-spacing:.06em;color:#ff6a5a;">{{ troubleTitle }}</span>
+        <span style="font-size:13px;color:#e8b3ac;">{{ troubleDetail }}</span>
+      </div>
+    </sc-if>
+
+    <!-- ░░░ THE GRID ░░░ -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(306px,1fr));gap:13px;align-items:start;">
+      <sc-for list="{{ stacks }}" as="s" hint-placeholder-count="15">
+        <section style="border-radius:13px;background:linear-gradient(180deg,#0c1524,#0a1420);padding:14px 15px 15px;display:flex;flex-direction:column;gap:12px;border:1px solid {{ s.bd }};border-left:3px solid {{ s.line }};">
+          <div style="display:flex;align-items:center;gap:9px;">
+            <span style="width:8px;height:8px;border-radius:50%;flex:none;background:{{ s.dot }};box-shadow:{{ s.dotGlow }};animation:{{ s.dotAnim }};"></span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15.5px;letter-spacing:.03em;color:#eef4fa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ s.name }}</span>
+            <div style="flex:1;min-width:6px;"></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.06em;border-radius:20px;padding:2px 9px;white-space:nowrap;color:{{ s.tallyFg }};border:1px solid {{ s.tallyBd }};">{{ s.tally }}</span>
+          </div>
+
+          <sc-if value="{{ s.showNote }}" hint-placeholder-val="{{ false }}">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.5;color:{{ s.noteFg }};">{{ s.note }}</div>
+          </sc-if>
+
+          <sc-if value="{{ named }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;flex-wrap:wrap;gap:6px;">
+              <sc-for list="{{ s.items }}" as="c" hint-placeholder-count="4">
+                <div style="display:flex;align-items:center;gap:7px;border-radius:7px;padding:0 10px 0 8px;height:30px;cursor:pointer;background:{{ c.bg }};border:1px solid {{ c.bd }};">
+                  <span style="width:6px;height:6px;border-radius:50%;flex:none;background:{{ c.dot }};box-shadow:{{ c.glow }};animation:{{ c.anim }};"></span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;white-space:nowrap;color:{{ c.fg }};">{{ c.name }}</span>
+                  <sc-if value="{{ c.showTag }}" hint-placeholder-val="{{ false }}">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.08em;color:{{ c.dot }};">{{ c.tag }}</span>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ dots }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;flex-wrap:wrap;gap:5px;">
+              <sc-for list="{{ s.items }}" as="c" hint-placeholder-count="4">
+                <span style="width:13px;height:13px;border-radius:4px;cursor:pointer;background:{{ c.dot }};box-shadow:{{ c.glow }};animation:{{ c.anim }};"></span>
+              </sc-for>
+            </div>
+          </sc-if>
+        </section>
+      </sc-for>
+    </div>
+
+    <!-- filtered-empty -->
+    <sc-if value="{{ filterEmpty }}" hint-placeholder-val="{{ false }}">
+      <div style="border-radius:13px;border:1px dashed #24384c;background:#08101c;padding:40px 24px;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;">
+        <div style="width:50px;height:50px;border-radius:13px;border:1px dashed #24384c;display:flex;align-items:center;justify-content:center;font-size:21px;color:#3f5470;">✓</div>
+        <div>
+          <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;letter-spacing:.05em;color:#8fe6a0;">NOTHING NEEDS ATTENTION</div>
+          <p style="margin:7px 0 0;font-size:12.5px;line-height:1.6;color:#6f849e;max-width:360px;text-wrap:pretty;">All 88 containers across 15 stacks are online. Last state change was 6 days ago.</p>
+        </div>
+        <button type="button" onClick="{{ setAll }}" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.07em;color:#7f95a8;background:#060b13;border:1px solid #24384c;border-radius:10px;padding:0 20px;min-height:44px;cursor:pointer;">SHOW ALL 15 STACKS</button>
+      </div>
+    </sc-if>
+  </section>
+
+  <!-- ░░░░░░░░ OTHER PANEL STATES ░░░░░░░░ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;">PANEL STATES</h2>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">busy · error · no stacks</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;align-items:start;">
+
+      <div style="display:flex;flex-direction:column;gap:9px;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.1em;color:#5fd6e8;">BUSY · SCANNING</div>
+        <div style="border-radius:13px;border:1px solid #1c2c44;background:#0c1524;padding:16px;display:flex;flex-direction:column;gap:12px;">
+          <div style="display:flex;align-items:center;gap:11px;">
+            <span style="width:8px;height:8px;border-radius:50%;background:#35c5d8;box-shadow:0 0 8px #35c5d8;animation:beacon 1.2s ease-in-out infinite;flex:none;"></span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13.5px;letter-spacing:.06em;color:#5fd6e8;">RE-READING THE FLEET</span>
+            <div style="flex:1"></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">9 / 15</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:9px;">
+            <div style="height:74px;border-radius:11px;border:1px solid #16233a;background:#08101c;"></div>
+            <div style="height:74px;border-radius:11px;border:1px solid #16233a;background:#08101c;"></div>
+            <div style="height:74px;border-radius:11px;border:1px dashed #16233a;background:#060b13;"></div>
+            <div style="height:74px;border-radius:11px;border:1px dashed #16233a;background:#060b13;"></div>
+          </div>
+          <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:10.5px;line-height:1.5;color:#5f7391;">Cards keep their last-known state while the scan runs — they never blank.</p>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:9px;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.1em;color:#ff6a5a;">ERROR · DAEMON UNREACHABLE</div>
+        <div style="border-radius:13px;border:1px solid rgba(239,60,46,.4);border-left:3px solid #ef3c2e;background:rgba(239,60,46,.06);padding:16px;display:flex;flex-direction:column;gap:13px;">
+          <div style="display:flex;align-items:center;gap:11px;">
+            <div style="width:42px;height:42px;border-radius:11px;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-size:19px;font-weight:700;color:#180402;background:#ef3c2e;box-shadow:0 0 18px rgba(239,60,46,.5);">⚠</div>
+            <div style="flex:1;min-width:0;">
+              <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14.5px;letter-spacing:.05em;color:#ff6a5a;">CAN'T REACH DOCKER</div>
+              <p style="margin:3px 0 0;font-size:12.5px;line-height:1.5;color:#e8b3ac;text-wrap:pretty;">The socket refused the connection. Container state is unknown, not bad.</p>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;border-radius:11px;border:1px solid rgba(239,60,46,.25);background:#100809;padding:11px 12px;font-family:'JetBrains Mono',monospace;font-size:10px;line-height:1.5;">
+            <div style="white-space:pre;overflow:hidden;text-overflow:ellipsis;color:#7f95a8;">last good read 13:51:21 · 7m ago</div>
+            <div style="white-space:pre;overflow:hidden;text-overflow:ellipsis;color:#e8b3ac;">dial unix /var/run/docker.sock: connect: permission denied</div>
+          </div>
+          <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.07em;color:#8fe6f5;background:rgba(53,197,216,.1);border:1px solid rgba(53,197,216,.45);border-radius:10px;min-height:46px;cursor:pointer;">RETRY SCAN</button>
+        </div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:9px;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.1em;color:#5f7391;">EMPTY · NO STACKS</div>
+        <div style="border-radius:13px;border:1px dashed #24384c;background:#08101c;padding:30px 20px;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center;">
+          <img src="static/characters/futurama/zoidberg.png" alt="" style="width:58px;height:58px;border-radius:50%;object-fit:cover;background:#0c1524;filter:grayscale(.4);">
+          <div>
+            <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15.5px;letter-spacing:.05em;color:#8fa3ba;">NO COMPOSE STACKS FOUND</div>
+            <p style="margin:7px 0 0;font-size:12.5px;line-height:1.6;color:#6f849e;text-wrap:pretty;">The daemon answered, but nothing on this host carries a compose project label.</p>
+          </div>
+          <button type="button" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.07em;color:#7f95a8;background:#060b13;border:1px solid #24384c;border-radius:10px;padding:0 20px;min-height:44px;cursor:pointer;">CHECK STACK PATHS</button>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ░░░░░░░░ MOBILE ░░░░░░░░ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;">MOBILE</h2>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">390px · one column · dots default</span>
+    </div>
+    <p style="margin:0;max-width:850px;font-size:13.5px;line-height:1.65;color:#8fa3ba;text-wrap:pretty;">On a phone the grid becomes one column and the default density flips to <b style="color:#eef4fa;">dots</b> — 15 cards at roughly 88px each is about two screens of scroll for the whole fleet, against twenty-plus for the list. Tapping a card expands it to named chips in place; tapping a chip opens the container detail.</p>
+
+    <div style="display:flex;gap:24px;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;gap:9px;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.1em;color:#5f7391;">FLEET · DOTS</div>
+        <div style="width:390px;height:844px;border-radius:30px;border:1px solid #24384c;background:#060b13;overflow:hidden;display:flex;flex-direction:column;">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 22px 0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;"><span>13:58</span><span>▮▮▮ ◍</span></div>
+          <div style="padding:13px 16px;border-bottom:1px solid #1c2c44;display:flex;align-items:center;gap:10px;">
+            <div style="flex:1;min-width:0;">
+              <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;letter-spacing:.09em;color:#eef4fa;">SERVICES</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;margin-top:2px;">15 stacks · 86 of 88 online</div>
+            </div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.08em;color:#f5c94a;border:1px solid rgba(245,184,32,.4);border-radius:20px;padding:5px 10px;">2 ISSUES</div>
+          </div>
+          <div style="flex:1;overflow:hidden;padding:13px 16px;display:flex;flex-direction:column;gap:9px;">
+
+            <div style="border-radius:12px;border:1px solid rgba(239,60,46,.4);border-left:3px solid #ef3c2e;background:rgba(239,60,46,.06);padding:12px 13px;display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;align-items:center;gap:9px;">
+                <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#ff6a5a;box-shadow:0 0 9px #ff6a5a;animation:critpulse .9s ease-in-out infinite;"></span>
+                <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.03em;">media</span>
+                <div style="flex:1"></div>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#ff6a5a;border:1px solid rgba(239,60,46,.45);border-radius:20px;padding:2px 9px;">14/16</span>
+              </div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#e8b3ac;">sonarr down · bazarr degraded</div>
+              <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                <span style="width:13px;height:13px;border-radius:4px;background:#ef3c2e;box-shadow:0 0 7px rgba(239,60,46,.7);animation:critpulse .9s ease-in-out infinite;"></span>
+                <span style="width:13px;height:13px;border-radius:4px;background:#f5b820;box-shadow:0 0 7px rgba(245,184,32,.6);animation:beacon 1.8s ease-in-out infinite;"></span>
+                <span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span>
+              </div>
+            </div>
+
+            <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:#0c1524;padding:12px 13px;display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;align-items:center;gap:9px;">
+                <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#6fcf5f;box-shadow:0 0 9px #6fcf5f;"></span>
+                <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.03em;">monitoring</span>
+                <div style="flex:1"></div>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 9px;">13/13</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                <span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span>
+              </div>
+            </div>
+
+            <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:#0c1524;padding:12px 13px;display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;align-items:center;gap:9px;">
+                <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#6fcf5f;box-shadow:0 0 9px #6fcf5f;"></span>
+                <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.03em;">home</span>
+                <div style="flex:1"></div>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 9px;">11/11</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:5px;">
+                <span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span>
+              </div>
+            </div>
+
+            <!-- expanded on tap -->
+            <div style="border-radius:12px;border:1px solid #35c5d8;border-left:3px solid #35c5d8;background:linear-gradient(180deg,rgba(53,197,216,.07),#0c1524);padding:12px 13px;display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;align-items:center;gap:9px;">
+                <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#6fcf5f;box-shadow:0 0 9px #6fcf5f;"></span>
+                <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.03em;">airwave</span>
+                <div style="flex:1"></div>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 9px;">4/4</span>
+                <span style="font-size:13px;color:#5fd6e8;">⌄</span>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                <div style="display:flex;align-items:center;gap:7px;border-radius:7px;padding:0 10px 0 8px;height:32px;background:#08101c;border:1px solid #1c3344;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#cfe6ee;">postgres</span></div>
+                <div style="display:flex;align-items:center;gap:7px;border-radius:7px;padding:0 10px 0 8px;height:32px;background:#08101c;border:1px solid #1c3344;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#cfe6ee;">server</span></div>
+                <div style="display:flex;align-items:center;gap:7px;border-radius:7px;padding:0 10px 0 8px;height:32px;background:#08101c;border:1px solid #1c3344;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#cfe6ee;">tvweb</span></div>
+                <div style="display:flex;align-items:center;gap:7px;border-radius:7px;padding:0 10px 0 8px;height:32px;background:#08101c;border:1px solid #1c3344;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#cfe6ee;">web</span></div>
+              </div>
+            </div>
+
+            <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:#0c1524;padding:12px 13px;display:flex;align-items:center;gap:9px;">
+              <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#6fcf5f;box-shadow:0 0 9px #6fcf5f;"></span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.03em;">nextcloud</span>
+              <div style="flex:1"></div>
+              <div style="display:flex;gap:5px;">
+                <span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span><span style="width:13px;height:13px;border-radius:4px;background:#6fcf5f;"></span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
+      <div style="max-width:420px;display:flex;flex-direction:column;gap:12px;padding-top:30px;">
+        <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:16px 18px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;">SCROLL LENGTH · 88 CONTAINERS</div>
+          <div style="display:flex flex-direction:column;gap:11px;margin-top:13px;">
+            <div style="margin-bottom:11px;">
+              <div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:5px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#ff6a5a;">flat list</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#ff6a5a;">~3,900px</span></div>
+              <div style="height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:100%;border-radius:20px;background:#ef3c2e;box-shadow:0 0 9px rgba(239,60,46,.55);"></div></div>
+            </div>
+            <div style="margin-bottom:11px;">
+              <div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:5px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#f5c94a;">cards · named</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#f5c94a;">~1,050px</span></div>
+              <div style="height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:27%;border-radius:20px;background:#f5b820;box-shadow:0 0 9px rgba(245,184,32,.55);"></div></div>
+            </div>
+            <div>
+              <div style="display:flex;justify-content:space-between;gap:10px;margin-bottom:5px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8fe6a0;">cards · dots</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#8fe6a0;">~620px</span></div>
+              <div style="height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:16%;border-radius:20px;background:#6fcf5f;box-shadow:0 0 9px rgba(111,207,95,.55);"></div></div>
+            </div>
+          </div>
+        </div>
+        <p style="margin:0;font-size:13px;line-height:1.65;color:#8fa3ba;text-wrap:pretty;">Measured at 390px wide. The flat list can't shrink because its cost is one row per container; the cards shrink because a healthy container is worth 13 pixels, not a full row and a redundant sentence.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ░░░░░░░░ NOTES ░░░░░░░░ -->
+  <section style="display:flex;flex-direction:column;gap:16px;max-width:900px;">
+    <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;">WHY THIS WORKS AT 88</h2>
+    <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 20px;">
+      <ul style="margin:0;padding-left:20px;font-size:13px;line-height:1.85;color:#9fb3c8;">
+        <li><b style="color:#eef4fa;">The stack is the unit, not the container.</b> 15 cards instead of 88 rows. Cards size to their contents, so <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">dockge</span> with one container takes one line and <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">media</span> with sixteen takes four — no fixed-height grid forcing them to match.</li>
+        <li><b style="color:#eef4fa;">Green says nothing, so it costs nothing.</b> A healthy container is an LED and its name. <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">running(healthy)</span> vanishes — a status word appears only when the status isn't green, which makes the exceptions findable instead of camouflaged.</li>
+        <li><b style="color:#eef4fa;">Trouble sorts to the front.</b> Stacks order by worst member, then by size. You never scroll to find the broken one, and the rail above the grid names it outright.</li>
+        <li><b style="color:#eef4fa;">Two densities, one layout.</b> NAMED when you're working, DOTS when you're checking — 88 containers in about 620px. Phones default to DOTS; a tap expands one card in place.</li>
+        <li><b style="color:#eef4fa;">Attention filter over search.</b> With 15 stacks you don't need to search, you need "show me the 2 that matter". The filter collapses to those, and reads as a reassurance when the answer is none.</li>
+        <li><b style="color:#eef4fa;">Everything stays clickable.</b> Chip → container detail; card header → stack actions. The list's one virtue was that every container was reachable, and that's preserved.</li>
+      </ul>
+    </div>
+    <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 20px;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;margin-bottom:11px;">DATA IT NEEDS</div>
+      <p style="margin:0 0 11px;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">Grouping by compose project is already in the payload — the current list renders stack headings from it. Two additions:</p>
+      <div style="background:#03130f;border:1px solid #1c4a3a;border-radius:9px;padding:13px 15px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.75;color:#7fe3a5;overflow-x:auto;">
+        <div style="white-space:pre;color:#4f9c76;"># per stack, computed in dashboard_data.py</div>
+        <div style="white-space:pre;">"up": 14, "total": 16,</div>
+        <div style="white-space:pre;">"level": "crit",      <span style="color:#4f9c76;"># worst member: ok|warn|crit|idle</span></div>
+        <div style="white-space:pre;">"note": "sonarr down · bazarr degraded",</div>
+        <div style="white-space:pre;">&nbsp;</div>
+        <div style="white-space:pre;color:#4f9c76;"># sort key — trouble first, then biggest</div>
+        <div style="white-space:pre;">stacks.sort(key=lambda s: (RANK[s["level"]], -s["total"]))</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1500}}">
+const RAW = [
+  ['airwave', ['postgres','server','tvweb','web']],
+  ['audiomuse', ['audiomuse-postgres','audiomuse-worker','audiomuse-app']],
+  ['dockge', ['dockge']],
+  ['linktool', ['utm-gen']],
+  ['media', ['jellyfin','sonarr','radarr','lidarr','readarr','prowlarr','bazarr','qbittorrent','sabnzbd','recyclarr','tautulli','jellyseerr','flaresolverr','unpackerr','kavita','navidrome']],
+  ['monitoring', ['grafana','prometheus','loki','promtail','alertmanager','node-exporter','cadvisor','uptime-kuma','blackbox','influxdb','telegraf','scrutiny','dozzle']],
+  ['immich', ['server','machine-learning','postgres','redis','typesense']],
+  ['nextcloud', ['app','db','redis','cron','collabora']],
+  ['paperless', ['webserver','broker','db','gotenberg','tika','ftp']],
+  ['traefik', ['traefik','crowdsec','error-pages','whoami']],
+  ['home', ['homeassistant','mosquitto','zigbee2mqtt','esphome','node-red','frigate','matter-server','go2rtc','music-assistant','whisper','piper']],
+  ['git', ['gitea','postgres','runner']],
+  ['dns', ['adguard','unbound','ddclient']],
+  ['ai', ['ollama','openwebui','comfyui','searxng']],
+  ['misc', ['watchtower','diun','portainer-agent','speedtest','it-tools','stirling-pdf','changedetection','vaultwarden','syncthing']],
+];
+
+// incident overlay: stack -> {container: state}
+const INCIDENT = {
+  media: { sonarr: 'crit', bazarr: 'warn' },
+  paperless: { tika: 'crit' },
+  home: { frigate: 'warn' },
+  misc: { speedtest: 'idle' },
+};
+
+const TIER = {
+  ok:   { dot:'#6fcf5f', glow:'0 0 7px rgba(111,207,95,.6)', line:'#3f8f5a', bd:'#1c2c44',
+          fg:'#cfe6ee', bg:'#08101c', cbd:'#1c3344', anim:'none',
+          tallyFg:'#8fe6a0', tallyBd:'rgba(111,207,95,.4)', rank:3 },
+  warn: { dot:'#f5b820', glow:'0 0 7px rgba(245,184,32,.65)', line:'#f5b820', bd:'rgba(245,184,32,.35)',
+          fg:'#f5c94a', bg:'rgba(245,184,32,.07)', cbd:'rgba(245,184,32,.4)', anim:'beacon 1.8s ease-in-out infinite',
+          tallyFg:'#f5c94a', tallyBd:'rgba(245,184,32,.45)', rank:1, tag:'DEGRADED' },
+  crit: { dot:'#ef3c2e', glow:'0 0 8px rgba(239,60,46,.7)', line:'#ef3c2e', bd:'rgba(239,60,46,.4)',
+          fg:'#ff6a5a', bg:'rgba(239,60,46,.08)', cbd:'rgba(239,60,46,.45)', anim:'critpulse .9s ease-in-out infinite',
+          tallyFg:'#ff6a5a', tallyBd:'rgba(239,60,46,.45)', rank:0, tag:'DOWN' },
+  idle: { dot:'#3f5470', glow:'none', line:'#2a3a50', bd:'#1c2c44',
+          fg:'#5f7391', bg:'#060b13', cbd:'#1c2c44', anim:'none',
+          tallyFg:'#5f7391', tallyBd:'#24384c', rank:2, tag:'PAUSED' },
+};
+
+class Component extends DCLogic {
+  state = { filter: 'all', density: 'named', scenario: 'incident' };
+
+  set = (k, v) => () => this.setState({ [k]: v });
+  toggleScenario = () => this.setState(s => ({ scenario: s.scenario === 'incident' ? 'healthy' : 'incident' }));
+
+  renderVals() {
+    const { filter, density, scenario } = this.state;
+    const inc = scenario === 'incident' ? INCIDENT : {};
+
+    let built = RAW.map(([name, names]) => {
+      const over = inc[name] || {};
+      const items = names.map(n => {
+        const st = over[n] || 'ok';
+        const t = TIER[st];
+        return { name: n, st, dot: t.dot, glow: t.glow, anim: t.anim, fg: t.fg, bg: t.bg, bd: t.cbd,
+                 showTag: st !== 'ok', tag: t.tag || '' };
+      });
+      const level = items.some(i => i.st === 'crit') ? 'crit'
+                  : items.some(i => i.st === 'warn') ? 'warn'
+                  : items.some(i => i.st === 'idle') ? 'idle' : 'ok';
+      const t = TIER[level];
+      const up = items.filter(i => i.st === 'ok').length;
+      const bad = items.filter(i => i.st !== 'ok');
+      return {
+        name, items, level, total: items.length,
+        tally: up + '/' + items.length,
+        tallyFg: t.tallyFg, tallyBd: t.tallyBd,
+        line: t.line, bd: t.bd, dot: t.dot, dotGlow: t.glow, dotAnim: t.anim,
+        showNote: bad.length > 0,
+        noteFg: level === 'crit' ? '#e8b3ac' : level === 'warn' ? '#c3b48a' : '#6f849e',
+        note: bad.map(b => b.name + ' ' + (b.st === 'crit' ? 'down' : b.st === 'warn' ? 'degraded' : 'paused')).join(' · '),
+      };
+    });
+
+    built.sort((a, b) => TIER[a.level].rank - TIER[b.level].rank || b.total - a.total || a.name.localeCompare(b.name));
+
+    const trouble = built.filter(s => s.level !== 'ok');
+    const stacks = filter === 'attention' ? trouble : built;
+
+    const total = built.reduce((n, s) => n + s.total, 0);
+    const online = built.reduce((n, s) => n + s.items.filter(i => i.st === 'ok').length, 0);
+
+    const on  = (a) => a ? { bg:'rgba(53,197,216,.12)', bd:'#35c5d8', fg:'#8fe6f5' }
+                         : { bg:'#08101c', bd:'#24384c', fg:'#7f95a8' };
+    const fA = on(filter === 'all'), fT = on(filter === 'attention');
+    const dN = on(density === 'named'), dD = on(density === 'dots');
+
+    const worst = trouble.filter(s => s.level === 'crit');
+    return {
+      stacks, named: density === 'named', dots: density === 'dots',
+      summary: '15 stacks · ' + online + ' of ' + total + ' containers online',
+      hasTrouble: trouble.length > 0 && filter !== 'attention',
+      troubleTitle: worst.length ? 'NEEDS YOU NOW' : 'WORTH A LOOK',
+      troubleDetail: trouble.map(s => s.note + ' (' + s.name + ')').join(' · '),
+      filterEmpty: stacks.length === 0,
+      attnLabel: trouble.length ? 'ATTENTION ' + trouble.length : 'ATTENTION 0',
+      scenarioLabel: scenario === 'incident' ? 'INCIDENT' : 'ALL GREEN',
+      setAll: this.set('filter', 'all'), setAttn: this.set('filter', 'attention'),
+      setNamed: this.set('density', 'named'), setDots: this.set('density', 'dots'),
+      toggleScenario: this.toggleScenario,
+      allBg: fA.bg, allBd: fA.bd, allFg: fA.fg,
+      attnBg: fT.bg, attnBd: fT.bd, attnFg: fT.fg,
+      namedBg: dN.bg, namedBd: dN.bd, namedFg: dN.fg,
+      dotsBg: dD.bg, dotsBd: dD.bd, dotsFg: dD.fg,
+    };
+  }
+}
+</script>
+</body>
+</html>
