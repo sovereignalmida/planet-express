@@ -1586,9 +1586,8 @@ footer p {
 #chat-ask:disabled { opacity: .5; cursor: wait; }
 
 /* Config editor is a persistent sibling of the replaceable dashboard snapshot. */
-.config-dock { position: relative; z-index: 2; max-width: 1180px; margin: 0 auto; padding: 22px 26px 40px; }
 .config-active #dashboard-live > .body-grid { display: none; }
-.config-shell, #config-workspace { display: flex; flex-direction: column; gap: 18px; }
+.config-shell { display: flex; flex-direction: column; gap: 18px; }
 .config-policy, .config-editor-card, .config-outcome { display: flex; flex-direction: column; gap: 14px; }
 .config-path { margin: 0; overflow-wrap: anywhere; color: var(--pe-ink-body); }
 .config-path span, .config-group-label { font: 10px var(--pe-font-mono); letter-spacing: .09em; color: var(--pe-ink-faint); }
@@ -1686,7 +1685,6 @@ footer p {
 .config-sheet-actions > * { flex: 1; min-height: 54px; }
 
 @media (max-width: 640px) {
-  .config-dock { padding: 16px; }
   #config-editor { min-height: 60vh; font-size: 11px; }
   .config-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .config-actions #config-review { grid-column: 1 / -1; margin-left: 0; }
@@ -2167,4 +2165,150 @@ button.overview-tile:hover { border-color: var(--tile-level); }
 }
 @media (max-width: 720px) {
   .deploy-runs { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Chat: ask on the left, the answer on the right (T45.5) ─────────────────────
+   The tab was a stack of question panels you scrolled; the answer to the question
+   you just asked started below the fold as soon as it had any evidence. */
+.chat-dock { position: relative; z-index: 2; padding: 14px 18px 18px; }
+/* Both columns run the height of the viewport below the header. Sized to the viewport
+   rather than the reference's literal 790px, which would leave a gap on a tall screen
+   and overflow a short one. */
+.chat-split { display: grid; grid-template-columns: 400px minmax(0, 1fr); gap: 12px;
+  align-items: stretch; min-height: calc(100dvh - 104px); }
+.chat-ask { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.chat-quota { color: var(--pe-ink-label); font: 9.5px var(--pe-font-mono); }
+.chat-notice { margin: 0; color: var(--pe-ink-dim); font-size: 12px; line-height: 1.55; }
+.chat-ask form { display: flex; flex-direction: column; gap: 12px; }
+#chat-question {
+  height: 150px; resize: vertical; padding: 12px; border-radius: 10px;
+  border: 1px solid var(--pe-border-strong); background: var(--pe-well);
+  color: var(--pe-ink); font: 13px var(--pe-font-body);
+}
+#chat-question:focus { outline: none; border-color: var(--pe-accent); background: var(--pe-accent-bg); }
+.chat-ask-btn {
+  height: 42px; border-radius: 9px; border: 1px solid var(--pe-ok-line);
+  background: var(--pe-ok-bg); color: var(--pe-ok-ink);
+  font: 700 13px var(--pe-font-display); letter-spacing: .08em; cursor: pointer;
+}
+.chat-message:empty { display: none; }
+.chat-message { margin: 0; color: var(--pe-warn-ink); font-size: 12px; }
+.chat-history-label { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); letter-spacing: .1em; }
+.chat-history { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.chat-history-row {
+  appearance: none; width: 100%; text-align: left; cursor: pointer; padding: 10px 12px;
+  border: 1px solid var(--pe-border); border-radius: 9px; background: var(--pe-well);
+  color: inherit; font: inherit;
+}
+.chat-history-row.is-selected { border-color: var(--pe-accent); background: var(--pe-accent-bg); }
+.chat-history-q { color: var(--pe-ink-body); font-size: 12.5px; }
+.chat-history-row.is-selected .chat-history-q { color: var(--pe-ink); }
+.chat-history-meta { margin-top: 3px; color: var(--pe-ink-label); font: 9.5px var(--pe-font-mono); }
+
+.chat-answer { display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 18px 22px; }
+.chat-answer-head { display: flex; align-items: center; gap: 11px; }
+.chat-answer-head img { width: 34px; height: 34px; flex: none; border-radius: 50%; object-fit: cover; background: var(--pe-well); }
+.chat-answer-heading { flex: 1; min-width: 0; }
+.chat-answer-heading h2 { font: 700 17px var(--pe-font-display); color: var(--pe-ink); overflow-wrap: anywhere; }
+.chat-answer-meta { margin-top: 2px; color: var(--pe-ink-label); font: 10px var(--pe-font-mono); }
+.chat-answer-badge {
+  flex: none; padding: 2px 9px; border-radius: var(--pe-r-pill);
+  border: 1px solid var(--pe-ok-line); color: var(--pe-ok-ink);
+  font: 700 9px var(--pe-font-mono); letter-spacing: .1em; text-transform: uppercase;
+}
+.chat-answer-badge.warn { border-color: var(--pe-warn-line); color: var(--pe-warn-ink); }
+.chat-answer-badge.crit { border-color: var(--pe-crit-line); color: var(--pe-crit-ink); }
+.chat-verdict {
+  padding: 12px 14px; border-radius: 10px; border: 1px solid var(--pe-ok-line);
+  background: var(--pe-ok-bg); color: var(--pe-ink-2); font-size: 13.5px; line-height: 1.6;
+  text-wrap: pretty;
+}
+.chat-verdict.warn { border-color: var(--pe-warn-line); background: var(--pe-warn-bg); }
+.chat-verdict.crit { border-color: var(--pe-crit-line); background: var(--pe-crit-bg); }
+.chat-verdict.working { border-style: dashed; border-color: var(--pe-border-strong); background: var(--pe-well); color: var(--pe-ink-dim); }
+.chat-prose { display: flex; flex-direction: column; gap: 10px; max-width: 760px; color: var(--pe-ink-body); font-size: 13px; line-height: 1.7; }
+.chat-prose p { margin: 0; text-wrap: pretty; }
+.chat-answer-note { margin: 0; color: var(--pe-ink-dim); font-size: 12px; }
+.chat-evidence-section { display: flex; flex-direction: column; gap: 8px; }
+.chat-evidence-label { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); letter-spacing: .1em; }
+.chat-evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; padding: 0; list-style: none; }
+.chat-evidence-card { border: 1px solid var(--pe-border-dash); border-radius: 10px; background: var(--pe-well); padding: 11px 13px; min-width: 0; }
+.chat-evidence-head { display: flex; align-items: center; gap: 8px; cursor: pointer; list-style: none; }
+.chat-evidence-head::-webkit-details-marker { display: none; }
+.chat-evidence-tick { color: var(--pe-ok-ink); font-size: 11px; }
+.chat-evidence-card.bad .chat-evidence-tick { color: var(--pe-crit-ink); }
+.chat-evidence-name { color: var(--pe-ink-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-evidence-exit { color: var(--pe-ink-label); font: 9.5px var(--pe-font-mono); }
+.chat-evidence-body h4 { margin: 9px 0 3px; color: var(--pe-ink-faint); font: 9px var(--pe-font-mono); letter-spacing: .1em; }
+.chat-evidence-body pre { margin: 0; max-height: 200px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--pe-ink-body); font: 10.5px/1.5 var(--pe-font-mono); }
+.chat-evidence-result { margin-top: 5px; color: var(--pe-ink-faint); font: 10px var(--pe-font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-evidence-other > summary { cursor: pointer; color: var(--pe-ink-dim); font: 10.5px var(--pe-font-mono); }
+.chat-answer-empty {
+  display: flex; align-items: center; gap: 14px; padding: 18px;
+  border: 1px dashed var(--pe-border-strong); border-radius: 12px; background: var(--pe-well);
+}
+.chat-answer-empty img { width: 44px; height: 44px; flex: none; border-radius: 50%; object-fit: cover; }
+.chat-answer-empty-title { color: var(--pe-ink-muted); font: 700 14px var(--pe-font-display); letter-spacing: .05em; }
+.chat-answer-empty-sub { margin-top: 3px; color: var(--pe-ink-dim); font-size: 12px; max-width: 46ch; }
+.pe-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (max-width: 1024px) {
+  .chat-split { grid-template-columns: minmax(0, 1fr); }
+  .chat-evidence-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── Config: rules left, a full-height editor right (T45.5) ─────────────────────
+   The three editor layers below share one font stack, one font-size and one
+   line-height. If those ever diverge the tints drift off their lines, so they are
+   set once on the shell and inherited. */
+.config-dock { position: relative; z-index: 2; padding: 14px 18px 18px; }
+.config-split {
+  /* A definite height, not min-height: the editor has to be a capped scrolling region, and a
+     min-height row still grows to whatever its tallest child wants. grid-template-rows caps
+     the row itself so the card's min-height:0 can take effect. */
+  display: grid; grid-template-columns: 400px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+  gap: 12px; align-items: stretch; height: calc(100dvh - 104px);
+}
+.config-rules { overflow-y: auto; }
+.config-rules { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.config-path { margin: 0 0 4px; }
+.config-path code { color: var(--pe-accent-ink); font: 10px var(--pe-font-mono); word-break: break-all; }
+
+.config-editor-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: 0; }
+.config-editor-head, .config-actions { flex: none; }
+.config-editor-head { padding: 11px 15px; border-bottom: 1px solid var(--pe-border-dash); margin: 0; }
+.config-line-count { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+
+.config-editor-shell {
+  /* min-height:0 is what makes flex:1 actually cap this box. Without it the shell grows with
+     the file, the textarea never scrolls, and a long config pushes the CHECK / REVERT /
+     REVIEW toolbar off the bottom of the page -- the one thing this tab must keep reachable. */
+  position: relative; flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 44px minmax(0, 1fr);
+  background: var(--pe-code-bg, #03130f); overflow: hidden;
+  font-family: var(--pe-font-mono); font-size: 11px; line-height: 1.7;
+}
+.config-gutter, .config-tints, #config-editor {
+  font: inherit; padding: 12px 0; overflow: hidden; margin: 0;
+}
+.config-gutter { text-align: right; color: #2f5a48; overflow-y: hidden; }
+.config-gutter-line { padding-right: 12px; }
+.config-tints { grid-column: 2; grid-row: 1; }
+.config-tint-line { height: calc(1em * 1.7); }
+.config-tint-line.locked { background: var(--pe-crit-bg); box-shadow: inset 2px 0 0 var(--pe-crit-line); }
+#config-editor {
+  grid-column: 2; grid-row: 1; position: relative; z-index: 1;
+  border: 0; resize: none; background: transparent; color: var(--pe-ink-2);
+  white-space: pre; overflow: auto; padding-left: 0;
+}
+#config-editor:focus { outline: none; }
+.config-actions {
+  display: flex; align-items: center; gap: 8px; padding: 11px 15px;
+  border-top: 1px solid var(--pe-border-dash); background: var(--pe-surface);
+}
+
+@media (max-width: 1024px) {
+  .config-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; height: auto; }
+  .config-rules { overflow-y: visible; }
+  .config-editor-shell { min-height: 420px; }
 }

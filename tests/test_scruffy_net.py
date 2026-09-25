@@ -81,6 +81,18 @@ def test_a_down_twin_makes_the_merged_pill_down():
     assert grouped["down"] == 1
 
 
+def test_two_disabled_twins_count_as_two_routers_down():
+    """A merged pill can stand for two routers, so "is this pill down" and "how many routers
+    behind it are down" are different questions. The header asks the second one."""
+    grouped = casa_scruffy_net.group_routers([
+        _router("api@docker", "api.casalan.com", status="disabled"),
+        _router("api-lan@docker", "api-lan.casalan.com", status="disabled"),
+    ])
+    assert grouped["down"] == 2
+    assert grouped["zones"][0]["down"] == 2
+    assert grouped["names"] == 1 and grouped["total"] == 2
+
+
 def test_docker_is_untagged_and_other_providers_are_not():
     grouped = casa_scruffy_net.group_routers([
         _router("a@docker", "a.casalan.com"),

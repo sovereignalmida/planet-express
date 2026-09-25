@@ -593,32 +593,42 @@
     {% endif %}
   </div>
 
-  <div class="tab-panel" data-tab-panel="chat" id="chat-panel">
-    <section class="panel">
-      <h2>Chat</h2>
-      <p>Chat investigates with read-only checks and can only propose actions that still need approval.</p>
-      <form id="chat-form">
-        <label for="chat-question">Question</label>
-        <textarea id="chat-question" name="question" maxlength="2000" required rows="4"></textarea>
-        <button class="refresh-btn" id="chat-ask" type="submit">Ask</button>
-      </form>
-      <p id="chat-message" role="status"></p>
-      <p id="chat-quota" class="muted-body">Loading daily chat quota…</p>
-    </section>
-    <ol id="chat-transcript" aria-label="This page's questions" aria-live="polite"></ol>
+  <div class="tab-panel chat-dock" data-tab-panel="chat" id="chat-panel">
+    <div class="chat-split">
+      <section class="panel chat-ask">
+        <div class="panel-head-row">
+          <h2>ASK THE SHIP</h2>
+          <div class="tabs-spacer"></div>
+          <span id="chat-quota" class="chat-quota">loading quota…</span>
+        </div>
+        <p class="chat-notice">Read-only checks. It can propose a plan, never run one.</p>
+        <form id="chat-form">
+          <label class="pe-visually-hidden" for="chat-question">Question</label>
+          <textarea id="chat-question" name="question" maxlength="2000" required
+                    placeholder="Why is immich slow this morning?"></textarea>
+          <button class="pe-btn chat-ask-btn" id="chat-ask" type="submit">ASK ⏎</button>
+        </form>
+        <p id="chat-message" role="status" class="chat-message"></p>
+        {# Only this browser session's questions. There is no chat.list RPC, so a real day
+           history would need a backend endpoint -- the label says what this actually is
+           rather than promising a day it cannot show. #}
+        <div class="chat-history-label">THIS SESSION</div>
+        <ol id="chat-transcript" class="chat-history" aria-label="This session's questions"
+            aria-live="polite"></ol>
+      </section>
+
+      <section class="panel chat-answer" id="chat-answer" aria-live="polite"></section>
+    </div>
   </div>
 
   <!-- Kept outside #dashboard-live: a snapshot refresh must never destroy a config
        draft, review sheet, apply request, or activation watch. Config text is loaded
        only from /api/config by static/config.js. -->
   <div class="tab-panel config-dock" data-tab-panel="config" id="config-panel">
-    <section class="panel config-shell">
-      <div class="panel-head-row">
-        <h2>CONFIG</h2>
-        <span class="panel-head-note">checked · audited · activated by core</span>
-      </div>
-      <p id="config-loading" role="status">Open this tab to load config…</p>
-      <div id="config-workspace" hidden>
+    <p id="config-loading" role="status">Open this tab to load config…</p>
+    <div id="config-workspace" class="config-split" hidden>
+
+      <div class="config-rules">
         <div id="config-verdict" class="pe-verdict unknown">
           <div class="pe-verdict-orb" aria-hidden="true">?</div>
           <div class="pe-verdict-text">
@@ -631,24 +641,9 @@
           <div class="pe-card-head">
             <h3 class="pe-card-title sm" id="config-policy-title">WHAT MAY CHANGE HERE</h3>
           </div>
-          <p class="config-path"><span>PATH</span> <code id="config-path"></code></p>
+          <p class="config-path"><code id="config-path"></code></p>
           <div id="config-field-groups" class="config-field-groups"></div>
           <p id="config-sensitive-note" class="muted-body" hidden></p>
-        </section>
-
-        <section class="pe-card config-editor-card" aria-labelledby="config-editor-title">
-          <div class="pe-card-head">
-            <h3 class="pe-card-title sm" id="config-editor-title">CONFIG YAML</h3>
-            <span class="pe-spacer"></span>
-            <span id="config-dirty" class="config-dirty">SAVED</span>
-          </div>
-          <textarea id="config-editor" aria-label="Config YAML" spellcheck="false"
-                    autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
-          <div class="config-actions">
-            <button type="button" class="pe-btn" id="config-check">CHECK</button>
-            <button type="button" class="pe-btn" id="config-revert">REVERT</button>
-            <button type="button" class="pe-btn warn" id="config-review" disabled>REVIEW CHANGES</button>
-          </div>
         </section>
 
         <section id="config-outcome" class="pe-card config-outcome" aria-live="polite" hidden>
@@ -656,7 +651,33 @@
           <div id="config-outcome-body"></div>
         </section>
       </div>
-    </section>
+
+      <section class="pe-card config-editor-card" aria-labelledby="config-editor-title">
+        <div class="pe-card-head config-editor-head">
+          <h3 class="pe-card-title sm" id="config-editor-title">CONFIG.YAML</h3>
+          <span id="config-dirty" class="config-dirty">SAVED</span>
+          <span class="pe-spacer"></span>
+          <span id="config-line-count" class="config-line-count"></span>
+        </div>
+        {# Three layers that must agree line for line: a gutter, a tint layer marking the
+           lines that touch a locked key, and the textarea itself on top with a transparent
+           background. They share one font and line-height, and the textarea does not wrap
+           (wrap="off"), because a soft-wrapped line would put every tint below it on the
+           wrong row. #}
+        <div class="config-editor-shell">
+          <div class="config-gutter" id="config-gutter" aria-hidden="true"></div>
+          <div class="config-tints" id="config-tints" aria-hidden="true"></div>
+          <textarea id="config-editor" aria-label="Config YAML" spellcheck="false" wrap="off"
+                    autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
+        </div>
+        <div class="config-actions">
+          <button type="button" class="pe-btn" id="config-check">CHECK</button>
+          <button type="button" class="pe-btn" id="config-revert">REVERT</button>
+          <span class="pe-spacer"></span>
+          <button type="button" class="pe-btn warn" id="config-review" disabled>REVIEW CHANGES</button>
+        </div>
+      </section>
+    </div>
 
     <dialog id="config-review-dialog" aria-labelledby="config-review-title">
       <div class="pe-sheet warn">

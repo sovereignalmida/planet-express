@@ -1118,6 +1118,30 @@ def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp
     assert 'getElementById("manifest-panel")' in script
 
 
+def test_the_config_editor_layers_cannot_drift_apart(tmp_path, monkeypatch):
+    """Gutter, locked-line tints and the textarea are three elements that must agree line for
+    line. They only do so while the textarea does not soft-wrap: one wrapped line would put
+    every tint below it on the wrong row, and a tint on the wrong row is worse than none."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    shell = html[html.index('class="config-editor-shell"'):html.index('class="config-actions"')]
+    assert 'id="config-gutter"' in shell
+    assert 'id="config-tints"' in shell
+    assert 'wrap="off"' in shell
+    script = (Path(__file__).resolve().parent.parent / "static" / "config.js").read_text()
+    # Both decorations scroll with the textarea, or they only line up at the top.
+    assert 'gutter.scrollTop = editor.scrollTop' in script
+    assert 'tints.scrollTop = editor.scrollTop' in script
+
+
+def test_locked_line_tints_come_from_the_servers_own_key_list(tmp_path, monkeypatch):
+    """The tint is presentation over the core's refusal, never a second opinion on it: it
+    reads sensitive_fields straight off the config payload."""
+    script = (Path(__file__).resolve().parent.parent / "static" / "config.js").read_text()
+    painter = script[script.index("function lockedLineFlags"):script.index("function paintEditor")]
+    assert "state.loaded.sensitive_fields" in painter
+    assert "sensitive_edits_enabled" in painter
+
+
 def test_history_renders_run_cards_beside_a_detail_pane(tmp_path, monkeypatch):
     history = tmp_path / "update_history.json"
     history.write_text(json.dumps({"entries": [

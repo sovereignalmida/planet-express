@@ -23,6 +23,9 @@
   const loading = document.getElementById("config-loading");
   const workspace = document.getElementById("config-workspace");
   const editor = document.getElementById("config-editor");
+  const gutter = document.getElementById("config-gutter");
+  const tints = document.getElementById("config-tints");
+  const lineCount = document.getElementById("config-line-count");
   const checkButton = document.getElementById("config-check");
   const revertButton = document.getElementById("config-revert");
   const reviewButton = document.getElementById("config-review");
@@ -80,6 +83,44 @@
     dirtyLabel.classList.toggle("is-dirty", dirty());
   }
 
+  // Which lines the locked keys own, read off the draft the operator is looking at.
+  //
+  // Deliberately shallow: a line is locked if it is a top-level `key:` in the locked set, or
+  // if it is indented under one. That is exact for this config, which is a flat list of
+  // top-level keys with indented blocks, and it is presentation only -- the refusal itself
+  // is the core's, computed server-side from the same key list, and is not affected by
+  // anything here. If the file ever grows nested structures that matter, this needs a real
+  // YAML parse rather than a cleverer regex.
+  function lockedLineFlags(text) {
+    const locked = new Set(state.loaded && !state.loaded.sensitive_edits_enabled
+      ? state.loaded.sensitive_fields || [] : []);
+    let inLocked = false;
+    return text.split("\n").map(line => {
+      const topLevel = /^([A-Za-z0-9_-]+)\s*:/.exec(line);
+      if (topLevel) inLocked = locked.has(topLevel[1]);
+      else if (line.trim() && !/^\s/.test(line)) inLocked = false;
+      // A blank line carries the state forward (a block may contain one) but is never itself
+      // painted: a red band across an empty row looks like a mistake, not a lock.
+      return inLocked && Boolean(line.trim());
+    });
+  }
+
+  function paintEditor() {
+    if (!gutter || !tints) return;
+    const flags = lockedLineFlags(editor.value);
+    gutter.replaceChildren();
+    tints.replaceChildren();
+    flags.forEach((isLocked, index) => {
+      gutter.append(node("div", "config-gutter-line", String(index + 1)));
+      tints.append(node("div", "config-tint-line" + (isLocked ? " locked" : "")));
+    });
+    if (lineCount) {
+      lineCount.textContent = flags.length + " line" + (flags.length === 1 ? "" : "s");
+    }
+    gutter.scrollTop = editor.scrollTop;
+    tints.scrollTop = editor.scrollTop;
+  }
+
   function chip(text, kind) {
     return node("span", "config-chip" + (kind ? " " + kind : ""), text);
   }
@@ -130,6 +171,7 @@
     state.lastCheck = null;
     editor.value = data.text;
     state.baseline = editor.value;
+    paintEditor();
     loading.hidden = true;
     workspace.hidden = false;
     renderLive(data);
@@ -433,11 +475,19 @@
   editor.addEventListener("input", () => {
     if (state.lastCheck && state.lastCheck.text !== editor.value) state.lastCheck = null;
     syncButtons();
+    paintEditor();
+  });
+  // Both decorations are separate elements from the textarea, so they only stay on their
+  // lines if they scroll with it.
+  editor.addEventListener("scroll", () => {
+    gutter.scrollTop = editor.scrollTop;
+    tints.scrollTop = editor.scrollTop;
   });
   checkButton.addEventListener("click", checkDraft);
   revertButton.addEventListener("click", () => {
     if (!dirty() || window.confirm("Discard this draft and restore the config you loaded?")) {
       editor.value = state.baseline;
+      paintEditor();
       state.lastCheck = null;
       outcome.hidden = true;
       syncButtons();

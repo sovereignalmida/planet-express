@@ -1,13 +1,15 @@
 // Kept outside the dashboard refresh lifecycle; server text never becomes HTML.
 (function () {
   "use strict";
-  const state = { pending: null, submitting: false, tickets: [], quota: null, timer: null };
+  const state = { pending: null, submitting: false, tickets: [], quota: null, timer: null,
+                  selected: null };
   const form = document.getElementById("chat-form");
   const question = document.getElementById("chat-question");
   const askButton = document.getElementById("chat-ask");
   const message = document.getElementById("chat-message");
   const quotaLine = document.getElementById("chat-quota");
   const transcript = document.getElementById("chat-transcript");
+  const answerEl = document.getElementById("chat-answer");
 
   function el(tag, text) {
     const node = document.createElement(tag);
@@ -34,7 +36,7 @@
   async function refreshQuota() {
     try {
       state.quota = await request("/api/chat/quota");
-      quotaLine.textContent = state.quota.used + " of " + state.quota.limit + " LLM calls used today";
+      quotaLine.textContent = state.quota.used + " of " + state.quota.limit + " calls today";
       state.tickets.forEach(entry => {
         if (entry.quotaLabel) entry.quotaLabel.textContent = quotaMessage();
       });
@@ -43,28 +45,129 @@
     }
   }
 
+  // Card face: a tick, what was checked, and the exit code. The argv is real and useful, but
+  // it is the answer to "how", not "what", so it opens with the output rather than being the
+  // first thing an operator has to parse.
   function evidenceRecord(record) {
-    const item = el("li");
-    item.append(el("p", record.command + " — exit code " + record.exit_code));
-    const details = el("details");
-    details.append(el("summary", "stdout / stderr"), el("h4", "stdout"),
-      el("pre", record.stdout || ""), el("h4", "stderr"), el("pre", record.stderr || ""));
-    item.append(details);
-    return item;
+    const card = el("li");
+    card.className = "chat-evidence-card" + (record.exit_code === 0 ? "" : " bad");
+
+    const summary = document.createElement("summary");
+    summary.className = "chat-evidence-head";
+    summary.append(el("span", record.exit_code === 0 ? "✓" : "✗"));
+    summary.firstChild.className = "chat-evidence-tick";
+    summary.append(el("span", record.label || "Read-only check"));
+    summary.lastChild.className = "chat-evidence-name";
+    const spacer = el("span");
+    spacer.className = "pe-spacer";
+    summary.append(spacer, el("span", "exit " + record.exit_code + " ›"));
+    summary.lastChild.className = "chat-evidence-exit";
+
+    const details = document.createElement("details");
+    details.className = "chat-evidence-detail";
+    details.append(summary);
+    const body = el("div");
+    body.className = "chat-evidence-body";
+    body.append(el("h4", "COMMAND"), el("pre", record.command || ""),
+      el("h4", "STDOUT"), el("pre", record.stdout || ""),
+      el("h4", "STDERR"), el("pre", record.stderr || ""));
+    details.append(body);
+    card.append(details);
+
+    const firstLine = (record.stdout || record.stderr || "").split("\n")[0];
+    if (firstLine) {
+      const result = el("div", firstLine);
+      result.className = "chat-evidence-result";
+      card.append(result);
+    }
+    return card;
   }
 
-  function render(entry, ticket) {
-    entry.status = ticket.status;
-    entry.body.replaceChildren();
-    if (ticket.status === "queued" || ticket.status === "running") {
-      entry.body.append(el("p", ticket.status === "queued" ? "Queued…" : "Investigating…"));
+  const OUTCOME_WORD = {
+    answer: "answered", proposal: "proposed plan",
+    insufficient_evidence: "not enough evidence", unsupported_fix: "no typed action covers it",
+    quota_exhausted: "quota reached",
+  };
+
+  function hhmm(seconds) {
+    if (typeof seconds !== "number") return "";
+    const d = new Date(seconds * 1000);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+
+  function verdictLevel(ticket) {
+    if (ticket.status === "failed" || ticket.status === "interrupted") return "crit";
+    if (ticket.outcome === "proposal") return "warn";
+    if (ticket.outcome === "insufficient_evidence" || ticket.outcome === "unsupported_fix"
+        || ticket.outcome === "quota_exhausted") return "warn";
+    return "ok";
+  }
+
+  // One line for the left column: what you asked, when, how many checks it took, how it ended.
+  function renderRow(entry) {
+    const ticket = entry.ticket || {};
+    entry.row.className = "chat-history-row" + (entry.id === state.selected ? " is-selected" : "");
+    entry.row.replaceChildren();
+    entry.row.append(el("div", entry.question));
+    entry.row.firstChild.className = "chat-history-q";
+
+    const checks = (ticket.evidence || []).length;
+    const parts = [];
+    if (ticket.finished_at) parts.push(hhmm(ticket.finished_at));
+    else if (ticket.created_at) parts.push(hhmm(ticket.created_at));
+    if (checks) parts.push(checks + " check" + (checks === 1 ? "" : "s"));
+    parts.push(entry.status === "queued" ? "queued"
+      : entry.status === "running" ? "working"
+      : OUTCOME_WORD[ticket.outcome] || entry.status);
+    entry.row.append(el("div", parts.join(" · ")));
+    entry.row.lastChild.className = "chat-history-meta";
+  }
+
+  function select(entry) {
+    state.selected = entry.id;
+    state.tickets.forEach(renderRow);
+    renderAnswer(entry);
+  }
+
+  function renderAnswer(entry) {
+    if (!answerEl || state.selected !== entry.id) return;
+    const ticket = entry.ticket || {};
+    answerEl.replaceChildren();
+
+    const head = el("div");
+    head.className = "chat-answer-head";
+    const portrait = document.createElement("img");
+    portrait.src = "/static/characters/futurama/farnsworth.png";
+    portrait.alt = "";
+    head.append(portrait);
+    const heading = el("div");
+    heading.className = "chat-answer-heading";
+    heading.append(el("h2", entry.question));
+    const checks = (ticket.evidence || []).length;
+    const when = ticket.finished_at ? "answered " + hhmm(ticket.finished_at) : entry.status;
+    heading.append(el("div", when + " · " + checks + " read-only check" + (checks === 1 ? "" : "s")));
+    heading.lastChild.className = "chat-answer-meta";
+    head.append(heading);
+    const badge = el("span", (OUTCOME_WORD[ticket.outcome] || entry.status).toUpperCase());
+    badge.className = "chat-answer-badge " + verdictLevel(ticket);
+    head.append(badge);
+    answerEl.append(head);
+
+    if (entry.status === "queued" || entry.status === "running") {
+      // The layout must not jump when the answer lands, so the working state occupies the
+      // same place the verdict will.
+      const working = el("div", entry.status === "queued" ? "Queued…" : "Investigating…");
+      working.className = "chat-verdict working";
+      answerEl.append(working);
       return;
     }
-    if (ticket.status === "failed" || ticket.status === "interrupted") {
-      entry.body.append(el("p", ticket.error || "Chat investigation failed"));
+    if (entry.status === "failed" || entry.status === "interrupted") {
+      const failed = el("div", ticket.error || "Chat investigation failed");
+      failed.className = "chat-verdict crit";
+      answerEl.append(failed);
       const retry = el("button", "Retry");
       retry.type = "button";
-      retry.className = "refresh-btn";
+      retry.className = "pe-btn";
       retry.addEventListener("click", () => {
         if (state.submitting || state.pending) {
           message.textContent = "Finish or retry the pending submission first.";
@@ -72,35 +175,80 @@
         }
         submit(entry.question); // A terminal ticket's retry gets a new submission id.
       });
-      entry.body.append(retry);
-    } else {
-      if (ticket.answer) entry.body.append(el("p", ticket.answer));
-      const labels = {
-        proposal: "Proposed: restart stack/service — approval card sent to Telegram · Approval ID: " + ticket.approval_id,
-        insufficient_evidence: "Not enough evidence to answer",
-        unsupported_fix: "No approved action covers this fix"
-      };
-      if (labels[ticket.outcome]) entry.body.append(el("p", labels[ticket.outcome]));
-      if (ticket.outcome === "quota_exhausted") {
-        entry.quotaLabel = el("p", quotaMessage());
-        entry.body.append(entry.quotaLabel);
+      answerEl.append(retry);
+      return;
+    }
+
+    // The verdict is the answer; everything under it is support. Paragraph one carries it.
+    const paragraphs = String(ticket.answer || "").split(/\n{2,}/).filter(p => p.trim());
+    if (paragraphs.length) {
+      const verdict = el("div", paragraphs[0]);
+      verdict.className = "chat-verdict " + verdictLevel(ticket);
+      answerEl.append(verdict);
+      if (paragraphs.length > 1) {
+        const prose = el("div");
+        prose.className = "chat-prose";
+        paragraphs.slice(1).forEach(text => prose.append(el("p", text)));
+        answerEl.append(prose);
       }
     }
-    const cited = new Set(ticket.cited || []);
-    const evidence = el("ul");
-    const other = el("ul");
-    (ticket.evidence || []).forEach((record, index) => {
-      (cited.has(index) ? evidence : other).append(evidenceRecord(record));
-    });
-    if (ticket.outcome === "answer" || evidence.childElementCount) {
-      entry.body.append(el("h3", "Evidence"), evidence);
+
+    const extra = {
+      proposal: "Proposed: a restart plan — approval card sent to Telegram · Approval ID: " + ticket.approval_id,
+      insufficient_evidence: "Not enough evidence to answer.",
+      unsupported_fix: "No approved action covers this fix.",
+    }[ticket.outcome];
+    if (extra) {
+      const note = el("p", extra);
+      note.className = "chat-answer-note";
+      answerEl.append(note);
     }
-    if (other.childElementCount) {
-      const details = el("details");
-      details.append(el("summary", "Other checks run"), other);
-      entry.body.append(details);
+    if (ticket.outcome === "quota_exhausted") {
+      entry.quotaLabel = el("p", quotaMessage());
+      entry.quotaLabel.className = "chat-answer-note";
+      answerEl.append(entry.quotaLabel);
+    }
+
+    const cited = new Set(ticket.cited || []);
+    const records = ticket.evidence || [];
+    const citedRecords = records.filter((_, index) => cited.has(index));
+    const otherRecords = records.filter((_, index) => !cited.has(index));
+    if (citedRecords.length) {
+      answerEl.append(evidenceSection("EVIDENCE · " + citedRecords.length + " CHECK" +
+        (citedRecords.length === 1 ? "" : "S"), citedRecords));
+    }
+    if (otherRecords.length) {
+      const details = document.createElement("details");
+      details.className = "chat-evidence-other";
+      const summary = document.createElement("summary");
+      summary.textContent = otherRecords.length + " other check" +
+        (otherRecords.length === 1 ? "" : "s") + " run";
+      details.append(summary, evidenceSection("", otherRecords));
+      answerEl.append(details);
     }
     refreshQuota();
+  }
+
+  function evidenceSection(label, records) {
+    const wrap = el("div");
+    wrap.className = "chat-evidence-section";
+    if (label) {
+      wrap.append(el("div", label));
+      wrap.firstChild.className = "chat-evidence-label";
+    }
+    const list = el("ul");
+    list.className = "chat-evidence-grid";
+    records.forEach(record => list.append(evidenceRecord(record)));
+    wrap.append(list);
+    return wrap;
+  }
+
+  function render(entry, ticket) {
+    entry.status = ticket.status;
+    entry.ticket = ticket;
+    renderRow(entry);
+    if (state.selected === entry.id) renderAnswer(entry);
+    else if (!state.selected) select(entry);
   }
 
   // Not crypto.randomUUID(): browsers only expose it in secure contexts (HTTPS or localhost), and
@@ -130,15 +278,19 @@
       if (!ticket.ticket_id || !ticket.status) throw new Error("Invalid chat response; retry your submission.");
       state.pending = null;
       const item = el("li");
-      item.className = "panel";
-      const entry = { question: pending.question, id: ticket.ticket_id, body: el("div"), polling: false };
-      item.append(el("h3", pending.question), entry.body);
+      const entry = { question: pending.question, id: ticket.ticket_id,
+                      row: document.createElement("button"), polling: false };
+      entry.row.type = "button";
+      entry.row.addEventListener("click", () => select(entry));
+      item.append(entry.row);
       transcript.prepend(item);
       state.tickets.push(entry);
+      state.selected = entry.id;
       render(entry, ticket);
+      select(entry);
       if (question.value.trim() === pending.question) question.value = "";
       message.textContent = "";
-      askButton.textContent = "Ask";
+      askButton.textContent = "ASK ⏎";
     } catch (error) {
       message.textContent = error.message + " Retry submission to resend the same question safely.";
       askButton.textContent = "Retry submission";
@@ -154,7 +306,7 @@
     try {
       render(entry, await request("/api/chat/" + encodeURIComponent(entry.id)));
     } catch (error) {
-      entry.body.replaceChildren(el("p", error.message + " Checking again shortly…"));
+      message.textContent = error.message + " Checking again shortly…";
     } finally {
       entry.polling = false;
     }
@@ -183,5 +335,25 @@
     }
     submit(text);
   });
+  // An empty right column reads as a broken panel, so it invites the first question instead.
+  function emptyAnswer() {
+    if (!answerEl || state.tickets.length) return;
+    answerEl.replaceChildren();
+    const well = el("div");
+    well.className = "chat-answer-empty";
+    const portrait = document.createElement("img");
+    portrait.src = "/static/characters/futurama/farnsworth.png";
+    portrait.alt = "";
+    well.append(portrait);
+    const copy = el("div");
+    copy.append(el("div", "NOTHING ASKED YET"));
+    copy.firstChild.className = "chat-answer-empty-title";
+    copy.append(el("div", "Ask a question on the left. The ship runs read-only checks and shows every one of them here."));
+    copy.lastChild.className = "chat-answer-empty-sub";
+    well.append(copy);
+    answerEl.append(well);
+  }
+
+  emptyAnswer();
   refreshQuota();
 })();

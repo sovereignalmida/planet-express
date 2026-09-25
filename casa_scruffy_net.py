@@ -159,6 +159,10 @@ def group_routers(routers: list) -> dict:
             "provider": provider, "down": router.get("status") != "enabled",
             "tag": "" if provider == _DEFAULT_PROVIDER else _PROVIDER_TAGS.get(provider, "EXT"),
             "lan": False, "routers": 1,
+            # A pill can stand for two routers once a twin merges, so "is this pill down" and
+            # "how many routers behind it are down" are different questions. The header asks
+            # the second one.
+            "down_count": 1 if router.get("status") != "enabled" else 0,
             "filter_text": f'{raw} {router.get("rule", "")} {router.get("service", "")}'.lower(),
         }
 
@@ -175,6 +179,7 @@ def group_routers(routers: list) -> dict:
         # way to search by host. Merging must not make the twin's own hostname unfindable.
         sibling["filter_text"] += " " + twin["filter_text"]
         sibling["down"] = sibling["down"] or twin["down"]
+        sibling["down_count"] += twin["down_count"]
         del pills[key]
         merged += 1
 
@@ -192,7 +197,7 @@ def group_routers(routers: list) -> dict:
             "count": sum(pill["routers"] for pill in items),
             "names": len(items),
             "items": items,
-            "down": sum(pill["down"] for pill in items),
+            "down": sum(pill["down_count"] for pill in items),
         })
 
     # Biggest zone first, but the catch-all bucket always last: it is a leftovers pile, not
