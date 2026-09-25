@@ -340,6 +340,34 @@ READONLY_DIAGNOSTIC_PREFIXES = [
 ]
 
 
+# One plain-language name per allowlisted prefix, for the Chat tab's evidence cards. The
+# face of a card says what was checked; the argv lives behind the disclosure. Keyed on the
+# same list above so adding a prefix without a label fails a test rather than shipping a
+# card labelled "docker".
+READONLY_DIAGNOSTIC_LABELS = {
+    "docker inspect": "Container configuration",
+    "docker logs": "Container log",
+    "docker ps": "Container list",
+    "journalctl": "System journal",
+    "systemctl status": "Unit status",
+    "systemctl is-active": "Unit running?",
+    "systemctl is-enabled": "Unit enabled?",
+    "df -h": "Disk usage",
+    "df -i": "Inode usage",
+}
+
+
+def diagnostic_label(command: str) -> str:
+    """The longest matching prefix wins: "systemctl is-active" must not be labelled with
+    "systemctl status"'s name just because it was declared first."""
+    lowered = (command or "").strip().lower()
+    best = ""
+    for prefix in READONLY_DIAGNOSTIC_LABELS:
+        if lowered.startswith(prefix) and len(prefix) > len(best):
+            best = prefix
+    return READONLY_DIAGNOSTIC_LABELS[best] if best else "Read-only check"
+
+
 class DiagnosticNotAllowed(SafetyError):
     """A diagnostic tool call didn't match the read-only allowlist."""
 

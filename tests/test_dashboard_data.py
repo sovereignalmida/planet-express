@@ -317,6 +317,27 @@ def test_disk_rows_use_the_documented_ramp_not_the_old_bar_thresholds(tmp_path, 
     assert levels == {"/a": "ok", "/b": "warn", "/c": "high", "/d": "crit", "/e": "none"}
 
 
+def test_a_valid_certificate_cannot_turn_a_backup_blind_spot_green():
+    """The reverse of the test below, and a bug my own fix introduced: making certs
+    independent of jobs let a valid cert supply an "ok" for a snapshot with no borg job in
+    it at all. _backup_verdict() calls zero job data unknown; so does the tile."""
+    ctx = _healthy_overview_context()
+    ctx["system_and_backups"]["backups"] = {}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["backups"]["level"] == "none"
+    assert tiles["backups"]["hero"] == "—"
+    assert tiles["backups"]["cert_count"] == 1      # the certs are still real information
+
+
+def test_traefik_answering_with_no_routers_is_not_an_all_clear():
+    """0 of 0 routers up is not a healthy fleet, it is no observation."""
+    tiles = dashboard_data.summarize_overview_tiles(
+        _healthy_overview_context(), {"available": True, "routers": []}, {"available": False})
+    assert tiles["network"]["level"] == "none"
+    assert tiles["network"]["hero"] == "—"
+    assert "no routers" in tiles["network"]["sub"]
+
+
 def test_an_unreadable_cert_list_does_not_hide_a_failed_backup():
     """Jobs and certificates are separate sensors. Requiring both let an unreadable cert list
     blank the one thing this tile exists to show."""

@@ -134,52 +134,74 @@ def group_routers(routers: list) -> dict:
 
     Three things happen here that the template must not try to do itself:
       * the provider suffix is split off `name@provider` and dropped when it is docker;
-      * `x-lan` collapses into its sibling `x` when that sibling exists in the same zone,
-        carrying a `+LAN` tag -- an orphan `x-lan` with no sibling keeps its own pill,
-        because dropping a router is worse than showing a twin;
+      * `x-lan` collapses into its sibling `x`, carrying a `+LAN` tag -- an orphan `x-lan`
+        with no sibling keeps its own pill, because dropping a router is worse than showing
+        a twin;
       * a router that is not `enabled` sorts to the front of its zone with a DOWN tag.
+
+    Twins are matched BEFORE zoning. `navidrome@docker` on the public domain and
+    `navidrome-lan@docker` on the LAN one are the normal shape on this host, and matching
+    them inside a zone would only ever have merged twins that shared a domain.
+
+    Entries are keyed by full `name@provider` identity, not by short name: Traefik lets two
+    providers define the same short name, and keying on the short one silently dropped a
+    route.
     """
-    pills_by_zone: dict[str, dict] = {}
+    pills = {}
     for router in routers:
         if not isinstance(router, dict):
             continue
         raw = str(router.get("name", "?"))
         short, _, provider = raw.partition("@")
         zone, host = _router_zone(router.get("rule", ""))
-        down = router.get("status") != "enabled"
-        pills_by_zone.setdefault(zone, {})[short] = {
-            "name": short, "raw": raw, "host": host, "down": down,
+        pills[raw] = {
+            "name": short, "raw": raw, "host": host, "zone": zone,
+            "provider": provider, "down": router.get("status") != "enabled",
             "tag": "" if provider == _DEFAULT_PROVIDER else _PROVIDER_TAGS.get(provider, "EXT"),
-            "lan": False,
+            "lan": False, "routers": 1,
             "filter_text": f'{raw} {router.get("rule", "")} {router.get("service", "")}'.lower(),
         }
 
     merged = 0
+    for key in [k for k, pill in pills.items() if pill["name"].endswith("-lan")]:
+        twin = pills[key]
+        sibling_key = f'{twin["name"][: -len("-lan")]}@{twin["provider"]}'
+        sibling = pills.get(sibling_key)
+        if sibling is None:
+            continue
+        sibling["lan"] = True
+        sibling["routers"] += 1
+        # The hostname left the pill face for the title attribute, so filtering is the only
+        # way to search by host. Merging must not make the twin's own hostname unfindable.
+        sibling["filter_text"] += " " + twin["filter_text"]
+        sibling["down"] = sibling["down"] or twin["down"]
+        del pills[key]
+        merged += 1
+
+    by_zone = {}
+    for pill in pills.values():
+        by_zone.setdefault(pill["zone"], []).append(pill)
+
     zones = []
-    for zone, pills in pills_by_zone.items():
-        for name in [n for n in pills if n.endswith("-lan")]:
-            sibling = pills.get(name[: -len("-lan")])
-            if sibling is None:
-                continue
-            sibling["lan"] = True
-            # The twin's own hostname still has to match the filter, or filtering by a LAN
-            # hostname would silently find nothing.
-            sibling["filter_text"] += " " + pills[name]["filter_text"]
-            sibling["down"] = sibling["down"] or pills[name]["down"]
-            del pills[name]
-            merged += 1
-        items = sorted(pills.values(), key=lambda pill: (not pill["down"], pill["name"]))
-        zones.append({"name": zone, "count": len(items), "items": items,
-                      "down": sum(pill["down"] for pill in items)})
+    for zone, items in by_zone.items():
+        items.sort(key=lambda pill: (not pill["down"], pill["name"]))
+        zones.append({
+            "name": zone,
+            # Two counts, because they differ wherever a twin merged: "3 routers" is what the
+            # zone label promises, while names is what the header's "n names" reports.
+            "count": sum(pill["routers"] for pill in items),
+            "names": len(items),
+            "items": items,
+            "down": sum(pill["down"] for pill in items),
+        })
 
     # Biggest zone first, but the catch-all bucket always last: it is a leftovers pile, not
     # a place, and reading it first tells you nothing about the host.
     zones.sort(key=lambda z: (z["name"] == _UNZONED, -z["count"], z["name"]))
-    names = sum(zone["count"] for zone in zones)
     return {
         "zones": zones,
-        "total": len(routers),
-        "names": names,
+        "total": sum(zone["count"] for zone in zones),
+        "names": sum(zone["names"] for zone in zones),
         "merged": merged,
         "down": sum(zone["down"] for zone in zones),
     }

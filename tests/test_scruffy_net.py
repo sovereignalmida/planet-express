@@ -110,6 +110,55 @@ def test_no_router_is_ever_lost():
     grouped = casa_scruffy_net.group_routers(routers)
     assert grouped["names"] + grouped["merged"] == len(routers)
     assert grouped["total"] == len(routers)
+    assert sum(zone["count"] for zone in grouped["zones"]) == len(routers)
+
+
+def test_a_twin_on_a_different_domain_still_merges():
+    """The normal shape on this host: navidrome on the public domain, navidrome-lan on the
+    LAN one. Matching twins inside a zone would only ever have merged same-domain pairs."""
+    grouped = casa_scruffy_net.group_routers([
+        _router("navidrome@docker", "navidrome.casaalmida.com"),
+        _router("navidrome-lan@docker", "navidrome.casalan.com"),
+    ])
+    pills = [pill for zone in grouped["zones"] for pill in zone["items"]]
+    assert len(pills) == 1
+    assert pills[0]["name"] == "navidrome" and pills[0]["lan"] is True
+    assert grouped["merged"] == 1 and grouped["total"] == 2 and grouped["names"] == 1
+
+
+def test_two_providers_may_share_a_short_name():
+    """Traefik allows api@docker and api@file. Keying on the short name dropped one."""
+    grouped = casa_scruffy_net.group_routers([
+        _router("api@docker", "api.casalan.com"),
+        _router("api@file", "api.casalan.com"),
+    ])
+    pills = grouped["zones"][0]["items"]
+    assert len(pills) == 2
+    assert {pill["tag"] for pill in pills} == {"", "FILE"}
+    assert grouped["names"] == 2 and grouped["total"] == 2
+
+
+def test_an_unrelated_lan_router_does_not_steal_another_providers_sibling():
+    """x-lan@file must not merge into x@docker: they are different routes."""
+    grouped = casa_scruffy_net.group_routers([
+        _router("x@docker", "x.casalan.com"),
+        _router("x-lan@file", "x-lan.casalan.com"),
+    ])
+    assert grouped["merged"] == 0 and grouped["names"] == 2
+
+
+def test_a_zone_counts_routers_not_displayed_names():
+    """The zone label says "n routers". With a twin merged, the displayed pill count and the
+    router count differ, and the label must not quietly report the smaller one."""
+    grouped = casa_scruffy_net.group_routers([
+        _router("one@docker", "one.casalan.com"),
+        _router("one-lan@docker", "one-lan.casalan.com"),
+        _router("two@docker", "two.casalan.com"),
+    ])
+    zone = grouped["zones"][0]
+    assert zone["count"] == 3      # routers
+    assert zone["names"] == 2      # pills on screen
+    assert grouped["total"] == 3 and grouped["names"] == 2
 
 
 def test_an_ip_literal_host_has_no_zone():

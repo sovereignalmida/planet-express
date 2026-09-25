@@ -27,6 +27,7 @@ from flask import (
 from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import BadData, URLSafeSerializer
 
+import casa_bender
 import casa_scruffy_net
 import config
 import dashboard_data
@@ -82,6 +83,25 @@ class ConfigReloadWatch:
             return
         self._signalled = digest
         self._reload()
+
+
+def label_chat_evidence(ticket):
+    """Give each evidence record the plain-language name of the check it ran.
+
+    Added here, on the way out to the browser, and deliberately not in the evidence record
+    itself: that record is embedded verbatim in the planner prompt, and a label exists only
+    so an operator reading the Chat tab sees "Container log" on the card face instead of an
+    argv. The model has no use for it and should not be paying tokens for it."""
+    if not isinstance(ticket, dict):
+        return ticket
+    evidence = ticket.get("evidence")
+    if not isinstance(evidence, list):
+        return ticket
+    return ticket | {"evidence": [
+        record | {"label": casa_bender.diagnostic_label(record.get("command", ""))}
+        if isinstance(record, dict) else record
+        for record in evidence
+    ]}
 
 
 def register_template_helpers(app) -> None:
@@ -355,7 +375,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def chat_get(ticket_id):
         if re.fullmatch(r"[0-9a-f]{12}", ticket_id) is None:
             return jsonify(error="Chat ticket not found"), 404
-        return jsonify(core("chat.get", {"operator": g.operator, "ticket_id": ticket_id}))
+        ticket = core("chat.get", {"operator": g.operator, "ticket_id": ticket_id})
+        return jsonify(label_chat_evidence(ticket))
 
     @app.get("/api/chat/quota")
     def chat_quota():

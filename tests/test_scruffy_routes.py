@@ -1054,6 +1054,27 @@ def test_the_backups_tab_never_calls_a_disabled_daily_a_fault(tmp_path, monkeypa
     assert "daily disabled on purpose" in html
 
 
+def test_the_disabled_note_follows_the_config_not_a_stale_snapshot(tmp_path, monkeypatch):
+    """A job disabled since the last full scan is still in that snapshot. Reading the note
+    from the snapshot's keys would have dropped it for hours, while the pod it explains had
+    already gone."""
+    monkeypatch.setattr(config, "BACKUP_JOBS", ["weekly"])
+    monitor = tmp_path / "latest_monitor.json"
+    monitor.write_text(json.dumps({
+        "timestamp": "2026-09-15T12:00:00+00:00", "mode": "full",
+        "backups": {"daily": {"result": "success"}, "weekly": {"result": "success"}},
+    }))
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor)
+    for attr in ("STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE"):
+        monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
+                        lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
+                        lambda: {"available": False})
+    html = _client().get("/").data.decode()
+    assert "daily disabled on purpose" in html
+
+
 def test_a_stack_with_no_readable_members_still_says_why(tmp_path, monkeypatch):
     """summarize_services() marks it warn with note="state unreadable". A dots-only card has
     no dots to draw for it and nothing to drill into, so without the note it is a bare 0/0."""

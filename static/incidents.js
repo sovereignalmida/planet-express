@@ -140,8 +140,10 @@
     });
     const summary = document.getElementById("incident-count");
     if (summary) {
+      // The resolved request takes the latest 10 with no time filter, so "this week" would
+      // have been a claim the query cannot support -- and an 11th would vanish silently.
       summary.textContent = state.counts.open + " open · " + state.counts.resolved +
-        " resolved this week";
+        " most recently resolved";
     }
 
     const items = state.items[state.status] || [];

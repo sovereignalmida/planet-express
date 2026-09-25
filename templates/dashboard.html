@@ -239,8 +239,13 @@
             <div class="tabs-spacer"></div>
             {# Only the enabled jobs get a pod. Without this line a reader counts one pod where
                they expected two and reads the absence as a fault -- on this host the daily timer
-               is switched off deliberately, and it is not broken. #}
-            {% set off = ['daily', 'weekly']|reject('in', backup_job_names)|list %}
+               is switched off deliberately, and it is not broken.
+
+               Derived from sb.enabled_jobs (the live config) rather than from the snapshot's
+               keys: a job disabled since the last full scan is still in that snapshot, and
+               reading it there would drop this notice for hours while the pod it explains had
+               already gone. #}
+            {% set off = ['daily', 'weekly']|reject('in', sb.enabled_jobs)|list %}
             {% if off %}<span class="panel-head-summary">{{ off|join(' and ') }} disabled on purpose</span>{% endif %}
           </div>
           <div class="cryo-grid">

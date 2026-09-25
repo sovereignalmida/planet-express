@@ -2075,6 +2075,9 @@ button.overview-tile:hover { border-color: var(--tile-level); }
   background: var(--pe-panel);
 }
 .approval-recent.ok { border-color: var(--pe-ok-line); border-left-color: var(--pe-ok-line); background: linear-gradient(180deg, var(--pe-ok-bg), var(--pe-panel)); }
+.approval-recent.none { border-color: var(--pe-border); border-left-color: var(--pe-idle); }
+.approval-recent.none .approval-recent-led { background: var(--pe-idle); box-shadow: none; }
+.approval-recent.none .approval-recent-badge { border-color: var(--pe-border-strong); color: var(--pe-ink-dim); }
 .approval-recent.crit { border-color: var(--pe-crit-line); border-left-color: var(--pe-crit-line); background: linear-gradient(180deg, var(--pe-crit-bg), var(--pe-panel)); }
 .approval-recent-led { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--pe-ok); box-shadow: 0 0 8px var(--pe-ok-glow); }
 .approval-recent.crit .approval-recent-led { background: var(--pe-crit); box-shadow: 0 0 8px var(--pe-crit-glow); }

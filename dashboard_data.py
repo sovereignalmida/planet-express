@@ -807,23 +807,28 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
     # list could hide a failed backup, which is the one thing this tile exists to show.
     live_certs = [c for c in certs.get("list", []) if not c.get("note")] if certs.get("available") else []
     cert_levels = [_cert_tier_level(cert) for cert in live_certs]
-    if newest is None and not live_certs:
+    known_days = [
+        c.get("days_left", c.get("days_remaining")) for c in live_certs
+        if c.get("days_left", c.get("days_remaining")) is not None
+    ]
+    soonest = min(known_days) if known_days else None
+    if newest is None:
+        # No borg job observed at all. _backup_verdict() calls that unknown, and a valid
+        # certificate must not promote a backup blind spot to green -- the certs are real
+        # information, so they still render, but they are not evidence about backups.
         tiles["backups"] = {
-            "level": "none", "hero": "—", "sub": f"mode {mode} did not collect backups",
-            "note": "backups ›", "next": "—", "cert_count": 0, "soonest": "—",
+            "level": "none", "hero": "—",
+            "sub": f"mode {mode} did not collect backups",
+            "note": "backups ›", "next": "—",
+            "cert_count": len(live_certs) if certs.get("available") else "—",
+            "soonest": f"{soonest}d" if soonest is not None else "—",
         }
     else:
         job_levels = [
             _BACKUP_FRESHNESS_LEVEL.get(job.get("freshness"), "warn")
             for job in backups.values() if isinstance(job, dict)
         ]
-        known_days = [
-            c.get("days_left", c.get("days_remaining")) for c in live_certs
-            if c.get("days_left", c.get("days_remaining")) is not None
-        ]
-        soonest = min(known_days) if known_days else None
         level = _overview_worst(*job_levels, *cert_levels)
-        newest = newest or {}
         # systemd stamps the completion time even when the run produced nothing, so for a
         # failed job age_human is "since we last tried", not "since we last had a backup".
         # The Backups tab already makes that distinction; the tile has to as well.
@@ -838,13 +843,16 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
     # AdGuard is an optional component: plenty of installs never run it, and it can be down
     # while Traefik is fine. Its absence may grey out its own two numbers, never the router
     # count -- a disabled router must not be replaced by a neutral "unavailable" tile.
-    if not routers.get("available"):
+    router_list = routers.get("routers", []) if routers.get("available") else []
+    # "0 of 0 routers up" is not a healthy fleet, it is no observation. Traefik answering with
+    # an empty list is the Network tab's "No routers reported", not an all-clear.
+    if not routers.get("available") or not router_list:
         tiles["network"] = {
-            "level": "none", "hero": "—", "sub": "traefik api unreachable",
+            "level": "none", "hero": "—",
+            "sub": "no routers reported" if routers.get("available") else "traefik api unreachable",
             "note": "network ›", "detail": "", "blocked_pct": "—", "avg_ms": "—",
         }
     else:
-        router_list = routers.get("routers", [])
         routers_up = sum(router.get("status") == "enabled" for router in router_list)
         router_level = "ok" if routers_up == len(router_list) else "crit"
         stats = summarize_adguard(adguard)

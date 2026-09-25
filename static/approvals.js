@@ -211,13 +211,25 @@
   // A decision already made is a one-line receipt, not a card: title, who and when, outcome.
   // The full record is still one click away behind the chevron.
   function renderRecentRow(item) {
-    const execution = item.execution || {};
-    const passed = item.status === "approved" && execution.state !== "failed";
-    const row = node("div", "approval-recent " + (passed ? "ok" : "crit"));
+    const execution = item.execution || (item.executions && item.executions[0]) || {};
+    // The field is execution.status, and "passed" is one of six terminal statuses. Testing
+    // `state !== "failed"` made undefined pass, so a failed, aborted or still-running
+    // execution rendered green and said PASSED.
+    const status = item.status || "expired";
+    const outcome = status === "approved"
+      ? (execution.status ? execution.status.toUpperCase().replace(/_/g, " ") : "AUTHORISED")
+      : status.toUpperCase();
+    const passed = status === "approved" && execution.status === "passed";
+    const level = passed ? "ok"
+      : (status === "approved" && !execution.status) ? "none"
+      : (status === "approved" || status === "denied") ? "crit" : "none";
+    const row = node("div", "approval-recent " + level);
     row.append(node("span", "approval-recent-led"));
 
     const middle = node("div", "approval-recent-main");
-    middle.append(node("div", "approval-recent-title", item.title || ("Plan " + item.id)));
+    // summary is the human-readable action text; there is no title field, so the previous
+    // fallback showed every decision as an opaque "Plan <id>".
+    middle.append(node("div", "approval-recent-title", item.summary || ("Plan " + item.id)));
     const steps = Array.isArray(item.steps) ? item.steps.length : item.step_count;
     const parts = [item.decided_by || "system"];
     if (item.decided_at) parts.push(new Date(item.decided_at * 1000).toLocaleDateString());
@@ -225,7 +237,7 @@
     middle.append(node("div", "approval-recent-meta", parts.join(" · ")));
     row.append(middle);
 
-    row.append(node("span", "approval-recent-badge", passed ? "PASSED" : item.status.toUpperCase()));
+    row.append(node("span", "approval-recent-badge", outcome));
     const href = execution.id ? "/executions/" + encodeURIComponent(execution.id) : targetUrl(item);
     if (href) {
       const link = document.createElement("a");
@@ -257,7 +269,9 @@
       if (!pending.length) cards.append(emptyStrip());
       pending.forEach(item => cards.append(renderCard(item)));
       if (recent.length) {
-        cards.append(node("div", "approval-recent-label", "RECENTLY AUTHORISED"));
+        // data.recent holds every resolved approval, denied and expired included. Calling the
+        // whole list "recently authorised" contradicts the rows underneath it.
+        cards.append(node("div", "approval-recent-label", "RECENT DECISIONS"));
         recent.forEach(item => cards.append(renderRecentRow(item)));
       }
       const count = document.getElementById("approval-count");
