@@ -835,7 +835,8 @@ def test_summarize_health_medium_stack_alert_is_warning(tmp_path, monkeypatch):
 def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
     from flask import Flask, render_template
 
-    from casa_scruffy import _extra_host_count, extract_host
+    import casa_scruffy_net
+    from casa_scruffy import register_template_helpers
 
     monkeypatch.setattr(config, 'BACKUP_JOBS', ['weekly'])
     for constant in ('STATE_MONITOR', 'STATE_FINDINGS', 'STATE_STATUS', 'UPDATE_HISTORY_FILE'):
@@ -843,8 +844,7 @@ def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
     app = Flask(__name__, template_folder=str(Path(__file__).resolve().parent.parent / 'templates'))
     app.add_url_rule('/logout', endpoint='logout', view_func=lambda: '', methods=['POST'])
     app.jinja_env.globals['csrf_token'] = lambda: ''
-    app.add_template_filter(extract_host)
-    app.add_template_filter(_extra_host_count, 'extra_host_count')
+    register_template_helpers(app)
     now = datetime.now(timezone.utc)
     # Includes a pre-upgrade two-job snapshot and both no-data fallback paths.
     for names, mode in [(['weekly'], 'full'), (['daily', 'weekly'], 'full'),
@@ -857,8 +857,12 @@ def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
             } for name in names},
         })
         ctx = dashboard_data.build_dashboard_context()
-        ctx.update(traefik={'available': False}, adguard={'available': False},
+        ctx.update(traefik={'available': False, 'routers': []}, adguard={'available': False},
                    telegram_bot_username='')
+        # Both are added by the route, not by build_dashboard_context(); render with them
+        # present so this exercises the real wiring, not the template's fallback.
+        ctx['router_zones'] = casa_scruffy_net.group_routers(ctx['traefik']['routers'])
+        ctx['adguard_stats'] = dashboard_data.summarize_adguard(ctx['adguard'])
         ctx['professor_lines'] = dashboard_data.build_professor_lines(ctx)
         summary = ctx['system_and_backups']
         assert list(summary['backups']) == names

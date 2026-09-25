@@ -8,6 +8,7 @@ Network tab instead of taking down the whole dashboard.
 """
 
 import logging
+import re
 
 import requests
 import urllib3
@@ -90,3 +91,95 @@ def fetch_adguard_stats() -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning(f"AdGuard stats fetch failed: {e}")
         return {"available": False, "configured": True}
+
+
+# ── Routing matrix grouping (T45.3) ──────────────────────────────────────────────
+# Pure shaping over whatever fetch_traefik_routers() returned. No I/O, so it is unit
+# tested directly. The Network tab used to draw 78 two-line cards in a 20-column wall;
+# this turns them into ~73 one-line pills in four labelled rows.
+
+_HOST_IN_RULE = re.compile(r"Host\(`([^`]+)`\)")
+# Traefik's own default provider. Tagging it would put the same three letters on nine
+# pills in ten, which is how a tag stops meaning anything.
+_DEFAULT_PROVIDER = "docker"
+_PROVIDER_TAGS = {"file": "FILE"}
+_UNZONED = "internal / external"
+
+
+def _registrable_domain(host: str) -> str:
+    """"immich.casalan.com" -> "casalan.com". Two labels is right for this host's zones
+    (casalan.com, casaalmida.com, chrisalmida.com); a public-suffix list would be the
+    correct general answer and is more machinery than a LAN dashboard earns.
+
+    An IP-literal Host() rule has no zone at all -- taking its last two labels would file
+    192.168.1.94 under a domain called "1.94"."""
+    labels = [label for label in host.split(".") if label]
+    if len(labels) < 2 or all(label.isdigit() for label in labels):
+        return ""
+    return ".".join(labels[-2:])
+
+
+def _router_zone(rule: str) -> tuple[str, str]:
+    """(zone, primary host). A router with no Host() rule -- a pure PathPrefix, Method or
+    Headers match -- has no zone to sort into and lands in the catch-all bucket."""
+    match = _HOST_IN_RULE.search(rule or "")
+    if not match:
+        return _UNZONED, ""
+    host = match.group(1)
+    return _registrable_domain(host) or _UNZONED, host
+
+
+def group_routers(routers: list) -> dict:
+    """Zones of pills, ready to render.
+
+    Three things happen here that the template must not try to do itself:
+      * the provider suffix is split off `name@provider` and dropped when it is docker;
+      * `x-lan` collapses into its sibling `x` when that sibling exists in the same zone,
+        carrying a `+LAN` tag -- an orphan `x-lan` with no sibling keeps its own pill,
+        because dropping a router is worse than showing a twin;
+      * a router that is not `enabled` sorts to the front of its zone with a DOWN tag.
+    """
+    pills_by_zone: dict[str, dict] = {}
+    for router in routers:
+        if not isinstance(router, dict):
+            continue
+        raw = str(router.get("name", "?"))
+        short, _, provider = raw.partition("@")
+        zone, host = _router_zone(router.get("rule", ""))
+        down = router.get("status") != "enabled"
+        pills_by_zone.setdefault(zone, {})[short] = {
+            "name": short, "raw": raw, "host": host, "down": down,
+            "tag": "" if provider == _DEFAULT_PROVIDER else _PROVIDER_TAGS.get(provider, "EXT"),
+            "lan": False,
+            "filter_text": f'{raw} {router.get("rule", "")} {router.get("service", "")}'.lower(),
+        }
+
+    merged = 0
+    zones = []
+    for zone, pills in pills_by_zone.items():
+        for name in [n for n in pills if n.endswith("-lan")]:
+            sibling = pills.get(name[: -len("-lan")])
+            if sibling is None:
+                continue
+            sibling["lan"] = True
+            # The twin's own hostname still has to match the filter, or filtering by a LAN
+            # hostname would silently find nothing.
+            sibling["filter_text"] += " " + pills[name]["filter_text"]
+            sibling["down"] = sibling["down"] or pills[name]["down"]
+            del pills[name]
+            merged += 1
+        items = sorted(pills.values(), key=lambda pill: (not pill["down"], pill["name"]))
+        zones.append({"name": zone, "count": len(items), "items": items,
+                      "down": sum(pill["down"] for pill in items)})
+
+    # Biggest zone first, but the catch-all bucket always last: it is a leftovers pile, not
+    # a place, and reading it first tells you nothing about the host.
+    zones.sort(key=lambda z: (z["name"] == _UNZONED, -z["count"], z["name"]))
+    names = sum(zone["count"] for zone in zones)
+    return {
+        "zones": zones,
+        "total": len(routers),
+        "names": names,
+        "merged": merged,
+        "down": sum(zone["down"] for zone in zones),
+    }

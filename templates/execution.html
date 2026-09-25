@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+  <link rel="stylesheet" href="{{ asset('cockpit.css') }}">
 </head>
 <body>
   <div class="scanline" aria-hidden="true"></div>
@@ -38,6 +38,6 @@
     <p id="execution-note" class="pe-note" role="status"></p>
     <div id="execution-actions" class="execution-actions"></div>
   </main>
-  <script src="{{ url_for('static', filename='execution.js') }}"></script>
+  <script src="{{ asset('execution.js') }}"></script>
 </body>
 </html>

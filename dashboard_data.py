@@ -670,6 +670,26 @@ _BACKUP_FRESHNESS_LEVEL = {"fresh": "ok", "stale": "warn", "overdue": "crit", "f
 _CERT_TIER_LEVEL = {"valid": "ok", "renew_soon": "warn", "expiring": "crit", "expired": "crit"}
 
 
+def summarize_adguard(adguard: dict) -> dict:
+    """One shaping of AdGuard's three raw counters, used by both the Network strip and the
+    Overview tile. A fresh AdGuard reports zero queries, so the percentage is guarded here
+    rather than in two templates that would each have to remember to."""
+    if not adguard.get("available"):
+        return {"available": False, "configured": bool(adguard.get("configured")),
+                "queries": "—", "blocked": "—", "blocked_pct": "—",
+                "allowed_pct": 0, "avg_ms": "—"}
+    queries = adguard.get("num_dns_queries") or 0
+    blocked = adguard.get("num_blocked_filtering") or 0
+    blocked_pct = round(blocked / queries * 100, 1) if queries else 0
+    avg = adguard.get("avg_processing_time")
+    return {
+        "available": True, "configured": True,
+        "queries": f"{queries:,}", "blocked": f"{blocked:,}",
+        "blocked_pct": blocked_pct, "allowed_pct": round(100 - blocked_pct, 1),
+        "avg_ms": round(avg * 1000) if isinstance(avg, (int, float)) else "—",
+    }
+
+
 def _hull_hero(total_findings: int, pending: int, plans_known: bool) -> str:
     if total_findings:
         return f"{total_findings} FINDING{'' if total_findings == 1 else 'S'}"
@@ -827,20 +847,15 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
         router_list = routers.get("routers", [])
         routers_up = sum(router.get("status") == "enabled" for router in router_list)
         router_level = "ok" if routers_up == len(router_list) else "crit"
-        if adguard.get("available"):
-            queries = adguard.get("num_dns_queries") or 0
-            blocked = adguard.get("num_blocked_filtering") or 0
-            blocked_pct = round(blocked / queries * 100, 1) if queries else 0
-            avg = adguard.get("avg_processing_time")
-            avg_ms = round(avg * 1000) if isinstance(avg, (int, float)) else "—"
-            detail = f"adguard {blocked_pct}% blocked · {avg_ms}ms"
+        stats = summarize_adguard(adguard)
+        if stats["available"]:
+            detail = f'adguard {stats["blocked_pct"]}% blocked · {stats["avg_ms"]}ms'
         else:
-            blocked_pct = avg_ms = "—"
-            detail = "adguard not configured" if not adguard.get("configured") else "adguard unavailable"
+            detail = "adguard not configured" if not stats["configured"] else "adguard unavailable"
         tiles["network"] = {
             "level": router_level, "hero": str(routers_up), "sub": "routers up",
             "note": "network ›", "detail": detail,
-            "blocked_pct": blocked_pct, "avg_ms": avg_ms,
+            "blocked_pct": stats["blocked_pct"], "avg_ms": stats["avg_ms"],
         }
 
     if not system_and_backups.get("available"):

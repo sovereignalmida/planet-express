@@ -9,6 +9,7 @@ import secrets
 import signal
 import time
 from functools import partial
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from flask import (
@@ -81,6 +82,29 @@ class ConfigReloadWatch:
             return
         self._signalled = digest
         self._reload()
+
+
+def register_template_helpers(app) -> None:
+    """Everything templates/ needs beyond Flask's own globals.
+
+    One function because several tests render these templates against a bare Flask app, and
+    a template that reaches for a helper the test app never registered fails as an
+    UndefinedError at render time -- which looks like a template bug, not a missing fixture.
+    """
+    def asset(filename):
+        """url_for('static') plus the file's mtime, so a browser that cached cockpit.css or
+        dashboard.js cannot keep running them against freshly deployed HTML. Without it an
+        operator sees new markup styled by the old stylesheet until they hard-refresh, which
+        is indistinguishable from a broken release."""
+        url = url_for("static", filename=filename)
+        try:
+            return f"{url}?v={int((Path(app.static_folder or '') / filename).stat().st_mtime)}"
+        except OSError:
+            return url
+
+    app.jinja_env.globals["asset"] = asset
+    app.add_template_filter(extract_host)
+    app.add_template_filter(_extra_host_count, "extra_host_count")
 
 
 def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
@@ -170,6 +194,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return session["csrf_token"]
 
     app.jinja_env.globals["csrf_token"] = csrf_token
+
+    register_template_helpers(app)
 
     def airlock(state="default", status=None, note=None):
         status = status or {}
@@ -485,8 +511,6 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def execution_page(execution_id):
         return render_template("execution.html", execution_id=execution_id)
 
-    app.add_template_filter(extract_host)
-    app.add_template_filter(_extra_host_count, "extra_host_count")
     app.add_url_rule("/", "index", partial(index, core))
     app.add_url_rule("/api/widget", view_func=widget)
     return app
@@ -547,7 +571,11 @@ def index(core=None):
         except Exception:  # noqa: BLE001 -- see above
             current_app.logger.warning("Could not read pending approvals from core")
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
+    # Zone grouping, LAN-twin merging and provider tagging are string work over the router
+    # rules. Doing it in Jinja would mean regexing Host() out of a rule in a template.
+    ctx["router_zones"] = casa_scruffy_net.group_routers(ctx["traefik"]["routers"])
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
+    ctx["adguard_stats"] = dashboard_data.summarize_adguard(ctx["adguard"])
     ctx["overview_tiles"] = dashboard_data.summarize_overview_tiles(
         ctx, ctx["traefik"], ctx["adguard"]
     )

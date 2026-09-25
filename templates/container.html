@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+  <link rel="stylesheet" href="{{ asset('cockpit.css') }}">
 </head>
 <body>
 <main id="container-detail" class="container-detail" data-api="{{ url_for('container_get', stack=stack, service=service) }}">
@@ -50,5 +50,5 @@
     </div>
   </div>
 </dialog>
-<script src="{{ url_for('static', filename='container.js') }}"></script>
+<script src="{{ asset('container.js') }}"></script>
 </body></html>

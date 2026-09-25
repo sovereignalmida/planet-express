@@ -667,7 +667,10 @@ p { text-wrap: pretty; }
   --cp-crit-text: var(--pe-crit-ink);
   --cp-orange: var(--pe-high);
   --cp-orange-text: var(--pe-high-ink);
-  --cp-purple: #b58ff0;
+  /* The Traefik file provider's tag. Not a status colour and not in the four-level ramp:
+     it says where a router came from, which is navigational, like the accent. */
+  --pe-provider-file: #b59cf0;
+  --cp-purple: var(--pe-provider-file);
   --cp-text: var(--pe-ink);
   --cp-dim1: var(--pe-ink-body);
   --cp-dim2: var(--pe-ink-muted);
@@ -1366,42 +1369,55 @@ body {
 .cert-stat-row span:last-child { color: var(--text2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; letter-spacing: normal; }
 
 /* routing matrix */
-.net-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--cp-dim1); }
-.net-legend-item { display: inline-flex; align-items: center; gap: 6px; }
-.net-legend-swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
-.net-legend-swatch.docker { background: var(--cp-teal-text); }
-.net-legend-swatch.internal { background: var(--cp-amber-text); }
-.net-legend-swatch.file { background: var(--cp-purple); }
+/* ── Network: AdGuard strip + a calm, zone-grouped routing matrix ───────────────
+   78 two-line cards in a 20-column wall became ~73 one-line pills in four labelled
+   rows. The hostname moved to the title attribute: it was the second line on every
+   card and it is the thing you least often need at a glance. */
+.net-adguard {
+  display: grid; grid-template-columns: 150px repeat(3, minmax(0, 1fr)) minmax(0, 1.6fr);
+  gap: 18px; align-items: center;
+}
+.net-adguard-id { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.net-adguard-note { grid-column: 2 / -1; margin: 0; }
+.net-stat { min-width: 0; }
+.net-stat-label { display: block; color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); letter-spacing: .08em; }
+.net-stat-value { display: block; margin-top: 3px; color: var(--pe-ink); font: 700 24px var(--pe-font-display); }
+.net-stat-value.ok { color: var(--pe-ok-ink); }
+.net-stat-value small { color: var(--pe-ink-label); font-size: 13px; font-weight: 400; }
+.net-split { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.net-split-labels { display: flex; justify-content: space-between; color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+.net-split-bar {
+  display: flex; height: 6px; overflow: hidden; border: 1px solid var(--pe-border-dash);
+  border-radius: 999px; background: var(--pe-well);
+}
+.net-split-bar .allowed { background: var(--pe-accent); opacity: .55; }
+.net-split-bar .blocked { flex: 1; background: var(--pe-ok); }
 
-.net-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(212px, 1fr)); gap: 10px; }
-.net-node {
-  border: 1px solid var(--cp-panel-border); border-radius: 10px; background: var(--cp-panel-bg);
-  padding: 12px 14px; cursor: pointer; transition: border-color .15s;
-}
-.net-node:hover { border-color: var(--cp-teal); }
-.net-node.hidden { display: none; }
-.net-node-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
-.net-node-led { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--cp-green); box-shadow: 0 0 7px var(--cp-green); animation: led 2.4s ease-in-out infinite; }
-.net-node-led.bad { background: var(--cp-crit); box-shadow: 0 0 7px var(--cp-crit); animation: none; }
-.net-provider {
-  font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 700; letter-spacing: .04em;
-  padding: 1px 6px; border-radius: 4px;
-}
-.net-provider.docker { color: var(--cp-teal-text); background: rgba(53,197,216,.12); }
-.net-provider.internal { color: var(--cp-amber-text); background: rgba(245,184,32,.12); }
-.net-provider.file { color: var(--cp-purple); background: rgba(181,143,240,.14); }
-.net-node-name {
-  font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text2);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
-}
-.net-node-host { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--cp-dim1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.net-node-hosts-more { color: var(--faint3); }
+.net-legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--pe-ink-label); font: 9.5px var(--pe-font-mono); }
+.net-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.net-tag { font: 700 8.5px var(--pe-font-mono); letter-spacing: .06em; }
+.net-tag.file { color: var(--pe-provider-file); }
+.net-tag.ext { color: var(--pe-warn-ink); }
+.net-tag.lan { color: var(--pe-accent-ink); }
+.net-tag.down { color: var(--pe-crit-ink); }
 
-.net-node.expanded { grid-column: 1 / -1; cursor: default; border-color: var(--cp-teal); }
-.net-node-detail { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border-hair); font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text2); }
-.net-node.expanded .net-node-detail { display: block; }
-.net-node-detail-row { display: flex; gap: 8px; margin-bottom: 5px; }
-.net-node-detail-row .dlabel { color: var(--faint2); min-width: 70px; flex: none; }
+.net-zone {
+  display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px;
+  padding-top: 11px; border-top: 1px dashed var(--pe-border-dash);
+}
+.net-zone-label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.net-zone-name { color: var(--pe-ink-2); font: 11px var(--pe-font-mono); overflow-wrap: anywhere; }
+.net-zone-count { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+.net-pills { display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; }
+.net-pill {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 7px;
+  border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-sm);
+  background: var(--pe-well); color: var(--pe-ink-body);
+  font: 10.5px var(--pe-font-mono); white-space: nowrap;
+}
+.net-pill-led { width: 5px; height: 5px; border-radius: 50%; flex: none; background: var(--pe-ok); }
+.net-pill.down { border-color: var(--pe-crit-line); background: var(--pe-crit-bg); color: var(--pe-crit-ink); }
+.net-pill.down .net-pill-led { background: var(--pe-crit); box-shadow: 0 0 7px var(--pe-crit-glow); }
 
 /* network filter */
 .net-head-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -1952,4 +1968,35 @@ button.overview-tile:hover { border-color: var(--tile-level); }
      unit; ellipsising it left "5d 10h since…", which says less than the hero alone. */
   .overview-tile-line { flex-wrap: wrap; }
   .overview-tile-line .overview-tile-sub { white-space: normal; overflow: visible; }
+}
+
+/* ── Backups: verdict strip over two equal columns (T45.3) ──────────────────────
+   The tab used to be two full-width panels, the first of which held one 120px pod
+   floating in 1,400px of nothing. */
+.backups-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.backups-split .cryo-grid, .backups-split .cert-grid { grid-template-columns: minmax(0, 1fr); }
+.backups-split .cert-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+
+/* The pod lies down: head, hero and window bar on the left, the readout on the right
+   behind a dashed divider. Stacked, those three stat rows were the reason a single
+   job needed 320px of height. */
+.backups-split .cryo-pod { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.backups-split .cryo-pod-head { grid-column: 1 / -1; margin-bottom: 0; }
+.backups-split .cryo-main { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+.backups-split .cryo-side {
+  min-width: 0; display: flex; flex-direction: column; gap: 8px; justify-content: center;
+  border-left: 1px dashed var(--pe-border-strong); padding-left: 18px;
+}
+.backups-split .cryo-pod.nodata .cryo-stats { grid-column: 1 / -1; }
+
+@media (max-width: 1024px) {
+  .backups-split { grid-template-columns: minmax(0, 1fr); }
+  .backups-split .cryo-pod { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .backups-split .cryo-side { border-left: 0; border-top: 1px dashed var(--pe-border-strong); padding: 10px 0 0; }
+}
+@media (max-width: 720px) {
+  .backups-split .cert-grid { grid-template-columns: minmax(0, 1fr); }
+  .net-adguard { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .net-adguard-note { grid-column: auto; }
+  .net-zone { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 }

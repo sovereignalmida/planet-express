@@ -1022,6 +1022,23 @@ def test_overview_replaces_full_width_hull_and_system_with_tiles(tmp_path, monke
     assert 'data-tab-panel="actions" id="hull-diagnostics-panel"' in html
 
 
+def test_static_assets_are_versioned_so_a_cached_one_cannot_outlive_a_deploy(tmp_path, monkeypatch):
+    """A browser holding the previous cockpit.css against freshly deployed markup looks
+    exactly like a broken release. Every stylesheet and script carries its file mtime."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    for asset in ("cockpit.css", "dashboard.js", "incidents.js", "approvals.js",
+                  "chat.js", "config.js"):
+        assert re.search(rf"/static/{re.escape(asset)}\?v=\d+", html), asset
+
+
+def test_the_backups_tab_never_calls_a_disabled_daily_a_fault(tmp_path, monkeypatch):
+    """This host's daily borg timer is off on purpose. Without the header note a reader
+    counts one pod where they expected two and reads the absence as a failure."""
+    monkeypatch.setattr(config, "BACKUP_JOBS", ["weekly"])
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    assert "daily disabled on purpose" in html
+
+
 def test_a_stack_with_no_readable_members_still_says_why(tmp_path, monkeypatch):
     """summarize_services() marks it warn with note="state unreadable". A dots-only card has
     no dots to draw for it and nothing to drill into, so without the note it is a bare 0/0."""

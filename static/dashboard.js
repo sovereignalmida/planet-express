@@ -67,6 +67,12 @@
       var counter = document.getElementById("net-count");
       var total = rows.length;
 
+      // The header reads "78 routers · 73 names · 5 LAN twins merged · all up" until you
+      // filter. Overwriting it with a count and never putting it back means one keystroke
+      // costs you the summary for the rest of the session.
+      var summary = counter ? counter.textContent : "";
+      var zones = Array.prototype.slice.call(document.querySelectorAll(".net-zone"));
+
       filterInput.addEventListener("input", function () {
         var q = filterInput.value.trim().toLowerCase();
         var shown = 0;
@@ -75,7 +81,11 @@
           row.classList.toggle("hidden", !match);
           if (match) shown++;
         });
-        if (counter) counter.textContent = "showing " + shown + " of " + total;
+        // A zone whose every pill is filtered out is a label over empty space.
+        zones.forEach(function (zone) {
+          zone.classList.toggle("hidden", !!q && !zone.querySelector(".net-filter-row:not(.hidden)"));
+        });
+        if (counter) counter.textContent = q ? "showing " + shown + " of " + total : summary;
       });
     }
 

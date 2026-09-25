@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+  <link rel="stylesheet" href="{{ asset('cockpit.css') }}">
 </head>
 <body>
   <div class="scanline" aria-hidden="true"></div>
@@ -231,11 +231,17 @@
         </section>
         {% endif %}
 
+        <div class="backups-split">
         <section class="panel">
           <div class="panel-head-row">
             <h3>COLD STORAGE · BORG</h3>
             <span class="status-chip {{ 'ok' if backup_jobs else '' }}">{{ 'COLLECTED' if backup_jobs else 'AWAITING FULL SCAN' }}</span>
-            <span class="panel-head-summary">source: systemd units · never touches the borg repo</span>
+            <div class="tabs-spacer"></div>
+            {# Only the enabled jobs get a pod. Without this line a reader counts one pod where
+               they expected two and reads the absence as a fault -- on this host the daily timer
+               is switched off deliberately, and it is not broken. #}
+            {% set off = ['daily', 'weekly']|reject('in', backup_job_names)|list %}
+            {% if off %}<span class="panel-head-summary">{{ off|join(' and ') }} disabled on purpose</span>{% endif %}
           </div>
           <div class="cryo-grid">
             {% for name in backup_job_names %}
@@ -257,6 +263,7 @@
                 <div class="cryo-stat-row"><span>LAST RUN</span><span>—</span></div>
               </div>
               {% else %}
+              <div class="cryo-main">
               <div class="cryo-hero">
                 <span class="cryo-hero-num">{{ b.age_human }}</span>
                 {# systemd's completion timestamp updates on a failed attempt too, not just
@@ -266,6 +273,8 @@
               </div>
               <div class="cryo-window-track"><div class="cryo-window-fill" style="width: {{ b.window_pct }}%;"></div></div>
               <div class="cryo-window-caption">{{ b.window_caption }}</div>
+              </div>
+              <div class="cryo-side">
               <div class="cryo-stats">
                 <div class="cryo-stat-row"><span>NEXT RUN</span><span class="{{ 'cryo-bad' if b.timer_armed == false else '' }}">{{ b.next_human }}</span></div>
                 <div class="cryo-stat-row"><span>RESULT</span><span class="{{ 'cryo-bad' if b.get('result') != 'success' else '' }}">{{ b.get('result', '?') }} · exit {{ b.get('exit_code', '?') }}</span></div>
@@ -276,6 +285,7 @@
                 {% elif b.timer_armed == false %}last run succeeded, but nothing is scheduled to run again
                 {% elif b.freshness == 'stale' or b.freshness == 'overdue' %}last run succeeded, but this job is running behind its {{ cadence_label }} cadence
                 {% else %}unit idle between runs (oneshot) — normal{% endif %}
+              </div>
               </div>
               {% endif %}
             </div>
@@ -361,71 +371,71 @@
           <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span> didn't collect certificate data. Available after the next full scan.</p>
           {% endif %}
         </section>
+        </div>
       </div>
 
       <!-- ═══ NETWORK ═══ -->
       <div class="tab-panel" data-tab-panel="network">
-        <section class="panel">
-          <div class="net-head-row">
-            <h3>ROUTING MATRIX</h3>
-            {% if ctx.traefik.available %}
-            <span class="net-count" id="net-count">showing {{ ctx.traefik.routers|length }} of {{ ctx.traefik.routers|length }}</span>
-            <div class="tabs-spacer"></div>
-            <input class="net-filter" id="net-filter" placeholder="filter routers…" autocomplete="off">
-            {% endif %}
+        {% set ad = ctx.adguard_stats|default({'available': False, 'configured': False}, true) %}
+        <section class="panel net-adguard">
+          <div class="net-adguard-id">
+            <h3>ADGUARD</h3>
+            <span class="status-chip {{ 'ok' if ad.available else '' }}">{{ 'LIVE' if ad.available else ('NOT CONFIGURED' if not ad.configured else 'UNAVAILABLE') }}</span>
           </div>
-          {% if ctx.traefik.available %}
-            {% if ctx.traefik.routers %}
-            <div class="net-legend">
-              <span class="net-legend-item"><span class="net-legend-swatch docker"></span>docker</span>
-              <span class="net-legend-item"><span class="net-legend-swatch internal"></span>internal</span>
-              <span class="net-legend-item"><span class="net-legend-swatch file"></span>file (@file)</span>
-            </div>
-            <div class="net-grid">
-              {% for r in ctx.traefik.routers %}
-              {% set provider = r.name.split('@')[1] if '@' in r.name else '' %}
-              {% set short_name = r.name.split('@')[0] %}
-              {% set primary_host = (r.rule|extract_host) or r.service %}
-              {% set more_hosts = r.rule|extra_host_count %}
-              <div class="net-node net-filter-row" data-filter-text="{{ (r.name ~ ' ' ~ r.rule ~ ' ' ~ r.service)|lower }}" data-net-node tabindex="0" role="button">
-                <div class="net-node-head">
-                  <span class="net-node-led {{ 'bad' if r.status != 'enabled' else '' }}"></span>
-                  {% if provider %}<span class="net-provider {{ provider }}">{{ provider }}</span>{% endif %}
-                  <span class="net-node-name" title="{{ r.name }}">{{ short_name }}</span>
-                </div>
-                <div class="net-node-host">{{ primary_host }}{% if more_hosts %} <span class="net-node-hosts-more">+{{ more_hosts }} host{{ '' if more_hosts == 1 else 's' }}</span>{% endif %}</div>
-                <div class="net-node-detail">
-                  <div class="net-node-detail-row"><span class="dlabel">RULE</span><span>{{ r.rule }}</span></div>
-                  <div class="net-node-detail-row"><span class="dlabel">SERVICE</span><span>{{ r.service }}</span></div>
-                  <div class="net-node-detail-row"><span class="dlabel">ROUTER</span><span>{{ r.name }}</span></div>
-                  <div class="net-node-detail-row"><span class="dlabel">STATUS</span><span class="status-ok {{ 'status-bad' if r.status != 'enabled' else '' }}"><span class="dot-sm {{ 'bad' if r.status != 'enabled' else '' }}"></span>{{ r.status }}</span></div>
-                </div>
-              </div>
-              {% endfor %}
-            </div>
-            {% else %}
-            <p class="muted-body">No routers reported.</p>
-            {% endif %}
+          {% if ad.available %}
+          <div class="net-stat"><span class="net-stat-label">QUERIES · 24H</span><span class="net-stat-value">{{ ad.queries }}</span></div>
+          <div class="net-stat"><span class="net-stat-label">BLOCKED</span><span class="net-stat-value ok">{{ ad.blocked }} <small>{{ ad.blocked_pct }}%</small></span></div>
+          <div class="net-stat"><span class="net-stat-label">AVG RESPONSE</span><span class="net-stat-value">{{ ad.avg_ms }}<small>ms</small></span></div>
+          <div class="net-split">
+            <div class="net-split-labels"><span>ALLOWED</span><span>BLOCKED</span></div>
+            <div class="net-split-bar"><span class="allowed" style="width: {{ ad.allowed_pct }}%"></span><span class="blocked"></span></div>
+          </div>
           {% else %}
-          <p class="muted-body">Traefik API unreachable at :8079 — is it running?</p>
+          <p class="muted-body net-adguard-note">
+            {% if not ad.configured %}Not configured — set ADGUARD_USERNAME/ADGUARD_PASSWORD in /etc/planetexpress-dashboard.env.
+            {% else %}Stats unavailable — check credentials, or that adguard.casalan.com resolves through Traefik.{% endif %}
+          </p>
           {% endif %}
         </section>
 
         <section class="panel">
-          <div class="panel-head-row">
-            <h3>ADGUARD</h3>
-            <span class="status-chip {{ 'ok' if ctx.adguard.available else '' }}">{{ 'LIVE' if ctx.adguard.available else ('NOT CONFIGURED' if not ctx.adguard.configured else 'UNAVAILABLE') }}</span>
+          {% set zones = ctx.router_zones|default({'zones': [], 'total': 0, 'names': 0, 'merged': 0, 'down': 0}, true) %}
+          <div class="net-head-row">
+            <h3>ROUTING MATRIX</h3>
+            {% if ctx.traefik.available %}
+            <span class="net-count" id="net-count">{{ zones.total }} routers · {{ zones.names }} names{% if zones.merged %} · {{ zones.merged }} LAN twin{{ '' if zones.merged == 1 else 's' }} merged{% endif %} · {{ (zones.down ~ ' down') if zones.down else 'all up' }}</span>
+            <div class="tabs-spacer"></div>
+            <div class="net-legend">
+              <span>docker = untagged</span>
+              <span><b class="net-tag file">FILE</b> file provider</span>
+              <span><b class="net-tag ext">EXT</b> external</span>
+              <span><b class="net-tag lan">+LAN</b> LAN twin merged</span>
+            </div>
+            <input class="net-filter" id="net-filter" placeholder="filter routers…" autocomplete="off">
+            {% endif %}
           </div>
-          {% if not ctx.adguard.configured %}
-          <p class="muted-body">Not configured — set ADGUARD_USERNAME/ADGUARD_PASSWORD in /etc/planetexpress-dashboard.env.</p>
-          {% elif not ctx.adguard.available %}
-          <p class="muted-body">Stats unavailable — check credentials, or that adguard.casalan.com resolves through Traefik.</p>
+          {% if not ctx.traefik.available %}
+          <p class="muted-body">Traefik API unreachable at :8079 — is it running?</p>
+          {% elif not zones.zones %}
+          <p class="muted-body">No routers reported.</p>
           {% else %}
-          <p class="muted-body">
-            <span class="mono-inline">{{ ctx.adguard.num_dns_queries }}</span> queries
-            &middot; <span class="mono-inline">{{ ctx.adguard.num_blocked_filtering }}</span> blocked
-            &middot; <span class="mono-inline">{{ ctx.adguard.avg_processing_time }}s</span> avg processing time
-          </p>
+            {% for zone in zones.zones %}
+            <div class="net-zone">
+              <div class="net-zone-label">
+                <span class="net-zone-name">{{ zone.name }}</span>
+                <span class="net-zone-count">{{ zone.count }} router{{ '' if zone.count == 1 else 's' }}</span>
+              </div>
+              <div class="net-pills">
+                {% for pill in zone['items'] %}
+                <span class="net-pill net-filter-row {{ 'down' if pill.down else '' }}"
+                      data-filter-text="{{ pill.filter_text }}"
+                      title="{{ pill.raw }}{{ (' · ' ~ pill.host) if pill.host else '' }}">
+                  <span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                </span>
+                {% endfor %}
+              </div>
+            </div>
+            {% endfor %}
           {% endif %}
         </section>
       </div>
@@ -721,10 +731,10 @@
     <p>Planet Express — authenticated LAN dashboard · auto-refreshes every 60s · held together by good news</p>
   </footer>
 
-  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
-  <script src="{{ url_for('static', filename='incidents.js') }}"></script>
-  <script src="{{ url_for('static', filename='approvals.js') }}"></script>
-  <script src="{{ url_for('static', filename='chat.js') }}"></script>
-  <script src="{{ url_for('static', filename='config.js') }}"></script>
+  <script src="{{ asset('dashboard.js') }}"></script>
+  <script src="{{ asset('incidents.js') }}"></script>
+  <script src="{{ asset('approvals.js') }}"></script>
+  <script src="{{ asset('chat.js') }}"></script>
+  <script src="{{ asset('config.js') }}"></script>
 </body>
 </html>
