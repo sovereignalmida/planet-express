@@ -364,6 +364,22 @@ def test_a_missing_findings_snapshot_does_not_swallow_a_pending_approval():
     assert tiles["hull"]["critical"] == "?" and tiles["hull"]["high"] == "?"
 
 
+def test_a_malformed_system_block_does_not_500_the_overview():
+    """MonitorSnapshot.system is an open dict, so pydantic cannot vouch for its contents. A
+    snapshot carrying the raw `free -h` line where the parsed dict belongs used to reach
+    `.get` on a str -- an AttributeError on the dashboard's main page, which this module's
+    contract says never happens. Found by the design harness feeding it exactly that."""
+    ctx = _healthy_overview_context()
+    ctx["system_and_backups"]["system"] = {"memory": "Mem: 15Gi 9.4Gi", "uptime_parsed": "up 3 days"}
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["system"]["level"] == "none"
+    assert tiles["system"]["show_memory"] is False
+    # And the whole system block being the wrong shape is survivable too.
+    ctx["system_and_backups"]["system"] = "not a dict at all"
+    tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
+    assert tiles["system"]["level"] == "none"
+
+
 def test_an_unreadable_uptime_does_not_hide_memory_pressure():
     """uptime and free -h are separately parsed and fail separately. Gating the tile on both
     hid a 94%-full memory bar behind "no system metrics"."""

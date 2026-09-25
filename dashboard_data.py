@@ -875,9 +875,17 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
         # `uptime` and `free -h` are separately parsed outputs and fail separately. Gating the
         # tile's level on both meant an unparseable uptime line quietly hid a 94%-full memory
         # bar behind "no system metrics" -- the one number on this tile worth an alarm.
+        # MonitorSnapshot.system is an open `dict`, so pydantic cannot vouch for what is in
+        # it: a snapshot from an older collector (or a hand-edited one) can carry the raw
+        # `free -h` line where the parsed dict belongs, and `.get` on a str is an
+        # AttributeError -- a 500 on the dashboard's main page, which this module's whole
+        # contract is that it never does.
         system = system_and_backups.get("system", {})
-        uptime = system.get("uptime_parsed", {})
-        memory = system.get("memory", {})
+        system = system if isinstance(system, dict) else {}
+        uptime = system.get("uptime_parsed")
+        uptime = uptime if isinstance(uptime, dict) else {}
+        memory = system.get("memory")
+        memory = memory if isinstance(memory, dict) else {}
         memory_pct = memory.get("used_pct")
         show_memory = isinstance(memory_pct, (int, float))
         if not show_memory:

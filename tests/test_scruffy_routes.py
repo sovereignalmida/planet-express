@@ -1118,6 +1118,19 @@ def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp
     assert 'getElementById("manifest-panel")' in script
 
 
+def test_the_crew_tab_carries_the_eight_the_design_package_names(tmp_path, monkeypatch):
+    """The v2.2 package revised this list: Zapp Brannigan is the dashboard now, replacing
+    Scruffy, whose "observes and does nothing" stopped being true once the dashboard could
+    authorise an action. Pinned because a crew card is easy to leave behind a rename."""
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    crew = html[html.index('id="crew-panel"'):html.index('id="computer-log-title"')]
+    assert re.findall(r"<h3>([^<]+)</h3>", crew) == [
+        "Prof. Farnsworth", "Leela", "Hermes", "Bender",
+        "Dr. Zoidberg", "Amy", "Fry", "Zapp Brannigan",
+    ]
+    assert "scruffy.png" not in crew
+
+
 def test_the_config_editor_layers_cannot_drift_apart(tmp_path, monkeypatch):
     """Gutter, locked-line tints and the textarea are three elements that must agree line for
     line. They only do so while the textarea does not soft-wrap: one wrapped line would put
