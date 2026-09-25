@@ -210,14 +210,16 @@ ROUTER_ZONES = {
         ("traefik", "docker"), ("transmute", "docker"), ("unraid", "file"),
         ("vikunja", "docker"), ("wiki", "docker"),
     ],
+    # subwave-api and subwave-stream are deliberately absent: on the live host they exist
+    # only as path routes (`/api`, `/stream.mp3`) and so have no launch link. They are added
+    # below, so the UI is exercised against services that legitimately have no button.
     "casaalmida.com": [
         ("erugo", "docker"), ("navidrome", "docker"), ("overseerr", "docker"),
-        ("subwave-api", "docker"), ("subwave-stream", "docker"), ("subwave-web", "docker"),
+        ("subwave-web", "docker"),
     ],
     "chrisalmida.com": [("blog", "docker"), ("sovereign", "docker")],
 }
-LAN_TWINS = [("casalan.com", "navidrome"), ("casaalmida.com", "subwave-api"),
-             ("casaalmida.com", "subwave-web")]
+LAN_TWINS = [("casalan.com", "navidrome"), ("casalan.com", "subwave-web")]
 DOWN_ROUTERS = {"bazarr@docker"}
 
 
@@ -226,17 +228,29 @@ def fixture_routers():
     for zone, entries in ROUTER_ZONES.items():
         for name, provider in entries:
             full = f"{name}@{provider}"
+            # Half the docker services are reachable on both domains from one router, which
+            # is how the live host actually does LAN/public for most things -- 15 of its 70.
+            rule = (f"Host(`{name}.{zone}`) || Host(`{name}.casaalmida.com`)"
+                    if provider == "docker" and zone == "casalan.com" and name[0] < "m"
+                    else f"Host(`{name}.{zone}`)")
             routers.append({
-                "name": full, "service": full,
-                "rule": f"Host(`{name}.{zone}`)",
+                "name": full, "service": name,
+                "rule": rule,
                 "status": "disabled" if full in DOWN_ROUTERS else "enabled",
+                "entry_points": ["websecure"],
             })
     for zone, name in LAN_TWINS:
-        routers.append({"name": f"{name}-lan@docker", "service": f"{name}@docker",
-                        "rule": f"Host(`{name}.{zone}`)", "status": "enabled"})
+        routers.append({"name": f"{name}-lan@docker", "service": name,
+                        "rule": f"Host(`{name}.{zone}`)", "status": "enabled",
+                        "entry_points": ["websecure"]})
+    for name, path in (("subwave-api", "/api"), ("subwave-stream", "/stream.mp3")):
+        routers.append({"name": f"{name}@docker", "service": name,
+                        "rule": f"Host(`radio.casaalmida.com`) && PathPrefix(`{path}`)",
+                        "status": "enabled", "entry_points": ["websecure"]})
     for name in ("api", "dashboard", "web-to-mobsec"):
-        routers.append({"name": f"{name}@external", "service": name,
-                        "rule": f"PathPrefix(`/{name}`)", "status": "enabled"})
+        routers.append({"name": f"{name}@internal", "service": name,
+                        "rule": f"PathPrefix(`/{name}`)", "status": "enabled",
+                        "entry_points": ["traefik"]})
     return {"available": True, "routers": routers}
 
 

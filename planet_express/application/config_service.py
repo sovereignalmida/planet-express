@@ -12,7 +12,7 @@ from config_io import ConfigConflict, validate_config_text, write_config_text
 log = logging.getLogger("planetexpress.config")
 
 MAX_CONFIG_BYTES = 256 * 1024
-EDITABLE_FIELDS = frozenset({"paused_containers", "exclude_services", "backup_jobs"})
+EDITABLE_FIELDS = frozenset({"paused_containers", "exclude_services", "backup_jobs", "links"})
 SENSITIVE_FIELDS = frozenset({"sudo_allowlist", "forbidden_stacks", "autonomy"})
 _MUTATION_OWNER = "config-apply"
 REPLY_WAIT_SECONDS = 30

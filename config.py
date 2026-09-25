@@ -94,6 +94,7 @@ MOUNT_UNITS = _cfg.mounts
 EXCLUDE_SERVICES: set[tuple[str, str]] = {(s.stack, s.service) for s in _cfg.exclude_services}
 SUDO_ALLOWLIST = _cfg.sudo_allowlist
 LAN_ONLY_DOMAIN = _cfg.lan_only_domain
+LAUNCH_LINKS = [link.model_dump() for link in _cfg.links]
 AUTONOMY = _cfg.autonomy
 BACKUP_JOBS = _cfg.backup_jobs
 

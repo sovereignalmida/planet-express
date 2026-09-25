@@ -62,6 +62,23 @@ class SudoAllowlist(BaseModel):
     globs: list[SudoGlobGrant] = []
 
 
+class LaunchLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    href: str
+    zone: Literal["lan", "public"] = "lan"
+
+    @field_validator("href")
+    @classmethod
+    def _http_only(cls, v: str) -> str:
+        # This value becomes an href the operator clicks. Anything that is not plain http(s)
+        # -- javascript:, data:, file: -- has no business in a launch button.
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("a launch link must be an http:// or https:// URL")
+        return v
+
+
 class PlanetExpressConfig(BaseModel):
     # extra="forbid": a misspelled key (e.g. "forbidden_stack") must be a hard error, not
     # silently ignored — pydantic's default would otherwise drop it and fall back to the
@@ -81,6 +98,12 @@ class PlanetExpressConfig(BaseModel):
     legacy_plans_enabled: bool | None = None
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
+    # The escape hatch for the Launch-links feature: a service whose route this host cannot
+    # turn into a URL, or which has no Traefik route at all. container_urls() only emits a
+    # link from a rule that is Host() terms joined by `||`, so a compound rule like
+    # adventurelog's `(Host || Host) && !(PathPrefix ...)` -- whose host root really is
+    # launchable -- gets its link declared here instead of guessed at.
+    links: list[LaunchLink] = []
     # /install only ever writes a LAN-only Traefik router (no auth of its own) —
     # restricted to this deployment's own LAN-only domain convention so a mistyped or
     # malicious domain can't silently expose a brand-new, unreviewed container to the

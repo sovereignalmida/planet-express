@@ -248,3 +248,43 @@ def test_expected_sha_rechecked_just_before_replace(tmp_path, monkeypatch):
         write_config_text(DRAFT + '# dashboard draft\n', path, expected_sha256=loaded)
     assert path.read_bytes() == host_edit
     assert [p.name for p in tmp_path.iterdir()] == ['config.yaml']  # temp file cleaned up
+
+
+# ── links: the launch-link escape hatch (T46.1) ──────────────────────────────────
+
+def test_a_declared_launch_link_validates():
+    model, errors = validate_config_text(
+        'stacks_root: /srv\n'
+        'links:\n'
+        '  - name: adventurelog\n'
+        '    href: https://travel.casalan.com\n'
+        '    zone: lan\n'
+    )
+    assert errors == []
+    assert model.links[0].name == 'adventurelog'
+    assert model.links[0].zone == 'lan'
+
+
+def test_a_launch_link_defaults_to_the_lan_zone():
+    model, _ = validate_config_text(
+        'stacks_root: /srv\nlinks:\n  - name: x\n    href: http://192.168.1.20:8123\n')
+    assert model.links[0].zone == 'lan'
+
+
+@pytest.mark.parametrize('href', [
+    'javascript:alert(1)', 'data:text/html,<script>', 'file:///etc/passwd', 'ftp://host/x',
+])
+def test_a_launch_link_must_be_http(href):
+    """This value becomes an href the operator clicks. A config file is not a reason to put
+    javascript: behind a button."""
+    model, errors = validate_config_text(
+        f'stacks_root: /srv\nlinks:\n  - name: x\n    href: {href}\n')
+    assert model is None
+    assert errors[0]['loc'] == 'links.0.href'
+
+
+def test_an_unknown_launch_link_key_is_refused():
+    model, errors = validate_config_text(
+        'stacks_root: /srv\nlinks:\n  - name: x\n    href: https://a\n    targett: _blank\n')
+    assert model is None
+    assert 'links.0.targett' == errors[0]['loc']

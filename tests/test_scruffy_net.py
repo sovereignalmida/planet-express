@@ -187,3 +187,144 @@ def test_a_malformed_router_entry_does_not_raise():
 def test_empty_input_returns_no_zones():
     assert casa_scruffy_net.group_routers([]) == {
         "zones": [], "total": 0, "names": 0, "merged": 0, "down": 0}
+
+
+# ── container_urls (T46.1) ───────────────────────────────────────────────────────
+# Every rule below is copied from the live host's Traefik API rather than invented.
+# group_routers() shipped with tests that passed against fixtures tidier than the host,
+# and a reviewer found three bugs the suite could not see; these shapes are the real ones.
+
+def _live(name, rule, service=None, status="enabled", entry_points=("websecure",)):
+    return {"name": name, "rule": rule, "status": status,
+            "service": service or name.split("@")[0], "entry_points": list(entry_points)}
+
+
+def test_a_multi_host_router_yields_one_url_per_host_with_opposite_zones():
+    """This, not the -lan twin, is how most services get both addresses: 15 of the live
+    host's 70 routers are a single router serving a LAN host and a public one."""
+    urls = casa_scruffy_net.container_urls([
+        _live("actual@docker", "Host(`actual.casalan.com`) || Host(`actual.casaalmida.com`)"),
+    ], lan_domain="casalan.com")
+    assert urls["actual"] == [
+        {"href": "https://actual.casalan.com", "zone": "lan"},
+        {"href": "https://actual.casaalmida.com", "zone": "public"},
+    ]
+
+
+def test_lan_sorts_first_because_it_is_the_default_target():
+    urls = casa_scruffy_net.container_urls([
+        _live("x@docker", "Host(`x.casaalmida.com`) || Host(`x.casalan.com`)"),
+    ], lan_domain="casalan.com")
+    assert [link["zone"] for link in urls["x"]] == ["lan", "public"]
+
+
+def test_a_lan_twin_and_its_sibling_collect_onto_one_service():
+    """They are separate routers pointing at different hosts, but the same compose service."""
+    urls = casa_scruffy_net.container_urls([
+        _live("subwave-web@docker", "Host(`radio.casaalmida.com`)", service="subwave-web"),
+        _live("subwave-web-lan@docker", "Host(`radio.casalan.com`)", service="subwave-web"),
+    ], lan_domain="casalan.com")
+    assert urls["subwave-web"] == [
+        {"href": "https://radio.casalan.com", "zone": "lan"},
+        {"href": "https://radio.casaalmida.com", "zone": "public"},
+    ]
+
+
+def test_the_same_host_twice_is_not_two_links():
+    urls = casa_scruffy_net.container_urls([
+        _live("a@docker", "Host(`same.casalan.com`)", service="dup"),
+        _live("b@docker", "Host(`same.casalan.com`)", service="dup"),
+    ], lan_domain="casalan.com")
+    assert urls["dup"] == [{"href": "https://same.casalan.com", "zone": "lan"}]
+
+
+def test_an_api_or_stream_path_is_never_a_launch_link():
+    """subwave-api is radio.casaalmida.com/api (JSON) and subwave-stream is /stream.mp3 (a
+    raw audio stream). A launch button onto either is worse than no button."""
+    urls = casa_scruffy_net.container_urls([
+        _live("subwave-api@docker", "Host(`radio.casaalmida.com`) && PathPrefix(`/api`)"),
+        _live("subwave-stream@docker", "Host(`radio.casalan.com`) && PathPrefix(`/stream.mp3`)"),
+    ], lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_an_asset_route_is_not_a_launch_link():
+    urls = casa_scruffy_net.container_urls([
+        _live("adventurelog-admin@docker",
+              "(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && "
+              "(PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`))"),
+    ], lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_a_negated_path_group_is_skipped_and_that_costs_one_real_link():
+    """adventurelog's host root IS launchable -- the negation only excludes asset paths. It is
+    skipped anyway, because recovering it needs a parser that reasons about negation, and the
+    config `links:` escape hatch covers it explicitly instead. Pinned so the decision is
+    visible if anyone wonders why travel has no button."""
+    urls = casa_scruffy_net.container_urls([
+        _live("adventurelog@docker",
+              "(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && "
+              "!(PathPrefix(`/media`) || PathPrefix(`/static`))"),
+    ], lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_traefiks_own_internal_routers_emit_nothing():
+    urls = casa_scruffy_net.container_urls([
+        _live("api@internal", "PathPrefix(`/api`)", entry_points=("traefik",)),
+        _live("dashboard@internal", "PathPrefix(`/`)", entry_points=("traefik",)),
+        _live("web-to-websecure@internal", "HostRegexp(`^.+$`)", entry_points=("web",)),
+    ], lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_the_scheme_comes_from_the_entrypoint_not_from_an_assumption():
+    urls = casa_scruffy_net.container_urls([
+        _live("secure@docker", "Host(`a.casalan.com`)", entry_points=("websecure",)),
+        _live("plain@docker", "Host(`b.casalan.com`)", entry_points=("web",)),
+    ], lan_domain="casalan.com")
+    assert urls["secure"][0]["href"].startswith("https://")
+    assert urls["plain"][0]["href"].startswith("http://")
+
+
+def test_an_unknown_entrypoint_is_not_a_guess():
+    urls = casa_scruffy_net.container_urls([
+        _live("odd@docker", "Host(`c.casalan.com`)", entry_points=("something-new",)),
+    ], lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_a_disabled_router_offers_no_link():
+    urls = casa_scruffy_net.container_urls([
+        _live("down@docker", "Host(`d.casalan.com`)", status="disabled"),
+    ], lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_malformed_entries_do_not_raise():
+    urls = casa_scruffy_net.container_urls(
+        [None, "nonsense", _live("ok@docker", "Host(`e.casalan.com`)")], lan_domain="casalan.com")
+    assert list(urls) == ["ok"]
+
+
+def test_a_declared_link_wins_over_a_derived_one():
+    """The operator wrote it down precisely because the route could not be read honestly.
+    Merging it with a guess would defeat the point of declaring it."""
+    derived = {"travel": [{"href": "https://wrong.casalan.com", "zone": "lan"}]}
+    merged = casa_scruffy_net.merge_declared_links(
+        derived, [{"name": "travel", "href": "https://travel.casalan.com", "zone": "lan"}])
+    assert merged["travel"] == [{"href": "https://travel.casalan.com", "zone": "lan"}]
+
+
+def test_a_declared_link_reaches_a_service_with_no_router_at_all():
+    merged = casa_scruffy_net.merge_declared_links(
+        {}, [{"name": "homeassistant", "href": "http://192.168.1.20:8123"}])
+    assert merged["homeassistant"] == [{"href": "http://192.168.1.20:8123", "zone": "lan"}]
+
+
+def test_a_malformed_declared_link_is_ignored_rather_than_rendered():
+    merged = casa_scruffy_net.merge_declared_links(
+        {"a": [{"href": "https://a.casalan.com", "zone": "lan"}]},
+        [None, {}, {"name": "b"}, {"href": "https://nameless"}])
+    assert list(merged) == ["a"]

@@ -56,6 +56,9 @@ def fetch_traefik_routers() -> dict:
                 "rule": r.get("rule", ""),
                 "service": r.get("service", "?"),
                 "status": r.get("status", "?"),
+                # The launch link's scheme comes from here, so it is collected rather than
+                # assumed: this host is 67 websecure, 2 traefik and 1 web.
+                "entry_points": [e for e in r.get("entryPoints", []) or [] if isinstance(e, str)],
             }
             for r in payload
             if isinstance(r, dict)
@@ -210,3 +213,85 @@ def group_routers(routers: list) -> dict:
         "merged": merged,
         "down": sum(zone["down"] for zone in zones),
     }
+
+
+# ── Launch links (T46.1) ─────────────────────────────────────────────────────────
+# One URL per Host() in a router's rule, and only from a rule that is Host() terms joined
+# by `||` and nothing else.
+#
+# Measured against the live host's 70 routers, that is 61 routers and 74 URLs. What it
+# refuses, it refuses for a reason: `subwave-api` is `radio.casaalmida.com/api` (JSON),
+# `subwave-stream` is `/stream.mp3` (a raw audio stream), `adventurelog-admin` serves
+# `/media` and `/static`, and the three `@internal` routers are Traefik's own. Emitting a
+# "launch" link to any of those is worse than emitting none, which is the spec's own rule.
+#
+# It costs one real link: `adventurelog@docker` is `(Host(a) || Host(b)) && !(PathPrefix(...))`
+# so its host root IS launchable, but recovering it means a parser that reasons about negated
+# path groups. That is covered by the `links:` escape hatch in config instead -- explicit,
+# auditable, and it says who decided.
+_ENTRYPOINT_SCHEME = {"websecure": "https", "web": "http"}
+
+
+def _rule_is_host_only(rule: str) -> bool:
+    """True when removing every Host() term leaves nothing but the `||` that joined them.
+
+    Deliberately not a Traefik expression parser. Anything with `&&`, a negation, a bare
+    PathPrefix or a HostRegexp fails this and emits no URL.
+    """
+    remainder = _HOST_IN_RULE.sub("", rule or "")
+    for token in ("||", "(", ")"):
+        remainder = remainder.replace(token, "")
+    return remainder.strip() == ""
+
+
+def container_urls(routers: list, *, lan_domain: str) -> dict:
+    """{service: [{"href", "zone"}]} for every router that can be turned into a link.
+
+    Keyed by the router's `service`, which is what ties a route back to a compose service.
+    A service reachable from two routers (`x` and its `-lan` twin) collects both their URLs,
+    de-duplicated: the twins point at different hosts, so both are real.
+    """
+    by_service: dict[str, list] = {}
+    for router in routers or []:
+        if not isinstance(router, dict) or router.get("status") != "enabled":
+            continue
+        rule = router.get("rule", "")
+        hosts = _HOST_IN_RULE.findall(rule or "")
+        if not hosts or not _rule_is_host_only(rule):
+            continue
+        entry_points = router.get("entry_points") or []
+        scheme = next((_ENTRYPOINT_SCHEME[e] for e in entry_points if e in _ENTRYPOINT_SCHEME), None)
+        if scheme is None:
+            # An entrypoint we do not have a scheme for is not a guess worth making.
+            continue
+        service = str(router.get("service", "")).split("@")[0]
+        links = by_service.setdefault(service, [])
+        for host in hosts:
+            href = f"{scheme}://{host}"
+            if any(link["href"] == href for link in links):
+                continue
+            links.append({
+                "href": href,
+                "zone": "lan" if _registrable_domain(host) == lan_domain else "public",
+            })
+    # LAN first: it is the default target, and the one that works when the WAN is down.
+    for links in by_service.values():
+        links.sort(key=lambda link: (link["zone"] != "lan", link["href"]))
+    return by_service
+
+
+def merge_declared_links(derived: dict, declared: list) -> dict:
+    """Fold config's `links:` over what the routers produced.
+
+    A declared link wins for its service: the operator wrote it down precisely because the
+    route could not be read honestly, so it is not something to merge with a guess.
+    """
+    merged = {service: list(links) for service, links in (derived or {}).items()}
+    for link in declared or []:
+        if not isinstance(link, dict) or not link.get("name") or not link.get("href"):
+            continue
+        merged[str(link["name"])] = [{
+            "href": str(link["href"]),
+            "zone": "public" if link.get("zone") == "public" else "lan",
+        }]
+    return merged
