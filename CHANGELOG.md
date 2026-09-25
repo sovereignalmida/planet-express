@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-25
+
+A layout pass over all eight tabs, implementing `docs/designs/planet_express_design_v21/handoffs/
+V2.1-ABOVE-THE-FOLD.md`. The design system itself is unchanged — `static/cockpit.css`'s first 582
+lines stay byte-identical to the v20 package. Every tab's primary content now sits above the fold
+at 1440×900; measurements are in `docs/handoff/T45-brief.md`.
+
+### Added
+- **A Crew tab.** The eight crew cards and Farnsworth's per-tab commentary used to be a ~150px
+  sidebar on Overview, Backups and Network. They have a tab; the other three got the width back.
+- **Overview summary tiles.** FLEET, HULL, BACKUPS, NETWORK and SYSTEM, each showing the worst
+  state it summarises and opening the tab it belongs to.
+- **A line-number gutter and locked-line tints in the config editor**, so a key the core will
+  refuse to change is visible in the file rather than only in a chip list above it.
+- **Static assets carry their file mtime.** After a deploy a browser holding the previous
+  `cockpit.css` rendered new markup with the old stylesheet, which is indistinguishable from a
+  broken release.
+
+### Changed
+- **The chrome is one 54px row.** A header, a status rail repeating it and a tab row used ~110px
+  before any content; the rail and the header sparkline (a duplicate of the System tile) are gone.
+- **Backups** is a verdict strip over two columns, with the weekly pod laid out horizontally
+  instead of one 120px pod floating in a full-width panel.
+- **Network** leads with AdGuard, and the routing matrix is four labelled zones of one-line pills
+  instead of 78 two-line cards in a 20-column wall. LAN twins merge, `docker` is untagged.
+- **Actions** is two columns: what wants a decision on the left, what is wrong on the right.
+  Incidents are rows with the evidence on click, behind an OPEN/RESOLVED filter.
+- **History** is run cards beside a sticky detail pane, replacing full-width rows in which one
+  service's dot floated in 2,000px of timeline.
+- **Chat** is ask-left, answer-right. Evidence cards lead with what was checked rather than with
+  an argv, which opens behind the disclosure.
+
+### Fixed
+- **Summary tiles that claimed the host was healthier than it was.** Thirteen of them, all one of
+  two mistakes: one sensor gating another's reading (services gated the fleet, AdGuard gated the
+  router count, uptime gated the memory bar, certificates gated the backup jobs), or an unknown
+  count rendered as zero. The Overview PLANS count in particular read a field the retired shell
+  planner wrote and nothing writes now, so it was structurally always zero.
+- **Approval receipts reported failed executions as PASSED.** The field is `execution.status`, not
+  `execution.state`, so the comparison was `undefined !== "failed"` and every approved item went
+  green.
+- **The routing matrix lost routes.** Entries were keyed by short name, so two providers defining
+  the same name overwrote one another.
+
 ## [2.0.5] - 2026-09-24
 
 ### Fixed

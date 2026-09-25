@@ -4,7 +4,7 @@ A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stack
 failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
 rollback, and talks to you over Telegram.
 
-**Status: v2.0.5.** This project started as a bespoke agent running on one person's home server,
+**Status: v2.1.0.** This project started as a bespoke agent running on one person's home server,
 hardcoded to that host. It's now generalized into something anyone with their own Compose-based
 homelab can install — see [CHANGELOG.md](CHANGELOG.md) for the full spec history, starting with
 v1.0.0's first tagged release. It is dogfooded on the author's own fleet from day one of that
