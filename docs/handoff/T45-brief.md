@@ -142,3 +142,22 @@ plain-language check name; the raw argv stays behind the disclosure, and the exi
 One release at the end rather than five. The tabs share the chrome changed in T45.1, so an
 intermediate deploy would put a half-migrated layout on the live host for no benefit; this is a
 presentation-only change with no host-mutation surface.
+
+---
+
+## Gate ledger
+
+| Slice | Codex rounds | Findings fixed | Declined | Status |
+| --- | --- | --- | --- | --- |
+| T45.1 | 1 | 2 | 0 | landed `7e47063` |
+| T45.2 | 6 (7th cut short by an API usage limit) | 13 + 2 found by my own review | 0 | landed `5f638fd`, **owes a final `codex review --commit 5f638fd`** |
+
+Every T45.2 finding was one shape: a summary tile claiming the host is healthier
+than it is. Two causes recur and are worth checking first in every later slice:
+
+1. **One sensor gating another's reading.** services gated the fleet, AdGuard gated
+   the router count, uptime gated the memory bar, the cert list gated the backup
+   jobs. Sensors that are collected separately fail separately, so they must
+   degrade separately.
+2. **Unknown rendered as zero.** A missing count is `—` or `?`, never `0`, and
+   never "ALL NOMINAL".
