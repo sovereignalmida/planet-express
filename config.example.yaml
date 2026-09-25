@@ -65,3 +65,23 @@ sudo_allowlist:
 #   forbidden_risks: [R4]
 #   cooldown_seconds: 1800
 #   max_attempts_per_day: 3
+
+# Launch links (v2.2). The dashboard builds these from the Traefik routes it already
+# reads, so most services need nothing here. This list is for the ones whose route
+# cannot be turned into a URL honestly.
+#
+# A link is derived only from a rule that is Host() terms joined by `||` and nothing
+# else -- so a route like `Host(a) && PathPrefix(/api)` gets no button, because a
+# "launch" button onto a JSON endpoint is worse than no button. The case that needs a
+# line here is the opposite one: a rule whose host root IS reachable but whose shape
+# is too complex to read, e.g. `(Host(a) || Host(b)) && !(PathPrefix(/media) || ...)`.
+#
+# href must be http:// or https://. zone is `lan` (default) or `public`; the LAN link
+# is the one the dashboard offers first.
+links: []
+# links:
+#   - name: adventurelog
+#     href: https://travel.casalan.com
+#     zone: lan
+#   - name: homeassistant           # no Traefik route at all
+#     href: http://192.168.1.20:8123
