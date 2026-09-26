@@ -2334,3 +2334,38 @@ button.overview-tile:hover { border-color: var(--tile-level); }
   .config-rules { overflow-y: visible; }
   .config-editor-shell { min-height: 420px; }
 }
+
+
+/* ── Launch links (v2.2) ─────────────────────────────────────────────────
+   The pill is the link. No arrow at rest, so the matrix stays as calm as it was in
+   v2.1; the arrow and the cyan only arrive on hover. A pill with no launchable link
+   -- a down router, a rule no honest URL can be read from -- is untouched. */
+.net-pill-face {
+  display: inline-flex; align-items: center; gap: inherit;
+  color: inherit; text-decoration: none; font: inherit;
+}
+.net-pill.is-link .net-pill-face:hover,
+.net-pill.is-link .net-pill-face:focus-visible { color: #8fe6f5; outline: none; }
+.net-pill.is-link:hover, .net-pill.is-link:focus-within {
+  border-color: #35c5d8; background: rgba(53,197,216,.10);
+}
+.net-pill.is-link:hover .net-pill-face::after,
+.net-pill.is-link:focus-within .net-pill-face::after { content: "↗"; margin-left: 5px; opacity: .9; }
+/* The split pill replaces v2.1's +LAN tag: the face opens the public host, this opens
+   the LAN one. Five of this host's services reach both ways only through a twin. */
+.net-pill.is-split { padding-right: 0; }
+.net-pill-lan {
+  margin-left: 7px; padding: 0 7px; align-self: stretch; display: inline-flex;
+  align-items: center; gap: 3px;
+  border-left: 1px solid rgba(53,197,216,.45);
+  color: var(--pe-accent-hi, #5fd6e8); text-decoration: none;
+  font-size: 9px; letter-spacing: .06em;
+}
+.net-pill-lan:hover, .net-pill-lan:focus-visible {
+  background: rgba(53,197,216,.16); color: #8fe6f5; outline: none;
+}
+
+.net-legend-lan {
+  color: var(--pe-accent-hi, #5fd6e8); border: 1px solid rgba(53,197,216,.45);
+  border-radius: 4px; padding: 0 5px; font-size: 9px; letter-spacing: .06em;
+}

@@ -424,7 +424,11 @@
               <span>docker = untagged</span>
               <span><b class="net-tag file">FILE</b> file provider</span>
               <span><b class="net-tag ext">EXT</b> external</span>
-              <span><b class="net-tag lan">+LAN</b> LAN twin merged</span>
+              <span><b class="net-tag lan">+LAN</b> LAN twin merged, no link</span>
+              {# The split pill replaced +LAN wherever a link could be read, so the legend
+                 has to say what the second segment is -- and +LAN still appears on a twin
+                 whose rule yields no URL, which is why both lines are here. #}
+              <span><b class="net-legend-lan">LAN ↗</b> opens the LAN address</span>
             </div>
             <input class="net-filter" id="net-filter" placeholder="filter routers…" autocomplete="off">
             {% endif %}
@@ -442,10 +446,30 @@
               </div>
               <div class="net-pills">
                 {% for pill in zone['items'] %}
-                <span class="net-pill net-filter-row {{ 'down' if pill.down else '' }}"
+                {# The pill IS the link (v2.2). Two links means a split pill: the face opens
+                   the public host, the LAN segment opens the LAN one, replacing v2.1's +LAN
+                   tag. A pill with no launchable link -- a down router, a rule no URL can be
+                   read from -- stays exactly as it was in v2.1. #}
+                {% set lan_link = (pill.links | selectattr('zone', 'equalto', 'lan') | first) %}
+                {% set web_link = (pill.links | selectattr('zone', 'equalto', 'public') | first) %}
+                {% set face = web_link or lan_link %}
+                <span class="net-pill net-filter-row {{ 'down' if pill.down else '' }}{{ ' is-link' if face else '' }}{{ ' is-split' if (lan_link and web_link) else '' }}"
                       data-filter-text="{{ pill.filter_text }}"
                       title="{{ pill.raw }}{{ (' · ' ~ pill.host) if pill.host else '' }}">
-                  <span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                  {% if face %}
+                  <a class="net-pill-face" href="{{ face.href }}" target="_blank" rel="noopener"
+                     title="{{ face.href }}">
+                    <span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                  </a>
+                  {% if lan_link and web_link %}
+                  <a class="net-pill-lan" href="{{ lan_link.href }}" target="_blank" rel="noopener"
+                     title="{{ lan_link.href }}">LAN ↗</a>
+                  {% endif %}
+                  {% else %}
+                  <span class="net-pill-face">
+                    <span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                  </span>
+                  {% endif %}
                 </span>
                 {% endfor %}
               </div>

@@ -577,3 +577,55 @@ def test_same_backends_does_not_raise_on_rubbish():
     assert casa_scruffy_net.same_backends(None, None)
     assert casa_scruffy_net.same_backends([None, "x"], [])
     assert casa_scruffy_net.same_backends([{"name": "a", "hosts": None}], [{"name": "a"}])
+
+
+# ── the pill as a link (T46.4) ──────────────────────────────────────────────────
+
+def test_a_pill_carries_the_same_links_the_container_join_would():
+    """One rule for "is this launchable", so the matrix and the stack drawer can never
+    disagree. group_routers and container_urls both go through router_links()."""
+    zones = casa_scruffy_net.group_routers(
+        [_live("actual@docker", "Host(`actual.casalan.com`) || Host(`actual.casaalmida.com`)")],
+        lan_domain="casalan.com")
+    pill = zones["zones"][0]["items"][0]
+    assert [link["href"] for link in pill["links"]] == [
+        "https://actual.casalan.com", "https://actual.casaalmida.com"]
+
+
+def test_a_merged_twin_keeps_both_hosts_on_the_pill():
+    """The merge used to drop the twin entirely. Five of this host's services reach both
+    ways only through a twin, so that would have thrown away their only LAN address."""
+    zones = casa_scruffy_net.group_routers([
+        _live("subwave-web@docker", "Host(`radio.casaalmida.com`)", service="subwave-web"),
+        _live("subwave-web-lan@docker", "Host(`radio.casalan.com`)", service="subwave-web"),
+    ], lan_domain="casalan.com")
+    pill = zones["zones"][0]["items"][0]
+    assert pill["lan"] is True and pill["routers"] == 2
+    assert [(link["zone"], link["href"]) for link in pill["links"]] == [
+        ("lan", "https://radio.casalan.com"), ("public", "https://radio.casaalmida.com")]
+
+
+def test_a_down_router_keeps_its_pill_and_loses_its_link():
+    """Clicking must not open a host that is not being served."""
+    zones = casa_scruffy_net.group_routers(
+        [_live("gone@docker", "Host(`gone.casalan.com`)", status="disabled")],
+        lan_domain="casalan.com")
+    pill = zones["zones"][0]["items"][0]
+    assert pill["down"] is True and pill["links"] == []
+
+
+@pytest.mark.parametrize("rule", [
+    "Host(`x.casalan.com`) && PathPrefix(`/api`)",
+    "HostRegexp(`^.+$`)",
+    "PathPrefix(`/media`)",
+])
+def test_a_rule_no_url_can_be_read_from_leaves_the_pill_as_it_was(rule):
+    zones = casa_scruffy_net.group_routers([_live("x@docker", rule)], lan_domain="casalan.com")
+    assert zones["zones"][0]["items"][0]["links"] == []
+
+
+def test_without_a_lan_domain_no_pill_claims_a_link():
+    """group_routers is called from one place with the domain; a caller that forgets it must
+    get no links rather than links zoned by a guess."""
+    zones = casa_scruffy_net.group_routers([_live("x@docker", "Host(`x.casalan.com`)")])
+    assert zones["zones"][0]["items"][0]["links"] == []

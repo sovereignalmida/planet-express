@@ -613,7 +613,8 @@ def index(core=None):
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
     # Zone grouping, LAN-twin merging and provider tagging are string work over the router
     # rules. Doing it in Jinja would mean regexing Host() out of a rule in a template.
-    ctx["router_zones"] = casa_scruffy_net.group_routers(ctx["traefik"]["routers"])
+    ctx["router_zones"] = casa_scruffy_net.group_routers(
+        ctx["traefik"]["routers"], lan_domain=config.LAN_ONLY_DOMAIN)
     # Launch links, keyed by compose service. Derived from the routers already fetched, with
     # config's `links:` folded over the top for the services whose rules cannot be read into
     # a URL honestly.
