@@ -245,9 +245,32 @@ a fixture that makes the sensor look right is the same defect as a tile that doe
 | T46.1 join | done, **last gate round owed** (quota, resets 09-27 00:58) |
 | T46.2 registry | done and gated |
 | **T46.3 fetcher** | **not started — the one security surface, must not land unreviewed** |
-| T46.4 links in the UI | not started; `ctx["launch_urls"]` is built and read by no template |
+| T46.4 links in the UI | **pills done** (`cc55996`); tile `↗ n`, drawer and detail buttons blocked, see below |
 | T46.5 widget frame | not started |
 | T46.6 retire homepage | not started |
 
 Also owed: the `links:` contract changed to container names, so the live config's
 eventual entries must use `CASA_*`, not service names.
+
+
+## T46.4's remaining blocker: containers do not know their stack
+
+The Overview tile's `↗ n` and the 420px stack drawer both need "which launchable
+containers are in this stack". Nothing in the snapshot answers that:
+
+* `stack_completeness.services` is keyed by compose service and holds only
+  `{status, state}` — no container name;
+* `containers[]` holds `name`, `status`, `image` — no compose project or service.
+
+So a stack cannot be joined to its containers, and launch links are keyed by container.
+The fix is two fields on `check_containers()`'s existing `docker ps --format`:
+`{{.Label "com.docker.compose.project"}}` and `{{.Label "com.docker.compose.service"}}`.
+Targeted labels, not `{{.Labels}}` — that is 111KB across 85 containers and `.Labels` is
+a string, not a map, so `index` does not work on it.
+
+It is a small change in scan-path code that runs unattended, which is why it did not go
+in ungated at 21:30. It also unblocks the `planetexpress.widget` label T46.2 needs.
+
+The container detail header's `OPEN ↗` / `WEB ↗` is a separate, smaller piece: that page
+resolves its container through core rather than from ctx, so the URLs have to ride along
+on `/api/containers/<stack>/<service>` rather than being rendered server-side.
