@@ -76,12 +76,19 @@ sudo_allowlist:
 # line here is the opposite one: a rule whose host root IS reachable but whose shape
 # is too complex to read, e.g. `(Host(a) || Host(b)) && !(PathPrefix(/media) || ...)`.
 #
+# `name` is the CONTAINER name, exactly as the dashboard shows it (CASA_ADVLOG_FRONTEND,
+# not "adventurelog"). Derived links are keyed by container, because that is what a route
+# is joined to -- a Traefik service name matches a compose service for only a minority of
+# this host's routes, and compose service names are not unique across projects. A declared
+# link replaces whatever was derived for that container.
+#
 # href must be http:// or https://. zone is `lan` (default) or `public`; the LAN link
 # is the one the dashboard offers first.
 links: []
 # links:
-#   - name: adventurelog
+#   - name: CASA_ADVLOG_FRONTEND    # rule too complex to read a URL out of
 #     href: https://travel.casalan.com
 #     zone: lan
-#   - name: homeassistant           # no Traefik route at all
-#     href: http://192.168.1.20:8123
+#   - name: CASA_PLEX               # host-networked: Traefik routes it to the host's own
+#     href: https://plex.casalan.com  # address, which identifies no container
+#     zone: lan

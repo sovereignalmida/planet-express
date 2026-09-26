@@ -10,6 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
+import pytest
+
 import casa_scruffy_net
 
 
@@ -199,61 +201,91 @@ def _live(name, rule, service=None, status="enabled", entry_points=("websecure",
             "service": service or name.split("@")[0], "entry_points": list(entry_points)}
 
 
+# A route is joined to its container through the backend IP Traefik reports, because the
+# router's service NAME is a Traefik label and on the live host it matches a compose service
+# for only 27 of 64 routers. These helpers build that join the way the host presents it.
+def _svc(name, ip, provider="docker"):
+    return {"name": f"{name}@{provider}", "provider": provider, "hosts": [ip]}
+
+
+def _ctr(name, ip):
+    """One entry of the {container: [ip]} map core serves."""
+    return {name: [ip]}
+
+
+def _urls(routers, services=None, addresses=None, lan_domain="casalan.com"):
+    """container_urls with a one-container-per-router-service join built automatically, so a
+    test about rules does not have to spell out plumbing it is not testing."""
+    if services is None or addresses is None:
+        services, addresses = [], {}
+        for index, router in enumerate(routers):
+            if not isinstance(router, dict):
+                continue
+            service = str(router.get("service", "")).split("@")[0]
+            ip = f"172.20.0.{index + 10}"
+            name = f"CASA_{service.upper().replace('-', '_')}"
+            if not any(item["name"] == f"{service}@docker" for item in services):
+                services.append(_svc(service, ip))
+                addresses[name] = [ip]
+    return casa_scruffy_net.container_urls(routers, services, addresses,
+                                           lan_domain=lan_domain)
+
+
 def test_a_multi_host_router_yields_one_url_per_host_with_opposite_zones():
     """This, not the -lan twin, is how most services get both addresses: 15 of the live
     host's 70 routers are a single router serving a LAN host and a public one."""
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("actual@docker", "Host(`actual.casalan.com`) || Host(`actual.casaalmida.com`)"),
-    ], lan_domain="casalan.com")
-    assert urls["actual"] == [
+    ])
+    assert urls["CASA_ACTUAL"] == [
         {"href": "https://actual.casalan.com", "zone": "lan"},
         {"href": "https://actual.casaalmida.com", "zone": "public"},
     ]
 
 
 def test_lan_sorts_first_because_it_is_the_default_target():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("x@docker", "Host(`x.casaalmida.com`) || Host(`x.casalan.com`)"),
-    ], lan_domain="casalan.com")
-    assert [link["zone"] for link in urls["x"]] == ["lan", "public"]
+    ])
+    assert [link["zone"] for link in urls["CASA_X"]] == ["lan", "public"]
 
 
-def test_a_lan_twin_and_its_sibling_collect_onto_one_service():
-    """They are separate routers pointing at different hosts, but the same compose service."""
-    urls = casa_scruffy_net.container_urls([
+def test_a_lan_twin_and_its_sibling_collect_onto_one_container():
+    """They are separate routers pointing at different hosts, but the same container."""
+    urls = _urls([
         _live("subwave-web@docker", "Host(`radio.casaalmida.com`)", service="subwave-web"),
         _live("subwave-web-lan@docker", "Host(`radio.casalan.com`)", service="subwave-web"),
-    ], lan_domain="casalan.com")
-    assert urls["subwave-web"] == [
+    ])
+    assert urls["CASA_SUBWAVE_WEB"] == [
         {"href": "https://radio.casalan.com", "zone": "lan"},
         {"href": "https://radio.casaalmida.com", "zone": "public"},
     ]
 
 
 def test_the_same_host_twice_is_not_two_links():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("a@docker", "Host(`same.casalan.com`)", service="dup"),
         _live("b@docker", "Host(`same.casalan.com`)", service="dup"),
-    ], lan_domain="casalan.com")
-    assert urls["dup"] == [{"href": "https://same.casalan.com", "zone": "lan"}]
+    ])
+    assert urls["CASA_DUP"] == [{"href": "https://same.casalan.com", "zone": "lan"}]
 
 
 def test_an_api_or_stream_path_is_never_a_launch_link():
     """subwave-api is radio.casaalmida.com/api (JSON) and subwave-stream is /stream.mp3 (a
     raw audio stream). A launch button onto either is worse than no button."""
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("subwave-api@docker", "Host(`radio.casaalmida.com`) && PathPrefix(`/api`)"),
         _live("subwave-stream@docker", "Host(`radio.casalan.com`) && PathPrefix(`/stream.mp3`)"),
-    ], lan_domain="casalan.com")
+    ])
     assert urls == {}
 
 
 def test_an_asset_route_is_not_a_launch_link():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("adventurelog-admin@docker",
               "(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && "
               "(PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`))"),
-    ], lan_domain="casalan.com")
+    ])
     assert urls == {}
 
 
@@ -262,50 +294,49 @@ def test_a_negated_path_group_is_skipped_and_that_costs_one_real_link():
     skipped anyway, because recovering it needs a parser that reasons about negation, and the
     config `links:` escape hatch covers it explicitly instead. Pinned so the decision is
     visible if anyone wonders why travel has no button."""
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("adventurelog@docker",
               "(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && "
               "!(PathPrefix(`/media`) || PathPrefix(`/static`))"),
-    ], lan_domain="casalan.com")
+    ])
     assert urls == {}
 
 
 def test_traefiks_own_internal_routers_emit_nothing():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("api@internal", "PathPrefix(`/api`)", entry_points=("traefik",)),
         _live("dashboard@internal", "PathPrefix(`/`)", entry_points=("traefik",)),
         _live("web-to-websecure@internal", "HostRegexp(`^.+$`)", entry_points=("web",)),
-    ], lan_domain="casalan.com")
+    ])
     assert urls == {}
 
 
 def test_the_scheme_comes_from_the_entrypoint_not_from_an_assumption():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("secure@docker", "Host(`a.casalan.com`)", entry_points=("websecure",)),
         _live("plain@docker", "Host(`b.casalan.com`)", entry_points=("web",)),
-    ], lan_domain="casalan.com")
-    assert urls["secure"][0]["href"].startswith("https://")
-    assert urls["plain"][0]["href"].startswith("http://")
+    ])
+    assert urls["CASA_SECURE"][0]["href"].startswith("https://")
+    assert urls["CASA_PLAIN"][0]["href"].startswith("http://")
 
 
 def test_an_unknown_entrypoint_is_not_a_guess():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("odd@docker", "Host(`c.casalan.com`)", entry_points=("something-new",)),
-    ], lan_domain="casalan.com")
+    ])
     assert urls == {}
 
 
 def test_a_disabled_router_offers_no_link():
-    urls = casa_scruffy_net.container_urls([
+    urls = _urls([
         _live("down@docker", "Host(`d.casalan.com`)", status="disabled"),
-    ], lan_domain="casalan.com")
+    ])
     assert urls == {}
 
 
 def test_malformed_entries_do_not_raise():
-    urls = casa_scruffy_net.container_urls(
-        [None, "nonsense", _live("ok@docker", "Host(`e.casalan.com`)")], lan_domain="casalan.com")
-    assert list(urls) == ["ok"]
+    urls = _urls([None, "nonsense", _live("ok@docker", "Host(`e.casalan.com`)")])
+    assert list(urls) == ["CASA_OK"]
 
 
 def test_a_declared_link_wins_over_a_derived_one():
@@ -328,3 +359,221 @@ def test_a_malformed_declared_link_is_ignored_rather_than_rendered():
         {"a": [{"href": "https://a.casalan.com", "zone": "lan"}]},
         [None, {}, {"name": "b"}, {"href": "https://nameless"}])
     assert list(merged) == ["a"]
+
+
+# ── service_containers: the join that replaced the name match (T46.1 gate) ──────
+# Keyed on the router's service NAME, this joined 27 of the live host's 64 router services.
+# The name is a Traefik label, not a compose service, and compose service names are not
+# unique across projects either. Every case below is from `docker ps` and the Traefik API.
+
+def test_the_service_name_is_not_the_compose_service_name():
+    """`audio@docker` is served by Traefik service `audiobookshelf-media`, and the container
+    behind it is CASA_ABS, whose compose service is `audiobookshelf`. Three different names
+    for one thing; only the address ties them together."""
+    owners = casa_scruffy_net.service_containers(
+        [_svc("audiobookshelf-media", "172.20.0.31")],
+        _ctr("CASA_ABS", "172.20.0.31"))
+    assert owners == {"audiobookshelf-media@docker": "CASA_ABS"}
+
+
+@pytest.mark.parametrize(("service", "container"), [
+    ("actual", "CASA_ACTUAL"),            # compose service actual_server
+    ("adguard", "CASA_ADGUARD"),          # compose service adguardhome
+    ("wiki", "CASA_WIKIGO"),              # compose service wiki-go
+    ("sabnzbd", "CASA_SABNZBD"),          # compose service SabNZBD, different case
+    ("billarr", "CASA_BILLARR"),          # compose service frontend
+    ("immich-server-media", "CASA_IMMICH_SERVER"),
+])
+def test_every_live_name_shape_still_joins(service, container):
+    owners = casa_scruffy_net.service_containers(
+        [_svc(service, "172.20.0.51")], _ctr(container, "172.20.0.51"))
+    assert owners == {f"{service}@docker": container}
+
+
+def test_two_projects_sharing_a_service_name_do_not_collide():
+    """CASA_SUBWAVE_WEB and CASA_KARA_KEEP are both compose service `web`. Keyed by name,
+    one service's URL would hang on the other's container."""
+    owners = casa_scruffy_net.service_containers(
+        [_svc("subwave-web", "172.20.0.41"), _svc("kara", "172.20.0.42")],
+        {"CASA_SUBWAVE_WEB": ["172.20.0.41"], "CASA_KARA_KEEP": ["172.20.0.42"]})
+    assert owners == {"subwave-web@docker": "CASA_SUBWAVE_WEB",
+                      "kara@docker": "CASA_KARA_KEEP"}
+
+
+def test_a_route_to_another_machine_is_not_a_container():
+    """opnsense is 192.168.1.1, unraid is .171, adguard-secondary is .25. File-provider
+    routes to other hosts must not be attached to anything here."""
+    owners = casa_scruffy_net.service_containers(
+        [_svc("opnsense", "192.168.1.1", provider="file"),
+         _svc("unraid", "192.168.1.171", provider="file")],
+        _ctr("CASA_ACTUAL", "172.20.0.51"))
+    assert owners == {}
+
+
+def test_a_host_networked_service_is_not_claimed_either():
+    """jellyfin, plex, qbit and planetexpress are routed to 192.168.1.94, the host itself.
+    They are containers, but nothing here can say which -- and the config `links:` escape
+    hatch is exactly what they are for."""
+    owners = casa_scruffy_net.service_containers(
+        [_svc("plex", "192.168.1.94", provider="file")],
+        _ctr("CASA_ACTUAL", "172.20.0.51"))
+    assert owners == {}
+
+
+def test_an_address_two_containers_claim_identifies_neither():
+    owners = casa_scruffy_net.service_containers(
+        [_svc("ambiguous", "172.20.0.9")],
+        {"CASA_ONE": ["172.20.0.9"], "CASA_TWO": ["172.20.0.9"]})
+    assert owners == {}
+
+
+def test_a_service_spread_over_two_containers_is_not_one_container():
+    owners = casa_scruffy_net.service_containers(
+        [{"name": "scaled@docker", "provider": "docker", "hosts": ["172.20.0.1", "172.20.0.2"]}],
+        {"CASA_ONE": ["172.20.0.1"], "CASA_TWO": ["172.20.0.2"]})
+    assert owners == {}
+
+
+def test_a_container_on_several_networks_is_found_by_any_of_its_addresses():
+    owners = casa_scruffy_net.service_containers(
+        [_svc("tracearr", "172.20.0.20")],
+        {"CASA_TRACEARR": ["172.22.0.9", "172.20.0.20"]})
+    assert owners == {"tracearr@docker": "CASA_TRACEARR"}
+
+
+@pytest.mark.parametrize(("services", "addresses"), [
+    (None, None), ([], {}), ([None, "x"], {"": ["1"], "CASA_X": None}),
+    ([{"hosts": None}], {"CASA_X": None}),
+    ([{"name": "a@docker", "hosts": [None, 5]}], {"CASA_X": ["172.20.0.1"]}),
+])
+def test_a_malformed_join_does_not_raise(services, addresses):
+    assert casa_scruffy_net.service_containers(services, addresses) == {}
+
+
+def test_a_router_naming_a_service_in_another_provider_is_honoured():
+    """traefik@docker is served by api@internal -- four live routers cross providers, and
+    appending the router's own provider would look for a service that does not exist."""
+    owners = casa_scruffy_net.service_containers(
+        [{"name": "api@internal", "provider": "internal", "hosts": ["172.20.0.2"]}],
+        _ctr("CASA_TRAEFIK", "172.20.0.2"))
+    urls = casa_scruffy_net.container_urls(
+        [_live("traefik@docker", "Host(`traefik.casalan.com`)", service="api@internal")],
+        [{"name": "api@internal", "provider": "internal", "hosts": ["172.20.0.2"]}],
+        _ctr("CASA_TRAEFIK", "172.20.0.2"), lan_domain="casalan.com")
+    assert owners == {"api@internal": "CASA_TRAEFIK"}
+    assert urls == {"CASA_TRAEFIK": [{"href": "https://traefik.casalan.com", "zone": "lan"}]}
+
+
+def test_a_route_with_no_container_behind_it_yields_no_link():
+    """A missing link is better than a wrong one."""
+    urls = casa_scruffy_net.container_urls(
+        [_live("opnsense@file", "Host(`opnsense.casalan.com`)")],
+        [_svc("opnsense", "192.168.1.1", provider="file")],
+        _ctr("CASA_ACTUAL", "172.20.0.51"), lan_domain="casalan.com")
+    assert urls == {}
+
+
+def test_a_declared_link_overrides_the_derived_one_for_that_container():
+    """Both sides are keyed by container. They were not when the join moved off service
+    names, and a declared link under the old key matched nothing at all."""
+    derived = casa_scruffy_net.container_urls(
+        [_live("advlog@docker", "Host(`travel.casalan.com`)", service="adventurelog")],
+        [_svc("adventurelog", "172.20.0.61")],
+        _ctr("CASA_ADVLOG_FRONTEND", "172.20.0.61"), lan_domain="casalan.com")
+    assert list(derived) == ["CASA_ADVLOG_FRONTEND"]
+
+    merged = casa_scruffy_net.merge_declared_links(derived, [
+        {"name": "CASA_ADVLOG_FRONTEND", "href": "https://travel.casalan.com", "zone": "lan"},
+    ])
+    assert merged == {"CASA_ADVLOG_FRONTEND": [
+        {"href": "https://travel.casalan.com", "zone": "lan"}]}
+
+
+def test_a_declared_link_covers_a_container_no_route_can_reach():
+    """plex, jellyfin, qbit and planetexpress are routed to 192.168.1.94, the host itself,
+    which identifies no container. The escape hatch is all they have."""
+    merged = casa_scruffy_net.merge_declared_links({}, [
+        {"name": "CASA_PLEX", "href": "https://plex.casalan.com"},
+    ])
+    assert merged == {"CASA_PLEX": [{"href": "https://plex.casalan.com", "zone": "lan"}]}
+
+
+def test_a_service_half_somewhere_else_claims_nothing():
+    """A balancer with one local backend and one remote is not "backed by one container".
+    Resolving the half that happens to be local would hang its link on that container."""
+    owners = casa_scruffy_net.service_containers(
+        [{"name": "mixed@file", "provider": "file",
+          "hosts": ["172.20.0.51", "192.168.1.171"]}],
+        _ctr("CASA_ACTUAL", "172.20.0.51"))
+    assert owners == {}
+
+
+def test_a_service_with_a_stale_backend_alongside_a_live_one_claims_nothing():
+    """Mid-rollout Traefik can list the old container's address and the new one's."""
+    owners = casa_scruffy_net.service_containers(
+        [{"name": "rolling@docker", "provider": "docker",
+          "hosts": ["172.20.0.51", "172.20.0.99"]}],
+        _ctr("CASA_ACTUAL", "172.20.0.51"))
+    assert owners == {}
+
+
+def test_every_backend_pointing_at_the_same_container_still_resolves():
+    owners = casa_scruffy_net.service_containers(
+        [{"name": "twonets@docker", "provider": "docker",
+          "hosts": ["172.20.0.20", "172.22.0.9"]}],
+        {"CASA_TRACEARR": ["172.22.0.9", "172.20.0.20"]})
+    assert owners == {"twonets@docker": "CASA_TRACEARR"}
+
+
+def test_a_service_with_no_backends_claims_nothing():
+    assert casa_scruffy_net.service_containers(
+        [{"name": "empty@docker", "provider": "docker", "hosts": []}],
+        _ctr("CASA_ACTUAL", "172.20.0.51")) == {}
+
+
+def test_the_address_lookup_shares_one_deadline_across_both_commands(monkeypatch):
+    """Two independent timeouts can add up past the dashboard's 5s deadline and leave an RPC
+    worker busy on a reply nobody is waiting for. Same rule query.container already follows."""
+    from planet_express.execution import actions
+
+    budgets = []
+    clock = [0.0]
+
+    def fake_run_argv(argv, timeout=None, **kwargs):
+        budgets.append(timeout)
+        clock[0] += 3.5                       # docker is slow but does answer
+        if argv[:2] == ["docker", "ps"]:
+            return 0, "CASA_ACTUAL\n", ""
+        return 0, "/CASA_ACTUAL\t172.20.0.51\n", ""
+
+    monkeypatch.setattr(actions.bender, "run_argv", fake_run_argv)
+    monkeypatch.setattr(actions.time, "monotonic", lambda: clock[0])
+
+    actions.container_addresses(timeout=4)
+
+    assert budgets[0] == 4
+    assert budgets[1] < 1            # what is left of the 4s, not another 4s
+
+
+# ── same_backends: the stable sample around the address read ────────────────────
+
+def test_an_unchanged_backend_map_is_the_same_moment():
+    before = [_svc("actual", "172.20.0.51"), _svc("adguard", "172.20.0.4")]
+    after = [_svc("adguard", "172.20.0.4"), _svc("actual", "172.20.0.51")]   # order is not news
+    assert casa_scruffy_net.same_backends(before, after)
+
+
+@pytest.mark.parametrize("after", [
+    [_svc("actual", "172.20.0.99")],                       # recreated with a new address
+    [_svc("actual", "172.20.0.51"), _svc("new", "172.20.0.7")],
+    [],                                                     # Traefik went away mid-read
+    [{"name": "actual@docker", "hosts": ["172.20.0.51", "172.20.0.52"]}],
+])
+def test_a_backend_that_moved_is_not_the_same_moment(after):
+    assert not casa_scruffy_net.same_backends([_svc("actual", "172.20.0.51")], after)
+
+
+def test_same_backends_does_not_raise_on_rubbish():
+    assert casa_scruffy_net.same_backends(None, None)
+    assert casa_scruffy_net.same_backends([None, "x"], [])
+    assert casa_scruffy_net.same_backends([{"name": "a", "hosts": None}], [{"name": "a"}])

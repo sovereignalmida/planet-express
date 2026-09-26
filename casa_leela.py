@@ -98,6 +98,41 @@ def _parse_go_duration_seconds(value: str) -> float:
     return total
 
 
+def _inspect_addresses(names: list[str]) -> dict[str, list[str]]:
+    """Every container's IP on every network it joins, keyed by container name.
+
+    Its own call rather than another field on _inspect_restart_info's format string: that one
+    carries a tab-delimited contract with a strict field count and a pre-25.0 Docker fallback,
+    and a container whose line does not split into exactly the expected number of parts is
+    dropped silently. This is scan-path code that runs unattended, so a new field that is only
+    wanted for launch links does not go in there.
+
+    Why the dashboard needs it: Traefik's API gives each service's backend URL, which for a
+    docker-provider service is the container's own address. That address is the only reliable
+    way back from a route to the container serving it -- the router's service NAME is a
+    Traefik label, and on this host it matches a compose service for 27 of 64 routers
+    (`actual` is `actual_server`, `adguard` is `adguardhome`, `wiki` is `wiki-go`), while
+    compose service names are not even unique across projects.
+    """
+    if not names:
+        return {}
+    rc, out, err = _run(
+        ["docker", "inspect", "--format",
+         "{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", *names],
+        timeout=30)
+    if rc != 0 or not out:
+        log.warning(f"Could not inspect container addresses: {err.strip()[:200]}")
+        return {}
+    addresses: dict[str, list[str]] = {}
+    for line in out.splitlines():
+        name, _, raw = line.partition("\t")
+        name = name.strip().lstrip("/")
+        if not name:
+            continue
+        addresses[name] = [ip for ip in raw.split() if ip]
+    return addresses
+
+
 def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
     """Batch docker inspect for RestartCount + current uptime, keyed by container name.
     One inspect call for every container is far cheaper than one call per container."""
@@ -226,8 +261,10 @@ def check_containers() -> list[dict]:
             log.warning(f"Skipping unparseable container line: {line!r}")
 
     restart_info = _inspect_restart_info([c["name"] for c in containers])
+    addresses = _inspect_addresses([c["name"] for c in containers])
     for c in containers:
         info = restart_info.get(c["name"], {})
+        c["ips"] = addresses.get(c["name"], [])
         restart_count = info.get("restart_count", 0)
         uptime_seconds = info.get("uptime_seconds")
         status = c["status"]

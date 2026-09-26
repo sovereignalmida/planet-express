@@ -208,13 +208,17 @@ def summarize_containers() -> dict:
     if not monitor or monitor.mode not in _MODES_WITH_CONTAINERS:
         return {
             "total": 0, "healthy": 0, "issues": [], "available": False,
-            "online": 0, "degraded": 0, "down": 0, "paused": 0, "cells": [],
+            "online": 0, "degraded": 0, "down": 0, "paused": 0, "cells": [], "all": [],
         }
     issues = [c for c in monitor.containers if c.get("issue")]
     states = [_container_state(c) for c in monitor.containers]
     return {
         "total": len(monitor.containers),
         "healthy": len(monitor.containers) - len(issues),
+        # The raw rows, for callers that need a field the summary does not carry. Launch
+        # links need each container's addresses: Traefik reports a service's backend by
+        # address, and that is what ties a route to the container serving it.
+        "all": monitor.containers,
         "issues": issues,
         "available": True,
         "online": states.count("online"),

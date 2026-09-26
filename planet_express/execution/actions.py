@@ -435,6 +435,38 @@ def resolve_stack_target(
     return StackTarget(stack)
 
 
+def container_addresses(*, timeout=DOCKER_TIMEOUT_SECONDS) -> dict[str, list[str]]:
+    """{container name: [ip, ...]} for every container, running or not.
+
+    Traefik reports a service's backend by address, so this is what ties a route back to the
+    container serving it -- the router's service NAME is a Traefik label and matches a compose
+    service for only a minority of this host's routes.
+    """
+    # One budget for the whole call, shared by both commands, the same rule query.container
+    # follows: two independent `timeout`s can add up past the dashboard's 5s deadline and
+    # leave an RPC worker busy on a reply nobody is waiting for any more.
+    deadline = time.monotonic() + timeout
+    rc, out, _err = bender.run_argv(
+        ["docker", "ps", "-a", "--format", "{{.Names}}"], timeout=timeout)
+    names = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 else []
+    left = deadline - time.monotonic()
+    if not names or left <= 0:
+        return {}
+    rc, out, _err = bender.run_argv(
+        ["docker", "inspect", "--format",
+         "{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", *names],
+        timeout=left)
+    if rc != 0:
+        return {}
+    addresses: dict[str, list[str]] = {}
+    for line in out.splitlines():
+        name, _, raw = line.partition("\t")
+        name = name.strip().lstrip("/")
+        if name:
+            addresses[name] = [ip for ip in raw.split() if ip]
+    return addresses
+
+
 def action_summary(action: str, target: dict) -> str:
     if action == RESTART_SERVICE:
         return f"Restart {target['stack']}/{target['service']}"

@@ -617,11 +617,42 @@ def index(core=None):
     # Launch links, keyed by compose service. Derived from the routers already fetched, with
     # config's `links:` folded over the top for the services whose rules cannot be read into
     # a URL honestly.
-    ctx["launch_urls"] = casa_scruffy_net.merge_declared_links(
-        casa_scruffy_net.container_urls(ctx["traefik"]["routers"],
-                                        lan_domain=config.LAN_ONLY_DOMAIN),
-        config.LAUNCH_LINKS,
-    )
+    # Keyed by CONTAINER name. The router's service name is a Traefik label and matched a
+    # compose service for only 27 of this host's 64 router services; the join is the backend
+    # address Traefik reports, which is the container's own.
+    #
+    # Both sides of that join have to describe the same moment, so the addresses come from
+    # core live rather than from the 6-hourly snapshot: a container recreated since the last
+    # scan could otherwise hand its old address -- possibly now another container's -- to a
+    # link. When core cannot answer, the derived links are simply absent. A missing link is
+    # better than a wrong one, and config's `links:` still work.
+    derived = {}
+    # Nothing to join against without routers, and container_urls() would return {} anyway --
+    # so during a Traefik outage this costs the page nothing rather than a 2s HTTP timeout
+    # plus a Docker round trip on every render.
+    if core is not None and ctx["traefik"]["routers"]:
+        try:
+            services = casa_scruffy_net.fetch_traefik_services()
+            if services:
+                addresses = core("query.container_addresses", {})
+                # Services, then addresses, then services again: two reads describing the
+                # same host. A container recreated in between can hand its old address to
+                # another one, and the join would look confident and be wrong. If anything
+                # moved, this render simply has no derived links; the next one, a minute
+                # later, will.
+                if casa_scruffy_net.same_backends(services,
+                                                  casa_scruffy_net.fetch_traefik_services()):
+                    derived = casa_scruffy_net.container_urls(
+                        ctx["traefik"]["routers"], services, addresses,
+                        lan_domain=config.LAN_ONLY_DOMAIN,
+                    )
+                else:
+                    current_app.logger.info(
+                        "Traefik backends moved while reading them; no derived launch links "
+                        "this render")
+        except Exception:  # noqa: BLE001 -- see above
+            current_app.logger.warning("Could not read container addresses from core")
+    ctx["launch_urls"] = casa_scruffy_net.merge_declared_links(derived, config.LAUNCH_LINKS)
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
     ctx["adguard_stats"] = dashboard_data.summarize_adguard(ctx["adguard"])
     ctx["overview_tiles"] = dashboard_data.summarize_overview_tiles(

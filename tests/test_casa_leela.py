@@ -894,3 +894,34 @@ def test_check_backups_only_queries_enabled_jobs(monkeypatch):
     assert commands[0][:3] == ['systemctl', 'show', 'weekly-borg-backup.service']
     assert all('daily-borg-backup' not in arg for cmd in commands for arg in cmd)
     assert queried_units == ['weekly-borg-backup.service', 'weekly-borg-backup.timer']
+
+
+# ── container addresses (T46.1 gate) ────────────────────────────────────────────
+
+def test_inspect_addresses_parses_every_network_a_container_is_on(monkeypatch):
+    """CASA_TRACEARR is on two networks on the live host. Traefik can report either."""
+    inspected = ("/CASA_TRACEARR\t172.22.0.9 172.20.0.20 \n"
+                 "/CASA_VIKUNJA_DB\t172.29.0.2\n"
+                 "/CASA_HOSTNET\t\n")
+    monkeypatch.setattr(casa_leela, "_run", lambda *a, **k: (0, inspected, ""))
+    assert casa_leela._inspect_addresses(["a", "b", "c"]) == {
+        "CASA_TRACEARR": ["172.22.0.9", "172.20.0.20"],
+        "CASA_VIKUNJA_DB": ["172.29.0.2"],
+        "CASA_HOSTNET": [],
+    }
+
+
+def test_inspect_addresses_is_its_own_call_and_never_raises(monkeypatch):
+    """It is deliberately not another field on _inspect_restart_info's tab-delimited format:
+    that one drops any container whose line does not split into exactly the expected number
+    of parts, and this is scan-path code that runs unattended."""
+    monkeypatch.setattr(casa_leela, "_run", lambda *a, **k: (1, "", "Cannot connect to Docker"))
+    assert casa_leela._inspect_addresses(["a"]) == {}
+    assert casa_leela._inspect_addresses([]) == {}
+
+
+def test_a_container_with_no_addresses_still_gets_the_key(monkeypatch):
+    """Unknown must not render as absent: a host-networked container has no address here,
+    and the launch-link join has to see that rather than guess."""
+    monkeypatch.setattr(casa_leela, "_run", lambda *a, **k: (0, "/CASA_PLEX\t  \n", ""))
+    assert casa_leela._inspect_addresses(["CASA_PLEX"]) == {"CASA_PLEX": []}

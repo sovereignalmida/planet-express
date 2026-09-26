@@ -9,6 +9,7 @@ import socket
 import sqlite3
 import stat
 import struct
+import subprocess
 import threading
 import time
 import uuid
@@ -495,6 +496,22 @@ def build_core_handlers(
         _control_params(params)
         return asdict(commands.rollback(params["execution_id"], operator=params["operator"]))
 
+    # Container addresses, read fresh on every call. The dashboard joins Traefik's live
+    # backend URLs to containers by address, and both sides have to describe the same moment:
+    # taking the addresses from the 6-hourly snapshot meant a container recreated since then
+    # could hand its old address -- possibly now another container's -- to a launch link, and
+    # a confidently wrong link is worse than no link. A cache here would put that same window
+    # back, just a shorter one, so there is none: this is a `docker ps` and one batched
+    # inspect, about 0.2s for 85 containers, against a page that refreshes once a minute.
+    # The dashboard's own user has no Docker access, so core answers, the same arrangement as
+    # the canary windows and the config.
+    def container_addresses(params):
+        _params(params, {})
+        try:
+            return actions.container_addresses(timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise RpcError("host slow, retry", "timeout") from None
+
     def scan_start(params):
         """Start the same full pipeline Telegram's /check runs, and say so synchronously.
 
@@ -699,7 +716,7 @@ def build_core_handlers(
 
     handlers = {"logs.tail": logs, "approval.get": approval_get,
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
-            "scan.start": scan_start,
+            "scan.start": scan_start, "query.container_addresses": container_addresses,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
             "execution.abort": execution_abort, "execution.rollback": execution_rollback,

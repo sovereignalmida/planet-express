@@ -63,6 +63,13 @@ class SudoAllowlist(BaseModel):
 
 
 class LaunchLink(BaseModel):
+    """A launch link the operator declares because no route can be read into one honestly.
+
+    `name` is the CONTAINER name, the same key the derived links use. They were keyed by
+    Traefik service name until the join moved to the container's address, and a declared
+    link under the old key silently matched nothing.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
