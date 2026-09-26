@@ -125,3 +125,79 @@ silently dropped a route. Both were found by a reviewer, not by the suite.
 
 While the gate is unavailable, a slice may be implemented and committed with the debt recorded
 in its commit message, but T46.3 waits.
+
+---
+
+## Gate ledger
+
+| Commit | Round | Findings | Status |
+| --- | --- | --- | --- |
+| `5bc5e58` harness + deploy template | 1 | 2 (1 P1, 1 P2) | fixed in `7228984` |
+| `65bf547` launch links | 1 | 2 P1 | **open — see below** |
+| `4556424` config docs | 1 | 0 | clean |
+| `fee8041` widget registry | 1 | 2 P2 | fixed in `7228984` |
+| `7228984` those fixes | 3 | 2 (a P1 in each of the first two rounds' own fixes) | clean on round 3 |
+| `ab89b2b` approvals 503 | 1 | 0 | clean |
+
+Two rounds on `7228984` each found a P1 *inside the previous round's fix* — a validator
+added to isolate broken widgets that could itself raise. Worth remembering: a fix to an
+isolation guarantee needs the same scrutiny as the thing it isolates.
+
+## T46.1's two open P1s
+
+Both are in code that is computed and not yet consumed — `ctx["launch_urls"]` is built in
+`casa_scruffy.py` and read by no template, because T46.4 is not built. Nothing is wrong on
+the live host today. Both must be settled before T46.4 wires them up.
+
+### 1. The router-to-container join is wrong
+
+`container_urls()` keys on the router's `service` with `@provider` stripped, on the
+assumption that this is the compose service name. Measured against the live host, it is
+mostly not:
+
+| | |
+| --- | --- |
+| distinct router services | 64 |
+| join to a compose service by name | **27** |
+| do not | **37** |
+
+The name is a Traefik service label, not a compose service: router `actual` is compose
+service `actual_server`, `adguard` is `adguardhome`, `wiki` is `wiki-go`, `sabnzbd` is
+`SabNZBD` (case differs), `billarr` is `frontend`, `immich-server-media` is `immich-server`.
+Adding a `<service>-<project>` rule recovers only 5 more.
+
+Worse than the misses: compose service names are **not unique across projects**.
+`CASA_SUBWAVE_WEB` and `CASA_KARA_KEEP` are both service `web`. Keying by bare name would
+attach one service's URL to another's container — the same collision shape as T45.3's
+`api@file`.
+
+**The join that works is the container IP.** `/api/http/services` gives each service's
+`loadBalancer.servers[].url`, which for a docker-provider service is the container's own
+address. Measured on the live host: 108 container IPs, **zero claimed by more than one
+container**, and **56 of 70 enabled routers resolve to exactly one container**. The 14 that
+do not are all genuinely not container routes — the 3 `@internal`, the file-provider routes
+to other machines (opnsense `.1`, unraid `.171`, solar `.154`, adguard-secondary `.25`), and
+the host-networked services on `.94` (jellyfin, plex, qbit, planetexpress, musicassistant),
+which are exactly what the config `links:` escape hatch is for. It also drops non-container
+routes for free, which was the second half of the finding.
+
+Cost: container IPs are not collected today, so this needs a field in `casa_leela.py`'s
+inspect pass — scan-path code.
+
+### 2. The dashboard never re-reads edited config
+
+`config.LAUNCH_LINKS` is computed at import, and activation (`_reexec_core`) re-execs **core
+only**; nothing restarts `casa-dashboard`. An operator edits `links:` in the Config tab, the
+UI reports it activated, and the dashboard serves the old value until someone restarts it by
+hand.
+
+**This is not a links bug — links joined it.** `config.PAUSED_CONTAINERS` and
+`config.BACKUP_JOBS` are read at module level in `dashboard_data.py` and are stale in exactly
+the same way today. All three of `EDITABLE_FIELDS` that the dashboard reads are affected.
+
+Direction: source them from core rather than from the dashboard's own import, so the
+dashboard shows what is **enforced** rather than what merely sits on disk. That distinction
+already has teeth — the deploy template fails a release when core's loaded sha does not match
+the file, for this reason. Restarting `casa-dashboard` from core is the alternative and is
+worse: it needs sudo that core does not otherwise want, and it bounces the operator's session
+on every edit.
