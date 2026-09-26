@@ -1353,3 +1353,69 @@ def test_every_detached_tab_hides_the_empty_live_grid():
     assert "crew" in detached
     assert outside <= detached, f"these tabs render outside the live grid but are not detached: {outside - detached}"
     assert ".detached-tab #dashboard-live > .body-grid { display: none; }" in css
+
+
+# ── SCAN ────────────────────────────────────────────────────────────────────────
+
+def test_scan_posts_the_operators_identity_and_returns_cores_answer(chat_client):
+    """The button used to be <a href="/">: it said SCAN and reloaded the page."""
+    client, rpc, _, data = chat_client
+    rpc.results["scan.start"] = {"status": "started"}
+
+    response = client.post("/api/scan", data={"csrf_token": data["csrf_token"]})
+
+    assert response.status_code == 200 and response.get_json() == {"status": "started"}
+    # The device identity, never anything the browser supplied.
+    assert rpc.calls == [("scan.start", {"operator": "alice"})]
+
+
+def test_a_refusal_reaches_the_browser_rather_than_only_telegram(chat_client):
+    """Whoever pressed the button is looking at the button, not at Telegram."""
+    client, rpc, _, data = chat_client
+    rpc.results["scan.start"] = {"status": "busy", "reason": "host busy (act:abc123)"}
+
+    response = client.post("/api/scan", data={"csrf_token": data["csrf_token"]})
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "busy", "reason": "host busy (act:abc123)"}
+
+
+@pytest.mark.parametrize("token", [None, "wrong", "é"])
+def test_scan_is_refused_without_a_csrf_token(chat_client, token):
+    """CSRF is enforced for exactly the paths is_json_request() matches, so a route left out
+    of that list has no CSRF check at all. /api/scan starts a host-wide scan."""
+    client, rpc, _, _ = chat_client
+    rpc.calls.clear()
+    rpc.results["scan.start"] = {"status": "started"}
+
+    response = client.post("/api/scan", data={} if token is None else {"csrf_token": token})
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Invalid CSRF token"}
+    assert rpc.calls == []
+
+
+def test_scan_needs_a_session():
+    client, rpc, _now = make_client()
+    rpc.calls.clear()
+    response = client.post("/api/scan", data={"csrf_token": "anything"})
+    assert response.status_code == 401
+    assert rpc.calls == []
+
+
+@pytest.mark.parametrize(("code", "status", "message"), [
+    ("unavailable", 503, "Scanning is unavailable"),
+    ("bad_request", 400, "Invalid scan request"),
+    ("internal", 503, "Core unavailable; try again shortly"),
+])
+def test_a_scan_rpc_failure_answers_json_not_an_html_airlock(chat_client, code, status, message):
+    """The handler's fallback renders the airlock page. The button parses JSON, so an HTML
+    body yields null and the real reason is lost -- it would say "could not start a scan"
+    whatever actually went wrong."""
+    client, rpc, _, data = chat_client
+    rpc.results["scan.start"] = RpcError("secret diagnostic", code)
+
+    response = client.post("/api/scan", data={"csrf_token": data["csrf_token"]})
+
+    assert response.status_code == status
+    assert response.get_json() == {"error": message}

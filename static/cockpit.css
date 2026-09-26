@@ -814,6 +814,24 @@ body {
   padding: 0 12px;
 }
 
+/* SCAN is a real button now, so it has a disabled state and something to say when core
+   refuses. Both are rendered from the server's pipeline state, so a scan started from
+   Telegram dims this button too. */
+.scan-group { display: inline-flex; align-items: center; gap: 8px; }
+.topbar .scan-btn[disabled] {
+  cursor: progress; opacity: .6;
+  color: var(--pe-ink-dim); background: var(--pe-well); border-color: var(--pe-border-strong);
+}
+.topbar .scan-btn[disabled]:hover { filter: none; }
+.scan-note {
+  font-family: var(--pe-font-mono, ui-monospace, monospace);
+  font-size: 10.5px; letter-spacing: .04em; color: var(--pe-warn, #f4b942);
+  /* Wide enough for the longest real refusal ("maintenance in progress (<reason>)"); the
+     full text is on the title attribute too, because an ellipsised reason is no reason. */
+  max-width: 38ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scan-note:empty { display: none; }
+
 /* The 54px single row only fits eight tabs plus the status line and two buttons on a wide
    screen. Below that the bar wraps to two rows and the tab strip scrolls sideways, rather
    than pushing navigation off the right edge -- the old header wrapped at 640px and losing
@@ -833,6 +851,10 @@ body {
 @media (max-width: 560px) {
   .topbar { gap: 10px; }
   .header-status { order: 11; flex-basis: 100%; }
+  /* A refusal reason must not push SCAN and LOG OUT off the row on a phone; it wraps to
+     its own line instead, which is what the 54px-row lesson from T45.1 was about. */
+  .scan-group { flex-wrap: wrap; }
+  .scan-note { max-width: 100%; white-space: normal; }
 }
 
 /* ── Scan progress bar ──────────────────────────────────────────────── */

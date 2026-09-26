@@ -296,6 +296,16 @@ class OfflineRpc:
     }
 
     def __call__(self, method, params):
+        if method == "scan.start":
+            # There is no pipeline behind a preview, and pretending one started would show
+            # a SCANNING button that never finishes. The refusal path is the one with UI
+            # worth looking at anyway.
+            # PE_PREVIEW_SCAN_BUSY lets the preview rehearse a specific refusal, including
+            # the cross-client race: someone else's scan owns the slot.
+            return {"ok": True, "result": {
+                "status": "busy",
+                "reason": os.environ.get("PE_PREVIEW_SCAN_BUSY",
+                                         "core is not running (design preview)")}}
         if method == "config.get":
             return {"ok": True, "result": {
                 "text": FIXTURE_CONFIG,

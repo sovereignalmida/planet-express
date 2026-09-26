@@ -314,7 +314,8 @@ def _params(params, strings, booleans=()):
 
 
 def build_core_handlers(
-    commands: CommandService, store: Store, notifier=None, chat=None, config_service=None
+    commands: CommandService, store: Store, notifier=None, chat=None, config_service=None,
+    *, start_scan=None,
 ) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
@@ -493,6 +494,20 @@ def build_core_handlers(
     def execution_rollback(params):
         _control_params(params)
         return asdict(commands.rollback(params["execution_id"], operator=params["operator"]))
+
+    def scan_start(params):
+        """Start the same full pipeline Telegram's /check runs, and say so synchronously.
+
+        The dashboard's SCAN control was an <a href="/"> that reloaded the page: it said SCAN
+        and did not scan, and the Backups tab had a line of copy admitting it. This is the
+        method behind the real one.
+        """
+        auth_params(params)
+        if params["operator"] == "?":
+            raise RpcError("Invalid operator", "bad_request")
+        if start_scan is None:
+            raise RpcError("Scanning is unavailable", "unavailable")
+        return start_scan(params["operator"])
 
     def incident_params(params, *, item=False, operator=False):
         expected = {"incident_id"} if item else {"status", "limit"}
@@ -684,6 +699,7 @@ def build_core_handlers(
 
     handlers = {"logs.tail": logs, "approval.get": approval_get,
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
+            "scan.start": scan_start,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
             "execution.abort": execution_abort, "execution.rollback": execution_rollback,

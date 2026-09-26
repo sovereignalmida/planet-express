@@ -4,8 +4,8 @@
 // a <meta http-equiv="refresh"> reload blanks the whole page and repaints from scratch,
 // which reads as a jarring full-screen flash. Fetching the same URL and replacing just
 // #dashboard-live's contents keeps the browser tab/scroll/focus alive and never blanks.
-// "Approve" is a plain link to Telegram, not JS-driven -- this dashboard has no route
-// to actually approve anything.
+// Approvals and SCAN are driven from here against /api/*; the claim that this dashboard
+// "has no route to actually approve anything" was true before approvals.js existed.
 (function () {
   "use strict";
 
@@ -46,6 +46,15 @@
   // Everything in here binds to DOM nodes -- must re-run after every refresh swap
   // (fresh nodes from the fetched HTML have no listeners of their own yet).
   function bindInteractions() {
+    var scanBtn = document.getElementById("scan-btn");
+    if (scanBtn && !scanBtn.disabled) {
+      scanBtn.addEventListener("click", function () { startScan(scanBtn); });
+    }
+    // A scan already in flight when this swap landed -- started here, from Telegram, or by
+    // the scheduler -- keeps the fast poll going until the server says it is over.
+    if (scanning()) pollWhileScanning();
+    else scanPollTries = 0;             // a finished scan gives the next one a full budget
+
     document.querySelectorAll(".tab").forEach(function (btn) {
       btn.addEventListener("click", function () {
         setActiveTab(btn.dataset.tab);
@@ -356,6 +365,120 @@
 
     document.addEventListener("visibilitychange", visibilityChanged);
     visibilityChanged();
+  }
+
+  // ── SCAN ────────────────────────────────────────────────────────────────────
+  // The button was <a href="/">: it said SCAN and reloaded the page. It now posts to
+  // /api/scan, which runs the same full pipeline Telegram's /check runs.
+  //
+  // The server owns "is a scan running": the button's disabled state is rendered from
+  // ctx.pipeline_status.state, and a refresh swap is what gives the button back. The client
+  // is optimistic only for the seconds between the click and the next swap, so a scan
+  // started from Telegram (or by the scheduler) disables this button too.
+  var SCAN_POLL_MS = 5000;
+  var SCAN_POLL_LIMIT = 120;          // 10 minutes, then the ordinary 60s poll takes over
+  var scanPolling = false;
+  // Budget per SCAN, not per chain: it survives the refreshes that restart the chain, and
+  // resets when the pipeline goes idle. Counted in the chain alone it was no limit at all --
+  // the ordinary 60s refresh calls bindInteractions() -> pollWhileScanning(), which would
+  // hand a stuck scan a fresh ten minutes every minute, for ever.
+  var scanPollTries = 0;
+
+  function scanNote(text) {
+    var note = document.getElementById("scan-note");
+    if (!note) return;
+    note.textContent = text || "";
+    // The reason is the point of the note, so it is never only the truncated version.
+    if (text) note.title = text; else note.removeAttribute("title");
+  }
+
+  function scanning() {
+    var btn = document.getElementById("scan-btn");
+    return !!(btn && btn.dataset.scanning);
+  }
+
+  // A running scan is worth watching at 5s rather than 60s. Exactly one chain: the flag stays
+  // set for the whole life of the chain, including while a refresh is in flight, because each
+  // refresh calls bindInteractions() -> pollWhileScanning() and a flag cleared any earlier
+  // would let that start a second chain, then a third, doubling on every poll.
+  function pollWhileScanning() {
+    if (scanPolling || scanPollTries >= SCAN_POLL_LIMIT) return;
+    scanPolling = true;
+    (function tick() {
+      window.setTimeout(function () {
+        if (++scanPollTries >= SCAN_POLL_LIMIT) {
+          // A scan this long is stuck or is doing something unusual; the ordinary 60s
+          // refresh is enough to notice when it finally ends.
+          scanPolling = false;
+          return;
+        }
+        Promise.resolve(refreshDashboard()).then(function () {
+          if (scanning()) tick();
+          else scanPollingEnded();
+        });
+      }, SCAN_POLL_MS);
+    })();
+  }
+
+  function scanPollingEnded() {
+    scanPolling = false;
+    scanPollTries = 0;
+  }
+
+  function startScan(btn) {
+    btn.disabled = true;
+    btn.textContent = "SCANNING…";
+    btn.dataset.scanning = "1";
+    scanNote("");
+    var body = new URLSearchParams({ csrf_token: csrfToken() });
+    fetch("/api/scan", { method: "POST", body: body, cache: "no-store" })
+      .then(function (r) { return r.json().catch(function () { return null; }); })
+      .then(function (result) {
+        if (result && result.status === "started") {
+          scanPollingEnded();           // this scan is ours and starts on a full budget
+          pollWhileScanning();
+          return;
+        }
+        // Busy, refused, or an error: hand the button back and say why. Core answers this
+        // synchronously precisely so the person who clicked does not have to go and look
+        // in Telegram to find out nothing happened.
+        refused((result && (result.reason || result.error)) || "could not start a scan");
+      })
+      .catch(function () {
+        refused("core unreachable");
+      });
+  }
+
+  function releaseScanButton() {
+    var btn = document.getElementById("scan-btn");
+    if (!btn) return;
+    btn.disabled = false;
+    btn.textContent = "SCAN ✈";
+    delete btn.dataset.scanning;
+  }
+
+  // A refusal is not necessarily "nothing is happening". Someone else -- Telegram, the
+  // scheduler, another browser -- may have taken the slot after this page was rendered, and
+  // then the honest button is SCANNING, not SCAN with a note beside it. The server owns that
+  // answer, so ask it: on a running scan the button re-renders disabled and the note comes
+  // off, because the button is already the explanation. The note is set twice on purpose,
+  // once for immediate feedback and once after the swap, which replaces the header.
+  function refused(reason) {
+    releaseScanButton();
+    scanNote(reason);
+    Promise.resolve(refreshDashboard()).then(function () {
+      if (scanning()) {
+        scanNote("");
+        pollWhileScanning();
+      } else {
+        scanNote(reason);
+      }
+    });
+  }
+
+  function csrfToken() {
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.content : "";
   }
 
   function refreshDashboard() {
