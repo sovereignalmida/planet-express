@@ -110,6 +110,29 @@ def _spawn_daemon(fn: Callable, *args) -> None:
     threading.Thread(target=fn, args=args, daemon=True, name="typed-action").start()
 
 
+def row_summary(row: dict) -> str:
+    """A human summary of a stored approval that never raises: startup reconciliation and the
+    dashboard read rows whose action may not be a legacy typed action (planner runbooks, a
+    rehearsal) — an assumption here crashed core at startup on the VM (T39 rehearsal).
+
+    Module level, and the only summary rule there is. `actions.action_summary()` answers for the
+    legacy typed actions alone and raises KeyError on anything else; the RPC layer called it
+    directly and one planner runbook approval — which has a title and no `stack` — 503'd
+    /api/approvals on every poll, so no plan could be seen or approved in the dashboard at all
+    (2026-09-26, the gluetun port-forward plan). Every caller shaping a stored row for a human
+    comes through here.
+    """
+    if row.get("action") in engine.LEGACY_STEP_TYPES:
+        try:
+            return actions.action_summary(row["action"], json.loads(row["target_json"]))
+        except Exception:  # noqa: BLE001 -- fall through to the plan's own title
+            log.debug("Legacy summary unavailable for %s", row.get("id"))
+    try:
+        return str(json.loads(row["plan_json"])["title"])[:200]
+    except Exception:  # noqa: BLE001
+        return str(row.get("action") or "typed action")
+
+
 class CommandService:
     def __init__(
         self,
@@ -1106,20 +1129,7 @@ class CommandService:
                                          decision.reason)
         return policy.decide(row["action"])
 
-    @staticmethod
-    def _row_summary(row: dict) -> str:
-        """A human summary of a stored approval that never raises: startup reconciliation and the
-        dashboard read rows whose action may not be a legacy typed action (planner runbooks, a
-        rehearsal) — an assumption here crashed core at startup on the VM (T39 rehearsal)."""
-        if row.get("action") in engine.LEGACY_STEP_TYPES:
-            try:
-                return actions.action_summary(row["action"], json.loads(row["target_json"]))
-            except Exception:  # noqa: BLE001 -- fall through to the plan's own title
-                log.debug("Legacy summary unavailable for %s", row.get("id"))
-        try:
-            return str(json.loads(row["plan_json"])["title"])[:200]
-        except Exception:  # noqa: BLE001
-            return str(row.get("action") or "typed action")
+    _row_summary = staticmethod(row_summary)
 
     @classmethod
     def _row_label(cls, row: dict) -> str:

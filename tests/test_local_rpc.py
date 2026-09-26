@@ -1137,3 +1137,68 @@ def test_canary_candidates_reports_open_windows_for_the_dashboard(tmp_path):
     assert rows[0]["expires_at"] == "when a human closes it"   # a failed inverse, held open
     with pytest.raises(RpcError):
         handlers["canary.candidates"]({"unexpected": 1})
+
+
+# ── the summary of a stored approval ────────────────────────────────────────────
+
+# The exact row that took /api/approvals down on 2026-09-26. A planner runbook's target is a
+# title and a list of finding ids; it has no `stack`, and actions.action_summary() -- which
+# answers for the legacy typed actions only -- raised KeyError on it. One such row 503'd the
+# whole endpoint on every poll, so no plan could be seen or approved in the dashboard at all,
+# and because a decided approval stays in approval.list_recent the tab never came back.
+LIVE_RUNBOOK_ROW = {
+    "id": "e18b793262d5", "action": "runbook", "target_key": "plan:b2168857b9b92a17",
+    "target_json": '{"finding_ids": ["f1"], "title": "Resync Gluetun dead port-forwarding '
+                   'and verify qBittorrent reachability"}',
+    "plan_json": '{"title": "Resync Gluetun dead port-forwarding and verify qBittorrent '
+                 'reachability", "steps": []}',
+    "risk": "R1", "status": "pending", "requested_via": "planner", "origin": "planner",
+    "message_id": 7,
+}
+
+
+def test_a_planner_runbook_is_listed_rather_than_bringing_the_endpoint_down():
+    commands, store = Mock(), Mock()
+    store.list_pending.return_value = [dict(LIVE_RUNBOOK_ROW)]
+    handlers = build_core_handlers(commands, store)
+
+    listed = handlers["proposal.list_pending"]({})
+
+    assert len(listed) == 1
+    assert listed[0]["summary"] == ("Resync Gluetun dead port-forwarding and verify "
+                                    "qBittorrent reachability")
+    assert listed[0]["target"] == {"finding_ids": ["f1"], "title": listed[0]["summary"]}
+    # No spec in the legacy registry must not mean no card.
+    assert listed[0]["capabilities"] == {}
+    assert "message_id" not in listed[0]
+
+
+def test_a_decided_runbook_does_not_brick_the_recent_list():
+    """The second half of the same outage: once approved, the row moves to list_recent, which
+    shaped it the same way. With four approvals against a limit of 20 it never aged out."""
+    commands, store = Mock(), Mock()
+    decided = dict(LIVE_RUNBOOK_ROW, status="approved", decided_by="@LIFEonBTC (1669424666)",
+                   execution_id="563d61255474", execution_status="passed",
+                   started_at=1.0, finished_at=2.0, reason="found 'New : 33492'")
+    store.list_recent_approvals.return_value = [decided]
+    handlers = build_core_handlers(commands, store)
+
+    recent = handlers["approval.list_recent"]({"limit": 20})
+
+    assert recent[0]["summary"].startswith("Resync Gluetun")
+    assert recent[0]["status"] == "approved"
+
+
+@pytest.mark.parametrize("action", [*rpc_module.actions.REGISTRY, "runbook", "not.an.action"])
+def test_every_action_summarises_without_raising(action):
+    """A summary is display text. No action name, and no target shape, may ever be able to
+    take the approvals list down with it."""
+    commands, store = Mock(), Mock()
+    store.list_pending.return_value = [{
+        "id": "a" * 12, "action": action, "target_json": "{}", "plan_json": None,
+    }]
+    handlers = build_core_handlers(commands, store)
+
+    summary = handlers["proposal.list_pending"]({})[0]["summary"]
+
+    assert isinstance(summary, str) and summary

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import config
-from planet_express.application.command_service import CommandService
+from planet_express.application.command_service import CommandService, row_summary
 from planet_express.core.store import INDEFINITE_EXPIRY, Store
 from planet_express.execution import actions
 from telegram_client import TelegramClient
@@ -398,8 +398,11 @@ def build_core_handlers(
     def approval_shape(row):
         item = dict(row)
         item.pop("message_id", None)
+        # row_summary(), not actions.action_summary(): the latter answers for legacy typed
+        # actions only and raises on a planner runbook, which 503'd this whole endpoint.
+        # Called before target_json is popped, because that is what it reads.
+        item["summary"] = row_summary(item)
         item["target"] = json.loads(item.pop("target_json"))
-        item["summary"] = actions.action_summary(item["action"], item["target"])
         spec = actions.REGISTRY.get(item["action"])
         item["capabilities"] = spec.capabilities() if spec else {}
         if item.get("status") == "denied":
@@ -455,8 +458,8 @@ def build_core_handlers(
         for row in store.list_pending():
             item = dict(row)
             item.pop("message_id", None)
+            item["summary"] = row_summary(item)
             item["target"] = json.loads(item.pop("target_json"))
-            item["summary"] = actions.action_summary(item["action"], item["target"])
             spec = actions.REGISTRY.get(item["action"])
             item["capabilities"] = spec.capabilities() if spec else {}
             result.append(item)
