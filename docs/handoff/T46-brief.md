@@ -201,3 +201,53 @@ already has teeth — the deploy template fails a release when core's loaded sha
 the file, for this reason. Restarting `casa-dashboard` from core is the alternative and is
 worse: it needs sudo that core does not otherwise want, and it bounces the operator's session
 on every edit.
+
+---
+
+## Status, 2026-09-26 evening
+
+v2.1.1 is deployed and verified. Since then, on `main`:
+
+| | |
+| --- | --- |
+| `ab89b2b` | the approvals 503 (shipped in v2.1.1) |
+| `7228984` | four gate findings from T45.5/T46.2 |
+| `dbd849a` | **SCAN scans** — the header button was `<a href="/">` |
+| `bb4d871` | the VPN sensor alerts on stuck, not on rotating |
+| `46ab9bf` | T46.1's join rewritten onto the container address |
+
+### Scan on demand
+
+Chris asked for it mid-v2.2 and chose the full pipeline, the same one Telegram's
+`/check` runs, so SCAN means one thing wherever it is pressed. `admit_pipeline_run()`
+now answers synchronously — run_pipeline could only report a refusal by sending a
+Telegram message, which is no use to someone holding a mouse button.
+
+### The VPN sensor
+
+The alert Chris approved on 2026-09-26 was a true positive about a condition that
+fixes itself. ProtonVPN rotates the forwarded port every 2h; a refused NAT-PMP renewal
+(7 of 24 over 48h) leaves it empty until the next cycle. The check now asks gluetun's
+log how long the port has actually been gone. Replayed over the real 48h: 0 alerts,
+where the shipped version alerted on all 6 gaps.
+
+**The first attempt was wrong and the gate killed it.** Carrying an "unhealthy since"
+timestamp between scans cannot establish continuity: all three of 2026-09-26's samples
+were unhealthy, but gluetun held a port for hours between them. It would have alerted
+claiming six continuous portless hours that never happened — and the test only passed
+because it inserted healthy scans the real scheduler never performs. Worth remembering:
+a fixture that makes the sensor look right is the same defect as a tile that does.
+
+### What is left
+
+| Slice | State |
+| --- | --- |
+| T46.1 join | done, **last gate round owed** (quota, resets 09-27 00:58) |
+| T46.2 registry | done and gated |
+| **T46.3 fetcher** | **not started — the one security surface, must not land unreviewed** |
+| T46.4 links in the UI | not started; `ctx["launch_urls"]` is built and read by no template |
+| T46.5 widget frame | not started |
+| T46.6 retire homepage | not started |
+
+Also owed: the `links:` contract changed to container names, so the live config's
+eventual entries must use `CASA_*`, not service names.
