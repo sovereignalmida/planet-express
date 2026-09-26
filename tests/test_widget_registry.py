@@ -191,3 +191,146 @@ def test_a_widget_file_without_the_contract_is_skipped_quietly(tmp_path):
         assert "zz_partial_fixture" not in registry.load_widgets()
     finally:
         partial.unlink()
+
+
+# ── the contract is checked at load, not discovered at request time ─────────────
+
+SUMMARISE = "\ndef summarise(r): return {}\n"
+
+
+@pytest.mark.parametrize(("name", "body"), [
+    ("zz_match_none", "WIDGET = {'name': 'x', 'match': None, 'port': 1, 'get': ['/a']}" + SUMMARISE),
+    ("zz_match_empty", "WIDGET = {'name': 'x', 'match': [], 'port': 1, 'get': ['/a']}" + SUMMARISE),
+    ("zz_no_port", "WIDGET = {'name': 'x', 'match': ['a/b'], 'get': ['/a']}" + SUMMARISE),
+    ("zz_bool_port", "WIDGET = {'name': 'x', 'match': ['a/b'], 'port': True, 'get': ['/a']}" + SUMMARISE),
+    ("zz_escaping_path", "WIDGET = {'name': 'x', 'match': ['a/b'], 'port': 1, 'get': ['/../etc']}" + SUMMARISE),
+    ("zz_absolute_url", "WIDGET = {'name': 'x', 'match': ['a/b'], 'port': 1, 'get': ['http://evil/x']}" + SUMMARISE),
+    ("zz_no_summarise", "WIDGET = {'name': 'x', 'match': ['a/b'], 'port': 1, 'get': ['/a']}\n"),
+])
+def test_a_malformed_contract_is_skipped_at_load(name, body):
+    """Importing cleanly is not the same as being usable. match=None iterates fine at import
+    and raises TypeError inside match_widget(), which runs once per container in the
+    dashboard's request path — so one bad declaration would take the whole page down."""
+    from planet_express import widgets as package
+
+    path = Path(package.__path__[0]) / f"{name}.py"
+    path.write_text(body)
+    try:
+        loaded = registry.load_widgets()
+        assert name not in loaded
+        assert "x" not in loaded
+        assert "sonarr" in loaded          # the healthy ones still load
+        # And the matcher still answers for every container, which is the point.
+        assert registry.match_widget("a/b", widgets=loaded) is None
+        assert registry.match_widget("lscr.io/linuxserver/sonarr", widgets=loaded)["name"] == "sonarr"
+    finally:
+        path.unlink()
+
+
+def test_every_shipped_widget_says_how_the_fetcher_authenticates():
+    """`key: "SOME_VAR"` could not express the difference between a header and basic auth,
+    so it said nothing useful to the fetcher that has to make the request."""
+    for name, widget in registry.load_widgets().items():
+        auth = widget.get("auth")
+        assert isinstance(auth, dict), f"{name} declares no auth"
+        if auth["type"] == "header":
+            assert auth["header"] and auth["env"], name
+        elif auth["type"] == "basic":
+            assert auth["username_env"] and auth["password_env"], name
+        else:
+            raise AssertionError(f"{name}: unknown auth type {auth['type']!r}")
+
+
+def test_adguard_asks_for_the_credentials_this_host_actually_has():
+    """config.adguard_credentials() reads ADGUARD_USERNAME and ADGUARD_PASSWORD from
+    /etc/planetexpress-dashboard.env. A widget naming anything else reads as "not
+    configured" on a host that is configured."""
+    import config
+
+    auth = registry.load_widgets()["adguard"]["auth"]
+    assert (auth["username_env"], auth["password_env"]) == ("ADGUARD_USERNAME", "ADGUARD_PASSWORD")
+    assert config.adguard_credentials() == (
+        os.environ.get("ADGUARD_USERNAME", ""), os.environ.get("ADGUARD_PASSWORD", ""))
+
+
+def test_adguard_is_declared_on_the_port_a_configured_install_answers_on():
+    """80, not 3000: 3000 is AdGuard's first-run setup port. Traefik routes this host's
+    AdGuard to 172.20.0.4:80."""
+    assert registry.load_widgets()["adguard"]["port"] == 80
+
+
+@pytest.mark.parametrize(("name", "auth"), [
+    ("zz_auth_not_a_dict", "'auth': 'X-Api-Key'"),
+    ("zz_auth_unknown_type", "'auth': {'type': 'oauth', 'env': 'X'}"),
+    ("zz_auth_no_type", "'auth': {'env': 'X'}"),
+    ("zz_auth_header_no_env", "'auth': {'type': 'header', 'header': 'X-Api-Key'}"),
+    ("zz_auth_header_blank_env", "'auth': {'type': 'header', 'header': 'X-Api-Key', 'env': '  '}"),
+    ("zz_auth_basic_half", "'auth': {'type': 'basic', 'username_env': 'U'}"),
+    ("zz_auth_basic_misspelt", "'auth': {'type': 'basic', 'username_env': 'U', 'passwrd_env': 'P'}"),
+])
+def test_an_auth_block_the_fetcher_could_not_act_on_is_skipped(name, auth):
+    """auth is part of the contract now, so it is validated with the rest of it. A widget
+    whose credentials cannot be turned into a request is broken, not unauthenticated."""
+    from planet_express import widgets as package
+
+    path = Path(package.__path__[0]) / f"{name}.py"
+    path.write_text(
+        "WIDGET = {'name': 'x', 'match': ['a/b'], 'port': 1, 'get': ['/a'], " + auth + "}" + SUMMARISE)
+    try:
+        loaded = registry.load_widgets()
+        assert "x" not in loaded and name not in loaded
+        assert "sonarr" in loaded
+    finally:
+        path.unlink()
+
+
+def test_a_widget_needing_no_credentials_is_allowed():
+    """Plenty of APIs need no auth. Absent is fine; malformed is not."""
+    from planet_express import widgets as package
+
+    path = Path(package.__path__[0]) / "zz_no_auth.py"
+    path.write_text("WIDGET = {'name': 'zz_no_auth', 'match': ['a/b'], 'port': 1, 'get': ['/a']}"
+                    + SUMMARISE)
+    try:
+        assert "zz_no_auth" in registry.load_widgets()
+    finally:
+        path.unlink()
+
+
+@pytest.mark.parametrize("auth", [
+    "'auth': {'type': []}",                      # unhashable: _AUTH_FIELDS.get() raises on it
+    "'auth': {'type': {'a': 1}}",
+    "'auth': {'type': 0}",
+])
+def test_an_auth_type_that_is_not_even_a_string_is_skipped(auth):
+    """The validator runs in the dashboard's request path, so it must not be the thing that
+    raises. A dict key lookup on an unhashable value is a TypeError, not a None."""
+    from planet_express import widgets as package
+
+    path = Path(package.__path__[0]) / "zz_auth_unhashable.py"
+    path.write_text(
+        "WIDGET = {'name': 'x', 'match': ['a/b'], 'port': 1, 'get': ['/a'], " + auth + "}" + SUMMARISE)
+    try:
+        loaded = registry.load_widgets()
+        assert "x" not in loaded
+        assert "sonarr" in loaded
+    finally:
+        path.unlink()
+
+
+def test_a_contract_broken_in_a_way_the_validator_never_anticipated_costs_one_panel():
+    """Belt and braces: the isolation guarantee must not rest on the validator being
+    exhaustive, so _validated() itself is wrapped the same way the import is."""
+    from planet_express import widgets as package
+
+    path = Path(package.__path__[0]) / "zz_hostile.py"
+    path.write_text(
+        "class Hostile(dict):\n"
+        "    def get(self, *a, **k): raise RuntimeError('boom')\n"
+        "WIDGET = Hostile(name='x', match=['a/b'], port=1, get=['/a'])\n" + SUMMARISE)
+    try:
+        loaded = registry.load_widgets()
+        assert "x" not in loaded
+        assert "sonarr" in loaded and "adguard" in loaded
+    finally:
+        path.unlink()

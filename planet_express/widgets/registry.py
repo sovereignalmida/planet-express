@@ -65,11 +65,79 @@ def load_widgets() -> dict:
             log.warning("Skipping widget module %s: it failed to import", module.name,
                         exc_info=True)
             continue
-        widget = getattr(spec, "WIDGET", None)
-        if not isinstance(widget, dict) or not widget.get("name"):
+        try:
+            widget = _validated(module.name, getattr(spec, "WIDGET", None),
+                                getattr(spec, "summarise", None))
+        except Exception:
+            # The validator runs in the request path too, so it gets the same treatment as
+            # the import: a declaration malformed in a way it did not anticipate costs its
+            # own panel. The guarantee cannot rest on the checker being exhaustive.
+            log.warning("Skipping widget module %s: its contract could not be validated",
+                        module.name, exc_info=True)
             continue
-        found[widget["name"]] = {**widget, "summarise": getattr(spec, "summarise", None)}
+        if widget is not None:
+            found[widget["name"]] = widget
     return found
+
+
+# The shapes the fetcher knows how to turn into a request, and the fields each one needs.
+# A widget may declare no auth at all -- plenty of APIs need none -- but a declaration the
+# fetcher cannot act on is a broken widget, not an unauthenticated one.
+_AUTH_FIELDS = {"header": ("header", "env"), "basic": ("username_env", "password_env")}
+
+
+def _auth_problem(auth) -> str | None:
+    if auth is None:
+        return None
+    if not isinstance(auth, dict):
+        return "auth must be a dict"
+    kind = auth.get("type")
+    # isinstance before the lookup: `{"type": []}` is unhashable and .get() raises TypeError
+    # on it rather than returning None.
+    required = _AUTH_FIELDS.get(kind) if isinstance(kind, str) else None
+    if required is None:
+        return f"unknown auth type {kind!r}"
+    missing = [field for field in required
+               if not isinstance(auth.get(field), str) or not auth[field].strip()]
+    return f"auth {auth['type']} is missing {', '.join(missing)}" if missing else None
+
+
+def _validated(module_name: str, widget, summarise) -> dict | None:
+    """A widget with a malformed contract is skipped here, not discovered later.
+
+    Importing cleanly is not the same as being usable: `match: None` iterates fine at import
+    and then raises TypeError inside match_widget(), which runs once per container in the
+    dashboard's request path -- so one bad declaration would take the whole page down, which
+    is the exact opposite of the per-widget isolation this module promises. Every field the
+    matcher and the fetcher will read is checked once, here, where the cost is one skipped
+    panel.
+    """
+    if not isinstance(widget, dict):
+        return None
+    name = widget.get("name")
+    match = widget.get("match")
+    paths = widget.get("get")
+    problem = None
+    if not isinstance(name, str) or not name.strip():
+        problem = "no usable name"
+    elif not isinstance(match, (list, tuple)) or not match or not all(
+            isinstance(entry, str) and entry.strip() for entry in match):
+        problem = "match must be a non-empty list of image strings"
+    elif not isinstance(widget.get("port"), int) or isinstance(widget.get("port"), bool):
+        problem = "port must be an int"
+    elif not isinstance(paths, (list, tuple)) or not paths or not all(
+            isinstance(path, str) and path.startswith("/")
+            and "://" not in path and ".." not in path for path in paths):
+        problem = "get must be a non-empty list of rooted paths"
+    elif not callable(summarise):
+        problem = "no summarise()"
+    else:
+        problem = _auth_problem(widget.get("auth"))
+    if problem is not None:
+        log.warning("Skipping widget module %s: %s", module_name, problem)
+        return None
+    return {**widget, "name": name, "match": list(match), "get": list(paths),
+            "summarise": summarise}
 
 
 def match_widget(image: str, *, label: str | None = None, widgets: dict | None = None):

@@ -3,10 +3,16 @@
 WIDGET = {
     "name": "adguard",
     "match": ["adguard/adguardhome"],
-    # AdGuard uses basic auth rather than an API key; the fetcher reads both halves from the
-    # host secrets file under this prefix.
-    "key": "ADGUARD_CREDENTIALS",
-    "port": 3000,
+    # AdGuard answers on :80 once it is set up. 3000 is the first-run setup port, exposed by
+    # the image and wrong for every configured install -- Traefik routes this host's AdGuard
+    # to 172.20.0.4:80.
+    "port": 80,
+    # Basic auth, and the two halves the dashboard already has: config.adguard_credentials()
+    # reads exactly these from /etc/planetexpress-dashboard.env. An earlier draft named a
+    # single ADGUARD_CREDENTIALS variable that does not exist anywhere, which would have read
+    # as "not configured" on a host that is configured.
+    "auth": {"type": "basic", "username_env": "ADGUARD_USERNAME",
+             "password_env": "ADGUARD_PASSWORD"},
     "get": ["/control/stats"],
 }
 

@@ -104,9 +104,13 @@ rollback() {
 }
 
 # Dashboard first. See the rule above.
+# The trap is armed BEFORE the stop, not after: `systemctl stop` takes two units, and if it
+# failed having stopped only one, set -e exited with production down and no rollback to bring
+# it back. At this point rollback resets to $BACKUP -- which is still HEAD -- and starts both
+# units, which is exactly the right thing to do.
 info "stopping casa-dashboard, then casa-planetexpress"
-sudo systemctl stop casa-dashboard casa-planetexpress
 trap rollback ERR
+sudo systemctl stop casa-dashboard casa-planetexpress
 
 info "checking out $TAG and replaying the host-only commit"
 git reset -q --hard "$TAG"
@@ -119,8 +123,15 @@ sudo systemctl start casa-planetexpress casa-dashboard
 sleep 12
 [[ "$(systemctl is-active casa-planetexpress)" == active ]] || { bad "core not active"; false; }
 [[ "$(systemctl is-active casa-dashboard)" == active ]] || { bad "dashboard not active"; false; }
-if sudo journalctl -u casa-planetexpress -u casa-dashboard --since "-20s" --no-pager | grep -q "CRITICAL\|Traceback\|Invalid config"; then
-    bad "errors in the journal:"; sudo journalctl -u casa-planetexpress -u casa-dashboard --since "-20s" --no-pager | tail -20; false
+# Read the journal ONCE into a variable, and fail if the read itself failed. As a pipeline
+# inside `if`, set -e does not apply: journalctl exiting nonzero -- sudo credentials timed
+# out, journald unavailable -- fed grep nothing, grep found nothing, and the script printed
+# "journal clean" about a journal it had never read. Same class as the verify steps that only
+# echoed.
+JOURNAL="$(sudo journalctl -u casa-planetexpress -u casa-dashboard --since "-20s" --no-pager)" \
+    || { bad "could not read the journal, so 'clean' is not something this script can claim"; false; }
+if grep -q "CRITICAL\|Traceback\|Invalid config" <<<"$JOURNAL"; then
+    bad "errors in the journal:"; tail -20 <<<"$JOURNAL"; false
 fi
 ok "core and dashboard active, journal clean"
 

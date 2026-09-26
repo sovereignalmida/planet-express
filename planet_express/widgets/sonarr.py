@@ -6,8 +6,11 @@ WIDGET = {
     # alternatives. normalise_image() strips the registry, so one entry covers lscr.io,
     # ghcr.io and the bare docker.io form.
     "match": ["linuxserver/sonarr", "hotio/sonarr"],
-    "key": "SONARR_API_KEY",
     "port": 8989,
+    # How the fetcher authenticates, said explicitly rather than left to a convention:
+    # Sonarr takes its key in a header, AdGuard takes basic auth, and a widget that only
+    # named "a key" could not express the difference.
+    "auth": {"type": "header", "header": "X-Api-Key", "env": "SONARR_API_KEY"},
     "get": ["/api/v3/queue", "/api/v3/wanted/missing", "/api/v3/series", "/api/v3/health"],
 }
 
