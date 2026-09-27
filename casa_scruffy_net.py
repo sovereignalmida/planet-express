@@ -9,7 +9,6 @@ Network tab instead of taking down the whole dashboard.
 
 import logging
 import re
-from urllib.parse import urlparse
 
 import requests
 import urllib3
@@ -72,36 +71,6 @@ def fetch_traefik_routers() -> dict:
     except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
         log.warning(f"Traefik router fetch failed: {e}")
         return {"available": False, "routers": []}
-
-
-def fetch_traefik_services() -> list[dict]:
-    """Each enabled service's name, provider and backend hosts. Best-effort like the rest of
-    this module: an empty list costs launch links, never the page."""
-    try:
-        resp = requests.get(_TRAEFIK_SERVICES_API, timeout=_TIMEOUT)
-        resp.raise_for_status()
-        payload = resp.json()
-        if not isinstance(payload, list):
-            raise TypeError(f"expected a list of services, got {type(payload).__name__}")
-        services = []
-        for item in payload:
-            if not isinstance(item, dict) or item.get("status") != "enabled":
-                continue
-            balancer = item.get("loadBalancer")
-            servers = balancer.get("servers") if isinstance(balancer, dict) else None
-            hosts = []
-            for server in servers or []:
-                url = server.get("url") if isinstance(server, dict) else None
-                host = urlparse(url).hostname if isinstance(url, str) else None
-                if host:
-                    hosts.append(host)
-            services.append({"name": item.get("name", "?"),
-                             "provider": item.get("provider", "?"),
-                             "hosts": hosts})
-        return services
-    except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
-        log.warning(f"Traefik service fetch failed: {e}")
-        return []
 
 
 def fetch_adguard_stats() -> dict:
@@ -290,6 +259,36 @@ def _rule_is_host_only(rule: str) -> bool:
     return remainder.strip() == ""
 
 
+def same_routes(before: list, after: list) -> bool:
+    """Did every router's rule, status and entrypoints stay put between two reads of Traefik?
+
+    The join reads the routers, then asks core which container declares each one. Those are
+    two moments, and a rule that changed between them would pair one host with another
+    container -- a link that looks confident and points somewhere wrong. Reading the routers
+    again afterwards makes that observable.
+
+    What this deliberately does NOT catch is a router moving between containers while keeping
+    its name, rule, status, service and entrypoints: both Traefik reads then look identical
+    while the label read already names the new owner, and the link sits on the incoming
+    container's card for one refresh while Traefik finishes the handover.
+
+    Closing that would mean comparing the containers' own rule label VALUES against Traefik's,
+    which needs the full label blob -- ~111KB across this host's 85 containers -- on every
+    render, rather than the keys this reads now. Declined knowingly, because the residual
+    error is the benign half of the race: the URL is derived from the ROUTE, so it is the
+    same URL either way, on the right hostname, and only the card it sits on is briefly ahead
+    of Traefik. The two paths that could produce a genuinely WRONG url -- a rule that changed
+    between the reads, and an owner inferred rather than declared -- are both closed above.
+    """
+    def shape(routers):
+        return {str(r.get("name")): (str(r.get("rule")), str(r.get("status")),
+                                     str(r.get("service")),
+                                     tuple(r.get("entry_points") or []))
+                for r in routers or [] if isinstance(r, dict)}
+
+    return shape(before) == shape(after)
+
+
 def router_links(router: dict, *, lan_domain: str) -> list[dict]:
     """[{"href", "zone"}] for one router, or [] when no URL can be read from it honestly.
 
@@ -320,78 +319,38 @@ def router_links(router: dict, *, lan_domain: str) -> list[dict]:
     return links
 
 
-def same_backends(before: list, after: list) -> bool:
-    """Did every service's backend set stay put between two reads of Traefik?
-
-    The join reads Traefik's services, then the container addresses. Those are two moments,
-    and between them a container can be recreated and its old address handed to another one
-    -- at which point exactly one container claims it, the join looks confident, and the link
-    lands on the wrong card. Reading the services again afterwards turns that into something
-    observable: if nothing moved, the addresses describe the same host the services did.
-    """
-    def shape(services):
-        return {str(item.get("name")): sorted(str(host) for host in item.get("hosts") or [])
-                for item in services or [] if isinstance(item, dict)}
-
-    return shape(before) == shape(after)
-
-
-def service_containers(services: list, addresses: dict) -> dict[str, str]:
-    """{"<service>@<provider>": container name}, for services backed by exactly one container.
-
-    The join is the backend IP. Traefik's docker provider points a service at the container's
-    own address, so that address is the only reliable way back from a route to the container
-    serving it. Measured on the live host: 108 container IPs with none shared, and 56 of 70
-    enabled routers resolving to exactly one container. The 14 that do not are genuinely not
-    container routes -- Traefik's own @internal ones, and file-provider routes to other
-    machines or to host-networked services, which is what the config `links:` escape hatch is
-    for.
-
-    The router's service NAME cannot do this job. It is a Traefik label: on this host it
-    matches a compose service for 27 of 64 routers (`actual` is compose service
-    `actual_server`, `adguard` is `adguardhome`, `wiki` is `wiki-go`, `sabnzbd` is
-    `SabNZBD`), and compose service names are not unique across projects either --
-    CASA_SUBWAVE_WEB and CASA_KARA_KEEP are both service `web`, so keying on the name would
-    hang one service's URL on another's container.
-    """
-    by_ip: dict[str, list[str]] = {}
-    for name, ips in (addresses or {}).items():
-        if not name or not isinstance(ips, (list, tuple)):
-            continue
-        for ip in ips:
-            by_ip.setdefault(str(ip), []).append(str(name))
-
-    resolved: dict[str, str] = {}
-    for service in services or []:
-        if not isinstance(service, dict):
-            continue
-        hosts = service.get("hosts")
-        if not isinstance(hosts, (list, tuple)) or not hosts:
-            continue
-        # EVERY backend must resolve, and all to the same container. Resolving the ones that
-        # happen to be local and ignoring the rest would claim a service that is half
-        # somewhere else -- a mixed local/remote balancer, or a stale backend mid-rollout --
-        # and hang its link on whichever half was recognised.
-        names = set()
-        for host in hosts:
-            claimants = by_ip.get(str(host), [])
-            if len(claimants) != 1:          # unknown, or an address two containers claim
-                names = None
-                break
-            names.add(claimants[0])
-        if names and len(names) == 1:
-            resolved[str(service.get("name", ""))] = names.pop()
-    return resolved
-
-
-def container_urls(routers: list, services: list, addresses: dict, *, lan_domain: str) -> dict:
+def container_urls(routers: list, declared: dict, *, lan_domain: str) -> dict:
     """{container name: [{"href", "zone"}]} for every route that can be turned into a link.
 
-    Keyed by the container, resolved through service_containers() above. A container reachable
-    from two routers (`x` and its `-lan` twin) collects both their URLs, de-duplicated: the
-    twins point at different hosts, so both are real.
+    `declared` is {container: {"routers": [...], "services": [...]}}, from the containers' own
+    `traefik.*` labels -- the labels Traefik's docker provider builds those routers from, so
+    this is the route's owner saying so itself rather than anything inferred.
+
+    A router no container DECLARES gets no link, including one Traefik generated itself from
+    its defaultRule. Matching those by normalising the container name was tried and removed:
+    Traefik derives that name from its own notion of the service, which an explicit
+    `container_name` or a replica suffix makes something else, so a normalised name that
+    collided would put the link on an unrelated card. None of this host's 57 enabled docker
+    routers is implicit, and a missing link is better than a wrong one.
+
+    A container reachable from two routers (`x` and its `-lan` twin) collects both their URLs,
+    de-duplicated: the twins point at different hosts, so both are real.
     """
-    owners = service_containers(services, addresses)
+    owners: dict[str, str] = {}
+    services: dict[str, str] = {}
+    for container, entry in (declared or {}).items():
+        if not container or not isinstance(entry, dict):
+            continue
+        names = entry.get("routers")
+        if not isinstance(names, (list, tuple)):
+            continue
+        listed = entry.get("services")
+        for item in listed if isinstance(listed, (list, tuple)) else ():
+            # Same rule as the routers: a service two containers declare identifies neither.
+            services[str(item)] = "" if str(item) in services else str(container)
+        for name in names:
+            # A router two containers claim identifies neither of them.
+            owners[str(name)] = "" if str(name) in owners else str(container)
     by_service: dict[str, list] = {}
     for router in routers or []:
         if not isinstance(router, dict) or router.get("status") != "enabled":
@@ -399,18 +358,39 @@ def container_urls(routers: list, services: list, addresses: dict, *, lan_domain
         links = router_links(router, lan_domain=lan_domain)
         if not links:
             continue
-        # The services endpoint names every service "<name>@<provider>". A router usually
-        # reports its service without the suffix, meaning its own provider -- but it can name
-        # one across providers, and on this host four do (traefik@docker is served by
-        # api@internal). So a service that already carries a provider is taken as written.
+        # Labels only ever produce docker-provider routers, so anything else is matched
+        # against nothing on purpose -- a file-provider `x@file` must never pick up a
+        # container that happens to declare a router called `x`.
+        short, _, provider = str(router.get("name", "")).partition("@")
+        # A router can name a service defined elsewhere -- `traefik@docker` on this host is
+        # served by `api@internal`. The container carrying the router label is then not the
+        # container serving the route, so declaring it the owner would put the link on the
+        # wrong card. One live router does this; it gets no link rather than a wrong one.
         service = str(router.get("service", ""))
-        if "@" not in service:
-            _short, _, provider = str(router.get("name", "")).partition("@")
-            service = f"{service}@{provider}"
-        container = owners.get(service)
+        _name, at, service_provider = service.partition("@")
+        if at and service_provider != _DEFAULT_PROVIDER:
+            continue
+        container = None
+        if provider == _DEFAULT_PROVIDER:
+            # `in`, not `or`: a router two containers explicitly claim is stored as "" to mean
+            # "identifies neither", and falling through to the implicit name on that would
+            # hand the route to whichever claimant happens to be named after it.
+            container = owners.get(short)
+        if container and _name:
+            # The router names the service that actually serves it, and that service can be
+            # declared by a DIFFERENT container -- declaring the router is not the same as
+            # being the thing behind it. So ask who declares the service, not whether this
+            # container happens to declare any. A service nobody declares is Traefik's
+            # implicit one, which belongs to the router's own container.
+            # Measured live: 50 routers name a service their own container declares, 7 name
+            # one nobody declares, 0 name another container's.
+            serving = services.get(_name)
+            if serving is not None and serving != container:
+                continue
         if not container:
             # No container behind this route: an @internal router, or a file-provider route
-            # to another machine. A missing link is better than a wrong one.
+            # to another machine or a host-networked service. A missing link is better than a
+            # wrong one, and config's `links:` is what those are for.
             continue
         collected = by_service.setdefault(container, [])
         for link in links:

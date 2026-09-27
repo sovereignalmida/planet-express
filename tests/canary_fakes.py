@@ -29,6 +29,9 @@ class CanarySvc:
         self._clock = lambda: 1_000_000.0
         self.argv = []
         self.reference = reference
+        self._container_reference = None
+        self._compose_images = None
+        self._compose_config = None
         self.running = running          # image the container runs
         self.reference_id = running     # image the reference points at
         self.pulled = pulled            # what a pull makes the reference point at
@@ -38,6 +41,40 @@ class CanarySvc:
         self.watched = []
         self.deploy_breaks = False      # `up` succeeds but the container runs something else
 
+    # What the CONTAINER was created from. The canary's reference comes from here, because a
+    # container has exactly one image reference and it is its own. Follows `reference` unless a
+    # test deliberately pulls them apart.
+    @property
+    def container_reference(self):
+        return self.reference if self._container_reference is None else self._container_reference
+
+    @container_reference.setter
+    def container_reference(self, value):
+        self._container_reference = value
+
+    # What compose lists for this SERVICE -- more than one line on a real host, and in a
+    # non-deterministic order. The network stack's gluetun lists gluetun's image and traefik's.
+    @property
+    def compose_images(self):
+        return [self.reference] if self._compose_images is None else self._compose_images
+
+    @compose_images.setter
+    def compose_images(self, value):
+        self._compose_images = value
+
+    # What compose CONFIGURES, per service. This is what the canary resolves against; the
+    # service under test is SERVICE, and anything else here is a related service sharing the
+    # file. Follows `reference` unless a test pulls them apart.
+    @property
+    def compose_config(self):
+        if self._compose_config is not None:
+            return self._compose_config
+        return {SERVICE: self.reference}
+
+    @compose_config.setter
+    def compose_config(self, value):
+        self._compose_config = value
+
     # ── the engine's ports ──────────────────────────────────────────────────
     def _run_argv(self, argv, timeout=None):
         self.argv.append(argv)
@@ -45,13 +82,24 @@ class CanarySvc:
         for marker, code in self.fail.items():
             if marker in joined:
                 return code, "", f"{marker} failed"
+        if "config --format json" in joined:
+            # Compose's resolved config: a MAP keyed by service, including the related ones.
+            # The related set is modelled because flattening it into lines and taking the
+            # first is what made a gluetun canary retag traefik on 2026-09-27.
+            import json as _json
+            services = {name: {"image": image} for name, image in self.compose_config.items()}
+            return 0, _json.dumps({"services": services}), ""
         if "config --images" in joined:
-            return 0, self.reference + "\n", ""
+            return 0, "\n".join(self.compose_images) + "\n", ""
         if "images -q" in joined:
             return 0, self.running + "\n", ""
         if argv[:3] == ["docker", "image", "inspect"]:
             return (0, f"sha256:{self.reference_id}\n", "") if self.reference_id else (1, "", "no such image")
         if argv[:3] == ["docker", "inspect", "--format"]:
+            # Two different questions about a container: which reference it was created from,
+            # and which image id it is actually running.
+            if "{{.Config.Image}}" in joined:
+                return 0, self.container_reference + "\n", ""
             return 0, f"sha256:{self.running}\n", ""
         if " pull " in f" {joined} ":
             self.reference_id = self.pulled

@@ -1023,25 +1023,3 @@ def test_services_status_snapshot(tmp_path, monkeypatch):
 
 # The pending-plan panel went with the shell planner in slice 5b-5: a proposal is an approval in
 # the store, shown on the actions screen, not a plan file summarised here.
-
-
-def test_the_container_summary_carries_the_raw_rows_for_launch_links(tmp_path, monkeypatch):
-    """ctx["containers"] is a SUMMARY dict, not a list. Handing it straight to the launch-link
-    join iterated its keys — strings — and the join's isinstance guard turned that into no
-    links at all, silently. The raw rows are exposed deliberately, with their addresses."""
-    path = tmp_path / "latest_monitor.json"
-    _write(path, {
-        "timestamp": "2026-09-26T14:36:53+00:00", "mode": "full",
-        "containers": [{"name": "CASA_ACTUAL", "status": "Up 2 days",
-                        "image": "actualbudget/actual", "ips": ["172.20.0.51"]}],
-    })
-    monkeypatch.setattr(config, "STATE_MONITOR", path)
-    summary = dashboard_data.summarize_containers()
-    assert isinstance(summary["all"], list)
-    assert summary["all"][0]["name"] == "CASA_ACTUAL"
-    assert summary["all"][0]["ips"] == ["172.20.0.51"]
-
-
-def test_the_raw_rows_are_empty_rather_than_absent_when_there_is_no_scan(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "STATE_MONITOR", tmp_path / "nothing.json")
-    assert dashboard_data.summarize_containers()["all"] == []

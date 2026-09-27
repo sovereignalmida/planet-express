@@ -16,6 +16,7 @@ from tests.canary_fakes import (
     NEW,
     OLD,
     REFERENCE,
+    SERVICE,
     CanarySvc,
     canary_step,
     execution,
@@ -140,13 +141,16 @@ def test_a_digest_pinned_or_build_only_service_is_refused_before_anything_runs(s
 
 
 def test_a_reference_that_moves_mid_update_refuses_phase_two(svc, monkeypatch):
-    references = iter([REFERENCE, "nginx:1.28-alpine"])
+    """The compose file is edited between the resolve and the deploy. A pull can take minutes.
+    Read from the keyed config now, so this is about this service's image and nothing else."""
+    images = iter([REFERENCE, "nginx:1.28-alpine"])
     original = svc._run_argv
 
     def run_argv(argv, timeout=None):
-        if "config --images" in " ".join(argv):
+        if "config --format json" in " ".join(argv):
             svc.argv.append(argv)
-            return 0, next(references) + "\n", ""
+            import json as _json
+            return 0, _json.dumps({"services": {SERVICE: {"image": next(images)}}}), ""
         return original(argv, timeout)
 
     monkeypatch.setattr(svc, "_run_argv", run_argv)
@@ -374,3 +378,152 @@ def test_a_rollback_is_never_refused_by_a_cooldown(svc, monkeypatch):
     # ...but an operator's undo runs
     undo = execution(svc)
     assert engine.RunbookEngine(svc).run(undo, plan, origin="rollback").status == "passed"
+
+
+# ── 2026-09-27: a gluetun canary took Traefik down for four hours ───────────────
+#
+# `docker compose config --images <service>` returns every image in the RELATED SET, in a
+# non-deterministic order. Compose v2.39.1, three consecutive runs against the live network
+# stack:
+#
+#     run1: traefik:v3.6.25 qmcgaw/gluetun:v3.41.1
+#     run2: qmcgaw/gluetun:v3.41.1 traefik:v3.6.25
+#     run3: traefik:v3.6.25 qmcgaw/gluetun:v3.41.1
+#
+# The canary took line [0]. At 05:45 that was traefik's. It pulled traefik, watched
+# CASA_GLUETON, found it still on gluetun's image -- as it always would be -- called that a
+# failure, and its automatic rollback ran `docker tag <gluetun's image> traefik:v3.6.25`.
+# Traefik then exited with "command is unknown: --configFile=/etc/traefik/traefik.yml" on
+# every start, with restart: no, until someone noticed four hours later.
+#
+# The reference now comes from the container being updated, and compose has to CONFIGURE that
+# same image for that same service -- read from the keyed JSON config, not from flattened
+# lines. Two independent single-valued sources that must agree.
+
+GLUETUN = "qmcgaw/gluetun:v3.41.1"
+TRAEFIK = "traefik:v3.6.25"
+
+
+def _network_stack(svc):
+    """The shape that caused it: one file, two services, the canary bound to the first."""
+    svc.container_reference = GLUETUN
+    svc.compose_config = {SERVICE: GLUETUN, "traefik": TRAEFIK}
+
+
+def test_a_related_services_image_is_never_chosen_for_this_one(svc):
+    """The whole outage in one assertion."""
+    _network_stack(svc)
+
+    _ex, result, step = run(svc)
+
+    assert result.status == "passed"
+    assert step["output"]["image_reference"] == GLUETUN
+    assert f"docker tag {NEW} {GLUETUN}" in joined(svc)
+    assert not any(TRAEFIK in line for line in joined(svc)), "another service's tag was touched"
+
+
+def test_a_reference_some_related_service_uses_is_not_good_enough(svc):
+    """Membership in compose's related set proves only that SOMETHING uses the reference. If
+    the container is stale after a config change and its old reference is still some sibling's
+    image, that has to be refused, not accepted."""
+    svc.container_reference = TRAEFIK                       # stale: this is the sibling's image
+    svc.compose_config = {SERVICE: GLUETUN, "traefik": TRAEFIK}
+
+    _ex, _result, step = run(svc)
+
+    assert (step["status"], step["effect"]) == ("failed", "not_applied")
+    assert "compose configures" in step["reason"]
+    assert not any("pull" in line for line in joined(svc))
+    assert not any("docker tag" in line for line in joined(svc))
+
+
+def test_a_container_running_something_compose_does_not_configure_is_refused(svc):
+    svc.container_reference = "nginx:1.27-alpine"
+    svc.compose_config = {SERVICE: GLUETUN, "traefik": TRAEFIK}
+
+    _ex, _result, step = run(svc)
+
+    assert (step["status"], step["effect"]) == ("failed", "not_applied")
+    assert "compose configures" in step["reason"]
+
+
+def test_a_service_compose_configures_no_image_for_is_refused(svc):
+    svc.compose_config = {"traefik": TRAEFIK}
+    _ex, _result, step = run(svc)
+    assert step["status"] == "failed"
+    assert "configures no image" in step["reason"]
+
+
+def test_a_rollback_refuses_to_tag_a_reference_the_container_does_not_run(svc, monkeypatch):
+    """Belt and braces over the fix above. The tag is the one irreversible thing a canary does
+    to state another service shares, so it is checked against the bound container immediately
+    before it runs -- the cost of being wrong here is somebody else's outage."""
+    _network_stack(svc)
+    original = svc._run_argv
+    asked = []
+
+    def drifting(argv, timeout=None):
+        # The first ask resolves the step's reference; by the second -- the check immediately
+        # before the tag -- the container has been recreated on something else.
+        if argv[:3] == ["docker", "inspect", "--format"] and "{{.Config.Image}}" in " ".join(argv):
+            asked.append(argv)
+            if len(asked) > 1:
+                svc.container_reference = TRAEFIK
+        return original(argv, timeout=timeout)
+
+    monkeypatch.setattr(svc, "_run_argv", drifting)
+    _ex, _result, step = run(svc)
+
+    assert step["status"] == "failed"
+    assert "refusing to tag" in step["reason"]
+    assert not any("docker tag" in line for line in joined(svc))
+
+
+def test_a_rollback_still_runs_when_the_container_is_gone(svc, monkeypatch):
+    """A failed recreate can remove the old container before making its replacement, and that
+    is exactly when the inverse has to run. Refusing there would leave the service absent and
+    the shared reference pointing at the image that just failed."""
+    _network_stack(svc)
+    svc.deploy_breaks = True               # the deploy lands the wrong image, forcing a rollback
+    original = svc._run_argv
+    asked = []
+
+    def vanishing(argv, timeout=None):
+        # Asked three times: resolving the reference, the forward guard, then the inverse's.
+        if argv[:3] == ["docker", "inspect", "--format"] and "{{.Config.Image}}" in " ".join(argv):
+            asked.append(argv)
+            if len(asked) > 2:             # the failed recreate removed it
+                return 1, "", "No such object: CASA_GLUETON"
+        return original(argv, timeout=timeout)
+
+    monkeypatch.setattr(svc, "_run_argv", vanishing)
+    _ex, _result, step = run(svc)
+
+    assert f"docker tag {OLD} {GLUETUN}" in joined(svc), "the inverse did not restore the image"
+    assert "refusing to tag" not in (step["reason"] or "")
+
+
+def test_going_forward_an_unreadable_container_stops_the_tag(svc, monkeypatch):
+    """Only the inverse gets to proceed on an unreadable container. Going forward there is no
+    urgency, and an inspect that timed out while the container was being recreated on
+    something else is exactly how the wrong image gets tagged."""
+    _network_stack(svc)
+    original = svc._run_argv
+    asked = []
+
+    def unreadable(argv, timeout=None):
+        if argv[:3] == ["docker", "inspect", "--format"] and "{{.Config.Image}}" in " ".join(argv):
+            asked.append(argv)
+            if len(asked) > 1:             # the forward guard cannot see it
+                return 1, "", "context deadline exceeded"
+        return original(argv, timeout=timeout)
+
+    monkeypatch.setattr(svc, "_run_argv", unreadable)
+    _ex, _result, step = run(svc)
+
+    assert step["status"] == "failed"
+    assert "cannot read what" in step["reason"]
+    # The forward tag never happened; the pull had already moved the reference, so the
+    # inverse still puts it back. That is the one tag allowed here.
+    assert f"docker tag {NEW} {GLUETUN}" not in joined(svc)
+    assert f"docker tag {OLD} {GLUETUN}" in joined(svc)

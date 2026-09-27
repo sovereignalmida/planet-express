@@ -435,36 +435,103 @@ def resolve_stack_target(
     return StackTarget(stack)
 
 
-def container_addresses(*, timeout=DOCKER_TIMEOUT_SECONDS) -> dict[str, list[str]]:
-    """{container name: [ip, ...]} for every container, running or not.
+# traefik.http.routers.<name>.<field>. The name is captured up to a known field rather than
+# to the first dot, so a name containing one survives -- `...routers.api.v1.rule` declares
+# `api.v1`, and stopping at the first dot would look for a router called `api` that the API
+# never reports. tls is both a field and a prefix (tls.certresolver), hence the trailing
+# alternation.
+_ROUTER_FIELDS = "rule|entrypoints|service|middlewares|priority|tls|observability"
+# Greedy on purpose, so the RIGHTMOST field wins: `...routers.api.tls.rule` is router
+# `api.tls`, while `...routers.adguard.tls.certresolver` is router `adguard`. Non-greedy
+# stopped at the first field-shaped component and got the first of those wrong.
+# Matched against a LOWERCASED key: Traefik's label keys are case-insensitive, and
+# `Traefik.HTTP.Routers.app.Rule` creates the same router as the lowercase spelling.
+_ROUTER_LABEL_RE = re.compile(
+    rf"^traefik\.http\.routers\.(?P<name>.+)\.(?:{_ROUTER_FIELDS})(?:\.|$)")
+_ENABLE_LABEL = "traefik.enable"
+# traefik.http.services.<name>.<field>, same rightmost-field rule as the routers.
+_SERVICE_FIELDS = "loadbalancer|weighted|mirroring|failover"
+_SERVICE_LABEL_RE = re.compile(
+    rf"^traefik\.http\.services\.(?P<name>.+)\.(?:{_SERVICE_FIELDS})(?:\.|$)")
 
-    Traefik reports a service's backend by address, so this is what ties a route back to the
-    container serving it -- the router's service NAME is a Traefik label and matches a compose
-    service for only a minority of this host's routes.
+
+def container_routers(*, timeout=DOCKER_TIMEOUT_SECONDS) -> dict[str, dict[str, list[str]]]:
+    """{container: {"routers": [...], "services": [...]}}, for every RUNNING container.
+
+    Both halves are needed. A router says which service serves it, and that service can be
+    declared by a DIFFERENT container -- `traefik.http.routers.app.service=backend` where
+    `backend` belongs to something else is valid. Declaring the router does not make you the
+    thing serving the route, so the service has to be checked too.
+
+    This is what ties a route back to the container serving it, and it is the container's own
+    declaration -- `traefik.http.routers.<name>.rule` and friends are exactly the labels
+    Traefik's docker provider builds those routers from. Read in the same inspect that lists
+    the container, so there is no window in which it can be describing a different host.
+
+    The obvious alternative, matching Traefik's reported backend address to a container IP,
+    was tried and is worse: it needs Traefik's view of the world to be current, and a
+    container recreated before Traefik processes the Docker event leaves its old address in
+    the API, where another container may already have it. Measured on this host, the labels
+    account for 57 of 57 enabled docker-provider routers with no ambiguity.
+
+    The router's service NAME cannot do this job either: it is a Traefik label that matches a
+    compose service for 27 of 64 of this host's routes (`actual` is compose service
+    `actual_server`, `adguard` is `adguardhome`), and compose service names are not unique
+    across projects.
     """
-    # One budget for the whole call, shared by both commands, the same rule query.container
-    # follows: two independent `timeout`s can add up past the dashboard's 5s deadline and
-    # leave an RPC worker busy on a reply nobody is waiting for any more.
     deadline = time.monotonic() + timeout
+    # Running only, not `-a`. Traefik does not publish a stopped container's routes, so a
+    # link to one would be dead -- and a stopped predecessor left behind by a recreate still
+    # carries the same router labels as its replacement, which would make the router look
+    # like something two containers claim and suppress the live link entirely.
     rc, out, _err = bender.run_argv(
-        ["docker", "ps", "-a", "--format", "{{.Names}}"], timeout=timeout)
+        ["docker", "ps", "--format", "{{.Names}}"], timeout=timeout)
     names = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 else []
     left = deadline - time.monotonic()
     if not names or left <= 0:
         return {}
-    rc, out, _err = bender.run_argv(
-        ["docker", "inspect", "--format",
-         "{{.Name}}\t{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}", *names],
-        timeout=left)
+    # Label KEYS only, and only this container's own. The full label blob is ~111KB across
+    # this host's 85 containers, and `docker ps --format {{.Labels}}` renders it as a string
+    # rather than a map, so it cannot be indexed at all.
+    # Label KEYS plus traefik.enable's value. The full label blob is ~111KB across this
+    # host's 85 containers, and `docker ps --format {{.Labels}}` renders it as a string rather
+    # than a map, so it cannot be indexed at all.
+    # `lower` on the key, not `index`: Traefik's label keys are case-insensitive, and an
+    # `index` lookup is not -- a container spelling it `Traefik.Enable=false` would read as
+    # unset while its mixed-case router labels were taken as live.
+    fmt = ("{{.Name}}\t"
+           "{{range $key, $value := .Config.Labels}}"
+           "{{if eq (lower $key) \"traefik.enable\"}}{{$value}}{{end}}{{end}}\t"
+           "{{range $key, $value := .Config.Labels}}{{$key}} {{end}}")
+    rc, out, _err = bender.run_argv(["docker", "inspect", "--format", fmt, *names], timeout=left)
     if rc != 0:
         return {}
-    addresses: dict[str, list[str]] = {}
+    declared: dict[str, list[str]] = {}
     for line in out.splitlines():
-        name, _, raw = line.partition("\t")
+        name, _, rest = line.partition("\t")
+        enable, _, keys = rest.partition("\t")
         name = name.strip().lstrip("/")
-        if name:
-            addresses[name] = [ip for ip in raw.split() if ip]
-    return addresses
+        if not name:
+            continue
+        # traefik.enable=false means the provider ignores this container entirely. It is
+        # OMITTED rather than recorded with no routers: an empty list is what an enabled
+        # container with no router labels looks like, and those are candidates for Traefik's
+        # implicit defaultRule router. A disabled container must not be able to claim one.
+        if enable.strip().lower() == "false":
+            continue
+        routers: list[str] = []
+        services: list[str] = []
+        for key in keys.split():
+            lowered = key.lower()
+            match = _ROUTER_LABEL_RE.match(lowered)
+            if match and match.group("name") not in routers:
+                routers.append(match.group("name"))
+                continue
+            match = _SERVICE_LABEL_RE.match(lowered)
+            if match and match.group("name") not in services:
+                services.append(match.group("name"))
+        declared[name] = {"routers": routers, "services": services}
+    return declared
 
 
 def action_summary(action: str, target: dict) -> str:
@@ -584,8 +651,46 @@ def compose_images_argv(stack: str, service: str) -> list[str]:
 
 
 def compose_config_images_argv(stack: str, service: str) -> list[str]:
-    """The image reference this service resolves to per its compose config (not what runs)."""
+    """Every image reference compose reports for this service.
+
+    It returns MORE THAN ONE line, and in a non-deterministic order. On Compose v2.39.1
+    `config --images gluetun` returns gluetun's image and traefik's, and three consecutive
+    runs put a different one first. Taking line [0] as "this service's image" therefore
+    retagged and redeployed another service roughly half the time: on 2026-09-27 a canary for
+    network/gluetun resolved `traefik:v3.6.25`, its rollback ran
+    `docker tag <gluetun's image> traefik:v3.6.25`, and Traefik spent four hours exiting with
+    "command is unknown: --configFile". Use this only to CHECK a reference, never to pick one.
+    """
     return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--images", service]
+
+
+def compose_config_json_argv(stack: str, service: str) -> list[str]:
+    """Compose's resolved config as JSON. Keyed by service, so one service's image can be read
+    exactly -- which `--images` cannot do, because it flattens the related set into lines."""
+    return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--format", "json",
+            service]
+
+
+def compose_configured_image(document: str, service: str) -> str | None:
+    """The image compose configures for exactly this service, or None."""
+    try:
+        services = json.loads(document).get("services")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(services, dict):
+        return None
+    entry = services.get(service)
+    image = entry.get("image") if isinstance(entry, dict) else None
+    return image.strip() if isinstance(image, str) and image.strip() else None
+
+
+def container_image_reference_argv(container: str) -> list[str]:
+    """The image reference this container was created from -- one value, for one container.
+
+    This is where a canary's reference comes from. The container being updated is the only
+    thing that can say which reference is its own; compose answers about a related set.
+    """
+    return ["docker", "inspect", "--format", "{{.Config.Image}}", container]
 
 
 def image_id_argv(reference: str) -> list[str]:

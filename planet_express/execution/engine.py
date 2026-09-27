@@ -596,11 +596,28 @@ class RunbookEngine:
             return refused
         stack, service, container = target.stack, target.service, target.container
 
+        # The reference comes from the CONTAINER being updated, not from compose. compose
+        # answers about a related set -- several lines, non-deterministically ordered -- and
+        # taking its first line made a gluetun canary retag traefik and take it down for four
+        # hours (2026-09-27; see compose_config_images_argv). A container has exactly one
+        # image reference and it is its own.
         rc, out, err = self.svc._run_argv(
-            actions.compose_config_images_argv(stack, service), timeout=actions.DOCKER_TIMEOUT_SECONDS)
+            actions.container_image_reference_argv(container),
+            timeout=actions.DOCKER_TIMEOUT_SECONDS)
         if rc != 0 or not out.strip():
             return self._refuse(f"cannot resolve the image reference: {_clip(err or out)}")
-        reference = out.strip().splitlines()[0]
+        reference = out.strip().splitlines()[0].strip()
+        # ...and compose must configure exactly that image for exactly this service. Two
+        # independent single-valued sources agreeing. `config --images` cannot do this job:
+        # it flattens the related set into lines, so membership in its output would prove
+        # only that some related service uses the reference, which is how this went wrong.
+        configured, error = self._compose_image(stack, service)
+        if error is not None:
+            return self._refuse(f"cannot resolve the image reference: {error}")
+        if configured != reference:
+            return self._refuse(
+                f"{container} runs {reference}, but compose configures {configured} for "
+                f"{stack}/{service}")
         if not actions.is_canary_reference(reference):
             # Digest-pinned or build-only: there is no mutable tag to move (design §4.5).
             return self._refuse(f"{reference} is not a canary-eligible image reference")
@@ -670,17 +687,27 @@ class RunbookEngine:
         _target, refused = self._bound_target(step)
         if refused is not None:
             return f"{refused.reason} during the update"
-        rc, out, _err = self.svc._run_argv(
-            actions.compose_config_images_argv(target.stack, target.service),
-            timeout=actions.DOCKER_TIMEOUT_SECONDS)
-        if rc != 0 or out.strip().splitlines()[:1] != [reference]:
+        configured, error = self._compose_image(target.stack, target.service)
+        if error is not None or configured != reference:
             return "the image reference changed during the update"
         return None
+
+    def _compose_image(self, stack: str, service: str) -> tuple[str | None, str | None]:
+        """The image compose configures for exactly this service."""
+        rc, out, err = self.svc._run_argv(
+            actions.compose_config_json_argv(stack, service),
+            timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        if rc != 0 or not out.strip():
+            return None, _clip(err or out or "no compose config")
+        image = actions.compose_configured_image(out, service)
+        if image is None:
+            return None, f"compose configures no image for {stack}/{service}"
+        return image, None
 
     def _canary_deploy(self, execution_id, step_n, target, reference, old_id, new_id) -> StepOutcome:
         outputs = {"image_reference": reference, "old_image_id": old_id, "new_image_id": new_id}
         self.svc._store.note_step_progress(execution_id, step_n, {"phase": "deploying"})
-        failure = self._canary_up(target, new_id, reference)
+        failure = self._canary_up(target, new_id, reference, inverse=False)
         if failure is None:
             self.svc._store.set_execution_status(execution_id, "verifying")
             stable, reason = self.svc._watch(target.container, CANARY_WATCH_SECONDS)
@@ -692,7 +719,7 @@ class RunbookEngine:
         # it too. An old image that crash-loops on restore is not a successful rollback, and saying
         # so would close the window that protects it (Codex, T42).
         self.svc._store.note_step_progress(execution_id, step_n, {"phase": "rolling_back"})
-        undone = self._canary_up(target, old_id, reference)
+        undone = self._canary_up(target, old_id, reference, inverse=True)
         if undone is None:
             stable, reason = self.svc._watch(target.container, CANARY_ROLLBACK_WATCH_SECONDS)
             if stable:
@@ -701,8 +728,31 @@ class RunbookEngine:
             undone = f"the restored image is not stable: {reason}"
         return StepOutcome("failed", "unknown", f"{failure}; rollback also failed: {undone}", outputs)
 
-    def _canary_up(self, target, image_id: str, reference: str) -> str | None:
-        """Point the reference at this exact image and recreate the service on it. None = done."""
+    def _canary_up(self, target, image_id: str, reference: str, *, inverse: bool) -> str | None:
+        """Point the reference at this exact image and recreate the service on it. None = done.
+
+        The tag is the one irreversible thing a canary does to shared state, so it is checked
+        against the bound container immediately before it runs. Nothing else in this class can
+        move a tag, and this is the line that made traefik:v3.6.25 point at gluetun's binary:
+        belt and braces over the reference fix above, because the cost of being wrong here is
+        another service's outage rather than this one's.
+        """
+        rc, out, err = self.svc._run_argv(
+            actions.container_image_reference_argv(target.container),
+            timeout=actions.DOCKER_TIMEOUT_SECONDS)
+        owned = out.strip().splitlines()[0].strip() if rc == 0 and out.strip() else None
+        if owned is None:
+            # Only the INVERSE gets to proceed on an unreadable container. A failed recreate
+            # can remove the old one before making its replacement, and refusing there would
+            # leave the service gone and the shared reference pointing at the image that just
+            # failed. Going FORWARD there is no such urgency, and an inspect that timed out
+            # while the container was being recreated on something else is exactly how the
+            # wrong image gets tagged -- so that fails closed.
+            if not inverse:
+                return (f"refusing to tag {reference}: cannot read what {target.container} "
+                        f"runs ({_clip(err or out or 'no output')})")
+        elif owned != reference:
+            return f"refusing to tag {reference}: {target.container} runs {owned}"
         rc, out, err = self.svc._run_argv(actions.tag_argv(image_id, reference),
                                           timeout=actions.DOCKER_TIMEOUT_SECONDS)
         if rc != 0:
