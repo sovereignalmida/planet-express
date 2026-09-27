@@ -129,7 +129,7 @@ line in the `/install` approval text: *this compose may receive widget keys.*
 **Decisions for the owner:**
 - A `planetexpress.widget` label can no longer pick a *keyed* widget for an image the widget
   does not already match (the spec allowed label overrides). Custom builds of a keyed app get
-  no widget. Keyless widgets and `=none` still work.
+  no widget. Keyless widgets and `=none` still work. **Settled: kept (option A).**
 - Sonarr shows QUEUE · WANTED · HEALTH, not the spec's SERIES: counting series means
   `/api/v3/series`, several MB parsed ~25x. Three tiles is within the contract.
 - On the containerd image store, provenance cannot tell a local build from a pull.
@@ -382,7 +382,8 @@ T46.1 P1 #1 (`fc4579a`) and the fetcher (`668d57c`) are where a second reviewer 
 
 **Owner decisions still open.**
 1. The Leela address-collection leftover (above, under P1 #1): keep or remove.
-2. **The `planetexpress.widget` label override** -- see "Decision: the widget label" below.
+2. ~~The `planetexpress.widget` label override~~ -- **settled: option A** (2026-09-27), see
+   "Decision: the widget label" below.
 3. Radarr needs 5.6+; the Immich key must be an admin's. Both are in INSTALL.md.
 
 **Live-host checks** (nothing here was run against the real host):
@@ -402,6 +403,10 @@ Jellyfin widgets need new auth kinds in the gated fetcher (cookie login, a query
 or a live check of Jellyfin's header.
 
 ### Decision: the widget label
+
+**Settled 2026-09-27: option A, keep it.** The V2.2 spec's "Matched by image repo" line now
+says the same. Custom images of a keyed app get no widget; the fix for a missing publisher is
+a line in that widget's match list. Revisit option C only if a live container needs it.
 
 **What the spec said.** A `planetexpress.widget=<name>` container label overrides the image
 match; `planetexpress.widget=none` disables it (V2.2 handoff, "Matched by image repo").
