@@ -312,7 +312,7 @@ def test_core_handlers():
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
                              "incident.list", "incident.get", "incident.propose",
-                             "canary.candidates", "containers.routers"}
+                             "canary.candidates", "containers.routers", "config.enforced"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
@@ -1438,3 +1438,17 @@ def test_a_cache_hit_between_two_races_means_they_were_not_consecutive(monkeypat
     with pytest.raises(RpcError):
         handler({})
     assert handler({}) == _R_ANSWER                   # no backoff: the races were apart
+
+
+def test_config_enforced_is_what_this_core_process_loaded(monkeypatch):
+    """Activation re-execs core only; the dashboard reads these from core so an edit shows."""
+    monkeypatch.setattr(rpc_module.config, "PAUSED_CONTAINERS", ["CASA_OFF"])
+    monkeypatch.setattr(rpc_module.config, "BACKUP_JOBS", ["weekly"])
+    monkeypatch.setattr(rpc_module.config, "LAUNCH_LINKS",
+                        [{"name": "CASA_X", "href": "https://x.casalan.com", "zone": "lan"}])
+    handler = build_core_handlers(Mock(), Mock())["config.enforced"]
+    assert handler({}) == {"paused_containers": ["CASA_OFF"], "backup_jobs": ["weekly"],
+                           "links": [{"name": "CASA_X", "href": "https://x.casalan.com",
+                                      "zone": "lan"}]}
+    with pytest.raises(RpcError):
+        handler({"unexpected": 1})

@@ -289,6 +289,7 @@ class OfflineRpc:
     EMPTY: ClassVar[dict] = {
         "canary.candidates": [],
         "containers.routers": {"routers": {}, "services": {}},
+        "config.enforced": {"paused_containers": ["CASA_ADGUARD"], "backup_jobs": ["weekly"], "links": []},
         "proposal.list_pending": [],
         "incident.list": [],
         "chat.quota": {"used": 3, "limit": 100, "resets_at": time.time() + 3600},

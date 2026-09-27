@@ -754,6 +754,18 @@ def build_core_handlers(
         routers_cache[0] = (running["containers"], answer)
         return answer
 
+    def config_enforced(params):
+        """The editable values the dashboard shows, as this core process loaded them (T46.1).
+
+        The dashboard read these from its own import. Config activation re-execs core only, and
+        the dashboard's reload watcher follows the file, so what it showed could be either behind
+        or ahead of what core enforces. Reading them from core shows what is enforced.
+        """
+        _params(params, {})
+        return {"paused_containers": list(config.PAUSED_CONTAINERS),
+                "backup_jobs": list(config.BACKUP_JOBS),
+                "links": [dict(link) for link in config.LAUNCH_LINKS]}
+
     def config_get(params):
         _params(params, {})
         try:
@@ -800,7 +812,7 @@ def build_core_handlers(
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked,
             "canary.candidates": canary_candidates,
-            "containers.routers": container_routers}
+            "containers.routers": container_routers, "config.enforced": config_enforced}
 
     if chat is not None:
         handlers.update({"chat.ask": chat_ask, "chat.get": chat_get, "chat.quota": chat_quota})

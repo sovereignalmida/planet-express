@@ -575,7 +575,24 @@ def index(core=None):
     # file-based state -- keeps the file-vs-live-HTTP boundary explicit here, in the
     # one route allowed to do this kind of I/O, rather than folding it into
     # dashboard_data.py's zero-I/O contract.
-    ctx = dashboard_data.build_dashboard_context()
+    # The editable config values this page shows, as core enforces them. Activation re-execs
+    # core only, and this process's reload watcher follows the file, so its own import can be
+    # behind OR ahead of core. Without core's answer the page falls back: pause decisions to
+    # the scan's own, backup jobs and links to this process's import.
+    enforced = None
+    if core is not None:
+        try:
+            enforced = dashboard_data.parse_enforced(core("config.enforced", {}))
+        except Exception:  # noqa: BLE001 -- see below
+            current_app.logger.warning("Could not read enforced config from core", exc_info=True)
+        else:
+            refused = {"paused_containers", "backup_jobs", "links"} - set(enforced)
+            if refused:
+                current_app.logger.warning(
+                    "Core's enforced config had unusable %s; falling back (pause decisions to the "
+                    "scan's own, the rest to this process's config)",
+                    ", ".join(sorted(refused)))
+    ctx = dashboard_data.build_dashboard_context(enforced)
     if core is not None:
         try:
             # The open canary rollback windows live in the core's database, which this process is
@@ -612,7 +629,7 @@ def index(core=None):
     ctx["launch_urls"] = casa_scruffy_net.merge_declared_links(
         casa_scruffy_net.container_urls(ctx["traefik"]["routers"], owners,
                                         lan_domain=config.LAN_ONLY_DOMAIN),
-        config.LAUNCH_LINKS,
+        dashboard_data.enforced_value(enforced, "links"),
     )
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
     ctx["adguard_stats"] = dashboard_data.summarize_adguard(ctx["adguard"])

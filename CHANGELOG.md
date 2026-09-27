@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name (`CASA_ADVENTURELOG`, not `adventurelog`). Nothing renders these links yet.
 
 ### Fixed
+- **The dashboard showed stale config after an activated edit.** Activation re-execs core
+  only, so `paused_containers`, `backup_jobs` and `links` on the dashboard were whatever it
+  last imported. It now asks core what is enforced (`config.enforced`), and a pause edit moves
+  the fleet cells and the healthy and unhealthy counts together.
 - **The Traefik router list stopped at 100.** Traefik's API pages; the Network tab now
   follows `X-Next-Page`.
 

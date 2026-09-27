@@ -243,6 +243,18 @@ adversarial review as the gate instead; twelve rounds of `/code-review high`:
 
 ### 2. The dashboard never re-reads edited config
 
+**Status: fixed** (commit after `fc4579a`). New read-only core RPC `config.enforced` returns
+core's loaded `paused_containers`, `backup_jobs` and `links`; `index()` reads it once per page
+and validates each field on its own (links through the schema's `LaunchLink`, jobs by the
+schema's rules), so one bad field falls back alone. A pause edit re-derives each container's
+issue, so the fleet cells, the healthy count and the unhealthy count move together; stack
+completeness stays scan-time until the next scan. Without core's answer -- core down, and
+always for the unauthenticated `/api/widget` -- pause decisions are the scan's own (Leela
+excuses a stopped container only for being paused), never this process's import, which
+follows the file and can be ahead of core. Gate: three adversarial rounds, the last clean.
+
+Original finding:
+
 `config.LAUNCH_LINKS` is computed at import, and activation (`_reexec_core`) re-execs **core
 only**; nothing restarts `casa-dashboard`. An operator edits `links:` in the Config tab, the
 UI reports it activated, and the dashboard serves the old value until someone restarts it by

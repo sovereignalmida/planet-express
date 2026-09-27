@@ -10,6 +10,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
@@ -1054,3 +1056,115 @@ def test_container_ips_is_empty_for_a_snapshot_that_did_not_scan_containers(tmp_
 def test_container_ips_without_a_snapshot_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STATE_MONITOR", tmp_path / "missing.json")
     assert dashboard_data.container_ips() == {}
+
+
+
+# ── enforced config from core (T46.1 P1 #2) ─────────────────────────────────────
+
+def test_parse_enforced_accepts_cores_answer():
+    answer = {"paused_containers": ["CASA_OFF"], "backup_jobs": ["weekly"],
+              "links": [{"name": "CASA_X", "href": "https://x", "zone": "public"}]}
+    assert dashboard_data.parse_enforced(answer) == answer
+
+
+@pytest.mark.parametrize("answer,kept", [
+    (None, set()), ([], set()), ({}, set()),
+    ({"paused_containers": "CASA_OFF", "backup_jobs": ["weekly"], "links": []},
+     {"backup_jobs", "links"}),
+    ({"paused_containers": [1], "backup_jobs": ["weekly"], "links": []}, {"backup_jobs", "links"}),
+    ({"paused_containers": [], "backup_jobs": ["hourly"], "links": []}, {"paused_containers", "links"}),
+    # config.yaml refuses an empty or repeated job list; so does this.
+    ({"paused_containers": [], "backup_jobs": [], "links": []}, {"paused_containers", "links"}),
+    ({"paused_containers": [], "backup_jobs": ["weekly", "weekly"], "links": []},
+     {"paused_containers", "links"}),
+    ({"paused_containers": [], "backup_jobs": ["weekly"], "links": ["x"]},
+     {"paused_containers", "backup_jobs"}),
+])
+def test_a_malformed_field_falls_back_alone(answer, kept):
+    """One bad field must not throw away the good ones -- that is the staleness this fixes."""
+    assert set(dashboard_data.parse_enforced(answer)) == kept
+
+
+@pytest.mark.parametrize("href", ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd"])
+def test_an_enforced_link_is_held_to_config_yamls_own_rules(href):
+    """An answer must never carry an href config.yaml would refuse."""
+    got = dashboard_data.parse_enforced({"links": [{"name": "CASA_X", "href": href}]})
+    assert "links" not in got
+
+
+def test_an_enforced_link_with_an_unknown_field_is_refused():
+    got = dashboard_data.parse_enforced({"links": [{"name": "X", "href": "https://x", "target": "_blank"}]})
+    assert "links" not in got
+
+
+def test_enforced_values_win_over_this_processes_import(tmp_path, monkeypatch):
+    """The dashboard's import is what core enforced when the dashboard started."""
+    path = tmp_path / "latest_monitor.json"
+    # As Leela wrote it before the pause was added: stopped, not excused.
+    _write(path, {"timestamp": "2026-09-26T12:00:00+00:00", "mode": "status",
+                  "containers": [{"name": "CASA_OFF", "status": "Exited (0) 2 hours ago",
+                                  "issue": "not running (Exited (0) 2 hours ago)"}]})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    monkeypatch.setattr(config, "PAUSED_CONTAINERS", [])
+    monkeypatch.setattr(config, "BACKUP_JOBS", ["daily", "weekly"])
+    stale = dashboard_data.summarize_containers()
+    assert stale["down"] == 1 and stale["paused"] == 0
+    enforced = {"paused_containers": ["CASA_OFF"], "backup_jobs": ["weekly"], "links": []}
+    fresh = dashboard_data.summarize_containers(enforced)
+    assert fresh["paused"] == 1 and fresh["down"] == 0
+    assert dashboard_data.summarize_system_and_backups(enforced)["enabled_jobs"] == ["weekly"]
+    assert dashboard_data.summarize_system_and_backups()["enabled_jobs"] == ["daily", "weekly"]
+
+
+def _monitor_with(tmp_path, monkeypatch, containers):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-09-26T12:00:00+00:00", "mode": "status",
+                  "containers": containers})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+
+
+def test_unpausing_a_stopped_container_moves_every_count_together(tmp_path, monkeypatch):
+    """Leela excused it at scan time. Once the pause is removed, the healthy count, the header
+    status and the fleet cell must all say it is down -- not one of them."""
+    _monitor_with(tmp_path, monkeypatch, [
+        {"name": "CASA_FOO", "status": "Exited (0) 2 hours ago"},
+        {"name": "CASA_OK", "status": "Up 2 days"}])
+    enforced = {"paused_containers": []}
+    containers = dashboard_data.summarize_containers(enforced)
+    assert containers["down"] == 1 and containers["healthy"] == 1
+    assert containers["issues"][0]["issue"] == "not running (Exited (0) 2 hours ago)"
+    assert dashboard_data.summarize_health(enforced)["unhealthy_count"] == 1
+
+
+def test_pausing_a_stopped_container_excuses_it_everywhere(tmp_path, monkeypatch):
+    _monitor_with(tmp_path, monkeypatch, [
+        {"name": "CASA_FOO", "status": "Exited (0) 2 hours ago",
+         "issue": "not running (Exited (0) 2 hours ago)"}])
+    enforced = {"paused_containers": ["CASA_FOO"]}
+    containers = dashboard_data.summarize_containers(enforced)
+    assert containers["paused"] == 1 and containers["healthy"] == 1 and containers["issues"] == []
+    assert dashboard_data.summarize_health(enforced)["unhealthy_count"] == 0
+
+
+def test_a_crash_loop_is_never_excused_by_the_pause_list(tmp_path, monkeypatch):
+    _monitor_with(tmp_path, monkeypatch, [
+        {"name": "CASA_FOO", "status": "Restarting (1) 3 seconds ago", "crash_looping": True,
+         "issue": "crash-looping (restarted 7x)"}])
+    enforced = {"paused_containers": ["CASA_FOO"]}
+    assert dashboard_data.summarize_health(enforced)["unhealthy_count"] == 1
+    assert dashboard_data.summarize_containers(enforced)["down"] == 1
+
+
+
+def test_without_cores_list_every_pause_decision_is_the_scans_own(tmp_path, monkeypatch):
+    """The widget, and the page when core cannot answer, must not read this process's import:
+    it follows the file, which can be ahead of what core enforces. Leela only excuses a stopped
+    container for being paused, so stopped-and-no-issue IS the scan's paused."""
+    _monitor_with(tmp_path, monkeypatch, [
+        {"name": "CASA_PAUSED", "status": "Exited (0) 2 hours ago"},
+        {"name": "CASA_DOWN", "status": "Exited (1) 1 hour ago",
+         "issue": "not running (Exited (1) 1 hour ago)"}])
+    monkeypatch.setattr(config, "PAUSED_CONTAINERS", ["CASA_DOWN"])      # ahead of core
+    containers = dashboard_data.summarize_containers()
+    assert containers["paused"] == 1 and containers["down"] == 1
+    assert dashboard_data.summarize_health()["unhealthy_count"] == 1

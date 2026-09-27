@@ -19,9 +19,10 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 import config
+from config_schema import LaunchLink
 from state_models import (
     Findings,
     MonitorSnapshot,
@@ -74,7 +75,7 @@ def _severity_rank(finding: dict) -> int:
     return _SEVERITY_ORDER.get(str(finding.get("severity", "")).lower(), len(_SEVERITY_ORDER))
 
 
-def summarize_health() -> dict:
+def summarize_health(enforced: dict | None = None) -> dict:
     """Shaped to already match Spec 7's future Homepage-widget contract (status,
     last scan time, open findings count) -- Spec 7 becomes jsonify(summarize_health())
     behind one new route, no change needed here.
@@ -98,7 +99,8 @@ def summarize_health() -> dict:
     stacks = monitor.stack_completeness if monitor else []
 
     crash_looping_count = sum(1 for c in containers if c.get("crash_looping"))
-    unhealthy_count = sum(1 for c in containers if c.get("issue"))
+    paused = enforced_value(enforced, "paused_containers")
+    unhealthy_count = sum(1 for c in containers if _effective_issue(c, paused))
     disk_critical = any(d.get("alert") == "CRITICAL" for d in disk)
     disk_high = any(d.get("alert") == "HIGH" for d in disk)
     stack_critical_or_high = any(s.get("alert") in ("CRITICAL", "HIGH") for s in stacks)
@@ -185,7 +187,71 @@ _MODES_WITH_STACK_COMPLETENESS = {"full"}
 _MODES_WITH_SYSTEM_AND_BACKUPS = {"full"}
 
 
-def _container_state(c: dict) -> str:
+def enforced_value(enforced: dict | None, field: str):
+    """`field` as core enforces it, when the route got that from core, else this process's own
+    import. Keys are the config.yaml field names.
+
+    The import is only a fallback: activation re-execs core, not the dashboard, and the
+    dashboard's reload watcher follows the file on disk -- which can be ahead of what core
+    enforces (an activation mid re-exec, or one that failed)."""
+    if enforced is not None and field in enforced:
+        return enforced[field]
+    if field == "paused_containers":
+        # No list at all: every pause decision then comes from the scan itself (see
+        # _effective_issue), which core made with the list it enforced at the time.
+        return None
+    return {"backup_jobs": config.BACKUP_JOBS, "links": config.LAUNCH_LINKS}[field]
+
+
+_LAUNCH_LINKS = TypeAdapter(list[LaunchLink])
+
+
+def parse_enforced(answer) -> dict:
+    """The fields of core's config.enforced answer that pass the same rules config.yaml does.
+
+    Per field: one malformed value falls back to the import for that field alone, rather than
+    throwing away the others -- the staleness this exists to fix. A link is validated by the
+    schema's own LaunchLink, so an answer can never carry an href config.yaml would refuse.
+    """
+    parsed: dict = {}
+    if not isinstance(answer, dict):
+        return parsed
+    paused = answer.get("paused_containers")
+    if isinstance(paused, list) and all(isinstance(p, str) for p in paused):
+        parsed["paused_containers"] = paused
+    jobs = answer.get("backup_jobs")
+    # The membership test first: set() on an unhashable element would raise, not refuse.
+    if (isinstance(jobs, list) and jobs and all(j in ("daily", "weekly") for j in jobs)
+            and len(set(jobs)) == len(jobs)):
+        parsed["backup_jobs"] = jobs
+    try:
+        links = _LAUNCH_LINKS.validate_python(answer.get("links"))
+    except ValidationError:
+        pass
+    else:
+        parsed["links"] = [link.model_dump() for link in links]
+    return parsed
+
+
+def _effective_issue(c: dict, paused_containers) -> str | None:
+    """The container's issue under the enforced pause list, not the one Leela applied at scan
+    time. A stopped container's only scan-time excuse is the pause list, so an edit to it must
+    move the healthy count, the unhealthy count and the fleet cell together, or the page
+    contradicts itself until the next scan. Crash-looping is never excused. Stack
+    completeness -- and so a header status it drives -- still reflects the scan-time list
+    until the next scan; it is per stack, and Leela's to recompute.
+
+    `paused_containers` None means core's list is not to hand: the scan's own decision stands.
+    """
+    status = str(c.get("status", ""))
+    if paused_containers is None or c.get("crash_looping") or status.startswith("Up"):
+        return c.get("issue")
+    if c.get("name") in paused_containers:
+        return None
+    return c.get("issue") or f"not running ({status})"
+
+
+def _container_state(c: dict, paused_containers) -> str:
     """Four-way bucket for the dashboard's fleet matrix -- crash-looping is a real
     outage (down), a deliberately-stopped configured container is "paused" (not
     "online" -- an independent Codex review caught the earlier version falling
@@ -194,7 +260,12 @@ def _container_state(c: dict) -> str:
     healthy."""
     if c.get("crash_looping"):
         return "down"
-    if c.get("name") in config.PAUSED_CONTAINERS and not str(c.get("status", "")).startswith("Up"):
+    stopped = not str(c.get("status", "")).startswith("Up")
+    if paused_containers is None:
+        # The scan's own decision: Leela excuses a stopped container only for being paused.
+        if stopped and not c.get("issue"):
+            return "paused"
+    elif c.get("name") in paused_containers and stopped:
         return "paused"
     if not str(c.get("status", "")).startswith("Up"):
         return "down"
@@ -203,15 +274,17 @@ def _container_state(c: dict) -> str:
     return "online"
 
 
-def summarize_containers() -> dict:
+def summarize_containers(enforced: dict | None = None) -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_CONTAINERS:
         return {
             "total": 0, "healthy": 0, "issues": [], "available": False,
             "online": 0, "degraded": 0, "down": 0, "paused": 0, "cells": [],
         }
-    issues = [c for c in monitor.containers if c.get("issue")]
-    states = [_container_state(c) for c in monitor.containers]
+    paused = enforced_value(enforced, "paused_containers")
+    issues = [{**c, "issue": issue} for c in monitor.containers
+              if (issue := _effective_issue(c, paused))]
+    states = [_container_state(c, paused) for c in monitor.containers]
     return {
         "total": len(monitor.containers),
         "healthy": len(monitor.containers) - len(issues),
@@ -588,10 +661,11 @@ def _backup_verdict(backups: dict, cert_list: list) -> dict:
     return {"level": level, "title": title, "detail": detail}
 
 
-def summarize_system_and_backups() -> dict:
+def summarize_system_and_backups(enforced: dict | None = None) -> dict:
+    enabled_jobs = enforced_value(enforced, "backup_jobs")
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_SYSTEM_AND_BACKUPS:
-        return {"system": {}, "backups": {}, "available": False, "enabled_jobs": config.BACKUP_JOBS}
+        return {"system": {}, "backups": {}, "available": False, "enabled_jobs": enabled_jobs}
     system = dict(monitor.system)
     system["hostname"] = socket.gethostname()
     scan_dt = None
@@ -658,7 +732,7 @@ def summarize_system_and_backups() -> dict:
     return {
         "system": system,
         "backups": backups,
-        "enabled_jobs": config.BACKUP_JOBS,
+        "enabled_jobs": enabled_jobs,
         "available": True,
         "verdict": _backup_verdict(backups, monitor.certs),
     }
@@ -1153,19 +1227,20 @@ def summarize_services() -> dict:
     }
 
 
-def build_dashboard_context() -> dict:
-    """Single entry point the Flask route calls."""
+def build_dashboard_context(enforced: dict | None = None) -> dict:
+    """Single entry point the Flask route calls. `enforced` is core's config.enforced answer,
+    or None to fall back to this process's own import (see enforced_value)."""
     ctx = {
-        "health": summarize_health(),
+        "health": summarize_health(enforced),
         "findings": summarize_findings(),
         "pipeline_status": summarize_pipeline_status(),
-        "containers": summarize_containers(),
+        "containers": summarize_containers(enforced),
         "stack_completeness": summarize_stack_completeness(),
         "services": summarize_services(),
         "disk": summarize_disk(),
         "update_history": summarize_update_history(),
         "rollback_candidates": summarize_rollback_candidates(),
-        "system_and_backups": summarize_system_and_backups(),
+        "system_and_backups": summarize_system_and_backups(enforced),
         "certs": summarize_certs(),
     }
     # Live network values are intentionally unavailable here; the route replaces

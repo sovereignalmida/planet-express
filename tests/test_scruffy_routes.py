@@ -1402,3 +1402,43 @@ def test_core_is_not_asked_for_routers_when_traefik_is_down(monkeypatch):
     client, rpc, _ = _launch_link_client(monkeypatch, traefik_up=False)
     assert client.get("/").status_code == 200
     assert ("containers.routers", {}) not in rpc.calls
+
+
+
+# ── enforced config comes from core, not this process's import (T46.1 P1 #2) ─────
+
+def test_index_uses_core_s_enforced_links(monkeypatch):
+    client, rpc, seen = _launch_link_client(monkeypatch)
+    monkeypatch.setattr(casa_scruffy.config, "LAUNCH_LINKS", [])     # stale import
+    rpc.results["config.enforced"] = {
+        "paused_containers": [], "backup_jobs": ["weekly"],
+        "links": [{"name": "CASA_JELLYFIN", "href": "https://jellyfin.casalan.com"}]}
+    rpc.results["containers.routers"] = {"routers": {}, "services": {}}
+    captured = {}
+    real = casa_scruffy.casa_scruffy_net.merge_declared_links
+
+    def spy(derived, declared):
+        captured["declared"] = declared
+        return real(derived, declared)
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "merge_declared_links", spy)
+    assert client.get("/").status_code == 200
+    assert ("config.enforced", {}) in rpc.calls
+    assert captured["declared"] == [{"name": "CASA_JELLYFIN", "href": "https://jellyfin.casalan.com",
+                                     "zone": "lan"}]
+
+
+def test_index_falls_back_to_its_own_import_when_core_cannot_say(monkeypatch):
+    client, rpc, _ = _launch_link_client(monkeypatch)
+    import_links = [{"name": "CASA_A", "href": "https://a.casalan.com", "zone": "lan"}]
+    monkeypatch.setattr(casa_scruffy.config, "LAUNCH_LINKS", import_links)
+    rpc.results["config.enforced"] = OSError("core is down")
+    rpc.results["containers.routers"] = OSError("core is down")
+    captured = {}
+    real = casa_scruffy.casa_scruffy_net.merge_declared_links
+
+    def spy(derived, declared):
+        captured["declared"] = declared
+        return real(derived, declared)
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "merge_declared_links", spy)
+    assert client.get("/").status_code == 200
+    assert captured["declared"] == import_links
