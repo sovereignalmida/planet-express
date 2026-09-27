@@ -209,6 +209,26 @@ Deviations from the spec, deliberately:
 
 The spec's checklist. Nothing is removed until what replaces it is working.
 
+**API keys move out of compose labels.** Homepage reads each widget's key from a
+`homepage.widget.key=...` label. Planet Express reads keys only from
+`/etc/planetexpress-dashboard.env` and never from labels, because a label is readable by
+anything that can `docker inspect`: every container with the docker socket (dozzle, dockge,
+beszel, Traefik), and the compose file itself (and git, if the stacks are versioned). In order:
+
+1. List every key homepage holds, and which container it is on:
+   `docker ps -q | xargs docker inspect --format '{{.Name}} {{index .Config.Labels "homepage.widget.type"}}' | grep -v ' $'`.
+   (List only names and types here; don't print the keys into a terminal log.)
+2. For each app that has a Planet Express widget, copy its key into
+   `/etc/planetexpress-dashboard.env` as `<WIDGET>_API_KEY=` (INSTALL.md, "Container widget
+   keys"), then `sudo systemctl restart casa-dashboard` and confirm the widget shows data.
+3. For apps with no widget yet (jellyfin, qbittorrent, sabnzbd, ...), keep a note of which
+   keys exist. Don't copy them anywhere Planet Express doesn't read.
+4. Only after homepage is removed: delete every `homepage.*` label from the compose files
+   (`homepage.widget.key` above all) and recreate those containers (`docker compose up -d`),
+   so the keys are gone from `docker inspect`.
+5. Consider rotating any key that sat in a label, above all if the compose files are in git
+   history: removing the label does not remove it from past commits.
+
 ---
 
 ## Process per slice
