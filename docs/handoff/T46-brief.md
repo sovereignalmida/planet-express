@@ -359,3 +359,39 @@ already has teeth — the deploy template fails a release when core's loaded sha
 the file, for this reason. Restarting `casa-dashboard` from core is the alternative and is
 worse: it needs sudo that core does not otherwise want, and it bounces the operator's session
 on every edit.
+
+---
+
+## Before 2.2 ships
+
+State at `c361878`: T46.1–T46.5 built and pushed on `claude/pensive-keller-bj1gkg`; 1999 tests
+pass; ruff shows the 10 pre-existing errors only. The CHANGELOG entry sits under
+`[Unreleased]` until the live checks below pass.
+
+**How the gates were cleared.** Every gate in this brief since T46.1 P1 #1 was a Claude
+adversarial `/code-review` standing in for `codex review`, on the owner's written permission
+for that session. None of this code has had a Codex pass. Running
+`codex review --base main` once over the branch before tagging is cheap and recommended;
+T46.1 P1 #1 (`fc4579a`) and the fetcher (`668d57c`) are where a second reviewer matters most.
+
+**Owner decisions still open.**
+1. The Leela address-collection leftover (above, under P1 #1): keep or remove.
+2. `planetexpress.widget=<name>` labels may select a *keyless* widget for any image, but a
+   keyed widget only for an image its match list names. Confirm that is the override you want.
+3. Radarr needs 5.6+; the Immich key must be an admin's. Both are in INSTALL.md.
+
+**Live-host checks** (nothing here was run against the real host):
+- Router coverage: of the 70 live routes, how many get a launch link, and is every miss
+  explained (host-networked, `server.url`, a shared namespace, a compound rule)?
+- The Traefik naming mirror (`traefik_normalise`, `<service>_<project>` defaults) against
+  `/api/http/routers` on the host.
+- Each widget's port, paths and answers against the real app: sonarr, radarr, prowlarr,
+  immich, adguard. Each image's `RepoDigests` must name its publisher, or its key is never
+  sent (under the containerd image store, see INSTALL.md's caveat).
+- The dashboard's 5s RPC deadline against `containers.routers` and `query.widget_target`
+  with ~100 containers.
+- The design at 1440×900 and 390×844 with real data: stack drawer, split pills, widget states.
+
+**Not started:** T46.6 (retire homepage) needs the live host. qBittorrent, SABnzbd and
+Jellyfin widgets need new auth kinds in the gated fetcher (cookie login, a query-string key)
+or a live check of Jellyfin's header.
