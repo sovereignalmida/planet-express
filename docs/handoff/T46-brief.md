@@ -184,40 +184,62 @@ routes for free, which was the second half of the finding.
 Cost: container IPs are not collected today, so this needs a field in `casa_leela.py`'s
 inspect pass — scan-path code.
 
-**Status: the join is by address now** (see the commit after `48bc436`). Leela collects
-every container's IPv4/IPv6 addresses in a second `docker inspect`; the dashboard reads
-Traefik's `/api/http/services` and gives a router's link to the one container holding every
-one of its service's backend addresses, else to no one. Links are keyed by container name,
-and so is `links:` `name` -- the old example's `adventurelog` would now need to be
-`CASA_ADVENTURELOG`.
+**Status: settled -- the join is by label, read live from core.** Superseded the address
+join of `9d52e24`, whose history is worth keeping because it is why:
 
-The Claude `/code-review` on that change found, and it fixes:
+1. `9d52e24` joined by backend IP from Leela's monitor snapshot. The snapshot is up to 6h old,
+   and a canary recreate can hand an address to another container: a wrong link for hours.
+2. A live core RPC (`containers.addresses`) fixed staleness, but four adversarial rounds each
+   found another moment an address is held by the wrong container -- `docker restart A B`
+   swapping them with no id change, a removed namespace sharer, `network connect`, Traefik's
+   provider lag. Each fix was a new special case.
+3. Round 4 named the altitude problem, and the join moved to **labels**: a router is joined to
+   the container whose `traefik.http.routers.<name>.*` labels declare it (or whose compose
+   service/project names Traefik's default router), and a link is emitted only when that same
+   container declares the service the router forwards to. Labels change only on recreate (a
+   new id) and names only on `docker rename`, so the RPC (`containers.routers`) caches its
+   inspect on the exact `[id, name, status]` list from one `docker ps -a` per call.
 
-- The first version put the address field last in the restart-info inspect. `_run()` strips
-  stdout, so an empty last field cost the last line its tab, the line was skipped, and that
-  container lost its RestartCount -- crash-loop detection off for one container. Addresses
-  are a separate inspect now, and the tests strip the way `_run()` does.
-- `network_mode: service:gluetun` containers have no address of their own; their backend is
-  gluetun's. They are given the owner's addresses, so the address is claimed several times
-  and the join refuses it instead of putting qbit's link on gluetun.
-- Traefik pages its API at 100; both the router and the service fetch follow `X-Next-Page`.
-- IPv6 backends, normalised on both sides.
+What the label join refuses, deliberately (every one costs a link, never misplaces one):
 
-**Still open -- a decision, not a bug fix.** The addresses come from the monitor snapshot,
-which the scheduled pipeline writes every 6h. Two consequences:
+- routers on a container whose network namespace another shares (gluetun carries qbit's
+  labels) -- `links:` places those;
+- names two claimants declare, counting compose one-offs and paused/restarting containers;
+- services with `loadbalancer.server.url`, or weighted/mirroring/failover;
+- file-provider and cross-provider routes;
+- the whole read, when a `container:<ref>` cannot be resolved the way Docker resolves it
+  (full id, name, 12+ hex prefix) -- a warning names the container responsible.
 
-1. *Wrong link, for up to 6h.* A canary update recreates A (new address); B is recreated
-   and gets A's old one. The snapshot still says A owns it, so B's URL shows as A's button.
-   The duplicate-claim check cannot see it -- B is not in the snapshot yet.
-2. *No links after `/updates`.* That mode overwrites the snapshot with no containers, so
-   every derived link disappears until the next full or status scan.
+**Must verify on the live host before T46.4 ships:** `_declared()` mirrors Traefik's
+docker-provider naming by hand (default router `Normalize(service_project)`, the >1-service
+rule, TCP/UDP-only, `traefik.enable`). Count how many of the 70 routers get a link through
+`containers.routers`, and that none lands on the wrong row. The address join measured 56.
 
-Neither matters until T46.4 renders `launch_urls`. The fix for both is to read addresses
-live: a read-only core RPC doing one `docker inspect` of every container, cached briefly.
-That is a new core RPC surface and wants the Codex gate. The alternative is to accept the
-staleness and have T46.4 treat links as advisory.
+**Also verify:** the dashboard's RPC client deadline (5s) against `RPC_DOCKER_TIMEOUT_SECONDS`
+(4s) with ~100 containers in one `docker inspect`.
 
-Codex review of this change is **owed** -- not installed in the session that wrote it.
+**Leftover, owner decision:** `9d52e24` added address collection to Leela's scan (`c["ips"]`,
+`_inspect_network_addresses`, `dashboard_data.container_ips`, Hermes stripping `ips`). Nothing
+reads it now. Removing it was blocked by the session's permission classifier as a revert, so
+it is left for you: one extra `docker inspect` per scan, otherwise inert.
+
+### Gate for this change (T46.1 P1 #1)
+
+Codex CLI was not available in the session that wrote it. The owner authorised a Claude
+adversarial review as the gate instead; twelve rounds of `/code-review high`:
+
+| Round | Wrong-container / escaping findings | Outcome |
+| --- | --- | --- |
+| 1-2 | partial inspect, ID-keyed cache vs `docker restart`, namespace sharers | fixed, then redesigned |
+| 3-4 | short-id owner ref; removed sharer; `network connect`; altitude | **moved to labels** |
+| 5 | router on a container that doesn't own its service; rename kept id | router+service must agree; key id+name |
+| 6 | sidecar labels on gluetun; rename between list and inspect | namespace owners withheld; key from inspect |
+| 7 | `server.url` services; enable/one-off fail-open | withheld; claimants-not-owners |
+| 8 | owner recreated alone (regression from 7); stopped sharer | `ps -a`; dangling ref fails closed |
+| 9 | paused/restarting key mismatch; weighted services; name refs | status key; withheld; names refused |
+| 10 | hex-looking names taken as id prefixes | Docker's resolution order |
+| 11 | short hex ref matched a stranger's id | prefixes need 12+ hex |
+| 12 | none at medium or above | **clear** |
 
 ### 2. The dashboard never re-reads edited config
 

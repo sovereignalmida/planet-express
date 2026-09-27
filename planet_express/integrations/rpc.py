@@ -26,6 +26,12 @@ from planet_express.execution import actions
 from telegram_client import TelegramClient
 
 MAX_FRAME = 1024 * 1024
+# After a containers.routers read fails, answer at once for this long rather than tie up another
+# RPC worker repeating it.
+CONTAINER_ROUTERS_BACKOFF_SECONDS = 15
+# How long a second containers.routers call waits for one in flight. Two dashboard tabs that
+# refresh together should both get links; neither may hold a worker for a docker call.
+CONTAINER_ROUTERS_WAIT_SECONDS = 0.5
 log = logging.getLogger("planetexpress.rpc")
 
 
@@ -647,6 +653,107 @@ def build_core_handlers(
             for row in store.open_rollback_candidates(time.time())
         ]
 
+    # ([[id, name, status], ...], answer -- or None for a final failure) from the last read, in
+    # one slot so a reader never pairs one read's containers with another's answer.
+    routers_cache = [None]
+    # Monotonic time of the last failed read -- a hung or refusing docker daemon, or a read
+    # that keeps failing -- so it costs one page load rather than every load an RPC worker.
+    routers_backoff = [None]
+    routers_lock = threading.Lock()
+    # Consecutive reads that ended in a listing/inspect race. One is ordinary churn; two in a
+    # row means the two views persistently disagree, which must back off like any failure.
+    routers_races = [0]
+
+    def container_routers(params):
+        """{"routers": {router: container}, "services": {service: container}} for the
+        dashboard's launch links (T46.1).
+
+        Every call lists every container's id, name and status (one cheap `docker ps -a`) --
+        the status string, not a running bool, which would let `restarting` and `exited`
+        share a key. The labels behind the answer change only when a container is created
+        or recreated (a new id), the names only by `docker rename`, and who declares anything
+        only by a start or stop, so the inspect is reused exactly while that list is unchanged.
+
+        One read at a time. A second call waits briefly for the first and then gives up with
+        "timeout", so it can never park a bounded RPC worker for the length of a docker call.
+        """
+        _params(params, {})
+
+        def backing_off():
+            last = routers_backoff[0]
+            return last is not None and time.monotonic() - last < CONTAINER_ROUTERS_BACKOFF_SECONDS
+
+        if backing_off():
+            raise RpcError("docker not answering, retry", "timeout")
+        if not routers_lock.acquire(timeout=CONTAINER_ROUTERS_WAIT_SECONDS):
+            raise RpcError("container read in progress", "timeout")
+        try:
+            return read_routers(backing_off)
+        except RpcError:
+            raise
+        except Exception:
+            # Anything unexpected from the docker helpers backs off like a failed read, or
+            # every page load would repeat it.
+            routers_backoff[0] = time.monotonic()
+            raise
+        finally:
+            routers_lock.release()
+
+    def read_routers(backing_off):
+        """One read of container routers, under routers_lock (see container_routers)."""
+        # Checked again: a call that waited out a failed read must not repeat it.
+        if backing_off():
+            raise RpcError("docker not answering, retry", "timeout")
+        deadline = time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS
+        result = {"ok": False, "error": "unavailable"}
+        # Twice at most: a `--rm` job exiting between the listing and the inspect fails the
+        # inspect, and is ordinary enough that it should not blank the links for a load.
+        for attempt in range(2):
+            if attempt and deadline - time.monotonic() < 1:
+                # Too little left to retry: a zero-budget call would report "timeout"
+                # although the daemon answered the first time.
+                break
+            running = actions.list_containers(timeout=deadline - time.monotonic())
+            if not running["ok"]:
+                routers_backoff[0] = time.monotonic()
+                raise RpcError("docker not answering, retry", "timeout"
+                               if running["error"] == "timeout" else "unavailable")
+            cached = routers_cache[0]
+            if cached is not None and cached[0] == running["containers"]:
+                routers_races[0] = 0
+                if cached[1] is None:
+                    # A final failure for exactly these containers: the same read would fail the
+                    # same way, and log the same warning, until one of them changes.
+                    raise RpcError("container routers unavailable", "unavailable")
+                return cached[1]
+            result = actions.read_router_owners([c[0] for c in running["containers"]],
+                                                timeout=deadline - time.monotonic())
+            if result["ok"] and result["containers"] != running["containers"]:
+                # Renamed, started or stopped between the listing and the inspect: the answer
+                # does not match the key it would be cached under. A race; read again.
+                result = {"ok": False, "error": "unavailable", "race": True}
+                continue
+            if not result.get("race"):
+                # Only churn is worth the second attempt; any other failure would repeat.
+                break
+        if not result["ok"]:
+            # Any failed read backs off, not just a failed listing: a hung inspect or a
+            # parse that keeps failing would otherwise cost every page load the full budget.
+            if result.get("final"):
+                routers_cache[0] = (running["containers"], None)
+            # A race that simply ran out of retries is not a sick daemon -- once.
+            routers_races[0] = routers_races[0] + 1 if result.get("race") else 0
+            if not result.get("race") or routers_races[0] >= 2:
+                routers_backoff[0] = time.monotonic()
+            if result["error"] == "timeout":
+                raise RpcError("host slow, retry", "timeout")
+            raise RpcError("container routers unavailable", "unavailable")
+        routers_backoff[0] = None
+        routers_races[0] = 0
+        answer = {"routers": result["routers"], "services": result["services"]}
+        routers_cache[0] = (running["containers"], answer)
+        return answer
+
     def config_get(params):
         _params(params, {})
         try:
@@ -692,7 +799,8 @@ def build_core_handlers(
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked,
-            "canary.candidates": canary_candidates}
+            "canary.candidates": canary_candidates,
+            "containers.routers": container_routers}
 
     if chat is not None:
         handlers.update({"chat.ask": chat_ask, "chat.get": chat_get, "chat.quota": chat_quota})

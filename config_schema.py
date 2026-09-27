@@ -102,8 +102,9 @@ class PlanetExpressConfig(BaseModel):
     # turn into a URL, or cannot join to the container. container_urls() only emits a link
     # from a rule that is Host() terms joined by `||`, so a compound rule like
     # adventurelog's `(Host || Host) && !(PathPrefix ...)` -- whose host root really is
-    # launchable -- gets its link declared here instead of guessed at. It joins by backend
-    # address, so a host-networked container needs one too. `name` is the container name.
+    # launchable -- gets its link declared here instead of guessed at. Only docker-provider
+    # routers are joined to a container, so a file-provider route (a host-networked service)
+    # needs one too. `name` is the container name.
     links: list[LaunchLink] = []
     # /install only ever writes a LAN-only Traefik router (no auth of its own) —
     # restricted to this deployment's own LAN-only domain convention so a mistyped or

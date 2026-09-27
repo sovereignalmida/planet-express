@@ -312,7 +312,7 @@ def test_core_handlers():
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
                              "incident.list", "incident.get", "incident.propose",
-                             "canary.candidates"}
+                             "canary.candidates", "containers.routers"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
@@ -1202,3 +1202,239 @@ def test_every_action_summarises_without_raising(action):
     summary = handlers["proposal.list_pending"]({})[0]["summary"]
 
     assert isinstance(summary, str) and summary
+
+
+
+
+
+
+# ── containers.routers (T46.1) ───────────────────────────────────────────────────
+
+_R_A, _R_B = ["a" * 64, "CASA_A", True], ["b" * 64, "CASA_B", True]
+_R_OK = {"ok": True, "routers": {"actual": "CASA_A"}, "services": {"actual": "CASA_A"},
+         "containers": [_R_A]}
+_R_ANSWER = {"routers": {"actual": "CASA_A"}, "services": {"actual": "CASA_A"}}
+
+
+def _routers_handler(monkeypatch, running, reads):
+    """`running` and `reads` are queues of what the two docker calls answer."""
+    inspected = []
+    monkeypatch.setattr(rpc_module.actions, "list_containers",
+                        lambda *, timeout: running.pop(0))
+
+    def read(ids, *, timeout):
+        inspected.append(ids)
+        return reads.pop(0)
+    monkeypatch.setattr(rpc_module.actions, "read_router_owners", read)
+    clock = [1000.0]
+    monkeypatch.setattr(rpc_module.time, "monotonic", lambda: clock[0])
+    return build_core_handlers(Mock(), Mock())["containers.routers"], inspected, clock
+
+
+def _listed(*containers):
+    return {"ok": True, "containers": [list(c) for c in containers]}
+
+
+def test_container_routers_are_reinspected_exactly_when_a_container_is_new_or_renamed(monkeypatch):
+    """Labels change only on create/recreate (a new id); names only on `docker rename`."""
+    renamed = [_R_A[0], "CASA_A_OLD", True]
+    handler, inspected, _ = _routers_handler(
+        monkeypatch,
+        running=[_listed(_R_A), _listed(_R_A), _listed(_R_B), _listed(renamed)],
+        reads=[dict(_R_OK), {**_R_OK, "containers": [_R_B]}, {**_R_OK, "containers": [renamed]}])
+    assert handler({}) == _R_ANSWER
+    assert handler({}) == _R_ANSWER
+    assert inspected == [[_R_A[0]]]                   # same containers: reused
+    handler({})
+    assert inspected[-1] == [_R_B[0]]                 # a new id
+    handler({})
+    assert len(inspected) == 3                        # same id, new name
+    with pytest.raises(RpcError):
+        handler({"unexpected": 1})
+
+
+def test_a_container_gone_mid_read_is_retried_once(monkeypatch):
+    handler, inspected, _ = _routers_handler(
+        monkeypatch,
+        running=[_listed(_R_A, _R_B), _listed(_R_A)],
+        reads=[{"ok": False, "error": "unavailable", "race": True}, dict(_R_OK)])
+    assert handler({}) == _R_ANSWER
+    assert inspected == [[_R_A[0], _R_B[0]], [_R_A[0]]]
+
+
+def test_a_retry_with_no_budget_left_is_not_reported_as_a_timeout(monkeypatch):
+    """Zero budget would read as "timeout" though docker answered."""
+    handler, _, clock = _routers_handler(monkeypatch, running=[_listed(_R_A)], reads=[])
+
+    def slow_fail(ids, *, timeout):
+        clock[0] += rpc_module.actions.RPC_DOCKER_TIMEOUT_SECONDS
+        return {"ok": False, "error": "unavailable"}
+    monkeypatch.setattr(rpc_module.actions, "read_router_owners", slow_fail)
+    with pytest.raises(RpcError) as raised:
+        handler({})
+    assert raised.value.code == "unavailable"
+
+
+@pytest.mark.parametrize("error,code", [("timeout", "timeout"), ("unavailable", "unavailable")])
+def test_a_failed_listing_backs_off_so_a_sick_daemon_costs_one_load(monkeypatch, error, code):
+    handler, inspected, clock = _routers_handler(
+        monkeypatch, running=[{"ok": False, "error": error}, _listed()], reads=[])
+    with pytest.raises(RpcError) as raised:
+        handler({})
+    assert raised.value.code == code
+    for _ in range(3):
+        with pytest.raises(RpcError):
+            handler({})
+    clock[0] += rpc_module.CONTAINER_ROUTERS_BACKOFF_SECONDS
+    monkeypatch.setattr(rpc_module.actions, "read_router_owners",
+                        lambda ids, *, timeout: {"ok": True, "routers": {}, "services": {},
+                                                 "containers": []})
+    assert handler({}) == {"routers": {}, "services": {}}
+
+
+@pytest.mark.parametrize("failure", [{"ok": False, "error": "timeout"},
+                                     {"ok": False, "error": "unavailable"}])
+def test_a_failed_inspect_backs_off_too(monkeypatch, failure):
+    """A hung inspect or a parse that keeps failing would otherwise cost every load its budget."""
+    handler, inspected, clock = _routers_handler(
+        monkeypatch, running=[_listed(_R_A), _listed(_R_A), _listed(_R_A)],
+        # Neither is churn, so neither is retried within the call.
+        reads=[dict(failure), dict(_R_OK)])
+    with pytest.raises(RpcError):
+        handler({})
+    calls = len(inspected)
+    with pytest.raises(RpcError):
+        handler({})
+    assert len(inspected) == calls
+    clock[0] += rpc_module.CONTAINER_ROUTERS_BACKOFF_SECONDS
+    assert handler({}) == _R_ANSWER
+
+
+def test_a_rename_between_listing_and_inspect_is_a_race_not_an_answer(monkeypatch):
+    """Caching it would store names under a key they do not match."""
+    handler, inspected, _ = _routers_handler(
+        monkeypatch, running=[_listed(_R_A), _listed(_R_A)],
+        reads=[{**_R_OK, "containers": [[_R_A[0], "SWAPPED", True]]}, dict(_R_OK)])
+    assert handler({}) == _R_ANSWER
+    assert len(inspected) == 2
+
+
+def test_a_concurrent_call_waits_briefly_then_gives_up_without_holding_a_worker(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    def slow(*, timeout):
+        started.set()
+        release.wait(5)
+        return _listed()
+    monkeypatch.setattr(rpc_module.actions, "list_containers", slow)
+    monkeypatch.setattr(rpc_module.actions, "read_router_owners",
+                        lambda ids, *, timeout: {"ok": True, "routers": {}, "services": {},
+                                                 "containers": []})
+    handler = build_core_handlers(Mock(), Mock())["containers.routers"]
+    first = threading.Thread(target=handler, args=({},))
+    first.start()
+    assert started.wait(5)
+    try:
+        began = time.monotonic()
+        with pytest.raises(RpcError) as raised:
+            handler({})
+        assert raised.value.code == "timeout"
+        assert time.monotonic() - began < rpc_module.CONTAINER_ROUTERS_WAIT_SECONDS + 1
+    finally:
+        release.set()
+        first.join(5)
+
+
+def test_a_concurrent_call_that_waits_out_the_first_gets_the_answer(monkeypatch):
+    started = threading.Event()
+
+    def quick(*, timeout):
+        started.set()
+        time.sleep(0.1)
+        return _listed()
+    monkeypatch.setattr(rpc_module.actions, "list_containers", quick)
+    monkeypatch.setattr(rpc_module.actions, "read_router_owners",
+                        lambda ids, *, timeout: {"ok": True, "routers": {}, "services": {},
+                                                 "containers": []})
+    handler = build_core_handlers(Mock(), Mock())["containers.routers"]
+    first = threading.Thread(target=handler, args=({},))
+    first.start()
+    assert started.wait(5)
+    assert handler({}) == {"routers": {}, "services": {}}
+    first.join(5)
+
+
+def test_an_unexpected_exception_backs_off_like_a_failed_read(monkeypatch):
+    calls = []
+
+    def broken(*, timeout):
+        calls.append(1)
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+    monkeypatch.setattr(rpc_module.actions, "list_containers", broken)
+    handler = build_core_handlers(Mock(), Mock())["containers.routers"]
+    with pytest.raises(UnicodeDecodeError):
+        handler({})
+    with pytest.raises(RpcError):
+        handler({})
+    assert calls == [1]
+
+
+def test_a_race_that_runs_out_of_retries_does_not_back_off_once(monkeypatch):
+    """Docker answered; the containers just kept changing under the read."""
+    moving = {**_R_OK, "containers": [[_R_A[0], "MOVING", True]]}
+    handler, inspected, _ = _routers_handler(
+        monkeypatch, running=[_listed(_R_A), _listed(_R_A), _listed(_R_A)],
+        reads=[dict(moving), dict(moving), dict(_R_OK)])
+    with pytest.raises(RpcError):
+        handler({})
+    assert handler({}) == _R_ANSWER
+
+
+def test_races_on_consecutive_reads_back_off(monkeypatch):
+    """Two views that persistently disagree are a sick read, not churn."""
+    moving = {**_R_OK, "containers": [[_R_A[0], "MOVING", True]]}
+    handler, inspected, _ = _routers_handler(
+        monkeypatch, running=[_listed(_R_A)] * 4, reads=[dict(moving)] * 4)
+    for _ in range(2):
+        with pytest.raises(RpcError):
+            handler({})
+    done = len(inspected)
+    with pytest.raises(RpcError):
+        handler({})
+    assert len(inspected) == done
+
+
+def test_an_unresolvable_namespace_owner_is_not_reread_until_a_container_changes(monkeypatch):
+    """Same containers, same answer, same warning: read once, then only the cheap listing."""
+    final = {"ok": False, "error": "unavailable", "final": True}
+    handler, inspected, clock = _routers_handler(
+        monkeypatch, running=[_listed(_R_A), _listed(_R_A), _listed(_R_B)],
+        reads=[dict(final), {**_R_OK, "containers": [_R_B]}])
+    with pytest.raises(RpcError):
+        handler({})
+    assert len(inspected) == 1
+    clock[0] += rpc_module.CONTAINER_ROUTERS_BACKOFF_SECONDS
+    with pytest.raises(RpcError) as raised:
+        handler({})
+    assert raised.value.code == "unavailable" and len(inspected) == 1
+    assert handler({}) == _R_ANSWER                   # a container changed: read again
+
+
+def test_a_cache_hit_between_two_races_means_they_were_not_consecutive(monkeypatch):
+    moving = {**_R_OK, "containers": [[_R_A[0], "MOVING", True]]}
+    handler, inspected, _ = _routers_handler(
+        monkeypatch,
+        running=[_listed(_R_A), _listed(_R_A),        # race, race: out of retries (1st)
+                 _listed(_R_A),                       # a good read ...
+                 _listed(_R_A),                       # ... then a cache hit
+                 _listed(_R_B), _listed(_R_B),        # race, race again (not consecutive)
+                 _listed(_R_B)],
+        reads=[dict(moving), dict(moving), {**_R_OK, "containers": [_R_A]},
+               dict(moving), dict(moving), {**_R_OK, "containers": [_R_B]}])
+    with pytest.raises(RpcError):
+        handler({})
+    handler({})
+    handler({})
+    with pytest.raises(RpcError):
+        handler({})
+    assert handler({}) == _R_ANSWER                   # no backoff: the races were apart

@@ -164,8 +164,6 @@ def _render_with_certs(tmp_path, monkeypatch, certs):
     for attr in ("STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE"):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers", lambda: {"available": False, "routers": []})
-    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
-                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats", lambda: {"available": False})
     resp = _client().get("/")
     assert resp.status_code == 200
@@ -183,8 +181,6 @@ def _render_with_service_snapshot(tmp_path, monkeypatch, mode="full", stacks=Non
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})
-    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
-                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
     response = _client().get("/")
@@ -1073,8 +1069,6 @@ def test_the_disabled_note_follows_the_config_not_a_stale_snapshot(tmp_path, mon
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})
-    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
-                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
     html = _client().get("/").data.decode()
@@ -1175,8 +1169,6 @@ def test_history_renders_run_cards_beside_a_detail_pane(tmp_path, monkeypatch):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})
-    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
-                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
     html = _client().get("/").data.decode()
@@ -1361,3 +1353,52 @@ def test_every_detached_tab_hides_the_empty_live_grid():
     assert "crew" in detached
     assert outside <= detached, f"these tabs render outside the live grid but are not detached: {outside - detached}"
     assert ".detached-tab #dashboard-live > .body-grid { display: none; }" in css
+
+
+
+# ── Launch links: which container declares a router comes from core (T46.1) ─────
+
+def _launch_link_client(monkeypatch, *, traefik_up=True):
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    routers = [{"name": "actual@docker", "rule": "Host(`actual.casalan.com`)", "service": "actual",
+                "status": "enabled", "entry_points": ["websecure"]}]
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
+                        lambda: {"available": traefik_up, "routers": routers if traefik_up else []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
+                        lambda: {"available": False})
+    seen = []
+    real = casa_scruffy.casa_scruffy_net.container_urls
+
+    def spy(*args, **kwargs):
+        seen.append(real(*args, **kwargs))
+        return seen[-1]
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "container_urls", spy)
+    return client, rpc, seen
+
+
+def test_launch_links_join_through_core_s_router_owners(monkeypatch):
+    client, rpc, seen = _launch_link_client(monkeypatch)
+    rpc.results["containers.routers"] = {"routers": {"actual": "CASA_ACTUAL"},
+                                         "services": {"actual": "CASA_ACTUAL"}}
+    assert client.get("/").status_code == 200
+    assert ("containers.routers", {}) in rpc.calls
+    assert seen[-1] == {"CASA_ACTUAL": [{"href": "https://actual.casalan.com", "zone": "lan"}]}
+
+
+@pytest.mark.parametrize("answer", [OSError("core is down"), RpcError("slow", "timeout"),
+                                    ["not", "a", "dict"], {"actual": "CASA_ACTUAL"},
+                                    {"routers": {"actual": "CASA_ACTUAL"}},
+                                    {"routers": ["actual"], "services": {}}])
+def test_no_answer_from_core_means_no_derived_links_never_guessed_ones(monkeypatch, answer):
+    client, rpc, seen = _launch_link_client(monkeypatch)
+    # FakeRpc pops a list as a queue, so a list answer is queued as one response.
+    rpc.results["containers.routers"] = [answer] if isinstance(answer, list) else answer
+    assert client.get("/").status_code == 200
+    assert seen[-1] == {}
+
+
+def test_core_is_not_asked_for_routers_when_traefik_is_down(monkeypatch):
+    client, rpc, _ = _launch_link_client(monkeypatch, traefik_up=False)
+    assert client.get("/").status_code == 200
+    assert ("containers.routers", {}) not in rpc.calls

@@ -8,11 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Launch links are keyed by container, joined through the address Traefik forwards to.**
-  The router's service name matched a compose service for 27 of 64 routes, and compose
-  service names repeat across stacks, so a link could land on another stack's `web`. Config
-  `links:` `name` is now a container name (`CASA_ADVENTURELOG`, not `adventurelog`).
-  Nothing renders these links yet.
+- **Launch links are keyed by container, joined through the container's own Traefik
+  labels.** The router's service name matched a compose service for 27 of 64 routes, and
+  compose service names repeat across stacks, so a link could land on another stack's `web`.
+  Core reads which container declares each router and service (`containers.routers`, one
+  `docker ps -a` per call, `docker inspect` only when a container changed), and a link is
+  offered only when one container declares both. Config `links:` `name` is now a container
+  name (`CASA_ADVENTURELOG`, not `adventurelog`). Nothing renders these links yet.
 
 ### Fixed
 - **The Traefik router list stopped at 100.** Traefik's API pages; the Network tab now

@@ -12,6 +12,7 @@ plan) into a shell=True command string.
 
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -25,6 +26,8 @@ import casa_bender as bender
 import config
 from planet_express.core.redact import redact
 from planet_express.execution.runbook import IMAGE_REFERENCE_MAX
+
+log = logging.getLogger("planetexpress.actions")
 
 # Same as casa_zoidberg._run()'s default, which these checks used before the extraction.
 # A shorter value turns a slow or remote daemon into a "missing/unhealthy" verdict and a
@@ -741,6 +744,253 @@ def read_facts(container: str, *, timeout) -> dict:
     except (ValueError, TypeError, AttributeError, KeyError):
         return {"ok": False, "error": "unavailable"}
     return {"ok": True, "facts": facts}
+
+
+# ── Which container declares which Traefik router, for launch links (T46.1) ─────
+# A router is joined to its container by the names Traefik's docker provider gives it, which
+# come from the container's own configuration: `traefik.http.routers.<name>.*` and
+# `traefik.http.services.<name>.*` labels, or -- where there are none -- the default router
+# and service Traefik names after the compose service and project. The dashboard emits a
+# link only when one container declares both the router and the service it forwards to.
+# None of that changes while a container lives except by `docker rename`, so the cache
+# keys on id AND name. (The first version joined by backend IP address; four review rounds
+# each found another way an address could be momentarily held by the wrong container.)
+# .State.Status, not .State.Running: the latter is also true for paused and restarting
+# containers, and the listing's {{.State}} is the Status -- the two must agree to be a key.
+ROUTERS_FORMAT = ("{{.Name}}\t{{.Id}}\t{{.State.Status}}\t{{.HostConfig.NetworkMode}}\t"
+                  "{{json .Config.Labels}}")
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
+# Docker's short id is 12 hex characters. A shorter hex ref is at least as likely to be an old
+# container name (`db`, `cafe`) as an id, so it is never resolved as a prefix.
+_ID_PREFIX_RE = re.compile(r"[0-9a-f]{12,64}")
+# Paused and restarting containers are still in Traefik's (non `-a`) container list, so they
+# still make a name ambiguous -- but a button onto one would not open.
+_CLAIMING_STATUSES = {"running", "paused", "restarting"}
+
+
+class UnresolvableNamespace(ValueError):
+    """A sharer's network owner cannot be identified. Retrying the same read will not help."""
+
+
+# Traefik's label parser matches the path case-insensitively and keeps the name's own case.
+_HTTP_ROUTER_RE = re.compile(r"traefik\.http\.routers\.([^.]+)\.", re.IGNORECASE)
+_HTTP_SERVICE_RE = re.compile(r"traefik\.http\.services\.([^.]+)\.", re.IGNORECASE)
+# Traefik goes TCP/UDP-only -- no default HTTP router or service -- when a container has TCP or
+# UDP routers or services and no HTTP routers, middlewares or services.
+_HTTP_CONFIG_RE = re.compile(r"traefik\.http\.(routers|middlewares|services)\.", re.IGNORECASE)
+_TCP_UDP_CONFIG_RE = re.compile(r"traefik\.(tcp|udp)\.(routers|services)\.", re.IGNORECASE)
+_GO_FALSE = {"0", "f", "F", "false", "FALSE", "False"}   # strconv.ParseBool
+# A labelled service that names its own server URL forwards wherever that says -- another
+# machine, or another container -- so which row its router belongs on is not known.
+_SERVER_URL_RE = re.compile(r"traefik\.http\.services\.([^.]+)\.loadbalancer\.server\.url$",
+                            re.IGNORECASE)
+# Likewise a weighted, mirroring or failover service forwards to other services, which may be
+# declared on other containers. Only a plain loadBalancer service is known to be this one.
+_NOT_LOADBALANCER_RE = re.compile(r"traefik\.http\.services\.([^.]+)\.(?!loadbalancer\.)",
+                                  re.IGNORECASE)
+_COMPOSE_SERVICE = "com.docker.compose.service"
+_COMPOSE_PROJECT = "com.docker.compose.project"
+_COMPOSE_ONEOFF = "com.docker.compose.oneoff"
+
+
+def traefik_normalise(name: str) -> str:
+    """Traefik's provider.Normalize: runs of anything but letters and digits become one `-`."""
+    return "-".join(part for part in re.split(r"[\W_]+", name) if part)
+
+
+def _declared(name: str, labels: dict) -> tuple[set[str], set[str], set[str]]:
+    """(http routers, http services, services to withhold) this container gives Traefik's
+    docker provider.
+
+    Mirrors the provider: no routers or services at all for `traefik.enable=false`; a default
+    service when none is labelled; a default router only when none is labelled, the container
+    is not TCP/UDP-only, and it has at most one service. Default names are
+    Normalize(`<compose service>_<compose project>`) when both labels are present, else of
+    the container name.
+    """
+    enable = [str(v).strip() for k, v in labels.items() if k.lower() == "traefik.enable"]
+    # Traefik merges case-variant keys and one of them wins; only when every spelling says
+    # false is the container certainly disabled. Otherwise it stays a claimant (fail closed).
+    if enable and all(v in _GO_FALSE for v in enable):
+        return set(), set(), set()
+    routers = {m.group(1) for key in labels if (m := _HTTP_ROUTER_RE.match(key))}
+    services = {m.group(1) for key in labels if (m := _HTTP_SERVICE_RE.match(key))}
+    if _COMPOSE_SERVICE in labels and _COMPOSE_PROJECT in labels:
+        default = traefik_normalise(f"{labels[_COMPOSE_SERVICE]}_{labels[_COMPOSE_PROJECT]}")
+    else:
+        default = traefik_normalise(name)
+    withheld = {m.group(1) for key in labels
+                if (m := _SERVER_URL_RE.match(key)) or (m := _NOT_LOADBALANCER_RE.match(key))}
+    tcp_udp_only = (any(_TCP_UDP_CONFIG_RE.match(k) for k in labels)
+                    and not any(_HTTP_CONFIG_RE.match(k) for k in labels))
+    if tcp_udp_only or not default:
+        return routers, services, withheld
+    if not services:
+        services = {default}
+    if not routers and len(services) == 1:
+        routers = {default}
+    return routers, services, withheld
+
+
+def parse_router_owners(out: str, ids: list[str]) -> dict:
+    """{"routers": {router: container}, "services": {service: container}, "containers":
+    [[id, name, status], ...]} for every name exactly one running container declares.
+
+    `ids` is every container, running or not: only running ones declare anything (Traefik
+    ignores the rest), but a stopped one can still be sharing another's network namespace.
+    Raises ValueError on anything short of a complete, well-formed read: a missing container
+    would leave a name another container also declares looking unique.
+
+    A container whose network namespace another container shares (gluetun, with qbittorrent
+    in `network_mode: service:gluetun`) declares nothing here. Its labels are commonly the
+    sharers' routers -- qbit's labels have to live on gluetun -- so a router on it could be
+    any of theirs, and its row is the wrong place for qbit's button. `links:` places those.
+    """
+    rows = []
+    # Split on "\n" only: str.splitlines() also breaks on U+0085 and friends, which Go's JSON
+    # does not escape, so one label value could split a record (same rule as the log reader).
+    for line in (out or "").split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t", 4)
+        if len(parts) != 5:
+            raise ValueError("malformed router line")
+        name, container_id, status, network_mode, labels_json = parts
+        name = name.lstrip("/")
+        if not name or not _CONTAINER_ID_RE.fullmatch(container_id) or not status:
+            raise ValueError("malformed router line")
+        running = status == "running"
+        claiming = status in _CLAIMING_STATUSES
+        labels = json.loads(labels_json) if labels_json not in ("", "null") else {}
+        if not isinstance(labels, dict):
+            raise ValueError("malformed labels")
+        rows.append((name, container_id, running, claiming, network_mode, labels, status))
+    if sorted(row[1] for row in rows) != sorted(ids):
+        raise ValueError("inspect did not answer for exactly the listed containers")
+
+    by_id = {row[1]: row[0] for row in rows}
+    names = set(by_id.values())
+    shared = set()
+    for sharer, _, _, _, network_mode, _, _ in rows:
+        if not network_mode.startswith("container:"):
+            continue
+        ref = network_mode.partition(":")[2]
+        # Docker's own order: a full id, then a name, then a unique id prefix. A name that
+        # happens to be hex (`db`, `cafe`) is a name, never a prefix of someone else's id.
+        if ref in by_id:
+            shared.add(by_id[ref])
+            continue
+        prefixed = ([n for cid, n in by_id.items() if cid.startswith(ref)]
+                    if ref not in names and _ID_PREFIX_RE.fullmatch(ref) else [])
+        if len(prefixed) == 1:
+            shared.add(prefixed[0])
+        else:
+            # Every container is listed, so an id that matches none means its owner was
+            # recreated alone -- and the new owner, carrying the sharer's labels, cannot be told
+            # apart. A name is worse: Docker resolves it only at start, so after a rename it can
+            # name a different container than the one whose namespace this is. Either way,
+            # refuse the read rather than trust it -- and say which container, because until it
+            # is recreated or removed there are no derived links on this host.
+            log.warning("Launch links withheld: %s shares the network of %r, which cannot be "
+                        "identified. Remove %s, or recreate it through compose "
+                        "(network_mode: service:...), which records the owner by id",
+                        sharer, ref, sharer)
+            raise UnresolvableNamespace("unresolvable network namespace owner")
+
+    router_claims: dict[str, set] = {}
+    service_claims: dict[str, set] = {}
+    for name, _, running, claiming, _, labels, _ in rows:
+        if not claiming:
+            continue
+        routers, services, withheld = _declared(name, labels)
+        # A network-namespace owner, a `docker compose run` one-off (it carries its service's
+        # labels and Traefik load-balances to it), and a paused or restarting container are
+        # still counted as claimants -- so a name they share stays ambiguous -- but never as
+        # an owner.
+        distrusted = (not running or name in shared
+                      or str(labels.get(_COMPOSE_ONEOFF, "")).strip().lower() == "true")
+        routers = {(r, None if distrusted else name) for r in routers}
+        withheld_folded = {w.lower() for w in withheld}
+        services = {(s, None if distrusted or s.lower() in withheld_folded else name)
+                    for s in services}
+        for router, owner in routers:
+            router_claims.setdefault(router, set()).add(owner)
+        for service, owner in services:
+            service_claims.setdefault(service, set()).add(owner)
+    # A name two containers declare (scaled replicas, a copy-pasted label) is one Traefik
+    # merges or rejects; which of them a button should open is unknown, so it opens none.
+    return {"routers": {r: n.pop() for r, n in router_claims.items() if len(n) == 1 and None not in n},
+            "services": {s: n.pop() for s, n in service_claims.items() if len(n) == 1 and None not in n},
+            "containers": sorted([row[1], row[0], row[6]] for row in rows)}
+
+
+def list_containers(*, timeout) -> dict:
+    """{"ok": True, "containers": [[id, name, status], ...]} for every container, sorted, or a
+    typed error. Cheap, and exactly what tells the router cache whether a container was
+    created, recreated, renamed, started or stopped since the last inspect."""
+    if timeout <= 0:
+        return {"ok": False, "error": "timeout"}
+    try:
+        rc, out, _err = bender.run_argv(
+            ["docker", "ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.Names}}\t{{.State}}"],
+            timeout=timeout)
+    except UnicodeDecodeError:
+        return {"ok": False, "error": "unavailable"}
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        return {"ok": False, "error": "timeout"}
+    if rc != 0:
+        return {"ok": False, "error": "unavailable"}
+    containers = []
+    for line in out.split("\n"):
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3:
+            return {"ok": False, "error": "unavailable"}
+        container_id, names, state = parts
+        # Legacy `--link` aliases make this `app,web/app`; the container's own name is the one
+        # without a slash, which is what `docker inspect` calls it.
+        own = [n for n in names.split(",") if n and "/" not in n]
+        if not _CONTAINER_ID_RE.fullmatch(container_id) or len(own) != 1 or not state:
+            return {"ok": False, "error": "unavailable"}
+        # {{.State}} here is the inspect's .State.Status: the two must key identically, and on
+        # the status itself -- a bool would let `restarting` and `exited` share a key.
+        containers.append([container_id, own[0], state])
+    return {"ok": True, "containers": sorted(containers)}
+
+
+def read_router_owners(ids: list[str], *, timeout) -> dict:
+    """{"ok": True, "routers": {...}, "services": {...}, "containers": [...]} for exactly these
+    containers, or a typed error. One `docker inspect`. Read-only.
+
+    A container *removed* between the listing and this read fails the inspect; that is tagged
+    "race", as is ordinary churn the caller detects by comparing "containers". A sharer whose
+    network owner cannot be identified is tagged "final": reading again will not change it.
+    """
+    if not all(isinstance(i, str) and _CONTAINER_ID_RE.fullmatch(i) for i in ids):
+        return {"ok": False, "error": "unavailable"}
+    if not ids:
+        return {"ok": True, "routers": {}, "services": {}, "containers": []}
+    if timeout <= 0:
+        return {"ok": False, "error": "timeout"}
+    try:
+        rc, out, _err = bender.run_argv(
+            ["docker", "inspect", "--type", "container", "--format", ROUTERS_FORMAT, *ids],
+            timeout=timeout)
+    except UnicodeDecodeError:
+        return {"ok": False, "error": "unavailable"}
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        return {"ok": False, "error": "timeout"}
+    if rc != 0:
+        # Only a container removed since the listing is churn worth a free retry; any other
+        # error will repeat, and should back off at once.
+        return {"ok": False, "error": "unavailable", **({"race": True} if "No such" in _err else {})}
+    try:
+        return {"ok": True, **parse_router_owners(out, ids)}
+    except UnresolvableNamespace:
+        return {"ok": False, "error": "unavailable", "final": True}
+    except (ValueError, TypeError, RecursionError):
+        return {"ok": False, "error": "unavailable"}
 
 
 def logs_argv(container: str, cursor: str | None) -> list[str]:

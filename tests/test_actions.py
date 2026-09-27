@@ -405,3 +405,381 @@ def test_logs_record_buffer_is_bounded_during_parsing(monkeypatch):
     assert result['skipped']
     assert len(result['lines']) <= actions.LOG_MAX_LINES
     assert peak < 40 * 1024 * 1024, f'peak {peak / 1e6:.0f} MB'
+
+
+
+
+
+# ── Which container declares which Traefik router (T46.1) ───────────────────────
+
+_ID_A, _ID_B, _ID_C = ("a" * 64, "b" * 64, "c" * 64)
+_ID_Q_ALT = "9" * 64
+
+
+def _row(name, cid, labels, mode="bridge", running=True, status=None):
+    status = status or ("running" if running else "exited")
+    return f"/{name}\t{cid}\t{status}\t{mode}\t{json.dumps(labels)}"
+
+
+def _owners(rows, ids=None):
+    if ids is None:
+        ids = [row.split("\t")[1] for row in rows]
+    got = actions.parse_router_owners("\n".join(rows).strip(), ids)
+    got.pop("containers")
+    return got
+
+
+def _compose(service, project, **extra):
+    return {"com.docker.compose.service": service, "com.docker.compose.project": project, **extra}
+
+
+def test_explicit_router_and_service_labels_name_their_container():
+    got = _owners([_row("CASA_ACTUAL", _ID_A, _compose("actual_server", "money", **{
+        "traefik.enable": "true",
+        "traefik.http.routers.actual.rule": "Host(`actual.casalan.com`)",
+        "traefik.http.routers.actual-lan.rule": "Host(`actual.casalan.com`)",
+        "traefik.http.services.actual.loadbalancer.server.port": "5006"}))])
+    assert got == {"routers": {"actual": "CASA_ACTUAL", "actual-lan": "CASA_ACTUAL"},
+                   "services": {"actual": "CASA_ACTUAL"}}
+
+
+def test_explicit_routers_with_no_service_label_use_the_default_service():
+    got = _owners([_row("CASA_X", _ID_A, _compose("x", "p", **{
+        "traefik.http.routers.named.rule": "Host(`x`)"}))])
+    assert got == {"routers": {"named": "CASA_X"}, "services": {"x-p": "CASA_X"}}
+
+
+def test_no_labels_means_traefiks_default_router_and_service():
+    """Traefik names both `<service>_<project>`, normalised: compose service `wiki-go` of
+    project `docs` is `wiki-go-docs`; a container outside compose uses its own name."""
+    got = _owners([_row("CASA_WIKI", _ID_A, _compose("wiki-go", "docs")),
+                   _row("loose_one", _ID_B, {})])
+    assert got == {"routers": {"wiki-go-docs": "CASA_WIKI", "loose-one": "loose_one"},
+                   "services": {"wiki-go-docs": "CASA_WIKI", "loose-one": "loose_one"}}
+
+
+def test_an_empty_compose_project_label_still_counts_as_present():
+    got = _owners([_row("CASA_X", _ID_A, _compose("svc", ""))])
+    assert got["routers"] == {"svc": "CASA_X"}
+
+
+def test_label_paths_match_case_insensitively_and_keep_the_names_case():
+    got = _owners([_row("CASA_APP", _ID_A, {"traefik.HTTP.Routers.MyApp.rule": "Host(`a`)",
+                                            "Traefik.http.services.MySvc.loadbalancer.server.port": "80"})])
+    assert got == {"routers": {"MyApp": "CASA_APP"}, "services": {"MySvc": "CASA_APP"}}
+
+
+@pytest.mark.parametrize("key,value", [("traefik.enable", "False"), ("traefik.enable", "0"),
+                                       ("traefik.Enable", "false"), ("TRAEFIK.ENABLE", "f")])
+def test_a_disabled_container_declares_nothing(key, value):
+    """Traefik matches the key case-insensitively and reads the value with ParseBool."""
+    got = _owners([_row("CASA_OFF", _ID_A, _compose("off", "p", **{key: value}))])
+    assert got == {"routers": {}, "services": {}}
+
+
+def test_a_one_off_compose_run_makes_its_services_routers_ambiguous_while_it_runs():
+    """`docker compose run web migrate` copies web's labels and Traefik load-balances to it
+    too, so for as long as it runs, which container `web` means is not one answer."""
+    labels = _compose("web", "p", **{"traefik.http.routers.web.rule": "Host(`w`)"})
+    got = _owners([_row("CASA_WEB", _ID_A, labels),
+                   _row("p-web-run-1", _ID_B, {**labels, "com.docker.compose.oneoff": "True"})])
+    assert "web" not in got["routers"]
+
+
+def test_a_one_off_alone_owns_nothing():
+    got = _owners([_row("p-job-run-1", _ID_A, _compose("job", "p", **{
+        "com.docker.compose.oneoff": "True", "traefik.http.routers.job.rule": "Host(`j`)"}))])
+    assert got == {"routers": {}, "services": {}}
+
+
+def test_a_server_url_label_in_another_case_still_withholds_its_service():
+    got = _owners([_row("CASA_P", _ID_A, {
+        "traefik.http.routers.Foo.rule": "Host(`f`)", "traefik.http.routers.Foo.service": "Foo",
+        "traefik.http.services.foo.loadbalancer.server.url": "http://10.0.0.9",
+        "traefik.http.services.Foo.loadbalancer.passhostheader": "true"})])
+    assert "Foo" not in got["services"] and "foo" not in got["services"]
+
+
+def test_a_service_that_names_its_own_server_url_is_withheld():
+    """It forwards wherever the URL says, so its router has no honest row."""
+    got = _owners([_row("CASA_TRAEFIK", _ID_A, {
+        "traefik.http.routers.nas.rule": "Host(`nas`)",
+        "traefik.http.services.nas.loadBalancer.server.url": "http://192.168.1.171:5000"})])
+    assert got["routers"] == {"nas": "CASA_TRAEFIK"}
+    assert "nas" not in got["services"]
+
+
+def test_a_container_is_disabled_only_when_every_enable_spelling_says_so():
+    """Traefik merges case-variant keys and one wins; mixed means still a claimant."""
+    mixed = _owners([_row("CASA_B", _ID_A, {"traefik.Enable": "false", "traefik.enable": "true",
+                                            "traefik.http.routers.app.rule": "Host(`b`)"}),
+                     _row("CASA_A", _ID_B, {"traefik.http.routers.app.rule": "Host(`a`)"})])
+    assert "app" not in mixed["routers"]
+
+
+def test_a_tcp_only_container_gets_no_default_http_router():
+    got = _owners([_row("CASA_DNS", _ID_A, _compose("dns", "net", **{
+        "traefik.tcp.routers.dns.rule": "HostSNI(`*`)"}))])
+    assert got == {"routers": {}, "services": {}}
+
+
+def test_a_tcp_middleware_alone_does_not_make_a_container_tcp_only():
+    got = _owners([_row("CASA_X", _ID_A, _compose("x", "p", **{
+        "traefik.tcp.middlewares.m.ipallowlist.sourcerange": "10.0.0.0/8"}))])
+    assert got["routers"] == {"x-p": "CASA_X"}
+
+
+def test_an_http_middleware_keeps_a_tcp_container_http_too():
+    got = _owners([_row("CASA_X", _ID_A, _compose("x", "p", **{
+        "traefik.tcp.routers.t.rule": "HostSNI(`*`)",
+        "traefik.http.middlewares.m.headers.customrequestheaders.a": "b"}))])
+    assert got["routers"] == {"x-p": "CASA_X"}
+
+
+def test_two_services_and_no_router_is_no_default_router():
+    """Traefik refuses to guess which of two services a default router would forward to."""
+    got = _owners([_row("CASA_X", _ID_A, _compose("x", "p", **{
+        "traefik.http.services.a.loadbalancer.server.port": "1",
+        "traefik.http.services.b.loadbalancer.server.port": "2"}))])
+    assert got == {"routers": {}, "services": {"a": "CASA_X", "b": "CASA_X"}}
+
+
+def test_a_vpn_d_app_labelled_on_itself_owns_its_router():
+    got = _owners([_row("CASA_GLUETUN", _ID_A, _compose("gluetun", "vpn")),
+                   _row("CASA_QBIT", _ID_B, _compose("qbit", "vpn", **{
+                       "traefik.http.routers.qbit.rule": "Host(`q`)",
+                       "traefik.http.services.qbit.loadbalancer.server.port": "8080"}),
+                        mode=f"container:{_ID_A}")])
+    assert got["routers"] == {"qbit": "CASA_QBIT"}
+    assert got["services"] == {"qbit": "CASA_QBIT"}
+
+
+@pytest.mark.parametrize("ref", [_ID_A, _ID_A[:12], _ID_A[:40]])
+def test_a_namespace_owner_declares_nothing_because_its_labels_may_be_its_sharers(ref):
+    """The usual gluetun setup puts qbit's labels ON gluetun: router and service both gluetun's.
+    qbit's button on gluetun's row would be wrong; `links:` places it."""
+    got = _owners([_row("CASA_GLUETUN", _ID_A, _compose("gluetun", "vpn", **{
+                       "traefik.http.routers.qbit.rule": "Host(`q`)",
+                       "traefik.http.services.qbit.loadbalancer.server.port": "8080"})),
+                   _row("CASA_QBIT", _ID_B, _compose("qbit", "vpn"), mode=f"container:{ref}")])
+    assert "qbit" not in got["routers"] and "qbit" not in got["services"]
+    assert "gluetun-vpn" not in got["routers"]
+
+
+def test_a_namespace_owner_still_makes_a_shared_name_ambiguous():
+    got = _owners([_row("CASA_GLUETUN", _ID_A, {"traefik.http.routers.web.rule": "Host(`g`)"}),
+                   _row("CASA_QBIT", _ID_B, {}, mode=f"container:{_ID_A}"),
+                   _row("CASA_WEB", _ID_C, {"traefik.http.routers.web.rule": "Host(`w`)"})])
+    assert "web" not in got["routers"]
+
+
+def test_a_sharer_naming_an_owner_that_no_longer_exists_fails_the_read():
+    """gluetun recreated alone: qbit still names the old id, and the NEW gluetun -- carrying
+    qbit's labels -- cannot be told apart from an ordinary container. Refused, not trusted."""
+    with pytest.raises(ValueError):
+        _owners([_row("CASA_GLUETUN", _ID_A, {"traefik.http.routers.qbit.rule": "Host(`q`)"}),
+                 _row("CASA_QBIT", _ID_B, {}, mode="container:" + "f" * 64)])
+
+
+def test_a_sharer_naming_its_owner_by_name_fails_the_read():
+    """Docker resolves a name only at start; after a rename it can name another container."""
+    with pytest.raises(ValueError):
+        _owners([_row("vpn", _ID_A, {}), _row("CASA_QBIT", _ID_B, {}, mode="container:vpn")])
+
+
+@pytest.mark.parametrize("kind", ["weighted.services[0].name", "mirroring.service",
+                                  "failover.service"])
+def test_a_service_that_forwards_to_other_services_is_withheld(kind):
+    got = _owners([_row("CASA_A", _ID_A, {"traefik.http.routers.app.rule": "Host(`a`)",
+                                          "traefik.http.routers.app.service": "app",
+                                          f"traefik.http.services.app.{kind}": "app-b@docker"})])
+    assert "app" not in got["services"]
+
+
+def test_a_stopped_sharer_still_marks_its_owner():
+    """qbit exited; Traefik can still list qbit's router, labelled on gluetun."""
+    got = _owners([_row("CASA_GLUETUN", _ID_A, {"traefik.http.routers.qbit.rule": "Host(`q`)",
+                                                "traefik.http.services.qbit.loadbalancer.server.port": "80"}),
+                   _row("CASA_QBIT", _ID_B, {}, mode=f"container:{_ID_A}", running=False)])
+    assert "qbit" not in got["routers"] and "qbit" not in got["services"]
+
+
+def test_a_stopped_container_declares_nothing_and_blocks_nothing():
+    """Traefik ignores stopped containers, so an old exited copy with the same labels must not
+    make the running one's router ambiguous."""
+    labels = {"traefik.http.routers.app.rule": "Host(`a`)"}
+    got = _owners([_row("CASA_APP", _ID_A, labels), _row("CASA_APP_OLD", _ID_B, labels, running=False)])
+    assert got["routers"] == {"app": "CASA_APP"}
+
+
+def test_an_ambiguous_namespace_owner_prefix_fails_the_read():
+    with pytest.raises(ValueError):
+        _owners([_row("A", "ab" + "0" * 62, {}), _row("B", "ab" + "1" * 62, {}),
+                 _row("Q", _ID_Q_ALT, {}, mode="container:ab")])
+
+
+def test_a_name_two_containers_declare_belongs_to_neither():
+    web = {"traefik.http.routers.web.rule": "Host(`w`)",
+           "traefik.http.services.web.loadbalancer.server.port": "80"}
+    got = _owners([_row("CASA_WEB_1", _ID_A, web), _row("CASA_WEB_2", _ID_B, web),
+                   _row("CASA_OTHER", _ID_C, {"traefik.http.routers.other.rule": "Host(`o`)"})])
+    assert got["routers"] == {"other": "CASA_OTHER"}
+    assert "web" not in got["services"]
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("wiki-go_docs", "wiki-go-docs"), ("__a..b__", "a-b"), ("SabNZBD", "SabNZBD"), ("___", "")])
+def test_traefik_normalise_matches_provider_normalize(name, expected):
+    assert actions.traefik_normalise(name) == expected
+
+
+@pytest.mark.parametrize("out,ids", [
+    ("junk", [_ID_A]),                                                  # malformed
+    ("/X\tnothex\t{}", ["nothex"]),                                    # bad id
+    (f"/X\t{_ID_A}\trunning\tbridge\t[1]", [_ID_A]),                   # labels not a map
+    (f"/X\t{_ID_A}\trunning\tbridge\t{{bad json", [_ID_A]),            # labels unreadable
+    (f"/X\t{_ID_A}\tbridge\t{{}}", [_ID_A]),                          # a field short
+    (f"/X\t{_ID_A}\t\tbridge\t{{}}", [_ID_A]),                        # no status
+    (_row("X", _ID_A, {}), [_ID_A, _ID_B]),                             # a container lost
+    (_row("X", _ID_A, {}) + "\n" + _row("Y", _ID_B, {}), [_ID_A]),     # one extra
+])
+def test_anything_short_of_a_complete_read_is_refused(out, ids):
+    """A container missing from the read would leave a name it also declares looking unique."""
+    with pytest.raises((ValueError, TypeError)):
+        actions.parse_router_owners(out, ids)
+
+
+def test_null_labels_are_no_labels():
+    assert _owners([f"/plain\t{_ID_A}\trunning\tbridge\tnull"])["routers"] == {"plain": "plain"}
+
+
+@pytest.mark.parametrize("status", ["paused", "restarting", "created", "exited", "dead"])
+def test_only_a_running_container_owns_anything(status):
+    got = _owners([_row("CASA_X", _ID_A, {"traefik.http.routers.x.rule": "Host(`x`)"},
+                        status=status)])
+    assert got["routers"] == {}
+
+
+def test_the_read_reports_status_the_same_way_the_listing_does():
+    """A paused container must key identically from both sides, or every read is a race."""
+    got = actions.parse_router_owners(_row("CASA_X", _ID_A, {}, status="paused"), [_ID_A])
+    assert got["containers"] == [[_ID_A, "CASA_X", "paused"]]
+
+
+def test_a_label_value_with_a_unicode_line_separator_does_not_split_the_record():
+    """Go's JSON leaves U+0085 unescaped; str.splitlines() would break the line on it."""
+    got = _owners([_row("CASA_X", _ID_A, {"note": "a\x85b\u2028c",
+                                          "traefik.http.routers.x.rule": "Host(`x`)"})])
+    assert got["routers"] == {"x": "CASA_X"}
+
+
+def test_the_read_reports_the_names_it_saw_for_the_cache_key():
+    out = "\n".join([_row("CASA_B", _ID_B, {}, running=False), _row("CASA_A", _ID_A, {})])
+    got = actions.parse_router_owners(out, [_ID_A, _ID_B])
+    assert got["containers"] == [[_ID_A, "CASA_A", "running"], [_ID_B, "CASA_B", "exited"]]
+
+
+def _docker(monkeypatch, answer):
+    calls = []
+
+    def run(argv, timeout):
+        calls.append((argv, timeout))
+        return answer
+    monkeypatch.setattr(actions.bender, "run_argv", run)
+    return calls
+
+
+def test_list_containers_is_every_container_with_whether_it_runs(monkeypatch):
+    calls = _docker(monkeypatch, (0, f"{_ID_B}\tCASA_B\texited\n{_ID_A}\tCASA_A\trunning", ""))
+    assert actions.list_containers(timeout=4) == {
+        "ok": True, "containers": [[_ID_A, "CASA_A", "running"], [_ID_B, "CASA_B", "exited"]]}
+    assert calls[0][0] == ["docker", "ps", "-a", "--no-trunc", "--format",
+                           "{{.ID}}\t{{.Names}}\t{{.State}}"]
+
+
+def test_legacy_link_aliases_resolve_to_the_containers_own_name(monkeypatch):
+    _docker(monkeypatch, (0, f"{_ID_A}\tapp,web/app\trunning", ""))
+    assert actions.list_containers(timeout=4) == {"ok": True, "containers": [[_ID_A, "app", "running"]]}
+
+
+@pytest.mark.parametrize("answer,error", [
+    ((124, "", "timed out"), "timeout"),
+    ((1, "", "daemon down"), "unavailable"),
+    ((0, "--format=evil\tx\trunning", ""), "unavailable"),  # never passed on as an argument
+    ((0, f"{_ID_A}\t\trunning", ""), "unavailable"),        # no name
+    ((0, f"{_ID_A}\ta,b\trunning", ""), "unavailable"),     # two own names: not a shape we know
+    ((0, f"{_ID_A}\ta", ""), "unavailable"),                 # a field short
+])
+def test_list_containers_failures_are_typed(monkeypatch, answer, error):
+    _docker(monkeypatch, answer)
+    assert actions.list_containers(timeout=4) == {"ok": False, "error": error}
+
+
+def test_read_router_owners_is_one_inspect_limited_to_containers(monkeypatch):
+    calls = _docker(monkeypatch, (0, _row("CASA_X", _ID_A, {"traefik.http.routers.x.rule": "H"}), ""))
+    assert actions.read_router_owners([_ID_A], timeout=4) == {
+        "ok": True, "routers": {"x": "CASA_X"}, "services": {"CASA-X": "CASA_X"},
+        "containers": [[_ID_A, "CASA_X", "running"]]}
+    assert calls[0][0] == ["docker", "inspect", "--type", "container",
+                           "--format", actions.ROUTERS_FORMAT, _ID_A]
+
+
+@pytest.mark.parametrize("ids,answer,expected", [
+    ([_ID_A], (124, "", "timed out"), {"error": "timeout"}),
+    # A container removed since the listing: churn, which the caller may retry once for free.
+    ([_ID_A, _ID_B], (1, _row("X", _ID_A, {}), "Error: No such container: bbbb"),
+     {"error": "unavailable", "race": True}),
+    # Anything else will repeat: no free retry.
+    ([_ID_A], (1, "", "permission denied while trying to connect"), {"error": "unavailable"}),
+    ([_ID_A], (0, "junk", ""), {"error": "unavailable"}),
+    (["--format=x"], None, {"error": "unavailable"}),
+    # An owner that cannot be identified will not be identified by reading again.
+    ([_ID_A, _ID_B], (0, _row("vpn", _ID_A, {}) + "\n" +
+                      _row("Q", _ID_B, {}, mode="container:vpn"), ""),
+     {"error": "unavailable", "final": True}),
+])
+def test_read_router_owners_failures_are_typed(monkeypatch, ids, answer, expected):
+    _docker(monkeypatch, answer)
+    assert actions.read_router_owners(ids, timeout=4) == {"ok": False, **expected}
+
+
+def test_undecodable_docker_output_is_a_typed_failure(monkeypatch):
+    def run(argv, timeout):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    monkeypatch.setattr(actions.bender, "run_argv", run)
+    assert actions.list_containers(timeout=4) == {"ok": False, "error": "unavailable"}
+    assert actions.read_router_owners([_ID_A], timeout=4) == {"ok": False, "error": "unavailable"}
+
+
+def test_a_short_hex_ref_is_never_taken_as_an_id_prefix():
+    """`container:db` after `docker rename db postgres`: no container is named db any more,
+    and an unrelated id that starts `db` must not be taken for the owner."""
+    with pytest.raises(ValueError):
+        _owners([_row("postgres", "2" * 64, {"traefik.http.routers.app.rule": "Host(`a`)"}),
+                 _row("other", "db" + "1" * 62, {}),
+                 _row("app", _ID_C, {}, mode="container:db")])
+
+
+def test_a_hex_looking_name_resolves_as_a_name_first():
+    """Docker resolves `container:db` to the container NAMED db before any id prefix."""
+    with pytest.raises(ValueError):
+        _owners([_row("db", "2" * 64, {"traefik.http.routers.qbit.rule": "Host(`q`)"}),
+                 _row("other", "db" + "1" * 62, {}),
+                 _row("sharer", _ID_C, {}, mode="container:db")])
+
+
+@pytest.mark.parametrize("status", ["paused", "restarting"])
+def test_a_paused_or_restarting_replica_keeps_a_shared_name_ambiguous(status):
+    """Traefik still lists it, so which replica a button would open is not one answer."""
+    labels = {"traefik.http.routers.web.rule": "Host(`w`)"}
+    got = _owners([_row("web_1", _ID_A, labels), _row("web_2", _ID_B, labels, status=status)])
+    assert "web" not in got["routers"]
+
+
+def test_no_containers_or_no_budget_runs_nothing(monkeypatch):
+    calls = _docker(monkeypatch, None)
+    assert actions.read_router_owners([], timeout=4) == {
+        "ok": True, "routers": {}, "services": {}, "containers": []}
+    assert actions.read_router_owners([_ID_A], timeout=0) == {"ok": False, "error": "timeout"}
+    assert actions.list_containers(timeout=0) == {"ok": False, "error": "timeout"}
+    assert calls == []

@@ -595,16 +595,22 @@ def index(core=None):
     # Zone grouping, LAN-twin merging and provider tagging are string work over the router
     # rules. Doing it in Jinja would mean regexing Host() out of a rule in a template.
     ctx["router_zones"] = casa_scruffy_net.group_routers(ctx["traefik"]["routers"])
-    # Launch links, keyed by container name. Derived from the routers already fetched, joined
-    # to containers through each Traefik service's backend address, with config's `links:`
-    # folded over the top for the containers whose routes cannot be read into a URL honestly.
-    # With Traefik already unreachable, asking it for services would only add a second timeout
-    # to the page load for an answer that cannot produce a link.
-    servers = (casa_scruffy_net.fetch_traefik_services()["servers"]
-               if ctx["traefik"]["available"] else {})
+    # Launch links, keyed by container name. Derived from the routers already fetched, each
+    # joined to the container that declares it -- core reads that from the containers' labels,
+    # since this process cannot reach Docker -- with config's `links:` folded over the top for
+    # the containers whose routes cannot be read into a URL honestly. Core down or slow means
+    # no derived links, never guessed ones.
+    owners = {}
+    if core is not None and ctx["traefik"]["available"]:
+        try:
+            answer = core("containers.routers", {})
+            if isinstance(answer, dict) and isinstance(answer.get("routers"), dict) \
+                    and isinstance(answer.get("services"), dict):
+                owners = answer
+        except Exception:  # noqa: BLE001 -- see above
+            current_app.logger.warning("Could not read container routers from core")
     ctx["launch_urls"] = casa_scruffy_net.merge_declared_links(
-        casa_scruffy_net.container_urls(ctx["traefik"]["routers"], servers,
-                                        dashboard_data.container_ips(),
+        casa_scruffy_net.container_urls(ctx["traefik"]["routers"], owners,
                                         lan_domain=config.LAN_ONLY_DOMAIN),
         config.LAUNCH_LINKS,
     )
