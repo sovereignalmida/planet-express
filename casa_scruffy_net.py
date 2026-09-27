@@ -188,6 +188,8 @@ def group_routers(routers: list) -> dict:
             # "how many routers behind it are down" are different questions. The header asks
             # the second one.
             "down_count": 1 if router.get("status") != "enabled" else 0,
+            # Every router behind this pill, once LAN twins merge: the links come from them.
+            "raws": [raw],
             "filter_text": f'{raw} {router.get("rule", "")} {router.get("service", "")}'.lower(),
         }
 
@@ -205,6 +207,7 @@ def group_routers(routers: list) -> dict:
         sibling["filter_text"] += " " + twin["filter_text"]
         sibling["down"] = sibling["down"] or twin["down"]
         sibling["down_count"] += twin["down_count"]
+        sibling["raws"].extend(twin["raws"])
         del pills[key]
         merged += 1
 
@@ -252,6 +255,8 @@ def group_routers(routers: list) -> dict:
 # path groups. That is covered by the `links:` escape hatch in config instead -- explicit,
 # auditable, and it says who decided.
 _ENTRYPOINT_SCHEME = {"websecure": "https", "web": "http"}
+_PLAIN_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?"
+                         r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*")
 
 
 def _rule_is_host_only(rule: str) -> bool:
@@ -264,6 +269,62 @@ def _rule_is_host_only(rule: str) -> bool:
     for token in ("||", "(", ")"):
         remainder = remainder.replace(token, "")
     return remainder.strip() == ""
+
+
+def router_urls(router: dict, *, lan_domain: str) -> list:
+    """[{"href", "zone"}] one router can honestly be opened at, else [].
+
+    Only a rule that is Host() terms joined by `||` and nothing else, and only with an
+    entrypoint whose scheme is known. A missing link is better than a wrong one.
+    """
+    if not isinstance(router, dict):
+        return []
+    rule = router.get("rule", "")
+    hosts = _HOST_IN_RULE.findall(rule or "")
+    if not hosts or not _rule_is_host_only(rule):
+        return []
+    entry_points = router.get("entry_points") or []
+    scheme = next((_ENTRYPOINT_SCHEME[e] for e in entry_points if e in _ENTRYPOINT_SCHEME), None)
+    if scheme is None:
+        # An entrypoint we do not have a scheme for is not a guess worth making.
+        return []
+    urls = []
+    for host in hosts:
+        if not _PLAIN_HOST.fullmatch(host):
+            # `app.casalan.com@evil.example` would open evil.example with a user part. A label
+            # an image supplies can put anything between the backticks; only a hostname links.
+            continue
+        href = f"{scheme}://{host}"
+        if not any(url["href"] == href for url in urls):
+            urls.append({"href": href,
+                         "zone": "lan" if _registrable_domain(host) == lan_domain else "public"})
+    return urls
+
+
+def link_pills(zones: dict, routers: list, *, lan_domain: str, detail_for=None) -> None:
+    """Make each routing-matrix pill a link (v2.2 B). Mutates `zones` from group_routers().
+
+    `href` opens the public host, `lan_href` the LAN one; a pill with both is drawn split.
+    A pill with only one host has only `href`. A DOWN pill gets no URL -- its link is the
+    container's detail view (`detail`), from `detail_for(router_name)`, where known.
+    """
+    by_name = {str(r.get("name")): r for r in routers or [] if isinstance(r, dict)}
+    for zone in zones.get("zones", []):
+        for pill in zone.get("items", []):
+            pill.update(href=None, lan_href=None, detail=None)
+            if pill.get("down"):
+                if detail_for is not None:
+                    pill["detail"] = next((d for raw in pill.get("raws", [pill["raw"]])
+                                           if (d := detail_for(raw))), None)
+                continue
+            urls = [url for raw in pill.get("raws", [pill["raw"]])
+                    for url in router_urls(by_name.get(raw), lan_domain=lan_domain)]
+            public = next((u["href"] for u in urls if u["zone"] == "public"), None)
+            lan = next((u["href"] for u in urls if u["zone"] == "lan"), None)
+            if public and lan:
+                pill["href"], pill["lan_href"] = public, lan
+            else:
+                pill["href"] = public or lan
 
 
 def container_urls(routers: list, owners: dict, *, lan_domain: str) -> dict:
@@ -298,24 +359,13 @@ def container_urls(routers: list, owners: dict, *, lan_domain: str) -> dict:
         service, _, service_provider = str(router.get("service", "")).partition("@")
         if service_provider not in ("", "docker") or service_owners.get(service) != owner:
             continue
-        rule = router.get("rule", "")
-        hosts = _HOST_IN_RULE.findall(rule or "")
-        if not hosts or not _rule_is_host_only(rule):
-            continue
-        entry_points = router.get("entry_points") or []
-        scheme = next((_ENTRYPOINT_SCHEME[e] for e in entry_points if e in _ENTRYPOINT_SCHEME), None)
-        if scheme is None:
-            # An entrypoint we do not have a scheme for is not a guess worth making.
+        urls = router_urls(router, lan_domain=lan_domain)
+        if not urls:
             continue
         links = by_container.setdefault(owner, [])
-        for host in hosts:
-            href = f"{scheme}://{host}"
-            if any(link["href"] == href for link in links):
-                continue
-            links.append({
-                "href": href,
-                "zone": "lan" if _registrable_domain(host) == lan_domain else "public",
-            })
+        for url in urls:
+            if not any(link["href"] == url["href"] for link in links):
+                links.append(url)
     # LAN first: it is the default target, and the one that works when the WAN is down.
     for links in by_container.values():
         links.sort(key=lambda link: (link["zone"] != "lan", link["href"]))

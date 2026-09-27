@@ -12,7 +12,10 @@
 </head>
 <body>
 <main id="container-detail" class="container-detail" data-api="{{ url_for('container_get', stack=stack, service=service) }}">
-  <header><a class="refresh-btn" href="/#overview">‹ OVERVIEW</a><h1>{{ service }}</h1><p>{{ stack }} · <span id="header-image">—</span></p></header>
+  <header><a class="refresh-btn" href="/#overview">‹ OVERVIEW</a><h1>{{ service }}</h1><p>{{ stack }} · <span id="header-image">—</span></p>
+    <span id="container-launch" class="container-launch"
+          data-api="{{ url_for('container_links', stack=stack, service=service) }}" hidden></span>
+  </header>
   <section id="verdict" class="pe-verdict unknown">
     <div class="pe-verdict-orb" aria-hidden="true">●</div>
     <div class="pe-verdict-text"><h2 id="verdict-text">Loading container…</h2></div>
@@ -34,7 +37,7 @@
     <p id="log-message" role="status">Loading logs…</p>
     <div id="log-lines" class="pe-logwell-body" aria-label="Container log output"></div>
   </section>
-  <div class="container-bottom"><button id="restart" class="pe-btn warn" type="button" hidden>RESTART ⟳</button></div>
+  <div class="container-bottom"><a id="launch-mobile" class="pe-launch primary container-launch-mobile" target="_blank" rel="noopener" hidden>OPEN ↗</a><button id="restart" class="pe-btn warn" type="button" hidden>RESTART ⟳</button></div>
 </main>
 <dialog id="restart-dialog" aria-labelledby="restart-title">
   <div class="pe-sheet warn">

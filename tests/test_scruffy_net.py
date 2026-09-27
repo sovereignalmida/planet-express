@@ -462,3 +462,49 @@ def test_a_malformed_declared_link_is_ignored_rather_than_rendered():
         {"a": [{"href": "https://a.casalan.com", "zone": "lan"}]},
         [None, {}, {"name": "b"}, {"href": "https://nameless"}])
     assert list(merged) == ["a"]
+
+
+# ── link_pills (T46.4 B): the pill is the link ──────────────────────────────────
+
+def _zones(routers):
+    zones = casa_scruffy_net.group_routers(routers)
+    casa_scruffy_net.link_pills(zones, routers, lan_domain="casalan.com",
+                                detail_for=lambda raw: f"/containers/x/{raw.split('@')[0]}")
+    return {p["raw"]: p for z in zones["zones"] for p in z["items"]}
+
+
+def test_a_router_with_a_lan_and_a_public_host_is_a_split_pill():
+    pills = _zones([_live("actual@docker", "Host(`actual.casalan.com`) || Host(`actual.casaalmida.com`)")])
+    pill = pills["actual@docker"]
+    assert pill["href"] == "https://actual.casaalmida.com"
+    assert pill["lan_href"] == "https://actual.casalan.com"
+
+
+def test_a_lan_twin_merges_into_one_split_pill():
+    pills = _zones([_live("subwave-web@docker", "Host(`radio.casaalmida.com`)"),
+                    _live("subwave-web-lan@docker", "Host(`radio.casalan.com`)")])
+    pill = pills["subwave-web@docker"]
+    assert (pill["href"], pill["lan_href"]) == ("https://radio.casaalmida.com", "https://radio.casalan.com")
+
+
+def test_a_single_host_pill_links_whole():
+    pill = _zones([_live("x@docker", "Host(`x.casalan.com`)")])["x@docker"]
+    assert pill["href"] == "https://x.casalan.com" and pill["lan_href"] is None
+
+
+def test_a_down_pill_opens_container_detail_not_the_url():
+    pill = _zones([_live("x@docker", "Host(`x.casalan.com`)", status="disabled")])["x@docker"]
+    assert pill["href"] is None and pill["detail"] == "/containers/x/x"
+
+
+def test_a_pill_whose_rule_cannot_be_read_is_not_a_link():
+    pill = _zones([_live("api@docker", "Host(`r.casaalmida.com`) && PathPrefix(`/api`)")])["api@docker"]
+    assert pill["href"] is None and pill["lan_href"] is None
+
+
+
+@pytest.mark.parametrize("host", ["app.casalan.com@evil.example", "evil.example/x", "a b.com",
+                                  "x.casalan.com:8443", "-bad.casalan.com", ""])
+def test_only_a_plain_hostname_becomes_a_link(host):
+    """Image labels can put anything between the backticks."""
+    assert casa_scruffy_net.router_urls(_live("x@docker", f"Host(`{host}`)"), lan_domain="casalan.com") == []

@@ -78,18 +78,24 @@ SERVICE_STATE = {
 }
 
 
+# Images a shipped widget names, so the stack drawer shows its ◉ hint on real rows.
+FIXTURE_IMAGES = {"sonarr": "lscr.io/linuxserver/sonarr:latest",
+                  "adguard": "adguard/adguardhome:latest"}
+FIXTURE_STACKS = {
+    "media": ["plex", "sonarr", "radarr", "bazarr", "prowlarr", "tautulli"],
+    "services": ["web", "db", "cache", "worker"],
+    "network": ["traefik", "adguard", "gluetun"],
+    "subwave": ["api", "stream", "web"],
+    "immich": ["server", "machine-learning", "postgres"],
+    "vikunja": ["api", "frontend"],
+    "linktool": ["app"],
+}
+
+
 def write_fixtures(state: Path) -> None:
     """A snapshot with something wrong in every panel that can be wrong."""
     now = datetime.now(timezone.utc)
-    stacks = {
-        "media": ["plex", "sonarr", "radarr", "bazarr", "prowlarr", "tautulli"],
-        "services": ["web", "db", "cache", "worker"],
-        "network": ["traefik", "adguard", "gluetun"],
-        "subwave": ["api", "stream", "web"],
-        "immich": ["server", "machine-learning", "postgres"],
-        "vikunja": ["api", "frontend"],
-        "linktool": ["app"],
-    }
+    stacks = FIXTURE_STACKS
     containers, completeness = [], []
     for stack, services in stacks.items():
         members = {}
@@ -104,11 +110,13 @@ def write_fixtures(state: Path) -> None:
             containers.append({
                 "name": f"CASA_{stack.upper()}_{service.upper()}",
                 "stack": stack, "service": service,
+                "image": FIXTURE_IMAGES.get(service, f"example/{service}:latest"),
                 "status": CONTAINER_STATUS[kind],
                 "issue": kind != "ok",
                 "crash_looping": kind == "down",
             })
-            members[service] = dict(SERVICE_STATE[kind])
+            members[service] = {**SERVICE_STATE[kind],
+                                "container": f"CASA_{stack.upper()}_{service.upper()}"}
         stack_status = "incomplete" if any(
             m["status"] == "failing" for m in members.values()) else "complete"
         completeness.append({"stack": stack, "status": stack_status, "services": members})
@@ -282,6 +290,22 @@ backup_jobs: [weekly]
 """
 
 
+def fixture_owners() -> dict:
+    """core's containers.routers, for the fixtures: a docker router that shares a name with a
+    stack service belongs to that service's container. Enough for the drawer and pills to
+    show real links; the rest of the fixture routers stay unjoined, as some do live."""
+    containers = {service: f"CASA_{stack.upper()}_{service.upper()}"
+                  for stack, services in FIXTURE_STACKS.items() for service in services}
+    routers, services = {}, {}
+    for router in fixture_routers()["routers"]:
+        short, _, provider = router["name"].partition("@")
+        base = short[:-4] if short.endswith("-lan") else short
+        if provider == "docker" and base in containers:
+            routers[short] = containers[base]
+            services[router["service"]] = containers[base]
+    return {"routers": routers, "services": services}
+
+
 class OfflineRpc:
     """Core is not running. Every method the dashboard calls answers empty but well-formed,
     so an unavailable panel is the panel's own empty state and never a traceback."""
@@ -309,6 +333,8 @@ class OfflineRpc:
             }}
         if method.startswith("auth."):
             return {"ok": True, "result": self.EMPTY["auth.status"]}
+        if method == "containers.routers":
+            return {"ok": True, "result": fixture_owners()}
         return {"ok": True, "result": self.EMPTY.get(method, {})}
 
 

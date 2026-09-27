@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Launch links.** Overview stack tiles show `↗ n` launchable containers and open a stack
+  drawer (LAN ↗ / WEB ↗ per container, ◉ where a widget file names the image). Network
+  router pills are links; a router with a LAN and a public host is a split pill; a DOWN pill
+  opens the container's detail view instead. Container detail has OPEN ↗ / WEB ↗ in the
+  header (the phone's bottom bar on mobile). Only a plain `Host()` hostname becomes a link.
 - **Container widgets, server-side.** `GET /api/containers/<stack>/<service>/widget` returns a
   container's live app stats (Sonarr, AdGuard) fetched by the dashboard from the app's own
   API. Keys live in `/etc/planetexpress-dashboard.env` and never reach the page. A key goes

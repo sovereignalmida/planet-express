@@ -1160,11 +1160,15 @@ def _service_member(service, detail) -> dict | None:
     ]
     level = min(levels, key=_SERVICE_LEVEL_RANK.get)
     word = "starting" if level == "warn" and status == "unknown" else _SERVICE_LEVEL_WORD[level]
+    container = detail.get("container")
     return {
         "service": service_name,
         "level": level,
         "word": word,
         "state": state,
+        # Recorded by scans since v2.2; older snapshots have none, and their members simply
+        # show no launch links until the next full scan.
+        "container": container if isinstance(container, str) and container else None,
     }
 
 
@@ -1225,6 +1229,58 @@ def summarize_services() -> dict:
         "total": sum(stack["total"] for stack in stacks),
         "attention": sum(stack["level"] != "ok" for stack in stacks),
     }
+
+
+def split_links(urls) -> dict:
+    """A container's launch links as the drawer and detail header use them: LAN first."""
+    urls = [u for u in urls or [] if isinstance(u, dict) and isinstance(u.get("href"), str)]
+    lan = next((u["href"] for u in urls if u.get("zone") == "lan"), None)
+    web = next((u["href"] for u in urls if u.get("zone") != "lan"), None)
+    primary = lan or web
+    return {"lan": lan, "web": web, "launchable": primary is not None,
+            "host": primary.split("://", 1)[-1] if primary else None}
+
+
+def attach_launch_links(services: dict, launch_urls: dict, widget_containers=frozenset()) -> None:
+    """Fold launch links (keyed by container) onto the Services panel's stacks and members.
+
+    `widget_containers` are the containers whose image a widget file names -- the drawer's ◉
+    hint. It is a hint: whether a widget actually answers (and gets a key) is decided when the
+    detail view asks, by core, against the image's provenance.
+    """
+    total = 0
+    for stack in services.get("stacks", []):
+        count = 0
+        for member in stack.get("members", []):
+            links = split_links(launch_urls.get(member.get("container")) if member.get("container") else None)
+            member.update(links)
+            member["widget"] = member.get("container") in widget_containers
+            count += links["launchable"]
+        stack["launchable"] = count
+        total += count
+    services["launchable"] = total
+
+
+def container_for(stack: str, service: str) -> str | None:
+    """The container behind stack/service, as the last full scan recorded it."""
+    monitor = load_monitor()
+    if not monitor:
+        return None
+    for raw_stack in monitor.stack_completeness:
+        if isinstance(raw_stack, dict) and raw_stack.get("stack") == stack:
+            detail = (raw_stack.get("services") or {}).get(service)
+            container = detail.get("container") if isinstance(detail, dict) else None
+            return container if isinstance(container, str) and container else None
+    return None
+
+
+def container_images() -> dict:
+    """{container: image} from the last scan that collected containers."""
+    monitor = load_monitor()
+    if not monitor or monitor.mode not in _MODES_WITH_CONTAINERS:
+        return {}
+    return {str(c["name"]): str(c.get("image", "")) for c in monitor.containers
+            if isinstance(c, dict) and c.get("name")}
 
 
 def build_dashboard_context(enforced: dict | None = None) -> dict:

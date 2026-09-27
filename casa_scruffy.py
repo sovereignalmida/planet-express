@@ -412,6 +412,23 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         container_target(stack, service)
         return render_template("container.html", stack=stack, service=service, operator=g.operator)
 
+    @app.get("/api/containers/<stack>/<service>/links")
+    def container_links(stack, service):
+        """OPEN ↗ / WEB ↗ for the detail header (v2.2 C): the same links the Overview drawer
+        shows. Fetched after the page renders, so a slow Traefik or core never holds up the
+        detail view -- it only delays two buttons."""
+        container_target(stack, service)
+        links = {"lan": None, "web": None, "launchable": False, "host": None}
+        container = dashboard_data.container_for(stack, service)
+        if container:
+            try:
+                enforced = dashboard_data.parse_enforced(core("config.enforced", {}))
+            except Exception:  # noqa: BLE001 -- the header loses its buttons, nothing else
+                enforced = None
+            urls, _owners = _launch_links(core, casa_scruffy_net.fetch_traefik_routers(), enforced)
+            links = dashboard_data.split_links(urls.get(container))
+        return jsonify(links)
+
     @app.get("/api/containers/<stack>/<service>")
     def container_get(stack, service):
         return jsonify(core("query.container", container_target(stack, service)))
@@ -588,6 +605,44 @@ def _extra_host_count(rule: str) -> int:
     return max(len(_HOST_RULE_RE.findall(rule or "")) - 1, 0)
 
 
+def _launch_links(core, traefik: dict, enforced) -> tuple[dict, dict]:
+    """(launch URLs keyed by container, core's router/service owners).
+
+    Derived from the Traefik routers already fetched, each joined to the container that
+    declares it -- core reads that from the containers' labels, since this process cannot
+    reach Docker -- with config's `links:` folded over the top for the containers whose routes
+    cannot be read into a URL honestly. Core down or slow means no derived links, never
+    guessed ones.
+    """
+    owners = {}
+    if core is not None and traefik.get("available"):
+        try:
+            answer = core("containers.routers", {})
+            if isinstance(answer, dict) and isinstance(answer.get("routers"), dict) \
+                    and isinstance(answer.get("services"), dict):
+                owners = answer
+        except Exception:  # noqa: BLE001 -- see above
+            current_app.logger.warning("Could not read container routers from core")
+    urls = casa_scruffy_net.merge_declared_links(
+        casa_scruffy_net.container_urls(traefik.get("routers", []), owners,
+                                        lan_domain=config.LAN_ONLY_DOMAIN),
+        dashboard_data.enforced_value(enforced, "links"),
+    )
+    return urls, owners
+
+
+def _widget_containers() -> frozenset:
+    """Containers whose image a widget file names -- the drawer's ◉ hint, nothing more."""
+    from planet_express.widgets import registry
+
+    try:
+        widgets = registry.load_widgets()
+    except Exception:  # noqa: BLE001 -- a hint is not worth a 500
+        return frozenset()
+    return frozenset(name for name, image in dashboard_data.container_images().items()
+                     if registry.widgets_matching(image, widgets))
+
+
 def index(core=None):
     # Live network pollers merged in separately from build_dashboard_context()'s
     # file-based state -- keeps the file-vs-live-HTTP boundary explicit here, in the
@@ -630,25 +685,22 @@ def index(core=None):
     # Zone grouping, LAN-twin merging and provider tagging are string work over the router
     # rules. Doing it in Jinja would mean regexing Host() out of a rule in a template.
     ctx["router_zones"] = casa_scruffy_net.group_routers(ctx["traefik"]["routers"])
-    # Launch links, keyed by container name. Derived from the routers already fetched, each
-    # joined to the container that declares it -- core reads that from the containers' labels,
-    # since this process cannot reach Docker -- with config's `links:` folded over the top for
-    # the containers whose routes cannot be read into a URL honestly. Core down or slow means
-    # no derived links, never guessed ones.
-    owners = {}
-    if core is not None and ctx["traefik"]["available"]:
-        try:
-            answer = core("containers.routers", {})
-            if isinstance(answer, dict) and isinstance(answer.get("routers"), dict) \
-                    and isinstance(answer.get("services"), dict):
-                owners = answer
-        except Exception:  # noqa: BLE001 -- see above
-            current_app.logger.warning("Could not read container routers from core")
-    ctx["launch_urls"] = casa_scruffy_net.merge_declared_links(
-        casa_scruffy_net.container_urls(ctx["traefik"]["routers"], owners,
-                                        lan_domain=config.LAN_ONLY_DOMAIN),
-        dashboard_data.enforced_value(enforced, "links"),
-    )
+    ctx["launch_urls"], owners = _launch_links(core, ctx["traefik"], enforced)
+    dashboard_data.attach_launch_links(ctx["services"], ctx["launch_urls"],
+                                       _widget_containers())
+    # A DOWN pill links to the container's detail view, when core can say which container
+    # declares that router and the scan which stack/service that container is.
+    by_container = {member["container"]: (stack["name"], member["service"])
+                    for stack in ctx["services"].get("stacks", [])
+                    for member in stack.get("members", []) if member.get("container")}
+
+    def detail_for(raw):
+        short, _, provider = raw.partition("@")
+        container = (owners.get("routers") or {}).get(short) if provider == "docker" else None
+        target = by_container.get(container)
+        return url_for("container_detail", stack=target[0], service=target[1]) if target else None
+    casa_scruffy_net.link_pills(ctx["router_zones"], ctx["traefik"]["routers"],
+                                lan_domain=config.LAN_ONLY_DOMAIN, detail_for=detail_for)
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
     ctx["adguard_stats"] = dashboard_data.summarize_adguard(ctx["adguard"])
     ctx["overview_tiles"] = dashboard_data.summarize_overview_tiles(

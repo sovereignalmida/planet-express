@@ -633,7 +633,8 @@ def test_stack_completeness_complete(tmp_path, monkeypatch):
     result = casa_leela.check_stack_completeness()
     assert result == [{"stack": "app", "expected_count": 2, "present_count": 2,
                        "missing_services": [], "status": "complete",
-                       "services": {name: {"status": "healthy", "state": "running"}
+                       "services": {name: {"status": "healthy", "state": "running",
+                                           "container": name}
                                     for name in ("web", "db")}}]
     assert "alert" not in result[0]
     compose = tmp_path / "stacks" / "app" / "docker-compose.yml"
@@ -665,7 +666,7 @@ def test_stack_completeness_some_missing_without_history(tmp_path, monkeypatch):
         {"stack": "app", "expected_count": 2, "present_count": 1,
          "missing_services": ["web"], "alert": "HIGH", "status": "incomplete",
          "services": {"web": {"status": "failing", "state": "absent"},
-                      "db": {"status": "healthy", "state": "running"}}},
+                      "db": {"status": "healthy", "state": "running", "container": "db"}}},
     ]
 
 
@@ -724,7 +725,7 @@ def test_stack_completeness_discovery_failure_reports_unknown(tmp_path, monkeypa
     assert by_name["good"] == {
         "stack": "good", "expected_count": 1, "present_count": 1,
         "missing_services": [], "status": "complete",
-        "services": {"web": {"status": "healthy", "state": "running"}},
+        "services": {"web": {"status": "healthy", "state": "running", "container": "web"}},
     }
     for name in ("empty", "failed"):
         assert any(rec.levelname == "WARNING" and
@@ -748,7 +749,7 @@ def test_stack_completeness_all_exited_is_critical(tmp_path, monkeypatch):
     assert results == [{
         "stack": "app", "status": "incomplete", "expected_count": 2, "present_count": 0,
         "missing_services": ["web", "db"], "alert": "CRITICAL",
-        "services": {name: {"status": "failing", "state": "exited(0)"}
+        "services": {name: {"status": "failing", "state": "exited(0)", "container": name}
                      for name in ("web", "db")},
     }]
     assert len(calls) == 2
@@ -788,7 +789,8 @@ def test_stack_completeness_service_observations(tmp_path, monkeypatch):
             ]},
         })
         entry, = casa_leela.check_stack_completeness()
-        assert entry["services"]["web"] == {"status": status, "state": state}
+        assert entry["services"]["web"] == {"status": status, "state": state,
+                                            "container": container.get("Name", "web")}
         assert entry.get("alert") == alert
         assert entry["status"] == ("incomplete" if alert else "complete")
         assert entry["missing_services"] == (["web"] if alert else [])
@@ -815,7 +817,8 @@ def test_stack_completeness_replicas_order_and_json_formats(tmp_path, monkeypatc
         }
         assert entry["services"]["web"] == {
             "status": "unknown", "state": "running, running(starting)",
-        }
+        }   # two containers behind it: no single container, so no "container" key
+        assert entry["services"]["db"]["container"] == "db"
         assert entry["alert"] == "HIGH"
         results.append(entry)
     assert results[0] == results[1]

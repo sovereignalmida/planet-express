@@ -1469,3 +1469,78 @@ def test_the_widget_route_refuses_a_bad_target_before_asking_core():
     rpc.calls.clear()
     assert client.get("/api/containers/me dia/sonarr/widget").status_code == 404
     assert not rpc.calls
+
+
+# ── T46.4: launch links in the UI ─────────────────────────────────────────────────
+
+def _ui_client(tmp_path, monkeypatch, routers):
+    monitor = tmp_path / "latest_monitor.json"
+    monitor.write_text(json.dumps({
+        "timestamp": "2026-09-26T12:00:00+00:00", "mode": "full",
+        "containers": [{"name": "CASA_ACTUAL", "status": "Up", "image": "actualbudget/actual-server"}],
+        "stack_completeness": [{"stack": "money", "status": "complete", "services": {
+            "actual_server": {"status": "healthy", "state": "running", "container": "CASA_ACTUAL"},
+            "db": {"status": "healthy", "state": "running", "container": "CASA_DB"}}}],
+    }))
+    monkeypatch.setattr(config, "STATE_MONITOR", monitor)
+    for attr in ("STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE"):
+        monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
+                        lambda: {"available": True, "routers": routers})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats", lambda: {"available": False})
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    rpc.results["containers.routers"] = {"routers": {"actual": "CASA_ACTUAL"},
+                                         "services": {"actual": "CASA_ACTUAL"}}
+    rpc.results["config.enforced"] = {"paused_containers": [], "backup_jobs": ["weekly"], "links": []}
+    return client, rpc
+
+
+_ACTUAL = {"name": "actual@docker", "service": "actual", "status": "enabled",
+           "entry_points": ["websecure"],
+           "rule": "Host(`actual.casalan.com`) || Host(`actual.casaalmida.com`)"}
+
+
+def test_the_overview_tile_counts_launchable_containers_and_carries_the_drawer(tmp_path, monkeypatch):
+    client, _ = _ui_client(tmp_path, monkeypatch, [_ACTUAL])
+    html = client.get("/").data.decode()
+    assert 'class="pe-tile-links"' in html and "↗ 1" in html
+    assert 'data-drawer-for="money"' in html
+    assert 'href="https://actual.casalan.com" target="_blank" rel="noopener">LAN ↗' in html
+    assert 'href="https://actual.casaalmida.com" target="_blank" rel="noopener">WEB ↗' in html
+    assert "— no route" in html                                   # db has none
+
+
+def test_a_network_pill_is_a_split_link(tmp_path, monkeypatch):
+    client, _ = _ui_client(tmp_path, monkeypatch, [_ACTUAL])
+    html = client.get("/").data.decode()
+    assert 'class="pe-pill-main" href="https://actual.casaalmida.com"' in html
+    assert 'class="pe-pill-lan" href="https://actual.casalan.com"' in html
+
+
+def test_a_down_pill_links_to_its_containers_detail(tmp_path, monkeypatch):
+    client, _ = _ui_client(tmp_path, monkeypatch, [{**_ACTUAL, "status": "disabled"}])
+    html = client.get("/").data.decode()
+    assert 'href="/containers/money/actual_server"' in html
+    assert 'href="https://actual.casaalmida.com"' not in html.split("ROUTING MATRIX")[1]
+
+
+def test_container_detail_header_links_come_from_their_own_endpoint(tmp_path, monkeypatch):
+    """Fetched after render: a slow Traefik or core delays two buttons, not the page."""
+    client, _ = _ui_client(tmp_path, monkeypatch, [_ACTUAL])
+    html = client.get("/containers/money/actual_server").data.decode()
+    assert 'id="container-launch"' in html and "OPEN ↗</a>" not in html.split('id="container-launch"')[1][:200]
+    assert client.get("/api/containers/money/actual_server/links").get_json() == {
+        "lan": "https://actual.casalan.com", "web": "https://actual.casaalmida.com",
+        "launchable": True, "host": "actual.casalan.com"}
+
+
+def test_container_detail_without_a_route_offers_no_launch(tmp_path, monkeypatch):
+    client, _ = _ui_client(tmp_path, monkeypatch, [_ACTUAL])
+    assert client.get("/api/containers/money/db/links").get_json()["launchable"] is False
+
+
+def test_the_links_endpoint_refuses_a_bad_target():
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    assert client.get("/api/containers/me dia/x/links").status_code == 404

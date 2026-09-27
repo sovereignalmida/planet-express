@@ -8,6 +8,37 @@
 
   const csrf = () => document.querySelector('meta[name="csrf-token"]').content;
 
+  // v2.2 C: OPEN ↗ (LAN) and WEB ↗ (public) in the header, OPEN ↗ in the phone's bottom bar.
+  // Built with textContent and an http(s)-only href; a failure just leaves them out.
+  const webUrl = value => typeof value === "string" && /^https?:\/\//.test(value) ? value : null;
+  function launchButton(href, label, primary) {
+    const a = document.createElement("a");
+    a.className = "pe-launch " + (primary ? "primary" : "neutral");
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = href.replace(/^https?:\/\//, "");
+    a.textContent = label;
+    return a;
+  }
+  async function launchLinks() {
+    const holder = get("container-launch");
+    try {
+      const links = await request(holder.dataset.api);
+      const lan = webUrl(links.lan);
+      const web = webUrl(links.web);
+      if (!lan && !web) return;
+      if (lan) holder.append(launchButton(lan, "OPEN ↗", true));
+      if (web) holder.append(launchButton(web, lan ? "WEB ↗" : "OPEN ↗", !lan));
+      holder.hidden = false;
+      const mobile = get("launch-mobile");
+      mobile.href = lan || web;
+      mobile.hidden = false;
+    } catch (e) {
+      // No buttons is the honest answer when the links cannot be read.
+    }
+  }
+
   async function request(url, options) {
     const response = await fetch(url, { cache: "no-store", ...options });
     if (response.status === 401) {
@@ -156,4 +187,5 @@
   }
   document.addEventListener("visibilitychange", visibility);
   visibility();
+  launchLinks();
 })();

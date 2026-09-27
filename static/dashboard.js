@@ -18,6 +18,7 @@
   var DETACHED_TABS = ["actions", "history", "chat", "config", "crew"];
 
   function setActiveTab(name) {
+    if (name !== "overview") closeDrawer();
     document.body.classList.toggle("chat-active", name === "chat");
     document.body.classList.toggle("detached-tab", DETACHED_TABS.indexOf(name) !== -1);
     document.querySelectorAll(".tab").forEach(function (btn) {
@@ -115,8 +116,68 @@
       });
     });
 
+    // v2.2 A: a stack tile opens the stack drawer. Its rows are server-rendered into a
+    // <template> per stack; opening clones them in, so nothing here builds markup from data.
+    // The stack-name button is the keyboard way in (a click on it bubbles here too).
+    document.querySelectorAll("article[data-drawer-open]").forEach(function (tile) {
+      tile.addEventListener("click", function (e) {
+        if (e.target.closest("a")) return;       // a dot is its own link to container detail
+        var opener = tile.querySelector(".pe-stack-open") || tile;
+        openDrawer(tile.dataset.drawerOpen, opener);
+      });
+    });
+
     buildDeployManifest();
   }
+
+  var drawerOpener = null;
+
+  function openDrawer(name, opener) {
+    var drawer = document.querySelector("[data-drawer]");
+    var template = Array.prototype.find.call(
+      document.querySelectorAll("template[data-drawer-for]"),
+      function (t) { return t.dataset.drawerFor === name; });
+    if (!drawer || !template) return;
+    drawer.replaceChildren(template.content.cloneNode(true));
+    drawer.hidden = false;
+    drawerOpener = opener || null;
+    var close = drawer.querySelector("[data-drawer-close]");
+    if (close) close.focus();
+  }
+
+  function closeDrawer() {
+    var drawer = document.querySelector("[data-drawer]");
+    if (!drawer || drawer.hidden) return;
+    drawer.hidden = true;
+    drawer.replaceChildren();
+    if (drawerOpener && document.contains(drawerOpener)) drawerOpener.focus();
+    drawerOpener = null;
+  }
+
+  // Bound once: document and the drawer (outside #dashboard-live) are never replaced by a
+  // refresh swap, so binding these in bindInteractions() would stack a copy per refresh.
+  document.addEventListener("keydown", function (e) {
+    // A modal dialog (the config review) owns Escape while it is open.
+    if (e.key === "Escape" && !document.querySelector("dialog[open]")) closeDrawer();
+  });
+  var drawerEl = document.querySelector("[data-drawer]");
+  if (drawerEl) {
+    drawerEl.addEventListener("click", function (e) {
+      if (e.target.closest("[data-drawer-close]")) { closeDrawer(); return; }
+      var filter = e.target.closest("[data-drawer-filter]");
+      if (!filter) return;
+      var launchableOnly = filter.dataset.drawerFilter === "launchable";
+      drawerEl.querySelectorAll("[data-drawer-filter]").forEach(function (btn) {
+        btn.classList.toggle("active", btn === filter);
+      });
+      drawerEl.querySelectorAll(".pe-drawer-row").forEach(function (row) {
+        row.classList.toggle("hidden", launchableOnly && row.dataset.launchable !== "yes");
+      });
+    });
+  }
+  // The drawer belongs to Overview: leaving the tab closes it, or it would float over another
+  // tab and -- since an open drawer holds off the refresh -- freeze the whole page.
+  window.addEventListener("hashchange", closeDrawer);
 
   // Which run the detail pane is showing. Module-level, because manifest-panel's innerHTML is
   // replaced every 60 seconds and a selection held inside buildDeployManifest() would reset to
@@ -362,6 +423,9 @@
     // Don't yank focus/typed text out from under someone mid-filter.
     var filterInput = document.getElementById("net-filter");
     if (filterInput && document.activeElement === filterInput) return;
+    // Nor close a stack drawer someone is reading: the swap would replace it.
+    var openDrawerEl = document.querySelector("[data-drawer]");
+    if (openDrawerEl && !openDrawerEl.hidden) return;
 
     return fetch(window.location.pathname, { cache: "no-store" })
       .then(function (r) {

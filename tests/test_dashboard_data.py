@@ -949,28 +949,28 @@ def test_services_roll_up_levels_notes_and_sorting(tmp_path, monkeypatch):
         "stacks": [
             {"name": "zeta-crit", "up": 0, "total": 2, "level": "crit",
              "note": "missing down · replica down", "members": [
-                 {"service": "missing", "level": "crit", "word": "down", "state": "absent"},
+                 {"service": "missing", "level": "crit", "word": "down", "state": "absent", "container": None},
                  {"service": "replica", "level": "crit", "word": "down",
-                 "state": "running(healthy), exited(2)"},
+                 "state": "running(healthy), exited(2)", "container": None},
              ]},
             {"name": "alpha-crit", "up": 0, "total": 1, "level": "crit",
              "note": "restart down", "members": [
-                 {"service": "restart", "level": "crit", "word": "down", "state": "restarting"},
+                 {"service": "restart", "level": "crit", "word": "down", "state": "restarting", "container": None},
              ]},
             {"name": "warning", "up": 0, "total": 2, "level": "warn",
              "note": "booting starting · degraded degraded", "members": [
                  {"service": "booting", "level": "warn", "word": "starting",
-                  "state": "running(starting)"},
+                  "state": "running(starting)", "container": None},
                  {"service": "degraded", "level": "warn", "word": "degraded",
-                  "state": "running(unhealthy)"},
+                  "state": "running(unhealthy)", "container": None},
              ]},
             {"name": "paused", "up": 0, "total": 1, "level": "idle",
              "note": "batch paused", "members": [
-                 {"service": "batch", "level": "idle", "word": "paused", "state": "exited(0)"},
+                 {"service": "batch", "level": "idle", "word": "paused", "state": "exited(0)", "container": None},
              ]},
             {"name": "large-ok", "up": 2, "total": 2, "level": "ok", "note": "", "members": [
-                {"service": "web", "level": "ok", "word": "", "state": "running(healthy)"},
-                {"service": "worker", "level": "ok", "word": "", "state": "running"},
+                {"service": "web", "level": "ok", "word": "", "state": "running(healthy)", "container": None},
+                {"service": "worker", "level": "ok", "word": "", "state": "running", "container": None},
             ]},
         ],
         "total_stacks": 5, "up": 2, "total": 8, "attention": 4,
@@ -1168,3 +1168,31 @@ def test_without_cores_list_every_pause_decision_is_the_scans_own(tmp_path, monk
     containers = dashboard_data.summarize_containers()
     assert containers["paused"] == 1 and containers["down"] == 1
     assert dashboard_data.summarize_health()["unhealthy_count"] == 1
+
+
+
+def test_a_member_carries_the_container_the_scan_recorded(tmp_path, monkeypatch):
+    path = tmp_path / "monitor.json"
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    _write(path, {"timestamp": "2026-09-17T12:00:00Z", "mode": "full", "stack_completeness": [
+        {"stack": "money", "services": {"actual_server": {"status": "healthy", "state": "running",
+                                                          "container": "CASA_ACTUAL"}}}]})
+    member, = dashboard_data.summarize_services()["stacks"][0]["members"]
+    assert member["container"] == "CASA_ACTUAL"
+    assert dashboard_data.container_for("money", "actual_server") == "CASA_ACTUAL"
+    assert dashboard_data.container_for("money", "nope") is None
+
+
+def test_launch_links_fold_onto_stacks_lan_first():
+    services = {"stacks": [{"name": "money", "members": [
+        {"service": "actual_server", "container": "CASA_ACTUAL"},
+        {"service": "db", "container": "CASA_DB"},
+        {"service": "old", "container": None}]}]}
+    dashboard_data.attach_launch_links(services, {"CASA_ACTUAL": [
+        {"href": "https://actual.casaalmida.com", "zone": "public"},
+        {"href": "https://actual.casalan.com", "zone": "lan"}]}, frozenset({"CASA_DB"}))
+    actual, db, old = services["stacks"][0]["members"]
+    assert (actual["lan"], actual["web"], actual["host"]) == (
+        "https://actual.casalan.com", "https://actual.casaalmida.com", "actual.casalan.com")
+    assert db["launchable"] is False and db["widget"] is True and old["host"] is None
+    assert services["stacks"][0]["launchable"] == 1 and services["launchable"] == 1

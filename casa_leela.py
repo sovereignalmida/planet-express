@@ -401,9 +401,11 @@ def check_stack_completeness() -> list[dict]:
         priority = {"healthy": 0, "unknown": 1, "failing": 2}
         for service in expected_services:
             observations = []
+            behind = []
             for container in containers:
                 if container.get("Service") != service:
                     continue
+                behind.append(container)
                 state = container.get("State", "unknown")
                 health = container.get("Health", "")
                 if state == "running":
@@ -425,6 +427,10 @@ def check_stack_completeness() -> list[dict]:
                 if observations else "failing",
                 "state": ", ".join(o[1] for o in observations) if observations else "absent",
             }
+            # The container behind the service, for the dashboard's launch links (keyed by
+            # container name). Only when exactly one: a scaled service has no single answer.
+            if len(behind) == 1 and isinstance(behind[0].get("Name"), str) and behind[0]["Name"]:
+                services[service]["container"] = behind[0]["Name"]
         missing = [s for s in expected_services if services[s]["status"] == "failing"]
         entry = {
             "stack": stack_name,

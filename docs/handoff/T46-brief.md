@@ -138,6 +138,25 @@ credentials. **Do not land this unreviewed.**
 
 ### T46.4 — Launch links in the UI
 
+**Status: built** (commit after `668d57c`). Leela now records each stack service's container
+(`services[svc].container`, only when exactly one container backs it), which is how a tile's
+members meet the container-keyed links; snapshots from before this show no links until the
+next full scan. Reviewed once (`/code-review high`): three mediums fixed -- the tile had
+`role=button` around links (now a real button on the stack name), the drawer's listener
+stacked per refresh (now bound once), and a drawer left open froze the page's refresh and
+floated over other tabs (now closes on leaving Overview). The detail header's links load
+from `/api/containers/<stack>/<service>/links` after render. Screenshots from the design
+harness were checked at 1440×900 and 390×844.
+
+Deviations from the spec, deliberately:
+- A router serving both a LAN and a public host is a split pill too, not only a `-lan` twin
+  (15 of the live 70 are one router with both). At rest the split segment reads `LAN`, like
+  v2.1's `+LAN`; it becomes `LAN ↗` on hover, so the matrix stays calm.
+- `PathPrefix` rules do not append the path (the spec said they should): T46.1's measured
+  rule emits no link for any compound rule, which keeps `/api` and `/stream.mp3` off.
+- ◉ is a hint from the image alone; the container's `planetexpress.widget` label is not in
+  the snapshot. The detail view is authoritative.
+
 Overview tile `↗ n`, the 420px stack drawer, and Network pills becoming links (including the
 split pill that replaces v2.1's `+LAN` tag).
 

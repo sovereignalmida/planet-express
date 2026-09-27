@@ -124,7 +124,7 @@
             <div class="pe-services-head">
               <h2>SERVICES</h2>
               {% if ctx.services.available %}
-              <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} online · worst first</span>
+              <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} online{% if ctx.services.launchable %} · {{ ctx.services.launchable }} launchable{% endif %} · worst first</span>
               <span class="pe-services-spacer"></span>
               <span class="overview-attention">ATTENTION {{ ctx.services.attention }}</span>
               {% endif %}
@@ -136,9 +136,13 @@
             {% else %}
             <div class="pe-stack-grid" data-services-grid>
               {% for stack in ctx.services.stacks %}
-              <article class="pe-card pe-stack-card {{ stack.level }}" data-stack-name="{{ stack.name }}">
+              <article class="pe-card pe-stack-card {{ stack.level }}" data-stack-name="{{ stack.name }}"
+                       {% if stack.members %}data-drawer-open="{{ stack.name }}"{% endif %}>
                 <div class="pe-stack-head">
-                  <span class="pe-stack-name">{{ stack.name }}</span><span class="pe-stack-spacer"></span>
+                  {# The keyboard and screen-reader way in is a real button; the rest of the tile
+                     is a mouse convenience, so the dots stay ordinary links to container detail. #}
+                  {% if stack.members %}<button type="button" class="pe-stack-name pe-stack-open" aria-label="{{ stack.name }}: open the stack drawer">{{ stack.name }}</button>{% else %}<span class="pe-stack-name">{{ stack.name }}</span>{% endif %}<span class="pe-stack-spacer"></span>
+                  {% if stack.launchable %}<span class="pe-tile-links" title="{{ stack.launchable }} launchable">↗ {{ stack.launchable }}</span>{% endif %}
                   <span class="pe-stack-tally {{ stack.level }}">{{ stack.up }}/{{ stack.total }}</span>
                 </div>
                 {% if stack.members %}
@@ -153,6 +157,39 @@
               </article>
               {% endfor %}
             </div>
+            {# One drawer; each stack's rows ride along as a template and are cloned in on open. #}
+            {% for stack in ctx.services.stacks if stack.members %}
+            <template data-drawer-for="{{ stack.name }}">
+              <div class="pe-drawer-head">
+                <span class="pe-drawer-led head {{ stack.level }}"></span>
+                <div class="pe-drawer-title"><strong>{{ stack.name }}</strong>
+                  <span>{{ stack.total }} container{{ '' if stack.total == 1 else 's' }} · {{ stack.launchable }} launchable · {{ stack.up }}/{{ stack.total }} online</span></div>
+                <button class="pe-drawer-close" type="button" data-drawer-close aria-label="Close">×</button>
+              </div>
+              <div class="pe-drawer-filters">
+                <button type="button" class="pe-drawer-filter active" data-drawer-filter="all">ALL {{ stack.total }}</button>
+                <button type="button" class="pe-drawer-filter" data-drawer-filter="launchable">LAUNCHABLE {{ stack.launchable }}</button>
+                <span class="pe-drawer-spacer"></span><span class="pe-drawer-note">LAN default</span>
+              </div>
+              <div class="pe-drawer-rows">
+                {% for member in stack.members %}
+                <div class="pe-drawer-row {{ member.level }}" data-launchable="{{ 'yes' if member.launchable else 'no' }}">
+                  <span class="pe-drawer-led {{ member.level }}"></span>
+                  <a class="pe-drawer-name" href="{{ url_for('container_detail', stack=stack.name, service=member.service) }}">
+                    <span>{{ member.service }}</span>
+                    <span class="pe-drawer-host {{ '' if member.launchable else 'none' }}">{{ member.host or '— no route' }}</span>
+                  </a>
+                  <span class="pe-drawer-actions">
+                    {% if member.lan %}<a class="pe-launch primary" href="{{ member.lan }}" target="_blank" rel="noopener">LAN ↗</a>{% endif %}
+                    {% if member.web %}<a class="pe-launch neutral" href="{{ member.web }}" target="_blank" rel="noopener">WEB ↗</a>{% endif %}
+                    {% if member.widget %}<span class="pe-launch-widget" title="has a live widget">◉</span>{% endif %}
+                  </span>
+                </div>
+                {% endfor %}
+              </div>
+              <div class="pe-drawer-foot">No button means no Traefik route (databases, workers). ◉ means a live widget in the detail view.</div>
+            </template>
+            {% endfor %}
             {% endif %}
           </section>
 
@@ -414,6 +451,7 @@
               <span>docker = untagged</span>
               <span><b class="net-tag file">FILE</b> file provider</span>
               <span><b class="net-tag ext">EXT</b> external</span>
+              <span><b class="net-tag lan">LAN</b> also on the LAN: a second target</span>
               <span><b class="net-tag lan">+LAN</b> LAN twin merged</span>
             </div>
             <input class="net-filter" id="net-filter" placeholder="filter routers…" autocomplete="off">
@@ -432,11 +470,27 @@
               </div>
               <div class="net-pills">
                 {% for pill in zone['items'] %}
+                {# v2.2 B: the pill IS the link. A LAN twin is a split pill (name → public, LAN ↗ → LAN);
+                   a DOWN pill opens the container's detail view, never the URL. #}
+                {% set target = pill.href or pill.detail %}
+                {% if pill.lan_href %}
+                <span class="net-pill pe-pill-split net-filter-row" data-filter-text="{{ pill.filter_text }}">
+                  <a class="pe-pill-main" href="{{ pill.href }}" target="_blank" rel="noopener" title="{{ pill.href.split('://', 1)[-1] }}"><span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}</a><a class="pe-pill-lan" href="{{ pill.lan_href }}" target="_blank" rel="noopener" title="{{ pill.lan_href.split('://', 1)[-1] }}" aria-label="{{ pill.name }} on the LAN">LAN</a>
+                </span>
+                {% elif target %}
+                <a class="net-pill is-link net-filter-row {{ 'down' if pill.down else '' }}" href="{{ target }}"
+                   {% if not pill.down %}target="_blank" rel="noopener"{% endif %}
+                   data-filter-text="{{ pill.filter_text }}"
+                   title="{{ pill.href.split('://', 1)[-1] if pill.href else pill.raw ~ ' · open container detail' }}">
+                  <span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                </a>
+                {% else %}
                 <span class="net-pill net-filter-row {{ 'down' if pill.down else '' }}"
                       data-filter-text="{{ pill.filter_text }}"
                       title="{{ pill.raw }}{{ (' · ' ~ pill.host) if pill.host else '' }}">
                   <span class="net-pill-led"></span>{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
                 </span>
+                {% endif %}
                 {% endfor %}
               </div>
             </div>
@@ -776,6 +830,10 @@
     <p>Planet Express — authenticated LAN dashboard · auto-refreshes every 60s · held together by good news</p>
   </footer>
 
+  {# The stack drawer lives outside #dashboard-live: fixed to the viewport, not to a panel, and
+     never replaced by the 60-second swap. Its rows come from the <template data-drawer-for>
+     elements inside the live region, which do refresh. #}
+  <aside class="pe-drawer" data-drawer hidden aria-label="Stack drawer"></aside>
   <script src="{{ asset('dashboard.js') }}"></script>
   <script src="{{ asset('incidents.js') }}"></script>
   <script src="{{ asset('approvals.js') }}"></script>
