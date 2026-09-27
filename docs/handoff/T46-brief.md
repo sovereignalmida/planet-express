@@ -184,6 +184,41 @@ routes for free, which was the second half of the finding.
 Cost: container IPs are not collected today, so this needs a field in `casa_leela.py`'s
 inspect pass — scan-path code.
 
+**Status: the join is by address now** (see the commit after `48bc436`). Leela collects
+every container's IPv4/IPv6 addresses in a second `docker inspect`; the dashboard reads
+Traefik's `/api/http/services` and gives a router's link to the one container holding every
+one of its service's backend addresses, else to no one. Links are keyed by container name,
+and so is `links:` `name` -- the old example's `adventurelog` would now need to be
+`CASA_ADVENTURELOG`.
+
+The Claude `/code-review` on that change found, and it fixes:
+
+- The first version put the address field last in the restart-info inspect. `_run()` strips
+  stdout, so an empty last field cost the last line its tab, the line was skipped, and that
+  container lost its RestartCount -- crash-loop detection off for one container. Addresses
+  are a separate inspect now, and the tests strip the way `_run()` does.
+- `network_mode: service:gluetun` containers have no address of their own; their backend is
+  gluetun's. They are given the owner's addresses, so the address is claimed several times
+  and the join refuses it instead of putting qbit's link on gluetun.
+- Traefik pages its API at 100; both the router and the service fetch follow `X-Next-Page`.
+- IPv6 backends, normalised on both sides.
+
+**Still open -- a decision, not a bug fix.** The addresses come from the monitor snapshot,
+which the scheduled pipeline writes every 6h. Two consequences:
+
+1. *Wrong link, for up to 6h.* A canary update recreates A (new address); B is recreated
+   and gets A's old one. The snapshot still says A owns it, so B's URL shows as A's button.
+   The duplicate-claim check cannot see it -- B is not in the snapshot yet.
+2. *No links after `/updates`.* That mode overwrites the snapshot with no containers, so
+   every derived link disappears until the next full or status scan.
+
+Neither matters until T46.4 renders `launch_urls`. The fix for both is to read addresses
+live: a read-only core RPC doing one `docker inspect` of every container, cached briefly.
+That is a new core RPC surface and wants the Codex gate. The alternative is to accept the
+staleness and have T46.4 treat links as advisory.
+
+Codex review of this change is **owed** -- not installed in the session that wrote it.
+
 ### 2. The dashboard never re-reads edited config
 
 `config.LAUNCH_LINKS` is computed at import, and activation (`_reexec_core`) re-execs **core

@@ -187,6 +187,56 @@ def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
     return info
 
 
+def _inspect_network_addresses(names: list[str]) -> dict[str, list[str]]:
+    """Every address each container answers on, keyed by container name.
+
+    The dashboard joins a Traefik service's backend URL to its container by this (T46.1):
+    the router's service name is a Traefik label, not a compose service, and compose service
+    names repeat across projects. A host-networked container has no address and needs none.
+
+    A container in another's network namespace (compose `network_mode: service:gluetun`)
+    has none of its own either, but Traefik's backend for it IS the namespace owner's
+    address. So it is given the owner's addresses: an address several containers report is
+    one the join refuses, which is the only honest answer -- attributing it to the owner
+    alone would put the VPN'd app's launch link on gluetun.
+    """
+    if not names:
+        return {}
+    fmt = (
+        "{{.Name}}\t{{.Id}}\t{{.HostConfig.NetworkMode}}\t"
+        "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{.GlobalIPv6Address}} {{end}}"
+    )
+    rc, out, err = _run(["docker", "inspect", "--format", fmt, *names], timeout=30)
+    if not out:
+        log.warning(f"docker inspect (network addresses) returned nothing: {err}")
+        return {}
+
+    own: dict[str, list[str]] = {}
+    ids: dict[str, str] = {}
+    shares: dict[str, str] = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        # _run() strips the whole output, so the last line loses an empty address field
+        # along with its tab. Three fields is that line, not a malformed one.
+        if len(parts) == 3:
+            parts.append("")
+        if len(parts) != 4:
+            continue
+        name, container_id, network_mode, addresses = parts
+        name = name.lstrip("/")
+        own[name] = sorted(set(addresses.split()))
+        ids[container_id] = name
+        if network_mode.startswith("container:"):
+            shares[name] = network_mode.partition(":")[2]
+
+    for name, owner_ref in shares.items():
+        owner = ids.get(owner_ref) or next(
+            (n for cid, n in ids.items() if owner_ref and cid.startswith(owner_ref)),
+            owner_ref if owner_ref in own else None)
+        own[name] = list(own.get(owner, [])) if owner else []
+    return own
+
+
 def check_containers() -> list[dict]:
     """All containers — status, health, image. Flag anything not running or crash-looping."""
     fmt = (
@@ -224,6 +274,7 @@ def check_containers() -> list[dict]:
             log.warning(f"Skipping unparseable container line: {line!r}")
 
     restart_info = _inspect_restart_info([c["name"] for c in containers])
+    addresses = _inspect_network_addresses([c["name"] for c in containers])
     for c in containers:
         info = restart_info.get(c["name"], {})
         restart_count = info.get("restart_count", 0)
@@ -231,6 +282,7 @@ def check_containers() -> list[dict]:
         status = c["status"]
         health = c["health"]
         c["restart_count"] = restart_count
+        c["ips"] = addresses.get(c["name"], [])
 
         crash_looping = restart_count >= CRASH_LOOP_RESTART_THRESHOLD or (
             status.startswith("Up")

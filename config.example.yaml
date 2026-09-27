@@ -76,12 +76,18 @@ sudo_allowlist:
 # line here is the opposite one: a rule whose host root IS reachable but whose shape
 # is too complex to read, e.g. `(Host(a) || Host(b)) && !(PathPrefix(/media) || ...)`.
 #
-# href must be http:// or https://. zone is `lan` (default) or `public`; the LAN link
-# is the one the dashboard offers first.
+# A derived link reaches its container by the address Traefik forwards to, so a
+# container with network_mode: host (its backend is the host's own address) never gets
+# one and needs a line here too.
+#
+# name is the container name, as `docker ps` shows it -- not the compose service name,
+# which is not unique across stacks. A declared link replaces whatever was derived for
+# that container. href must be http:// or https://. zone is `lan` (default) or
+# `public`; the LAN link is the one the dashboard offers first.
 links: []
 # links:
-#   - name: adventurelog
+#   - name: CASA_ADVENTURELOG
 #     href: https://travel.casalan.com
 #     zone: lan
-#   - name: homeassistant           # no Traefik route at all
-#     href: http://192.168.1.20:8123
+#   - name: CASA_JELLYFIN           # network_mode: host
+#     href: https://jellyfin.casalan.com

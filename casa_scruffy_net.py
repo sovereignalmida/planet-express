@@ -7,8 +7,10 @@ file. Both are best-effort: they never raise, so a Traefik/AdGuard hiccup degrad
 Network tab instead of taking down the whole dashboard.
 """
 
+import ipaddress
 import logging
 import re
+from urllib.parse import urlsplit
 
 import requests
 import urllib3
@@ -28,6 +30,9 @@ _TIMEOUT = 2
 # same endpoint Homepage's own Traefik widget already polls -- see traefik.yml/homepage
 # labels in ~/stacks/network/docker-compose.yml.
 _TRAEFIK_API = "http://127.0.0.1:8079/api/http/routers"
+# The same API's services: each one's loadBalancer.servers[].url is, for a docker-provider
+# service, the container's own address. That is the join from a route to a container.
+_TRAEFIK_SERVICES_API = "http://127.0.0.1:8079/api/http/services"
 
 # AdGuard sits on the casapilan macvlan, unreachable from its own Docker host by
 # design -- routed through Traefik instead, the same Host-header trick already used to
@@ -43,13 +48,35 @@ def _adguard_host_header() -> str:
     return f"adguard.{config.LAN_ONLY_DOMAIN}"
 
 
-def fetch_traefik_routers() -> dict:
-    try:
-        resp = requests.get(_TRAEFIK_API, timeout=_TIMEOUT)
+# Traefik's API pages its lists at 100 by default and names the next page in X-Next-Page,
+# which reads "1" on the last one. This host is at 70 routers; the cap only stops a
+# misbehaving server from looping us.
+_TRAEFIK_MAX_PAGES = 20
+
+
+def _get_traefik_list(url: str) -> list:
+    items: list = []
+    page = 1
+    for _ in range(_TRAEFIK_MAX_PAGES):
+        resp = requests.get(url, params={"page": page}, timeout=_TIMEOUT)
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):
-            raise TypeError(f"expected a list of routers, got {type(payload).__name__}")
+            raise TypeError(f"expected a list, got {type(payload).__name__}")
+        items.extend(payload)
+        try:
+            next_page = int((getattr(resp, "headers", None) or {}).get("X-Next-Page", "1"))
+        except (TypeError, ValueError):
+            next_page = 1
+        if next_page <= page:
+            break
+        page = next_page
+    return items
+
+
+def fetch_traefik_routers() -> dict:
+    try:
+        payload = _get_traefik_list(_TRAEFIK_API)
         routers = [
             {
                 "name": r.get("name", "?"),
@@ -68,6 +95,37 @@ def fetch_traefik_routers() -> dict:
     except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
         log.warning(f"Traefik router fetch failed: {e}")
         return {"available": False, "routers": []}
+
+
+def fetch_traefik_services() -> dict:
+    """{"available", "servers": {"name@provider": [backend host, ...]}}. Never raises.
+
+    Only the host of each backend URL is kept -- the join is by address, and the port says
+    nothing about which container is behind it. A service with no loadBalancer (a weighted
+    or mirroring service) has no servers of its own and is left out.
+    """
+    try:
+        payload = _get_traefik_list(_TRAEFIK_SERVICES_API)
+        servers = {}
+        for svc in payload:
+            if not isinstance(svc, dict) or not isinstance(svc.get("name"), str):
+                continue
+            balancer = svc.get("loadBalancer")
+            if not isinstance(balancer, dict):
+                continue
+            hosts = []
+            for server in balancer.get("servers") or []:
+                url = server.get("url") if isinstance(server, dict) else None
+                try:
+                    host = urlsplit(url).hostname if isinstance(url, str) else None
+                except ValueError:
+                    host = None
+                hosts.append(_normalise_address(host) if host else None)
+            servers[svc["name"]] = hosts
+        return {"available": True, "servers": servers}
+    except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
+        log.warning(f"Traefik service fetch failed: {e}")
+        return {"available": False, "servers": {}}
 
 
 def fetch_adguard_stats() -> dict:
@@ -244,14 +302,62 @@ def _rule_is_host_only(rule: str) -> bool:
     return remainder.strip() == ""
 
 
-def container_urls(routers: list, *, lan_domain: str) -> dict:
-    """{service: [{"href", "zone"}]} for every router that can be turned into a link.
+def _normalise_address(value: str) -> str:
+    """One spelling per address, so `fd00:0::5` from Traefik matches `fd00::5` from Docker."""
+    try:
+        return ipaddress.ip_address(str(value)).compressed
+    except ValueError:
+        return str(value)
 
-    Keyed by the router's `service`, which is what ties a route back to a compose service.
-    A service reachable from two routers (`x` and its `-lan` twin) collects both their URLs,
-    de-duplicated: the twins point at different hosts, so both are real.
+
+def _address_owners(container_ips: dict) -> dict:
+    """{ip: container} for every address exactly one container claims.
+
+    The live host has none claimed twice, but the snapshot this comes from is up to one scan
+    old, and a recreated container can hand its address on. An address two containers
+    report is dropped rather than given to whichever came first.
     """
-    by_service: dict[str, list] = {}
+    claims: dict[str, set] = {}
+    for name, ips in (container_ips or {}).items():
+        for ip in ips or []:
+            claims.setdefault(_normalise_address(ip), set()).add(str(name))
+    return {ip: names.pop() for ip, names in claims.items() if len(names) == 1}
+
+
+def _router_service_key(router: dict) -> str:
+    """The router's service as the services API names it.
+
+    A router names a service in its own provider without a suffix (`actual`), and one in
+    another provider with it (`api@internal`); the services API always has the suffix.
+    """
+    service = str(router.get("service", ""))
+    if "@" in service:
+        return service
+    provider = str(router.get("name", "")).partition("@")[2]
+    return f"{service}@{provider}" if provider else service
+
+
+def container_urls(routers: list, services: dict, container_ips: dict, *,
+                   lan_domain: str) -> dict:
+    """{container: [{"href", "zone"}]} for every router that can be turned into a link.
+
+    Keyed by container name, joined through the backend address: router -> its service ->
+    that service's server URLs -> the one container holding every one of those addresses.
+    The router's service *name* is not a usable key: it is a Traefik label (`actual` routes
+    to compose service `actual_server`) and compose service names repeat across projects
+    (two stacks each have a `web`). Measured on the live host, the name joins 27 of 64;
+    the address joins 56 of 70 enabled routers, and the 14 it does not are genuinely not
+    container routes -- file-provider routes to other machines, and host-networked services,
+    which are what config's `links:` is for.
+
+    A router whose servers resolve to no container, to more than one, or only partly, gets
+    no link: a button onto the wrong app is worse than none.
+
+    A container reachable from two routers (`x` and its `-lan` twin) collects both their
+    URLs, de-duplicated: the twins point at different hosts, so both are real.
+    """
+    owners = _address_owners(container_ips)
+    by_container: dict[str, list] = {}
     for router in routers or []:
         if not isinstance(router, dict) or router.get("status") != "enabled":
             continue
@@ -264,8 +370,11 @@ def container_urls(routers: list, *, lan_domain: str) -> dict:
         if scheme is None:
             # An entrypoint we do not have a scheme for is not a guess worth making.
             continue
-        service = str(router.get("service", "")).split("@")[0]
-        links = by_service.setdefault(service, [])
+        backends = (services or {}).get(_router_service_key(router)) or []
+        resolved = {owners.get(backend) for backend in backends}
+        if len(resolved) != 1 or None in resolved:
+            continue
+        links = by_container.setdefault(resolved.pop(), [])
         for host in hosts:
             href = f"{scheme}://{host}"
             if any(link["href"] == href for link in links):
@@ -275,18 +384,18 @@ def container_urls(routers: list, *, lan_domain: str) -> dict:
                 "zone": "lan" if _registrable_domain(host) == lan_domain else "public",
             })
     # LAN first: it is the default target, and the one that works when the WAN is down.
-    for links in by_service.values():
+    for links in by_container.values():
         links.sort(key=lambda link: (link["zone"] != "lan", link["href"]))
-    return by_service
+    return by_container
 
 
 def merge_declared_links(derived: dict, declared: list) -> dict:
     """Fold config's `links:` over what the routers produced.
 
-    A declared link wins for its service: the operator wrote it down precisely because the
+    A declared link wins for its container: the operator wrote it down precisely because the
     route could not be read honestly, so it is not something to merge with a guess.
     """
-    merged = {service: list(links) for service, links in (derived or {}).items()}
+    merged = {name: list(links) for name, links in (derived or {}).items()}
     for link in declared or []:
         if not isinstance(link, dict) or not link.get("name") or not link.get("href"):
             continue

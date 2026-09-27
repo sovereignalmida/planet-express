@@ -1023,3 +1023,34 @@ def test_services_status_snapshot(tmp_path, monkeypatch):
 
 # The pending-plan panel went with the shell planner in slice 5b-5: a proposal is an approval in
 # the store, shown on the actions screen, not a plan file summarised here.
+
+
+# ── container_ips: the launch-link join's side of the snapshot (T46.1) ──────────
+
+def test_container_ips_reads_the_last_container_scan(tmp_path, monkeypatch):
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {
+        "timestamp": "2026-09-26T12:00:00+00:00", "mode": "status",
+        "containers": [
+            {"name": "CASA_ACTUAL", "status": "Up", "ips": ["172.18.0.14"]},
+            # Written before addresses were collected: present, with none.
+            {"name": "CASA_OLD", "status": "Up"},
+        ],
+    })
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    assert dashboard_data.container_ips() == {"CASA_ACTUAL": ["172.18.0.14"], "CASA_OLD": []}
+
+
+def test_container_ips_is_empty_for_a_snapshot_that_did_not_scan_containers(tmp_path, monkeypatch):
+    """/updates overwrites the snapshot with no containers; that must mean no links, not
+    links joined against nothing."""
+    path = tmp_path / "latest_monitor.json"
+    _write(path, {"timestamp": "2026-09-26T12:00:00+00:00", "mode": "updates",
+                  "containers": [{"name": "CASA_ACTUAL", "ips": ["172.18.0.14"]}]})
+    monkeypatch.setattr(config, "STATE_MONITOR", path)
+    assert dashboard_data.container_ips() == {}
+
+
+def test_container_ips_without_a_snapshot_is_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_MONITOR", tmp_path / "missing.json")
+    assert dashboard_data.container_ips() == {}

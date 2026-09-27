@@ -98,11 +98,12 @@ class PlanetExpressConfig(BaseModel):
     legacy_plans_enabled: bool | None = None
     mounts: dict[str, str] = {}
     exclude_services: list[ExcludedService] = []
-    # The escape hatch for the Launch-links feature: a service whose route this host cannot
-    # turn into a URL, or which has no Traefik route at all. container_urls() only emits a
-    # link from a rule that is Host() terms joined by `||`, so a compound rule like
+    # The escape hatch for the Launch-links feature: a container whose route this host cannot
+    # turn into a URL, or cannot join to the container. container_urls() only emits a link
+    # from a rule that is Host() terms joined by `||`, so a compound rule like
     # adventurelog's `(Host || Host) && !(PathPrefix ...)` -- whose host root really is
-    # launchable -- gets its link declared here instead of guessed at.
+    # launchable -- gets its link declared here instead of guessed at. It joins by backend
+    # address, so a host-networked container needs one too. `name` is the container name.
     links: list[LaunchLink] = []
     # /install only ever writes a LAN-only Traefik router (no auth of its own) —
     # restricted to this deployment's own LAN-only domain convention so a mistyped or

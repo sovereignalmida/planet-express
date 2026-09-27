@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Launch links are keyed by container, joined through the address Traefik forwards to.**
+  The router's service name matched a compose service for 27 of 64 routes, and compose
+  service names repeat across stacks, so a link could land on another stack's `web`. Config
+  `links:` `name` is now a container name (`CASA_ADVENTURELOG`, not `adventurelog`).
+  Nothing renders these links yet.
+
+### Fixed
+- **The Traefik router list stopped at 100.** Traefik's API pages; the Network tab now
+  follows `X-Next-Page`.
+
 ## [2.1.0] - 2026-09-25
 
 A layout pass over all eight tabs, implementing `docs/designs/planet_express_design_v21/handoffs/

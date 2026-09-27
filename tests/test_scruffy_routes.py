@@ -164,6 +164,8 @@ def _render_with_certs(tmp_path, monkeypatch, certs):
     for attr in ("STATE_FINDINGS", "STATE_STATUS", "UPDATE_HISTORY_FILE"):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers", lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
+                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats", lambda: {"available": False})
     resp = _client().get("/")
     assert resp.status_code == 200
@@ -181,6 +183,8 @@ def _render_with_service_snapshot(tmp_path, monkeypatch, mode="full", stacks=Non
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
+                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
     response = _client().get("/")
@@ -1069,6 +1073,8 @@ def test_the_disabled_note_follows_the_config_not_a_stale_snapshot(tmp_path, mon
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
+                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
     html = _client().get("/").data.decode()
@@ -1169,6 +1175,8 @@ def test_history_renders_run_cards_beside_a_detail_pane(tmp_path, monkeypatch):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers",
                         lambda: {"available": False, "routers": []})
+    monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_services",
+                        lambda: {"available": False, "servers": {}})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
     html = _client().get("/").data.decode()
