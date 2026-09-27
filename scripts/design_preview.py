@@ -328,10 +328,11 @@ FIXTURE_WIDGETS = {
     ("media", "radarr"): {"state": "needs_key", "widget": "radarr", "via": "/api/v3/queue",
                           "env": ["RADARR_API_KEY"]},
     ("media", "prowlarr"): {
-        "state": "error", "widget": "prowlarr", "via": "/api/v1/indexer", "error": "answered 401",
+        "state": "error", "widget": "prowlarr", "via": "/api/v1/indexerstatus", "error": "answered 401",
         "status": 401, "stale_at": 240,
-        "stale": {"stats": [{"k": "INDEXERS", "v": 14}, {"k": "FAILING", "v": 1, "level": "warn"},
-                            {"k": "GRABS 24H", "v": 37}], "rows": [], "rows_label": "", "line": None}},
+        "stale": {"stats": [{"k": "FAILING", "v": 1, "level": "warn"}, {"k": "HEALTH", "v": "1", "level": "warn"}],
+                  "rows": [{"title": "Indexers unavailable due to failures: 1337x", "meta": "warning"}],
+                  "rows_label": "HEALTH", "line": None}},
 }
 
 

@@ -133,18 +133,22 @@ If you use [gethomepage.dev](https://gethomepage.dev), the dashboard also expose
 
 ## Container widget keys
 
-A container's detail view can show live stats from the app's own API (Sonarr's queue,
-AdGuard's query counts). The dashboard fetches them server-side; the keys stay on the host
+A container's detail view can show live stats from the app's own API (Sonarr's and
+Radarr's queues, Prowlarr's failing indexers, Immich's library size, AdGuard's query counts). The dashboard fetches them server-side; the keys stay on the host
 and never reach the page. Put each key in `/etc/planetexpress-dashboard.env` (root-owned,
 read by `casa-dashboard.service`), then `sudo systemctl restart casa-dashboard`:
 
 ```sh
 SONARR_API_KEY=...                  # Sonarr → Settings → General → API Key
+RADARR_API_KEY=...                  # Radarr → Settings → General → API Key
+PROWLARR_API_KEY=...                # Prowlarr → Settings → General → API Key
+IMMICH_API_KEY=...                  # Immich, signed in as an admin → Account Settings → API Keys,
+                                    # with the server.statistics permission (or "all")
 ADGUARD_USERNAME=...                # the same pair the Network tab already uses
 ADGUARD_PASSWORD=...
 ```
 
-A widget reads only `<WIDGET>_API_KEY`, `_TOKEN`, `_USERNAME` or `_PASSWORD`, named after
+Radarr's widget needs Radarr 5.6 or later. A widget reads only `<WIDGET>_API_KEY`, `_TOKEN`, `_USERNAME` or `_PASSWORD`, named after
 itself. A key is sent only to a container whose image was pulled, as that app, from a
 registry the widget names (Docker Hub, `lscr.io`, `ghcr.io`), over a docker bridge network,
 and never across a shared network namespace. Treat that as hardening, not a guarantee: a

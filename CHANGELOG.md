@@ -14,11 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opens the container's detail view instead. Container detail has OPEN ↗ / WEB ↗ in the
   header (the phone's bottom bar on mobile). Only a plain `Host()` hostname becomes a link.
 - **Container widgets, server-side.** `GET /api/containers/<stack>/<service>/widget` returns a
-  container's live app stats (Sonarr, AdGuard) fetched by the dashboard from the app's own
+  container's live app stats (Sonarr, Radarr, Prowlarr, Immich, AdGuard) fetched by the dashboard from the app's own
   API. Keys live in `/etc/planetexpress-dashboard.env` and never reach the page. A key goes
   only to an image pulled from a registry the widget names, on a docker bridge network, never
   across a shared network namespace; answers are size-, time- and shape-bounded. See
-  INSTALL.md, "Container widget keys". No template renders it yet.
+  INSTALL.md, "Container widget keys".
+- **The widget on the container view.** Second after the verdict: live stats (and a queue or
+  a line), a "needs an API key" card naming the env vars, or the API's failure with the last
+  good values dimmed. A container without a widget shows nothing. When the widget is working
+  the logs fold away behind a "show logs" toggle.
 
 ### Changed
 - **Launch links are keyed by container, joined through the container's own Traefik
@@ -27,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Core reads which container declares each router and service (`containers.routers`, one
   `docker ps -a` per call, `docker inspect` only when a container changed), and a link is
   offered only when one container declares both. Config `links:` `name` is now a container
-  name (`CASA_ADVENTURELOG`, not `adventurelog`). Nothing renders these links yet.
+  name (`CASA_ADVENTURELOG`, not `adventurelog`).
 
 ### Fixed
 - **The dashboard showed stale config after an activated edit.** Activation re-execs core

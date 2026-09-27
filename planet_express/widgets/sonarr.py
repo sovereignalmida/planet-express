@@ -1,5 +1,7 @@
 """Sonarr: what is queued, what is missing, and whether it is healthy."""
 
+import math
+
 WIDGET = {
     "name": "sonarr",
     # lscr.io/linuxserver/sonarr is what this host runs; the others are the common
@@ -23,27 +25,34 @@ WIDGET = {
 
 def summarise(responses) -> dict:
     queue, missing, health = responses
-    warnings = [h for h in (health or []) if isinstance(h, dict) and h.get("type") in ("warning", "error")]
-    wanted = (missing or {}).get("totalRecords", 0)
+    queue = queue if isinstance(queue, dict) else {}
+    missing = missing if isinstance(missing, dict) else {}
+    warnings = [h for h in (health if isinstance(health, list) else [])
+                if isinstance(h, dict) and h.get("type") in ("warning", "error")]
+    records = queue.get("records") if isinstance(queue.get("records"), list) else []
+    wanted = missing.get("totalRecords") or 0
     return {
         "stats": [
-            {"k": "QUEUE", "v": (queue or {}).get("totalRecords", 0)},
+            {"k": "QUEUE", "v": queue.get("totalRecords") or 0},
             {"k": "WANTED", "v": wanted, "level": "warn" if wanted else "ok"},
             {"k": "HEALTH", "v": "ok" if not warnings else f"{len(warnings)}",
              "level": "ok" if not warnings else "warn"},
         ],
         "rows": [
             {"title": item.get("title", "?"), "pct": _progress(item)}
-            for item in ((queue or {}).get("records") or [])[:3] if isinstance(item, dict)
+            for item in records[:3] if isinstance(item, dict)
         ],
         "rows_label": "DOWNLOADING",
         "line": None,
     }
 
 
+def _number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def _progress(item) -> int:
-    size = item.get("size") or 0
-    left = item.get("sizeleft")
-    if not isinstance(size, (int, float)) or not isinstance(left, (int, float)) or not size:
+    size, left = item.get("size"), item.get("sizeleft")
+    if not _number(size) or not _number(left) or not size:
         return 0
     return max(0, min(100, round((size - left) / size * 100)))

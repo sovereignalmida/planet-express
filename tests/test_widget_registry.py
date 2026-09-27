@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
-from planet_express.widgets import registry
+from planet_express.widgets import fetcher, registry
 
 FAKE = {
     "sonarr": {"name": "sonarr", "match": ["linuxserver/sonarr", "hotio/sonarr"]},
@@ -333,3 +333,103 @@ def test_a_contract_broken_in_a_way_the_validator_never_anticipated_costs_one_pa
         assert "sonarr" in loaded and "adguard" in loaded
     finally:
         path.unlink()
+
+
+# ── radarr, prowlarr, immich ────────────────────────────────────────────────────
+
+def test_the_common_radarr_prowlarr_and_immich_images_match_their_widgets():
+    assert registry.match_widget("lscr.io/linuxserver/radarr:latest")["name"] == "radarr"
+    assert registry.match_widget("ghcr.io/hotio/prowlarr:release")["name"] == "prowlarr"
+    assert registry.match_widget("ghcr.io/immich-app/immich-server:release")["name"] == "immich"
+    # The machine-learning container has no API to read.
+    assert registry.match_widget("ghcr.io/immich-app/immich-machine-learning:release") is None
+
+
+def test_radarr_line_names_a_download_in_progress_not_a_stuck_import():
+    widget = registry.load_widgets()["radarr"]
+    out = widget["summarise"]([
+        {"totalRecords": 2, "records": [
+            {"title": "Dune.Part.Two.2024.2160p", "status": "completed", "size": 200, "sizeleft": 0},
+            {"title": "Arrival.2016.1080p", "status": "downloading", "size": 200, "sizeleft": 50,
+             "movie": {"title": "Arrival", "year": 2016}}]},
+        {"totalRecords": 4},
+        [],
+    ])
+    assert [(s["k"], s["v"]) for s in out["stats"]] == [("QUEUE", 2), ("WANTED", 4), ("HEALTH", "ok")]
+    # Announced movies count as wanted: a number is not a warning by itself.
+    assert "level" not in out["stats"][1]
+    assert out["line"] == "downloading: Arrival (2016) · 75%"
+
+
+def test_radarr_progress_survives_non_finite_sizes():
+    """1e999 parses to inf; the widget must still answer, at 0%."""
+    widget = registry.load_widgets()["radarr"]
+    out = widget["summarise"]([
+        {"records": [{"title": "x", "status": "downloading", "size": float("inf"), "sizeleft": 1}]},
+        {}, []])
+    assert out["line"] == "downloading: x · 0%"
+
+
+def test_prowlarr_summarise_counts_blocked_indexers_and_lists_health():
+    widget = registry.load_widgets()["prowlarr"]
+    out = widget["summarise"]([
+        [{"indexerId": 2, "disabledTill": "2026-09-27T13:00:00Z"}, {"indexerId": 9}],
+        [{"type": "warning", "message": "Indexers unavailable due to failures: 1337x"},
+         {"type": "notice", "message": "ignored"}],
+    ])
+    assert [(s["k"], s["v"]) for s in out["stats"]] == [("FAILING", 2), ("HEALTH", "1")]
+    assert out["rows"] == [{"title": "Indexers unavailable due to failures: 1337x", "meta": "warning"}]
+    assert out["rows_label"] == "HEALTH"
+
+
+def test_prowlarr_never_asks_for_the_unbounded_indexer_list():
+    """/api/v1/indexer carries every indexer's schema and can spend the whole budget."""
+    widget = registry.load_widgets()["prowlarr"]
+    assert "/api/v1/indexer" not in widget["get"]
+    assert "max_bytes" not in widget
+
+
+def test_immich_summarise_formats_counts_and_usage():
+    widget = registry.load_widgets()["immich"]
+    out = widget["summarise"]([{"photos": 48213, "videos": 1207, "usage": 612_400_000_000}])
+    assert [(s["k"], s["v"]) for s in out["stats"]] == [
+        ("PHOTOS", "48,213"), ("VIDEOS", "1,207"), ("USED", "570.3 GiB")]
+    assert widget["summarise"]([{"usage": float("inf")}])["stats"][2]["v"] == "—"
+
+
+@pytest.mark.parametrize("name", ["radarr", "prowlarr", "immich"])
+@pytest.mark.parametrize("junk", [None, "text", 7, [], {}])
+def test_new_widgets_survive_an_api_that_answers_with_junk(name, junk):
+    """Every value is the app's own JSON: a wrong shape must still produce the contract."""
+    widget = registry.load_widgets()[name]
+    out = fetcher.normalise_summary(widget["summarise"]([junk] * len(widget["get"])))
+    assert len(out["stats"]) == {"radarr": 3, "prowlarr": 2, "immich": 3}[name]
+
+
+
+@pytest.mark.parametrize(("name", "accepted", "refused"), [
+    ("radarr", ["lscr.io/linuxserver/radarr", "docker.io/linuxserver/radarr", "ghcr.io/hotio/radarr",
+                "docker.io/hotio/radarr"],
+     ["evil.example/linuxserver/radarr", "ghcr.io/linuxserver/radar", "docker.io/radarr/radarr"]),
+    ("prowlarr", ["ghcr.io/linuxserver/prowlarr", "docker.io/linuxserver/prowlarr", "ghcr.io/hotio/prowlarr"],
+     ["evil.example/hotio/prowlarr", "lscr.io/hotio/prowlarr"]),
+    ("immich", ["ghcr.io/immich-app/immich-server"],
+     ["docker.io/immich-app/immich-server", "ghcr.io/immich-app/immich-machine-learning",
+      "evil.example/immich-app/immich-server"]),
+])
+def test_new_widgets_send_keys_only_to_their_publishers(name, accepted, refused):
+    widget = registry.load_widgets()[name]
+    for repo in accepted:
+        assert registry.trusted_provenance(widget, [repo]), repo
+    for repo in refused:
+        assert not registry.trusted_provenance(widget, [repo]), repo
+
+
+@pytest.mark.parametrize("name", ["sonarr", "radarr", "prowlarr", "immich"])
+def test_widgets_survive_mixed_wrong_shapes(name):
+    """Each answer in a different wrong shape: a dict where a list goes, and the reverse."""
+    widget = registry.load_widgets()[name]
+    count = len(widget["get"])
+    for answers in ([[], {}, "x"][:count], [{}, [], 1][:count], [{"records": "x"}, {"totalRecords": "3"}, [1]][:count]):
+        answers += [None] * (count - len(answers))
+        fetcher.normalise_summary(widget["summarise"](answers))

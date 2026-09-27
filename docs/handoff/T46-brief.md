@@ -162,7 +162,42 @@ split pill that replaces v2.1's `+LAN` tag).
 
 ### T46.5 — Widget frame and states
 
-Detail view placement, the four states, mobile.
+**Status: built** (`feat(dashboard): widget frame and states`). The widget sits second on the
+detail view, after the verdict and before vitals. States: ok (stats, then rows or a line),
+needs a key (names the exact env vars, says keys stay on the host), error (reason, the last
+good values dimmed, "never marks the container as down"), and none (no box at all). Two
+review rounds, Claude standing in for Codex under the user's standing permission: one high
+(the 5s detail poll rewrote the log well's class and dropped the fold, leaving logs visible
+but frozen) and five mediums (a failed refresh left a live-looking widget; `aria-live`
+re-read the box every 30s; the skeleton re-armed every poll on widgetless containers; a
+widget that went away left the logs folded; logs folded on key/error states) -- all fixed,
+then a second round found one more medium (the screen-reader status still said "live" after
+a failed refresh), fixed. Checked in the design harness at 1440×1000 and 390×844, including
+the fold surviving a detail poll, a 503 run, and a widget going to none.
+
+Deviations from the spec, deliberately:
+- Vitals stay the v2.1 two cards (CPU, MEMORY), not the 3-up CPU · MEMORY · RESTARTS row;
+  restarts are already in FACTS.
+- The loading skeleton appears only if the page's first answer takes over 400ms. Most
+  containers have no widget, and a skeleton on every one of them is the empty box the spec
+  rules out.
+- Logs fold away only when the page's first answer is a working widget -- not for needs-key
+  or error, where the logs are what explains it, and never later under someone reading them.
+- A failed refresh after a good answer keeps the last answer, dimmed, with the beacon off and
+  "could not refresh · shown Ns ago".
+- Five of the first wave's eight widgets exist: sonarr, radarr, prowlarr, immich, adguard.
+  qBittorrent (cookie login) and SABnzbd (key in the query string) need auth kinds the
+  fetcher does not have; adding one is a change to the gated fetcher, not a widget file.
+  Jellyfin's key header differs across 10.x releases and it is host-networked here, which
+  the fetcher never reaches. All three wait for the live host.
+- Sonarr and Radarr show QUEUE · WANTED · HEALTH: SERIES and MOVIES need `/api/v3/series`
+  or `/api/v3/movie`, unpaged, only to count; Radarr's WANTED carries no warn level, since
+  Radarr counts announced movies too. Radarr needs 5.6+ (`/api/v3/wanted/missing`). Prowlarr
+  shows FAILING · HEALTH, with the health messages as rows: INDEXERS needs `/api/v1/indexer`
+  (every indexer's schema, enough to spend the whole budget) and GRABS 24H a date in the
+  path. Immich leaves out "last upload"; its key must be an admin's, with server.statistics.
+- None of the new widgets' paths, ports or answers has been seen on a live host. A wrong
+  one shows the error state; it cannot send a key anywhere the provenance rules refuse.
 
 ### T46.6 — Retire homepage
 
