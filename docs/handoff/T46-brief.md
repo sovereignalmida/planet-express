@@ -1,5 +1,11 @@
 # T46 — v2.2 launch links and container widgets
 
+> **Resume here.** Branch `claude/pensive-keller-bj1gkg`, last pushed at the commit that
+> added this note; no PR is open. Read "Before 2.2 ships" at the end of this file first: it
+> lists the open owner decisions, the live-host checks, and the Codex pass that has not run.
+> The design spec is `docs/designs/planet_express_design_v22/handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md`;
+> the design harness is `python scripts/design_preview.py --port 8773` (fixtures, no host).
+
 Source spec: `docs/designs/planet_express_design_v22/handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md`
 Visual reference: `docs/designs/planet_express_design_v22/reference/Dashboard v2.2 - Launch Links and Widgets.dc.html`
 
@@ -376,8 +382,7 @@ T46.1 P1 #1 (`fc4579a`) and the fetcher (`668d57c`) are where a second reviewer 
 
 **Owner decisions still open.**
 1. The Leela address-collection leftover (above, under P1 #1): keep or remove.
-2. `planetexpress.widget=<name>` labels may select a *keyless* widget for any image, but a
-   keyed widget only for an image its match list names. Confirm that is the override you want.
+2. **The `planetexpress.widget` label override** -- see "Decision: the widget label" below.
 3. Radarr needs 5.6+; the Immich key must be an admin's. Both are in INSTALL.md.
 
 **Live-host checks** (nothing here was run against the real host):
@@ -395,3 +400,47 @@ T46.1 P1 #1 (`fc4579a`) and the fetcher (`668d57c`) are where a second reviewer 
 **Not started:** T46.6 (retire homepage) needs the live host. qBittorrent, SABnzbd and
 Jellyfin widgets need new auth kinds in the gated fetcher (cookie login, a query-string key)
 or a live check of Jellyfin's header.
+
+### Decision: the widget label
+
+**What the spec said.** A `planetexpress.widget=<name>` container label overrides the image
+match; `planetexpress.widget=none` disables it (V2.2 handoff, "Matched by image repo").
+
+**What the code does** (`widget_target` in `planet_express/integrations/rpc.py`, and
+`registry.match_widget`):
+
+| Label | Result |
+| --- | --- |
+| none | The image's repo picks the widget. If two widgets claim the image, none shows. |
+| `none` (on the container or baked into the image) | No widget. |
+| `<name>` of a widget with no auth | That widget, for any image. |
+| `<name>` of a keyed widget, image in its match list | That widget, if provenance passes. Picks between two widgets that both match. |
+| `<name>` of a keyed widget, image not in its match list | **No widget.** This is where the code departs from the spec. |
+| `<name>` baked into the image (`LABEL` in a Dockerfile) | Ignored. Only `none` counts from the image. |
+
+In practice: **all five shipped widgets are keyed**, so today a label can only switch a widget
+off, or choose between two that both match. It cannot turn a widget on for a custom image.
+
+**Why.** The label is written in compose, and compose is exactly what `/install` drafts and
+the operator approves. If a label could pick a keyed widget, one line
+(`planetexpress.widget: sonarr` on any container) would send `SONARR_API_KEY` to that
+container: a typo, a copy-pasted compose block or an unvetted image gets the key. Gate round 4
+on T46.3 found this, and requiring the image match was the fix.
+
+**What it costs.** A keyed app gets no widget when its image is:
+- a custom or forked build (`myname/sonarr`), or a local build;
+- pulled through a private registry mirror under another hostname (the digest names the
+  mirror, so provenance also fails -- check this on the live host);
+- a publisher missing from the match list (add it to the widget file; that is the intended
+  fix, and it is a one-line reviewable change).
+
+**Options.**
+- **A. Keep it (recommended for 2.2).** Safe default; the cost only bites on custom images.
+  Update the V2.2 spec's line to match.
+- **B. Do what the spec said.** Any label picks any widget, keys included. Simplest, and the
+  key then goes wherever an approved compose says.
+- **C. Consent in config, not compose.** A core-enforced `widget_overrides:` map in
+  `config.yaml` (`CASA_MYSONARR: sonarr`), marked sensitive so the dashboard cannot edit it.
+  The key follows the operator's config, never a compose label; bridge-only and no shared
+  namespace still apply. New capability: needs the gate. Worth building only if a container
+  on the live host actually needs it.
