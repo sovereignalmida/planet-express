@@ -1544,3 +1544,18 @@ def test_the_links_endpoint_refuses_a_bad_target():
     client, rpc, now = make_client()
     assert login(client, now).status_code == 302
     assert client.get("/api/containers/me dia/x/links").status_code == 404
+
+
+def test_container_detail_carries_the_widget_slot_after_the_verdict(tmp_path, monkeypatch):
+    """v2.2 C: header -> verdict -> widget -> vitals. The slot starts hidden; with no widget
+    it stays out entirely rather than showing an empty box."""
+    client, _ = _ui_client(tmp_path, monkeypatch, [_ACTUAL])
+    html = client.get("/containers/money/actual_server").data.decode()
+    assert html.index('id="verdict"') < html.index('id="widget"') < html.index('class="container-vitals"')
+    assert 'data-api="/api/containers/money/actual_server/widget"' in html
+    widget_tag = html[html.index('id="widget"') - 20:html.index('id="widget"') + 300]
+    assert " hidden>" in widget_tag
+    # Announced through a small status line on state change, not by re-reading the box every 30s.
+    assert "aria-live" not in widget_tag
+    assert 'id="widget-status"' in html
+    assert 'id="log-toggle"' in html

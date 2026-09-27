@@ -306,6 +306,76 @@ def fixture_owners() -> dict:
     return {"routers": routers, "services": services}
 
 
+def _ago(seconds):
+    return datetime.fromtimestamp(time.time() - seconds, timezone.utc).isoformat(timespec="seconds")
+
+
+# One container per widget state, so each can be looked at: ok with rows, ok with a line,
+# needs a key, and an error with stale values. Everything else has no widget. Ages are in
+# seconds and become timestamps when asked, so a preview left open stays true to the design.
+FIXTURE_WIDGETS = {
+    ("media", "sonarr"): {
+        "state": "ok", "widget": "sonarr", "via": "/api/v3/queue?pageSize=3", "fetched_at": 18,
+        "stats": [{"k": "QUEUE", "v": 3}, {"k": "WANTED", "v": 12, "level": "warn"},
+                  {"k": "HEALTH", "v": "ok", "level": "ok"}],
+        "rows": [{"title": "Severance · S02E08", "pct": 84}, {"title": "The Bear · S04E02", "pct": 41},
+                 {"title": "Andor · S02E11 <b>not markup</b>", "pct": 7}],
+        "rows_label": "DOWNLOADING", "line": None},
+    ("network", "adguard"): {
+        "state": "ok", "widget": "adguard", "via": "/control/stats", "fetched_at": 4,
+        "stats": [{"k": "QUERIES", "v": "35,591"}, {"k": "BLOCKED", "v": "22.4%"}, {"k": "AVG", "v": "41ms"}],
+        "rows": [], "rows_label": "", "line": "most blocked: ads.example.com"},
+    ("media", "radarr"): {"state": "needs_key", "widget": "radarr", "via": "/api/v3/queue",
+                          "env": ["RADARR_API_KEY"]},
+    ("media", "prowlarr"): {
+        "state": "error", "widget": "prowlarr", "via": "/api/v1/indexer", "error": "answered 401",
+        "status": 401, "stale_at": 240,
+        "stale": {"stats": [{"k": "INDEXERS", "v": 14}, {"k": "FAILING", "v": 1, "level": "warn"},
+                            {"k": "GRABS 24H", "v": 37}], "rows": [], "rows_label": "", "line": None}},
+}
+
+
+class FixtureWidgets:
+    """Stands in for the WidgetFetcher: answers from FIXTURE_WIDGETS, never the network."""
+
+    def __init__(self, **_kwargs):
+        pass
+
+    def now(self):
+        return time.monotonic()
+
+    def cached(self, key):
+        answer = dict(FIXTURE_WIDGETS.get(tuple(key), {"state": "none"}))
+        for field in ("fetched_at", "stale_at"):
+            if field in answer:
+                answer[field] = _ago(answer[field])
+        return answer
+
+    def fetch(self, target, key, asked=None):
+        return self.cached(key)
+
+
+def fixture_container(params):
+    """core's query.container, enough for the detail view to render its verdict and vitals."""
+    service = params.get("service", "?")
+    down = service == "bazarr"
+    return {
+        "target": {"stack": params.get("stack"), "service": service,
+                   "container": f"CASA_{str(params.get('stack', '')).upper()}_{service.upper()}"},
+        "paused": False,
+        "vitals": {"ok": not down, "stats": {"cpu_percent": 1.8, "memory_percent": 3.4,
+                                              "memory_used_bytes": 286 * 1048576}},
+        "facts": {"ok": True, "facts": {
+            "state": "restarting" if down else "running", "started_at": _ago(6 * 86400),
+            "health": "unhealthy" if down else "healthy", "failing_streak": 0,
+            "restart_count": 7 if down else 0,
+            "restart_policy": {"name": "unless-stopped", "max_retries": 0},
+            "ports": [], "image_id": FIXTURE_IMAGES.get(service, f"example/{service}:latest")}},
+        "actions": {"docker.restart_service": {"abortable": False, "rollbackable": False,
+                                                "resumable": False}},
+    }
+
+
 class OfflineRpc:
     """Core is not running. Every method the dashboard calls answers empty but well-formed,
     so an unavailable panel is the panel's own empty state and never a traceback."""
@@ -335,6 +405,16 @@ class OfflineRpc:
             return {"ok": True, "result": self.EMPTY["auth.status"]}
         if method == "containers.routers":
             return {"ok": True, "result": fixture_owners()}
+        if method == "query.container":
+            return {"ok": True, "result": fixture_container(params)}
+        if method == "logs.tail":
+            # Three lines on the first poll, then nothing new: the well does not fill with copies.
+            first = not params.get("cursor")
+            return {"ok": True, "result": {
+                "ok": True, "cursor": "2026-09-27T12:00:02Z", "cursor_hashes": [], "skipped": False,
+                "started_at": None,
+                "lines": [{"ts": "2026-09-27T12:00:0%dZ" % i, "stream": "stdout",
+                           "text": f"fixture log line {i}"} for i in range(3 if first else 0)]}}
         return {"ok": True, "result": self.EMPTY.get(method, {})}
 
 
@@ -370,6 +450,8 @@ def main() -> int:
     import casa_scruffy_net
 
     casa_scruffy_net.fetch_traefik_routers = fixture_routers
+    # Widgets from fixtures: the real fetcher would try the fixture containers' addresses.
+    casa_scruffy.WidgetFetcher = FixtureWidgets
     casa_scruffy_net.fetch_adguard_stats = lambda: {
         "available": True, "configured": True, "num_dns_queries": 35591,
         "num_blocked_filtering": 7982, "avg_processing_time": 0.041,

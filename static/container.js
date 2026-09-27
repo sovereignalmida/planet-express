@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   const state = { detailBusy: false, logsBusy: false, restarting: false, paused: false, pausedRefusal: false,
-    cursor: null, hashes: [], startedAt: null, detailTimer: null, logTimer: null };
+    cursor: null, hashes: [], startedAt: null, detailTimer: null, logTimer: null, autoCollapse: true };
   const get = id => document.getElementById(id);
   const api = get("container-detail").dataset.api;
   const sheet = get("restart-dialog");
@@ -21,6 +21,202 @@
     a.textContent = label;
     return a;
   }
+  // ── v2.2 widget ──────────────────────────────────────────────────────────────────
+  // Every string in a widget answer is the app's own (a queue item's title): built with
+  // textContent only, never markup.
+  const el = (tag, className, text) => {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
+  };
+  const LEVELS = ["ok", "warn", "crit"];
+  const title = name => name.charAt(0).toUpperCase() + name.slice(1);
+  function ago(iso) {
+    const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+    if (!isFinite(seconds)) return "";
+    if (seconds < 60) return Math.round(seconds) + "s ago";
+    if (seconds < 3600) return Math.round(seconds / 60) + "m ago";
+    return Math.round(seconds / 3600) + "h ago";
+  }
+  const REASONS = {
+    "timeout": "did not answer within its time budget",
+    "unreachable": "could not be reached from the dashboard",
+    "not reachable from the dashboard": "has no address the dashboard can reach",
+    "connection dropped": "dropped the connection mid-answer",
+    "answer too large": "answered with more than the widget reads",
+    "answer was not JSON": "answered with something other than JSON",
+    "answer was compressed": "answered compressed, which the widget refuses",
+    "busy": "is queued behind other widgets",
+    "the configured key cannot be sent over HTTP": "cannot be sent the configured key: it has characters HTTP cannot carry",
+    "widget failed to read the answer": "answered in a shape the widget could not read",
+  };
+  // Failures on the dashboard's own side: not the app's API, so not worded as if it were.
+  const OWN_FAILURES = {
+    "widget summary malformed": "The widget produced a summary the dashboard refuses. That is a widget bug, not the app's.",
+    "widget declaration refused": "The widget's declaration was refused. See the dashboard's log.",
+    "request failed": "The dashboard could not run the widget. See the dashboard's log.",
+  };
+  function reason(name, data) {
+    if (OWN_FAILURES[data.error]) return OWN_FAILURES[data.error];
+    const api = title(name) + "'s API ";
+    if (data.status === 401 || data.status === 403) return api + "returned " + data.status + ". The key may have been rotated.";
+    if (data.status) return api + "returned " + data.status + ".";
+    return api + (REASONS[data.error] || "failed") + ".";
+  }
+  function stats(values, dim) {
+    const grid = el("div", "pe-widget-stats" + (dim ? " is-stale" : ""));
+    grid.style.setProperty("--pe-widget-cols", String(Math.max(1, Math.min(4, values.length))));
+    values.forEach(stat => {
+      const well = el("div", "pe-widget-stat");
+      well.append(el("span", "pe-widget-k", stat.k));
+      well.append(el("strong", "pe-widget-v" + (LEVELS.includes(stat.level) ? " " + stat.level : ""), stat.v));
+      grid.append(well);
+    });
+    return grid;
+  }
+  function rows(summary, dim) {
+    const out = [];
+    if (summary.rows && summary.rows.length) {
+      const list = el("div", "pe-widget-rows" + (dim ? " is-stale" : ""));
+      if (summary.rows_label) list.append(el("span", "pe-widget-k", summary.rows_label));
+      summary.rows.forEach(row => {
+        const item = el("div", "pe-widget-row");
+        item.append(el("span", "pe-widget-row-title", row.title));
+        if (typeof row.pct === "number") {
+          const bar = el("span", "pe-widget-bar");
+          const fill = el("span");
+          fill.style.width = Math.max(0, Math.min(100, row.pct)) + "%";
+          bar.append(fill);
+          item.append(bar, el("span", "pe-widget-pct", row.pct + "%"));
+        } else if (row.meta) item.append(el("span", "pe-widget-pct", row.meta));
+        list.append(item);
+      });
+      out.push(list);
+    }
+    if (summary.line) out.push(el("p", "pe-widget-line" + (dim ? " is-stale" : ""), summary.line));
+    return out;
+  }
+  function head(led, name, sub, pill) {
+    const bar = el("div", "pe-widget-head");
+    bar.append(el("span", "pe-widget-led " + led), el("span", "pe-widget-name", name));
+    if (sub) bar.append(el("span", "pe-widget-via", sub));
+    bar.append(el("span", "pe-widget-spacer"));
+    if (pill) bar.append(el("span", "pe-widget-ro", pill));
+    return bar;
+  }
+  function renderWidget(box, data) {
+    const name = String(data.widget || "widget");
+    box.replaceChildren();
+    if (data.state === "ok") {
+      box.className = "pe-widget";
+      box.append(head("ok", name.toUpperCase(), "via " + data.via + " · " + ago(data.fetched_at), "READ-ONLY"));
+      box.append(stats(data.stats, false), ...rows(data, false));
+    } else if (data.state === "needs_key") {
+      box.className = "pe-widget needs-key";
+      box.append(head("warn", "NEEDS AN API KEY"));
+      const text = el("p", "pe-widget-text", title(name) + " supports a widget, but no key is configured. Add ");
+      (data.env || []).forEach((env, i) => {
+        if (i) text.append(document.createTextNode(" and "));
+        text.append(el("code", null, env));
+      });
+      text.append(document.createTextNode(" to /etc/planetexpress-dashboard.env and restart the dashboard."));
+      box.append(text, el("p", "pe-widget-foot", "It can't be set from the dashboard. Keys stay on the host."));
+    } else {
+      box.className = "pe-widget is-error";
+      box.append(head("crit", OWN_FAILURES[data.error] ? "WIDGET FAILED" : "API DIDN'T ANSWER",
+        data.stale_at ? "last good " + ago(data.stale_at) : ""));
+      box.append(el("p", "pe-widget-text", reason(name, data)));
+      if (data.stale) box.append(stats(data.stale.stats || [], true), ...rows(data.stale, true));
+      box.append(el("p", "pe-widget-foot", "The widget never marks the container as down."));
+    }
+    box.hidden = false;
+  }
+  function renderLoading(box) {
+    box.className = "pe-widget is-loading";
+    box.replaceChildren(head("idle", "LOADING", "first fetch"));
+    const grid = el("div", "pe-widget-stats");
+    grid.style.setProperty("--pe-widget-cols", "3");
+    for (let i = 0; i < 3; i++) grid.append(el("div", "pe-widget-stat pe-skeleton"));
+    box.append(grid);
+    box.hidden = false;
+  }
+  // The log well's level class is rewritten by every detail poll: keep the fold with it.
+  function logLevel(level) {
+    get("logwell").className = "pe-logwell " + level + (state.logsCollapsed ? " is-collapsed" : "");
+  }
+  function collapseLogs(collapsed) {
+    state.logsCollapsed = collapsed;
+    const toggle = get("log-toggle");
+    toggle.textContent = collapsed ? "show logs" : "hide logs";
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    get("logwell").classList.toggle("is-collapsed", collapsed);
+    if (!collapsed) logs();
+  }
+  get("log-toggle").addEventListener("click", () => {
+    state.autoCollapse = false;
+    collapseLogs(!state.logsCollapsed);
+  });
+  // Screen readers hear a state change, not every 30s re-render of the box.
+  const ANNOUNCE = { ok: " widget is live.", needs_key: " widget needs an API key.", error: " widget: the API didn't answer.",
+    unrefreshed: " widget could not refresh; showing its last answer." };
+  function announce(name, widgetState) {
+    const text = widgetState ? title(name) + ANNOUNCE[widgetState] : "";
+    if (state.widgetAnnounced === text) return;
+    state.widgetAnnounced = text;
+    get("widget-status").textContent = text;
+  }
+  function hideWidget(box) {
+    box.hidden = true;
+    box.replaceChildren();
+    announce("", null);
+    get("log-toggle").hidden = true;
+    // A widget that went away must not leave the logs folded with nothing above them.
+    if (state.logsCollapsed) collapseLogs(false);
+    state.widgetLoaded = false;
+  }
+  function unrefreshed(box) {
+    // Keep the last answer, but never let it look live: no beacon, dimmed, and says so.
+    box.classList.add("is-unrefreshed");
+    const led = box.querySelector(".pe-widget-led");
+    if (led) led.className = "pe-widget-led idle";
+    let via = box.querySelector(".pe-widget-via");
+    if (!via) {
+      via = el("span", "pe-widget-via");
+      box.querySelector(".pe-widget-name").after(via);
+    }
+    via.textContent = "could not refresh" + (state.widgetShownAt ? " · shown " + ago(state.widgetShownAt) : "");
+  }
+  async function widget() {
+    if (document.visibilityState !== "visible" || state.widgetBusy) return;
+    state.widgetBusy = true;
+    const box = get("widget");
+    // A skeleton only on the page's first ask, and only if that answer is slow: most containers
+    // have no widget, and a box that flashes up and vanishes is the "empty box" the spec rules out.
+    const slow = state.widgetAsked ? null : setTimeout(() => renderLoading(box), 400);
+    state.widgetAsked = true;
+    try {
+      const data = await request(box.dataset.api);
+      clearTimeout(slow);
+      if (!data || !["ok", "needs_key", "error"].includes(data.state)) { hideWidget(box); return; }
+      renderWidget(box, data);
+      state.widgetShownAt = new Date().toISOString();
+      state.widgetName = String(data.widget || "widget");
+      announce(state.widgetName, data.state);
+      get("log-toggle").hidden = false;
+      // Logs fold away only when the page's first answer is a working widget. Not for a key or
+      // an error (the logs are what explains those), and never later, under someone reading them.
+      if (state.autoCollapse && data.state === "ok") collapseLogs(true);
+      state.widgetLoaded = true;
+    } catch (error) {
+      clearTimeout(slow);
+      if (state.widgetLoaded) { unrefreshed(box); announce(state.widgetName, "unrefreshed"); } else hideWidget(box);
+    } finally {
+      state.autoCollapse = false;
+      state.widgetBusy = false;
+    }
+  }
+
   async function launchLinks() {
     const holder = get("container-launch");
     try {
@@ -56,7 +252,7 @@
       get("verdict-text").textContent = "PAUSED BY OPERATOR";
       get("verdict").className = "pe-verdict warn";
       get("log-led").className = "led-dot status-warn";
-      get("logwell").className = "pe-logwell warn";
+      logLevel("warn");
       ["cpu", "memory"].forEach(key => {
         get(key + "-value").textContent = "—";
         get(key + "-bar").value = 0;
@@ -84,7 +280,7 @@
           : starting ? "STARTING — HEALTHCHECK PENDING"
           : facts.state === "running" ? "RUNNING CLEAN" : "NOT RUNNING";
         get("log-led").className = "led-dot status-" + level;
-        get("logwell").className = "pe-logwell " + level;
+        logLevel(level);
         const values = { health: facts.health, policy: facts.restart_policy.name + " (max retries: " + facts.restart_policy.max_retries + ")",
           restarts: facts.restart_count, ports: facts.ports.map(p => p.host_ip + ":" + p.host_port + " → " + p.container_port + "/" + p.protocol).join(", ") || "None",
           image: facts.image_id };
@@ -109,7 +305,7 @@
     get("log-lines").append(node);
   }
   async function logs() {
-    if (document.visibilityState !== "visible" || state.logsBusy) return;
+    if (document.visibilityState !== "visible" || state.logsBusy || state.logsCollapsed) return;
     state.logsBusy = true;
     try {
       // POSTed in the body: a cursor can carry up to 1000 dedupe hashes, far past what a query
@@ -179,10 +375,13 @@
   function visibility() {
     clearInterval(state.detailTimer);
     clearInterval(state.logTimer);
+    clearInterval(state.widgetTimer);
     if (document.visibilityState === "visible") {
-      detail(); logs();
+      detail(); logs(); widget();
       state.detailTimer = setInterval(detail, 5000);
       state.logTimer = setInterval(logs, 3000);
+      // The server caches an answer 30s; asking faster only re-reads its cache.
+      state.widgetTimer = setInterval(widget, 30000);
     }
   }
   document.addEventListener("visibilitychange", visibility);

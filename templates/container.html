@@ -21,6 +21,11 @@
     <div class="pe-verdict-text"><h2 id="verdict-text">Loading container…</h2></div>
   </section>
   <p id="detail-message" role="status"></p>
+  {# v2.2: the app's own readout, second after the verdict. Filled by container.js from
+     /api/containers/<stack>/<service>/widget; left out entirely when there is no widget. #}
+  <section id="widget" class="pe-widget" aria-label="Live widget"
+           data-api="{{ url_for('container_widget', stack=stack, service=service) }}" hidden></section>
+  <p id="widget-status" class="pe-visually-hidden" role="status"></p>
   <section class="container-vitals" aria-label="Vitals">
     {% for key, label in [('cpu', 'CPU'), ('memory', 'MEMORY')] %}
     <div class="pe-card"><h2>{{ label }}</h2><strong id="{{ key }}-value" class="container-hero">—</strong>
@@ -33,7 +38,8 @@
     {% endfor %}
   </dl></section>
   <section class="pe-logwell" id="logwell">
-    <header class="pe-logwell-head"><span id="log-led" class="led-dot status-warn"></span><h4>LOGS</h4><span id="log-count"></span></header>
+    <header class="pe-logwell-head"><span id="log-led" class="led-dot status-warn"></span><h4>LOGS</h4><span id="log-count"></span>
+      <button id="log-toggle" class="pe-log-toggle" type="button" aria-expanded="true" aria-controls="log-lines" hidden>hide logs</button></header>
     <p id="log-message" role="status">Loading logs…</p>
     <div id="log-lines" class="pe-logwell-body" aria-label="Container log output"></div>
   </section>
