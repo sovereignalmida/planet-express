@@ -114,8 +114,8 @@ def test_every_declared_path_is_a_get_path_under_root():
 def test_no_two_widgets_claim_the_same_image():
     seen = {}
     for name, widget in registry.load_widgets().items():
-        for candidate in widget["match"]:
-            repo = registry.normalise_image(candidate)
+        # One widget may list a repo under several registries (lscr.io, ghcr.io, Docker Hub).
+        for repo in {registry.normalise_image(candidate) for candidate in widget["match"]}:
             assert repo not in seen, f"{name} and {seen.get(repo)} both claim {repo}"
             seen[repo] = name
 
@@ -131,10 +131,9 @@ def test_sonarr_summarise_shapes_the_contract():
     out = widget["summarise"]([
         {"totalRecords": 3, "records": [{"title": "Severance · S02E08", "size": 100, "sizeleft": 16}]},
         {"totalRecords": 12},
-        [{"id": 1}, {"id": 2}],
         [{"type": "warning", "message": "x"}],
     ])
-    assert [stat["k"] for stat in out["stats"]] == ["QUEUE", "WANTED", "SERIES", "HEALTH"]
+    assert [stat["k"] for stat in out["stats"]] == ["QUEUE", "WANTED", "HEALTH"]
     assert out["rows"] == [{"title": "Severance · S02E08", "pct": 84}]
     assert out["rows_label"] == "DOWNLOADING"
 
@@ -142,8 +141,8 @@ def test_sonarr_summarise_shapes_the_contract():
 def test_sonarr_summarise_survives_an_api_that_answers_with_nothing():
     """A reachable API returning empty or null bodies must not take the panel down with it."""
     widget = registry.load_widgets()["sonarr"]
-    out = widget["summarise"]([None, None, None, None])
-    assert [stat["v"] for stat in out["stats"]] == [0, 0, 0, "ok"]
+    out = widget["summarise"]([None, None, None])
+    assert [stat["v"] for stat in out["stats"]] == [0, 0, "ok"]
     assert out["rows"] == []
 
 

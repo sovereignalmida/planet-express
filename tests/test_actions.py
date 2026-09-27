@@ -783,3 +783,153 @@ def test_no_containers_or_no_budget_runs_nothing(monkeypatch):
     assert actions.read_router_owners([_ID_A], timeout=0) == {"ok": False, "error": "timeout"}
     assert actions.list_containers(timeout=0) == {"ok": False, "error": "timeout"}
     assert calls == []
+
+
+
+
+# ── Where a container's widget API is (T46.3) ──────────────────────────────────
+
+_IMG = "sha256:" + "e" * 64
+_NET_BRIDGE, _NET_MACVLAN = "1" * 64, "2" * 64
+
+
+def _networks(**by_name):
+    return {name: {"NetworkID": net, "IPAddress": ip} for name, (net, ip) in by_name.items()}
+
+
+def _widget_line(labels, networks=None, status="running", mode="default",
+                 image="lscr.io/linuxserver/sonarr:latest"):
+    networks = _networks(media=(_NET_BRIDGE, "172.18.0.5")) if networks is None else networks
+    return (f"{_ID_A}\t{_IMG}\t{image}\t{status}\t{mode}\t{json.dumps(labels)}\t"
+            f"{json.dumps(networks)}")
+
+
+_DRIVERS = (0, f"{_NET_BRIDGE}\tbridge\n{_NET_MACVLAN}\tmacvlan", "")
+
+
+_PULLED = (0, '{}\t["lscr.io/linuxserver/sonarr@sha256:' + "f" * 64 + '"]', "")
+
+
+def _widget_docker(monkeypatch, container_answer, image_answer=_PULLED, owner_answer=None,
+                   drivers=_DRIVERS):
+    calls = []
+
+    def run(argv, timeout):
+        calls.append(argv)
+        if argv[1] == "image":
+            return image_answer
+        if argv[1] == "network":
+            return drivers
+        if argv[-1] != "CASA_SONARR" and argv[-1] != "CASA_X":
+            return owner_answer
+        return container_answer
+    monkeypatch.setattr(actions.bender, "run_argv", run)
+    return calls
+
+
+def test_widget_target_reads_the_container_and_its_networks_drivers(monkeypatch):
+    calls = _widget_docker(monkeypatch, (0, _widget_line({}), ""))
+    got = actions.read_widget_target("CASA_SONARR", timeout=4)
+    assert got == {"ok": True, "id": _ID_A, "image": "lscr.io/linuxserver/sonarr:latest",
+                   "running": True, "label": None, "label_from_image": False,
+                   "pulled_from": ["lscr.io/linuxserver/sonarr"], "shares_namespace": False,
+                   "addresses": ["172.18.0.5"]}
+    assert calls[0] == ["docker", "inspect", "--type", "container", "--format",
+                        actions.WIDGET_TARGET_FORMAT, "CASA_SONARR"]
+    assert calls[1] == ["docker", "image", "inspect", "--format",
+                        "{{json .Config.Labels}}\t{{json .RepoDigests}}", _IMG]
+    assert calls[2] == ["docker", "network", "inspect", "--format", "{{.Id}}\t{{.Driver}}",
+                        _NET_BRIDGE]
+
+
+@pytest.mark.parametrize("digests,pulled", [
+    ("null", []), ("[]", []), ('["evil.example/linuxserver/sonarr@sha256:' + "f" * 64 + '"]',
+                               ["evil.example/linuxserver/sonarr"]),
+    ('["junk"]', []), ("[1]", [])])
+def test_where_an_image_was_pulled_from_is_read_from_its_registry_digests(monkeypatch, digests, pulled):
+    """A local build has no digest; a foreign registry's digest names that registry."""
+    _widget_docker(monkeypatch, (0, _widget_line({}), ""), image_answer=(0, "{}\t" + digests, ""))
+    assert actions.read_widget_target("CASA_X", timeout=4)["pulled_from"] == pulled
+
+
+def test_only_bridge_network_addresses_are_handed_over(monkeypatch):
+    networks = _networks(casapilan=(_NET_MACVLAN, "192.168.1.53"), web=(_NET_BRIDGE, "172.20.0.4"))
+    _widget_docker(monkeypatch, (0, _widget_line({}, networks=networks), ""))
+    assert actions.read_widget_target("CASA_X", timeout=4)["addresses"] == ["172.20.0.4"]
+
+
+def test_a_network_whose_driver_cannot_be_read_hands_over_nothing(monkeypatch):
+    _widget_docker(monkeypatch, (0, _widget_line({}), ""), drivers=(1, "", "no such network"))
+    assert actions.read_widget_target("CASA_X", timeout=4) == {"ok": False, "error": "unavailable"}
+
+
+def test_a_namespace_sharer_uses_its_owners_bridge_address(monkeypatch):
+    """qbittorrent in gluetun's namespace: its API is on gluetun's addresses."""
+    owner = (0, f"{_ID_B}\t{json.dumps(_networks(vpn=(_NET_BRIDGE, '172.30.0.2')))}", "")
+    calls = _widget_docker(monkeypatch, (0, _widget_line({}, networks={}, mode=f"container:{_ID_B}"), ""),
+                           owner_answer=owner)
+    assert actions.read_widget_target("CASA_X", timeout=4)["addresses"] == ["172.30.0.2"]
+    assert calls[2][-1] == _ID_B
+
+
+def test_a_label_set_on_the_container_is_the_operators(monkeypatch):
+    _widget_docker(monkeypatch, (0, _widget_line({"planetexpress.widget": "sonarr"}), ""),
+                   (0, json.dumps({"maintainer": "x"}) + "\t[]", ""))
+    got = actions.read_widget_target("CASA_X", timeout=4)
+    assert got["label"] == "sonarr" and got["label_from_image"] is False
+
+
+def test_a_label_baked_into_the_image_is_flagged(monkeypatch):
+    _widget_docker(monkeypatch, (0, _widget_line({"planetexpress.widget": "sonarr"}), ""),
+                   (0, json.dumps({"planetexpress.widget": "sonarr"}) + "\t[]", ""))
+    assert actions.read_widget_target("CASA_X", timeout=4)["label_from_image"] is True
+
+
+@pytest.mark.parametrize("image_answer", [(1, "", "no such image"), (0, "junk\t[]", ""), (0, "[1]\t[]", "")])
+def test_an_unreadable_image_label_counts_as_the_images(monkeypatch, image_answer):
+    """Cannot tell where the label came from: the safe reading."""
+    _widget_docker(monkeypatch, (0, _widget_line({"planetexpress.widget": "sonarr"}), ""), image_answer)
+    assert actions.read_widget_target("CASA_X", timeout=4)["label_from_image"] is True
+
+
+def test_a_host_networked_container_has_no_addresses(monkeypatch):
+    calls = _widget_docker(monkeypatch, (0, _widget_line({}, networks={"host": {"NetworkID": _NET_BRIDGE,
+                                                                               "IPAddress": ""}}), ""))
+    assert actions.read_widget_target("CASA_X", timeout=4)["addresses"] == []
+    assert all(c[1] != "network" for c in calls)
+
+
+@pytest.mark.parametrize("container,answer,error", [
+    ("--format=x", None, "unavailable"),
+    ("CASA_X", (124, "", "timed out"), "timeout"),
+    ("CASA_X", (1, "", "No such container"), "unavailable"),
+    ("CASA_X", (0, "junk", ""), "unavailable"),
+    ("CASA_X", (0, f"nothex\t{_IMG}\timg\trunning\tdefault\t{{}}\t{{}}", ""), "unavailable"),
+    ("CASA_X", (0, f"{_ID_A}\t{_IMG}\timg\trunning\tdefault\t{{}}\t[1]", ""), "unavailable"),
+])
+def test_widget_target_failures_are_typed(monkeypatch, container, answer, error):
+    _widget_docker(monkeypatch, answer)
+    assert actions.read_widget_target(container, timeout=4) == {"ok": False, "error": error}
+
+
+
+def test_a_sharer_naming_its_owner_by_name_gets_no_addresses(monkeypatch):
+    """A name is resolved when asked; after a rename it names another container."""
+    calls = _widget_docker(monkeypatch, (0, _widget_line({}, networks={}, mode="container:gluetun"), ""))
+    assert actions.read_widget_target("CASA_X", timeout=4)["addresses"] == []
+    assert all(c[1] != "inspect" or c[-1] == "CASA_X" for c in calls)
+
+
+def test_an_owner_that_answers_with_another_id_gets_no_addresses(monkeypatch):
+    owner = (0, f"{_ID_C}\t{json.dumps(_networks(vpn=(_NET_BRIDGE, '172.30.0.2')))}", "")
+    _widget_docker(monkeypatch, (0, _widget_line({}, networks={}, mode=f"container:{_ID_B}"), ""),
+                   owner_answer=owner)
+    assert actions.read_widget_target("CASA_X", timeout=4)["addresses"] == []
+
+
+def test_an_owner_that_no_longer_exists_gets_no_addresses_not_an_error(monkeypatch):
+    """Recreated alone: a stale id. 'Host slow, retry' would never succeed."""
+    _widget_docker(monkeypatch, (0, _widget_line({}, networks={}, mode=f"container:{_ID_B}"), ""),
+                   owner_answer=(1, "", "No such container"))
+    got = actions.read_widget_target("CASA_X", timeout=4)
+    assert got["ok"] is True and got["addresses"] == []

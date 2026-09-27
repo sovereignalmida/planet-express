@@ -97,6 +97,41 @@ scheme follows the entrypoint; a `-lan` twin and its sibling do not produce a du
 
 ### T46.3 — The widget fetcher  ⚠ *needs the gate*
 
+**Status: built, gate cleared** (commit after `6543b3a`). Route
+`GET /api/containers/<stack>/<service>/widget`; core RPC `query.widget_target` resolves which
+widget and where; `planet_express/widgets/fetcher.py` fetches. Eight adversarial security
+rounds (Codex stand-in, owner-authorised); round 8 had nothing at medium or above. What the
+rounds changed, so the reasons survive:
+
+| Round | Found | Now |
+| --- | --- | --- |
+| 1 | key sent in cleartext to a **macvlan** address (the host cannot reach its macvlan children -- ARP answered by the LAN); trickling server held threads; urllib3 decompression bomb | bridge-driver addresses only (core checks `docker network inspect`); background slots with a wall-clock wait; identity encoding |
+| 2 | requests reads **and gunzips** a whole 3xx body inside `session.get()`; urllib3 reads chunk lines unbounded | `http.client` directly; socket watchdog |
+| 3 | watchdog blind on `Connection: close` (http.client drops `conn.sock`); header flood outside the budget | watchdog holds its own socket; a capped reader charges every byte |
+| 4 | compose **label** could route a key; parse amplification | keyed widgets need the image to match; 256 KiB default budget |
+| 5 | compose **image name** could route a key (`evil.example/linuxserver/sonarr`, local `build:`) | registry-digest provenance |
+| 6 | provenance registry-blind (`ghcr.io/adguard` != Docker Hub `adguard`); namespace owner's image unvetted | exact (registry, repo) pairs; no keys across shared namespaces |
+| 7 | containerd image store gives local tags digests too | documented: hardening, not proof |
+| 8 | none at medium+ | **clear** |
+
+**The trust boundary, stated plainly:** widget keys are safe among containers the operator
+approved. An approved compose sets entrypoint, volumes and env, and can run the genuine image
+with a hostile listener -- the same approval that could mount the docker socket. Every check
+above narrows accidents and label/name tricks; none makes an unreviewed compose safe. Worth a
+line in the `/install` approval text: *this compose may receive widget keys.*
+
+**Decisions for the owner:**
+- A `planetexpress.widget` label can no longer pick a *keyed* widget for an image the widget
+  does not already match (the spec allowed label overrides). Custom builds of a keyed app get
+  no widget. Keyless widgets and `=none` still work.
+- Sonarr shows QUEUE · WANTED · HEALTH, not the spec's SERIES: counting series means
+  `/api/v3/series`, several MB parsed ~25x. Three tiles is within the contract.
+- On the containerd image store, provenance cannot tell a local build from a pull.
+
+**Verify on the live host:** each first-wave widget's image digest (`docker image inspect
+--format '{{json .RepoDigests}}'`) names a registry in its match list; the widget's port is
+reachable from the host on the container's bridge address.
+
 Server-side, GET-only, 3s timeout, 30s cache, keys from the host secrets file and never into
 the page. This is the one part of v2.2 with a security surface: a new outbound fetch path with
 credentials. **Do not land this unreviewed.**

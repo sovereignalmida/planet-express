@@ -993,6 +993,134 @@ def read_router_owners(ids: list[str], *, timeout) -> dict:
         return {"ok": False, "error": "unavailable"}
 
 
+# ── Where a container's widget API is, for the dashboard's widget fetcher (T46.3) ─────
+# Core resolves; the dashboard fetches. Core has docker and sudo and should not also parse
+# third-party HTTP responses, so all it hands over is which widget and which addresses.
+#
+# Only addresses on docker BRIDGE networks. The fetcher sends a credential to whatever address
+# it is given, and a macvlan or ipvlan address is on the physical LAN: the host cannot reach
+# its own macvlan children, so a request to one goes out on the wire -- ARP for it answered
+# by anything on the LAN, the credential sent in cleartext to whoever does.
+WIDGET_TARGET_FORMAT = ("{{.Id}}\t{{.Image}}\t{{.Config.Image}}\t{{.State.Status}}\t"
+                        "{{.HostConfig.NetworkMode}}\t{{json .Config.Labels}}\t"
+                        "{{json .NetworkSettings.Networks}}")
+_OWNER_NETWORKS_FORMAT = "{{.Id}}\t{{json .NetworkSettings.Networks}}"
+WIDGET_LABEL = "planetexpress.widget"
+
+
+def _run_docker(argv, deadline):
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return {"ok": False, "error": "timeout"}, ""
+    try:
+        rc, out, _err = bender.run_argv(argv, timeout=left)
+    except UnicodeDecodeError:
+        return {"ok": False, "error": "unavailable"}, ""
+    if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
+        return {"ok": False, "error": "timeout"}, ""
+    if rc != 0:
+        return {"ok": False, "error": "unavailable"}, ""
+    return None, out
+
+
+def _json_map(text):
+    try:
+        value = json.loads(text) if text not in ("", "null") else {}
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def read_widget_target(container: str, *, timeout) -> dict:
+    """{"ok": True, "id", "image", "running", "label", "label_from_image", "pulled_from",
+    "addresses"} for one container, or a typed error. Read-only: the container, its image's
+    labels and registry digests, its network-namespace owner when it shares one, and its
+    networks' drivers.
+
+    `label_from_image` says the planetexpress.widget label is baked into the image rather than
+    set on the container. It matters because a label can select a keyed widget: an image that
+    shipped `planetexpress.widget=sonarr` would otherwise make the dashboard send the Sonarr
+    key to whatever that image runs.
+    """
+    if not isinstance(container, str) or not _CONTAINER_NAME_RE.fullmatch(container):
+        return {"ok": False, "error": "unavailable"}
+    if timeout <= 0:
+        return {"ok": False, "error": "timeout"}
+    deadline = time.monotonic() + timeout
+    failed, out = _run_docker(["docker", "inspect", "--type", "container", "--format",
+                               WIDGET_TARGET_FORMAT, container], deadline)
+    if failed:
+        return failed
+    parts = out.split("\t")
+    if len(parts) != 7:
+        return {"ok": False, "error": "unavailable"}
+    container_id, image_id, image, status, network_mode, labels_json, networks_json = parts
+    labels, networks = _json_map(labels_json), _json_map(networks_json)
+    if (labels is None or networks is None or not _CONTAINER_ID_RE.fullmatch(container_id)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id)):
+        return {"ok": False, "error": "unavailable"}
+
+    label = labels.get(WIDGET_LABEL)
+    # The image's own labels, and where it was pulled from. A registry digest names its
+    # registry: a compose `image: evil.example/linuxserver/sonarr` says evil.example. With
+    # the classic image store a local `build:` has no digest at all; with the containerd
+    # store it gets one per tag (see registry.trusted_provenance for what that leaves).
+    failed, out = _run_docker(["docker", "image", "inspect", "--format",
+                               "{{json .Config.Labels}}\t{{json .RepoDigests}}", image_id], deadline)
+    if failed and failed["error"] == "timeout":
+        return failed
+    image_labels, digests = None, []
+    if not failed:
+        halves = out.split("\t", 1)
+        image_labels = _json_map(halves[0])
+        try:
+            parsed = json.loads(halves[1]) if len(halves) == 2 and halves[1] != "null" else []
+        except (ValueError, RecursionError):
+            parsed = []
+        digests = [d.split("@", 1)[0] for d in parsed if isinstance(d, str) and "@sha256:" in d] \
+            if isinstance(parsed, list) else []
+    # Unreadable: cannot tell where the label came from, so treat it as the image's.
+    label_from_image = label is not None and (image_labels is None
+                                              or image_labels.get(WIDGET_LABEL) == label)
+
+    if network_mode.startswith("container:"):
+        # A sharer (qbittorrent in gluetun's namespace) has no networks of its own; its API is
+        # on the owner's addresses, which ARE its own namespace's. Followed by full id only,
+        # and only if the owner answering is that id: a name is resolved when asked, and after
+        # a rename it names some other container -- whose addresses would get this widget's key.
+        ref = network_mode.partition(":")[2]
+        networks = {}
+        if _CONTAINER_ID_RE.fullmatch(ref):
+            failed, out = _run_docker(["docker", "inspect", "--type", "container", "--format",
+                                       _OWNER_NETWORKS_FORMAT, ref], deadline)
+            if failed and failed["error"] == "timeout":
+                return failed
+            owner = [] if failed else out.split("\t", 1)
+            if len(owner) == 2 and owner[0] == ref:
+                networks = _json_map(owner[1]) or {}
+
+    by_network = {}
+    for value in networks.values():
+        if isinstance(value, dict) and isinstance(value.get("NetworkID"), str) \
+                and _CONTAINER_ID_RE.fullmatch(value["NetworkID"]) and value.get("IPAddress"):
+            by_network.setdefault(value["NetworkID"], []).append(str(value["IPAddress"]))
+    addresses = []
+    if by_network:
+        failed, out = _run_docker(["docker", "network", "inspect", "--format",
+                                   "{{.Id}}\t{{.Driver}}", *sorted(by_network)], deadline)
+        if failed:
+            return failed
+        for line in out.split("\n"):
+            network_id, _, driver = line.partition("\t")
+            if driver == "bridge" and network_id in by_network:
+                addresses.extend(by_network[network_id])
+    return {"ok": True, "id": container_id, "image": image, "running": status == "running",
+            "label": label if isinstance(label, str) else None,
+            "label_from_image": label_from_image, "pulled_from": sorted(set(digests)),
+            "shares_namespace": network_mode.startswith("container:"),
+            "addresses": sorted(set(addresses))}
+
+
 def logs_argv(container: str, cursor: str | None) -> list[str]:
     if cursor is not None and not LOG_TIMESTAMP_RE.fullmatch(cursor):
         raise ValueError("invalid cursor")

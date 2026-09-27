@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Container widgets, server-side.** `GET /api/containers/<stack>/<service>/widget` returns a
+  container's live app stats (Sonarr, AdGuard) fetched by the dashboard from the app's own
+  API. Keys live in `/etc/planetexpress-dashboard.env` and never reach the page. A key goes
+  only to an image pulled from a registry the widget names, on a docker bridge network, never
+  across a shared network namespace; answers are size-, time- and shape-bounded. See
+  INSTALL.md, "Container widget keys". No template renders it yet.
+
 ### Changed
 - **Launch links are keyed by container, joined through the container's own Traefik
   labels.** The router's service name matched a compose service for 27 of 64 routes, and

@@ -2,6 +2,7 @@
 
 WIDGET = {
     "name": "adguard",
+    # Docker Hub's, which is where AdGuard publishes; ghcr.io/adguard is someone else's account.
     "match": ["adguard/adguardhome"],
     # AdGuard answers on :80 once it is set up. 3000 is the first-run setup port, exposed by
     # the image and wrong for every configured install -- Traefik routes this host's AdGuard

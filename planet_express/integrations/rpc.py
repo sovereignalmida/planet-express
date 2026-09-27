@@ -754,6 +754,59 @@ def build_core_handlers(
         routers_cache[0] = (running["containers"], answer)
         return answer
 
+    def widget_target(params):
+        """Which widget a container has and where its API is, for the dashboard's fetcher
+        (T46.3). Core resolves and hands over a widget NAME and addresses; the dashboard, which
+        holds the keys and has no docker, fetches. Nothing here touches the widget's API.
+
+        A planetexpress.widget label baked into the IMAGE may only disable a widget, never pick
+        one: a keyed widget chosen by an image would send its key to whatever that image runs.
+        """
+        from planet_express.widgets import registry
+
+        _params(params, {"stack": 255, "service": 255})
+        deadline = time.monotonic() + actions.RPC_DOCKER_TIMEOUT_SECONDS
+        try:
+            target = actions.resolve_target(**params, for_mutation=False,
+                                            timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS)
+        except actions.TargetTimeout:
+            raise RpcError("host slow, retry", "timeout") from None
+        except actions.TargetError as e:
+            raise RpcError(str(e), "not_found") from None
+        found = actions.read_widget_target(target.container, timeout=deadline - time.monotonic())
+        if not found["ok"]:
+            raise RpcError("host slow, retry" if found["error"] == "timeout"
+                           else "container unavailable", found["error"])
+        widgets = registry.load_widgets()
+        label = (found["label"] or "").strip() or None
+        if label is not None and found["label_from_image"] and label.lower() != registry.DISABLE:
+            label = None
+        matching = registry.widgets_matching(found["image"], widgets)
+        if label is None and len(matching) > 1:
+            # Two widgets claim this image (a second instance's widget): which key it should
+            # get is not the image's to say. A label on the container picks.
+            widget = None
+        else:
+            widget = registry.match_widget(found["image"], label=label, widgets=widgets)
+        if widget is not None and widget.get("auth") is not None and (
+                found.get("shares_namespace")
+                or not any(w["name"] == widget["name"] for w in matching)
+                or not registry.trusted_provenance(widget, found.get("pulled_from"))):
+            # A KEY goes only to an image that is the widget's own -- by name AND by where it
+            # was pulled from. Compose content (including files drafted for /install) sets both
+            # the image name and labels; a registry digest from a trusted registry it cannot
+            # fake. A local build has no digest and never gets a key. And never across a shared
+            # network namespace: the key would go to the OWNER's address, an image nobody vetted.
+            #
+            # This is hardening, not a boundary. Compose also sets entrypoint, volumes and env:
+            # an APPROVED compose can run the genuine image with its own listener on the port.
+            # The trust boundary for widget keys is "containers the operator approved", the
+            # same as for the docker socket such a compose could equally mount.
+            widget = None
+        return {"container": target.container, "container_id": found["id"],
+                "running": found["running"], "widget": widget["name"] if widget else None,
+                "addresses": found["addresses"] if widget else []}
+
     def config_enforced(params):
         """The editable values the dashboard shows, as this core process loaded them (T46.1).
 
@@ -812,7 +865,8 @@ def build_core_handlers(
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked,
             "canary.candidates": canary_candidates,
-            "containers.routers": container_routers, "config.enforced": config_enforced}
+            "containers.routers": container_routers, "config.enforced": config_enforced,
+            "query.widget_target": widget_target}
 
     if chat is not None:
         handlers.update({"chat.ask": chat_ask, "chat.get": chat_get, "chat.quota": chat_quota})

@@ -131,6 +131,26 @@ If you use [gethomepage.dev](https://gethomepage.dev), the dashboard also expose
           format: relativeDate
 ```
 
+## Container widget keys
+
+A container's detail view can show live stats from the app's own API (Sonarr's queue,
+AdGuard's query counts). The dashboard fetches them server-side; the keys stay on the host
+and never reach the page. Put each key in `/etc/planetexpress-dashboard.env` (root-owned,
+read by `casa-dashboard.service`), then `sudo systemctl restart casa-dashboard`:
+
+```sh
+SONARR_API_KEY=...                  # Sonarr → Settings → General → API Key
+ADGUARD_USERNAME=...                # the same pair the Network tab already uses
+ADGUARD_PASSWORD=...
+```
+
+A widget reads only `<WIDGET>_API_KEY`, `_TOKEN`, `_USERNAME` or `_PASSWORD`, named after
+itself. A key is sent only to a container whose image was pulled, as that app, from a
+registry the widget names (Docker Hub, `lscr.io`, `ghcr.io`), over a docker bridge network,
+and never across a shared network namespace. Treat that as hardening, not a guarantee: a
+compose file you approve decides what a container runs, so only approve compose files you
+would trust with the key.
+
 ## What this does not cover
 
 - **No authentication on the web dashboard.** It's read-only and meant for a LAN-trust

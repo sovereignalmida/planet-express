@@ -312,7 +312,8 @@ def test_core_handlers():
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
                              "incident.list", "incident.get", "incident.propose",
-                             "canary.candidates", "containers.routers", "config.enforced"}
+                             "canary.candidates", "containers.routers", "config.enforced",
+                             "query.widget_target"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
@@ -1452,3 +1453,114 @@ def test_config_enforced_is_what_this_core_process_loaded(monkeypatch):
                                       "zone": "lan"}]}
     with pytest.raises(RpcError):
         handler({"unexpected": 1})
+
+
+
+# ── query.widget_target (T46.3) ───────────────────────────────────────────────────
+
+def _widget_target_handler(monkeypatch, found):
+    from planet_express.execution.actions import Target
+    monkeypatch.setattr(rpc_module.actions, "resolve_target",
+                        lambda **kw: Target(stack="media", service="sonarr", container="CASA_SONARR"))
+    monkeypatch.setattr(rpc_module.actions, "read_widget_target", lambda container, *, timeout: found)
+    return build_core_handlers(Mock(), Mock())["query.widget_target"]
+
+
+def _found(**over):
+    found = {"ok": True, "id": "a" * 64, "image": "lscr.io/linuxserver/sonarr:latest",
+             "running": True, "label": None, "label_from_image": False,
+             "pulled_from": ["lscr.io/linuxserver/sonarr"], "addresses": ["172.18.0.5"]}
+    found.update(over)
+    return found
+
+
+def test_widget_target_names_the_widget_and_hands_over_addresses_only(monkeypatch):
+    handler = _widget_target_handler(monkeypatch, _found())
+    assert handler({"stack": "media", "service": "sonarr"}) == {
+        "container": "CASA_SONARR", "container_id": "a" * 64, "running": True,
+        "widget": "sonarr", "addresses": ["172.18.0.5"]}
+
+
+def test_an_image_baked_label_cannot_pick_a_keyed_widget(monkeypatch):
+    """An image shipping planetexpress.widget=sonarr would otherwise be sent Sonarr's key."""
+    handler = _widget_target_handler(monkeypatch, _found(
+        image="evil/image", label="sonarr", label_from_image=True))
+    assert handler({"stack": "media", "service": "sonarr"})["widget"] is None
+
+
+def test_an_operator_label_confirming_the_images_own_keyed_widget_is_fine(monkeypatch):
+    handler = _widget_target_handler(monkeypatch, _found(label="sonarr", label_from_image=False))
+    assert handler({"stack": "media", "service": "sonarr"})["widget"] == "sonarr"
+
+
+def test_an_operator_label_cannot_route_a_keyed_widget_to_another_image(monkeypatch):
+    """Compose content -- /install drafts included -- would decide where a key goes."""
+    handler = _widget_target_handler(monkeypatch, _found(
+        image="custom/sonarr-build", label="sonarr", label_from_image=False))
+    assert handler({"stack": "media", "service": "sonarr"})["widget"] is None
+
+
+@pytest.mark.parametrize("from_image", [True, False])
+def test_none_disables_a_widget_from_either_source(monkeypatch, from_image):
+    handler = _widget_target_handler(monkeypatch, _found(label="none", label_from_image=from_image))
+    got = handler({"stack": "media", "service": "sonarr"})
+    assert got["widget"] is None and got["addresses"] == []
+
+
+@pytest.mark.parametrize("error,code", [("timeout", "timeout"), ("unavailable", "unavailable")])
+def test_widget_target_failures_are_typed(monkeypatch, error, code):
+    handler = _widget_target_handler(monkeypatch, {"ok": False, "error": error})
+    with pytest.raises(RpcError) as raised:
+        handler({"stack": "media", "service": "sonarr"})
+    assert raised.value.code == code
+
+
+def test_widget_target_refuses_extra_params(monkeypatch):
+    handler = _widget_target_handler(monkeypatch, _found())
+    with pytest.raises(RpcError):
+        handler({"stack": "media", "service": "sonarr", "address": "10.0.0.1"})
+
+
+
+@pytest.mark.parametrize("pulled_from", [
+    [],                                          # a local build: no registry digest at all
+    ["evil.example/linuxserver/sonarr"],         # compose `image:` naming a foreign registry
+    ["lscr.io/someone/else"],                    # a trusted registry, but not this app
+])
+def test_a_key_goes_only_to_an_image_pulled_from_a_trusted_registry_as_the_widgets_own(
+        monkeypatch, pulled_from):
+    """Compose sets the image NAME; the registry digest says where the image came from."""
+    handler = _widget_target_handler(monkeypatch, _found(pulled_from=pulled_from))
+    got = handler({"stack": "media", "service": "sonarr"})
+    assert got["widget"] is None and got["addresses"] == []
+
+
+def test_the_docker_hub_form_is_trusted_too(monkeypatch):
+    handler = _widget_target_handler(monkeypatch, _found(
+        image="linuxserver/sonarr:latest", pulled_from=["linuxserver/sonarr"]))
+    assert handler({"stack": "media", "service": "sonarr"})["widget"] == "sonarr"
+
+
+def test_provenance_is_exact_per_registry(monkeypatch):
+    """Who owns `adguard` differs between Docker Hub and ghcr.io."""
+    from planet_express.execution.actions import Target
+    monkeypatch.setattr(rpc_module.actions, "resolve_target",
+                        lambda **kw: Target(stack="net", service="adguard", container="CASA_ADGUARD"))
+    monkeypatch.setattr(rpc_module.actions, "read_widget_target", lambda c, *, timeout: {
+        "ok": True, "id": "a" * 64, "image": "ghcr.io/adguard/adguardhome", "running": True,
+        "label": None, "label_from_image": False, "shares_namespace": False,
+        "pulled_from": ["ghcr.io/adguard/adguardhome"], "addresses": ["172.20.0.4"]})
+    handler = build_core_handlers(Mock(), Mock())["query.widget_target"]
+    assert handler({"stack": "net", "service": "adguard"})["widget"] is None
+
+
+def test_a_keyed_widget_never_crosses_a_shared_network_namespace(monkeypatch):
+    """The key would go to the OWNER's address, an image nobody vetted."""
+    handler = _widget_target_handler(monkeypatch, _found(shares_namespace=True))
+    assert handler({"stack": "media", "service": "sonarr"})["widget"] is None
+
+
+@pytest.mark.parametrize("label", ["", "  "])
+def test_an_empty_label_is_no_label(monkeypatch, label):
+    handler = _widget_target_handler(monkeypatch, _found(label=label))
+    assert handler({"stack": "media", "service": "sonarr"})["widget"] == "sonarr"

@@ -35,6 +35,7 @@ import web_auth
 from config_io import validate_config_text
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
+from planet_express.widgets.fetcher import WidgetFetcher
 
 
 class DashboardSessionInterface(SecureCookieSessionInterface):
@@ -414,6 +415,23 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     @app.get("/api/containers/<stack>/<service>")
     def container_get(stack, service):
         return jsonify(core("query.container", container_target(stack, service)))
+
+    # One per process: its 30s cache is what keeps "fetch when the detail view opens" from
+    # becoming a poll of every app's API. Keys come from this process's environment (the
+    # dashboard env file) and never into a response.
+    widget_fetcher = WidgetFetcher(env=environ)
+
+    @app.get("/api/containers/<stack>/<service>/widget")
+    def container_widget(stack, service):
+        params = container_target(stack, service)
+        key = (stack, service)
+        # A fresh answer costs neither core nor the app anything. Only a miss asks core where
+        # the API is -- fresh, because the address it hands over is where a key will go.
+        answer = widget_fetcher.cached(key)
+        if answer is None:
+            asked = widget_fetcher.now()
+            answer = widget_fetcher.fetch(core("query.widget_target", params), key, asked)
+        return jsonify(answer)
 
     # POST, not GET: a cursor can carry up to LOG_CURSOR_HASH_LIMIT (1000) dedupe hashes, and ~180 of
     # them in a query string already exceed gunicorn's default 4094-byte request line — every later

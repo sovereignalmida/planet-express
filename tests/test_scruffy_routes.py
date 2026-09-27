@@ -1442,3 +1442,30 @@ def test_index_falls_back_to_its_own_import_when_core_cannot_say(monkeypatch):
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "merge_declared_links", spy)
     assert client.get("/").status_code == 200
     assert captured["declared"] == import_links
+
+
+
+# ── container widget route (T46.3) ────────────────────────────────────────────────
+
+def test_the_widget_route_needs_a_login_unlike_the_public_health_widget():
+    client, rpc, now = make_client()
+    assert client.get("/api/containers/media/sonarr/widget").status_code in (302, 401)
+    assert all(method != "query.widget_target" for method, _ in rpc.calls)
+
+
+def test_the_widget_route_fetches_what_core_resolved(monkeypatch):
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    rpc.results["query.widget_target"] = {"container": "CASA_SONARR", "container_id": "a" * 64,
+                                          "running": True, "widget": None, "addresses": []}
+    response = client.get("/api/containers/media/sonarr/widget")
+    assert response.status_code == 200 and response.get_json() == {"state": "none"}
+    assert ("query.widget_target", {"stack": "media", "service": "sonarr"}) in rpc.calls
+
+
+def test_the_widget_route_refuses_a_bad_target_before_asking_core():
+    client, rpc, now = make_client()
+    assert login(client, now).status_code == 302
+    rpc.calls.clear()
+    assert client.get("/api/containers/me dia/sonarr/widget").status_code == 404
+    assert not rpc.calls
