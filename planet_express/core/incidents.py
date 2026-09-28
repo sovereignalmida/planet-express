@@ -160,13 +160,24 @@ def observations_from_snapshot(snapshot: dict) -> list[Observation]:
 
     vpn = snapshot.get("vpn_port_forwarding")
     if isinstance(vpn, dict) and "reachable" in vpn:
-        severity = "HIGH" if vpn.get("alert") else None
+        if vpn.get("alert"):
+            condition, severity = "failing", vpn["alert"]
+        elif vpn.get("within_renewal_grace"):
+            # Something IS wrong -- no forwarded port, or one qBittorrent is not using. It is
+            # only not yet actionable, because ProtonVPN's two-hourly rotation clears it for
+            # up to a cycle on its own (see check_vpn_port_forwarding). Calling that healthy
+            # would be one more tile healthier than the host it describes.
+            condition, severity = "unknown", "MEDIUM"
+        else:
+            condition, severity = "healthy", None
         observations.append(_observation("vpn_port_forwarding", "gluetun-qbittorrent",
-                                         "failing" if severity else "healthy", severity,
+                                         condition, severity,
                                          vpn.get("issue", "VPN port forwarding is healthy"), {
                                              "reachable": vpn.get("reachable"),
                                              "gluetun_port": vpn.get("gluetun_port"),
                                              "qbit_port": vpn.get("qbit_port"),
+                                             "grace_evidence": vpn.get("grace_evidence"),
+                                             "grace_evidence_seconds": vpn.get("grace_evidence_seconds"),
                                          }))
 
     for name, item in snapshot.get("backups", {}).items():

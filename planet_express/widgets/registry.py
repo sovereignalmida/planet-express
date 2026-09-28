@@ -16,59 +16,24 @@ import re
 import sys
 import threading
 
+from planet_express.core.images import (
+    normalise_image,
+    split_image,
+)
+
 log = logging.getLogger("planetexpress.widgets")
 
-# Registry prefixes that say where an image came from, not what it is. The same application
-# appears on this host under three of them -- lscr.io/linuxserver/sonarr, linuxserver/radarr
-# and ghcr.io/linuxserver/qbittorrent are all the linuxserver images -- so a match list of
-# literal strings would miss two of the three.
-_REGISTRY_MARKERS = (".", ":")
 # What a widget's GET path may contain: a rooted path and a plain query string. No scheme, no
 # authority, no fragment, no whitespace -- the fetcher appends it to http://<address>:<port>
 # and nothing in it may change where that goes.
 _PATH_RE = re.compile(r"/[A-Za-z0-9._~/\-]*(\?[A-Za-z0-9._~=&%\-]*)?")
 
 DISABLE = "none"
-_DOCKER_HUB_ALIASES = frozenset({"docker.io", "index.docker.io", "registry-1.docker.io"})
 # The most a widget may declare it needs for a whole fetch. Parsed JSON costs ~25x its wire
 # size, so this is a memory ceiling as much as a bandwidth one: 1 MiB is ~25 MB parsed. No
 # shipped widget declares more than the fetcher's 256 KiB default; one wanting more than
 # this should find a lighter endpoint.
 MAX_RESPONSE_BYTES_LIMIT = 1024 * 1024
-
-
-def split_image(image: str) -> tuple[str, str]:
-    """'lscr.io/linuxserver/sonarr:latest' -> ('lscr.io', 'linuxserver/sonarr').
-
-    Strips a digest and a tag; a reference with no registry host is Docker Hub's. The one
-    place a registry is told apart from a repo path, so matching and provenance agree.
-    """
-    if not isinstance(image, str) or not image.strip():
-        return "", ""
-    repo = image.strip().split("@", 1)[0]
-    head, separator, tail = repo.rpartition(":")
-    # A tag, not a registry port: a port is followed by a path, a tag never is.
-    if separator and "/" not in tail:
-        repo = head
-    parts = [part for part in repo.split("/") if part]
-    host = "docker.io"
-    if len(parts) > 1 and (any(marker in parts[0] for marker in _REGISTRY_MARKERS)
-                           or parts[0] == "localhost"):
-        host, parts = parts[0].lower(), parts[1:]
-    if host in _DOCKER_HUB_ALIASES:
-        host = "docker.io"
-        if len(parts) == 2 and parts[0] == "library":
-            parts = parts[1:]
-    return host, "/".join(parts)
-
-
-def normalise_image(image: str) -> str:
-    """'lscr.io/linuxserver/sonarr:latest' -> 'linuxserver/sonarr'.
-
-    Strips a digest, a tag and a registry host. Keeps the rest verbatim, because the rest is
-    the only part that identifies the application.
-    """
-    return split_image(image)[1]
 
 
 _loaded: dict = {}

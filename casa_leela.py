@@ -19,6 +19,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ import yaml
 
 import casa_stackctl as stackctl
 import config
+from planet_express.core.images import normalise_image
 
 log = logging.getLogger("planetexpress.leela")
 
@@ -686,6 +688,134 @@ def _read_env_var(env_file: Path, key: str) -> str | None:
     return None
 
 
+# ProtonVPN hands out a new forwarded port every two hours, and gluetun clears the old one a
+# beat before it gets the new one -- a healthy renewal is a ~15 second gap. Measured over 48h
+# on this host: 24 renewals, 7 of which had their NAT-PMP RPC refused ("adding port mapping:
+# ... recvfrom: connection refused"). gluetun does not retry a refusal; it waits for the next
+# cycle, so the port is genuinely gone for up to two hours and then returns on its own.
+#
+# A sensor that fires on a single sample of "no port" therefore fires on something that fixes
+# itself. At the 6h scan cadence it sampled that ~2h window three times on 2026-09-26 alone,
+# and the plan it proposed restarted GSP to obtain a port that the next scheduled renewal
+# replaced 26 minutes later.
+#
+# What is worth waking someone for is a forward that has outlasted a renewal cycle. Elapsed
+# time between two scans cannot establish that: all three of 2026-09-26's samples were
+# unhealthy, but gluetun held a port for hours between them, so "unhealthy last time and
+# unhealthy now" would have claimed 6 continuous hours that never happened. gluetun's own log
+# is the evidence -- it records every port it obtains, with a timestamp -- so the question is
+# asked of the host rather than inferred from two samples of it.
+VPN_RENEWAL_GRACE_SECONDS = 2.5 * 3600
+# GSP re-syncs qBittorrent within about a minute of a rotation, so a mismatch is only news
+# once it has outlasted that.
+GSP_SYNC_GRACE_SECONDS = 300
+# How far back the log is read. Deliberately much longer than either grace: the evidence for
+# "this outage started at HH:MM" has to be inside the window, and a chain of failed renewals
+# pushes that moment further back than the grace it is being compared against. 12h of this
+# log is about 3k lines and a fifth of a second.
+GLUETUN_LOG_LOOKBACK_SECONDS = 12 * 3600
+GLUETUN_IMAGE_REPO = "qmcgaw/gluetun"
+# 2026-09-26T19:17:14Z INFO [port forwarding] port forwarded is 47268
+# 2026-09-26T17:45:56Z INFO [port forwarding] clearing port file /tmp/gluetun/forwarded_port
+#
+# Which of the two answers the question depends on the fault. For a MISSING port it is the
+# clear: the port is gone from that moment, and measuring from the last successful allocation
+# instead would count the two hours the port was healthily in use, so a 2.5h window would
+# expire barely half an hour into a gap that self-heals at the next cycle. For a MISMATCH the
+# port exists and GSP is behind, so the clock starts when the port gluetun now holds arrived.
+_PORT_OBTAINED_RE = re.compile(
+    r"^(?P<ts>\S+)\s+INFO\s+\[port forwarding\]\s+port forwarded is\s+\d+")
+_PORT_CLEARED_RE = re.compile(
+    r"^(?P<ts>\S+)\s+INFO\s+\[port forwarding\]\s+clearing port file")
+
+
+def _gluetun_container() -> str | None:
+    """gluetun's container, found by image rather than by name.
+
+    This host's is called CASA_GLUETON -- a typo that has outlived several rebuilds. Matching
+    on the image means the check does not depend on anyone's spelling, here or anywhere else.
+    normalise_image handles the forms the same image is written in: a bare repo, a tag,
+    docker.io/ in front, a digest, and a registry with a port (which is not a tag).
+    """
+    rc, out, _err = _run(["docker", "ps", "--format", "{{.Names}}|{{.Image}}"], timeout=10)
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        name, _, image = line.partition("|")
+        if normalise_image(image) == GLUETUN_IMAGE_REPO:
+            return name.strip()
+    return None
+
+
+def _gluetun_port_events(window_seconds: float) -> tuple[list[float], list[float], str | None]:
+    """gluetun's port-forwarding history inside the window: (obtained, cleared, error).
+
+    Both lists are epoch seconds, ascending. An error means the question could not be asked
+    at all, and the caller treats an unverifiable fault the same way this module treats every
+    other one: as worth reporting.
+    """
+    container = _gluetun_container()
+    if not container:
+        return [], [], f"no running container for image {GLUETUN_IMAGE_REPO}"
+    rc, out, err = _run(
+        ["docker", "logs", "--since", f"{int(window_seconds)}s", container], timeout=20)
+    if rc != 0:
+        return [], [], f"could not read {container}'s log: {err.strip()[:120] or 'unknown error'}"
+    obtained: list[float] = []
+    cleared: list[float] = []
+    # Both streams. `docker logs` keeps stdout and stderr separate and plenty of images write
+    # their ordinary log to stderr; this gluetun uses stdout, and a check that silently
+    # depended on that would turn every transient gap into a HIGH the day one changed.
+    for line in (out + "\n" + err).splitlines():
+        line = line.strip()
+        for pattern, bucket in ((_PORT_OBTAINED_RE, obtained), (_PORT_CLEARED_RE, cleared)):
+            match = pattern.match(line)
+            if not match:
+                continue
+            try:
+                stamp = datetime.fromisoformat(match.group("ts").replace("Z", "+00:00"))
+            except ValueError:
+                break
+            bucket.append(stamp.timestamp())
+            break
+    return sorted(obtained), sorted(cleared), None
+
+
+def _seconds_since_port_lost() -> tuple[float | None, str | None]:
+    """How long the forwarded port has been gone, measured from the start of THIS outage.
+
+    The start is the FIRST clear after the last port gluetun actually got, not the most
+    recent clear. gluetun logs a clear on every failed renewal, so taking the latest one
+    would restart the clock every two hours: a forward that stayed dead all day would look
+    two hours old for ever and never alert, which is the silence this check exists to break.
+
+    None means the lookback cannot date the start -- gluetun got no port in all of it, or the
+    port vanished with no log line to say when. Both are things the caller should treat as
+    real, and the first is decisive rather than unknown: no port obtained in twelve hours,
+    and none now, is a dead forward whatever the clears say.
+    """
+    obtained, cleared, error = _gluetun_port_events(GLUETUN_LOG_LOOKBACK_SECONDS)
+    if error:
+        return None, error
+    if not obtained:
+        return None, None
+    un_recovered = [moment for moment in cleared if moment > obtained[-1]]
+    if not un_recovered:
+        return None, None
+    return max(0.0, time.time() - min(un_recovered)), None
+
+
+def _seconds_since_port_obtained() -> tuple[float | None, str | None]:
+    """How long ago gluetun last got a forwarded port. The mismatch case asks this one: the
+    port exists and qBittorrent is behind it, so what matters is when it arrived."""
+    obtained, _cleared, error = _gluetun_port_events(GLUETUN_LOG_LOOKBACK_SECONDS)
+    if error:
+        return None, error
+    if not obtained:
+        return None, None
+    return max(0.0, time.time() - obtained[-1]), None
+
+
 def check_vpn_port_forwarding() -> dict:
     """Gluetun's own healthcheck only proves the VPN tunnel is up, not that port
     forwarding actually succeeded -- gluetun can report "healthy" for hours with an
@@ -700,6 +830,54 @@ def check_vpn_port_forwarding() -> dict:
     existed) is caught on the next scan instead of only surfacing as "Firewalled" in the
     qBittorrent UI.
     """
+    def still_missing() -> bool:
+        """Is there still no forwarded port, right now?
+
+        Asked only when the log says this fault is old enough to alert on. The port is read,
+        then the log; between those two the ordinary two-hourly renewal can land, and then
+        the newest obtain sits after every clear, the outage looks undateable, and a healthy
+        recovery alerts. A fault nobody can still observe is not worth waking anyone for.
+        """
+        try:
+            response = requests.get(GLUETUN_PORTFORWARD_URL, headers={"X-Api-Key": api_key},
+                                    timeout=5)
+            response.raise_for_status()
+            return not response.json().get("port", 0)
+        except (requests.RequestException, ValueError):
+            return True
+
+    def settled(result: dict, *, issue: str, transient: str, window: float,
+                measure, evidence: str, confirm=None) -> dict:
+        """Alert only once gluetun's own log says the fault has outlasted `window`.
+
+        `transient` is what to report while it has not -- reported, visible, and deliberately
+        not an alert, because it is about to fix itself. If the log cannot be read the fault
+        is treated as real: an unverifiable fault reporting nothing is exactly the silence
+        this check exists to break.
+        """
+        since, error = measure()
+        if error:
+            result["alert"] = "HIGH"
+            result["issue"] = f"{issue} (could not check gluetun's log: {error})"
+            return result
+        # None means the log cannot date the start of this fault, which for a fault this
+        # module can already see is a reason to report it, not to wait.
+        if since is None or since >= window:
+            if confirm is not None and not confirm():
+                result["issue"] = "the fault cleared while this check was running"
+                result["within_renewal_grace"] = True
+                result["grace_evidence"] = "recovered during the check"
+                result["grace_evidence_seconds"] = 0
+                return result
+            result["alert"] = "HIGH"
+            result["issue"] = issue
+            return result
+        result["issue"] = transient.format(minutes=round(since / 60))
+        result["within_renewal_grace"] = True
+        result["grace_evidence"] = evidence
+        result["grace_evidence_seconds"] = round(since)
+        return result
+
     api_key = _read_env_var(GLUETUN_ENV_FILE, "GSP_GTN_API_KEY")
     if not api_key:
         return {
@@ -729,9 +907,18 @@ def check_vpn_port_forwarding() -> dict:
     result: dict = {"reachable": True, "gluetun_port": gluetun_port}
 
     if not gluetun_port:
-        result["alert"] = "HIGH"
-        result["issue"] = "gluetun reports no forwarded port -- port forwarding is dead"
-        return result
+        return settled(
+            result,
+            issue=("gluetun has had no forwarded port for over "
+                   f"{VPN_RENEWAL_GRACE_SECONDS / 3600:g}h -- longer than its renewal cycle, "
+                   "so port forwarding is stuck and qBittorrent is firewalled"),
+            transient=("gluetun cleared its forwarded port {minutes} min ago and has not got a "
+                       "new one yet; ProtonVPN rotates it every 2h and a refused renewal "
+                       "leaves it empty until the next cycle, so this clears itself"),
+            window=VPN_RENEWAL_GRACE_SECONDS,
+            measure=_seconds_since_port_lost, evidence="port lost",
+            confirm=still_missing,
+        )
 
     rc, out, err = _run(["docker", "exec", QBIT_CONTAINER, "cat", QBIT_CONF_PATH], timeout=10)
     if rc != 0:
@@ -755,11 +942,16 @@ def check_vpn_port_forwarding() -> dict:
 
     result["qbit_port"] = qbit_port
     if qbit_port != gluetun_port:
-        result["alert"] = "HIGH"
-        result["issue"] = (
-            f"qBittorrent's configured port ({qbit_port}) doesn't match gluetun's "
-            f"forwarded port ({gluetun_port}) -- GSP sync is stuck or qBittorrent needs "
-            f"a restart to pick up the new port"
+        return settled(
+            result,
+            issue=(f"qBittorrent's configured port ({qbit_port}) doesn't match gluetun's "
+                   f"forwarded port ({gluetun_port}) -- GSP sync is stuck or qBittorrent "
+                   f"needs a restart to pick up the new port"),
+            transient=(f"qBittorrent is on {qbit_port} and gluetun on {gluetun_port}, which "
+                       "rotated {minutes} min ago -- GSP syncs within about a minute of a "
+                       "rotation, so this is very likely that minute"),
+            window=GSP_SYNC_GRACE_SECONDS,
+            measure=_seconds_since_port_obtained, evidence="port obtained",
         )
 
     return result
