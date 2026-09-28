@@ -27,6 +27,7 @@ import argparse
 import base64
 import json
 import os
+import pathlib
 import secrets
 import shutil
 import sys
@@ -232,6 +233,13 @@ DOWN_ROUTERS = {"bazarr@docker"}
 
 
 def fixture_routers():
+    real = _real("PE_PREVIEW_ROUTERS")
+    if real is not None:
+        return {"available": True, "routers": [
+            {"name": r.get("name", "?"), "rule": r.get("rule", ""),
+             "service": r.get("service", "?"), "status": r.get("status", "?"),
+             "entry_points": r.get("entryPoints") or []}
+            for r in real if isinstance(r, dict)]}
     routers = []
     for zone, entries in ROUTER_ZONES.items():
         for name, provider in entries:
@@ -290,10 +298,32 @@ backup_jobs: [weekly]
 """
 
 
+def _real(name: str):
+    """A real read captured from the live host, when one is pointed at.
+
+    PE_PREVIEW_ROUTERS is /api/http/routers as Traefik answered it; PE_PREVIEW_OWNERS is
+    core's containers.routers. Together with --state they make this the real dashboard on
+    real data, which is the only way to check the launch links and the drawer against the
+    routes that actually exist -- the fixtures below are shaped like the awkward cases, not
+    like this host.
+    """
+    path = os.environ.get(name)
+    if not path:
+        return None
+    try:
+        return json.loads(pathlib.Path(path).read_text())
+    except (OSError, ValueError) as e:
+        print(f"  {name}: {e}")
+        return None
+
+
 def fixture_owners() -> dict:
     """core's containers.routers, for the fixtures: a docker router that shares a name with a
     stack service belongs to that service's container. Enough for the drawer and pills to
     show real links; the rest of the fixture routers stay unjoined, as some do live."""
+    real = _real("PE_PREVIEW_OWNERS")
+    if real is not None:
+        return real
     containers = {service: f"CASA_{stack.upper()}_{service.upper()}"
                   for stack, services in FIXTURE_STACKS.items() for service in services}
     routers, services = {}, {}
