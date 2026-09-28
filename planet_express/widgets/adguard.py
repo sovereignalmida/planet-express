@@ -1,5 +1,7 @@
 """AdGuard Home: queries, how many were blocked, and how fast it answered."""
 
+from planet_express.core.numbers import finite, ratio, rounded
+
 WIDGET = {
     "name": "adguard",
     # Docker Hub's, which is where AdGuard publishes; ghcr.io/adguard is someone else's account.
@@ -27,11 +29,11 @@ def summarise(responses) -> dict:
     domain = next(iter(top), None) if isinstance(top, dict) else None
     return {
         "stats": [
-            {"k": "QUERIES", "v": f"{queries:,}"},
+            {"k": "QUERIES", "v": f"{queries:,}" if finite(queries) else "—"},
             # Guarded: a freshly started AdGuard reports zero queries, and the dashboard has
             # already been bitten once by a percentage computed in a template.
-            {"k": "BLOCKED", "v": f"{round(blocked / queries * 100, 1)}%" if queries else "—"},
-            {"k": "AVG", "v": f"{round(average * 1000)}ms" if isinstance(average, (int, float)) else "—"},
+            {"k": "BLOCKED", "v": f"{_blocked}%" if (_blocked := rounded(ratio(blocked, queries), 1)) is not None else "—"},
+            {"k": "AVG", "v": f"{_avg}ms" if (_avg := rounded(average * 1000 if finite(average) else None)) is not None else "—"},
         ],
         "rows": [],
         "rows_label": "",

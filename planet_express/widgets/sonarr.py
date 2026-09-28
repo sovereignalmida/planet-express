@@ -1,6 +1,6 @@
 """Sonarr: what is queued, what is missing, and whether it is healthy."""
 
-import math
+from planet_express.core.numbers import MAX_BYTES, finite, rounded
 
 WIDGET = {
     "name": "sonarr",
@@ -47,12 +47,11 @@ def summarise(responses) -> dict:
     }
 
 
-def _number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
 def _progress(item) -> int:
+    """Percent done, or 0 when the two numbers do not make one."""
     size, left = item.get("size"), item.get("sizeleft")
-    if not _number(size) or not _number(left) or not size:
+    # MAX_BYTES: these are byte counts, and a 4K season pack clears the 1e12 count bound.
+    if not finite(size, MAX_BYTES) or not finite(left, MAX_BYTES) or not size:
         return 0
-    return max(0, min(100, round((size - left) / size * 100)))
+    pct = rounded((size - left) / size * 100)
+    return max(0, min(100, pct)) if pct is not None else 0

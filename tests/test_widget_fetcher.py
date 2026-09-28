@@ -874,3 +874,31 @@ def test_the_re_read_is_paid_for_out_of_the_fetch_budget():
 
     assert answer["state"] == "error" and answer["error"] == "timeout"
     assert wire.sent == [], "the budget was already spent before the socket opened"
+
+
+# ── a header that carries a scheme in front of the key ──────────────────────────
+# audiobookshelf, karakeep, mealie and speedtest-tracker want `Authorization: Bearer <key>`;
+# tubearchivist wants `Authorization: Token <key>`. The prefix is a fixed scheme word the
+# registry allowlists, never a template -- a widget file says WHICH scheme, not where in the
+# header its key lands.
+
+def test_a_prefixed_header_sends_the_scheme_then_the_key():
+    widget = _widget(auth={"type": "header", "header": "Authorization",
+                           "prefix": "Bearer", "env": "SONARR_API_KEY"})
+    f, wire, _ = _fetcher({(A, Q): _Reply()}, widgets={"sonarr": widget})
+    assert f.fetch(_target(), KEY)["state"] == "ok"
+    _address, _port, _path, headers = wire.sent[0]
+    assert headers["Authorization"] == f"Bearer {SECRET}"
+
+
+def test_a_header_without_a_prefix_is_unchanged():
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+    f.fetch(_target(), KEY)
+    assert wire.sent[0][3]["X-Api-Key"] == SECRET
+
+
+def test_the_key_never_appears_in_the_answer_even_with_a_prefix():
+    widget = _widget(auth={"type": "header", "header": "Authorization",
+                           "prefix": "Bearer", "env": "SONARR_API_KEY"})
+    f, _wire, _ = _fetcher({(A, Q): _Reply()}, widgets={"sonarr": widget})
+    assert SECRET not in json.dumps(f.fetch(_target(), KEY))

@@ -176,6 +176,11 @@ def _load_widgets(package, sources: dict, previous=()) -> dict:
 # A widget may declare no auth at all -- plenty of APIs need none -- but a declaration the
 # fetcher cannot act on is a broken widget, not an unauthenticated one.
 _AUTH_FIELDS = {"header": ("header", "env"), "basic": ("username_env", "password_env")}
+# A header auth may carry a scheme in front of the value: `Authorization: Bearer <token>`,
+# `Authorization: Token <token>`. Optional, and a fixed word rather than a format string --
+# the widget says which scheme, never how the whole header is built, so nothing a widget
+# file declares can put the key anywhere but after that word.
+_AUTH_PREFIXES = frozenset({"Bearer", "Token", "Basic", "Bot"})
 
 
 # Names a widget may never read, whatever it is called: the dashboard's own login secrets, and
@@ -224,6 +229,9 @@ def _auth_problem(auth, widget_name: str = "") -> str | None:
         return f"auth {auth['type']} is missing {', '.join(missing)}"
     if kind == "header" and not re.fullmatch(r"[A-Za-z0-9-]{1,64}", auth["header"]):
         return f"header name {auth['header']!r} is not a plain header name"
+    if kind == "header" and "prefix" in auth and auth["prefix"] not in _AUTH_PREFIXES:
+        return (f"auth prefix {auth.get('prefix')!r} must be one of "
+                f"{', '.join(sorted(_AUTH_PREFIXES))}")
     for env in auth_env_names(auth):
         if (problem := env_name_problem(widget_name, env)) is not None:
             return problem

@@ -46,6 +46,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+from planet_express.core.numbers import finite
 from planet_express.widgets import registry
 
 log = logging.getLogger("planetexpress.widgets.fetcher")
@@ -117,7 +118,11 @@ def _credentials(widget: dict, env) -> tuple[dict | None, list[str]]:
     if not all(_usable_credential(value) for value in values.values()):
         raise _Failure("the configured key cannot be sent over HTTP")
     if auth["type"] == "header":
-        return {auth["header"]: values[auth["env"]]}, []
+        # The prefix is a fixed scheme word the registry allowlists, not a template: a widget
+        # file says `Bearer`, it does not get to say where in the header the key lands.
+        prefix = auth.get("prefix")
+        value = f"{prefix} {values[auth['env']]}" if prefix else values[auth["env"]]
+        return {auth["header"]: value}, []
     pair = f'{values[auth["username_env"]]}:{values[auth["password_env"]]}'.encode("latin-1")
     return {"Authorization": "Basic " + base64.b64encode(pair).decode("ascii")}, []
 
@@ -346,7 +351,10 @@ def normalise_summary(summary) -> dict:
             continue
         item = {"title": _text(row.get("title", ""))}
         pct = row.get("pct")
-        if isinstance(pct, (int, float)) and not isinstance(pct, bool) and math.isfinite(pct):
+        # finite(), not math.isfinite(): the latter raises OverflowError on a JSON integer
+        # too large to become a float, which would cost the panel at the very boundary
+        # that exists to save it.
+        if finite(pct):
             item["pct"] = max(0, min(100, round(pct)))
         if row.get("meta") is not None:
             item["meta"] = _text(row["meta"])

@@ -1,6 +1,6 @@
 """Immich: how many photos and videos it holds, and how much space they use."""
 
-import math
+from planet_express.core.numbers import MAX_BYTES, finite
 
 WIDGET = {
     "name": "immich",
@@ -33,12 +33,15 @@ def summarise(responses) -> dict:
 
 
 def _count(value):
-    return f"{value:,}" if isinstance(value, int) and not isinstance(value, bool) else "—"
+    # finite() bounds it too: a 310-digit JSON integer is not inf, but it is not a tile either.
+    return f"{value:,}" if finite(value) and isinstance(value, int) else "—"
 
 
 def _size(value) -> str:
     # Binary units, as Immich's own server-stats page shows them.
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+    # MAX_BYTES, not MAX: this is a library size in bytes, and the ordinary count bound
+    # would blank out every library past 931 GiB.
+    if not finite(value, MAX_BYTES) or value < 0:
         return "—"
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
         if value < 1024 or unit == "TiB":
