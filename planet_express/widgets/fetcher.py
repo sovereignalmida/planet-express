@@ -367,6 +367,30 @@ class _Job:
         self.started = started
 
 
+def _target_moved(target: dict, reverify) -> str | None:
+    """None when the container is demonstrably the same one, else why the key is not sent.
+
+    Compared on the container id AND the addresses: an id that changed is a different
+    container outright, and the same id answering on a different address means the one we
+    were about to use is now free for anyone.
+    """
+    try:
+        fresh = reverify()
+    except Exception:
+        # A check that cannot run is not a check that passed.
+        log.warning("Could not re-read the widget target before sending its key", exc_info=True)
+        return "could not confirm the container"
+    if not isinstance(fresh, dict) or not fresh.get("running"):
+        return "the container is no longer there"
+    # query.widget_target's own key. It is the container's 64-hex id, so a recreate changes
+    # it even when the name and the address do not.
+    if not fresh.get("container_id") or fresh["container_id"] != target.get("container_id"):
+        return "the container was replaced while this was being fetched"
+    if _usable_addresses(fresh.get("addresses")) != _usable_addresses(target.get("addresses")):
+        return "the container moved address while this was being fetched"
+    return None
+
+
 class WidgetFetcher:
     """Per-process fetcher. Answers are cached per page key (the stack/service the page asked
     about), so a cache hit costs neither core nor the app anything; the last good values are
@@ -397,12 +421,18 @@ class WidgetFetcher:
         """This fetcher's clock, for the route to stamp when it asked core (see fetch)."""
         return self._clock()
 
-    def fetch(self, target: dict, key, asked: float | None = None) -> dict:
+    def fetch(self, target: dict, key, asked: float | None = None, reverify=None) -> dict:
         """`target` is core's query.widget_target answer. Returns one of the four states.
 
         `asked` is when the caller asked core for `target` (now() before the call). Every
         store this request makes is ordered by it, so a request that resolved a predecessor
         container before its successor was answered can never displace that answer.
+
+        `reverify` re-reads the target from core immediately before the credential is sent.
+        `target` was inspected -- image provenance, label, addresses -- at some earlier
+        moment, and a bridge address freed by a recreate is reused. Without this, a container
+        removed between the inspect and the connection can have its address answered by an
+        entirely different container, and the validated app's API key goes to that one.
         """
         asked = self._clock() if asked is None else asked
         name = target.get("widget") if isinstance(target, dict) else None
@@ -437,7 +467,8 @@ class WidgetFetcher:
             return self._fail_fast(key, target, widget, "busy", asked)
         if starting:
             try:
-                self._start(lambda: self._run(job, job_key, key, target, widget, asked))
+                self._start(
+                    lambda: self._run(job, job_key, key, target, widget, asked, reverify))
             except Exception:
                 log.warning("Could not start a widget fetch", exc_info=True)
                 with self._lock:
@@ -456,10 +487,10 @@ class WidgetFetcher:
         answer = self._with_stale(key, target, widget, {"state": "error", "error": reason})
         return self._store(key, target, answer, ttl=FAILED_CACHE_SECONDS, started=asked)
 
-    def _run(self, job, job_key, key, target, widget, asked):
+    def _run(self, job, job_key, key, target, widget, asked, reverify=None):
         answer = None
         try:
-            answer = self._fetch_now(widget, target)
+            answer = self._fetch_now(widget, target, reverify)
             if answer["state"] == "error":
                 answer = self._with_stale(key, target, widget, answer)
             # What the cache kept: a fresh good answer, if one arrived while this failed.
@@ -523,7 +554,7 @@ class WidgetFetcher:
             answer["stale_at"] = good["fetched_at"]
         return answer
 
-    def _fetch_now(self, widget: dict, target: dict) -> dict:
+    def _fetch_now(self, widget: dict, target: dict, reverify=None) -> dict:
         base = {"widget": widget["name"], "via": widget["get"][0]}
         try:
             headers, missing = _credentials(widget, self._env)
@@ -534,6 +565,13 @@ class WidgetFetcher:
         addresses = _usable_addresses(target.get("addresses"))
         if not target.get("running") or not addresses:
             return {**base, "state": "error", "error": "not reachable from the dashboard"}
+        # Last thing before the key leaves this process: is this still the same container, on
+        # the same address? An id that changed is a recreate, and the address it used to hold
+        # may already belong to something nobody vetted.
+        if reverify is not None:
+            moved = _target_moved(target, reverify)
+            if moved is not None:
+                return {**base, "state": "error", "error": moved}
         deadline = self._clock() + FETCH_BUDGET_SECONDS
         responses, failure = None, None
         for address in addresses:

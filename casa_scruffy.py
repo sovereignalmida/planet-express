@@ -456,7 +456,11 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         answer = widget_fetcher.cached(key)
         if answer is None:
             asked = widget_fetcher.now()
-            answer = widget_fetcher.fetch(core("query.widget_target", params), key, asked)
+            answer = widget_fetcher.fetch(
+                core("query.widget_target", params), key, asked,
+                # Re-read immediately before the key is sent: the address in that answer is
+                # where a credential goes, and a bridge address freed by a recreate is reused.
+                reverify=lambda: core("query.widget_target", params))
         return jsonify(answer)
 
     # POST, not GET: a cursor can carry up to LOG_CURSOR_HASH_LIMIT (1000) dedupe hashes, and ~180 of

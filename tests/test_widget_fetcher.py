@@ -789,3 +789,70 @@ def test_a_removed_widget_file_is_forgotten_by_both_import_forms():
     registry.load_widgets()
     assert not hasattr(package, "zz_gone_fixture")
     assert "planet_express.widgets.zz_gone_fixture" not in sys.modules
+
+
+# ── the key goes to the container that was vetted, or to nobody ─────────────────
+# query.widget_target inspects the container -- image provenance, label, addresses -- and the
+# fetcher then opens a socket to one of those addresses. Between those two moments the
+# container can be removed and its bridge address handed to another one, and the validated
+# app's API key would go to whatever answered. The target is re-read immediately before the
+# key leaves this process.
+
+def test_a_replaced_container_never_receives_the_key():
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+    replaced = _target(container_id="b" * 64)
+
+    answer = f.fetch(_target(), KEY, reverify=lambda: replaced)
+
+    assert answer["state"] == "error"
+    assert answer["error"] == "the container was replaced while this was being fetched"
+    assert wire.sent == [], "the key was sent to a container nobody vetted"
+
+
+def test_a_container_that_moved_address_never_receives_the_key():
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+
+    answer = f.fetch(_target(), KEY, reverify=lambda: _target(addresses=["172.18.0.99"]))
+
+    assert answer["error"] == "the container moved address while this was being fetched"
+    assert wire.sent == []
+
+
+def test_a_container_that_stopped_never_receives_the_key():
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+    answer = f.fetch(_target(), KEY, reverify=lambda: _target(running=False))
+    assert answer["error"] == "the container is no longer there"
+    assert wire.sent == []
+
+
+def test_a_target_with_no_id_to_compare_never_receives_the_key():
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+    answer = f.fetch(_target(), KEY, reverify=lambda: _target(container_id=None))
+    assert answer["error"] == "the container was replaced while this was being fetched"
+    assert wire.sent == []
+
+
+def test_a_re_read_that_cannot_run_is_not_a_re_read_that_passed():
+    """A check that fails open is not a check. Core being unreachable must not mean "send it"."""
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+
+    def unreachable():
+        raise RuntimeError("core is down")
+
+    answer = f.fetch(_target(), KEY, reverify=unreachable)
+    assert answer["error"] == "could not confirm the container"
+    assert wire.sent == []
+
+
+def test_the_same_container_on_the_same_address_is_fetched_normally():
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+    answer = f.fetch(_target(), KEY, reverify=_target)
+    assert answer["state"] == "ok"
+    assert wire.sent, "the fetch did not happen"
+
+
+def test_without_a_re_read_the_fetch_still_works():
+    """reverify is optional: the fetcher is used in tests and tooling without core behind it."""
+    f, wire, _ = _fetcher({(A, Q): _Reply()})
+    assert f.fetch(_target(), KEY)["state"] == "ok"
+    assert wire.sent
