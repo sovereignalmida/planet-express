@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-09-28
+
+### Fixed
+- **A host with paths carved out of it now links to its root.** A router whose rule is
+  `Host(…) && !(PathPrefix(`/a`) || PathPrefix(`/b`))` serves that host's root — the negation
+  only excludes those prefixes, usually because a sibling router sends them to another
+  container. 2.2.0 refused the whole shape and lost the link (adventurelog: `travel.casalan.com`
+  and `travel.casaalmida.com` had no button, while the sibling served `/admin` and `/media`).
+  Read now, narrowly: a trailing negated group of Path/PathPrefix terms, none of which covers
+  the root. A negated Header, a positive path group, or anything after the negation still
+  emits nothing.
+
 ## [2.2.0] - 2026-09-28
 
 ### Added
