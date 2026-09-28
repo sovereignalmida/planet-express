@@ -273,17 +273,22 @@ def test_an_asset_route_is_not_a_launch_link():
     assert urls == {}
 
 
-def test_a_negated_path_group_is_skipped_and_that_costs_one_real_link():
-    """adventurelog's host root IS launchable -- the negation only excludes asset paths. It is
-    skipped anyway, because recovering it needs a parser that reasons about negation, and the
-    config `links:` escape hatch covers it explicitly instead. Pinned so the decision is
-    visible if anyone wonders why travel has no button."""
+def test_a_negated_path_group_now_links_to_the_host_root():
+    """This was pinned the other way: the brief took the loss and pointed at config `links:`,
+    reasoning that a parser which understands negation would eventually emit a confident
+    wrong link. Reversed on 2026-09-28, when the missing button was reported from the live
+    host -- the shape turns out to be narrow enough to read safely (a trailing negated group
+    of Path/PathPrefix terms, none of which covers the root), and the tests below hold the
+    line at exactly that."""
     urls = _urls([
         _live("adventurelog@docker",
               "(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && "
               "!(PathPrefix(`/media`) || PathPrefix(`/static`))"),
     ])
-    assert urls == {}
+    assert urls == {"adventurelog": [
+        {"href": "https://travel.casalan.com", "zone": "lan"},
+        {"href": "https://travel.casaalmida.com", "zone": "public"},
+    ]}
 
 
 def test_traefiks_own_internal_routers_emit_nothing():
@@ -508,3 +513,60 @@ def test_a_pill_whose_rule_cannot_be_read_is_not_a_link():
 def test_only_a_plain_hostname_becomes_a_link(host):
     """Image labels can put anything between the backticks."""
     assert casa_scruffy_net.router_urls(_live("x@docker", f"Host(`{host}`)"), lan_domain="casalan.com") == []
+
+
+# ── a negation that carves paths out of a host still serves its root ────────────
+# Reported from the live host on 2026-09-28: travel.casaalmida.com had no launch link.
+# Its rule is `(Host(a) || Host(b)) && !(PathPrefix(/media) || /admin || /static || /accounts)`
+# -- the frontend answers the root and a second router sends those four prefixes to the
+# backend. Refusing the whole shape lost a URL the host really serves.
+
+ADVENTURELOG = ("(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && "
+                "!(PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`) "
+                "|| PathPrefix(`/accounts`))")
+
+
+def _urls_for(rule, lan_domain="casalan.com"):
+    return casa_scruffy_net.router_urls(
+        {"rule": rule, "entry_points": ["websecure"], "status": "enabled"},
+        lan_domain=lan_domain)
+
+
+def test_a_host_with_paths_carved_out_of_it_still_links_to_its_root():
+    assert [u["href"] for u in _urls_for(ADVENTURELOG)] == [
+        "https://travel.casalan.com", "https://travel.casaalmida.com"]
+
+
+def test_the_sibling_router_that_serves_only_those_paths_still_links_to_nothing():
+    """adventurelog-admin has the same hosts and the same prefixes WITHOUT the negation, so
+    it serves only /media, /admin, /static and /accounts. A button onto it is a button onto
+    an asset route."""
+    assert _urls_for(ADVENTURELOG.replace("&& !(", "&& (")) == []
+
+
+@pytest.mark.parametrize("rule", [
+    "Host(`x.casalan.com`) && !(PathPrefix(`/`))",
+    "Host(`x.casalan.com`) && !(Path(`/`))",
+    "Host(`x.casalan.com`) && !(PathPrefix(`/a`) || PathPrefix(`/`))",
+    "Host(`x.casalan.com`) && !(PathPrefix(``))",
+])
+def test_a_negation_that_covers_the_root_leaves_no_honest_url(rule):
+    """`!(PathPrefix(`/`))` excludes everything, so the root is not served at all."""
+    assert _urls_for(rule) == []
+
+
+@pytest.mark.parametrize("rule", [
+    "Host(`x.casalan.com`) && !(Header(`X-Real`, `y`))",
+    "Host(`x.casalan.com`) && !(ClientIP(`10.0.0.0/8`))",
+    "Host(`x.casalan.com`) && !(HostRegexp(`^.+$`))",
+    "Host(`x.casalan.com`) && !(PathPrefix(`/a`)) && Method(`GET`)",
+    "!(PathPrefix(`/a`))",
+])
+def test_only_a_trailing_negated_group_of_paths_is_read(rule):
+    """Still not a Traefik expression parser. Anything else about the rule refuses it."""
+    assert _urls_for(rule) == []
+
+
+def test_the_carve_out_does_not_change_zoning():
+    urls = _urls_for(ADVENTURELOG)
+    assert [u["zone"] for u in urls] == ["lan", "public"]

@@ -259,6 +259,31 @@ _PLAIN_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?"
                          r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*")
 
 
+# `<hosts> && !(PathPrefix(`/a`) || PathPrefix(`/b`))` -- a negation that carves specific
+# prefixes OUT of a host still serves that host's root. adventurelog is exactly this shape:
+# the frontend answers travel.casalan.com/ while the backend answers /admin, /media, /static
+# and /accounts through a second router. Refusing it lost a link the host really has.
+#
+# Deliberately narrow, and still not a Traefik expression parser. Only a trailing negated
+# group, only Path/PathPrefix terms inside it, and only when none of those covers the root --
+# `!(PathPrefix(`/`))` excludes everything, so the root is NOT served and no URL is honest.
+_EXCLUDED_PATHS = re.compile(
+    r"&&\s*!\(\s*(?P<group>(?:PathPrefix|Path)\(`[^`]*`\)"
+    r"(?:\s*\|\|\s*(?:PathPrefix|Path)\(`[^`]*`\))*)\s*\)\s*$")
+_PATH_TERM = re.compile(r"(?:PathPrefix|Path)\(`([^`]*)`\)")
+
+
+def _without_excluded_paths(rule: str) -> tuple[str, bool]:
+    """(the rule with a trailing `&& !(paths)` removed, whether it may be linked at all)."""
+    match = _EXCLUDED_PATHS.search(rule or "")
+    if match is None:
+        return rule or "", True
+    paths = _PATH_TERM.findall(match.group("group"))
+    if not paths or any(path.strip() in ("", "/") for path in paths):
+        return rule or "", False
+    return (rule or "")[: match.start()], True
+
+
 def _rule_is_host_only(rule: str) -> bool:
     """True when removing every Host() term leaves nothing but the `||` that joined them.
 
@@ -279,9 +304,9 @@ def router_urls(router: dict, *, lan_domain: str) -> list:
     """
     if not isinstance(router, dict):
         return []
-    rule = router.get("rule", "")
-    hosts = _HOST_IN_RULE.findall(rule or "")
-    if not hosts or not _rule_is_host_only(rule):
+    rule, linkable = _without_excluded_paths(router.get("rule", ""))
+    hosts = _HOST_IN_RULE.findall(rule)
+    if not linkable or not hosts or not _rule_is_host_only(rule):
         return []
     entry_points = router.get("entry_points") or []
     scheme = next((_ENTRYPOINT_SCHEME[e] for e in entry_points if e in _ENTRYPOINT_SCHEME), None)
