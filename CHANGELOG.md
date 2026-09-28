@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-28
+
 ### Added
 - **Launch links.** Overview stack tiles show `↗ n` launchable containers and open a stack
   drawer (LAN ↗ / WEB ↗ per container, ◉ where a widget file names the image). Network
@@ -19,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only to an image pulled from a registry the widget names, on a docker bridge network, never
   across a shared network namespace; answers are size-, time- and shape-bounded. See
   INSTALL.md, "Container widget keys".
+- **SCAN ✈ scans.** The header control was a link to `/` that reloaded the page; the Backups
+  tab carried a line of copy admitting the dashboard could not trigger a scan. It now runs
+  the same full pipeline Telegram's `/check` runs and answers in the request: "started", or
+  "host busy (…)" with the reason. A scan started from Telegram or the scheduler dims the
+  button too.
 - **The widget on the container view.** Second after the verdict: live stats (and a queue or
   a line), a "needs an API key" card naming the env vars, or the API's failure with the last
   good values dimmed. A container without a widget shows nothing. When the widget is working
@@ -34,6 +41,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   name (`CASA_ADVENTURELOG`, not `adventurelog`).
 
 ### Fixed
+- **A canary update could retag another service's image.** `docker compose config --images
+  <service>` returns every image in the related set, in a non-deterministic order, and the
+  canary took the first line. On 2026-09-27 that was Traefik's during a *gluetun* update: the
+  automatic rollback ran `docker tag <gluetun's image> traefik:v3.6.25` and Traefik spent four
+  hours exiting with "command is unknown: --configFile". A canary now takes its reference from
+  the container it is updating, requires compose to configure that same image for that same
+  service, and re-checks the binding immediately before the tag.
+- **The VPN port-forwarding check alerted on a port that was merely rotating.** ProtonVPN
+  hands out a new forwarded port every two hours, and a refused NAT-PMP renewal leaves it
+  empty until the next cycle — 7 of 24 renewals over 48h. The check fired on a single sample
+  of "no port", three times on 2026-09-26 alone, each proposing a plan for something that
+  fixes itself. It now asks gluetun's log how long the forward has actually been gone and
+  alerts only past a renewal cycle. Inside the grace the fault is still reported, never as
+  healthy.
+- **A widget key could follow a reused address.** The container is inspected, then the
+  fetcher opens a socket to one of its addresses; in between, a recreate can hand that bridge
+  address to another container. The target is re-read immediately before the key leaves the
+  process, and the request is abandoned unless it is the same container, still running, on
+  the same address.
 - **The dashboard showed stale config after an activated edit.** Activation re-execs core
   only, so `paused_containers`, `backup_jobs` and `links` on the dashboard were whatever it
   last imported. It now asks core what is enforced (`config.enforced`), and a pause edit moves
