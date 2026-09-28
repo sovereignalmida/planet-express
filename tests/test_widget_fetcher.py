@@ -856,3 +856,21 @@ def test_without_a_re_read_the_fetch_still_works():
     f, wire, _ = _fetcher({(A, Q): _Reply()})
     assert f.fetch(_target(), KEY)["state"] == "ok"
     assert wire.sent
+
+
+def test_the_re_read_is_paid_for_out_of_the_fetch_budget():
+    """A joiner's wait starts when the job does, so anything the job does before opening the
+    socket has to come out of the same budget. query.widget_target costs 0.5-0.8s on the live
+    host; charging it outside the budget would let the job outlive the window the waiter gives
+    it and answer "timeout" to a fetch that was about to succeed."""
+    now = [1000.0]
+    f, wire, _ = _fetcher({(A, Q): _Reply()}, clock=now)
+
+    def slow():
+        now[0] += fetcher.FETCH_BUDGET_SECONDS + 1     # core takes longer than the whole budget
+        return _target()
+
+    answer = f.fetch(_target(), KEY, reverify=slow)
+
+    assert answer["state"] == "error" and answer["error"] == "timeout"
+    assert wire.sent == [], "the budget was already spent before the socket opened"

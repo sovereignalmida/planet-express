@@ -565,6 +565,11 @@ class WidgetFetcher:
         addresses = _usable_addresses(target.get("addresses"))
         if not target.get("running") or not addresses:
             return {**base, "state": "error", "error": "not reachable from the dashboard"}
+        # The budget starts HERE, before the re-read, because a joiner's wait started when the
+        # job did. Measured on the live host, query.widget_target costs 0.5-0.8s; taking the
+        # budget after it would let the job outlive the window the waiter gives it and answer
+        # "timeout" to a fetch that was about to succeed.
+        deadline = self._clock() + FETCH_BUDGET_SECONDS
         # Last thing before the key leaves this process: is this still the same container, on
         # the same address? An id that changed is a recreate, and the address it used to hold
         # may already belong to something nobody vetted.
@@ -572,7 +577,8 @@ class WidgetFetcher:
             moved = _target_moved(target, reverify)
             if moved is not None:
                 return {**base, "state": "error", "error": moved}
-        deadline = self._clock() + FETCH_BUDGET_SECONDS
+            if self._clock() >= deadline:
+                return {**base, "state": "error", "error": "timeout"}
         responses, failure = None, None
         for address in addresses:
             try:
