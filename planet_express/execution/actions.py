@@ -555,8 +555,46 @@ def compose_images_argv(stack: str, service: str) -> list[str]:
 
 
 def compose_config_images_argv(stack: str, service: str) -> list[str]:
-    """The image reference this service resolves to per its compose config (not what runs)."""
+    """Every image reference compose reports for this service.
+
+    It returns MORE THAN ONE line, and in a non-deterministic order. On Compose v2.39.1
+    `config --images gluetun` returns gluetun's image and traefik's, and three consecutive
+    runs put a different one first. Taking line [0] as "this service's image" therefore
+    retagged and redeployed another service roughly half the time: on 2026-09-27 a canary for
+    network/gluetun resolved `traefik:v3.6.25`, its rollback ran
+    `docker tag <gluetun's image> traefik:v3.6.25`, and Traefik spent four hours exiting with
+    "command is unknown: --configFile". Use this only to CHECK a reference, never to pick one.
+    """
     return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--images", service]
+
+
+def compose_config_json_argv(stack: str, service: str) -> list[str]:
+    """Compose's resolved config as JSON. Keyed by service, so one service's image can be read
+    exactly -- which `--images` cannot do, because it flattens the related set into lines."""
+    return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--format", "json",
+            service]
+
+
+def compose_configured_image(document: str, service: str) -> str | None:
+    """The image compose configures for exactly this service, or None."""
+    try:
+        services = json.loads(document).get("services")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(services, dict):
+        return None
+    entry = services.get(service)
+    image = entry.get("image") if isinstance(entry, dict) else None
+    return image.strip() if isinstance(image, str) and image.strip() else None
+
+
+def container_image_reference_argv(container: str) -> list[str]:
+    """The image reference this container was created from -- one value, for one container.
+
+    This is where a canary's reference comes from. The container being updated is the only
+    thing that can say which reference is its own; compose answers about a related set.
+    """
+    return ["docker", "inspect", "--format", "{{.Config.Image}}", container]
 
 
 def image_id_argv(reference: str) -> list[str]:
