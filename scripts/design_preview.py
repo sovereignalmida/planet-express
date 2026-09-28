@@ -527,6 +527,13 @@ def main() -> int:
     print(f"  auth code:  {code}  (30s; next with: "
           f"venv/bin/python -c \"import time, web_auth; "
           f"print(web_auth.totp_at('{totp_secret}', int(time.time()//30)))\")\n")
+    # Jinja caches templates unless debug is on, and this harness exists to show a template
+    # edit without a deploy -- without this, editing dashboard.html and reloading the page
+    # showed the previous markup, which is the same failure the `no-store` on static files
+    # above was added to prevent. Only the template cache is turned off: debug stays False,
+    # so no reloader and no interactive debugger.
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.jinja_env.auto_reload = True
     app.run(host="127.0.0.1", port=args.port, debug=False, use_reloader=False)
     return 0
 
