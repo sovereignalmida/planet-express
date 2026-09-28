@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
@@ -994,6 +995,59 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
 
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
+@dataclass(frozen=True)
+class Admission:
+    """Whether the pipeline's run slot was taken, and if not, why not.
+
+    The admission check and the run used to be inseparable, which was fine while Telegram was
+    the only caller: it could be told "host busy" in a message. A dashboard button needs the
+    answer synchronously, in the same request that asked -- so the check is its own function,
+    and the caller that already holds the slot passes admitted=True rather than racing for it
+    a second time.
+    """
+
+    ok: bool
+    kind: str = ""          # "" | "maintenance" | "busy" | "running"
+    detail: str = ""
+
+    @property
+    def reason(self) -> str:
+        if self.kind == "maintenance":
+            return f"maintenance in progress ({self.detail})"
+        if self.kind == "busy":
+            return f"host busy ({self.detail})"
+        if self.kind == "running":
+            return "a scan is already running"
+        return ""
+
+    @property
+    def message(self) -> str:
+        if self.kind == "maintenance":
+            return f"🧰 Maintenance in progress ({self.detail}) — scan not started."
+        if self.kind == "busy":
+            return f"⏳ Host busy ({self.detail}) — scan not started. Try again shortly."
+        return "⚠️ Pipeline already running or awaiting approval. Please wait."
+
+
+def admit_pipeline_run(state: PipelineState, *, scheduled: bool = False) -> Admission:
+    """Take the pipeline's run slot (IDLE -> RUNNING), or say why it could not be taken.
+
+    On Admission(ok=True) the slot IS held, and whoever called this owns returning the state
+    to IDLE -- which run_pipeline(admitted=True) does on every path including its except.
+    """
+    while not state.try_start_run():
+        if window := state.maintenance():
+            if scheduled:
+                _wait_for_maintenance(state)
+                continue
+            return Admission(False, "maintenance", window.reason)
+        owner = state.mutation_owner
+        if owner:
+            return Admission(False, "busy", owner)
+        return Admission(False, "running")
+    return Admission(True)
+
+
 def run_pipeline(
     notifier: Notifier,
     state: PipelineState,
@@ -1002,24 +1056,19 @@ def run_pipeline(
     scheduled: bool = False,
     incident_store: Store | None = None,
     commands: CommandService | None = None,
+    admitted: bool = False,
 ) -> None:
     """
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
     mode: 'full' | 'status' | 'updates'
+
+    admitted=True means the caller already holds the run slot from admit_pipeline_run().
     """
-    while not state.try_start_run():
-        if window := state.maintenance():
-            if scheduled:
-                _wait_for_maintenance(state)
-                continue
-            notifier.notify(f"🧰 Maintenance in progress ({window.reason}) — scan not started.")
+    if not admitted:
+        admission = admit_pipeline_run(state, scheduled=scheduled)
+        if not admission.ok:
+            notifier.notify(admission.message)
             return
-        owner = state.mutation_owner
-        if owner:
-            notifier.notify(f"⏳ Host busy ({owner}) — scan not started. Try again shortly.")
-        else:
-            notifier.notify("⚠️ Pipeline already running or awaiting approval. Please wait.")
-        return
     try:
         # ── Step 1: Leela scans ──────────────────────────────────────────────
         notifier.notify("👁️ *Leela scanning...*")
@@ -2269,9 +2318,60 @@ def digest_scheduler_loop(notifier: Notifier) -> None:
         time.sleep(60)  # clear the target minute before recomputing next day's delay
 
 
+def make_scan_starter(notifier: Notifier, state: PipelineState, store: Store | None,
+                      commands: CommandService | None) -> Callable[[str], dict]:
+    """The dashboard's SCAN button, as one callable the RPC layer can hand an operator name.
+
+    It runs the same pipeline Telegram's /check runs -- scan, findings, plans, and the progress
+    messages -- rather than a quieter dashboard-only variant, so SCAN means one thing wherever
+    it is pressed.
+
+    What it adds is a synchronous answer. Telegram could be told "host busy" in a message
+    arriving whenever it arrives; someone who just clicked a button needs to know in that
+    request whether anything started. Hence admit_pipeline_run() first, then the thread.
+    """
+
+    def announce_and_run(operator: str) -> None:
+        """Who started it, then the scan. Both inside the thread, deliberately.
+
+        Announcing from start_scan() would have put a Telegram round trip inside the RPC call
+        the dashboard is waiting on: Telegram can block for tens of seconds, the dashboard's
+        RPC client gives up in five, and the browser would say the scan could not start while
+        it was already running. Worse, a notify() that RAISED there would have left the run
+        slot held by a pipeline that never ran.
+        """
+        try:
+            notifier.notify(f"🛰 Scan started from the dashboard by {TelegramClient.s(operator)}.")
+        except Exception:
+            # The scan matters; the announcement does not.
+            log.warning("Could not announce the dashboard scan", exc_info=True)
+        run_pipeline(notifier, state, "full", incident_store=store, commands=commands,
+                     admitted=True)
+
+    def start_scan(operator: str) -> dict:
+        admission = admit_pipeline_run(state, scheduled=False)
+        if not admission.ok:
+            return {"status": "busy", "reason": admission.reason}
+        thread = threading.Thread(
+            target=announce_and_run, args=(operator,), daemon=True, name="dashboard-scan",
+        )
+        try:
+            thread.start()
+        except Exception:
+            # The run slot is taken and run_pipeline -- which is what releases it -- never
+            # ran. Put the state back, or core would refuse every scan until it restarts.
+            log.exception("Dashboard scan thread would not start")
+            state.transition(PipelineState.IDLE)
+            raise
+        return {"status": "started"}
+
+    return start_scan
+
+
 # ── Main bot loop ─────────────────────────────────────────────────────────────
 def _start_dashboard_rpc(
-    commands: CommandService, store: Store, notifier: Notifier, chat=None, config_service=None
+    commands: CommandService, store: Store, notifier: Notifier, chat=None, config_service=None,
+    start_scan=None,
 ) -> RpcServer | None:
     """Optional dashboard transport: installation failures never prevent polling."""
     try:
@@ -2285,7 +2385,8 @@ def _start_dashboard_rpc(
             raise ValueError("no resolvable RPC peer users")
         server = RpcServer(
             config.RPC_SOCKET,
-            build_core_handlers(commands, store, notifier, chat, config_service),
+            build_core_handlers(commands, store, notifier, chat, config_service,
+                                start_scan=start_scan),
             allowed_uids,
             config.RPC_GROUP,
         )
@@ -2479,7 +2580,10 @@ def run_bot() -> None:
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
 
-    rpc_server = _start_dashboard_rpc(commands, store, notifier, chat, config_service)
+    rpc_server = _start_dashboard_rpc(
+        commands, store, notifier, chat, config_service,
+        start_scan=make_scan_starter(notifier, state, store, commands),
+    )
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")

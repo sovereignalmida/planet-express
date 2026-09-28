@@ -186,10 +186,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return request.path.startswith("/api/chat")
 
     def is_json_request():
+        # This list is not only about response format: POST CSRF is checked for exactly the
+        # paths it matches (see the auth hook below), so a JSON route left out of it is a
+        # route with no CSRF check. /api/scan starts a host-wide scan and belongs here.
         return (is_chat_request() or request.path.startswith("/api/containers/")
                 or request.path.startswith("/api/approvals")
                 or request.path.startswith("/api/executions/")
                 or request.path.startswith("/api/incidents")
+                or request.path.startswith("/api/scan")
                 or request.path.startswith("/api/config"))
 
     def check_csrf():
@@ -255,6 +259,11 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             status, message = {"bad_request": (400, "Invalid incident request"),
                                "not_found": (404, "Incident not found")}.get(
                                    error.code, (503, "Incidents unavailable; try again shortly"))
+            return jsonify(error=message), status
+        if request.path.startswith("/api/scan"):
+            status, message = {"bad_request": (400, "Invalid scan request"),
+                               "unavailable": (503, "Scanning is unavailable")}.get(
+                                   error.code, (503, "Core unavailable; try again shortly"))
             return jsonify(error=message), status
         # Fail closed for this request only: keep the cookies, so a core restart doesn't
         # sign every operator out.
@@ -549,6 +558,16 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return jsonify(core("incident.propose", {
             "incident_id": incident_id, "operator": g.operator,
         }))
+
+    @app.post("/api/scan")
+    def scan_start():
+        """Run the same full pipeline Telegram's /check runs.
+
+        The SCAN control was an <a href="/"> that reloaded the page. Core answers
+        synchronously -- "started", or "busy" with the reason -- because whoever pressed the
+        button is looking at it now, not at Telegram.
+        """
+        return jsonify(core("scan.start", {"operator": g.operator}))
 
     @app.post("/api/executions/<execution_id>/abort")
     def execution_abort(execution_id):

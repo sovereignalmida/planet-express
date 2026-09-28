@@ -38,7 +38,17 @@
       <span class="led-dot status-{{ ctx.health.status }}"></span>
       <span>pipeline {{ ctx.pipeline_status.state }} · scanned {{ ctx.health.last_scan or "never" }}</span>
     </div>
-    <a class="refresh-btn scan-btn" href="/">SCAN ✈</a>
+    {# Server-rendered from the live pipeline state, so the 60s swap of #dashboard-live is
+       what puts the button back when a scan ends -- the client is optimistic in between,
+       never authoritative. It used to be <a href="/">, which reloaded the page and scanned
+       nothing. #}
+    <span class="scan-group">
+      <button class="refresh-btn scan-btn" type="button" id="scan-btn"
+              {% if ctx.pipeline_status.state == "running" %}data-scanning="1" disabled{% endif %}>
+        {{ "SCANNING…" if ctx.pipeline_status.state == "running" else "SCAN ✈" }}
+      </button>
+      <span class="scan-note" id="scan-note" role="status" aria-live="polite"></span>
+    </span>
     <form class="pe-logout" method="post" action="{{ url_for('logout') }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="refresh-btn logout-btn" type="submit">LOG OUT</button>
@@ -262,7 +272,7 @@
           <div class="alarm-orb">?</div>
           <div class="alarm-text">
             <p class="alarm-title">BACKUP STATUS UNKNOWN</p>
-            <p class="alarm-sub">Last scan ran <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span>, which doesn't read backup or certificate state. This is not a failure — it's a blind spot. Full scans run automatically every few hours — this dashboard doesn't trigger one itself.</p>
+            <p class="alarm-sub">Last scan ran <span class="mono-inline">(mode: {{ ctx.health.last_scan_mode or "?" }})</span>, which doesn't read backup or certificate state. This is not a failure — it's a blind spot. Full scans run automatically every few hours, and SCAN ✈ in the header runs one now.</p>
           </div>
           <a class="verdict-action" href="/">CHECK AGAIN ⟳</a>
         </section>
