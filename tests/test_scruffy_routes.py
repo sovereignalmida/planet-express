@@ -1408,7 +1408,7 @@ def test_core_is_not_asked_for_routers_when_traefik_is_down(monkeypatch):
 # ── enforced config comes from core, not this process's import (T46.1 P1 #2) ─────
 
 def test_index_uses_core_s_enforced_links(monkeypatch):
-    client, rpc, seen = _launch_link_client(monkeypatch)
+    client, rpc, _seen = _launch_link_client(monkeypatch)
     monkeypatch.setattr(casa_scruffy.config, "LAUNCH_LINKS", [])     # stale import
     rpc.results["config.enforced"] = {
         "paused_containers": [], "backup_jobs": ["weekly"],
@@ -1448,7 +1448,7 @@ def test_index_falls_back_to_its_own_import_when_core_cannot_say(monkeypatch):
 # ── container widget route (T46.3) ────────────────────────────────────────────────
 
 def test_the_widget_route_needs_a_login_unlike_the_public_health_widget():
-    client, rpc, now = make_client()
+    client, rpc, _now = make_client()
     assert client.get("/api/containers/media/sonarr/widget").status_code in (302, 401)
     assert all(method != "query.widget_target" for method, _ in rpc.calls)
 
@@ -1541,7 +1541,7 @@ def test_container_detail_without_a_route_offers_no_launch(tmp_path, monkeypatch
 
 
 def test_the_links_endpoint_refuses_a_bad_target():
-    client, rpc, now = make_client()
+    client, _rpc, now = make_client()
     assert login(client, now).status_code == 302
     assert client.get("/api/containers/me dia/x/links").status_code == 404
 

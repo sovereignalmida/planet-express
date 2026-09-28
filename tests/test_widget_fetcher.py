@@ -20,7 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
-from planet_express.widgets import fetcher, registry  # noqa: E402
+from planet_express.widgets import fetcher, registry
 
 SECRET = "s3cr3t-sonarr-key-value"
 KEY = ("media", "sonarr")
@@ -738,7 +738,7 @@ def test_a_predecessors_late_job_does_not_overwrite_its_successors_answer():
 
 def test_one_widgets_values_are_never_shown_for_another():
     """A match-list edit can move a running container to a different widget."""
-    f, _, now = _fetcher({(A, Q): _Reply()})
+    f, _, _now = _fetcher({(A, Q): _Reply()})
     f.fetch(_target(), KEY)
     other = {"widget": "radarr", "via": "/x", "state": "error", "error": "timeout"}
     kept = f._store(KEY, _target(), other, ttl=fetcher.FAILED_CACHE_SECONDS)

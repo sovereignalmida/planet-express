@@ -901,7 +901,11 @@ def parse_router_owners(out: str, ids: list[str]) -> dict:
         claiming = status in _CLAIMING_STATUSES
         labels = json.loads(labels_json) if labels_json not in ("", "null") else {}
         if not isinstance(labels, dict):
-            raise ValueError("malformed labels")
+            # ValueError, not the TypeError ruff would prefer: this function's contract is
+            # that ANY malformed read raises ValueError, and read_router_owners catches
+            # exactly that. A TypeError would escape it and take the dashboard down instead
+            # of costing the links.
+            raise ValueError("malformed labels")  # noqa: TRY004
         rows.append((name, container_id, running, claiming, network_mode, labels, status))
     if sorted(row[1] for row in rows) != sorted(ids):
         raise ValueError("inspect did not answer for exactly the listed containers")

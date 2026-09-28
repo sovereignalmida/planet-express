@@ -1278,7 +1278,7 @@ def test_a_retry_with_no_budget_left_is_not_reported_as_a_timeout(monkeypatch):
 
 @pytest.mark.parametrize("error,code", [("timeout", "timeout"), ("unavailable", "unavailable")])
 def test_a_failed_listing_backs_off_so_a_sick_daemon_costs_one_load(monkeypatch, error, code):
-    handler, inspected, clock = _routers_handler(
+    handler, _inspected, clock = _routers_handler(
         monkeypatch, running=[{"ok": False, "error": error}, _listed()], reads=[])
     with pytest.raises(RpcError) as raised:
         handler({})
@@ -1383,7 +1383,7 @@ def test_an_unexpected_exception_backs_off_like_a_failed_read(monkeypatch):
 def test_a_race_that_runs_out_of_retries_does_not_back_off_once(monkeypatch):
     """Docker answered; the containers just kept changing under the read."""
     moving = {**_R_OK, "containers": [[_R_A[0], "MOVING", True]]}
-    handler, inspected, _ = _routers_handler(
+    handler, _inspected, _ = _routers_handler(
         monkeypatch, running=[_listed(_R_A), _listed(_R_A), _listed(_R_A)],
         reads=[dict(moving), dict(moving), dict(_R_OK)])
     with pytest.raises(RpcError):
@@ -1423,7 +1423,7 @@ def test_an_unresolvable_namespace_owner_is_not_reread_until_a_container_changes
 
 def test_a_cache_hit_between_two_races_means_they_were_not_consecutive(monkeypatch):
     moving = {**_R_OK, "containers": [[_R_A[0], "MOVING", True]]}
-    handler, inspected, _ = _routers_handler(
+    handler, _inspected, _ = _routers_handler(
         monkeypatch,
         running=[_listed(_R_A), _listed(_R_A),        # race, race: out of retries (1st)
                  _listed(_R_A),                       # a good read ...

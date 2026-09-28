@@ -675,7 +675,7 @@ def index(core=None):
     if core is not None:
         try:
             enforced = dashboard_data.parse_enforced(core("config.enforced", {}))
-        except Exception:  # noqa: BLE001 -- see below
+        except Exception:
             current_app.logger.warning("Could not read enforced config from core", exc_info=True)
         else:
             refused = {"paused_containers", "backup_jobs", "links"} - set(enforced)

@@ -898,77 +898,27 @@ def test_check_backups_only_queries_enabled_jobs(monkeypatch):
     assert all('daily-borg-backup' not in arg for cmd in commands for arg in cmd)
     assert queried_units == ['weekly-borg-backup.service', 'weekly-borg-backup.timer']
 
+def test_the_last_container_in_the_restart_inspect_keeps_its_restart_count(monkeypatch):
+    """docker inspect's output is stripped before splitting, so a trailing field that is empty
+    on the last line used to make that line one field short -- it was skipped, and the
+    container lost its RestartCount and with it crash-loop detection. The address field that
+    caused it is gone, but the parser still has to hold for the last line."""
+    ps_lines = "\n".join(
+        f'{{"name":"{name}","status":"{status}","image":"img"}}' 
+        for name, status in (("CASA_OK", "Up 2 days"), ("CASA_CRASHY", "Restarting (1) 3s ago"))
+    )
+    restart = [
+        "/CASA_OK\t0\trunning\t2026-09-25T10:00:00Z\t0\t\t\t\t\t0",
+        "/CASA_CRASHY\t7\trestarting\t2026-09-25T10:00:00Z\t0\t\t\t\t\t0",
+    ]
 
-
-# ── Container addresses for the launch-link join (T46.1) ────────────────────────
-
-_PS = [("CASA_ACTUAL", "Up 2 days"), ("CASA_GLUETUN", "Up 2 days"),
-       ("CASA_QBIT", "Up 2 days"), ("CASA_CRASHY", "Restarting (1) 5 seconds ago")]
-
-
-def _fake_container_scan(monkeypatch, network_lines, restart_lines=None):
-    """Both inspect calls, with the output stripped the way the real _run() strips it."""
-    ps = "\n".join(json.dumps({"name": n, "status": st, "image": "img"}) for n, st in _PS)
-    if restart_lines is None:
-        restart_lines = [f"/{n}\t0\trunning\t2026-09-25T10:00:00Z\t0\t\t\t\t\t0" for n, _ in _PS]
-
-    def fake_run(cmd, timeout=30, env=None):
-        if isinstance(cmd, str):
-            return 0, ps.strip(), ""
-        lines = network_lines if "NetworkSettings" in cmd[3] else restart_lines
-        return 0, "\n".join(lines).strip(), ""
+    def fake_run(cmd, timeout=None):
+        if isinstance(cmd, list) and cmd[:2] == ["docker", "inspect"]:
+            return 0, "\n".join(restart) + "\n", ""
+        return 0, ps_lines + "\n", ""
 
     monkeypatch.setattr(casa_leela, "_run", fake_run)
-
-
-def test_container_scan_records_every_network_address(monkeypatch):
-    _fake_container_scan(monkeypatch, [
-        "/CASA_ACTUAL\taaa\tstacks_default\t172.18.0.14  192.168.1.60 fd00::14 ",
-        "/CASA_GLUETUN\tggg\tvpn\t172.30.0.2  ",
-        "/CASA_QBIT\tqqq\tcontainer:ggg\t",
-        "/CASA_CRASHY\tccc\thost\t",
-    ])
-    by_name = {c["name"]: c for c in casa_leela.check_containers()}
-    assert by_name["CASA_ACTUAL"]["ips"] == ["172.18.0.14", "192.168.1.60", "fd00::14"]
-    assert by_name["CASA_CRASHY"]["ips"] == []
-
-
-def test_a_container_in_anothers_network_namespace_reports_the_owners_address(monkeypatch):
-    """qbittorrent behind gluetun has no address of its own; Traefik's backend for it is
-    gluetun's. Both reporting it is what makes the join refuse it rather than hand qbit's
-    launch link to gluetun."""
-    _fake_container_scan(monkeypatch, [
-        "/CASA_ACTUAL\taaa\tstacks_default\t172.18.0.14  ",
-        "/CASA_GLUETUN\tggg\tvpn\t172.30.0.2  ",
-        "/CASA_QBIT\tqqq\tcontainer:ggg\t",
-        "/CASA_CRASHY\tccc\thost\t",
-    ])
-    by_name = {c["name"]: c for c in casa_leela.check_containers()}
-    assert by_name["CASA_QBIT"]["ips"] == by_name["CASA_GLUETUN"]["ips"] == ["172.30.0.2"]
-
-
-def test_an_empty_address_on_the_last_line_survives_the_strip(monkeypatch):
-    """_run() strips the whole output, taking the last line's trailing tab with it."""
-    _fake_container_scan(monkeypatch, [
-        "/CASA_ACTUAL\taaa\tstacks_default\t172.18.0.14  ",
-        "/CASA_CRASHY\tccc\thost\t",
-    ])
-    by_name = {c["name"]: c for c in casa_leela.check_containers()}
-    assert by_name["CASA_CRASHY"]["ips"] == []
-    assert by_name["CASA_ACTUAL"]["ips"] == ["172.18.0.14"]
-
-
-def test_collecting_addresses_leaves_crash_loop_detection_on_the_last_container(monkeypatch):
-    """The first version of this put the address field last in the restart inspect, where the
-    strip made the last line one field short and it was skipped -- losing its RestartCount."""
-    restart = [f"/{n}\t0\trunning\t2026-09-25T10:00:00Z\t0\t\t\t\t\t0" for n, _ in _PS[:-1]]
-    restart.append("/CASA_CRASHY\t7\trestarting\t2026-09-25T10:00:00Z\t0\t\t\t\t\t0")
-    _fake_container_scan(monkeypatch, ["/CASA_CRASHY\tccc\thost\t"], restart_lines=restart)
     by_name = {c["name"]: c for c in casa_leela.check_containers()}
     assert by_name["CASA_CRASHY"]["restart_count"] == 7
     assert by_name["CASA_CRASHY"].get("crash_looping") is True
-
-
-def test_a_container_missing_from_inspect_has_no_addresses(monkeypatch):
-    _fake_container_scan(monkeypatch, [])
-    assert all(c["ips"] == [] for c in casa_leela.check_containers())
+    assert by_name["CASA_OK"]["restart_count"] == 0

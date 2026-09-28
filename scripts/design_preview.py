@@ -299,7 +299,7 @@ def fixture_owners() -> dict:
     routers, services = {}, {}
     for router in fixture_routers()["routers"]:
         short, _, provider = router["name"].partition("@")
-        base = short[:-4] if short.endswith("-lan") else short
+        base = short.removesuffix("-lan")
         if provider == "docker" and base in containers:
             routers[short] = containers[base]
             services[router["service"]] = containers[base]
@@ -424,7 +424,7 @@ class OfflineRpc:
             return {"ok": True, "result": {
                 "ok": True, "cursor": "2026-09-27T12:00:02Z", "cursor_hashes": [], "skipped": False,
                 "started_at": None,
-                "lines": [{"ts": "2026-09-27T12:00:0%dZ" % i, "stream": "stdout",
+                "lines": [{"ts": f"2026-09-27T12:00:0{i}Z", "stream": "stdout",
                            "text": f"fixture log line {i}"} for i in range(3 if first else 0)]}}
         return {"ok": True, "result": self.EMPTY.get(method, {})}
 

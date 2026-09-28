@@ -106,9 +106,7 @@ def _slim_snapshot(snapshot: dict) -> dict:
     """Reduce snapshot to only what Hermes needs — keeps token count low.
     Healthy running containers are noise; only problems and summary matter."""
     containers = snapshot.get("containers", [])
-    # Container addresses are for the dashboard's launch-link join, not for diagnosis.
-    problem_containers = [{k: v for k, v in c.items() if k != "ips"}
-                          for c in containers if c.get("issue")]
+    problem_containers = [c for c in containers if c.get("issue")]
     healthy_count = len(containers) - len(problem_containers)
 
     stack_completeness = snapshot.get("stack_completeness", [])

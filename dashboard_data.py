@@ -298,19 +298,6 @@ def summarize_containers(enforced: dict | None = None) -> dict:
     }
 
 
-def container_ips() -> dict:
-    """{container: [ip, ...]} from the last scan that collected containers, else {}.
-
-    The launch-link join (casa_scruffy_net.container_urls) needs it. A snapshot from a mode
-    that does not collect containers has none, so it yields no links rather than stale ones.
-    """
-    monitor = load_monitor()
-    if not monitor or monitor.mode not in _MODES_WITH_CONTAINERS:
-        return {}
-    return {str(c["name"]): list(c.get("ips") or [])
-            for c in monitor.containers if isinstance(c, dict) and c.get("name")}
-
-
 def summarize_stack_completeness() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_STACK_COMPLETENESS:

@@ -290,7 +290,7 @@ def http_get_json(address: str, port: int, path: str, *, headers: dict, timeout:
                 raise _Failure("connection dropped")
         except _Failure:
             raise
-        except socket.timeout:
+        except TimeoutError:
             raise _Failure("timeout") from None
         except (OSError, http.client.HTTPException, ValueError):
             # Includes the watchdog's shutdown, an over-long line, too many headers, bad chunks.
@@ -438,7 +438,7 @@ class WidgetFetcher:
         if starting:
             try:
                 self._start(lambda: self._run(job, job_key, key, target, widget, asked))
-            except Exception:  # noqa: BLE001 -- e.g. no thread to start: release the slot
+            except Exception:
                 log.warning("Could not start a widget fetch", exc_info=True)
                 with self._lock:
                     self._inflight.pop(job_key, None)
@@ -464,7 +464,7 @@ class WidgetFetcher:
                 answer = self._with_stale(key, target, widget, answer)
             # What the cache kept: a fresh good answer, if one arrived while this failed.
             answer = self._store(key, target, answer, started=asked)
-        except Exception:  # noqa: BLE001 -- one widget's failure is its own panel's
+        except Exception:
             log.warning("Widget %s fetch failed unexpectedly", widget["name"], exc_info=True)
             try:
                 # Cached like any failure, or a broken widget is re-fetched -- key and all --
@@ -554,7 +554,7 @@ class WidgetFetcher:
             summary = normalise_summary(widget["summarise"](responses))
         except _Failure as failure:
             return {**base, "state": "error", "error": failure.reason}
-        except Exception:  # noqa: BLE001 -- one widget's bug costs its own panel
+        except Exception:
             log.warning("Widget %s failed to summarise its answer", widget["name"], exc_info=True)
             return {**base, "state": "error", "error": "widget failed to read the answer"}
         return {**base, "state": "ok", "fetched_at": _iso(self._wall()), **summary}
