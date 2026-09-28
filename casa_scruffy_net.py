@@ -326,17 +326,27 @@ def router_urls(router: dict, *, lan_domain: str) -> list:
     return urls
 
 
-def link_pills(zones: dict, routers: list, *, lan_domain: str, detail_for=None) -> None:
+def link_pills(zones: dict, routers: list, *, lan_domain: str, detail_for=None,
+               icon_for=None) -> None:
     """Make each routing-matrix pill a link (v2.2 B). Mutates `zones` from group_routers().
 
     `href` opens the public host, `lan_href` the LAN one; a pill with both is drawn split.
     A pill with only one host has only `href`. A DOWN pill gets no URL -- its link is the
     container's detail view (`detail`), from `detail_for(router_name)`, where known.
+
+    `icon_for(router_name)` gives the pill its app icon, by the same router-to-container join
+    `detail_for` uses. None for a route no container declares -- a file-provider route to
+    another machine has no container here to take an icon from.
     """
     by_name = {str(r.get("name")): r for r in routers or [] if isinstance(r, dict)}
     for zone in zones.get("zones", []):
         for pill in zone.get("items", []):
-            pill.update(href=None, lan_href=None, detail=None)
+            # Across every router merged into this pill, not just the surviving one: a
+            # `-lan` twin folds into its sibling, and ownership may be readable for only one
+            # of the two. Same rule as `detail` below.
+            pill.update(href=None, lan_href=None, detail=None,
+                        icon=next((i for raw in pill.get("raws", [pill.get("raw")])
+                                   if (i := icon_for(raw or ""))), None) if icon_for else None)
             if pill.get("down"):
                 if detail_for is not None:
                     pill["detail"] = next((d for raw in pill.get("raws", [pill["raw"]])

@@ -23,6 +23,7 @@ from pydantic import TypeAdapter, ValidationError
 
 import config
 from config_schema import LaunchLink
+from planet_express.core.icons import monogram as icon_monogram
 from state_models import (
     Findings,
     MonitorSnapshot,
@@ -1228,13 +1229,18 @@ def split_links(urls) -> dict:
             "host": primary.split("://", 1)[-1] if primary else None}
 
 
-def attach_launch_links(services: dict, launch_urls: dict, widget_containers=frozenset()) -> None:
+def attach_launch_links(services: dict, launch_urls: dict, widget_containers=frozenset(),
+                        icons=None) -> None:
     """Fold launch links (keyed by container) onto the Services panel's stacks and members.
 
     `widget_containers` are the containers whose image a widget file names -- the drawer's ◉
     hint. It is a hint: whether a widget actually answers (and gets a key) is decided when the
     detail view asks, by core, against the image's provenance.
+
+    `icons` maps a container to an icon slug. A member with no entry renders a monogram, which
+    is the normal outcome for 26 of this host's 85 containers, not a failure.
     """
+    icons = icons or {}
     total = 0
     for stack in services.get("stacks", []):
         count = 0
@@ -1242,6 +1248,10 @@ def attach_launch_links(services: dict, launch_urls: dict, widget_containers=fro
             links = split_links(launch_urls.get(member.get("container")) if member.get("container") else None)
             member.update(links)
             member["widget"] = member.get("container") in widget_containers
+            member["icon"] = icons.get(member.get("container"))
+            # Always present, so a row that never gets an icon still fills the same frame and
+            # the column of names stays aligned.
+            member["mono"] = icon_monogram(member.get("service") or "")
             count += links["launchable"]
         stack["launchable"] = count
         total += count

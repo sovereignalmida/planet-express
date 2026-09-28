@@ -12,7 +12,9 @@
 </head>
 <body>
 <main id="container-detail" class="container-detail" data-api="{{ url_for('container_get', stack=stack, service=service) }}">
-  <header><a class="refresh-btn" href="/#overview">‹ OVERVIEW</a><h1>{{ service }}</h1><p>{{ stack }} · <span id="header-image">—</span></p>
+  <header><a class="refresh-btn" href="/#overview">‹ OVERVIEW</a>
+    <span class="pe-icon lg">{% if icon %}<img src="{{ url_for('container_icon', slug=icon) }}" alt="" width="40" height="40">{% else %}<span class="pe-icon-mono">{{ mono }}</span>{% endif %}</span>
+    <div class="pe-detail-title"><h1>{{ service }}</h1><p>{{ stack }} · <span id="header-image">—</span></p></div>
     <span id="container-launch" class="container-launch"
           data-api="{{ url_for('container_links', stack=stack, service=service) }}" hidden></span>
   </header>
@@ -24,7 +26,8 @@
   {# v2.2: the app's own readout, second after the verdict. Filled by container.js from
      /api/containers/<stack>/<service>/widget; left out entirely when there is no widget. #}
   <section id="widget" class="pe-widget" aria-label="Live widget"
-           data-api="{{ url_for('container_widget', stack=stack, service=service) }}" hidden></section>
+           data-api="{{ url_for('container_widget', stack=stack, service=service) }}"
+           {% if icon %}data-icon="{{ url_for('container_icon', slug=icon) }}"{% endif %} hidden></section>
   <p id="widget-status" class="pe-visually-hidden" role="status"></p>
   <section class="container-vitals" aria-label="Vitals">
     {% for key, label in [('cpu', 'CPU'), ('memory', 'MEMORY')] %}

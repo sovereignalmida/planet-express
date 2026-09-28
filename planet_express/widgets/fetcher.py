@@ -41,12 +41,12 @@ import ipaddress
 import json
 import logging
 import math
-import socket
 import threading
 import time
 from datetime import datetime, timezone
 
 from planet_express.core.numbers import finite
+from planet_express.core.sockets import shutdown_sock
 from planet_express.widgets import registry
 
 log = logging.getLogger("planetexpress.widgets.fetcher")
@@ -127,12 +127,9 @@ def _credentials(widget: dict, env) -> tuple[dict | None, list[str]]:
     return {"Authorization": "Basic " + base64.b64encode(pair).decode("ascii")}, []
 
 
-def _shutdown_sock(sock):
-    if sock is not None:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+# Shared with the icon cache, which drives http.client against a CDN and hits the same wall.
+# One copy, because a safety primitive with two is one that gets fixed once.
+_shutdown_sock = shutdown_sock
 
 
 # Bytes one call's status line and headers may take, on top of the body budget (which also

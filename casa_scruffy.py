@@ -21,6 +21,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     session,
     url_for,
 )
@@ -311,7 +312,9 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
 
     @app.after_request
     def private_response(response):
-        if not request.path.startswith("/static/") and request.path != "/api/widget":
+        if (not request.path.startswith("/static/")
+                and not request.path.startswith("/icons/")
+                and request.path != "/api/widget"):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -419,7 +422,32 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     @app.get("/containers/<stack>/<service>")
     def container_detail(stack, service):
         container_target(stack, service)
-        return render_template("container.html", stack=stack, service=service, operator=g.operator)
+        # container_for() maps stack/service to the container the last scan recorded; the
+        # icon map is keyed by container, same as the drawer's.
+        container = dashboard_data.container_for(stack, service)
+        icon = _container_icons().get(container) if container else None
+        return render_template("container.html", stack=stack, service=service,
+                               operator=g.operator, icon=icon,
+                               mono=dashboard_data.icon_monogram(service))
+
+    @app.get("/icons/<slug>")
+    def container_icon(slug):
+        """An app icon, from disk. Never fetches: an uncached slug is a 404 and a monogram.
+
+        Behind the login gate like everything else -- which icons exist says which apps run
+        here, and there is no reason to answer that before someone signs in.
+        """
+        path = icon_cache().path_for(slug)
+        if path is None:
+            abort(404)
+        response = send_file(path, mimetype="image/png", conditional=True)
+        # no-cache, not max-age: the browser must ask every time, so the login gate above is
+        # checked every time. A stored icon would otherwise stay readable on a shared machine
+        # for as long as it was fresh -- after the operator logged out -- which is the exact
+        # question this route is behind the gate to avoid answering. conditional=True still
+        # answers the revalidation with a 304, so the bytes cross the wire once.
+        response.headers["Cache-Control"] = "private, no-cache"
+        return response
 
     @app.get("/api/containers/<stack>/<service>/links")
     def container_links(stack, service):
@@ -666,6 +694,40 @@ def _widget_containers() -> frozenset:
                      if registry.widgets_matching(image, widgets))
 
 
+_ICON_CACHE = None
+
+
+def icon_cache():
+    """The icon cache, read-only from this process.
+
+    The dashboard never fills this. It runs as planetexpress-web, which web_access.py grants
+    rX on state/ and nothing more, so warming here would fail silently and every container
+    would render a monogram. Core warms it when a scan writes the snapshot; this process
+    serves what is already on disk.
+    """
+    global _ICON_CACHE
+    if _ICON_CACHE is None:
+        from planet_express.core.iconcache import IconCache
+
+        _ICON_CACHE = IconCache(Path(config.STATE_DIR) / "icons")
+    return _ICON_CACHE
+
+
+def _container_icons() -> dict:
+    """Container -> icon slug, as the last scan resolved it.
+
+    Read, never derived. Core resolves the slug (honouring a `planetexpress.icon` label),
+    fetches the file and records the map; this process serves what is on disk. That is what
+    keeps the override working on the container detail page, which renders without an RPC,
+    and while Traefik is down, which has nothing to do with what an app's icon is.
+    """
+    try:
+        return icon_cache().read_index()
+    except Exception:  # noqa: BLE001 -- an icon is not worth a 500
+        current_app.logger.warning("Could not read the resolved icon map")
+        return {}
+
+
 def index(core=None):
     # Live network pollers merged in separately from build_dashboard_context()'s
     # file-based state -- keeps the file-vs-live-HTTP boundary explicit here, in the
@@ -710,7 +772,8 @@ def index(core=None):
     ctx["router_zones"] = casa_scruffy_net.group_routers(ctx["traefik"]["routers"])
     ctx["launch_urls"], owners = _launch_links(core, ctx["traefik"], enforced)
     dashboard_data.attach_launch_links(ctx["services"], ctx["launch_urls"],
-                                       _widget_containers())
+                                       _widget_containers(),
+                                       _container_icons())
     # A DOWN pill links to the container's detail view, when core can say which container
     # declares that router and the scan which stack/service that container is.
     by_container = {member["container"]: (stack["name"], member["service"])
@@ -722,8 +785,16 @@ def index(core=None):
         container = (owners.get("routers") or {}).get(short) if provider == "docker" else None
         target = by_container.get(container)
         return url_for("container_detail", stack=target[0], service=target[1]) if target else None
+    container_icons = _container_icons()
+
+    def icon_for(raw):
+        short, _, provider = raw.partition("@")
+        container = (owners.get("routers") or {}).get(short) if provider == "docker" else None
+        return container_icons.get(container) if container else None
+
     casa_scruffy_net.link_pills(ctx["router_zones"], ctx["traefik"]["routers"],
-                                lan_domain=config.LAN_ONLY_DOMAIN, detail_for=detail_for)
+                                lan_domain=config.LAN_ONLY_DOMAIN, detail_for=detail_for,
+                                icon_for=icon_for)
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
     ctx["adguard_stats"] = dashboard_data.summarize_adguard(ctx["adguard"])
     ctx["overview_tiles"] = dashboard_data.summarize_overview_tiles(

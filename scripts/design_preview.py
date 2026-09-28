@@ -482,6 +482,10 @@ def main() -> int:
         write_fixtures(state)
         print("state: generated fixtures (a fault in every panel that can have one)")
 
+    # STATE_DIR too, not just the files under it: anything that keeps a cache beside the
+    # state files (the icon cache) would otherwise read and write the real one while a
+    # preview is running.
+    config.STATE_DIR = state
     config.STATE_MONITOR = state / "latest_monitor.json"
     config.STATE_FINDINGS = state / "latest_findings.json"
     config.STATE_STATUS = state / "run_status.json"

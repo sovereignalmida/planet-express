@@ -99,7 +99,19 @@
   }
   function head(led, name, sub, pill) {
     const bar = el("div", "pe-widget-head");
-    bar.append(el("span", "pe-widget-led " + led), el("span", "pe-widget-name", name));
+    bar.append(el("span", "pe-widget-led " + led));
+    // The container's own icon, chosen server-side: a widget's name is not always its icon
+    // slug (the adguard widget's icon is adguard-home), and this page already knows which
+    // icon this container resolved to. Absent when it has none, which is a monogram in the
+    // header and simply nothing here.
+    const src = get("widget").dataset.icon;
+    if (src) {
+      const glyph = el("img", "pe-icon-bare md");
+      glyph.src = src;
+      glyph.alt = "";
+      bar.append(glyph);
+    }
+    bar.append(el("span", "pe-widget-name", name));
     if (sub) bar.append(el("span", "pe-widget-via", sub));
     bar.append(el("span", "pe-widget-spacer"));
     if (pill) bar.append(el("span", "pe-widget-ro", pill));

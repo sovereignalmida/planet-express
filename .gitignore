@@ -4,6 +4,9 @@ __pycache__/
 
 # Runtime state and logs are host-specific, not part of the shipped project
 state/*.json
+# The app-icon cache: fetched PNGs, remembered misses and the resolved map. Host state
+# a scan writes, the same as the snapshots above.
+state/icons/
 logs/*.log
 
 # Real topology config is host-specific (real stack names, mounts) — never commit it.

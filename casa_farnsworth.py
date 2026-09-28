@@ -381,6 +381,143 @@ def _log_diagnostic_model_text(text: str) -> None:
         log.info(f"Diagnostic pre-check model text (not passed to planner): {text[:1000]}")
 
 
+# Everything one warm may spend: the two docker reads and the CDN fetching. A bound on the
+# work, not on the scan -- the scan does not wait for any of it (see _start_icon_warm).
+ICON_WARM_SECONDS = 30
+# One warm at a time, and never more. Every download is bounded by a watchdog that closes its
+# socket (see iconcache._download), so a warm always ends and this lock is always released --
+# which is what lets it be this simple. The earlier version, built on top of a download that
+# could hang forever, needed an expiring marker to escape a permanently held lock, and then
+# needed generation tokens because that marker allowed two warms to publish out of order.
+# Bounding the thing that actually misbehaved removed both.
+_icon_warm_running = threading.Lock()
+
+
+def _start_icon_warm(monitor_data: dict) -> None:
+    """Warm the icon cache without the scan waiting for it.
+
+    Off the critical path on purpose, and after several attempts to make it safe on it. A
+    bounded HTTP exchange cannot be built out of http.client's timeouts: they are per-recv
+    inactivity timeouts, so trickled headers stall getresponse() before any deadline check,
+    and a `Connection: close` response moves the socket onto the response and leaves
+    conn.sock None, past the reach of later reductions. Every one of those was a way for an
+    optional icon to hold the scan slot and delay findings behind it.
+
+    So the scan hands this off and returns. A warm already in flight means this snapshot is
+    skipped; scans are frequent and the next one carries the same containers. Exactly one
+    warm runs at a time, so no two can publish a map out of order and stuck workers cannot
+    pile up -- both of which were real once a download could hang.
+    """
+    if not _icon_warm_running.acquire(blocking=False):
+        return
+
+    def run():
+        try:
+            _warm_container_icons(monitor_data)
+        finally:
+            _icon_warm_running.release()
+
+    threading.Thread(target=run, name="icon-warm", daemon=True).start()
+
+
+def _warm_container_icons(monitor_data: dict) -> None:
+    """Fill the app-icon cache for the containers a scan saw. Runs on its own thread.
+
+    Here rather than in the dashboard because of who may write. `casa-dashboard.service` runs
+    as planetexpress-web under ProtectSystem=strict, and scripts/web_access.py grants that user
+    only rX on state/ -- it can read the cache and serve from it, and can never create or fill
+    it. Core owns state (it just wrote the snapshot above), so the fetching belongs here.
+
+    Non-fatal in every direction: a scan must not fail because a CDN did, and an icon that
+    does not arrive is a monogram.
+    """
+    try:
+        from planet_express.core import icons
+        from planet_express.core.iconcache import IconCache
+        from planet_express.execution import actions
+
+        containers = monitor_data.get("containers")
+        if not isinstance(containers, list) or not containers:
+            # An updates-only scan does not collect containers, so the snapshot carries an
+            # empty list -- not "this host has no containers". Writing the map from it would
+            # blank every icon on the dashboard until the next full scan rebuilt it.
+            return
+        # The `planetexpress.icon` labels, from the same bounded read the launch links use.
+        # Warming only image-derived slugs would leave the override half-wired: the dashboard
+        # would choose the label's icon and this would never fetch it, so every overridden
+        # container would show a monogram forever. One extra read-only inspect on a scan that
+        # already runs several is the cheaper half of that trade.
+        # One deadline over the whole thing, docker reads included. Bounding only the CDN
+        # fetching left the two reads below on DOCKER_TIMEOUT_SECONDS (120s each), so a
+        # stalled daemon could hold the pipeline for four minutes before the icon budget even
+        # started -- for a feature whose failure mode is a monogram.
+        deadline = time.monotonic() + ICON_WARM_SECONDS
+
+        def remaining():
+            return max(0.0, deadline - time.monotonic())
+
+        def docker_budget():
+            return min(actions.RPC_DOCKER_TIMEOUT_SECONDS, remaining())
+
+        labels, labels_read, covered = {}, False, set()
+        listing = actions.list_containers(timeout=docker_budget())
+        if listing.get("ok"):
+            owners = actions.read_router_owners([c[0] for c in listing["containers"]],
+                                                timeout=docker_budget())
+            if owners.get("ok"):
+                labels, labels_read = owners.get("icons") or {}, True
+                # Which containers the inspect actually spoke for. This read happens after
+                # the snapshot, so a container can be gone by now: it is then missing from
+                # `labels` for the same reason a container with no label is, and resolving it
+                # would publish an image-derived icon over an override -- or over an explicit
+                # `=none` -- for a container the dashboard is still showing.
+                covered = {str(row[1]) for row in owners.get("containers") or []
+                           if isinstance(row, (list, tuple)) and len(row) > 1}
+                # By name, which is not an identity: a container recreated under the same
+                # name between the snapshot and this read would pair its new labels with the
+                # snapshot's old image. Known and accepted (2026-09-28). The map describes the
+                # snapshot the dashboard is rendering, so the snapshot's image is the right
+                # source; only the labels could belong to a replacement, the window is the few
+                # seconds between the two reads, and the next scan corrects it. Closing it
+                # properly means carrying an id or image through ROUTERS_FORMAT and
+                # parse_router_owners -- the read every launch link depends on -- which is not
+                # a trade worth making until something actually sets `planetexpress.icon`.
+
+        cache = IconCache(config.STATE_DIR / "icons")
+        previous = cache.read_index()
+        resolved = {}
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            name = str(container.get("name") or "")
+            if not name:
+                continue
+            if name not in covered:
+                # Unknown, not unlabelled: keep what the last scan that could see it decided.
+                if name in previous:
+                    resolved[name] = previous[name]
+                continue
+            slug = icons.slug_for(str(container.get("image") or ""),
+                                  {icons.LABEL: labels.get(name)})
+            if slug:
+                resolved[name] = slug
+        if resolved:
+            cache.warm(sorted(set(resolved.values())), budget=remaining())
+        # Only when the labels were actually read. A failed inspect -- a container recreated
+        # between the list and the inspect is ordinary churn -- leaves `labels` empty, which
+        # is indistinguishable from "no container sets one". Publishing that would quietly
+        # replace every override with its image-derived fallback, and turn an explicit
+        # `planetexpress.icon=none` back into an icon, until some later scan happened to
+        # succeed. An unreadable label set is unknown, so the previous map stands.
+        #
+        # An empty `labels` from a read that DID succeed is a real answer and publishes: that
+        # is the ordinary case on this host, where nothing sets the label.
+        if labels_read:
+            cache.write_index(resolved)
+    except Exception:
+        log.warning("Could not warm the app-icon cache (non-fatal)", exc_info=True)
+
+
 class _AnthropicDiagnosticAdapter:
     def __init__(self, findings_json: str, *, system_prompt=DIAGNOSTIC_SYSTEM_PROMPT,
                  max_tokens=DIAGNOSTIC_MAX_TOKENS, user_prefix="Findings:\n"):
@@ -1082,6 +1219,7 @@ def run_pipeline(
         monitor = MonitorSnapshot(**snapshot)
         monitor_data = monitor.model_dump(mode="json")
         config.STATE_MONITOR.write_text(monitor.model_dump_json(indent=2))
+        _start_icon_warm(monitor_data)
 
         if mode == "full" and incident_store is not None:
             try:

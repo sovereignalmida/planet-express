@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import threading
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from planet_express.integrations.rpc import RpcError
 
 PASSPHRASE = "a long test passphrase"
 SECRET = web_auth.new_totp_secret()
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"a tiny but believable png"
+
 ENV = {
     "PE_DASHBOARD_SECRET_KEY": "s" * 48,
     "PE_OPERATORS": "alice,bob",
@@ -1623,3 +1626,79 @@ def test_a_scan_rpc_failure_answers_json_not_an_html_airlock(chat_client, code, 
 
     assert response.status_code == status
     assert response.get_json() == {"error": message}
+
+
+def test_the_dashboard_never_starts_a_thread_that_writes_the_icon_cache():
+    """The dashboard runs as planetexpress-web, which web_access.py grants rX on state/ and
+    nothing more. A warmer here could not create state/icons, would swallow the OSError, and
+    every container would render a monogram on the live host while passing every test on a
+    developer machine. Core warms the cache when a scan writes the snapshot.
+    """
+    before = {t.name for t in threading.enumerate()}
+    casa_scruffy.create_app(dict(ENV))
+    started = {t.name for t in threading.enumerate()} - before
+    assert not started, f"create_app started {started}"
+    assert not hasattr(casa_scruffy, "_warm_icons_forever")
+
+
+# ── /icons ──────────────────────────────────────────────────────────────────────
+
+def _icon_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(casa_scruffy, "_ICON_CACHE", None)
+    directory = tmp_path / "icons"
+    directory.mkdir()
+    return directory
+
+
+def test_an_icon_requires_a_signed_in_operator(monkeypatch, tmp_path):
+    """Which icons exist says which apps run here. No reason to answer that before login."""
+    _icon_dir(monkeypatch, tmp_path).joinpath("sonarr.png").write_bytes(PNG_BYTES)
+    client, _rpc, _now = make_client()
+    response = client.get("/icons/sonarr")
+    assert response.status_code in (302, 401)
+
+
+def test_a_cached_icon_is_served_as_a_png(monkeypatch, tmp_path):
+    _icon_dir(monkeypatch, tmp_path).joinpath("sonarr.png").write_bytes(PNG_BYTES)
+    client, _rpc, now = make_client()
+    login(client, now)
+    response = client.get("/icons/sonarr")
+    assert response.status_code == 200
+    assert response.mimetype == "image/png"
+    assert response.data == PNG_BYTES
+    # Revalidated, never stored fresh: a cached icon must not outlive the session on a
+    # shared machine, or it answers "which apps run here" after logout -- the question this
+    # route sits behind the login gate to avoid answering.
+    assert response.headers.get("Cache-Control") == "private, no-cache"
+    assert "max-age" not in response.headers.get("Cache-Control", "")
+
+
+def test_an_uncached_icon_is_a_404_and_never_a_fetch(monkeypatch, tmp_path):
+    """A 404 here is the normal path for 26 of this host's containers, and the page renders a
+    monogram. What it must never be is a request that goes out to a CDN."""
+    _icon_dir(monkeypatch, tmp_path)
+    client, _rpc, now = make_client()
+    login(client, now)
+    assert client.get("/icons/sonarr").status_code == 404
+
+
+@pytest.mark.parametrize("slug", ["..%2f..%2fetc%2fpasswd", "..", "a.b", "X", "-x", "x" * 80])
+def test_a_slug_that_is_not_a_slug_is_a_404(monkeypatch, tmp_path, slug):
+    _icon_dir(monkeypatch, tmp_path).joinpath("sonarr.png").write_bytes(PNG_BYTES)
+    client, _rpc, now = make_client()
+    login(client, now)
+    assert client.get(f"/icons/{slug}").status_code == 404
+
+
+def test_a_merged_lan_pill_keeps_an_icon_known_only_for_its_twin():
+    """A `-lan` router folds into its sibling, and ownership may be readable for only one of
+    the two. Looking at the surviving pill's `raw` alone drops the icon from a pill that has
+    one -- the same reason `detail` resolves across every merged router."""
+    import casa_scruffy_net
+
+    zones = {"zones": [{"items": [{"raw": "sonarr@docker", "name": "sonarr",
+                                   "raws": ["sonarr@docker", "sonarr-lan@docker"]}]}]}
+    casa_scruffy_net.link_pills(zones, [], lan_domain="casalan.com",
+                                icon_for=lambda raw: "sonarr" if raw == "sonarr-lan@docker" else None)
+    assert zones["zones"][0]["items"][0]["icon"] == "sonarr"

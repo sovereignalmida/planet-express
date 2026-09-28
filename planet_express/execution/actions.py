@@ -795,6 +795,8 @@ def read_facts(container: str, *, timeout) -> dict:
 # each found another way an address could be momentarily held by the wrong container.)
 # .State.Status, not .State.Running: the latter is also true for paused and restarting
 # containers, and the listing's {{.State}} is the Status -- the two must agree to be a key.
+# The container label that overrides which app icon a container shows.
+ICON_LABEL = "planetexpress.icon"
 ROUTERS_FORMAT = ("{{.Name}}\t{{.Id}}\t{{.State.Status}}\t{{.HostConfig.NetworkMode}}\t"
                   "{{json .Config.Labels}}")
 _CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
@@ -963,7 +965,13 @@ def parse_router_owners(out: str, ids: list[str]) -> dict:
     # merges or rejects; which of them a button should open is unknown, so it opens none.
     return {"routers": {r: n.pop() for r, n in router_claims.items() if len(n) == 1 and None not in n},
             "services": {s: n.pop() for s, n in service_claims.items() if len(n) == 1 and None not in n},
-            "containers": sorted([row[1], row[0], row[6]] for row in rows)}
+            "containers": sorted([row[1], row[0], row[6]] for row in rows),
+            # The app-icon override, from the labels this read already parsed. Here rather
+            # than from `docker ps --format` because {{json .Config.Labels}} survives a label
+            # value containing a quote or a tab; a per-label format string does not, and a
+            # container whose line fails to parse drops out of the scan entirely.
+            "icons": {row[0]: str(row[5][ICON_LABEL]) for row in rows
+                      if isinstance(row[5].get(ICON_LABEL), str)}}
 
 
 def list_containers(*, timeout) -> dict:

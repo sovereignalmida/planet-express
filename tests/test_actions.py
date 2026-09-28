@@ -426,6 +426,8 @@ def _owners(rows, ids=None):
         ids = [row.split("\t")[1] for row in rows]
     got = actions.parse_router_owners("\n".join(rows).strip(), ids)
     got.pop("containers")
+    # These cases are about router and service claims; the icon label has its own tests below.
+    got.pop("icons")
     return got
 
 
@@ -719,7 +721,7 @@ def test_read_router_owners_is_one_inspect_limited_to_containers(monkeypatch):
     calls = _docker(monkeypatch, (0, _row("CASA_X", _ID_A, {"traefik.http.routers.x.rule": "H"}), ""))
     assert actions.read_router_owners([_ID_A], timeout=4) == {
         "ok": True, "routers": {"x": "CASA_X"}, "services": {"CASA-X": "CASA_X"},
-        "containers": [[_ID_A, "CASA_X", "running"]]}
+        "containers": [[_ID_A, "CASA_X", "running"]], "icons": {}}
     assert calls[0][0] == ["docker", "inspect", "--type", "container",
                            "--format", actions.ROUTERS_FORMAT, _ID_A]
 
@@ -933,3 +935,47 @@ def test_an_owner_that_no_longer_exists_gets_no_addresses_not_an_error(monkeypat
                    owner_answer=(1, "", "No such container"))
     got = actions.read_widget_target("CASA_X", timeout=4)
     assert got["ok"] is True and got["addresses"] == []
+
+
+# ── the app-icon override label (T46.7) ─────────────────────────────────────────
+
+def _icons(rows, ids=None):
+    if ids is None:
+        ids = [row.split("\t")[1] for row in rows]
+    return actions.parse_router_owners("\n".join(rows).strip(), ids)["icons"]
+
+
+def test_the_icon_label_is_carried_from_the_labels_already_read():
+    assert _icons([_row("CASA_X", _ID_A, {"planetexpress.icon": "plex"})]) == {"CASA_X": "plex"}
+
+
+def test_a_container_without_the_icon_label_is_absent_rather_than_empty():
+    """Absent, so slug_for() falls through to the image. An empty string would read as a
+    declared value and is not one."""
+    assert _icons([_row("CASA_X", _ID_A, {"traefik.enable": "true"})]) == {}
+
+
+def test_the_icon_label_survives_a_value_that_would_break_a_format_string():
+    """The reason this lives here and not in `docker ps --format`: {{json .Config.Labels}}
+    encodes a quote or a tab, a per-label format string does not, and a container whose line
+    fails to parse would drop out of the scan altogether."""
+    hostile = 'he said "no"\tand a tab'
+    got = _icons([_row("CASA_X", _ID_A, {"planetexpress.icon": hostile})])
+    assert got == {"CASA_X": hostile}
+
+
+def test_a_non_string_icon_label_is_ignored():
+    """Docker labels are strings, but this parses JSON someone else produced."""
+    assert _icons([_row("CASA_X", _ID_A, {"planetexpress.icon": None})]) == {}
+
+
+def test_the_icon_map_uses_the_name_the_snapshot_uses():
+    """`docker inspect` reports .Name with a leading slash; `docker ps --format {{.Names}}`,
+    which is what the monitor snapshot holds, does not. The icon map is joined to the
+    snapshot by name, so it must carry the slashless form -- an off-by-one-slash here would
+    silently ignore every real `planetexpress.icon` label while slashless test fixtures passed.
+    """
+    cid = "a" * 64
+    row = "\t".join(["/CASA_X", cid, "running", "default",
+                     json.dumps({"planetexpress.icon": "plex"})])
+    assert actions.parse_router_owners(row, [cid])["icons"] == {"CASA_X": "plex"}
