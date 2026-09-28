@@ -469,3 +469,75 @@ on T46.3 found this, and requiring the image match was the fix.
   The key follows the operator's config, never a compose label; bridge-only and no shared
   namespace still apply. New capability: needs the gate. Worth building only if a container
   on the live host actually needs it.
+
+---
+
+## Integration, 2026-09-28
+
+Two lines of work existed: this branch (built in the cloud overnight) and `main`, which
+forked at the same commit. Both independently built the launch-link join twice over --
+backend address, then container labels. Neither was a superset of the other.
+
+`integration/v2.2` is this branch plus the three things only `main` had:
+
+| Replayed from main | Why it had to come across |
+| --- | --- |
+| `fix(canary)` | **This branch still had the line that took Traefik down on 2026-09-27** and would have done it again on the next weekly pass. See below. |
+| `fix(leela)` VPN sensor | The port-forwarding check fired on a condition that fixes itself: 3 false alerts on 09-26, each proposing a plan for a rotating port. |
+| `feat(dashboard)` SCAN | The header button was `<a href="/">`. It said SCAN and reloaded the page. |
+
+`main`'s own launch-link work was dropped in favour of this branch's, which is better: it
+mirrors Traefik's provider defaults, merges case-variant `traefik.enable` fail-closed, and
+handles shared network namespaces (gluetun with qbittorrent in `network_mode:
+service:gluetun`) -- a case main's version never reached.
+
+### The outage this branch would have repeated
+
+The weekly canary resolved a service's image with `docker compose config --images <service>`
+and took line `[0]`. Compose v2.39.1 returns every image in the RELATED set, in a
+non-deterministic order -- three consecutive runs against the live network stack put a
+different one first. On 2026-09-27 the first line was traefik's during a *gluetun* update;
+the step's own record says `{"image_reference": "traefik:v3.6.25"}`. Its rollback then ran
+`docker tag <gluetun's image> traefik:v3.6.25`, and Traefik exited with "command is unknown:
+--configFile" on every start, with `restart: no`, for four hours.
+
+A canary now takes its reference from the container it is updating, requires compose to
+configure that same image for that same service, and re-checks the binding immediately before
+the `docker tag`.
+
+### Settled here
+
+* **The Leela address leftover: removed.** `_inspect_network_addresses`, `ips` on every
+  container, and `dashboard_data.container_ips()` were the address join's side. Nothing has
+  called them since `fc4579a`, and they cost a `docker inspect` over every container on every
+  scan. `main` reached the same conclusion independently.
+* **Ruff: clean.** 17 errors, not the 10 recorded as pre-existing -- `main` is clean, so they
+  were this branch's.
+* **`split_image`/`normalise_image`** moved to `planet_express/core/images.py`, so the widget
+  registry and casa_leela read one parser rather than two.
+
+### The Codex pass this branch was missing
+
+Run over the whole branch (`codex review --base main`). One finding, on the fetcher, exactly
+where this brief predicted a second reviewer would matter:
+
+> **[P2] Bind credential requests to the validated container.** `query.widget_target`
+> inspects the container, then the fetcher opens a socket to one of its addresses. In between,
+> the container can be removed and its bridge address reassigned -- and the validated app's
+> API key goes to whatever answers.
+
+Fixed in `8a7b690`: the target is re-read immediately before the key leaves the process, and
+the request is abandoned unless it is the same container id, still running, on the same
+address. A re-read that cannot run counts as a failure. Five tests, each failing with the
+re-read removed. The branch is clean on the re-run.
+
+State: 2065 tests pass, ruff clean, no open Codex findings.
+
+### Still to do
+
+* **T46.6**, retiring homepage -- needs the live host.
+* **The live-host checks** listed above: router coverage against the real 70 routes, each
+  widget's port and paths against the real app, the 5s RPC deadline with ~100 containers, the
+  design at 1440×900 and 390×844.
+* **Deploy.** The host is on `v2.1.1-1-g336e383`; none of this is live.
+* qBittorrent, SABnzbd and Jellyfin widgets need auth kinds the fetcher does not have yet.
