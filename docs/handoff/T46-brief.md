@@ -541,3 +541,89 @@ State: 2065 tests pass, ruff clean, no open Codex findings.
   design at 1440×900 and 390×844.
 * **Deploy.** The host is on `v2.1.1-1-g336e383`; none of this is live.
 * qBittorrent, SABnzbd and Jellyfin widgets need auth kinds the fetcher does not have yet.
+
+---
+
+## Live-host checks, 2026-09-28
+
+All read-only against `casaroot@192.168.1.94`, running this branch's own code over the real
+Traefik API, the real `docker inspect` output and a copy of the live snapshot.
+
+### 1 · Router coverage — pass
+
+`parse_router_owners` over the real 85 containers, joined to the real 70 routers:
+**46 containers, 63 URLs.** Twenty routers get no link and **every one is explained**:
+
+| Not linked | Why |
+| --- | --- |
+| 10 file-provider (plex, jellyfin, qbit, unraid, opnsense, solar, musicassistant, planetexpress, adguard-secondary, myservice) | routes to another machine or to a host-networked service — `links:` covers these |
+| 3 `@internal` (api, dashboard, web-to-websecure) | Traefik's own |
+| adventurelog, adventurelog-admin | negated path group / asset routes |
+| subwave-api ×2, subwave-stream ×2 | `…/api` and `…/stream.mp3` — not pages |
+| traefik@docker | served by `api@internal`, which no container declares |
+
+Nothing unexplained.
+
+### 2 · The Traefik naming mirror — pass
+
+**Every one of the 57 live docker routers is predicted by the code; so is every one of the 52
+live docker services.** The 33 extra predictions are containers Traefik never exposed
+(`exposedByDefault: false` in traefik.yml) and are inert. **Zero ambiguous router names and
+zero ambiguous service names**, so no prediction shadows a real route.
+
+### 3 · The widgets against the real apps — pass, with one gap
+
+Each widget's declared port is listening and **every declared path answers 401, not 404** —
+the paths are right and auth is required, checked without touching a key:
+
+| widget | container | port | paths |
+| --- | --- | --- | --- |
+| sonarr | CASA_SONARR | 8989 ✓ | 3 × 401 |
+| radarr | CASA_RADARR | 7878 ✓ | 3 × 401 |
+| prowlarr | CASA_PROWLARR | 9696 ✓ | 2 × 401 |
+| immich | CASA_IMMICH_SERVER | 2283 ✓ | 401 |
+| adguard | CASA_ADGUARD | 80 ✓ | 401 |
+
+Provenance: all five images' `RepoDigests` name their publisher, so `trusted_provenance`
+passes and a key would be sent. No private-registry-mirror problem on this host.
+
+**The gap:** the response *bodies* were not checked, because the keys live in
+`/etc/planetexpress-dashboard.env`, which is root-only and sudo needs a password. The
+`summarise()` functions are unit-tested against recorded shapes; the first real fetch after
+deploy is what confirms them.
+
+### 4 · The RPC deadline with ~100 containers — pass
+
+| call | measured | budget |
+| --- | --- | --- |
+| `containers.routers` (inspect over all 85) | 0.15–0.36s | 4s |
+| `query.widget_target` (compose ps + 3 inspects) | 0.46–0.81s | 4s |
+
+Timing this found a real defect, fixed in `37b3d51`: the credential re-read added in `8a7b690`
+took the fetch budget *after* itself, so the job could outlive the window a joiner waits and
+answer "timeout" to a fetch that was about to succeed.
+
+### 5 · The design with real data — pass
+
+The harness serving the live snapshot, the real routers and the real owners
+(`PE_PREVIEW_ROUTERS`/`PE_PREVIEW_OWNERS`, added for this).
+
+* **1440×900:** `↗ n` on the tiles summing to the 46 the join found; "14 stacks · 85 of 85
+  online · 46 launchable". Drawer exactly 420px: 28 rows, 16 launchable, 12 `— no route`,
+  every link `target="_blank" rel="noopener"`.
+* **Network matrix:** 66 pills after twin merging, **59 link**, 15 of them split. The 7 that
+  do not are exactly the rules that yield no honest URL. The matrix is route-scoped and the
+  drawer container-scoped, which is why plex and jellyfin are pills but `— no route` rows.
+* **390×844:** no horizontal scroll, the drawer goes full-width, and the `◉` widget dots land
+  on immich-server and prowlarr — the two containers in that stack a widget file names.
+
+### Deploy prerequisite
+
+`/etc/planetexpress-dashboard.env` must gain four names before the widgets can fetch:
+`SONARR_API_KEY`, `RADARR_API_KEY`, `PROWLARR_API_KEY`, `IMMICH_API_KEY`.
+`ADGUARD_USERNAME`/`ADGUARD_PASSWORD` are already there. Until then those widgets render
+their `needs_key` state, which is the designed behaviour, not a failure.
+
+Launch links also need one full scan by the new code: `stack_completeness.services[*]` gains
+a `container` key (casa_leela.py:383) that the deployed v2.1.1 snapshot does not have, and the
+drawer joins on it. The first scheduled scan, or SCAN ✈, fills it in.
