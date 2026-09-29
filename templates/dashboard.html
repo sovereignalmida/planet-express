@@ -179,7 +179,21 @@
               <div class="pe-drawer-filters">
                 <button type="button" class="pe-drawer-filter active" data-drawer-filter="all">ALL {{ stack.total }}</button>
                 <button type="button" class="pe-drawer-filter" data-drawer-filter="launchable">LAUNCHABLE {{ stack.launchable }}</button>
-                <span class="pe-drawer-spacer"></span><span class="pe-drawer-note">LAN default</span>
+                <span class="pe-drawer-spacer"></span>
+                {# T47: the stack's own controls. UP is R1 and goes straight through; DOWN is
+                   R2 and asks for the passphrase first. Which of those applies is core's
+                   answer, not this template's -- the button just asks. #}
+                <button type="button" class="pe-stack-act" data-stack-act="up"
+                        data-stack="{{ stack.name }}">UP</button>
+                {% if stack.ingress %}
+                {# Taking this one down is compose.down_ingress (R3), which the drawer does
+                   not offer: it is the stack carrying Traefik, so the click that stops it is
+                   also the click that removes the way back in. #}
+                <span class="pe-drawer-note" title="ingress: bring this down from core">ingress</span>
+                {% else %}
+                <button type="button" class="pe-stack-act warn" data-stack-act="down"
+                        data-stack="{{ stack.name }}">DOWN</button>
+                {% endif %}
               </div>
               <div class="pe-drawer-rows">
                 {% for member in stack.members %}
@@ -193,11 +207,14 @@
                     {% if member.lan %}<a class="pe-launch primary" href="{{ member.lan }}" target="_blank" rel="noopener">LAN ↗</a>{% endif %}
                     {% if member.web %}<a class="pe-launch neutral" href="{{ member.web }}" target="_blank" rel="noopener">WEB ↗</a>{% endif %}
                     {% if member.widget %}<span class="pe-launch-widget" title="has a live widget">◉</span>{% endif %}
+                    <button type="button" class="pe-svc-act" data-svc-restart
+                            data-stack="{{ stack.name }}" data-service="{{ member.service }}"
+                            title="Restart {{ member.service }}">RESTART</button>
                   </span>
                 </div>
                 {% endfor %}
               </div>
-              <div class="pe-drawer-foot">No button means no Traefik route (databases, workers). ◉ means a live widget in the detail view.</div>
+              <div class="pe-drawer-foot" data-drawer-foot>No button means no Traefik route (databases, workers). ◉ means a live widget in the detail view.</div>
             </template>
             {% endfor %}
             {% endif %}
@@ -872,6 +889,7 @@
   <script src="{{ asset('approvals.js') }}"></script>
   <script src="{{ asset('chat.js') }}"></script>
   <script src="{{ asset('elevate.js') }}"></script>
+  <script src="{{ asset('stacks.js') }}"></script>
   <script src="{{ asset('config.js') }}"></script>
 </body>
 </html>

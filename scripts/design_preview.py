@@ -448,6 +448,19 @@ class OfflineRpc:
             return {"ok": True, "result": fixture_owners()}
         if method == "query.container":
             return {"ok": True, "result": fixture_container(params)}
+        if method == "action.request":
+            # Stack control (T47). Honours the `elevated` flag the dashboard sends, so the
+            # preview rehearses the whole loop: DOWN is refused, the passphrase prompt opens,
+            # and the retry goes through. Refusing unconditionally would only ever show half
+            # of it, which is the half that needs no design.
+            if params.get("action") == "compose.down_stack" and not params.get("elevated"):
+                return {"ok": True, "result": {
+                    "outcome": "elevation_required", "approval_id": None, "execution_id": None,
+                    "message": "compose.down_stack needs your passphrase again.",
+                    "capabilities": {}}}
+            return {"ok": True, "result": {
+                "outcome": "started", "approval_id": None, "execution_id": "exec-preview",
+                "message": "started (design preview)", "capabilities": {}}}
         if method == "logs.tail":
             # Three lines on the first poll, then nothing new: the well does not fill with copies.
             first = not params.get("cursor")

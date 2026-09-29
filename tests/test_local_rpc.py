@@ -759,7 +759,8 @@ def test_action_request_exact_params_and_timeout_result():
         assert error.value.code == 'bad_request'
     assert not commands.mock_calls
     assert handler(params) == asdict(commands.request_action.return_value)
-    commands.request_action.assert_called_once_with(**params, timeout=4)
+    # `elevated` is optional on the wire and defaults closed; the service always gets it.
+    commands.request_action.assert_called_once_with(**params, elevated=False, timeout=4)
 
 
 def test_stack_action_request_exact_params():
@@ -770,7 +771,8 @@ def test_stack_action_request_exact_params():
     handler = build_core_handlers(commands, Mock())["action.request"]
     params = {"action": "compose.up_stack", "stack": "media", "operator": "chris"}
     assert handler(params) == asdict(commands.request_action.return_value)
-    commands.request_action.assert_called_once_with(**params, timeout=4)
+    # `elevated` is optional on the wire and defaults closed; the service always gets it.
+    commands.request_action.assert_called_once_with(**params, elevated=False, timeout=4)
     for invalid in (params | {"service": "web"}, params | {"extra": True}):
         with pytest.raises(RpcError) as error:
             handler(invalid)

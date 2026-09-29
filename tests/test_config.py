@@ -183,8 +183,19 @@ def test_autonomy_defaults():
         'direct_request_risks_by_origin': {},
         'cooldown_seconds': 1800, 'max_attempts_per_day': 3,
     }
-    assert autonomy.direct_risks_for('dashboard-direct') == ['R1']
+    # The dashboard's built-in default (T47): its stack controls need R2 to exist at all, and
+    # what makes that safe is the elevated session, not a lower ceiling. Telegram keeps the
+    # shared R1, because a chat message cannot prove a passphrase.
+    assert autonomy.direct_risks_for('dashboard-direct') == ['R1', 'R2', 'R3']
     assert autonomy.direct_risks_for('telegram-direct') == ['R1']
+    # The shared list governs the surfaces with no default of their own -- Telegram today.
+    from config_schema import AutonomyConfig
+    assert AutonomyConfig(direct_request_risks=[]).direct_risks_for('telegram-direct') == []
+    # Changing what the dashboard may reach is written down per origin, so a config diff can
+    # see it. See test_two_configs_that_dump_alike_grant_alike for why that matters.
+    assert AutonomyConfig(
+        direct_request_risks_by_origin={'dashboard-direct': ['R1']}
+    ).direct_risks_for('dashboard-direct') == ['R1']
 
 
 @pytest.mark.parametrize('settings', [
@@ -293,3 +304,49 @@ def test_an_unknown_launch_link_key_is_refused():
         'stacks_root: /srv\nlinks:\n  - name: x\n    href: https://a\n    targett: _blank\n')
     assert model is None
     assert 'links.0.targett' == errors[0]['loc']
+
+
+def test_a_forbidden_risk_never_arrives_through_the_default_ceiling():
+    """The validator refuses a hand-written ceiling that names a forbidden risk. The built-in
+    dashboard default is not hand-written, so it gets the same rule applied to it rather than
+    a free pass -- otherwise forbidding R3 would forbid it everywhere except the one place
+    nobody had to type.
+    """
+    from config_schema import AutonomyConfig
+
+    strict = AutonomyConfig(forbidden_risks=["R3", "R4"])
+    assert strict.direct_risks_for("dashboard-direct") == ["R1", "R2"]
+
+    # And a hand-written one still cannot say it at all.
+    with pytest.raises(ValueError, match="both forbidden and directly requestable"):
+        AutonomyConfig(forbidden_risks=["R3", "R4"],
+                       direct_request_risks_by_origin={"dashboard-direct": ["R3"]})
+
+
+def test_two_configs_that_dump_alike_grant_alike():
+    """No policy may depend on whether a key was written down.
+
+    Config changes are compared by dumped value, so a ceiling that consulted
+    `model_fields_set` could be raised by DELETING a line: identical dumps, no changed field,
+    no lock, no passphrase -- an escalation that shows up nowhere. Whatever governs the
+    ceiling has to be visible in the values themselves.
+    """
+    import yaml
+
+    from config_schema import AutonomyConfig
+
+    written = AutonomyConfig(**yaml.safe_load("direct_request_risks: [R1]"))
+    defaulted = AutonomyConfig()
+    assert written.model_dump() == defaulted.model_dump()
+    for origin in ("dashboard-direct", "telegram-direct"):
+        assert written.direct_risks_for(origin) == defaulted.direct_risks_for(origin)
+
+
+def test_lowering_the_dashboard_is_something_you_write_down():
+    """The escape hatch, and it is value-visible: a config diff sees it, so it is lockable and
+    needs the passphrase like any other autonomy change."""
+    from config_schema import AutonomyConfig
+
+    clamped = AutonomyConfig(direct_request_risks_by_origin={"dashboard-direct": ["R1"]})
+    assert clamped.direct_risks_for("dashboard-direct") == ["R1"]
+    assert clamped.model_dump() != AutonomyConfig().model_dump()

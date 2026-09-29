@@ -24,6 +24,7 @@ from pydantic import TypeAdapter, ValidationError
 import config
 from config_schema import LaunchLink
 from planet_express.core.icons import monogram as icon_monogram
+from planet_express.execution.actions import is_ingress_stack
 from state_models import (
     Findings,
     MonitorSnapshot,
@@ -1254,6 +1255,11 @@ def attach_launch_links(services: dict, launch_urls: dict, widget_containers=fro
             member["mono"] = icon_monogram(member.get("service") or "")
             count += links["launchable"]
         stack["launchable"] = count
+        # Whether `compose.down_stack` is even the right action here. An ingress stack (the
+        # one carrying Traefik and AdGuard) must go down through compose.down_ingress, which
+        # is R3 and which the drawer does not offer -- so its DOWN button could only ever
+        # return a refusal. Asked of core's own rule rather than restated in the template.
+        stack["ingress"] = is_ingress_stack(str(stack.get("name") or ""))
         total += count
     services["launchable"] = total
 

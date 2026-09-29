@@ -196,6 +196,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
                 or request.path.startswith("/api/incidents")
                 or request.path.startswith("/api/scan")
                 or request.path.startswith("/api/elevate")
+                or request.path.startswith("/api/stacks/")
                 or request.path.startswith("/api/config"))
 
     def check_csrf():
@@ -300,6 +301,11 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         if request.path.startswith("/api/containers/"):
             status, message = {"bad_request": (400, "Invalid container request"),
                                "not_found": (404, "Container not found")}.get(
+                                   error.code, (503, "host slow, retry"))
+            return jsonify(error=message), status
+        if request.path.startswith("/api/stacks/"):
+            status, message = {"bad_request": (400, "Invalid stack request"),
+                               "not_found": (404, "Stack not found")}.get(
                                    error.code, (503, "host slow, retry"))
             return jsonify(error=message), status
         if request.path.startswith("/api/elevate"):
@@ -680,10 +686,53 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         params["cursor_hashes"] = hashes
         return jsonify(core("logs.tail", params))
 
+    def _requested(answer):
+        """An action.request answer, with core's elevation refusal turned into a typed 403.
+
+        Core decides, against the risk it computed for the action -- the dashboard keeps no
+        copy of which actions need a passphrase, because every time that rule has lived in two
+        places in this feature the second copy is the one that went stale. This only
+        translates, so the browser can prompt and retry rather than showing a refusal it could
+        recover from.
+        """
+        if not isinstance(answer, dict):
+            return jsonify(answer)
+        if answer.get("outcome") == "elevation_required":
+            return jsonify(error=answer.get("message") or "This needs your passphrase again.",
+                           reason="elevation_required"), 403
+        # Renewed only when the action actually needed elevation, which core reports -- not
+        # whenever a request succeeds while the operator happens to hold a window. Otherwise
+        # restarting containers all afternoon keeps a privileged session alive, which is the
+        # one thing the idle expiry exists to stop.
+        if answer.get("outcome") == "started" and answer.get("used_elevation"):
+            elevation_acted()
+        return jsonify(answer)
+
     @app.post("/api/containers/<stack>/<service>/restart")
     def container_restart(stack, service):
-        return jsonify(core("action.request", {
-            **container_target(stack, service), "action": "docker.restart_service", "operator": g.operator,
+        return _requested(core("action.request", {
+            **container_target(stack, service), "action": "docker.restart_service",
+            "operator": g.operator, "elevated": elevated_operator() is not None,
+        }))
+
+    # Stack control (T47). The steps have existed since slice 5b-5; what was missing was a way
+    # to ask for them that is not a chat message.
+    #
+    # No per-service START / STOP, though the spec's sketch had them: the action registry holds
+    # RESTART_SERVICE and the stack actions and nothing else. `service.start` and
+    # `service.stop` exist as runbook STEPS, but reaching them means adding entries to the
+    # action catalogue, and adding an action adds a capability. That is a spec of its own, not
+    # something to slip in behind a pair of buttons.
+    _STACK_ACTIONS = {"up": "compose.up_stack", "down": "compose.down_stack"}
+
+    @app.post("/api/stacks/<stack>/<what>")
+    def stack_action(stack, what):
+        action = _STACK_ACTIONS.get(what)
+        if action is None or re.fullmatch(r"[A-Za-z0-9._-]{1,64}", stack) is None:
+            raise RpcError("Stack not found", "not_found")
+        return _requested(core("action.request", {
+            "action": action, "stack": stack, "operator": g.operator,
+            "elevated": elevated_operator() is not None,
         }))
 
     def action_id(value, kind):

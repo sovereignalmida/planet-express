@@ -633,10 +633,21 @@ def test_stats_cannot_be_proposed_or_requested(env):
     assert_no_actions(env)
 
 
-@pytest.mark.parametrize('risk', ['R2', 'R3', 'R4', 'R9'])
+@pytest.mark.parametrize('risk', ['R4', 'R9'])
 def test_direct_risk_restriction(env, monkeypatch, risk):
+    """Above the dashboard's ceiling: refused outright, with no passphrase that would help.
+    R4 is forbidden and R9 is not a risk class at all."""
     monkeypatch.setitem(actions.REGISTRY, RESTART, actions.ActionSpec(RESTART, risk, 'restart'))
     assert direct(env).outcome == 'refused'
+    assert_no_actions(env)
+
+
+@pytest.mark.parametrize('risk', ['R2', 'R3'])
+def test_direct_risk_within_the_ceiling_asks_for_the_passphrase(env, monkeypatch, risk):
+    """Inside the dashboard's ceiling (R1-R3 by default, T47) but above what a plain session
+    may originate. Not `refused` -- refused is a dead end, and this one has a way through."""
+    monkeypatch.setitem(actions.REGISTRY, RESTART, actions.ActionSpec(RESTART, risk, 'restart'))
+    assert direct(env).outcome == 'elevation_required'
     assert_no_actions(env)
 
 
@@ -881,7 +892,11 @@ def test_direct_request_uses_configured_risks(env, monkeypatch):
     import config
     from config_schema import AutonomyConfig
 
-    monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(direct_request_risks=[]))
+    # The shared list governs origins without a default of their own. The dashboard has one
+    # (T47), so clamping it is said out loud -- and has to be, or the clamp would be invisible
+    # to a config diff and therefore unlockable.
+    monkeypatch.setattr(config, 'AUTONOMY', AutonomyConfig(
+        direct_request_risks=[], direct_request_risks_by_origin={'dashboard-direct': []}))
     result = direct(env)
     assert result.outcome == 'refused'
     assert result.message == 'direct requests are not allowed for R1'
@@ -1351,3 +1366,105 @@ def test_a_preface_whose_card_cannot_be_sent_says_so(env, monkeypatch):
     assert not result.ok
     assert said[0] == "THE DIFF"
     assert "not</b> proposed" in said[1] and "Nothing is awaiting you" in said[1]
+
+
+# ── elevation for originated actions (T47) ───────────────────────────────────────
+
+def test_an_unelevated_r2_request_is_refused(env, monkeypatch):
+    """End to end through the service, not just the helper. `compose.down_stack` is R2: a
+    signed-in operator can ask for it, and is told to prove it is them first."""
+    import config
+    from config_schema import AutonomyConfig
+
+    _stack_service(env)
+    # A ceiling that permits R2 at all, so the refusal below is elevation and not the ceiling.
+    monkeypatch.setattr(config, "AUTONOMY",
+                        AutonomyConfig(direct_request_risks=["R1", "R2"]))
+
+    refused = env.service.request_action(
+        actions.DOWN_STACK, "media", operator="chris", origin="dashboard-direct",
+    )
+    assert refused.outcome == "elevation_required"
+    assert "passphrase" in refused.message
+
+    allowed = env.service.request_action(
+        actions.DOWN_STACK, "media", operator="chris", origin="dashboard-direct",
+        elevated=True,
+    )
+    assert allowed.outcome != "elevation_required", allowed.message
+
+
+def test_an_r1_action_needs_no_elevation(env, monkeypatch):
+    _stack_service(env)
+    result = env.service.request_action(
+        actions.UP_STACK, "media", operator="chris", origin="dashboard-direct",
+    )
+    assert result.outcome != "elevation_required", result.message
+
+
+def test_an_r2_action_needs_an_elevated_session():
+    """Decided here, against the risk this service computed, rather than by the caller: a
+    caller does not know an action's risk class and should not keep a copy of the rule."""
+    from planet_express.execution import policy
+
+    assert policy.requires_elevation("R2")
+    assert policy.requires_elevation("R3")
+    assert not policy.requires_elevation("R1")
+    assert not policy.requires_elevation("R0")
+
+
+def test_telegram_keeps_its_r2_stack_requests(env, monkeypatch):
+    """A chat message cannot re-prove a passphrase, so requiring elevation of it would not
+    raise its bar -- it would refuse `/down <stack>` forever. What governs Telegram is its
+    ceiling, which is now its own. This is a regression guard: the first version of the
+    elevation check applied to every origin and broke exactly this.
+    """
+    import config
+    from config_schema import AutonomyConfig
+
+    _stack_service(env)
+    monkeypatch.setattr(config, "AUTONOMY",
+                        AutonomyConfig(direct_request_risks=["R1", "R2"]))
+    result = env.service.request_action(
+        actions.DOWN_STACK, "media", operator="chris", origin="telegram-direct",
+    )
+    assert result.outcome != "elevation_required", result.message
+
+
+def test_a_ceiling_still_governs_telegram(env, monkeypatch):
+    """Elevation not applying does not mean anything goes: the per-origin ceiling is what
+    holds the line for a surface that cannot elevate."""
+    import config
+    from config_schema import AutonomyConfig
+
+    _stack_service(env)
+    monkeypatch.setattr(config, "AUTONOMY", AutonomyConfig(
+        direct_request_risks=["R1", "R2"],
+        direct_request_risks_by_origin={"telegram-direct": ["R1"]}))
+    result = env.service.request_action(
+        actions.DOWN_STACK, "media", operator="chris", origin="telegram-direct",
+    )
+    assert result.outcome == "refused"
+
+
+def test_a_started_action_says_whether_it_spent_elevation(env, monkeypatch):
+    """What the dashboard renews its window on. "A request succeeded" is not the same as "this
+    needed a passphrase", and renewing on the former keeps a privileged session alive on
+    nothing but container restarts."""
+    import config
+    from config_schema import AutonomyConfig
+
+    _stack_service(env)
+    monkeypatch.setattr(config, "AUTONOMY",
+                        AutonomyConfig(direct_request_risks=["R1", "R2"]))
+
+    ordinary = env.service.request_action(
+        actions.UP_STACK, "media", operator="chris", origin="dashboard-direct",
+    )
+    assert ordinary.used_elevation is False
+
+    privileged = env.service.request_action(
+        actions.DOWN_STACK, "media", operator="chris", origin="dashboard-direct",
+        elevated=True,
+    )
+    assert privileged.used_elevation is True

@@ -73,11 +73,16 @@ class DecideResult:
 
 @dataclass(frozen=True)
 class RequestResult:
-    outcome: str  # started | busy | refused | timeout
+    outcome: str  # started | busy | refused | timeout | elevation_required
     message: str
     approval_id: str | None
     execution_id: str | None
     capabilities: dict[str, bool]
+    # Whether an elevated session was actually required for this action, as opposed to the
+    # operator merely happening to hold one. The dashboard renews its window on this and not
+    # on "a request succeeded", or restarting containers all afternoon keeps a privileged
+    # session alive -- which is the whole thing the idle expiry is for.
+    used_elevation: bool = False
 
 
 STEP_OUTPUT_MAX_BYTES = 256 * 1024
@@ -799,7 +804,8 @@ class CommandService:
 
     def request_action(
         self, action: str, stack: str, service: str | None = None, *, operator: str,
-        origin: str = "dashboard-direct", timeout=actions.DOCKER_TIMEOUT_SECONDS,
+        origin: str = "dashboard-direct", elevated: bool = False,
+        timeout=actions.DOCKER_TIMEOUT_SECONDS,
     ) -> RequestResult:
         arrived = self._clock()
         spec = actions.REGISTRY.get(action)
@@ -828,6 +834,16 @@ class CommandService:
             return RequestResult("refused", f"{action} is a read, not an action", None, None, capabilities)
         if not policy.allows_direct_request(decision.risk, origin):
             return RequestResult("refused", f"direct requests are not allowed for {decision.risk}",
+                                 None, None, capabilities)
+        if policy.requires_elevation(decision.risk, origin) and not elevated:
+            # Decided here, against the risk this service computed, rather than by whoever
+            # called it: the caller does not know an action's risk class and should not have
+            # to keep a copy of the rule to find out.
+            self._store.record_event("proposal.refused", action=action, stack=stack,
+                                     service=service, reason="elevation required",
+                                     requested_via=origin, requested_by=operator)
+            return RequestResult("elevation_required",
+                                 f"{action} needs your passphrase again.",
                                  None, None, capabilities)
         runbook_decision = policy.decide_runbook(plan, origin) if plan is not None else None
         if runbook_decision is None or not runbook_decision.allowed:
@@ -872,7 +888,8 @@ class CommandService:
             # failure queues its own "failed to start" message after it.
             self._in_background(lambda: self._notify_quietly(text))
             start(row, execution["id"], operator)
-            return RequestResult("started", text, row["id"], execution["id"], capabilities)
+            return RequestResult("started", text, row["id"], execution["id"], capabilities,
+                                 used_elevation=policy.requires_elevation(decision.risk, origin))
 
     # ── unattended runs (slice 5b-3; D34 canary, D38 safe prune) ───────────
     def record_event(self, kind: str, **fields) -> None:

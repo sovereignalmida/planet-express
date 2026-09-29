@@ -20,6 +20,20 @@ Risk = Literal["R0", "R1", "R2", "R3", "R4"]
 # Kept here rather than imported from policy.py, which imports this module.
 DIRECT_ORIGINS = ("dashboard-direct", "telegram-direct")
 
+# What a direct origin may reach when the config says nothing about it.
+#
+# The dashboard ships at R3 because that is what its stack controls need to exist at all:
+# taking a stack down is R2, and a ceiling of R1 refuses it before the passphrase is ever
+# asked for, leaving a DOWN button that can never work. What makes it safe is the elevated
+# session -- policy.requires_elevation() puts everything above R1 behind the passphrase, and
+# only for origins that can prove one. Telegram is absent here and keeps the shared R1,
+# because a chat message cannot.
+#
+# A default, not a field default: writing it into the model would make every config that
+# forbids R3 fail to load, since a forbidden risk may not also be directly requestable. It is
+# filtered against forbidden_risks below instead, so forbidden always wins.
+DEFAULT_DIRECT_RISKS: dict[str, list[Risk]] = {"dashboard-direct": ["R1", "R2", "R3"]}
+
 
 class AutonomyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -27,16 +41,27 @@ class AutonomyConfig(BaseModel):
     # Per-origin overrides of the ceiling above (T47). One number for every direct origin was
     # wrong once the dashboard grew an elevated session: elevation is something a browser can
     # ask for and prove, and a chat message cannot, so the two surfaces should not be obliged
-    # to trust each other's requests equally. Absent means the shared value applies, which is
-    # what every existing config gets.
+    # to trust each other's requests equally. An origin with no entry here takes the built-in
+    # default below, and failing that the shared value above.
     direct_request_risks_by_origin: dict[str, list[Risk]] = {}
     forbidden_risks: list[Risk] = ["R4"]
     cooldown_seconds: int = Field(default=1800, ge=0)
     max_attempts_per_day: int = Field(default=3, ge=1)
 
     def direct_risks_for(self, origin: str) -> list[Risk]:
-        """The ceiling for one direct origin: its own if it has one, else the shared value."""
-        return self.direct_request_risks_by_origin.get(origin, self.direct_request_risks)
+        """The ceiling for one direct origin.
+
+        Its own override if the config wrote one, else the built-in default for that origin,
+        else the shared value. A forbidden risk is never reachable through the default -- the
+        validator already refuses one written by hand, and this is the same rule for the one
+        nobody wrote.
+        """
+        if origin in self.direct_request_risks_by_origin:
+            return self.direct_request_risks_by_origin[origin]
+        if origin in DEFAULT_DIRECT_RISKS:
+            return [risk for risk in DEFAULT_DIRECT_RISKS[origin]
+                    if risk not in self.forbidden_risks]
+        return self.direct_request_risks
 
     @model_validator(mode="after")
     def _validate_risks(self) -> "AutonomyConfig":

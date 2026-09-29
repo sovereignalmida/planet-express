@@ -61,7 +61,19 @@ sudo_allowlist:
 # Autonomy policy: only R0 reads are automatic; mutations require approval.
 # Limits apply to automation, never operator requests.
 # autonomy:
+#   # What an operator may set running without an approval card. Leave the whole block out and
+#   # the defaults apply: Telegram R1, and the dashboard R1-R3 -- the dashboard reaches further
+#   # because everything above R1 there asks for the operator's passphrase again first (T47),
+#   # which is a thing a browser can prove and a chat message cannot.
+#   #
+#   # `direct_request_risks` governs the surfaces that have no default of their own, which
+#   # today means Telegram. To change what the DASHBOARD may reach -- in either direction --
+#   # say so under direct_request_risks_by_origin: that is visible in a config diff, which is
+#   # what makes it lockable and what makes changing it need the passphrase.
 #   direct_request_risks: [R1]
+#   direct_request_risks_by_origin:
+#     dashboard-direct: [R1, R2, R3]
+#     telegram-direct: [R1]
 #   forbidden_risks: [R4]
 #   cooldown_seconds: 1800
 #   max_attempts_per_day: 3

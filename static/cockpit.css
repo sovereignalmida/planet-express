@@ -2615,3 +2615,21 @@ a.net-pill { text-decoration: none; }
 .elevate-note { margin: 0 0 14px; font-size: 12.5px; line-height: 1.5; color: var(--pe-ink-body); }
 .elevate-note.warn { color: var(--pe-warn-ink); }
 .elevate-note.crit { color: var(--pe-crit-ink); }
+
+/* ---------- stack + service controls in the drawer (T47) ----------
+   Deliberately quiet. These sit beside launch links that open a page, and one of them takes a
+   stack down; the difference is carried by the warn colour and the passphrase prompt, not by
+   making the button loud. */
+.pe-stack-act, .pe-svc-act {
+  font-family: var(--pe-font-mono); font-size: 10px; letter-spacing: .08em;
+  padding: 4px 9px; border-radius: var(--pe-r-sm); cursor: pointer;
+  border: 1px solid var(--pe-border-strong); background: var(--pe-well);
+  color: var(--pe-ink-dim);
+}
+.pe-stack-act:hover, .pe-svc-act:hover { color: var(--pe-ink-2); border-color: var(--pe-accent); }
+.pe-stack-act.warn { color: var(--pe-warn-ink); border-color: var(--pe-warn-line); }
+.pe-stack-act.warn:hover { border-color: var(--pe-warn); }
+.pe-stack-act[disabled], .pe-svc-act[disabled] { opacity: .45; cursor: default; }
+.pe-stack-act[disabled]:hover, .pe-svc-act[disabled]:hover {
+  color: var(--pe-ink-dim); border-color: var(--pe-border-strong);
+}

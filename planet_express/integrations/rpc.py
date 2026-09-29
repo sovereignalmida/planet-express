@@ -331,24 +331,32 @@ def build_core_handlers(
     def request_action(params):
         if not isinstance(params, dict):
             raise RpcError("Invalid params", "bad_request")
-        action = params.get("action")
+        # `elevated` is optional and strictly a bool. Optional because Telegram has no such
+        # thing and never sends it; strictly a bool because "truthy" is not a basis for taking
+        # a stack down. Split off before the shape checks below, which are exact-set matches.
+        rest = {key: value for key, value in params.items() if key != "elevated"}
+        elevated = params.get("elevated", False)
+        if type(elevated) is not bool:
+            raise RpcError("Invalid elevated flag", "bad_request")
+        action = rest.get("action")
         if action == actions.RESTART_SERVICE:
-            _params(params, {"action": 128, "stack": 255, "service": 255, "operator": 32})
+            _params(rest, {"action": 128, "stack": 255, "service": 255, "operator": 32})
         elif action in actions.STACK_ACTIONS:
             expected = {"action", "stack", "operator"}
-            if set(params) == expected:
-                _params(params, {"action": 128, "stack": 255, "operator": 32})
-            elif set(params) == expected | {"service"} and params["service"] is None:
-                _params({key: value for key, value in params.items() if key != "service"},
+            if set(rest) == expected:
+                _params(rest, {"action": 128, "stack": 255, "operator": 32})
+            elif set(rest) == expected | {"service"} and rest["service"] is None:
+                _params({key: value for key, value in rest.items() if key != "service"},
                         {"action": 128, "stack": 255, "operator": 32})
             else:
                 raise RpcError("Invalid params", "bad_request")
         else:
             raise RpcError("Invalid action", "bad_request")
-        auth_params({"operator": params["operator"]})
-        if params["operator"] == "?":
+        auth_params({"operator": rest["operator"]})
+        if rest["operator"] == "?":
             raise RpcError("Invalid operator", "bad_request")
-        return asdict(commands.request_action(**params, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS))
+        return asdict(commands.request_action(**rest, elevated=elevated,
+                                              timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS))
 
     def container(params):
         _params(params, {"stack": 255, "service": 255})

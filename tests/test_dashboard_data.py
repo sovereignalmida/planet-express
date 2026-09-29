@@ -1162,3 +1162,21 @@ def test_launch_links_fold_onto_stacks_lan_first():
         "https://actual.casalan.com", "https://actual.casaalmida.com", "actual.casalan.com")
     assert db["launchable"] is False and db["widget"] is True and old["host"] is None
     assert services["stacks"][0]["launchable"] == 1 and services["launchable"] == 1
+
+
+def test_an_ingress_stack_is_marked_so_the_drawer_can_omit_down():
+    """The drawer offers compose.down_stack, which core refuses for an ingress stack -- it
+    must go down through compose.down_ingress (R3), which the drawer does not offer. A DOWN
+    button there could only ever return a refusal.
+
+    Marked from core's own is_ingress_stack rather than by matching names in the template:
+    this rule has one owner, and a copy of it in Jinja is a copy that goes stale.
+    """
+    services = {"stacks": [
+        {"name": "network", "members": []},
+        {"name": "media", "members": []},
+        {"name": "my-traefik-stack", "members": []},
+    ]}
+    dashboard_data.attach_launch_links(services, {})
+    marked = {stack["name"]: stack["ingress"] for stack in services["stacks"]}
+    assert marked == {"network": True, "media": False, "my-traefik-stack": True}

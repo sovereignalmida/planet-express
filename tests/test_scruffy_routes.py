@@ -742,7 +742,7 @@ def test_container_restart_identity_and_outcomes(chat_client, outcome):
     assert response.status_code == 200 and response.get_json() == payload
     assert "Location" not in response.headers
     assert rpc.calls == [("action.request", {"stack": "media", "service": "search",
-        "action": "docker.restart_service", "operator": "alice"})]
+        "action": "docker.restart_service", "operator": "alice", "elevated": False})]
 
 
 def test_approvals_list_returns_pending_and_recent(chat_client):
@@ -2270,3 +2270,129 @@ def test_a_sensitive_field_that_is_not_locked_still_needs_the_passphrase():
     assert response.status_code == 403
     assert response.json["reason"] == "elevation_required"
     assert not [c for c in rpc.calls if c[0] == "config.apply"]
+
+
+# ── stack control (T47) ──────────────────────────────────────────────────────────
+
+def _stack_client(outcome="started", message="ok"):
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["action.request"] = {"outcome": outcome, "message": message,
+                                     "approval_id": None, "execution_id": "exec-1",
+                                     "capabilities": {}}
+    return client, rpc
+
+
+def test_taking_a_stack_up_asks_core_for_the_right_action():
+    client, rpc = _stack_client()
+    response = client.post("/api/stacks/media/up", data={"csrf_token": csrf(client)})
+    assert response.status_code == 200
+    assert ("action.request", {"action": "compose.up_stack", "stack": "media",
+                               "operator": "alice", "elevated": False}) in rpc.calls
+
+
+def test_taking_a_stack_down_asks_for_the_down_action():
+    client, rpc = _stack_client()
+    client.post("/api/stacks/media/down", data={"csrf_token": csrf(client)})
+    assert ("action.request", {"action": "compose.down_stack", "stack": "media",
+                               "operator": "alice", "elevated": False}) in rpc.calls
+
+
+@pytest.mark.parametrize("path", [
+    "/api/stacks/media/sideways", "/api/stacks/media/restart",
+    "/api/stacks/bad!name/up", "/api/stacks/" + "x" * 65 + "/up",
+])
+def test_only_up_and_down_are_stack_actions(path):
+    """The verb is looked up in a fixed map, so a URL cannot name an action the registry
+    happens to hold -- down_all and down_ingress are R3 and are not reachable from here."""
+    client, rpc = _stack_client()
+    response = client.post(path, data={"csrf_token": csrf(client)})
+    assert response.status_code == 404
+    assert not [c for c in rpc.calls if c[0] == "action.request"]
+
+
+def test_a_stack_action_needing_elevation_comes_back_as_a_403():
+    """Core decides, against the risk it computed. The route only translates, so the browser
+    can prompt and retry."""
+    client, _rpc = _stack_client(outcome="elevation_required",
+                                 message="compose.down_stack needs your passphrase again.")
+    response = client.post("/api/stacks/media/down", data={"csrf_token": csrf(client)})
+    assert response.status_code == 403
+    assert response.json["reason"] == "elevation_required"
+
+
+def test_an_elevated_operator_says_so_to_core():
+    client, rpc = _stack_client()
+    _elevate(client)
+    client.post("/api/stacks/media/down", data={"csrf_token": csrf(client)})
+    assert ("action.request", {"action": "compose.down_stack", "stack": "media",
+                               "operator": "alice", "elevated": True}) in rpc.calls
+
+
+def test_stack_actions_need_csrf_and_a_session():
+    client, rpc = _stack_client()
+    assert client.post("/api/stacks/media/up").status_code == 400
+    assert not [c for c in rpc.calls if c[0] == "action.request"]
+
+    stranger, rpc2, _ = make_client()
+    response = stranger.post("/api/stacks/media/up")
+    assert response.status_code == 401 and response.is_json
+    assert not rpc2.calls
+
+
+def test_the_drawer_carries_stack_controls():
+    page = (ROOT / "templates/dashboard.html").read_text()
+    assert 'data-stack-act="up"' in page and 'data-stack-act="down"' in page
+    assert "data-svc-restart" in page
+    assert "stacks.js" in page
+    # After elevate.js, which defines the prompt it calls.
+    assert page.index("asset('elevate.js')") < page.index("asset('stacks.js')")
+
+
+def test_stack_control_js_prompts_once_and_keeps_no_rule_of_its_own():
+    js = (ROOT / "static/stacks.js").read_text()
+    assert "window.peElevate" in js
+    assert '"elevation_required"' in js
+    # Delegated from document: #dashboard-live is replaced wholesale every 60 seconds.
+    assert "document.addEventListener" in js
+    # It must not decide which actions need a passphrase -- core does, against the risk it
+    # computed. A list of action names or risk classes in here is the duplication that went
+    # stale twice in this feature.
+    #
+    # Comments stripped first: the file explains the rule in prose, which is the point, and a
+    # test that matches a comment is testing nothing. (Same trap as grepping for a name a file
+    # only mentions in a note about it.)
+    code = "\n".join(line for line in js.splitlines() if not line.strip().startswith("//"))
+    for encoded in ("compose.down_stack", "compose.up_stack", "R1", "R2", "R3"):
+        assert encoded not in code, f"stacks.js encodes {encoded}; that rule belongs to core"
+    assert "innerHTML" not in js
+
+
+def test_an_r1_action_does_not_renew_an_elevated_window():
+    """Restarting containers all afternoon must not keep a privileged session alive. Core
+    reports whether an action spent elevation; the route renews on that, not on success."""
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["action.request"] = {"outcome": "started", "message": "ok", "approval_id": None,
+                                     "execution_id": "e", "capabilities": {},
+                                     "used_elevation": False}
+    _elevate(client)
+
+    now[0] += web_auth.ELEVATION_SECONDS - 100
+    assert client.post("/api/stacks/media/up",
+                       data={"csrf_token": csrf(client)}).status_code == 200
+    now[0] += web_auth.ELEVATION_SECONDS - 100      # past the window, had the R1 renewed it
+
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": ["autonomy"], "locked_fields": []}
+    assert _apply(client).json["reason"] == "elevation_required", (
+        "an R1 action kept the privileged window alive")
+
+
+def test_the_drawer_offers_no_down_for_an_ingress_stack():
+    page = (ROOT / "templates/dashboard.html").read_text()
+    assert "stack.ingress" in page, "the template does not consult core's ingress rule"
+    # The template must not carry its own idea of which stacks are ingress.
+    for guess in ('== "network"', "'network'", "traefik", "adguard"):
+        assert guess not in page.split("data-stack-act")[1][:600], \
+            f"the drawer restates the ingress rule ({guess}); that rule belongs to core"

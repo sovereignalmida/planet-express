@@ -65,11 +65,24 @@ def test_telegram_direct_is_an_operator_origin():
     assert "telegram-direct" in policy.OPERATOR_ORIGINS
 
 
-@pytest.mark.parametrize('origin', ['dashboard-direct', 'telegram-direct'])
-def test_only_r1_allows_direct_request(origin):
-    """The default ceiling, and it is still shared: without an override both surfaces get it."""
+def test_the_default_ceilings_differ_by_surface():
+    """Telegram keeps R1. The dashboard reaches R3, because its stack controls need R2 to
+    exist at all -- what holds the line there is the passphrase (requires_elevation), not a
+    lower ceiling.
+    """
     for risk in (*policy.RISK_LEVELS, 'R9', '', None):
-        assert policy.allows_direct_request(risk, origin) is (risk == 'R1')
+        assert policy.allows_direct_request(risk, 'telegram-direct') is (risk == 'R1')
+        assert policy.allows_direct_request(risk, 'dashboard-direct') is (
+            risk in {'R1', 'R2', 'R3'})
+
+
+def test_everything_above_r1_still_needs_the_passphrase():
+    """The ceiling says what the dashboard may reach; this says what it may reach without
+    asking again. Raising the first without the second would be the gate undone."""
+    assert not policy.requires_elevation('R1', 'dashboard-direct')
+    for risk in ('R2', 'R3'):
+        assert policy.allows_direct_request(risk, 'dashboard-direct')
+        assert policy.requires_elevation(risk, 'dashboard-direct')
 
 
 def test_configurable_policy(monkeypatch):
@@ -81,9 +94,15 @@ def test_configurable_policy(monkeypatch):
     monkeypatch.setitem(actions.REGISTRY, 'test', actions.ActionSpec('test', 'R3', 'test'))
     assert not policy.decide('test').allowed
     assert policy.decide('test', autonomy=AutonomyConfig()).needs_approval
-    assert not policy.allows_direct_request('R1', 'dashboard-direct')
-    assert policy.allows_direct_request('R2', 'dashboard-direct')
-    assert not policy.allows_direct_request('R2', 'dashboard-direct', autonomy=AutonomyConfig())
+    # The shared list is Telegram's: R2 and nothing else.
+    assert not policy.allows_direct_request('R1', 'telegram-direct')
+    assert policy.allows_direct_request('R2', 'telegram-direct')
+    # The dashboard keeps its own default until a per-origin entry says otherwise.
+    assert policy.allows_direct_request('R1', 'dashboard-direct')
+    # A config that says nothing gets the built-in defaults instead: the dashboard reaches R2
+    # (behind the passphrase), Telegram does not reach it at all.
+    assert policy.allows_direct_request('R2', 'dashboard-direct', autonomy=AutonomyConfig())
+    assert not policy.allows_direct_request('R2', 'telegram-direct', autonomy=AutonomyConfig())
     for rollbackable in (False, True):
         monkeypatch.setitem(actions.REGISTRY, 'test', actions.ActionSpec(
             'test', 'R1', 'test', rollbackable=rollbackable,

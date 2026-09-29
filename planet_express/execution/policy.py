@@ -68,6 +68,33 @@ def decide(
     return PolicyDecision(True, True, spec.risk, f"{spec.risk}: needs approval")
 
 
+# Risks a signed-in operator may originate without re-proving the passphrase (T47). Anything
+# above this asks again: taking a stack down and writing a compose file are not things to do
+# on the strength of a browser tab someone left open.
+#
+# Deliberately NOT configurable. The ceiling in AutonomyConfig says what a surface may reach
+# at all; this says what it may reach without asking. Two knobs for one decision is how a
+# gate ends up switched off by whoever found it inconvenient.
+UNELEVATED_RISKS = frozenset({"R0", "R1"})
+
+
+# Origins that can hold an elevated session, and so can be asked for one. A chat message
+# cannot re-prove a passphrase, so requiring elevation of Telegram would not raise its bar --
+# it would refuse the request forever. What governs Telegram is its ceiling, which is now its
+# own (see AutonomyConfig.direct_request_risks_by_origin).
+ELEVATABLE_ORIGINS = frozenset({"dashboard-direct"})
+
+
+def requires_elevation(risk: str, origin: str = "dashboard-direct") -> bool:
+    """Whether originating this risk from this origin needs an elevated session.
+
+    The one place this is decided. The dashboard route, the command service and the config
+    service all ask here rather than each keeping a list -- every time that rule has lived in
+    two places in this feature, the second copy is the one that went stale.
+    """
+    return origin in ELEVATABLE_ORIGINS and risk not in UNELEVATED_RISKS
+
+
 def allows_direct_request(risk: str, origin: str, *,
                           autonomy: AutonomyConfig | None = None) -> bool:
     """Whether `origin` may originate a request at this risk without an approval.
