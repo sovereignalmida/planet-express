@@ -212,8 +212,13 @@ def main(argv=None):
                 # leaving the old passphrase working and the second revocation skipped,
                 # because a picture failed to render.
                 try:
-                    subprocess.run([qrencode, "-t", "ANSIUTF8"], input=uri, text=True,
-                                   check=False)
+                    drawn = subprocess.run([qrencode, "-t", "ANSIUTF8"], input=uri, text=True,
+                                           check=False)
+                    if drawn.returncode != 0:
+                        # check=False keeps the reset going; the returncode still has to be
+                        # looked at, or a qrencode that starts and fails says nothing at all
+                        # and the operator is left wondering where the code went.
+                        print(f"(qrencode exited {drawn.returncode}; use the URI above)")
                 except OSError as exc:
                     print(f"(could not draw the QR code: {exc})")
 

@@ -295,3 +295,25 @@ def test_a_broken_qrencode_does_not_abort_the_reset(monkeypatch, capsys):
     assert revoked == ["alice", "alice"], "the reset did not finish"
     assert "could not draw the QR code" in capsys.readouterr().out
     assert state["old_hash"] not in state["text"]
+
+
+def test_a_qrencode_that_exits_nonzero_is_reported(monkeypatch, capsys):
+    """The motivating failure, and the one the previous test missed: qrencode starting and
+    failing, rather than failing to start. check=False keeps the reset going but discards the
+    result, so without looking at returncode the operator is told nothing at all."""
+    revoked = []
+    _reset_harness(monkeypatch, lambda name: revoked.append(name) or len(revoked))
+    monkeypatch.setattr(operators.shutil, "which", lambda _: "/usr/bin/qrencode")
+    inner = operators.subprocess.run
+
+    def run(argv, **kwargs):
+        if argv and argv[0] == "/usr/bin/qrencode":
+            return SimpleNamespace(returncode=3)
+        return inner(argv, **kwargs)
+
+    monkeypatch.setattr(operators.subprocess, "run", run)
+    operators.main(["reset", "alice"])
+    output = capsys.readouterr().out
+    assert "qrencode exited 3" in output
+    assert "otpauth://" in output, "the URI is the credential and must still be shown"
+    assert revoked == ["alice", "alice"], "the reset did not finish"
