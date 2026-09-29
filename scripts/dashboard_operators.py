@@ -206,7 +206,16 @@ def main(argv=None):
             print(uri)
             qrencode = shutil.which("qrencode")
             if qrencode:
-                subprocess.run([qrencode, "-t", "ANSIUTF8"], input=uri, text=True, check=True)
+                # Never fatal. The URI above is the credential; this only draws it. Since this
+                # block moved ahead of the restart, a qrencode that exits nonzero would
+                # otherwise abort a reset that has already written the new credentials --
+                # leaving the old passphrase working and the second revocation skipped,
+                # because a picture failed to render.
+                try:
+                    subprocess.run([qrencode, "-t", "ANSIUTF8"], input=uri, text=True,
+                                   check=False)
+                except OSError as exc:
+                    print(f"(could not draw the QR code: {exc})")
 
         if action == "reset":
             # The running dashboard still holds the OLD passphrase until it restarts, and it

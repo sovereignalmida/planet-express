@@ -272,3 +272,26 @@ def test_a_failed_second_revoke_still_shows_the_new_totp_code(capsys, monkeypatc
     with pytest.raises(SystemExit):
         operators.main(["reset", "alice"])
     assert "otpauth://" in capsys.readouterr().out
+
+
+def test_a_broken_qrencode_does_not_abort_the_reset(monkeypatch, capsys):
+    """Drawing the code is cosmetic -- the URI printed above it is the credential. This block
+    sits ahead of the restart so a post-write failure cannot hide it, which means a qrencode
+    that exits nonzero would otherwise abort a reset whose new credentials are already on
+    disk: old passphrase still working, second revocation skipped, because a picture failed.
+    """
+    revoked = []
+    state = _reset_harness(monkeypatch, lambda name: revoked.append(name) or len(revoked))
+    monkeypatch.setattr(operators.shutil, "which", lambda _: "/usr/bin/qrencode")
+    inner = operators.subprocess.run
+
+    def run(argv, **kwargs):
+        if argv and argv[0] == "/usr/bin/qrencode":
+            raise OSError("qrencode died")
+        return inner(argv, **kwargs)
+
+    monkeypatch.setattr(operators.subprocess, "run", run)
+    operators.main(["reset", "alice"])
+    assert revoked == ["alice", "alice"], "the reset did not finish"
+    assert "could not draw the QR code" in capsys.readouterr().out
+    assert state["old_hash"] not in state["text"]
