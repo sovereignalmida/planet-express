@@ -195,6 +195,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
                 or request.path.startswith("/api/executions/")
                 or request.path.startswith("/api/incidents")
                 or request.path.startswith("/api/scan")
+                or request.path.startswith("/api/elevate")
                 or request.path.startswith("/api/config"))
 
     def check_csrf():
@@ -209,8 +210,51 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return {"httponly": True, "samesite": "Strict",
                 "secure": request.is_secure or app.config["DASHBOARD_HTTPS"]}
 
+    def elevated_operator():
+        """The operator this request is elevated as, or None.
+
+        Re-derived per request from the marker, the device token it is bound to, and the
+        operator's current epoch -- never from the presence of a cookie. A passphrase change
+        bumps the epoch, which revokes every outstanding marker without touching them.
+        """
+        token = request.cookies.get("pe_auth", "")
+        known = operators.get(getattr(g, "operator", None))
+        if known is None:
+            return None
+        read = web_auth.read_elevation(secret, request.cookies.get("pe_elevated", ""),
+                                       token, clock(), credential=known.passphrase_hash)
+        if read is None:
+            return None
+        operator, marker_epoch, first = read
+        # fresh=True: the 60-second epoch cache is fine for deciding whether a page renders,
+        # and not fine here. Revoking an operator has to stop an R2 or R3 at once, not within
+        # a minute -- a minute is long enough to take a stack down.
+        if operator != known.name or epoch(operator, fresh=True) != marker_epoch:
+            return None
+        # Slide the window forward; after_request writes it back. `first` is carried through,
+        # so the hour-long cap is still measured from the passphrase entry.
+        g.refresh_elevation = (operator, marker_epoch, first)
+        return operator
+
+    def require_elevation():
+        """None when this request may run a step above the unelevated ceiling, else a 403.
+
+        403 and a typed reason, never a redirect: these arrive from fetch(), and a redirect
+        would put the login page's HTML into a JSON handler.
+        """
+        if elevated_operator() is not None:
+            return None
+        return jsonify(error="This action needs your passphrase again.",
+                       reason="elevation_required"), 403
+
+    # The seam the stack-control slice calls, and the one these can be tested through while
+    # nothing uses them yet. A security boundary that lands untested because it has no caller
+    # is a boundary nobody has checked.
+    app.require_elevation = require_elevation
+    app.elevated_operator = elevated_operator
+
     def clear_auth(response):
-        for name in ("pe_auth", "pe_auth_trust"):
+        for name in ("pe_auth", "pe_auth_trust", "pe_elevated"):
             response.delete_cookie(name, **cookie_options())
         return response
 
@@ -246,6 +290,9 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
                                "not_found": (404, "Container not found")}.get(
                                    error.code, (503, "host slow, retry"))
             return jsonify(error=message), status
+        if request.path.startswith("/api/elevate"):
+            return jsonify(error="Authentication unavailable; try again shortly",
+                           reason="unavailable"), 503
         if request.path.startswith("/api/approvals"):
             status, message = {"bad_request": (400, "Invalid approval request"),
                                "not_found": (404, "Approval not found")}.get(
@@ -311,6 +358,20 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return clear_auth(redirect(url_for("login", next=request.path)))
 
     @app.after_request
+    def refresh_elevation(response):
+        pending = getattr(g, "refresh_elevation", None)
+        if pending is not None and response.status_code < 400:
+            operator, marker_epoch, first = pending
+            response.set_cookie(
+                "pe_elevated",
+                web_auth.make_elevation(secret, operator, marker_epoch,
+                                        request.cookies.get("pe_auth", ""), clock(),
+                                        credential=operators[operator].passphrase_hash,
+                                        first=first),
+                **cookie_options())
+        return response
+
+    @app.after_request
     def private_response(response):
         if (not request.path.startswith("/static/")
                 and not request.path.startswith("/icons/")
@@ -356,6 +417,56 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
             response.set_cookie(name, value, max_age=30 * 86400 if trusted else None, **cookie_options())
         session.clear()
         csrf_token()
+        return response
+
+    @app.post("/api/elevate")
+    def elevate():
+        """Re-enter the passphrase to unlock the higher-risk steps for a short window (T47).
+
+        The passphrase and not TOTP: reaching for the phone is what this work removes. What it
+        answers is a browser someone walked up to while it held a 30-day trust cookie.
+
+        Counted by the same lockout as the login form. Without that this is an unlimited
+        passphrase oracle for anyone holding a session -- the one attacker it exists to stop.
+        """
+        operator = operators.get(g.operator)
+        if operator is None:
+            return jsonify(error="Unknown operator"), 403
+        # First, before the submitted passphrase is looked at or a failure recorded. The
+        # device token carries the epoch it was minted under, and this worker may have
+        # authenticated it from a cache up to a minute stale. Checking later would leave a
+        # revoked browser a working passphrase oracle for that minute -- a wrong guess
+        # answering "rejected" and a right one "stale_session" is an answer either way -- and
+        # would let it spend the real operator's lockout budget doing it.
+        token = request.cookies.get("pe_auth", "")
+        current = epoch(operator.name, fresh=True)
+        identity = web_auth.read_device_token(secret, token, clock())
+        if identity is None or identity[1] != current:
+            return jsonify(error="Sign in again.", reason="stale_session"), 401
+        status = rpc("status", operator.name, client_ip=request.remote_addr)
+        if status["locked"]:
+            return jsonify(error="Too many attempts. Locked.", reason="locked",
+                           locked_until=status.get("locked_until")), 429
+        if not web_auth.verify_passphrase(operator.passphrase_hash,
+                                          request.form.get("passphrase", "")):
+            after = rpc("record_failure", operator.name, client_ip=request.remote_addr)
+            if after.get("locked"):
+                # The attempt that crosses the threshold answers like the already-locked
+                # branch above, rather than a plain rejection with the fact buried in a flag:
+                # otherwise the countdown only appears once the operator tries again, which
+                # is the moment they are least inclined to.
+                return jsonify(error="Too many attempts. Locked.", reason="locked",
+                               locked_until=after.get("locked_until")), 429
+            return jsonify(error="That passphrase was not right.", reason="rejected",
+                           remaining_attempts=after.get("remaining_attempts")), 403
+        rpc("record_success", operator.name, client_ip=request.remote_addr)
+        now = clock()
+        response = jsonify(ok=True, expires_in=web_auth.ELEVATION_SECONDS)
+        response.set_cookie(
+            "pe_elevated",
+            web_auth.make_elevation(secret, operator.name, current, token, now,
+                                    credential=operator.passphrase_hash),
+            **cookie_options())
         return response
 
     @app.post("/login/notify")

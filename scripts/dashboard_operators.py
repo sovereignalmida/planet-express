@@ -15,8 +15,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import web_auth
+from scripts import revoke_devices
 
 ENV_FILE = "/etc/planetexpress-dashboard.env"
+# The unit holding the credentials this script writes. `reset` restarts it itself, because a
+# reset is not finished while the old passphrase still works.
+RESTART_UNIT = "casa-dashboard"
 ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
@@ -176,15 +180,64 @@ def main(argv=None):
         elif action == "remove":
             values = apply_operator_change(values, action, name)
         rendered = render_env(text, values)
+        if action == "reset":
+            # Here, and not earlier: after the new passphrase has been read and accepted,
+            # so a typo or a mismatched confirmation cannot sign every device out for a reset
+            # that then refuses to happen. And before the write, because leaving the old
+            # devices signed in is a password reset that does not end the sessions it was
+            # performed to end. If this fails -- the install user cannot reach core's
+            # database -- nothing has changed yet and the operator can act on that.
+            try:
+                epoch = revoke_devices.revoke(name)
+            except Exception as exc:  # noqa: BLE001 -- any failure here must stop the reset
+                raise SystemExit(
+                    f"Could not revoke {name}'s trusted devices ({exc}).\n"
+                    f"The passphrase has NOT been changed. Run this as the core user, or run\n"
+                    f"scripts/revoke_devices.py {name} first and try again.") from None
+            print(f"Device epoch for {name}: {epoch}. Trusted devices must log in again.")
+            # A second bump follows the restart below; see the note there.
         if rendered != text:
             _write_env(rendered)
+        # Before the restart and the second revocation, both of which can fail. The new TOTP
+        # secret is live the moment the file is written, so an exit between here and there
+        # would leave the operator with an active secret they were never shown -- locked out
+        # by the recovery path rather than helped by it.
         if uri:
             print(uri)
             qrencode = shutil.which("qrencode")
             if qrencode:
                 subprocess.run([qrencode, "-t", "ANSIUTF8"], input=uri, text=True, check=True)
-        print("Restart with: sudo systemctl restart casa-dashboard")
-        print("scripts/revoke_devices.py <name> (run as the core user) signs out trusted devices.")
+
+        if action == "reset":
+            # The running dashboard still holds the OLD passphrase until it restarts, and it
+            # mints tokens against a live epoch lookup. So a sign-in with the old passphrase,
+            # in the gap between the bump above and the restart, walks away with a token
+            # carrying the NEW epoch -- one that survives the reset it was supposed to end.
+            # Restart first so the old credentials stop working, then bump again to strand
+            # anything issued during the gap.
+            try:
+                subprocess.run(["sudo", "systemctl", "restart", RESTART_UNIT],
+                               check=True, capture_output=True)
+            except (subprocess.CalledProcessError, OSError) as exc:
+                raise SystemExit(
+                    f"The passphrase was changed, but restarting {RESTART_UNIT} failed ({exc}).\n"
+                    f"The old passphrase still works until it restarts. Run:\n"
+                    f"  sudo systemctl restart {RESTART_UNIT}\n"
+                    f"  scripts/revoke_devices.py {name}") from None
+            try:
+                epoch = revoke_devices.revoke(name)
+            except Exception as exc:  # noqa: BLE001 -- the recovery matters more than the type
+                raise SystemExit(
+                    f"The passphrase was changed and {RESTART_UNIT} restarted, but the second\n"
+                    f"device revocation failed ({exc}). A session that signed in with the OLD\n"
+                    f"passphrase during the restart may still be trusted. Run:\n"
+                    f"  scripts/revoke_devices.py {name}") from None
+            print(f"Restarted {RESTART_UNIT}. Device epoch for {name}: {epoch}.")
+        if action != "reset":
+            print(f"Restart with: sudo systemctl restart {RESTART_UNIT}")
+        if action != "reset":
+            print("scripts/revoke_devices.py <name> (run as the core user) signs out trusted "
+                  "devices without changing a passphrase.")
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     except subprocess.CalledProcessError:

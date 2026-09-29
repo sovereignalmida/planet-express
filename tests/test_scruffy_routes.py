@@ -1702,3 +1702,349 @@ def test_a_merged_lan_pill_keeps_an_icon_known_only_for_its_twin():
     casa_scruffy_net.link_pills(zones, [], lan_domain="casalan.com",
                                 icon_for=lambda raw: "sonarr" if raw == "sonarr-lan@docker" else None)
     assert zones["zones"][0]["items"][0]["icon"] == "sonarr"
+
+
+# ── elevated sessions (T47) ──────────────────────────────────────────────────────
+
+def _elevate(client, passphrase=PASSPHRASE):
+    return client.post("/api/elevate",
+                       data={"csrf_token": csrf(client), "passphrase": passphrase})
+
+
+def test_signing_in_does_not_elevate():
+    """R0 and R1 are the session; R2 and R3 are a second, deliberate step."""
+    client, _rpc, now = make_client()
+    login(client, now)
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_the_right_passphrase_elevates():
+    client, _rpc, now = make_client()
+    login(client, now)
+    response = _elevate(client)
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert response.json["expires_in"] == web_auth.ELEVATION_SECONDS
+    assert client.get_cookie("pe_elevated") is not None
+
+
+def test_the_wrong_passphrase_does_not():
+    client, _rpc, now = make_client()
+    login(client, now)
+    response = _elevate(client, "not the passphrase")
+    assert response.status_code == 403
+    assert response.json["reason"] == "rejected"
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_a_wrong_passphrase_is_counted_by_the_lockout():
+    """Otherwise this is an unlimited passphrase oracle for anyone holding a session -- the
+    exact attacker elevation exists to stop."""
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.calls.clear()
+    _elevate(client, "not the passphrase")
+    assert [c for c in rpc.calls if c[0] == "auth.record_failure"], rpc.calls
+
+
+def test_a_right_passphrase_clears_the_count():
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.calls.clear()
+    _elevate(client)
+    assert [c for c in rpc.calls if c[0] == "auth.record_success"], rpc.calls
+
+
+def test_elevation_is_refused_while_locked():
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results[("auth.status", "alice")] = {"locked": True, "remaining_attempts": 0,
+                                            "locked_until": now[0] + 900}
+    response = _elevate(client)
+    assert response.status_code == 429
+    assert response.json["reason"] == "locked"
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_elevating_needs_a_csrf_token():
+    """CSRF is enforced on both branches of the auth hook, so this holds either way -- what
+    being in is_json_request() changes is that the refusal comes back as JSON rather than an
+    HTML abort, which is what the fetch() calling it can actually read."""
+    client, _rpc, now = make_client()
+    login(client, now)
+    response = client.post("/api/elevate", data={"passphrase": PASSPHRASE})
+    assert response.status_code == 400
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_elevating_needs_a_session():
+    """401 and JSON, not a redirect. This is what being in is_json_request() buys: a fetch()
+    gets an answer it can read instead of the login page's HTML."""
+    client, _rpc, _now = make_client()
+    response = client.post("/api/elevate", data={"passphrase": PASSPHRASE})
+    assert response.status_code == 401
+    assert response.is_json
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_a_marker_carrying_a_stale_epoch_is_refused():
+    """Belt and braces, and tested directly because the normal path cannot reach it: an epoch
+    bump also invalidates the device token, so the session dies before the marker is read.
+    This forges the state that would exist if it did not -- a current session, a marker minted
+    under an older epoch -- because that is the state a passphrase change has to survive.
+    """
+    client, _rpc, now = make_client()
+    login(client, now)
+    app = client.application
+    token = client.get_cookie("pe_auth").value
+    stale = web_auth.make_elevation(
+        ENV["PE_DASHBOARD_SECRET_KEY"], "alice", 7, token, now[0],
+        credential=ENV["PE_OPERATOR_ALICE_PASSPHRASE_HASH"])
+    client.set_cookie("pe_elevated", stale, domain="localhost")
+    with _in_session(client):
+        app.preprocess_request()
+        assert app.elevated_operator() is None
+
+
+def test_logging_out_clears_the_elevation():
+    client, _rpc, now = make_client()
+    login(client, now)
+    _elevate(client)
+    assert client.get_cookie("pe_elevated") is not None
+    client.post("/logout", data={"csrf_token": csrf(client)})
+    assert client.get_cookie("pe_elevated") is None
+
+
+def _in_session(client, path="/api/containers/media/sonarr"):
+    """A request context carrying this client's cookies, with the auth hook already run."""
+    app = client.application
+    jar = {c.key: c.value for c in client._cookies.values()} if hasattr(client, "_cookies") else {}
+    return app.test_request_context(path, headers={
+        "Cookie": "; ".join(f"{k}={v}" for k, v in jar.items())})
+
+
+def test_require_elevation_refuses_an_unelevated_session():
+    """403 with a typed reason, never a redirect: these arrive from fetch(), and a redirect
+    would put the login page's HTML into a JSON handler."""
+    client, _rpc, now = make_client()
+    login(client, now)
+    app = client.application
+    with _in_session(client):
+        app.preprocess_request()
+        refusal = app.require_elevation()
+    assert refusal is not None
+    body, status = refusal
+    assert status == 403
+    assert body.json["reason"] == "elevation_required"
+
+
+def test_require_elevation_allows_an_elevated_one():
+    client, _rpc, now = make_client()
+    login(client, now)
+    _elevate(client)
+    app = client.application
+    with _in_session(client):
+        app.preprocess_request()
+        assert app.require_elevation() is None
+        assert app.elevated_operator() == "alice"
+
+
+def test_revoking_devices_ends_the_session_and_its_elevation():
+    """What a revocation actually does, end to end: the device token carries the epoch it was
+    minted under, so once core moves past it the whole session goes -- elevation with it.
+
+    The previous version of this test checked elevated_operator() in a bare request context
+    with no auth hook run, so g had no operator and it returned None whatever the epoch did.
+    It passed with revocation completely broken. A request through the app cannot do that.
+    """
+    client, rpc, now = make_client()
+    app = client.application
+
+    @app.get("/api/elevated-probe-revoked")
+    def probe_revoked():
+        refusal = app.require_elevation()
+        return refusal if refusal is not None else ("elevated", 200)
+
+    login(client, now)
+    _elevate(client)
+    assert client.get("/api/elevated-probe-revoked").status_code == 200
+
+    rpc.results[("auth.device_epoch", "alice")] = {"epoch": 9}
+    rpc.results["auth.device_epoch"] = {"epoch": 9}
+    assert client.get("/api/elevated-probe-revoked").status_code != 200
+def test_an_elevation_does_not_survive_a_new_epoch():
+    """A passphrase change bumps the epoch, which revokes every outstanding marker without
+    having to find them."""
+    client, rpc, now = make_client()
+    login(client, now)
+    _elevate(client)
+    app = client.application
+    with _in_session(client):
+        app.preprocess_request()
+        assert app.elevated_operator() == "alice"
+    rpc.results[("auth.device_epoch", "alice")] = {"epoch": 9}
+    rpc.results["auth.device_epoch"] = {"epoch": 9}
+    with _in_session(client):
+        # the device token carries the old epoch, so the session itself is gone too
+        assert app.elevated_operator() is None
+
+
+def test_working_keeps_the_elevation_alive():
+    """The window slides on each elevated action. Without that it expires a flat ten minutes
+    after the passphrase, and an operator part-way through editing a compose file gets asked
+    again for no reason -- which is how people learn to keep a second tab elevated.
+    """
+    client, _rpc, now = make_client()
+    app = client.application
+
+    @app.get("/api/elevated-probe-alive")
+    def probe_alive():
+        refusal = app.require_elevation()
+        return refusal if refusal is not None else ("elevated", 200)
+
+    login(client, now)
+    _elevate(client)
+    for _ in range(3):                              # 3 x 500s = well past a 600s window
+        now[0] += web_auth.ELEVATION_SECONDS - 100
+        assert client.get("/api/elevated-probe-alive").status_code == 200
+    assert now[0] - 1800000000 > web_auth.ELEVATION_SECONDS, "never left the original window"
+
+
+def test_refreshing_cannot_outlive_the_cap():
+    """Each elevated action slides the window; the cap is measured from the passphrase entry
+    and carried through every refresh. Without that, clicking often enough would keep a
+    session elevated forever -- which is the whole thing the cap exists to prevent.
+
+    Exercised through a probe route because nothing calls require_elevation() yet: the seam
+    has to be proven before the stack-control slice is built on it.
+    """
+    client, _rpc, now = make_client()
+    app = client.application
+
+    @app.get("/api/elevated-probe")
+    def probe():                                    # registered before the first request
+        refusal = app.require_elevation()
+        return refusal if refusal is not None else ("elevated", 200)
+
+    login(client, now)
+    assert _elevate(client).status_code == 200
+    first = now[0]
+
+    elevated_for = 0
+    for _ in range(30):                             # far more clicks than the cap allows
+        now[0] += web_auth.ELEVATION_SECONDS - 1    # just inside the sliding window
+        if client.get("/api/elevated-probe").status_code != 200:
+            break
+        elevated_for = now[0] - first
+    else:
+        raise AssertionError("refreshing never ran out; the cap is not being enforced")
+
+    assert elevated_for <= web_auth.ELEVATION_CAP_SECONDS, (
+        f"stayed elevated {elevated_for}s against a {web_auth.ELEVATION_CAP_SECONDS}s cap")
+    assert client.get("/api/elevated-probe").status_code == 403
+
+
+def test_revoking_an_operator_ends_an_elevation_at_once():
+    """Not within a minute. The epoch cache is fine for deciding whether a page renders and
+    not fine for authorising a stack going down: a minute is long enough to do it.
+    """
+    client, rpc, now = make_client()
+    app = client.application
+
+    @app.get("/api/elevated-probe-revoke")
+    def probe_revoke():
+        refusal = app.require_elevation()
+        return refusal if refusal is not None else ("elevated", 200)
+
+    login(client, now)
+    _elevate(client)
+    assert client.get("/api/elevated-probe-revoke").status_code == 200
+
+    # Revoked this instant, with the cached epoch still well inside its 60 seconds.
+    rpc.results[("auth.device_epoch", "alice")] = {"epoch": 11}
+    rpc.results["auth.device_epoch"] = {"epoch": 11}
+    assert client.get("/api/elevated-probe-revoke").status_code != 200
+
+
+def test_elevating_answers_json_when_core_is_down():
+    """The route is called by fetch(). An RpcError falling through to the HTML airlock gives
+    it a login page to parse as JSON."""
+    from planet_express.integrations.rpc import RpcError
+
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["auth.status"] = RpcError("Authentication unavailable")
+    response = _elevate(client)
+    assert response.status_code == 503
+    assert response.is_json
+    assert response.json["reason"] == "unavailable"
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_the_attempt_that_locks_says_so():
+    """Not a plain rejection with the fact buried in a flag: the countdown would then only
+    appear when the operator tries again, which is the moment they are least inclined to."""
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results[("auth.record_failure", "alice")] = {
+        "locked": True, "locked_until": now[0] + 900, "remaining_attempts": 0}
+    response = _elevate(client, "not the passphrase")
+    assert response.status_code == 429
+    assert response.json["reason"] == "locked"
+    assert response.json["locked_until"] == now[0] + 900
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_a_revoked_device_cannot_elevate_even_if_this_worker_had_not_noticed():
+    """The multi-worker window. The auth hook accepts a device token against a cached epoch,
+    so a worker up to a minute behind will authenticate a revoked device. Minting against a
+    fresh epoch there would hand it a marker that every other worker then honours -- one
+    elevated action bought by whichever worker had not caught up.
+    """
+    client, rpc, now = make_client()
+    login(client, now)                       # token minted under epoch 0
+    # Revoked at core. The worker's cached epoch is still 0 and still inside its 60 seconds,
+    # so the session itself continues to authenticate.
+    rpc.results[("auth.device_epoch", "alice")] = {"epoch": 3}
+    rpc.results["auth.device_epoch"] = {"epoch": 3}
+    response = _elevate(client)
+    assert response.status_code == 401
+    assert response.json["reason"] == "stale_session"
+    assert client.get_cookie("pe_elevated") is None
+
+
+def test_a_revoked_session_is_not_a_passphrase_oracle():
+    """Checked before the submitted passphrase is looked at. Otherwise a revoked browser gets
+    a minute of free guessing while spending the real operator's lockout budget.
+
+    A side effect worth knowing: the fresh lookup also refreshes this worker's cache, so the
+    very next request is refused by the auth hook instead. The revoked session gets one 401
+    that tells it nothing about the passphrase, and then it is simply signed out.
+    """
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results[("auth.device_epoch", "alice")] = {"epoch": 3}
+    rpc.results["auth.device_epoch"] = {"epoch": 3}
+    rpc.calls.clear()
+
+    wrong = _elevate(client, "not the passphrase")
+    assert wrong.status_code == 401
+    assert wrong.json["reason"] == "stale_session"
+    # Nothing about the passphrase was recorded, so it cannot burn the lockout budget...
+    assert not [c for c in rpc.calls if c[0] == "auth.record_failure"], rpc.calls
+    # ...and the answer says nothing about whether the guess was right.
+    assert "rejected" not in wrong.get_data(as_text=True)
+
+
+def test_the_correct_passphrase_tells_a_revoked_session_nothing_either():
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results[("auth.device_epoch", "alice")] = {"epoch": 3}
+    rpc.results["auth.device_epoch"] = {"epoch": 3}
+    rpc.calls.clear()
+
+    right = _elevate(client)
+    assert right.status_code == 401
+    assert right.json["reason"] == "stale_session"
+    assert not [c for c in rpc.calls if c[0] == "auth.record_success"], rpc.calls
+    assert client.get_cookie("pe_elevated") is None
