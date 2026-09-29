@@ -161,7 +161,7 @@ def test_stack_actions_route_to_typed_actions(monkeypatch, text, action, target)
 
 
 def test_up_stack_direct_reply_names_execution(monkeypatch):
-    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk: True)
+    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk, origin: True)
     commands = FakeCommands()
     notifier = FakeNotifier()
     fw._run_stack_action_request(commands, notifier, fw.actions.UP_STACK, "media", "chris")
@@ -173,7 +173,7 @@ def test_up_stack_direct_reply_names_execution(monkeypatch):
 
 
 def test_approval_gated_stack_action_reports_card(monkeypatch):
-    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk: False)
+    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk, origin: False)
     commands = FakeCommands()
     notifier = FakeNotifier()
     fw._run_stack_action_request(commands, notifier, fw.actions.DOWN_STACK, "media", "chris")
@@ -189,7 +189,7 @@ def test_farnsworth_has_no_stackctl_up_down_calls():
 
 def test_direct_refusal_quoting_user_input_is_escaped(monkeypatch):
     # Codex review, T37: `/up <x>` must not break Telegram's HTML parse of the refusal.
-    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk: True)
+    monkeypatch.setattr(fw.policy, "allows_direct_request", lambda risk, origin: True)
     commands = FakeCommands()
     commands.request_action = lambda *a, **k: RequestResult(
         "refused", "target refused: invalid stack name '<x>'", None, None, {}

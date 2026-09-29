@@ -844,10 +844,34 @@
      never replaced by the 60-second swap. Its rows come from the <template data-drawer-for>
      elements inside the live region, which do refresh. #}
   <aside class="pe-drawer" data-drawer hidden aria-label="Stack drawer"></aside>
+    {# T47: the passphrase prompt for actions above the unelevated ceiling. One dialog for
+       every surface that needs one -- config apply today, stack control next.
+
+       At page level rather than inside a tab panel: a panel is display:none while its tab is
+       not the active one, and showModal() on a dialog in a hidden subtree renders nothing at
+       all. #}
+  <dialog id="elevate-dialog" aria-labelledby="elevate-title">
+      <div class="pe-sheet warn">
+        <div class="pe-sheet-grab" aria-hidden="true"></div>
+        <h2 id="elevate-title">CONFIRM IT IS YOU</h2>
+        <p id="elevate-note" class="elevate-note">This action needs your passphrase again.</p>
+        <form method="dialog">
+          <label class="elevate-label" for="elevate-passphrase">PASSPHRASE</label>
+          <input id="elevate-passphrase" name="passphrase" type="password"
+                 autocomplete="current-password" required>
+          <div class="config-sheet-actions">
+            <button type="button" class="pe-btn" data-elevate-cancel>CANCEL</button>
+            <button type="submit" class="pe-btn warn" id="elevate-confirm">CONFIRM</button>
+          </div>
+        </form>
+      </div>
+  </dialog>
+
   <script src="{{ asset('dashboard.js') }}"></script>
   <script src="{{ asset('incidents.js') }}"></script>
   <script src="{{ asset('approvals.js') }}"></script>
   <script src="{{ asset('chat.js') }}"></script>
+  <script src="{{ asset('elevate.js') }}"></script>
   <script src="{{ asset('config.js') }}"></script>
 </body>
 </html>

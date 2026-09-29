@@ -173,7 +173,17 @@ class ConfigService:
         )
         return ApplyResult(status, errors or [], reason, changed_fields, locked_fields)
 
-    def apply(self, text: str, *, base_sha256: str, operator: str) -> ApplyResult:
+    def apply(self, text: str, *, base_sha256: str, operator: str,
+              elevated: bool = False) -> ApplyResult:
+        """Write a new config, if the operator may.
+
+        `elevated` says the caller re-proved the operator's passphrase (T47). It is decided by
+        the dashboard, which is the only surface that has such a thing, and enforced HERE --
+        inside the mutation lock, against the same comparison the write uses. The dashboard
+        also checks before submitting, but only so the prompt appears at a sensible moment:
+        its check reads the live file at a different instant from this one, and a config that
+        changes in between would have it authorising a different change from the one applied.
+        """
         draft_data, errors = _draft_bytes(text)
         if errors:
             return self._refused(operator, "invalid", errors=errors)
@@ -211,6 +221,18 @@ class ConfigService:
                     operator,
                     "locked",
                     reason=self._locked_reason(validation.locked_fields),
+                    changed_fields=validation.changed_fields,
+                    locked_fields=validation.locked_fields,
+                )
+            if not elevated and set(validation.changed_fields) & SENSITIVE_FIELDS:
+                # After the locked check, because a field the switch forbids outright is
+                # locked rather than un-elevated, and inside the lock, against the comparison
+                # this write actually uses. `autonomy` holds the direct-request ceiling, so an
+                # unelevated session raising it would be the gate undoing itself.
+                return self._refused(
+                    operator,
+                    "elevation_required",
+                    reason="Changing this needs the operator's passphrase again.",
                     changed_fields=validation.changed_fields,
                     locked_fields=validation.locked_fields,
                 )

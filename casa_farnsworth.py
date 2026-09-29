@@ -1759,7 +1759,7 @@ def _run_stack_action_request(
     commands: CommandService, notifier: Notifier, action: str, target: str, requested_by: str
 ) -> None:
     spec = actions.REGISTRY[action]
-    if policy.allows_direct_request(spec.risk):
+    if policy.allows_direct_request(spec.risk, "telegram-direct"):
         result = commands.request_action(
             action, target, operator=requested_by, origin="telegram-direct"
         )

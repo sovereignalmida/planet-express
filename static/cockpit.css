@@ -2589,3 +2589,29 @@ a.net-pill { text-decoration: none; }
   .pe-icon.lg { width: 36px; height: 36px; border-radius: 9px; }
   .pe-icon.lg .pe-icon-mono { font-size: 14px; }
 }
+
+/* ---------- elevation prompt (T47) ----------
+   The passphrase again, for steps above the unelevated ceiling. Deliberately plain: it
+   borrows the review sheet's frame so it reads as the same kind of moment, and adds only
+   what a password field needs. */
+/* The dialog needs its own frame, the way the review sheet does: .pe-sheet is absolutely
+   positioned, so a <dialog> sized to fit-content collapses to nothing around it. */
+#elevate-dialog { width: min(460px, calc(100% - 24px)); padding: 0;
+  border: 0; background: transparent; color: var(--pe-ink); }
+#elevate-dialog::backdrop { background: rgba(4,8,14,.78); }
+#elevate-dialog .pe-sheet { position: relative; border-bottom: 1px solid #3a2f18;
+  border-radius: 22px; }
+#elevate-dialog h2 { margin: 0; }
+
+.elevate-label { display: block; font-family: var(--pe-font-mono); font-size: 10px;
+                 letter-spacing: .12em; color: var(--pe-ink-label); margin-bottom: 6px; }
+#elevate-passphrase {
+  width: 100%; box-sizing: border-box; margin-bottom: 14px;
+  padding: 10px 12px; border-radius: var(--pe-r-md);
+  border: 1px solid var(--pe-border-strong); background: var(--pe-well);
+  color: var(--pe-ink); font-family: var(--pe-font-mono); font-size: 13px;
+}
+#elevate-passphrase:focus { outline: none; border-color: var(--pe-accent); }
+.elevate-note { margin: 0 0 14px; font-size: 12.5px; line-height: 1.5; color: var(--pe-ink-body); }
+.elevate-note.warn { color: var(--pe-warn-ink); }
+.elevate-note.crit { color: var(--pe-crit-ink); }

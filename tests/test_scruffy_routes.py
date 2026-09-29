@@ -969,8 +969,11 @@ def test_config_routes_use_csrf_and_authenticated_operator(chat_client):
     assert rpc.calls == [
         ("config.get", {}),
         ("config.validate", {"text": "draft"}),
+        # Apply asks what the change touches before applying it, so whether an elevated
+        # session is required is read off the change rather than guessed (T47).
+        ("config.validate", {"text": "draft"}),
         ("config.apply", {"text": "draft", "base_sha256": "a" * 64,
-                          "operator": "alice"}),
+                          "operator": "alice", "elevated": False}),
     ]
 
 
@@ -993,6 +996,12 @@ def test_config_rpc_errors_are_always_503_json(chat_client, path):
     method = {"/api/config": "config.get", "/api/config/validate": "config.validate",
               "/api/config/apply": "config.apply"}[path]
     rpc.results[method] = RpcError("secret diagnostic", "bad_request")
+    if path == "/api/config/apply":
+        # Apply now validates first; give that step a real answer so the failure under test is
+        # config.apply's own and not the pre-check refusing for want of one.
+        rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                          "changed_fields": ["backup_jobs"],
+                                          "locked_fields": []}
     response = (client.get(path) if path == "/api/config" else client.post(
         path, data={"csrf_token": data["csrf_token"], "text": "draft",
                     "base_sha256": "a" * 64}
@@ -1900,7 +1909,10 @@ def test_working_keeps_the_elevation_alive():
     @app.get("/api/elevated-probe-alive")
     def probe_alive():
         refusal = app.require_elevation()
-        return refusal if refusal is not None else ("elevated", 200)
+        if refusal is not None:
+            return refusal
+        app.elevation_acted()          # this probe stands in for a route that did the thing
+        return ("elevated", 200)
 
     login(client, now)
     _elevate(client)
@@ -2048,3 +2060,213 @@ def test_the_correct_passphrase_tells_a_revoked_session_nothing_either():
     assert right.json["reason"] == "stale_session"
     assert not [c for c in rpc.calls if c[0] == "auth.record_success"], rpc.calls
     assert client.get_cookie("pe_elevated") is None
+
+
+# ── raising your own ceiling (T47) ───────────────────────────────────────────────
+
+def _config_client(changed_fields):
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": changed_fields, "locked_fields": []}
+    rpc.results["config.apply"] = {"status": "activating", "errors": [], "reason": "",
+                                   "changed_fields": changed_fields, "locked_fields": []}
+    return client, rpc
+
+
+def _apply(client, text="autonomy:\n  direct_request_risks: [R1, R2, R3]\n"):
+    return client.post("/api/config/apply", data={
+        "csrf_token": csrf(client), "text": text, "base_sha256": "a" * 64})
+
+
+def test_an_unelevated_session_cannot_raise_its_own_ceiling():
+    """The single edit that would undo the whole gate: autonomy holds the direct-request
+    ceiling, so changing it unelevated would let an operator grant themselves R3 and then use
+    it. Elevation is required to change the thing that decides what elevation is for."""
+    client, rpc = _config_client(["autonomy"])
+    response = _apply(client)
+    assert response.status_code == 403
+    assert response.json["reason"] == "elevation_required"
+    assert not [c for c in rpc.calls if c[0] == "config.apply"], "it was applied anyway"
+
+
+def test_an_elevated_session_can():
+    client, rpc = _config_client(["autonomy"])
+    _elevate(client)
+    response = _apply(client)
+    assert response.status_code == 200
+    assert [c for c in rpc.calls if c[0] == "config.apply"]
+
+
+@pytest.mark.parametrize("field", ["sudo_allowlist", "forbidden_stacks"])
+def test_the_other_load_bearing_fields_need_it_too(field):
+    """Same class of consequence as autonomy: what may run as root, and what may not be
+    touched at all."""
+    client, rpc = _config_client([field])
+    assert _apply(client).status_code == 403
+    assert not [c for c in rpc.calls if c[0] == "config.apply"]
+
+
+def test_an_ordinary_config_edit_does_not_need_elevation():
+    """Everything this gate is not for. Pausing a container is a normal day."""
+    client, rpc = _config_client(["paused_containers", "links"])
+    assert _apply(client).status_code == 200
+    assert [c for c in rpc.calls if c[0] == "config.apply"]
+
+
+def test_an_unreadable_validation_refuses_rather_than_guesses():
+    """No answer about what a change touches is no basis for letting it through unelevated."""
+    client, rpc = _config_client(["autonomy"])
+    rpc.results["config.validate"] = {"ok": True, "errors": []}     # no changed_fields
+    response = _apply(client)
+    assert response.status_code == 503
+    assert set(response.json) == {"error"}
+    assert not [c for c in rpc.calls if c[0] == "config.apply"]
+
+
+def test_an_elevated_request_that_did_nothing_does_not_slide_the_window():
+    """The window slides when an elevated action happened, not when one was attempted.
+
+    config.apply answers 200 for `conflict`, `locked` and `invalid` alike, so "the response
+    was not an error" says nothing about whether anything was done. Without this, resubmitting
+    a stale config would keep an otherwise idle session elevated up to the hour cap.
+    """
+    client, _rpc, now = make_client()
+    app = client.application
+
+    @app.get("/api/elevated-probe-idle")
+    def probe_idle():
+        refusal = app.require_elevation()
+        return refusal if refusal is not None else ("checked, did nothing", 200)
+
+    login(client, now)
+    _elevate(client)
+    for _ in range(3):
+        now[0] += web_auth.ELEVATION_SECONDS - 100
+        client.get("/api/elevated-probe-idle")
+    # Past the original ten minutes, and nothing ever confirmed an action.
+    assert client.get("/api/elevated-probe-idle").status_code == 403
+
+
+def test_a_rejected_config_apply_does_not_slide_the_window():
+    """Resubmitting a config that keeps being refused must not keep the session elevated.
+    Checked by running the clock out, because the cookie is still present either way -- what
+    differs is whether its window was pushed forward."""
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": ["autonomy"], "locked_fields": []}
+    rpc.results["config.apply"] = {"status": "conflict", "errors": [],
+                                   "reason": "someone else changed it",
+                                   "changed_fields": ["autonomy"], "locked_fields": []}
+    _elevate(client)
+
+    now[0] += web_auth.ELEVATION_SECONDS - 100                # still inside the first window
+    assert _apply(client).status_code == 200                  # refused by core, answered 200
+
+    now[0] += web_auth.ELEVATION_SECONDS - 100                # past it, had it not slid
+    assert _apply(client).json["reason"] == "elevation_required", (
+        "a refused apply pushed the window forward")
+
+
+# ── the elevation prompt (T47) ───────────────────────────────────────────────────
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_the_dashboard_carries_the_elevation_prompt():
+    """A backend gate with no way to satisfy it is a feature removed, not secured: with
+    sensitive config edits enabled, apply would 403 with nothing the operator could do."""
+    page = (ROOT / "templates/dashboard.html").read_text()
+    assert 'id="elevate-dialog"' in page
+    assert 'id="elevate-passphrase"' in page and 'type="password"' in page
+    # The script tags, not any mention: config.js is named in a comment much earlier in this
+    # file, and comparing against that compares nothing.
+    elevate = page.index("asset('elevate.js')")
+    config = page.index("asset('config.js')")
+    # Loaded before the tab that calls it, or window.peElevate is undefined when it is needed.
+    assert elevate < config
+
+
+def test_the_prompt_sends_csrf_and_keeps_no_passphrase():
+    js = (ROOT / "static/elevate.js").read_text()
+    assert "csrf_token" in js, "an unprotected POST of the passphrase"
+    assert "/api/elevate" in js
+    # Cleared on every exit, so a passphrase is never left sitting in the field behind a
+    # closed dialog.
+    assert js.count('input.value = ""') >= 2
+    assert "innerHTML" not in js
+    assert "console.log" not in js, "never log anything from the passphrase path"
+
+
+def test_config_apply_retries_after_elevating():
+    js = (ROOT / "static/config.js").read_text()
+    assert "error.reason = data.reason" in js, "the refusal's reason is discarded"
+    assert 'error.reason !== "elevation_required"' in js
+    assert "window.peElevate" in js
+    # Asked once and retried once; not a loop that re-prompts on every refusal.
+    assert js.count("await send()") == 2
+
+
+def test_cores_own_elevation_refusal_reaches_the_browser_as_a_403():
+    """The race the pre-check cannot cover: core decides this needs elevation although the
+    dashboard's earlier read did not. Answered as the same typed 403, so the browser prompts
+    and retries instead of reporting an unknown outcome for something recoverable."""
+    client, rpc = _config_client(["paused_containers"])     # pre-check sees nothing sensitive
+    rpc.results["config.apply"] = {"status": "elevation_required", "errors": [],
+                                   "reason": "needs the passphrase again",
+                                   "changed_fields": ["autonomy"], "locked_fields": []}
+    response = _apply(client)
+    assert response.status_code == 403
+    assert response.json["reason"] == "elevation_required"
+
+
+def test_an_ordinary_config_edit_does_not_extend_an_elevated_window():
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": ["links"], "locked_fields": []}
+    rpc.results["config.apply"] = {"status": "activating", "errors": [], "reason": "",
+                                   "changed_fields": ["links"], "locked_fields": []}
+    _elevate(client)
+
+    now[0] += web_auth.ELEVATION_SECONDS - 100
+    assert _apply(client).status_code == 200                # ordinary edit inside the window
+    now[0] += web_auth.ELEVATION_SECONDS - 100              # past it, had the edit slid it
+
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": ["autonomy"], "locked_fields": []}
+    assert _apply(client).json["reason"] == "elevation_required", (
+        "an ordinary edit kept the privileged window alive")
+
+
+def test_a_locked_field_is_not_worth_a_passphrase_prompt():
+    """With PE_ALLOW_SENSITIVE_CONFIG_EDITS off, a sensitive field appears in changed_fields
+    AND locked_fields. Prompting there spends the operator's lockout attempts to arrive at
+    `locked` regardless -- core checks locked first, and this mirrors it."""
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": ["autonomy"],
+                                      "locked_fields": ["autonomy"]}
+    rpc.results["config.apply"] = {"status": "locked", "errors": [],
+                                   "reason": "Sensitive config edits require …",
+                                   "changed_fields": ["autonomy"],
+                                   "locked_fields": ["autonomy"]}
+    response = _apply(client)
+    assert response.status_code == 200
+    assert response.json["status"] == "locked"
+    assert [c for c in rpc.calls if c[0] == "config.apply"], "it never reached core"
+
+
+def test_a_sensitive_field_that_is_not_locked_still_needs_the_passphrase():
+    """The other side of it: with the switch on, the field is editable and elevation is the
+    gate that remains."""
+    client, rpc, now = make_client()
+    login(client, now)
+    rpc.results["config.validate"] = {"ok": True, "errors": [],
+                                      "changed_fields": ["autonomy"], "locked_fields": []}
+    response = _apply(client)
+    assert response.status_code == 403
+    assert response.json["reason"] == "elevation_required"
+    assert not [c for c in rpc.calls if c[0] == "config.apply"]

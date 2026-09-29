@@ -351,10 +351,11 @@ def test_config_handlers_and_exact_param_validation():
         "ok": True, "errors": [], "changed_fields": ["backup_jobs"], "locked_fields": [],
     }
     reply = handlers["config.apply"]({
-        "text": "draft", "base_sha256": "a" * 64, "operator": "alice",
+        "text": "draft", "base_sha256": "a" * 64, "operator": "alice", "elevated": True,
     })
     assert reply.result == applied.as_dict() and reply.callback is callback
-    service.apply.assert_called_once_with("draft", base_sha256="a" * 64, operator="alice")
+    service.apply.assert_called_once_with("draft", base_sha256="a" * 64, operator="alice",
+                                          elevated=True)
 
     invalid = [
         ("config.get", {"extra": True}),
@@ -364,6 +365,13 @@ def test_config_handlers_and_exact_param_validation():
         ("config.apply", {"text": "x", "base_sha256": "a" * 64, "operator": "?"}),
         ("config.apply", {"text": "x", "base_sha256": "a" * 64,
                           "operator": "alice", "extra": True}),
+        # `elevated` missing entirely: the caller has not said what it is asserting.
+        ("config.apply", {"text": "x", "base_sha256": "a" * 64, "operator": "alice"}),
+        # ...and strictly a bool. "truthy" is not a thing to authorise a sensitive config
+        # change on, and a caller sending a string does not know what it is claiming.
+        *[("config.apply", {"text": "x", "base_sha256": "a" * 64, "operator": "alice",
+                            "elevated": value})
+          for value in ("yes", "true", 1, [], None, "False")],
     ]
     for method, params in invalid:
         with pytest.raises(RpcError) as error:

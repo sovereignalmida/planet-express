@@ -68,9 +68,16 @@ def decide(
     return PolicyDecision(True, True, spec.risk, f"{spec.risk}: needs approval")
 
 
-def allows_direct_request(risk: str, *, autonomy: AutonomyConfig | None = None) -> bool:
+def allows_direct_request(risk: str, origin: str, *,
+                          autonomy: AutonomyConfig | None = None) -> bool:
+    """Whether `origin` may originate a request at this risk without an approval.
+
+    `origin` is required and has no default. The ceiling used to be one number shared by every
+    direct origin; now that a browser can prove an elevated session and a chat message cannot,
+    a caller that does not say which surface is asking cannot be given a correct answer.
+    """
     autonomy = config.AUTONOMY if autonomy is None else autonomy
-    return risk in autonomy.direct_request_risks
+    return risk in autonomy.direct_risks_for(origin)
 
 
 def decide_runbook(
@@ -100,7 +107,7 @@ def decide_runbook(
             f"runbook is {computed_risk}: never allowed", pairs,
         )
     if origin in DIRECT_RUNBOOK_ORIGINS:
-        if not allows_direct_request(computed_risk, autonomy=autonomy):
+        if not allows_direct_request(computed_risk, origin, autonomy=autonomy):
             return RunbookDecision(
                 False, False, False, computed_risk,
                 f"{computed_risk}: not directly requestable", pairs,

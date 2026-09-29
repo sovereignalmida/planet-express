@@ -231,10 +231,21 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         # a minute -- a minute is long enough to take a stack down.
         if operator != known.name or epoch(operator, fresh=True) != marker_epoch:
             return None
-        # Slide the window forward; after_request writes it back. `first` is carried through,
-        # so the hour-long cap is still measured from the passphrase entry.
-        g.refresh_elevation = (operator, marker_epoch, first)
+        # The material for a refresh, but not the refresh itself: the window slides when an
+        # elevated action HAPPENED, not when one was attempted. A route confirms by calling
+        # elevation_acted(). Defaulting the other way is how a session stays alive on nothing
+        # but rejected submissions -- config.apply answers 200 for `conflict`, `locked` and
+        # `invalid` alike, so "the response was not an error" does not mean anything was done.
+        # Forgetting to confirm costs an early re-prompt; forgetting to decline would cost the
+        # idle expiry altogether.
+        g.elevation_material = (operator, marker_epoch, first)
         return operator
+
+    def elevation_acted():
+        """Slide the elevation window: this request did the thing it was elevated for."""
+        material = getattr(g, "elevation_material", None)
+        if material is not None:
+            g.refresh_elevation = material
 
     def require_elevation():
         """None when this request may run a step above the unelevated ceiling, else a 403.
@@ -252,6 +263,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     # is a boundary nobody has checked.
     app.require_elevation = require_elevation
     app.elevated_operator = elevated_operator
+    app.elevation_acted = elevation_acted
 
     def clear_auth(response):
         for name in ("pe_auth", "pe_auth_trust", "pe_elevated"):
@@ -514,13 +526,61 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     def config_validate():
         return jsonify(core("config.validate", {"text": request.form.get("text", "")}))
 
+    # The fields whose change needs an elevated session. `autonomy` is the one that matters
+    # most: it holds the direct-request ceiling, so without this an unelevated operator could
+    # raise their own ceiling and then use it -- the whole gate undone in one edit. The other
+    # two are in the same class of consequence, so they are treated the same way.
+    ELEVATED_CONFIG_FIELDS = frozenset({"autonomy", "sudo_allowlist", "forbidden_stacks"})
+
     @app.post("/api/config/apply")
     def config_apply():
-        return jsonify(core("config.apply", {
-            "text": request.form.get("text", ""),
+        text = request.form.get("text", "")
+        # Asked before applying, and about this exact text: core reports which fields a change
+        # touches, so whether elevation is needed is read off the change rather than guessed
+        # from who is asking.
+        checked = core("config.validate", {"text": text})
+        touched = checked.get("changed_fields") if isinstance(checked, dict) else None
+        if not isinstance(touched, list):
+            # No answer about what changes means no basis for letting it through unelevated.
+            # `error` alone, like every other answer from these routes: the config surface
+            # deliberately says nothing more than that when something fails.
+            return jsonify(error="Could not tell what this change touches; try again."), 503
+        # Minus whatever is already locked, mirroring core's order: a field the sensitive-edits
+        # switch forbids outright cannot be applied at all, so asking for the passphrase first
+        # spends lockout attempts to arrive at "locked" anyway.
+        blocked = checked.get("locked_fields") if isinstance(checked, dict) else None
+        needs_elevation = ELEVATED_CONFIG_FIELDS.intersection(touched).difference(
+            blocked if isinstance(blocked, list) else [])
+        elevated = elevated_operator() is not None
+        if needs_elevation and not elevated:
+            # Asked here only so the prompt appears before the draft is submitted. Core makes
+            # the real decision, inside the lock, against the comparison it actually writes --
+            # this one reads the live file at a different instant and cannot be authoritative.
+            return jsonify(error="This action needs your passphrase again.",
+                           reason="elevation_required"), 403
+        applied = core("config.apply", {
+            "text": text,
             "base_sha256": request.form.get("base_sha256", ""),
             "operator": g.operator,
-        }))
+            "elevated": elevated,
+        })
+        if isinstance(applied, dict):
+            if applied.get("status") == "elevation_required":
+                # Core decided this needs elevation although the pre-check did not: the live
+                # config changed between the two reads. Answered as the same typed 403 the
+                # pre-check uses, so the browser prompts and retries instead of reporting an
+                # unknown outcome for something it can actually recover from.
+                return jsonify(error="This action needs your passphrase again.",
+                               reason="elevation_required"), 403
+            # Only a change that landed AND needed elevation slides the window. `invalid`,
+            # `conflict` and `locked` all answer 200, so the status is the only thing that
+            # says whether anything happened -- and an ordinary edit to `links` should not
+            # keep a privileged window alive just because the operator happened to hold one.
+            landed = applied.get("changed_fields") or []
+            if (applied.get("status") == "activating"
+                    and ELEVATED_CONFIG_FIELDS.intersection(landed)):
+                elevation_acted()
+        return jsonify(applied)
 
     def container_target(stack, service):
         if any(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value) is None

@@ -16,12 +16,27 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Risk = Literal["R0", "R1", "R2", "R3", "R4"]
 
 
+# The origins a human drives directly, and therefore the ones a ceiling can differ between.
+# Kept here rather than imported from policy.py, which imports this module.
+DIRECT_ORIGINS = ("dashboard-direct", "telegram-direct")
+
+
 class AutonomyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     direct_request_risks: list[Risk] = ["R1"]
+    # Per-origin overrides of the ceiling above (T47). One number for every direct origin was
+    # wrong once the dashboard grew an elevated session: elevation is something a browser can
+    # ask for and prove, and a chat message cannot, so the two surfaces should not be obliged
+    # to trust each other's requests equally. Absent means the shared value applies, which is
+    # what every existing config gets.
+    direct_request_risks_by_origin: dict[str, list[Risk]] = {}
     forbidden_risks: list[Risk] = ["R4"]
     cooldown_seconds: int = Field(default=1800, ge=0)
     max_attempts_per_day: int = Field(default=3, ge=1)
+
+    def direct_risks_for(self, origin: str) -> list[Risk]:
+        """The ceiling for one direct origin: its own if it has one, else the shared value."""
+        return self.direct_request_risks_by_origin.get(origin, self.direct_request_risks)
 
     @model_validator(mode="after")
     def _validate_risks(self) -> "AutonomyConfig":
@@ -29,10 +44,23 @@ class AutonomyConfig(BaseModel):
             raise ValueError("R4 must be forbidden")
         if "R0" in self.forbidden_risks:
             raise ValueError("R0 must not be forbidden")
-        if "R0" in self.direct_request_risks:
-            raise ValueError("R0 must not be directly requestable")
-        if set(self.forbidden_risks) & set(self.direct_request_risks):
-            raise ValueError("a risk cannot be both forbidden and directly requestable")
+        for origin, risks in [(None, self.direct_request_risks)] + sorted(
+                self.direct_request_risks_by_origin.items()):
+            where = "direct_request_risks" if origin is None else f"{origin}'s ceiling"
+            if "R0" in risks:
+                raise ValueError(f"R0 must not be directly requestable ({where})")
+            # Checked per origin, not just on the shared list: an override naming a forbidden
+            # risk is a contradiction the old single check could not have seen.
+            if set(self.forbidden_risks) & set(risks):
+                raise ValueError(
+                    f"a risk cannot be both forbidden and directly requestable ({where})")
+        unknown = sorted(set(self.direct_request_risks_by_origin) - set(DIRECT_ORIGINS))
+        if unknown:
+            # Fail rather than ignore: a ceiling written for an origin that cannot originate
+            # anything looks like it is in force and is not.
+            raise ValueError(
+                f"direct_request_risks_by_origin: {', '.join(unknown)} "
+                f"is not a direct origin (expected {', '.join(DIRECT_ORIGINS)})")
         return self
 
 

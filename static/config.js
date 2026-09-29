@@ -56,6 +56,9 @@
     if (!response.ok) {
       const error = new Error(data.error || "Config unavailable; try again shortly");
       error.status = response.status;
+      // Carried, not discarded: "elevation_required" is a recoverable refusal and every other
+      // 403 is not, and they are indistinguishable without it.
+      error.reason = data.reason;
       throw error;
     }
     return data;
@@ -454,10 +457,24 @@
     state.applying = true;
     syncButtons();
     showOutcome("SUBMITTING", "warn", ["Sending the checked draft to core…"]);
+    const send = () => request("/api/config/apply", {
+      method: "POST", body: new URLSearchParams({ csrf_token: csrf(), text: appliedText, base_sha256: baseSha256 }),
+    });
     try {
-      const result = await request("/api/config/apply", {
-        method: "POST", body: new URLSearchParams({ csrf_token: csrf(), text: appliedText, base_sha256: baseSha256 }),
-      });
+      let result;
+      try {
+        result = await send();
+      } catch (error) {
+        // Changing autonomy, the sudo allowlist or forbidden stacks needs the passphrase
+        // again. Ask once and retry; anything else is somebody else's error.
+        if (error.reason !== "elevation_required" || !window.peElevate) throw error;
+        if (!await window.peElevate("Changing this part of the config needs your passphrase again.")) {
+          dialog.close();
+          showOutcome("NOT APPLIED", "warn", ["Nothing was changed."]);
+          return;
+        }
+        result = await send();
+      }
       dialog.close();
       renderApplyResult(result, appliedText, baseSha256);
     } catch (error) {

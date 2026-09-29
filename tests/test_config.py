@@ -178,8 +178,13 @@ def test_autonomy_defaults():
     autonomy = PlanetExpressConfig(stacks_root='/srv').autonomy
     assert autonomy.model_dump() == {
         'direct_request_risks': ['R1'], 'forbidden_risks': ['R4'],
+        # Empty by default, so every existing config keeps the single shared ceiling and
+        # nothing changes for either surface until an override is written down.
+        'direct_request_risks_by_origin': {},
         'cooldown_seconds': 1800, 'max_attempts_per_day': 3,
     }
+    assert autonomy.direct_risks_for('dashboard-direct') == ['R1']
+    assert autonomy.direct_risks_for('telegram-direct') == ['R1']
 
 
 @pytest.mark.parametrize('settings', [

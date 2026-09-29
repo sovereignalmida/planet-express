@@ -826,7 +826,7 @@ class CommandService:
             return RequestResult("refused", decision.reason, None, None, capabilities)
         if not decision.needs_approval:
             return RequestResult("refused", f"{action} is a read, not an action", None, None, capabilities)
-        if not policy.allows_direct_request(decision.risk):
+        if not policy.allows_direct_request(decision.risk, origin):
             return RequestResult("refused", f"direct requests are not allowed for {decision.risk}",
                                  None, None, capabilities)
         runbook_decision = policy.decide_runbook(plan, origin) if plan is not None else None

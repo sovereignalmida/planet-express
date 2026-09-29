@@ -81,8 +81,8 @@ def make_service(tmp_path, *, sensitive=False, busy=False, activate=None, notify
     return service, path, state, store, activated, live
 
 
-def apply_and_activate(service, text, live, operator="alice"):
-    result = service.apply(text, base_sha256=digest(live), operator=operator)
+def apply_and_activate(service, text, live, operator="alice", elevated=False):
+    result = service.apply(text, base_sha256=digest(live), operator=operator, elevated=elevated)
     if result.status == "activating":
         result._post_reply()
     return result
@@ -117,8 +117,14 @@ def test_sensitive_fields_require_switch(field, value, tmp_path):
     assert result.status == "locked" and result.locked_fields == [field]
     assert path.read_text() == live
 
+    # With the switch on the field becomes editable, and then it needs an elevated session:
+    # two different gates, and the switch is the outer one (T47).
     service, path, _, _, activated, live = make_service(tmp_path, sensitive=True)
-    result = apply_and_activate(service, draft, live)
+    refused = apply_and_activate(service, draft, live)
+    assert refused.status == "elevation_required"
+    assert path.read_text() == live, "a sensitive change landed without elevation"
+
+    result = apply_and_activate(service, draft, live, elevated=True)
     assert result.status == "activating" and activated.wait(1)
     assert path.read_text() == draft
 
@@ -339,3 +345,32 @@ def test_error_after_replace_still_activates(tmp_path, monkeypatch):
     assert activated.wait(1)
     assert _wait_released(state)
     assert path.read_text() == draft
+
+
+def test_core_refuses_a_sensitive_change_the_dashboard_thought_was_ordinary(tmp_path):
+    """The reason this decision lives in core rather than in the route that prompts.
+
+    The dashboard asks what a draft changes, then submits it. Those are two reads of the live
+    file at different instants. If it changes in between -- including changing back, so the
+    submitted base_sha256 still matches -- the question the dashboard answered is not the
+    change core performs. Core decides against the comparison it actually writes.
+    """
+    service, path, _, _, _, live = make_service(tmp_path, sensitive=True)
+    draft = dump(BASE | {"autonomy": {"direct_request_risks": ["R1", "R2", "R3"]}})
+
+    # Whatever the dashboard concluded, an unelevated apply of a sensitive change is refused
+    # here, where the live file cannot change underneath the decision.
+    refused = service.apply(draft, base_sha256=digest(live), operator="alice", elevated=False)
+    assert refused.status == "elevation_required"
+    assert "autonomy" in refused.changed_fields
+    assert path.read_text() == live
+
+
+def test_elevation_is_not_a_way_past_the_sensitive_switch(tmp_path):
+    """Elevation is the inner gate, not a bypass of the outer one: with the switch off the
+    field is not editable at all, and saying the passphrase again does not change that."""
+    service, path, _, _, _, live = make_service(tmp_path)          # switch off
+    draft = dump(BASE | {"autonomy": {"direct_request_risks": ["R1", "R2", "R3"]}})
+    result = service.apply(draft, base_sha256=digest(live), operator="alice", elevated=True)
+    assert result.status == "locked"
+    assert path.read_text() == live

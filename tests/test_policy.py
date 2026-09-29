@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
@@ -63,9 +65,11 @@ def test_telegram_direct_is_an_operator_origin():
     assert "telegram-direct" in policy.OPERATOR_ORIGINS
 
 
-def test_only_r1_allows_direct_request():
+@pytest.mark.parametrize('origin', ['dashboard-direct', 'telegram-direct'])
+def test_only_r1_allows_direct_request(origin):
+    """The default ceiling, and it is still shared: without an override both surfaces get it."""
     for risk in (*policy.RISK_LEVELS, 'R9', '', None):
-        assert policy.allows_direct_request(risk) is (risk == 'R1')
+        assert policy.allows_direct_request(risk, origin) is (risk == 'R1')
 
 
 def test_configurable_policy(monkeypatch):
@@ -77,9 +81,9 @@ def test_configurable_policy(monkeypatch):
     monkeypatch.setitem(actions.REGISTRY, 'test', actions.ActionSpec('test', 'R3', 'test'))
     assert not policy.decide('test').allowed
     assert policy.decide('test', autonomy=AutonomyConfig()).needs_approval
-    assert not policy.allows_direct_request('R1')
-    assert policy.allows_direct_request('R2')
-    assert not policy.allows_direct_request('R2', autonomy=AutonomyConfig())
+    assert not policy.allows_direct_request('R1', 'dashboard-direct')
+    assert policy.allows_direct_request('R2', 'dashboard-direct')
+    assert not policy.allows_direct_request('R2', 'dashboard-direct', autonomy=AutonomyConfig())
     for rollbackable in (False, True):
         monkeypatch.setitem(actions.REGISTRY, 'test', actions.ActionSpec(
             'test', 'R1', 'test', rollbackable=rollbackable,
@@ -177,3 +181,67 @@ def test_runbook_policy_refuses_unknown_registry_risk(monkeypatch):
     decision = policy.decide_runbook(_runbook(), "planner")
     assert not decision.allowed and decision.risk == "R9"
     assert "unknown risk class" in decision.reason
+
+
+# ── per-origin direct-request ceilings (T47) ─────────────────────────────────────
+
+def _autonomy(**kwargs):
+    from config_schema import AutonomyConfig
+    return AutonomyConfig(**kwargs)
+
+
+def test_an_override_raises_one_surface_and_not_the_other():
+    """The point of the whole change. An elevated session is something a browser can ask for
+    and prove; a chat message cannot, so the two must not share one number."""
+    autonomy = _autonomy(direct_request_risks_by_origin={
+        "dashboard-direct": ["R1", "R2", "R3"]})
+    for risk in ("R1", "R2", "R3"):
+        assert policy.allows_direct_request(risk, "dashboard-direct", autonomy=autonomy)
+    assert policy.allows_direct_request("R1", "telegram-direct", autonomy=autonomy)
+    for risk in ("R2", "R3"):
+        assert not policy.allows_direct_request(risk, "telegram-direct", autonomy=autonomy)
+
+
+def test_an_origin_with_no_override_falls_back_to_the_shared_ceiling():
+    autonomy = _autonomy(direct_request_risks=["R1", "R2"],
+                         direct_request_risks_by_origin={"dashboard-direct": ["R1"]})
+    assert policy.allows_direct_request("R2", "telegram-direct", autonomy=autonomy)
+    # An override can lower a ceiling as well as raise it.
+    assert not policy.allows_direct_request("R2", "dashboard-direct", autonomy=autonomy)
+
+
+def test_an_unknown_origin_gets_the_shared_ceiling():
+    """Not a silent allow-all. A caller naming something that cannot originate anything is a
+    bug, and it should behave no more permissively than the default."""
+    autonomy = _autonomy(direct_request_risks_by_origin={
+        "dashboard-direct": ["R1", "R2", "R3"]})
+    assert policy.allows_direct_request("R1", "planner", autonomy=autonomy)
+    assert not policy.allows_direct_request("R3", "planner", autonomy=autonomy)
+    assert not policy.allows_direct_request("R3", "", autonomy=autonomy)
+
+
+@pytest.mark.parametrize("override,message", [
+    ({"nonsense": ["R1"]}, "is not a direct origin"),
+    ({"dashboard": ["R1"]}, "is not a direct origin"),
+    ({"dashboard-direct": ["R0", "R1"]}, "R0 must not be directly requestable"),
+    ({"dashboard-direct": ["R4"]}, "cannot be both forbidden and directly requestable"),
+])
+def test_a_nonsensical_override_is_refused_at_load(override, message):
+    """Refused rather than ignored: a ceiling written for an origin that cannot originate
+    anything looks like it is in force and is not."""
+    with pytest.raises(ValueError, match=message):
+        _autonomy(direct_request_risks_by_origin=override)
+
+
+def test_a_runbook_is_decided_against_its_own_origin():
+    """The ceiling has to reach decide_runbook, not only the helper -- that is the path a real
+    request takes, and it is where the origin was previously thrown away."""
+    autonomy = _autonomy(direct_request_risks_by_origin={
+        "dashboard-direct": ["R1", "R2", "R3"]})
+    plan = _runbook("service.stop")                 # R2
+
+    allowed = policy.decide_runbook(plan, "dashboard-direct", autonomy=autonomy)
+    assert allowed.allowed and not allowed.needs_approval, allowed.reason
+
+    refused = policy.decide_runbook(plan, "telegram-direct", autonomy=autonomy)
+    assert not refused.allowed, "telegram-direct kept the dashboard's raised ceiling"

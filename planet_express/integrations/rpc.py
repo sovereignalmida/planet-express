@@ -852,8 +852,13 @@ def build_core_handlers(
                 "changed_fields": result.changed_fields, "locked_fields": result.locked_fields}
 
     def config_apply(params):
-        if not isinstance(params, dict) or set(params) != {"text", "base_sha256", "operator"}:
+        if not isinstance(params, dict) or set(params) != {"text", "base_sha256", "operator",
+                                                           "elevated"}:
             raise RpcError("Invalid params", "bad_request")
+        # Strictly a bool. Anything else is a caller that does not know what it is asserting,
+        # and "truthy" is not a thing to authorise a sensitive config change on.
+        if type(params["elevated"]) is not bool:
+            raise RpcError("Invalid config apply params", "bad_request")
         text = params["text"]
         digest = params["base_sha256"]
         if (not isinstance(text, str)
@@ -864,7 +869,8 @@ def build_core_handlers(
         auth_params({"operator": params["operator"]})
         if params["operator"] == "?":
             raise RpcError("Invalid operator", "bad_request")
-        result = config_service.apply(text, base_sha256=digest, operator=params["operator"])
+        result = config_service.apply(text, base_sha256=digest, operator=params["operator"],
+                                      elevated=params["elevated"])
         callback = getattr(result, "_post_reply", None)
         public = result.as_dict()
         return _PostReply(public, callback) if callback is not None else public
