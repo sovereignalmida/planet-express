@@ -104,12 +104,13 @@ is down takes the whole list with it, and a dashboard restart loses even the mem
 that the host existed.
 
 So PE carries an **expected-host inventory** in config: for each host, the beszel
-system id (stable, `systems.id`), a display name, the URL of that host's own UI,
-and whether it is the local host. PE renders that inventory. Live values are looked
-up per host by system id and filled in; a host the collector does not answer for
-renders from the inventory with its state as unknown and the reason shown. The
-inventory is also the only source of the outbound link — beszel stores no link, and
-a link is exactly the field we would not want a remote host to be able to set.
+system id (stable, `systems.id`), a display name, and the URL of that host's own
+UI. No entry declares whether it is the local host — locality is derived, below.
+PE renders that inventory. Live values are looked up per host by system id and
+filled in; a host the collector does not answer for renders from the inventory with
+its state as unknown and the reason shown. The inventory is also the only source of
+the outbound link — beszel stores no link, and a link is exactly the field we would
+not want a remote host to be able to set.
 
 A host the collector reports that the inventory does not list is surfaced, not
 hidden: a new agent appearing should be visible rather than silently ignored. It
@@ -161,22 +162,38 @@ from the local docker socket, which does not depend on beszel at all.
   | CASA SOLAR ASSISTANT | 0                                                   |
 
   The separation is not close, but note the Unraid 1: that is `beszel-agent`, a
-  container name that exists on every host. So the test is **proportional** overlap,
-  never any-overlap — the winning system must cover a large majority of local
-  container names and beat the runner-up by a wide margin. Name and address are not
-  identity: beszel's name is editable in its UI and addresses change.
+  container name that exists on every host. Any-overlap matching would be wrong.
+  Name and address are not identity either: beszel's name is editable in its UI and
+  addresses change.
 
-  Config may still pin the local system id, for an operator who needs to override.
-  If it is pinned and derivation disagrees, that is a config validation failure
-  refused at apply time — loudly, because one of the two is wrong and PE cannot
-  tell which.
+  **The predicate, stated so two implementations cannot disagree.** Let `L` be the
+  set of container names from the local docker socket, and for each system `S` the
+  set of container names the collector reports for it. Compare by exact name.
 
-  **If locality cannot be determined, no remote host renders at all.** Fail closed.
-  No dominant match — collector unreachable, a partial answer, or a local host
-  running too few containers to discriminate — means PE renders zero remote entries
-  and says why, rather than guessing and risking the duplicate. The rule that
-  surfaces unlisted hosts applies only to systems positively determined not to be
-  local.
+  - `coverage(S) = |S ∩ L| / |L|` — the denominator is always the local set, never
+    the remote one, so a host reporting thousands of containers cannot win by volume.
+  - Derivation is **not attempted** when `|L| < 5`. Too few names to discriminate,
+    and the answer would turn on one coincidence.
+  - A system is the local one when `coverage(S) >= 0.5` **and** `|S ∩ L|` is at
+    least three times the second-best `|S ∩ L|`. On the measured data: coverage
+    1.0 and 85 against a runner-up of 1.
+  - Anything else — no system clearing 0.5, two systems within the 3× margin, or a
+    tie — leaves locality **unknown**. No guessing.
+
+  Config may pin the local system id as an optional override for an operator who
+  needs one. It is a single pinned id, not a per-entry boolean. If it is pinned and
+  derivation disagrees, that is a config validation failure refused at apply time —
+  loudly, because one of the two is wrong and PE cannot tell which.
+
+  **While locality is unknown, configured hosts still render; unconfigured ones do
+  not.** This is where the earlier draft of this section had it backwards. It said
+  no remote host renders at all, which hides every host in the inventory exactly
+  when the collector is failing — the opposite of the invariant six paragraphs up,
+  and the same "unreadable is not absent" mistake a third time. Correct behaviour:
+  every inventory entry renders, with unknown state and the reason, because its
+  identity comes from config and does not depend on the collector. What is withheld
+  is only the *unconfigured* collector rows, since surfacing those before locality
+  is known is precisely what would render this host a second time.
 
   **An empty inventory means PE does not query the collector.** Not "queries it and
   shows nothing" — that is the state where every returned row is unlisted, including
