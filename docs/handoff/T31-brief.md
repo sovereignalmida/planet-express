@@ -8,7 +8,7 @@ it (then say so explicitly).
 Landing 1c was marked complete but its dashboard half was never built (see "Finish landing 1c" in
 `docs/designs/planet-express-2-0-slices.md`). T29 landed the core reads, T30 the container page and
 restart sheet. T31 is the remaining two screens from
-`docs/designs/planet_express_design_v20/system/ACTION-SCREENS.md`: **C · Flight authorisation
+`docs/designs/archive/planet_express_design_v20/system/ACTION-SCREENS.md`: **C · Flight authorisation
 (approval card)** and **D · Flight recorder (execution)**. After this, an operator can authorise a
 proposal and watch it run without Telegram.
 

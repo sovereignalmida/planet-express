@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#060b13;}
+  a{color:#5fd6e8;text-decoration:none;border-bottom:1px solid rgba(95,214,232,.3);}
+  a:hover{color:#8fe6f5;border-bottom-color:#8fe6f5;}
+  @keyframes beacon{0%,100%{opacity:1}50%{opacity:.25}}
+  @keyframes critpulse{0%,100%{opacity:1}50%{opacity:.4}}
+</style>
+</helmet>
+
+<div style="min-height:100vh;background:#060b13;font-family:'Space Grotesk',sans-serif;padding:34px 40px 70px;color:#eef4fa;">
+<div style="max-width:1180px;margin:0 auto;display:flex;flex-direction:column;gap:34px;">
+
+  <header style="display:flex;flex-direction:column;gap:9px;border-bottom:1px solid #1c2c44;padding-bottom:22px;">
+    <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.16em;color:#5f7391;">SOVEREIGNALMIDA / PLANET-EXPRESS · main @ d09f6a8 · templates/dashboard.html + static/dashboard.css</div>
+    <h1 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:38px;letter-spacing:.02em;color:#eef4fa;">BACKUPS TAB — DESIGN HANDOFF</h1>
+    <p style="margin:0;max-width:760px;font-size:14.5px;line-height:1.65;color:#8fa3ba;text-wrap:pretty;">The v3 Backups tab renders the data it's given, but the data it's given is the wrong data, in the wrong order, with the loudest field being the one that means nothing. Below: what's wrong and why, the corrected design, and the exact backend changes it needs.</p>
+  </header>
+
+  <!-- ══════════ A. FAULTS ══════════ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <div style="display:flex;align-items:baseline;gap:14px;">
+      <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;color:#eef4fa;">A · WHAT'S WRONG</h2>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">7 faults · 4 need a backend change</span>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;">
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #ef3c2e;background:rgba(239,60,46,.05);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#ff6a5a;border:1px solid rgba(239,60,46,.4);border-radius:20px;padding:2px 8px;">F1 · BLOCKER</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#5f7391;">UI ONLY</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">STATE is the loudest field and it means nothing</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">The pod leads with <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">STATE</span>, which is systemd <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">ActiveState</span>. Borg jobs are oneshot units fired by timers — between runs that is <em>always</em> <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">inactive</span>. A perfectly healthy backup reads as dead.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">casa_hermes.py:56 already says so — <span style="color:#7f95a8;">"because state is 'inactive' — check result and last_run instead"</span>. The dashboard didn't get the memo.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #ef3c2e;background:rgba(239,60,46,.05);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#ff6a5a;border:1px solid rgba(239,60,46,.4);border-radius:20px;padding:2px 8px;">F2 · BLOCKER</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#f5c94a;">NEEDS BACKEND</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">No next-run time, so you can't tell if the timer is armed</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">A disabled timer and a healthy idle job look identical. This is the single most load-bearing fact on the tab and it isn't collected.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">Already solved elsewhere: <span style="color:#8fe6a0;">casa_stackctl.check_backups()</span> reads <span style="color:#7f95a8;">LastTriggerUSec</span> + <span style="color:#7f95a8;">NextElapseUSecRealtime</span> off the <span style="color:#7f95a8;">.timer</span> unit. <span style="color:#f5c94a;">casa_leela.check_backups()</span> — the one the dashboard uses — only shows the <span style="color:#7f95a8;">.service</span>.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #f0864a;background:rgba(240,134,74,.05);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#f4ad63;border:1px solid rgba(240,134,74,.4);border-radius:20px;padding:2px 8px;">F3 · HIGH</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#f5c94a;">NEEDS BACKEND</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">last_run is a raw systemd string with no age</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">You get <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">Sat 2026-07-25 03:10:42 UTC</span> and have to do date arithmetic in your head. "How fresh is my backup" is the question the panel exists to answer.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">casa_leela.py:340 → <span style="color:#7f95a8;">InactiveExitTimestamp</span>, passed through untouched. Jinja can't parse that format; the age has to be computed in <span style="color:#7f95a8;">dashboard_data.py</span>.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #ef3c2e;background:rgba(239,60,46,.05);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#ff6a5a;border:1px solid rgba(239,60,46,.4);border-radius:20px;padding:2px 8px;">F4 · BLOCKER</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#f5c94a;">NEEDS BACKEND</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">A nine-day-old backup renders green</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">The pod's only alert condition is <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">result != 'success'</span>. A daily job that last succeeded nine days ago and hasn't fired since is, by that test, perfectly fine. Silent staleness is exactly how backups fail.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">Fix: a <span style="color:#8fe6a0;">freshness</span> verdict derived from age vs. cadence, not from <span style="color:#7f95a8;">result</span> alone.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #f0864a;background:rgba(240,134,74,.05);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#f4ad63;border:1px solid rgba(240,134,74,.4);border-radius:20px;padding:2px 8px;">F5 · HIGH</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#f5c94a;">NEEDS BACKEND</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">Certs are a table of raw notAfter strings</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">A cert expiring in 5 days and one expiring in 300 render identically — same colour, same weight, same row. The vault has one job: tell you which cert is about to take the site down.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">casa_leela.py:452 emits <span style="color:#7f95a8;">expires</span> as openssl's <span style="color:#7f95a8;">notAfter</span> ("Aug 15 12:00:00 2026 GMT"). Needs <span style="color:#8fe6a0;">days_left</span> computed alongside it.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #f0864a;background:rgba(240,134,74,.05);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#f4ad63;border:1px solid rgba(240,134,74,.4);border-radius:20px;padding:2px 8px;">F6 · HIGH</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#5f7391;">UI ONLY</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">Broken-cert rows shatter the table</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">When some certs parse and one doesn't, <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">check_certs()</span> appends an error dict with a full sentence stuffed into <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">domain</span> and no other keys. The template only inspects <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">cert_list[0]</span>, so that row renders as a paragraph crammed in the DOMAIN column with <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">?</span> in the other three.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">casa_leela.py:479-484. Error rows need their own card treatment, not a table row.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #f5b820;background:rgba(245,184,32,.04);padding:16px 18px;display:flex;flex-direction:column;gap:9px;">
+        <div style="display:flex;align-items:center;gap:9px;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#f5c94a;border:1px solid rgba(245,184,32,.4);border-radius:20px;padding:2px 8px;">F7 · MED</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#5f7391;">UI ONLY</span>
+        </div>
+        <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#eef4fa;">Two orphan panels, no verdict</h3>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">The tab opens with two panel headers and no answer to "is my data safe." Every other tab leads with a verdict (FLEET STATUS, HULL DIAGNOSTICS). Also: the pending-plan footer only renders in the <em>unavailable</em> branch, so plan context vanishes the moment data arrives.</p>
+        <p style="margin:0;font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;line-height:1.6;">templates/dashboard.html:366-372 — <span style="color:#7f95a8;">{% if ctx.pending_plan %}</span> nested inside the else.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ══════════ B. PROPOSED ══════════ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;">
+      <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;color:#eef4fa;">B · THE CORRECTED TAB</h2>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">rendered with representative data — daily/weekly borg, casalan.com internal CA, casaalmida.com CF origin</span>
+    </div>
+
+    <div style="border-radius:14px;border:1px solid #1c2c44;background:#080f1b;padding:22px;display:flex;flex-direction:column;gap:16px;">
+
+      <!-- verdict strip -->
+      <div style="border-radius:13px;border:1px solid #1c4a3a;background:linear-gradient(180deg,#101d16,#0a1420);padding:18px 20px;display:flex;align-items:center;gap:18px;">
+        <div style="width:58px;height:58px;border-radius:14px;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-size:26px;font-weight:700;color:#04140f;background:#6fcf5f;box-shadow:0 0 22px rgba(111,207,95,.6);">✓</div>
+        <div style="flex:1;min-width:0;">
+          <p style="margin:0 0 4px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.06em;color:#8fe6a0;">DATA IS SAFE</p>
+          <p style="margin:0;font-size:13px;line-height:1.55;color:#9fb3c8;">Both borg jobs succeeded on schedule. Newest snapshot <span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">14h ago</span> · next run in <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">9h 48m</span> · 2 certs live, soonest expiry in <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">64d</span>.</p>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;border-radius:20px;padding:3px 10px;color:#8fe6a0;background:rgba(111,207,95,.1);border:1px solid rgba(111,207,95,.35);">2 JOBS OK</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;border-radius:20px;padding:3px 10px;color:#8fe6a0;background:rgba(111,207,95,.1);border:1px solid rgba(111,207,95,.35);">TIMERS ARMED</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;border-radius:20px;padding:3px 10px;color:#7fbfd4;background:rgba(53,197,216,.1);border:1px solid rgba(53,197,216,.3);">2 CERTS</span>
+        </div>
+      </div>
+
+      <!-- cold storage -->
+      <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+        <div style="display:flex;align-items:center;gap:13px;margin-bottom:16px;flex-wrap:wrap;">
+          <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">COLD STORAGE · BORG</h3>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#8fe6a0;border:1px solid rgba(111,207,95,.3);border-radius:6px;padding:3px 8px;background:rgba(111,207,95,.08);">COLLECTED</span>
+          <div style="flex:1"></div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">source: systemd units · never touches the borg repo</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;">
+
+          <!-- healthy pod -->
+          <div style="border-radius:13px;border:1px solid #24384c;border-left:3px solid #3f8f5a;background:linear-gradient(180deg,#0e1f2b,#0a1420);padding:16px 18px;position:relative;overflow:hidden;">
+            <div aria-hidden="true" style="pointer-events:none;position:absolute;left:-30%;top:-60%;width:160%;height:120%;background:radial-gradient(closest-side, rgba(111,207,95,.1), transparent 70%);"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:9px;margin-bottom:14px;">
+              <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#6fcf5f;box-shadow:0 0 9px #6fcf5f;"></span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:20px;color:#cfe6ee;letter-spacing:.03em;">DAILY</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">03:10 · every 24h</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:#8fe6a0;border:1px solid rgba(111,207,95,.4);border-radius:20px;padding:2px 9px;">FRESH</span>
+            </div>
+            <div style="position:relative;display:flex;align-items:baseline;gap:9px;">
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:34px;color:#8fe6a0;line-height:1;">14h</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4f6684;letter-spacing:.08em;">SINCE LAST SNAPSHOT</span>
+            </div>
+            <div style="position:relative;height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;margin-top:11px;">
+              <div style="height:100%;width:58%;border-radius:20px;background:#6fcf5f;box-shadow:0 0 10px rgba(111,207,95,.55);"></div>
+            </div>
+            <div style="position:relative;font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;margin-top:6px;">58% through the 24h window</div>
+            <div style="position:relative;margin-top:14px;padding-top:13px;border-top:1px dashed #1c3344;display:flex;flex-direction:column;gap:9px;">
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">NEXT RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#cfe6ee;">in 9h 48m · 03:10</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">RESULT</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8fe6a0;">success · exit 0</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">LAST RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#7f95a8;">Fri 03:10:42 UTC</span></div>
+            </div>
+            <div style="position:relative;margin-top:11px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#3f5470;line-height:1.5;">unit idle between runs (oneshot) — normal</div>
+          </div>
+
+          <!-- stale pod -->
+          <div style="border-radius:13px;border:1px solid #24384c;border-left:3px solid #f5b820;background:linear-gradient(180deg,#211a0e,#0a1420);padding:16px 18px;position:relative;overflow:hidden;">
+            <div aria-hidden="true" style="pointer-events:none;position:absolute;left:-30%;top:-60%;width:160%;height:120%;background:radial-gradient(closest-side, rgba(245,184,32,.11), transparent 70%);"></div>
+            <div style="position:relative;display:flex;align-items:center;gap:9px;margin-bottom:14px;">
+              <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#f5b820;box-shadow:0 0 9px #f5b820;animation:beacon 1.8s ease-in-out infinite;"></span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:20px;color:#cfe6ee;letter-spacing:.03em;">WEEKLY</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">Sun 02:30 · every 7d</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:#f5c94a;border:1px solid rgba(245,184,32,.45);border-radius:20px;padding:2px 9px;">STALE</span>
+            </div>
+            <div style="position:relative;display:flex;align-items:baseline;gap:9px;">
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:34px;color:#f5c94a;line-height:1;">9d 4h</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4f6684;letter-spacing:.08em;">SINCE LAST SNAPSHOT</span>
+            </div>
+            <div style="position:relative;height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;margin-top:11px;">
+              <div style="height:100%;width:100%;border-radius:20px;background:#f5b820;box-shadow:0 0 10px rgba(245,184,32,.6);"></div>
+            </div>
+            <div style="position:relative;font-family:'JetBrains Mono',monospace;font-size:10px;color:#c3b48a;margin-top:6px;">2d 4h past its 7d window</div>
+            <div style="position:relative;margin-top:14px;padding-top:13px;border-top:1px dashed #3a2f18;display:flex;flex-direction:column;gap:9px;">
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">NEXT RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#f5c94a;">timer not armed</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">RESULT</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#8fe6a0;">success · exit 0</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">LAST RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#7f95a8;">Wed 02:30:07 UTC</span></div>
+            </div>
+            <div style="position:relative;margin-top:11px;font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#c3b48a;line-height:1.5;">last run succeeded, but nothing is scheduled to run again</div>
+          </div>
+
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#5f7391;padding-top:15px;margin-top:15px;border-top:1px dashed #16233a;">
+          <span style="width:8px;height:8px;border-radius:50%;background:#f5b820;animation:beacon 1.6s ease-in-out infinite;"></span>plan <span style="color:#f5c94a;">p1</span> pending — persists in both the collected and awaiting states
+        </div>
+      </section>
+
+      <!-- certificate vault -->
+      <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+        <div style="display:flex;align-items:center;gap:13px;margin-bottom:16px;flex-wrap:wrap;">
+          <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">CERTIFICATE VAULT</h3>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#8fe6a0;border:1px solid rgba(111,207,95,.3);border-radius:6px;padding:3px 8px;background:rgba(111,207,95,.08);">COLLECTED</span>
+          <div style="flex:1"></div>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">Traefik file provider · ACME disabled on this host</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;">
+
+          <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #3f8f5a;background:rgba(111,207,95,.04);padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#8fe6a0;box-shadow:0 0 9px #8fe6a0;"></span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">*.casalan.com</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:#8fe6a0;border:1px solid rgba(143,230,160,.35);border-radius:20px;padding:2px 9px;">VALID</span>
+            </div>
+            <div style="display:flex;align-items:baseline;gap:8px;">
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:26px;color:#8fe6a0;line-height:1;">311d</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">UNTIL EXPIRY</span>
+            </div>
+            <div style="height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;">
+              <div style="height:100%;width:100%;border-radius:20px;background:#8fe6a0;box-shadow:0 0 10px rgba(143,230,160,.5);"></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;padding-top:9px;border-top:1px dashed #16233a;">
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">SOURCE FILE</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#9fb0c6;">casalan-wildcard</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">EXPIRES</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#7f95a8;">Jun 1 2027 GMT</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">2 SANS</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">casalan.com · *.casalan.com</span></div>
+            </div>
+          </div>
+
+          <div style="border-radius:12px;border:1px solid #1c2c44;border-left:3px solid #f5b820;background:rgba(245,184,32,.05);padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#f5c94a;box-shadow:0 0 9px #f5c94a;"></span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">casaalmida.com</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:#f5c94a;border:1px solid rgba(245,201,74,.4);border-radius:20px;padding:2px 9px;">RENEW SOON</span>
+            </div>
+            <div style="display:flex;align-items:baseline;gap:8px;">
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:26px;color:#f5c94a;line-height:1;">26d</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">UNTIL EXPIRY</span>
+            </div>
+            <div style="height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;">
+              <div style="height:100%;width:29%;border-radius:20px;background:#f5c94a;box-shadow:0 0 10px rgba(245,201,74,.5);"></div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;padding-top:9px;border-top:1px dashed #16233a;">
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">SOURCE FILE</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#9fb0c6;">cloudflare-origin</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">EXPIRES</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#7f95a8;">Aug 20 2026 GMT</span></div>
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">2 SANS</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">casaalmida.com · *.casaalmida.com</span></div>
+            </div>
+          </div>
+
+          <div style="border-radius:12px;border:1px solid rgba(239,60,46,.4);border-left:3px solid #ef3c2e;background:rgba(239,60,46,.06);padding:14px 16px;display:flex;flex-direction:column;gap:10px;">
+            <div style="display:flex;align-items:center;gap:9px;">
+              <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#ff6a5a;box-shadow:0 0 9px #ff6a5a;animation:critpulse .9s ease-in-out infinite;"></span>
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#ff6a5a;letter-spacing:.02em;">UNREADABLE</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:#ff6a5a;border:1px solid rgba(239,60,46,.45);border-radius:20px;padding:2px 9px;">ERROR</span>
+            </div>
+            <p style="margin:0;font-size:12.5px;line-height:1.6;color:#e8b3ac;text-wrap:pretty;">declared in Traefik's dynamic config but missing on disk</p>
+            <div style="padding-top:9px;border-top:1px dashed rgba(239,60,46,.25);">
+              <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#8a6560;letter-spacing:.08em;">SOURCE FILE</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#e8b3ac;">legacy-origin.crt</span></div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+  <!-- ══════════ C. AWAITING STATE ══════════ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;color:#eef4fa;">C · AWAITING-SCAN STATE</h2>
+    <p style="margin:0;max-width:760px;font-size:13.5px;line-height:1.65;color:#8fa3ba;text-wrap:pretty;">Both panels gate on <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">mode == "full"</span>. Today the tab goes near-blank and the verdict disappears. Instead: keep the verdict strip, state plainly that the sensor is dark, and keep the plan CTA visible — this is the state a user hits most often.</p>
+
+    <div style="border-radius:14px;border:1px solid #1c2c44;background:#080f1b;padding:22px;display:flex;flex-direction:column;gap:16px;">
+      <div style="border-radius:13px;border:1px solid #3a2f18;background:linear-gradient(180deg,rgba(245,184,32,.07),#0c1524);padding:18px 20px;display:flex;align-items:center;gap:18px;">
+        <div style="width:58px;height:58px;border-radius:14px;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-size:26px;font-weight:700;color:#1a1304;background:#f5b820;box-shadow:0 0 22px rgba(245,184,32,.55);">?</div>
+        <div style="flex:1;min-width:0;">
+          <p style="margin:0 0 4px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.06em;color:#f5c94a;">BACKUP STATUS UNKNOWN</p>
+          <p style="margin:0;font-size:13px;line-height:1.55;color:#c3b48a;">Last scan ran <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">mode: status</span>, which doesn't read backup or certificate state. This is not a failure — it's a blind spot.</p>
+        </div>
+        <a href="#" style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.06em;color:#f5c94a;border:1px solid rgba(245,184,32,.45);background:rgba(245,184,32,.1);border-radius:9px;padding:11px 18px;white-space:nowrap;border-bottom:1px solid rgba(245,184,32,.45);" style-hover="background:rgba(245,184,32,.2);color:#ffdd7a;">RUN FULL SCAN ✈</a>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;">
+        <div style="border-radius:13px;border:1px dashed #24384c;background:#08101c;padding:16px 18px;opacity:.62;">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px;">
+            <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#3f5470;"></span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:20px;color:#5f7391;letter-spacing:.03em;">DAILY</span>
+            <div style="flex:1"></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;border:1px solid #24384c;border-radius:20px;padding:2px 9px;">NO DATA</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:9px;">
+            <div style="display:flex;justify-content:space-between;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;letter-spacing:.08em;">NEXT RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;letter-spacing:.08em;">RESULT</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;letter-spacing:.08em;">LAST RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+          </div>
+        </div>
+        <div style="border-radius:13px;border:1px dashed #24384c;background:#08101c;padding:16px 18px;opacity:.62;">
+          <div style="display:flex;align-items:center;gap:9px;margin-bottom:12px;">
+            <span style="width:8px;height:8px;border-radius:50%;flex:none;background:#3f5470;"></span>
+            <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:20px;color:#5f7391;letter-spacing:.03em;">WEEKLY</span>
+            <div style="flex:1"></div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:.1em;color:#4f6684;border:1px solid #24384c;border-radius:20px;padding:2px 9px;">NO DATA</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:9px;">
+            <div style="display:flex;justify-content:space-between;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;letter-spacing:.08em;">NEXT RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;letter-spacing:.08em;">RESULT</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+            <div style="display:flex;justify-content:space-between;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;letter-spacing:.08em;">LAST RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ D. CONTRACT ══════════ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;color:#eef4fa;">D · BACKEND CHANGES REQUIRED</h2>
+
+    <div style="display:flex;flex-direction:column;gap:14px;">
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 20px;display:flex;flex-direction:column;gap:11px;">
+        <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:#5fd6e8;">casa_leela.check_backups()</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">fixes F2, F3, F4</span>
+        </div>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">Also query the <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">.timer</span> unit, not just the <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">.service</span>. <span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">casa_stackctl.check_backups()</span> already does this — lift the two <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">systemctl show</span> properties across. Keep returning a dict keyed by <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">daily</span>/<span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">weekly</span> so nothing downstream breaks.</p>
+        <div style="background:#03130f;border:1px solid #1c4a3a;border-radius:9px;padding:13px 15px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.75;color:#7fe3a5;overflow-x:auto;">
+          <div style="white-space:pre;color:#4f9c76;"># .service props as today, plus two off the .timer</div>
+          <div style="white-space:pre;">result[key] = {</div>
+          <div style="white-space:pre;">    "state":         props.get("ActiveState", "unknown"),</div>
+          <div style="white-space:pre;">    "result":        props.get("Result", "unknown"),</div>
+          <div style="white-space:pre;">    "exit_code":     props.get("ExecMainStatus", "?"),</div>
+          <div style="white-space:pre;">    "last_run":      props.get("InactiveExitTimestamp", "n/a"),</div>
+          <div style="white-space:pre;color:#f5c94a;">+   "next_run":      tmr.get("NextElapseUSecRealtime", "n/a"),</div>
+          <div style="white-space:pre;color:#f5c94a;">+   "last_trigger":  tmr.get("LastTriggerUSec", "n/a"),</div>
+          <div style="white-space:pre;color:#f5c94a;">+   "cadence_hours": 24 if key == "daily" else 168,</div>
+          <div style="white-space:pre;">}</div>
+          <div style="white-space:pre;color:#4f9c76;"># "state" stays in the payload but is demoted to a footnote in the UI</div>
+        </div>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 20px;display:flex;flex-direction:column;gap:11px;">
+        <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:#5fd6e8;">dashboard_data.summarize_system_and_backups()</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">fixes F3, F4, F7</span>
+        </div>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">Jinja can't do date maths on systemd strings. Derive everything the UI needs here and pass it down pre-computed, one extra key per job plus one tab-level verdict.</p>
+        <div style="background:#03130f;border:1px solid #1c4a3a;border-radius:9px;padding:13px 15px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.75;color:#7fe3a5;overflow-x:auto;">
+          <div style="white-space:pre;color:#4f9c76;"># per job, added alongside the raw fields</div>
+          <div style="white-space:pre;">"age_human":   "14h",          <span style="color:#4f9c76;"># or "9d 4h", "never"</span></div>
+          <div style="white-space:pre;">"age_hours":   14.2,</div>
+          <div style="white-space:pre;">"next_human":  "in 9h 48m",    <span style="color:#4f9c76;"># or "timer not armed"</span></div>
+          <div style="white-space:pre;">"timer_armed": True,</div>
+          <div style="white-space:pre;">"window_pct":  58,             <span style="color:#4f9c76;"># age / cadence, capped at 100</span></div>
+          <div style="white-space:pre;">"freshness":   "fresh",        <span style="color:#4f9c76;"># fresh | stale | overdue | failed</span></div>
+          <div style="white-space:pre;">&nbsp;</div>
+          <div style="white-space:pre;color:#4f9c76;"># tab-level, new key on the summary dict</div>
+          <div style="white-space:pre;">"verdict": {</div>
+          <div style="white-space:pre;">    "level":  "ok",            <span style="color:#4f9c76;"># ok | warn | crit | unknown</span></div>
+          <div style="white-space:pre;">    "title":  "DATA IS SAFE",</div>
+          <div style="white-space:pre;">    "detail": "Both borg jobs succeeded on schedule…",</div>
+          <div style="white-space:pre;">}</div>
+        </div>
+        <p style="margin:0;font-size:12.5px;line-height:1.6;color:#7f95a8;text-wrap:pretty;"><b style="color:#9fb3c8;">freshness rules</b> — <span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">fresh</span>: age &lt; 1.5× cadence and result == success · <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">stale</span>: age ≥ 1.5× cadence, or timer not armed · <span style="font-family:'JetBrains Mono',monospace;color:#ff6a5a;">overdue</span>: age ≥ 3× cadence · <span style="font-family:'JetBrains Mono',monospace;color:#ff6a5a;">failed</span>: result != success. Worst job wins the tab verdict.</p>
+      </div>
+
+      <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 20px;display:flex;flex-direction:column;gap:11px;">
+        <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap;">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600;color:#5fd6e8;">casa_leela._parse_cert_file()</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">fixes F5, F6</span>
+        </div>
+        <p style="margin:0;font-size:13px;line-height:1.6;color:#9fb3c8;text-wrap:pretty;">Parse <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">notAfter</span> once, at the source, and tag error rows explicitly instead of smuggling the message through <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">domain</span>.</p>
+        <div style="background:#03130f;border:1px solid #1c4a3a;border-radius:9px;padding:13px 15px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.75;color:#7fe3a5;overflow-x:auto;">
+          <div style="white-space:pre;">return {</div>
+          <div style="white-space:pre;">    "domain":    domain,</div>
+          <div style="white-space:pre;">    "sans":      sans,</div>
+          <div style="white-space:pre;">    "resolver":  path.stem,     <span style="color:#4f9c76;"># label as SOURCE FILE in UI</span></div>
+          <div style="white-space:pre;">    "expires":   end_str,</div>
+          <div style="white-space:pre;color:#f5c94a;">+   "days_left": (parsed_end - now).days,</div>
+          <div style="white-space:pre;color:#f5c94a;">+   "tier":      "valid" | "renew_soon" | "expiring" | "expired",</div>
+          <div style="white-space:pre;">}</div>
+          <div style="white-space:pre;">&nbsp;</div>
+          <div style="white-space:pre;color:#4f9c76;"># error rows — stop overwriting `domain` (casa_leela.py:481)</div>
+          <div style="white-space:pre;color:#ef8478;">-   e["domain"] = f"⚠ {e['error']}"</div>
+          <div style="white-space:pre;color:#f5c94a;">+   e["kind"] = "error"    <span style="color:#4f9c76;"># rendered as its own card</span></div>
+        </div>
+        <p style="margin:0;font-size:12.5px;line-height:1.6;color:#7f95a8;text-wrap:pretty;"><b style="color:#9fb3c8;">tier thresholds</b> — <span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">valid</span> &gt; 30d · <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">renew_soon</span> ≤ 30d · <span style="font-family:'JetBrains Mono',monospace;color:#ff6a5a;">expiring</span> ≤ 7d (LED pulses) · <span style="font-family:'JetBrains Mono',monospace;color:#ff6a5a;">expired</span> ≤ 0d.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ══════════ E. CSS ══════════ -->
+  <section style="display:flex;flex-direction:column;gap:16px;">
+    <h2 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.12em;color:#eef4fa;">E · CSS NOTES</h2>
+    <div style="border-radius:12px;border:1px solid #1c2c44;background:#0c1524;padding:18px 20px;display:flex;flex-direction:column;gap:12px;">
+      <p style="margin:0;font-size:13px;line-height:1.65;color:#9fb3c8;text-wrap:pretty;">Keep <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.cryo-grid</span> / <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.cryo-pod</span> / <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.cryo-led</span> / <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.cryo-stats</span> (dashboard.css:682-698) — the shell is right, the contents aren't. Changes:</p>
+      <ul style="margin:0;padding-left:20px;font-size:13px;line-height:1.85;color:#9fb3c8;">
+        <li>Bump <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.cryo-grid</span> min track 220px → 300px; pods now carry a hero number and a progress bar.</li>
+        <li>Replace the binary <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.cryo-pod.alert</span> with four states: <span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">.fresh</span> / <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">.stale</span> / <span style="font-family:'JetBrains Mono',monospace;color:#ff6a5a;">.overdue</span> / <span style="font-family:'JetBrains Mono',monospace;color:#ff6a5a;">.failed</span>, each setting a 3px <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">border-left</span> + tinted radial glow. Reuse the severity ramp already in <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.hull-card</span>.</li>
+        <li>Retire <span style="font-family:'JetBrains Mono',monospace;color:#ef8478;">.cols-certs</span> (dashboard.css:561) and the cert <span style="font-family:'JetBrains Mono',monospace;color:#ef8478;">.grid-head</span>/<span style="font-family:'JetBrains Mono',monospace;color:#ef8478;">.grid-row</span> markup. Certs become <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.cert-grid</span> / <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.cert-card</span>, structurally a <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.cryo-pod</span> with a tier modifier — same 300px track, so the two panels read as one system.</li>
+        <li>New <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">.verdict-strip</span>: same geometry as <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.alarm-banner</span> (58px orb, 18px gap) with the same <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.crit/.high/.medium/.none</span> level classes — the Backups verdict and Hull Diagnostics should be visually interchangeable.</li>
+        <li>Reuse <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.disk-bar-track</span> / <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.disk-bar-fill</span> for both the backup-window and cert-expiry bars; only the fill colour differs.</li>
+        <li>Move the pending-plan <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">.dashed-footer</span> out of the <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">{% else %}</span> branch so it renders in both states.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer style="border-top:1px solid #1c2c44;padding-top:20px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#4f6684;line-height:1.7;">
+    Nothing here surfaces a shell command — the plan panel's <span style="color:#7f95a8;">fix_steps</span> contract is unchanged.<br>
+    Order of work: D (backend keys) → B (collected markup) → C (awaiting markup) → E (CSS).
+  </footer>
+
+</div>
+</div>
+</x-dc>
+</body>
+</html>

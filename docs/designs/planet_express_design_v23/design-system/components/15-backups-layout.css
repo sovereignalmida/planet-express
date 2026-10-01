@@ -1,0 +1,33 @@
+/* Planet Express design system · Backups: verdict strip over two columns, pod lies down
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ── Backups: verdict strip over two equal columns (T45.3) ──────────────────────
+   The tab used to be two full-width panels, the first of which held one 120px pod
+   floating in 1,400px of nothing. */
+.backups-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.backups-split .cryo-grid, .backups-split .cert-grid { grid-template-columns: minmax(0, 1fr); }
+.backups-split .cert-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+
+/* The pod lies down: head, hero and window bar on the left, the readout on the right
+   behind a dashed divider. Stacked, those three stat rows were the reason a single
+   job needed 320px of height. */
+.backups-split .cryo-pod { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+.backups-split .cryo-pod-head { grid-column: 1 / -1; margin-bottom: 0; }
+.backups-split .cryo-main { min-width: 0; display: flex; flex-direction: column; gap: 9px; }
+.backups-split .cryo-side {
+  min-width: 0; display: flex; flex-direction: column; gap: 8px; justify-content: center;
+  border-left: 1px dashed var(--pe-border-strong); padding-left: 18px;
+}
+.backups-split .cryo-pod.nodata .cryo-stats { grid-column: 1 / -1; }
+
+@media (max-width: 1024px) {
+  .backups-split { grid-template-columns: minmax(0, 1fr); }
+  .backups-split .cryo-pod { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .backups-split .cryo-side { border-left: 0; border-top: 1px dashed var(--pe-border-strong); padding: 10px 0 0; }
+}
+@media (max-width: 720px) {
+  .backups-split .cert-grid { grid-template-columns: minmax(0, 1fr); }
+  .net-adguard { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .net-adguard-note { grid-column: auto; }
+  .net-zone { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+}
+

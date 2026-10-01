@@ -1,0 +1,12 @@
+/* Planet Express design system · motion
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ---------- 9. MOTION ---------- */
+@keyframes pe-beacon   { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+@keyframes pe-critpulse{ 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+@keyframes pe-sweep    { 0% { transform: translateX(-100%) } 100% { transform: translateX(100%) } }
+/* beacon   = warn-level attention, 1.8s — "look when you can"
+   critpulse = crit-level alarm, .9s   — "look now"
+   Never animate ok or idle. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

@@ -1,0 +1,55 @@
+/* Planet Express design system · colour tokens
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+:root {
+  /* ---------- 2. SURFACES ---------- */
+  --pe-bg:            #060b13;  /* page */
+  --pe-surface:       #080f1b;  /* tab body */
+  --pe-panel:         #0c1524;  /* panel card */
+  --pe-well:          #08101c;  /* inset / track / code */
+  --pe-border:        #1c2c44;  /* default hairline */
+  --pe-border-strong: #24384c;  /* raised element edge */
+  --pe-border-dash:   #16233a;  /* dashed dividers */
+
+  /* ---------- 3. INK ---------- */
+  --pe-ink:        #eef4fa;  /* headings, hero numbers */
+  --pe-ink-2:      #cfe6ee;  /* strong body / values */
+  --pe-ink-body:   #9fb3c8;  /* body copy */
+  --pe-ink-muted:  #8fa3ba;  /* secondary copy */
+  --pe-ink-dim:    #7f95a8;  /* tertiary values */
+  --pe-ink-label:  #5f7391;  /* mono labels */
+  --pe-ink-faint:  #4f6684;  /* micro labels */
+  --pe-ink-ghost:  #3f5470;  /* no-data placeholders */
+
+  /* ---------- 4. STATUS RAMP ----------
+     Four levels only. Every status surface in the product
+     — reactor cells, hull findings, cryo pods, cert cards,
+     verdict strips — maps onto exactly one of these. */
+  --pe-ok:         #6fcf5f;   --pe-ok-ink:   #8fe6a0;
+  --pe-ok-line:    #3f8f5a;   --pe-ok-bg:    rgba(111,207,95,.05);
+  --pe-ok-glow:    rgba(111,207,95,.55);
+
+  --pe-warn:       #f5b820;   --pe-warn-ink: #f5c94a;
+  --pe-warn-line:  #8a6a14;   --pe-warn-bg:  rgba(245,184,32,.05);
+  --pe-warn-glow:  rgba(245,184,32,.55);
+
+  --pe-high:       #f0864a;   --pe-high-ink: #f4ad63;
+  --pe-high-line:  #8a4d26;   --pe-high-bg:  rgba(240,134,74,.05);
+  --pe-high-glow:  rgba(240,134,74,.55);
+
+  --pe-crit:       #ef3c2e;   --pe-crit-ink: #ff6a5a;
+  --pe-crit-line:  #8a221a;   --pe-crit-bg:  rgba(239,60,46,.06);
+  --pe-crit-glow:  rgba(239,60,46,.55);
+
+  --pe-idle:       #3f5470;   --pe-idle-ink: #5f7391;
+  --pe-idle-bg:    #08101c;
+
+  /* ---------- 5. ACCENT (navigational, never status) ---------- */
+  --pe-accent:     #35c5d8;
+  --pe-accent-ink: #5fd6e8;
+  --pe-accent-hi:  #8fe6f5;
+  --pe-accent-bg:  rgba(53,197,216,.08);
+
+
+  /* Traefik file-provider tag. Navigational, not status. */
+  --pe-provider-file: #b59cf0;
+}

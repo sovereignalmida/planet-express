@@ -15,7 +15,7 @@ system/           the design system — this is what you implement against
   DATA-CONTRACT.md  context keys the templates need, and what's missing today
 
 handoffs/         point-in-time specs, newest first
-  V2.3-STACK-CONTROL.md    stack up/down + a compose editor in the v2.2 drawer; retires dockge
+  V2.4-STACK-CONTROL.md    stack up/down + a compose editor in the v2.2 drawer; retires dockge
   V2.2-LAUNCH-LINKS-AND-WIDGETS.md  ↗ links from Traefik routes + server-side app widgets; retires homepage
   V2.1-ABOVE-THE-FOLD.md   layout pass on every tab — control-panel Overview, Crew tab, 2-col layouts
   SERVICES-STACK-CARDS.md  Overview services panel → stack cards (88 containers / 15 stacks)
@@ -64,7 +64,7 @@ These are design artefacts, not source. Open them in a browser to read exact spa
 
 0. `handoffs/V2.1-ABOVE-THE-FOLD.md` — the current layout target for every tab. Supersedes tab layouts in older handoffs.
 0b. `handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md` — builds on v2.1. Links + widgets, then remove the homepage container.
-0c. `handoffs/V2.3-STACK-CONTROL.md` — builds on v2.2's drawer. Adds no capability, only the surface
+0c. `handoffs/V2.4-STACK-CONTROL.md` — builds on v2.2's drawer. Adds no capability, only the surface
     for steps that already exist; then remove the dockge container.
 1. `system/DATA-CONTRACT.md` — the backend keys. Several screens can't be honest until these exist.
 2. `handoffs/SERVICES-STACK-CARDS.md` — the Overview panel that doesn't survive 88 containers.

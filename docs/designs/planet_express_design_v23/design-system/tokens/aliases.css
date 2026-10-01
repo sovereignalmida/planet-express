@@ -1,0 +1,99 @@
+/* Planet Express design system · compatibility aliases (--cp-*, --text, --green …) used by the dashboard tab rules
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ============================================================
+   EXISTING DASHBOARD TAB ADAPTERS
+   The v3 server-rendered tabs retain their stable class names while sharing the
+   v20 tokens and reusable components above. New 2.0 surfaces use pe-* directly.
+   ============================================================ */
+:root {
+  /* Canonical v20 cockpit tokens. Dashboard-specific rules below use compatibility
+     aliases so the proven v3 layout can migrate without two competing stylesheets. */
+  --pe-bg: #060b13;
+  --pe-surface: #080f1b;
+  --pe-panel: #0c1524;
+  --pe-well: #08101c;
+  --pe-border: #1c2c44;
+  --pe-border-strong: #24384c;
+  --pe-border-dash: #16233a;
+  --pe-ink: #eef4fa;
+  --pe-ink-2: #cfe6ee;
+  --pe-ink-body: #9fb3c8;
+  --pe-ink-muted: #8fa3ba;
+  --pe-ink-dim: #7f95a8;
+  --pe-ink-label: #5f7391;
+  --pe-ink-faint: #4f6684;
+  --pe-ink-ghost: #3f5470;
+  --pe-ok: #6fcf5f;
+  --pe-ok-ink: #8fe6a0;
+  --pe-warn: #f5b820;
+  --pe-warn-ink: #f5c94a;
+  --pe-high: #f0864a;
+  --pe-high-ink: #f4ad63;
+  --pe-crit: #ef3c2e;
+  --pe-crit-ink: #ff6a5a;
+  --pe-idle: #3f5470;
+  --pe-accent: #35c5d8;
+  --pe-accent-ink: #5fd6e8;
+  --pe-font-display: 'Chakra Petch', system-ui, sans-serif;
+  --pe-font-body: 'Space Grotesk', system-ui, sans-serif;
+  --pe-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --pe-track: 300px;
+
+  --page-bg: var(--pe-bg);
+  --panel-bg: rgba(12,21,36,.5);
+  --panel-border: var(--pe-border);
+  --border-hair: var(--pe-border-dash);
+  --border-hair2: #12191f;
+  --text: var(--pe-ink);
+  --text2: var(--pe-ink-2);
+  --text3: var(--pe-ink-body);
+  --muted: var(--pe-ink-muted);
+  --muted2: var(--pe-ink-dim);
+  --faint: var(--pe-ink-label);
+  --faint2: var(--pe-ink-faint);
+  --faint3: var(--pe-ink-ghost);
+  --cream: #ece0c4;
+  --green: var(--pe-ok);
+  --green-bright: var(--pe-ok-ink);
+  --green-text: var(--pe-ok-ink);
+  --green-dim: #2f6b3a;
+  --green-dim2: #3f7a4c;
+  --red: var(--pe-crit);
+  --red-text: var(--pe-crit-ink);
+  --orange: var(--pe-high);
+  --amber: var(--pe-warn);
+  --amber-text: var(--pe-warn-ink);
+  --cyan: var(--pe-accent);
+  --cyan-text: var(--pe-accent-ink);
+  --cyan-text2: #9fc9e0;
+
+  /* ── Cockpit theme additions (v3) — layered on top of the tokens above,
+     nothing above is renamed since other rules still depend on it. ────── */
+  --cp-page-bg: var(--pe-bg);
+  --cp-strip-grad: linear-gradient(180deg, #182234, #0d1626);
+  --cp-strip-border: #24344c;
+  --cp-panel-bg: var(--pe-panel);
+  --cp-panel-border: var(--pe-border);
+  --cp-inset-bg: var(--pe-well);
+  --cp-reactor-grad: linear-gradient(180deg, #101d16, #0a1420);
+  --cp-reactor-border: #1c4a3a;
+  --cp-teal: var(--pe-accent);
+  --cp-teal-text: var(--pe-accent-ink);
+  --cp-green: var(--pe-ok);
+  --cp-green-text: var(--pe-ok-ink);
+  --cp-amber: var(--pe-warn);
+  --cp-amber-text: var(--pe-warn-ink);
+  --cp-crit: var(--pe-crit);
+  --cp-crit-text: var(--pe-crit-ink);
+  --cp-orange: var(--pe-high);
+  --cp-orange-text: var(--pe-high-ink);
+  /* The Traefik file provider's tag. Not a status colour and not in the four-level ramp:
+     it says where a router came from, which is navigational, like the accent. */
+  --pe-provider-file: #b59cf0;
+  --cp-purple: var(--pe-provider-file);
+  --cp-text: var(--pe-ink);
+  --cp-dim1: var(--pe-ink-body);
+  --cp-dim2: var(--pe-ink-muted);
+  --cp-dim3: var(--pe-ink-label);
+  --cp-dim4: var(--pe-ink-faint);
+}

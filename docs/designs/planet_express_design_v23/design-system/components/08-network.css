@@ -1,0 +1,63 @@
+/* Planet Express design system · AdGuard strip, routing matrix, net pills, filter
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* routing matrix */
+/* ── Network: AdGuard strip + a calm, zone-grouped routing matrix ───────────────
+   78 two-line cards in a 20-column wall became ~73 one-line pills in four labelled
+   rows. The hostname moved to the title attribute: it was the second line on every
+   card and it is the thing you least often need at a glance. */
+.net-adguard {
+  display: grid; grid-template-columns: 150px repeat(3, minmax(0, 1fr)) minmax(0, 1.6fr);
+  gap: 18px; align-items: center;
+}
+.net-adguard-id { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.net-adguard-note { grid-column: 2 / -1; margin: 0; }
+.net-stat { min-width: 0; }
+.net-stat-label { display: block; color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); letter-spacing: .08em; }
+.net-stat-value { display: block; margin-top: 3px; color: var(--pe-ink); font: 700 24px var(--pe-font-display); }
+.net-stat-value.ok { color: var(--pe-ok-ink); }
+.net-stat-value small { color: var(--pe-ink-label); font-size: 13px; font-weight: 400; }
+.net-split { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.net-split-labels { display: flex; justify-content: space-between; color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+.net-split-bar {
+  display: flex; height: 6px; overflow: hidden; border: 1px solid var(--pe-border-dash);
+  border-radius: 999px; background: var(--pe-well);
+}
+.net-split-bar .allowed { background: var(--pe-accent); opacity: .55; }
+.net-split-bar .blocked { flex: 1; background: var(--pe-ok); }
+
+.net-legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--pe-ink-label); font: 9.5px var(--pe-font-mono); }
+.net-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.net-tag { font: 700 8.5px var(--pe-font-mono); letter-spacing: .06em; }
+.net-tag.file { color: var(--pe-provider-file); }
+.net-tag.ext { color: var(--pe-warn-ink); }
+.net-tag.lan { color: var(--pe-accent-ink); }
+.net-tag.down { color: var(--pe-crit-ink); }
+
+.net-zone {
+  display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px;
+  padding-top: 11px; border-top: 1px dashed var(--pe-border-dash);
+}
+.net-zone-label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.net-zone-name { color: var(--pe-ink-2); font: 11px var(--pe-font-mono); overflow-wrap: anywhere; }
+.net-zone-count { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+.net-pills { display: flex; flex-wrap: wrap; gap: 5px; align-content: flex-start; }
+.net-pill {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px 0 7px;
+  border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-sm);
+  background: var(--pe-well); color: var(--pe-ink-body);
+  font: 10.5px var(--pe-font-mono); white-space: nowrap;
+}
+.net-pill-led { width: 5px; height: 5px; border-radius: 50%; flex: none; background: var(--pe-ok); }
+.net-pill.down { border-color: var(--pe-crit-line); background: var(--pe-crit-bg); color: var(--pe-crit-ink); }
+.net-pill.down .net-pill-led { background: var(--pe-crit); box-shadow: 0 0 7px var(--pe-crit-glow); }
+
+/* network filter */
+.net-head-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+.net-count { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--faint); }
+.net-filter {
+  appearance: none; background: #0c1119; border: 1px solid #1e2836; border-radius: 8px; color: var(--text);
+  font-family: 'JetBrains Mono', monospace; font-size: 12.5px; padding: 8px 12px; width: 230px; outline: none;
+}
+.net-filter:focus { border-color: var(--green-dim); }
+.net-filter-row.hidden { display: none; }
+

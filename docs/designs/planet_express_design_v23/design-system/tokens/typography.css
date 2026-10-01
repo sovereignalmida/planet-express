@@ -1,0 +1,13 @@
+/* Planet Express design system · type tokens
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+@import url('https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ---------- 6. TYPE ---------- */
+  --pe-font-display: 'Chakra Petch', system-ui, sans-serif; /* headings, hero numbers, nav */
+  --pe-font-body:    'Space Grotesk', system-ui, sans-serif; /* prose */
+  --pe-font-mono:    'JetBrains Mono', ui-monospace, monospace; /* every machine value */
+
+}
+
+/* Scale in use (px): hero 34–44 Chakra 700 · panel title 13–15 Chakra 700 +.1em · body 13–14 Space Grotesk · mono value 11–12.5 · micro label 9.5–10.5 mono +.1em */

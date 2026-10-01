@@ -1,0 +1,582 @@
+/* ============================================================
+   PLANET EXPRESS — COCKPIT DESIGN SYSTEM  v20
+   Single stylesheet. Drop in as static/cockpit.css and load it
+   before (or instead of) the legacy dashboard.css.
+   Everything below is token-driven — never hardcode a hex in
+   a template.
+   ============================================================ */
+
+/* ---------- 1. FONTS ---------------------------------------- */
+/* Add to <head>:
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+*/
+
+:root {
+  /* ---------- 2. SURFACES ---------- */
+  --pe-bg:            #060b13;  /* page */
+  --pe-surface:       #080f1b;  /* tab body */
+  --pe-panel:         #0c1524;  /* panel card */
+  --pe-well:          #08101c;  /* inset / track / code */
+  --pe-border:        #1c2c44;  /* default hairline */
+  --pe-border-strong: #24384c;  /* raised element edge */
+  --pe-border-dash:   #16233a;  /* dashed dividers */
+
+  /* ---------- 3. INK ---------- */
+  --pe-ink:        #eef4fa;  /* headings, hero numbers */
+  --pe-ink-2:      #cfe6ee;  /* strong body / values */
+  --pe-ink-body:   #9fb3c8;  /* body copy */
+  --pe-ink-muted:  #8fa3ba;  /* secondary copy */
+  --pe-ink-dim:    #7f95a8;  /* tertiary values */
+  --pe-ink-label:  #5f7391;  /* mono labels */
+  --pe-ink-faint:  #4f6684;  /* micro labels */
+  --pe-ink-ghost:  #3f5470;  /* no-data placeholders */
+
+  /* ---------- 4. STATUS RAMP ----------
+     Four levels only. Every status surface in the product
+     — reactor cells, hull findings, cryo pods, cert cards,
+     verdict strips — maps onto exactly one of these. */
+  --pe-ok:         #6fcf5f;   --pe-ok-ink:   #8fe6a0;
+  --pe-ok-line:    #3f8f5a;   --pe-ok-bg:    rgba(111,207,95,.05);
+  --pe-ok-glow:    rgba(111,207,95,.55);
+
+  --pe-warn:       #f5b820;   --pe-warn-ink: #f5c94a;
+  --pe-warn-line:  #8a6a14;   --pe-warn-bg:  rgba(245,184,32,.05);
+  --pe-warn-glow:  rgba(245,184,32,.55);
+
+  --pe-high:       #f0864a;   --pe-high-ink: #f4ad63;
+  --pe-high-line:  #8a4d26;   --pe-high-bg:  rgba(240,134,74,.05);
+  --pe-high-glow:  rgba(240,134,74,.55);
+
+  --pe-crit:       #ef3c2e;   --pe-crit-ink: #ff6a5a;
+  --pe-crit-line:  #8a221a;   --pe-crit-bg:  rgba(239,60,46,.06);
+  --pe-crit-glow:  rgba(239,60,46,.55);
+
+  --pe-idle:       #3f5470;   --pe-idle-ink: #5f7391;
+  --pe-idle-bg:    #08101c;
+
+  /* ---------- 5. ACCENT (navigational, never status) ---------- */
+  --pe-accent:     #35c5d8;
+  --pe-accent-ink: #5fd6e8;
+  --pe-accent-hi:  #8fe6f5;
+  --pe-accent-bg:  rgba(53,197,216,.08);
+
+  /* ---------- 6. TYPE ---------- */
+  --pe-font-display: 'Chakra Petch', system-ui, sans-serif; /* headings, hero numbers, nav */
+  --pe-font-body:    'Space Grotesk', system-ui, sans-serif; /* prose */
+  --pe-font-mono:    'JetBrains Mono', ui-monospace, monospace; /* every machine value */
+
+  /* ---------- 7. SPACE / SHAPE ---------- */
+  --pe-r-sm: 6px;  --pe-r-md: 9px;  --pe-r-lg: 12px;
+  --pe-r-xl: 14px; --pe-r-pill: 20px;
+  --pe-gap-tight: 9px;  --pe-gap: 14px;  --pe-gap-loose: 18px;
+  --pe-pad-card: 16px 18px;
+  --pe-pad-panel: 18px 20px;
+  --pe-track: 300px;  /* min column width for every status grid */
+}
+
+/* ---------- 8. RESET / BASE ---------- */
+body {
+  margin: 0;
+  background: var(--pe-bg);
+  color: var(--pe-ink);
+  font-family: var(--pe-font-body);
+  font-size: 14px;
+  line-height: 1.6;
+}
+a { color: var(--pe-accent-ink); text-decoration: none; border-bottom: 1px solid rgba(95,214,232,.3); }
+a:hover { color: var(--pe-accent-hi); border-bottom-color: var(--pe-accent-hi); }
+h1,h2,h3,h4 { font-family: var(--pe-font-display); font-weight: 700; margin: 0; letter-spacing: .02em; }
+code, pre, .pe-mono { font-family: var(--pe-font-mono); }
+p { text-wrap: pretty; }
+
+/* ---------- 9. MOTION ---------- */
+@keyframes pe-beacon   { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+@keyframes pe-critpulse{ 0%,100% { opacity: 1 } 50% { opacity: .4 } }
+@keyframes pe-sweep    { 0% { transform: translateX(-100%) } 100% { transform: translateX(100%) } }
+/* beacon   = warn-level attention, 1.8s — "look when you can"
+   critpulse = crit-level alarm, .9s   — "look now"
+   Never animate ok or idle. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ============================================================
+   10. LAYOUT SHELL
+   ============================================================ */
+.pe-app     { min-height: 100vh; background: var(--pe-bg); padding: 26px 32px 60px; }
+.pe-wrap    { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 26px; }
+.pe-tabbody { border-radius: var(--pe-r-xl); border: 1px solid var(--pe-border);
+              background: var(--pe-surface); padding: 22px;
+              display: flex; flex-direction: column; gap: var(--pe-gap-loose); }
+
+/* ---------- Masthead ---------- */
+.pe-masthead   { display: flex; align-items: center; gap: var(--pe-gap-loose);
+                 border-bottom: 1px solid var(--pe-border); padding-bottom: 20px; }
+.pe-masthead img { height: 46px; width: auto; }
+.pe-masthead h1{ font-size: 26px; letter-spacing: .06em; }
+.pe-kicker     { font-family: var(--pe-font-mono); font-size: 11px;
+                 letter-spacing: .16em; color: var(--pe-ink-label); }
+
+/* ---------- Tab bar ---------- */
+.pe-tabs     { display: flex; gap: 8px; flex-wrap: wrap; }
+.pe-tab      { font-family: var(--pe-font-display); font-weight: 600; font-size: 13px;
+               letter-spacing: .08em; color: var(--pe-ink-label);
+               background: var(--pe-well); border: 1px solid var(--pe-border);
+               border-radius: var(--pe-r-md); padding: 9px 16px; cursor: pointer;
+               transition: color .15s, border-color .15s; }
+.pe-tab:hover{ color: var(--pe-ink-2); border-color: var(--pe-border-strong); }
+.pe-tab.is-active { color: var(--pe-accent-hi); border-color: var(--pe-accent);
+                    background: var(--pe-accent-bg); }
+
+/* ---------- Panel ---------- */
+.pe-panel      { border-radius: 13px; background: var(--pe-panel);
+                 border: 1px solid var(--pe-border); padding: var(--pe-pad-panel); }
+.pe-panel-head { display: flex; align-items: center; gap: 13px;
+                 margin-bottom: var(--pe-gap-loose); flex-wrap: wrap; }
+.pe-panel-head h3 { font-size: 14px; letter-spacing: .1em; }
+.pe-panel-head .pe-spacer { flex: 1; }
+.pe-panel-note { font-family: var(--pe-font-mono); font-size: 11px; color: var(--pe-ink-label); }
+
+/* ============================================================
+   11. ATOMS
+   ============================================================ */
+
+/* ---------- LED ---------- */
+.pe-led { width: 8px; height: 8px; border-radius: 50%; flex: none;
+          background: var(--pe-idle); }
+.pe-led.ok   { background: var(--pe-ok);   box-shadow: 0 0 9px var(--pe-ok); }
+.pe-led.warn { background: var(--pe-warn); box-shadow: 0 0 9px var(--pe-warn);
+               animation: pe-beacon 1.8s ease-in-out infinite; }
+.pe-led.high { background: var(--pe-high); box-shadow: 0 0 9px var(--pe-high);
+               animation: pe-beacon 1.8s ease-in-out infinite; }
+.pe-led.crit { background: var(--pe-crit); box-shadow: 0 0 9px var(--pe-crit);
+               animation: pe-critpulse .9s ease-in-out infinite; }
+.pe-led.idle { background: var(--pe-idle); box-shadow: none; }
+
+/* ---------- Badge (status pill, right-aligned in a head row) ---------- */
+.pe-badge { font-family: var(--pe-font-mono); font-size: 9.5px; font-weight: 700;
+            letter-spacing: .1em; border-radius: var(--pe-r-pill); padding: 2px 9px;
+            color: var(--pe-ink-faint); border: 1px solid var(--pe-border-strong);
+            white-space: nowrap; }
+.pe-badge.ok   { color: var(--pe-ok-ink);   border-color: rgba(111,207,95,.4); }
+.pe-badge.warn { color: var(--pe-warn-ink); border-color: rgba(245,184,32,.45); }
+.pe-badge.high { color: var(--pe-high-ink); border-color: rgba(240,134,74,.4); }
+.pe-badge.crit { color: var(--pe-crit-ink); border-color: rgba(239,60,46,.45); }
+
+/* ---------- Chip (availability / tally, larger than a badge) ---------- */
+.pe-chip { font-family: var(--pe-font-mono); font-size: 10.5px; font-weight: 700;
+           border-radius: var(--pe-r-pill); padding: 3px 10px;
+           color: var(--pe-ink-label); background: var(--pe-well);
+           border: 1px solid var(--pe-border); white-space: nowrap; }
+.pe-chip.ok   { color: var(--pe-ok-ink);   background: rgba(111,207,95,.1);  border-color: rgba(111,207,95,.35); }
+.pe-chip.warn { color: var(--pe-warn-ink); background: rgba(245,184,32,.08); border-color: rgba(245,184,32,.3); }
+.pe-chip.crit { color: var(--pe-crit-ink); background: rgba(239,60,46,.08);  border-color: rgba(239,60,46,.35); }
+.pe-chip.info { color: #7fbfd4;            background: var(--pe-accent-bg);  border-color: rgba(53,197,216,.3); }
+
+/* ---------- Mono label / value pair ---------- */
+.pe-readout      { display: flex; flex-direction: column; gap: var(--pe-gap-tight);
+                   padding-top: 13px; border-top: 1px dashed var(--pe-border-dash); }
+.pe-readout-row  { display: flex; justify-content: space-between; gap: 10px; }
+.pe-label        { font-family: var(--pe-font-mono); font-size: 9.5px;
+                   letter-spacing: .08em; color: var(--pe-ink-faint); }
+.pe-value        { font-family: var(--pe-font-mono); font-size: 11px; color: var(--pe-ink-2);
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pe-value.dim    { color: var(--pe-ink-dim); }
+.pe-value.ok     { color: var(--pe-ok-ink); }
+.pe-value.warn   { color: var(--pe-warn-ink); }
+.pe-value.crit   { color: var(--pe-crit-ink); }
+.pe-value.none   { color: var(--pe-ink-ghost); }
+
+/* ---------- Bar (one bar component, every progress surface) ---------- */
+.pe-bar       { height: 5px; border-radius: var(--pe-r-pill); background: var(--pe-well);
+                border: 1px solid var(--pe-border-dash); overflow: hidden; }
+.pe-bar-fill  { height: 100%; border-radius: var(--pe-r-pill);
+                background: var(--pe-idle); transition: width .3s ease; }
+.pe-bar-fill.ok   { background: var(--pe-ok);   box-shadow: 0 0 10px var(--pe-ok-glow); }
+.pe-bar-fill.warn { background: var(--pe-warn); box-shadow: 0 0 10px var(--pe-warn-glow); }
+.pe-bar-fill.high { background: var(--pe-high); box-shadow: 0 0 10px var(--pe-high-glow); }
+.pe-bar-fill.crit { background: var(--pe-crit); box-shadow: 0 0 10px var(--pe-crit-glow); }
+.pe-bar-cap   { font-family: var(--pe-font-mono); font-size: 10px;
+                color: var(--pe-ink-faint); margin-top: 6px; }
+
+/* ---------- Button ---------- */
+.pe-btn { font-family: var(--pe-font-display); font-weight: 700; font-size: 13px;
+          letter-spacing: .06em; color: var(--pe-ink-dim); background: var(--pe-well);
+          border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-md);
+          padding: 11px 18px; cursor: pointer; white-space: nowrap;
+          transition: color .15s, border-color .15s, background .15s; }
+.pe-btn:hover  { color: var(--pe-ink-2); border-color: var(--pe-accent); }
+.pe-btn.accent { color: var(--pe-accent-hi); border-color: rgba(53,197,216,.45); background: var(--pe-accent-bg); }
+.pe-btn.warn   { color: var(--pe-warn-ink); border-color: rgba(245,184,32,.45); background: rgba(245,184,32,.1); }
+.pe-btn.warn:hover { background: rgba(245,184,32,.2); color: #ffdd7a; }
+.pe-btn.sm     { font-family: var(--pe-font-mono); font-weight: 400; font-size: 10px;
+                 letter-spacing: .08em; padding: 4px 10px; }
+
+/* ============================================================
+   12. VERDICT STRIP
+   Every tab opens with one. It answers the tab's question in
+   one sentence before any detail. Geometry is identical across
+   tabs so they read as the same instrument.
+   ============================================================ */
+.pe-verdict { border-radius: 13px; border: 1px solid var(--pe-border);
+              background: linear-gradient(180deg, var(--pe-panel), var(--pe-surface));
+              padding: var(--pe-pad-panel); display: flex; align-items: center;
+              gap: var(--pe-gap-loose); flex-wrap: wrap; }
+.pe-verdict-orb { width: 58px; height: 58px; border-radius: var(--pe-r-xl); flex: none;
+                  display: flex; align-items: center; justify-content: center;
+                  font-family: var(--pe-font-display); font-size: 26px; font-weight: 700;
+                  color: #04140f; background: var(--pe-idle); }
+.pe-verdict-text { flex: 1; min-width: 220px; }
+.pe-verdict-text h2 { font-size: 19px; letter-spacing: .06em; margin-bottom: 4px; }
+.pe-verdict-text p  { margin: 0; font-size: 13px; line-height: 1.55; color: var(--pe-ink-body); }
+.pe-verdict-tally   { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+.pe-verdict.ok   { border-color: #1c4a3a; background: linear-gradient(180deg,#101d16,#0a1420); }
+.pe-verdict.ok   .pe-verdict-orb  { background: var(--pe-ok);   box-shadow: 0 0 22px var(--pe-ok-glow); }
+.pe-verdict.ok   .pe-verdict-text h2 { color: var(--pe-ok-ink); }
+
+.pe-verdict.warn { border-color: #3a2f18; background: linear-gradient(180deg,rgba(245,184,32,.07),var(--pe-panel)); }
+.pe-verdict.warn .pe-verdict-orb  { background: var(--pe-warn); color: #1a1304; box-shadow: 0 0 22px var(--pe-warn-glow); }
+.pe-verdict.warn .pe-verdict-text h2 { color: var(--pe-warn-ink); }
+.pe-verdict.warn .pe-verdict-text p  { color: #c3b48a; }
+
+.pe-verdict.crit { border-color: rgba(239,60,46,.4); background: linear-gradient(180deg,rgba(239,60,46,.1),var(--pe-panel)); }
+.pe-verdict.crit .pe-verdict-orb  { background: var(--pe-crit); color: #180402;
+                                    box-shadow: 0 0 22px var(--pe-crit-glow);
+                                    animation: pe-critpulse .9s ease-in-out infinite; }
+.pe-verdict.crit .pe-verdict-text h2 { color: var(--pe-crit-ink); }
+.pe-verdict.crit .pe-verdict-text p  { color: #e8b3ac; }
+
+.pe-verdict.unknown .pe-verdict-orb { background: var(--pe-warn); color: #1a1304; }
+/* orb glyph: ✓ ok · ! warn · ⚠ crit · ? unknown */
+
+/* ============================================================
+   13. STATUS CARD — the one repeating unit
+   Reactor cells, cryo pods, cert cards, hull findings and
+   router nodes are all this card with a different modifier.
+   ============================================================ */
+.pe-grid { display: grid; gap: var(--pe-gap);
+           grid-template-columns: repeat(auto-fill, minmax(var(--pe-track), 1fr)); }
+.pe-grid.tight { --pe-track: 220px; gap: 12px; }
+
+.pe-card { border-radius: 13px; border: 1px solid var(--pe-border-strong);
+           border-left: 3px solid var(--pe-idle);
+           background: linear-gradient(180deg, var(--pe-panel), #0a1420);
+           padding: var(--pe-pad-card); position: relative; overflow: hidden; }
+.pe-card > * { position: relative; }
+.pe-card::before { content: ""; pointer-events: none; position: absolute;
+                   left: -30%; top: -60%; width: 160%; height: 120%;
+                   background: radial-gradient(closest-side, transparent, transparent 70%); }
+
+.pe-card.ok   { border-left-color: var(--pe-ok-line); }
+.pe-card.ok::before   { background: radial-gradient(closest-side, rgba(111,207,95,.10), transparent 70%); }
+.pe-card.warn { border-left-color: var(--pe-warn); }
+.pe-card.warn::before { background: radial-gradient(closest-side, rgba(245,184,32,.11), transparent 70%); }
+.pe-card.high { border-left-color: var(--pe-high); }
+.pe-card.high::before { background: radial-gradient(closest-side, rgba(240,134,74,.11), transparent 70%); }
+.pe-card.crit { border-left-color: var(--pe-crit); border-color: rgba(239,60,46,.4); }
+.pe-card.crit::before { background: radial-gradient(closest-side, rgba(239,60,46,.12), transparent 70%); }
+
+/* no-data variant — the shape of what's missing is information */
+.pe-card.none { border: 1px dashed var(--pe-border-strong); background: var(--pe-well);
+                opacity: .62; }
+.pe-card.none::before { background: none; }
+
+/* card head row */
+.pe-card-head  { display: flex; align-items: center; gap: var(--pe-gap-tight); margin-bottom: var(--pe-gap); }
+.pe-card-title { font-family: var(--pe-font-display); font-weight: 700; font-size: 20px;
+                 color: var(--pe-ink-2); letter-spacing: .03em;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pe-card-title.sm { font-size: 15px; color: var(--pe-ink); letter-spacing: .02em; }
+.pe-card-sub   { font-family: var(--pe-font-mono); font-size: 10px; color: var(--pe-ink-faint); }
+.pe-card-head .pe-spacer { flex: 1; }
+
+/* hero number — the single answer the card exists to give */
+.pe-hero       { display: flex; align-items: baseline; gap: var(--pe-gap-tight); }
+.pe-hero-num   { font-family: var(--pe-font-display); font-weight: 700; font-size: 34px;
+                 line-height: 1; color: var(--pe-ink); }
+.pe-hero-num.sm{ font-size: 26px; }
+.pe-hero-num.ok{ color: var(--pe-ok-ink); }
+.pe-hero-num.warn { color: var(--pe-warn-ink); }
+.pe-hero-num.crit { color: var(--pe-crit-ink); }
+.pe-hero-num.none { color: var(--pe-ink-ghost); }
+.pe-hero-label { font-family: var(--pe-font-mono); font-size: 10.5px;
+                 letter-spacing: .08em; color: var(--pe-ink-faint); }
+
+/* footnote — where demoted fields go (e.g. systemd ActiveState) */
+.pe-footnote   { margin-top: 11px; font-family: var(--pe-font-mono); font-size: 9.5px;
+                 line-height: 1.5; color: var(--pe-ink-ghost); }
+.pe-footnote.warn { color: #c3b48a; }
+
+/* ============================================================
+   14. SUPPORTING BLOCKS
+   ============================================================ */
+
+/* dashed footer — pending plan, scan notices. Renders in EVERY
+   branch of a panel, never nested inside one {% else %}. */
+.pe-dashed-footer { display: flex; align-items: center; gap: 10px;
+                    font-family: var(--pe-font-mono); font-size: 11.5px;
+                    color: var(--pe-ink-label); padding-top: 15px; margin-top: 15px;
+                    border-top: 1px dashed var(--pe-border-dash); }
+
+/* sensor-dark notice — used when a scan mode didn't collect a metric */
+.pe-sensor-dark { display: flex; align-items: center; gap: 15px;
+                  border: 1px dashed var(--pe-border-strong); border-radius: 11px;
+                  background: var(--pe-well); padding: 16px 18px; }
+.pe-sensor-dark .glyph { width: 44px; height: 44px; border-radius: 11px; flex: none;
+                         border: 1px solid var(--pe-border-strong);
+                         background: var(--pe-accent-bg); display: flex;
+                         align-items: center; justify-content: center;
+                         font-size: 20px; color: var(--pe-ink-label); }
+.pe-sensor-dark p { margin: 0; font-size: 12.5px; line-height: 1.6; color: #6f849e; }
+
+/* collapsed low-severity counter — keeps routine findings from
+   drowning the signal (see Hull Diagnostics) */
+.pe-rollup { display: flex; align-items: center; gap: 11px;
+             border: 1px solid var(--pe-border); border-radius: var(--pe-r-lg);
+             background: var(--pe-well); padding: 12px 16px; cursor: pointer; }
+.pe-rollup:hover { border-color: var(--pe-border-strong); }
+.pe-rollup-count { font-family: var(--pe-font-display); font-weight: 700;
+                   font-size: 20px; color: var(--pe-ink-label); }
+
+/* code block — mono, dark-green well. Use <div> rows with
+   white-space:pre, not <pre>, so long lines wrap predictably. */
+.pe-code { background: #03130f; border: 1px solid #1c4a3a; border-radius: var(--pe-r-md);
+           padding: 13px 15px; font-family: var(--pe-font-mono); font-size: 11.5px;
+           line-height: 1.75; color: #7fe3a5; overflow-x: auto; }
+.pe-code .cmt { color: #4f9c76; }
+.pe-code .add { color: var(--pe-warn-ink); }
+.pe-code .del { color: #ef8478; }
+
+/* crew portrait */
+.pe-crew      { display: flex; gap: 12px; flex-wrap: wrap; }
+.pe-crew-card { display: flex; align-items: center; gap: 11px;
+                border: 1px solid var(--pe-border); border-radius: var(--pe-r-lg);
+                background: var(--pe-well); padding: 10px 14px 10px 10px; }
+.pe-crew-card img { width: 38px; height: 38px; border-radius: 50%; object-fit: cover;
+                    background: var(--pe-panel); flex: none; }
+.pe-crew-name { font-family: var(--pe-font-display); font-weight: 600; font-size: 13px; color: var(--pe-ink-2); }
+.pe-crew-role { font-family: var(--pe-font-mono); font-size: 10px; color: var(--pe-ink-faint); }
+
+/* ============================================================
+   16. ACTION SURFACES  (login, container detail, approval,
+   execution — see ACTION-SCREENS.md)
+   ============================================================ */
+
+@keyframes pe-spin  { to { transform: rotate(360deg) } }
+@keyframes pe-sweep { 0% { transform: translateX(-100%) } 100% { transform: translateX(220%) } }
+@keyframes pe-caret { 0%,49% { opacity: 1 } 50%,100% { opacity: 0 } }
+
+/* ---------- spinner / in-flight ---------- */
+.pe-spinner { width: 18px; height: 18px; border-radius: 50%; flex: none;
+              border: 2px solid rgba(53,197,216,.25); border-top-color: var(--pe-accent);
+              animation: pe-spin .8s linear infinite; }
+.pe-spinner.warn { border-color: rgba(245,184,32,.25); border-top-color: var(--pe-warn); }
+.pe-spinner.lg   { width: 20px; height: 20px; }
+
+/* shimmer on a busy button — add as a child span */
+.pe-shimmer { position: absolute; inset: 0; width: 40%;
+              background: linear-gradient(90deg, transparent, rgba(53,197,216,.12), transparent);
+              animation: pe-sweep 1.4s linear infinite; }
+.pe-shimmer.warn { background: linear-gradient(90deg, transparent, rgba(245,184,32,.14), transparent); }
+
+.pe-btn.is-busy { position: relative; overflow: hidden; display: flex;
+                  align-items: center; justify-content: center; gap: 11px;
+                  pointer-events: none; }
+
+/* a whole block waiting on the server */
+.pe-is-busy { opacity: .45; pointer-events: none; }
+
+/* ---------- phone frame (design reference only) ---------- */
+.pe-phone { width: 390px; height: 844px; border-radius: 30px;
+            border: 1px solid var(--pe-border-strong); background: var(--pe-bg);
+            overflow: hidden; display: flex; flex-direction: column; }
+.pe-statusbar { display: flex; justify-content: space-between; align-items: center;
+                padding: 12px 22px 0; font-family: var(--pe-font-mono);
+                font-size: 11px; color: var(--pe-ink-label); }
+
+/* ---------- screen header + bottom bar ---------- */
+.pe-screen-head { display: flex; align-items: center; gap: 12px;
+                  padding: 14px 18px; border-bottom: 1px solid var(--pe-border); }
+.pe-screen-head .back { font-size: 20px; color: var(--pe-ink-label); flex: none; }
+.pe-screen-title { font-family: var(--pe-font-display); font-weight: 700; font-size: 17px;
+                   color: var(--pe-ink); letter-spacing: .02em;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pe-screen-sub   { font-family: var(--pe-font-mono); font-size: 10px; color: var(--pe-ink-faint); }
+
+.pe-actionbar { display: flex; gap: 10px; padding: 14px 18px 22px;
+                border-top: 1px solid var(--pe-border); background: var(--pe-surface); }
+.pe-actionbar .pe-btn { flex: 1; height: 50px; padding: 0; }
+.pe-actionbar .pe-btn.primary { flex: 1.3; }
+
+/* ---------- confirm sheet (every destructive action) ---------- */
+.pe-sheet-scrim { position: absolute; inset: 0; background: rgba(4,8,14,.72); }
+.pe-sheet { position: absolute; left: 0; right: 0; bottom: 0;
+            border-radius: 22px 22px 30px 30px; border: 1px solid var(--pe-border-strong);
+            border-bottom: none; background: linear-gradient(180deg, var(--pe-panel), #0c1524);
+            padding: 22px 20px 26px; display: flex; flex-direction: column; gap: 16px; }
+.pe-sheet.warn { border-color: #3a2f18; background: linear-gradient(180deg,#141108,#0c1524); }
+.pe-sheet.crit { border-color: rgba(239,60,46,.4); background: linear-gradient(180deg,#160d0c,#0c1524); }
+.pe-sheet-grab { width: 40px; height: 4px; border-radius: var(--pe-r-pill);
+                 background: var(--pe-border-strong); align-self: center; }
+
+/* ---------- log well ---------- */
+.pe-logwell { flex: 1; min-height: 0; display: flex; flex-direction: column;
+              border-radius: var(--pe-r-lg); border: 1px solid var(--pe-border);
+              background: var(--pe-well); overflow: hidden; }
+.pe-logwell.crit { border-color: rgba(239,60,46,.3); }
+.pe-logwell-head { display: flex; align-items: center; gap: 9px; padding: 10px 13px;
+                   border-bottom: 1px solid var(--pe-border-dash); }
+.pe-logwell-head h4 { font-family: var(--pe-font-display); font-weight: 700;
+                      font-size: 12px; letter-spacing: .1em; color: var(--pe-ink-2); }
+.pe-logwell-body { flex: 1; overflow: hidden; padding: 11px 13px;
+                   display: flex; flex-direction: column; gap: 5px;
+                   font-family: var(--pe-font-mono); font-size: 10.5px; line-height: 1.5; }
+.pe-logline  { color: var(--pe-ink-faint); white-space: pre;
+               overflow: hidden; text-overflow: ellipsis; }
+.pe-logline > span      { color: var(--pe-ink-dim); }
+.pe-logline > span.warn { color: #e8b3ac; }
+.pe-logline > span.crit { color: var(--pe-crit-ink); }
+.pe-caret { color: var(--pe-accent); animation: pe-caret 1.1s step-end infinite; }
+
+/* inline output well inside an execution step */
+.pe-output { border-radius: var(--pe-r-md); border: 1px solid var(--pe-border-dash);
+             background: var(--pe-well); padding: 10px 11px; margin-top: 8px;
+             display: flex; flex-direction: column; gap: 4px;
+             font-family: var(--pe-font-mono); font-size: 10px; line-height: 1.5;
+             color: var(--pe-ink-dim); }
+.pe-output.crit { border-color: rgba(239,60,46,.3); background: #100809; }
+
+/* ---------- empty well ---------- */
+.pe-empty { flex: 1; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 11px; padding: 24px; text-align: center; }
+.pe-empty-glyph { width: 46px; height: 46px; border-radius: var(--pe-r-lg);
+                  border: 1px dashed var(--pe-border-strong); display: flex;
+                  align-items: center; justify-content: center;
+                  font-size: 20px; color: var(--pe-ink-ghost); }
+.pe-empty p { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--pe-ink-label); }
+
+/* ---------- attribution strip (who approved / denied) ---------- */
+.pe-attrib { display: flex; align-items: flex-start; gap: 12px;
+             border-radius: 11px; border: 1px solid var(--pe-border);
+             background: var(--pe-well); padding: 13px; }
+.pe-attrib img { width: 40px; height: 40px; border-radius: 50%; object-fit: cover;
+                 background: var(--pe-panel); flex: none; }
+.pe-attrib.ok   { border-color: rgba(111,207,95,.25); background: rgba(111,207,95,.05); }
+.pe-attrib.ok   img { box-shadow: 0 0 0 2px rgba(111,207,95,.35); }
+.pe-attrib.crit { border-color: rgba(239,60,46,.25); background: rgba(239,60,46,.05); }
+.pe-attrib.crit img { box-shadow: 0 0 0 2px rgba(239,60,46,.3); }
+.pe-attrib-name { font-family: var(--pe-font-display); font-weight: 700;
+                  font-size: 14px; letter-spacing: .03em; color: var(--pe-ink-2); }
+.pe-attrib.ok   .pe-attrib-name { color: var(--pe-ok-ink); }
+.pe-attrib.crit .pe-attrib-name { color: var(--pe-crit-ink); }
+.pe-attrib-meta { font-family: var(--pe-font-mono); font-size: 10.5px;
+                  color: var(--pe-ink-label); margin-top: 2px; }
+/* denial reason, verbatim — the most useful field on a denied card */
+.pe-attrib-quote { margin: 8px 0 0; font-size: 12.5px; line-height: 1.5;
+                   color: #c9a9a4; font-style: italic; text-wrap: pretty; }
+
+/* ---------- agent hint (Leela's read) ---------- */
+.pe-hint { display: flex; align-items: flex-start; gap: 11px;
+           border-radius: var(--pe-r-lg); border: 1px dashed rgba(245,184,32,.35);
+           background: rgba(245,184,32,.05); padding: 13px 14px; }
+.pe-hint img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; flex: none; }
+.pe-hint-kicker { font-family: var(--pe-font-mono); font-size: 9.5px;
+                  letter-spacing: .1em; color: var(--pe-warn-ink); }
+.pe-hint p { margin: 4px 0 0; font-size: 12.5px; line-height: 1.5; color: #c3b48a; }
+
+/* ---------- fix steps (descriptions only — never a command) ---------- */
+.pe-steps { display: flex; flex-direction: column; gap: 9px; }
+.pe-step  { display: flex; gap: 11px; align-items: flex-start; }
+.pe-step-idx { font-family: var(--pe-font-mono); font-size: 10px;
+               color: var(--pe-warn-ink); flex: none; margin-top: 2px; }
+.pe-step-text { font-size: 12.5px; line-height: 1.5; color: var(--pe-ink-body); text-wrap: pretty; }
+.pe-steps.is-resolved .pe-step-idx  { color: var(--pe-ink-faint); }
+.pe-steps.is-resolved .pe-step-text { color: var(--pe-ink-dim); }
+
+/* ---------- countdown ---------- */
+.pe-countdown { border-radius: 11px; border: 1px solid #3a2f18;
+                background: rgba(245,184,32,.05); padding: 13px;
+                display: flex; align-items: center; gap: 13px; }
+.pe-countdown-num { font-family: var(--pe-font-display); font-weight: 700;
+                    font-size: 29px; line-height: 1; color: var(--pe-warn-ink);
+                    font-variant-numeric: tabular-nums; }
+.pe-countdown-num.lg { font-size: 44px; }
+
+/* ---------- execution step rail ---------- */
+.pe-rail      { display: flex; flex-direction: column; gap: 11px; }
+.pe-rail-item { display: flex; gap: 13px; align-items: flex-start; }
+.pe-rail-gutter { display: flex; flex-direction: column; align-items: center;
+                  gap: 4px; flex: none; padding-top: 2px; }
+.pe-rail-line { width: 1px; flex: 1; min-height: 20px; background: var(--pe-border-strong); }
+.pe-rail-line.done { background: #1c4a3a; }
+
+.pe-marker { width: 20px; height: 20px; border-radius: 50%; flex: none;
+             display: flex; align-items: center; justify-content: center;
+             font-size: 11px; border: 1px dashed var(--pe-border-strong); }
+.pe-marker.done { background: rgba(111,207,95,.15); border: 1px solid rgba(111,207,95,.5);
+                  color: var(--pe-ok-ink); border-style: solid; }
+.pe-marker.active { background: rgba(245,184,32,.15); border: 1px solid rgba(245,184,32,.55); }
+.pe-marker.active::after { content: ""; width: 7px; height: 7px; border-radius: 50%;
+                           background: var(--pe-warn); animation: pe-beacon 1.2s ease-in-out infinite; }
+.pe-marker.failed { background: rgba(239,60,46,.15); border: 1px solid rgba(239,60,46,.55);
+                    color: var(--pe-crit-ink); }
+.pe-rail-text { font-size: 13px; line-height: 1.45; color: var(--pe-ink); text-wrap: pretty; }
+.pe-rail-item.is-done    .pe-rail-text { color: var(--pe-ok-ink); }
+.pe-rail-item.is-pending .pe-rail-text { color: var(--pe-ink-label); }
+.pe-rail-meta { font-family: var(--pe-font-mono); font-size: 10px;
+                color: var(--pe-ink-faint); margin-top: 3px; }
+
+/* ---------- verification check list ---------- */
+.pe-check { display: flex; align-items: center; gap: 12px; border-radius: 11px;
+            border: 1px dashed var(--pe-border-strong); background: var(--pe-well);
+            padding: 13px; opacity: .6; }
+.pe-check.passed  { border: 1px solid rgba(111,207,95,.3); background: rgba(111,207,95,.05); opacity: 1; }
+.pe-check.running { border: 1px solid rgba(53,197,216,.3); background: rgba(53,197,216,.05); opacity: 1; }
+.pe-check.failed  { border: 1px solid rgba(239,60,46,.3); background: rgba(239,60,46,.05); opacity: 1; }
+.pe-check-label { flex: 1; font-size: 13px; color: var(--pe-ink-2); }
+.pe-check.is-pending .pe-check-label { color: var(--pe-ink-label); }
+.pe-check-meta  { font-family: var(--pe-font-mono); font-size: 10.5px; color: var(--pe-ink-faint); }
+
+/* ---------- TOTP input ---------- */
+.pe-totp      { display: flex; gap: 8px; }
+.pe-totp-cell { flex: 1; height: 52px; border-radius: 11px;
+                border: 1px solid var(--pe-border-strong); background: var(--pe-well);
+                display: flex; align-items: center; justify-content: center;
+                font-family: var(--pe-font-mono); font-size: 21px; color: var(--pe-ink-2); }
+.pe-totp-cell.is-focused { border-color: var(--pe-accent); background: var(--pe-accent-bg); }
+.pe-totp.is-rejected .pe-totp-cell { border-color: rgba(239,60,46,.5); background: rgba(239,60,46,.06); }
+
+.pe-field       { display: flex; flex-direction: column; gap: 7px; }
+.pe-field label { font-family: var(--pe-font-mono); font-size: 9.5px;
+                  letter-spacing: .1em; color: var(--pe-ink-faint); }
+.pe-field.is-rejected label { color: var(--pe-crit-ink); }
+.pe-input { height: 52px; border-radius: 11px; border: 1px solid var(--pe-border-strong);
+            background: var(--pe-well); display: flex; align-items: center; padding: 0 16px;
+            font-family: var(--pe-font-mono); font-size: 16px; letter-spacing: .3em;
+            color: var(--pe-ink-dim); }
+
+/* ---------- login quip ---------- */
+.pe-quip { display: flex; align-items: center; gap: 12px;
+           border-top: 1px dashed var(--pe-border-dash); padding-top: 18px; }
+.pe-quip img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover;
+               background: var(--pe-panel); flex: none; }
+.pe-quip p { margin: 0; font-size: 12.5px; line-height: 1.5; color: #6f849e;
+             font-style: italic; text-wrap: pretty; }
+
+/* ---------- desktop: authorise + watch side by side ---------- */
+.pe-split { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.1fr);
+            gap: 20px; align-items: start; }
+@media (max-width: 1023px) { .pe-split { grid-template-columns: minmax(0,1fr); } }
+
+/* ============================================================
+   15. RESPONSIVE
+   ============================================================ */
+@media (max-width: 720px) {
+  .pe-app { padding: 18px 16px 44px; }
+  :root { --pe-track: 100%; }
+  .pe-verdict-tally { justify-content: flex-start; }
+  .pe-masthead { flex-wrap: wrap; gap: 12px; }
+}

@@ -1,0 +1,260 @@
+/* Planet Express design system · pe-* primitives: shell, masthead, tab bar, panel, LED, badge, chip, label/value, bar, button, verdict, card, notices, code well, portrait
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ============================================================
+   10. LAYOUT SHELL
+   ============================================================ */
+.pe-app     { min-height: 100vh; background: var(--pe-bg); padding: 26px 32px 60px; }
+.pe-wrap    { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 26px; }
+.pe-tabbody { border-radius: var(--pe-r-xl); border: 1px solid var(--pe-border);
+              background: var(--pe-surface); padding: 22px;
+              display: flex; flex-direction: column; gap: var(--pe-gap-loose); }
+
+/* ---------- Masthead ---------- */
+.pe-masthead   { display: flex; align-items: center; gap: var(--pe-gap-loose);
+                 border-bottom: 1px solid var(--pe-border); padding-bottom: 20px; }
+.pe-masthead img { height: 46px; width: auto; }
+.pe-masthead h1{ font-size: 26px; letter-spacing: .06em; }
+.pe-kicker     { font-family: var(--pe-font-mono); font-size: 11px;
+                 letter-spacing: .16em; color: var(--pe-ink-label); }
+
+/* ---------- Tab bar ---------- */
+.pe-tabs     { display: flex; gap: 8px; flex-wrap: wrap; }
+.pe-tab      { font-family: var(--pe-font-display); font-weight: 600; font-size: 13px;
+               letter-spacing: .08em; color: var(--pe-ink-label);
+               background: var(--pe-well); border: 1px solid var(--pe-border);
+               border-radius: var(--pe-r-md); padding: 9px 16px; cursor: pointer;
+               transition: color .15s, border-color .15s; }
+.pe-tab:hover{ color: var(--pe-ink-2); border-color: var(--pe-border-strong); }
+.pe-tab.is-active { color: var(--pe-accent-hi); border-color: var(--pe-accent);
+                    background: var(--pe-accent-bg); }
+
+/* ---------- Panel ---------- */
+.pe-panel      { border-radius: 13px; background: var(--pe-panel);
+                 border: 1px solid var(--pe-border); padding: var(--pe-pad-panel); }
+.pe-panel-head { display: flex; align-items: center; gap: 13px;
+                 margin-bottom: var(--pe-gap-loose); flex-wrap: wrap; }
+.pe-panel-head h3 { font-size: 14px; letter-spacing: .1em; }
+.pe-panel-head .pe-spacer { flex: 1; }
+.pe-panel-note { font-family: var(--pe-font-mono); font-size: 11px; color: var(--pe-ink-label); }
+
+/* ============================================================
+   11. ATOMS
+   ============================================================ */
+
+/* ---------- LED ---------- */
+.pe-led { width: 8px; height: 8px; border-radius: 50%; flex: none;
+          background: var(--pe-idle); }
+.pe-led.ok   { background: var(--pe-ok);   box-shadow: 0 0 9px var(--pe-ok); }
+.pe-led.warn { background: var(--pe-warn); box-shadow: 0 0 9px var(--pe-warn);
+               animation: pe-beacon 1.8s ease-in-out infinite; }
+.pe-led.high { background: var(--pe-high); box-shadow: 0 0 9px var(--pe-high);
+               animation: pe-beacon 1.8s ease-in-out infinite; }
+.pe-led.crit { background: var(--pe-crit); box-shadow: 0 0 9px var(--pe-crit);
+               animation: pe-critpulse .9s ease-in-out infinite; }
+.pe-led.idle { background: var(--pe-idle); box-shadow: none; }
+
+/* ---------- Badge (status pill, right-aligned in a head row) ---------- */
+.pe-badge { font-family: var(--pe-font-mono); font-size: 9.5px; font-weight: 700;
+            letter-spacing: .1em; border-radius: var(--pe-r-pill); padding: 2px 9px;
+            color: var(--pe-ink-faint); border: 1px solid var(--pe-border-strong);
+            white-space: nowrap; }
+.pe-badge.ok   { color: var(--pe-ok-ink);   border-color: rgba(111,207,95,.4); }
+.pe-badge.warn { color: var(--pe-warn-ink); border-color: rgba(245,184,32,.45); }
+.pe-badge.high { color: var(--pe-high-ink); border-color: rgba(240,134,74,.4); }
+.pe-badge.crit { color: var(--pe-crit-ink); border-color: rgba(239,60,46,.45); }
+
+/* ---------- Chip (availability / tally, larger than a badge) ---------- */
+.pe-chip { font-family: var(--pe-font-mono); font-size: 10.5px; font-weight: 700;
+           border-radius: var(--pe-r-pill); padding: 3px 10px;
+           color: var(--pe-ink-label); background: var(--pe-well);
+           border: 1px solid var(--pe-border); white-space: nowrap; }
+.pe-chip.ok   { color: var(--pe-ok-ink);   background: rgba(111,207,95,.1);  border-color: rgba(111,207,95,.35); }
+.pe-chip.warn { color: var(--pe-warn-ink); background: rgba(245,184,32,.08); border-color: rgba(245,184,32,.3); }
+.pe-chip.crit { color: var(--pe-crit-ink); background: rgba(239,60,46,.08);  border-color: rgba(239,60,46,.35); }
+.pe-chip.info { color: #7fbfd4;            background: var(--pe-accent-bg);  border-color: rgba(53,197,216,.3); }
+
+/* ---------- Mono label / value pair ---------- */
+.pe-readout      { display: flex; flex-direction: column; gap: var(--pe-gap-tight);
+                   padding-top: 13px; border-top: 1px dashed var(--pe-border-dash); }
+.pe-readout-row  { display: flex; justify-content: space-between; gap: 10px; }
+.pe-label        { font-family: var(--pe-font-mono); font-size: 9.5px;
+                   letter-spacing: .08em; color: var(--pe-ink-faint); }
+.pe-value        { font-family: var(--pe-font-mono); font-size: 11px; color: var(--pe-ink-2);
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pe-value.dim    { color: var(--pe-ink-dim); }
+.pe-value.ok     { color: var(--pe-ok-ink); }
+.pe-value.warn   { color: var(--pe-warn-ink); }
+.pe-value.crit   { color: var(--pe-crit-ink); }
+.pe-value.none   { color: var(--pe-ink-ghost); }
+
+/* ---------- Bar (one bar component, every progress surface) ---------- */
+.pe-bar       { height: 5px; border-radius: var(--pe-r-pill); background: var(--pe-well);
+                border: 1px solid var(--pe-border-dash); overflow: hidden; }
+.pe-bar-fill  { height: 100%; border-radius: var(--pe-r-pill);
+                background: var(--pe-idle); transition: width .3s ease; }
+.pe-bar-fill.ok   { background: var(--pe-ok);   box-shadow: 0 0 10px var(--pe-ok-glow); }
+.pe-bar-fill.warn { background: var(--pe-warn); box-shadow: 0 0 10px var(--pe-warn-glow); }
+.pe-bar-fill.high { background: var(--pe-high); box-shadow: 0 0 10px var(--pe-high-glow); }
+.pe-bar-fill.crit { background: var(--pe-crit); box-shadow: 0 0 10px var(--pe-crit-glow); }
+.pe-bar-cap   { font-family: var(--pe-font-mono); font-size: 10px;
+                color: var(--pe-ink-faint); margin-top: 6px; }
+
+/* ---------- Button ---------- */
+.pe-btn { font-family: var(--pe-font-display); font-weight: 700; font-size: 13px;
+          letter-spacing: .06em; color: var(--pe-ink-dim); background: var(--pe-well);
+          border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-md);
+          padding: 11px 18px; cursor: pointer; white-space: nowrap;
+          transition: color .15s, border-color .15s, background .15s; }
+.pe-btn:hover  { color: var(--pe-ink-2); border-color: var(--pe-accent); }
+.pe-btn.accent { color: var(--pe-accent-hi); border-color: rgba(53,197,216,.45); background: var(--pe-accent-bg); }
+.pe-btn.warn   { color: var(--pe-warn-ink); border-color: rgba(245,184,32,.45); background: rgba(245,184,32,.1); }
+.pe-btn.warn:hover { background: rgba(245,184,32,.2); color: #ffdd7a; }
+.pe-btn.sm     { font-family: var(--pe-font-mono); font-weight: 400; font-size: 10px;
+                 letter-spacing: .08em; padding: 4px 10px; }
+
+/* ============================================================
+   12. VERDICT STRIP
+   Every tab opens with one. It answers the tab's question in
+   one sentence before any detail. Geometry is identical across
+   tabs so they read as the same instrument.
+   ============================================================ */
+.pe-verdict { border-radius: 13px; border: 1px solid var(--pe-border);
+              background: linear-gradient(180deg, var(--pe-panel), var(--pe-surface));
+              padding: var(--pe-pad-panel); display: flex; align-items: center;
+              gap: var(--pe-gap-loose); flex-wrap: wrap; }
+.pe-verdict-orb { width: 58px; height: 58px; border-radius: var(--pe-r-xl); flex: none;
+                  display: flex; align-items: center; justify-content: center;
+                  font-family: var(--pe-font-display); font-size: 26px; font-weight: 700;
+                  color: #04140f; background: var(--pe-idle); }
+.pe-verdict-text { flex: 1; min-width: 220px; }
+.pe-verdict-text h2 { font-size: 19px; letter-spacing: .06em; margin-bottom: 4px; }
+.pe-verdict-text p  { margin: 0; font-size: 13px; line-height: 1.55; color: var(--pe-ink-body); }
+.pe-verdict-tally   { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+.pe-verdict.ok   { border-color: #1c4a3a; background: linear-gradient(180deg,#101d16,#0a1420); }
+.pe-verdict.ok   .pe-verdict-orb  { background: var(--pe-ok);   box-shadow: 0 0 22px var(--pe-ok-glow); }
+.pe-verdict.ok   .pe-verdict-text h2 { color: var(--pe-ok-ink); }
+
+.pe-verdict.warn { border-color: #3a2f18; background: linear-gradient(180deg,rgba(245,184,32,.07),var(--pe-panel)); }
+.pe-verdict.warn .pe-verdict-orb  { background: var(--pe-warn); color: #1a1304; box-shadow: 0 0 22px var(--pe-warn-glow); }
+.pe-verdict.warn .pe-verdict-text h2 { color: var(--pe-warn-ink); }
+.pe-verdict.warn .pe-verdict-text p  { color: #c3b48a; }
+
+.pe-verdict.crit { border-color: rgba(239,60,46,.4); background: linear-gradient(180deg,rgba(239,60,46,.1),var(--pe-panel)); }
+.pe-verdict.crit .pe-verdict-orb  { background: var(--pe-crit); color: #180402;
+                                    box-shadow: 0 0 22px var(--pe-crit-glow);
+                                    animation: pe-critpulse .9s ease-in-out infinite; }
+.pe-verdict.crit .pe-verdict-text h2 { color: var(--pe-crit-ink); }
+.pe-verdict.crit .pe-verdict-text p  { color: #e8b3ac; }
+
+.pe-verdict.unknown .pe-verdict-orb { background: var(--pe-warn); color: #1a1304; }
+/* orb glyph: ✓ ok · ! warn · ⚠ crit · ? unknown */
+
+/* ============================================================
+   13. STATUS CARD — the one repeating unit
+   Reactor cells, cryo pods, cert cards, hull findings and
+   router nodes are all this card with a different modifier.
+   ============================================================ */
+.pe-grid { display: grid; gap: var(--pe-gap);
+           grid-template-columns: repeat(auto-fill, minmax(var(--pe-track), 1fr)); }
+.pe-grid.tight { --pe-track: 220px; gap: 12px; }
+
+.pe-card { border-radius: 13px; border: 1px solid var(--pe-border-strong);
+           border-left: 3px solid var(--pe-idle);
+           background: linear-gradient(180deg, var(--pe-panel), #0a1420);
+           padding: var(--pe-pad-card); position: relative; overflow: hidden; }
+.pe-card > * { position: relative; }
+.pe-card::before { content: ""; pointer-events: none; position: absolute;
+                   left: -30%; top: -60%; width: 160%; height: 120%;
+                   background: radial-gradient(closest-side, transparent, transparent 70%); }
+
+.pe-card.ok   { border-left-color: var(--pe-ok-line); }
+.pe-card.ok::before   { background: radial-gradient(closest-side, rgba(111,207,95,.10), transparent 70%); }
+.pe-card.warn { border-left-color: var(--pe-warn); }
+.pe-card.warn::before { background: radial-gradient(closest-side, rgba(245,184,32,.11), transparent 70%); }
+.pe-card.high { border-left-color: var(--pe-high); }
+.pe-card.high::before { background: radial-gradient(closest-side, rgba(240,134,74,.11), transparent 70%); }
+.pe-card.crit { border-left-color: var(--pe-crit); border-color: rgba(239,60,46,.4); }
+.pe-card.crit::before { background: radial-gradient(closest-side, rgba(239,60,46,.12), transparent 70%); }
+
+/* no-data variant — the shape of what's missing is information */
+.pe-card.none { border: 1px dashed var(--pe-border-strong); background: var(--pe-well);
+                opacity: .62; }
+.pe-card.none::before { background: none; }
+
+/* card head row */
+.pe-card-head  { display: flex; align-items: center; gap: var(--pe-gap-tight); margin-bottom: var(--pe-gap); }
+.pe-card-title { font-family: var(--pe-font-display); font-weight: 700; font-size: 20px;
+                 color: var(--pe-ink-2); letter-spacing: .03em;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pe-card-title.sm { font-size: 15px; color: var(--pe-ink); letter-spacing: .02em; }
+.pe-card-sub   { font-family: var(--pe-font-mono); font-size: 10px; color: var(--pe-ink-faint); }
+.pe-card-head .pe-spacer { flex: 1; }
+
+/* hero number — the single answer the card exists to give */
+.pe-hero       { display: flex; align-items: baseline; gap: var(--pe-gap-tight); }
+.pe-hero-num   { font-family: var(--pe-font-display); font-weight: 700; font-size: 34px;
+                 line-height: 1; color: var(--pe-ink); }
+.pe-hero-num.sm{ font-size: 26px; }
+.pe-hero-num.ok{ color: var(--pe-ok-ink); }
+.pe-hero-num.warn { color: var(--pe-warn-ink); }
+.pe-hero-num.crit { color: var(--pe-crit-ink); }
+.pe-hero-num.none { color: var(--pe-ink-ghost); }
+.pe-hero-label { font-family: var(--pe-font-mono); font-size: 10.5px;
+                 letter-spacing: .08em; color: var(--pe-ink-faint); }
+
+/* footnote — where demoted fields go (e.g. systemd ActiveState) */
+.pe-footnote   { margin-top: 11px; font-family: var(--pe-font-mono); font-size: 9.5px;
+                 line-height: 1.5; color: var(--pe-ink-ghost); }
+.pe-footnote.warn { color: #c3b48a; }
+
+/* ============================================================
+   14. SUPPORTING BLOCKS
+   ============================================================ */
+
+/* dashed footer — pending plan, scan notices. Renders in EVERY
+   branch of a panel, never nested inside one {% else %}. */
+.pe-dashed-footer { display: flex; align-items: center; gap: 10px;
+                    font-family: var(--pe-font-mono); font-size: 11.5px;
+                    color: var(--pe-ink-label); padding-top: 15px; margin-top: 15px;
+                    border-top: 1px dashed var(--pe-border-dash); }
+
+/* sensor-dark notice — used when a scan mode didn't collect a metric */
+.pe-sensor-dark { display: flex; align-items: center; gap: 15px;
+                  border: 1px dashed var(--pe-border-strong); border-radius: 11px;
+                  background: var(--pe-well); padding: 16px 18px; }
+.pe-sensor-dark .glyph { width: 44px; height: 44px; border-radius: 11px; flex: none;
+                         border: 1px solid var(--pe-border-strong);
+                         background: var(--pe-accent-bg); display: flex;
+                         align-items: center; justify-content: center;
+                         font-size: 20px; color: var(--pe-ink-label); }
+.pe-sensor-dark p { margin: 0; font-size: 12.5px; line-height: 1.6; color: #6f849e; }
+
+/* collapsed low-severity counter — keeps routine findings from
+   drowning the signal (see Hull Diagnostics) */
+.pe-rollup { display: flex; align-items: center; gap: 11px;
+             border: 1px solid var(--pe-border); border-radius: var(--pe-r-lg);
+             background: var(--pe-well); padding: 12px 16px; cursor: pointer; }
+.pe-rollup:hover { border-color: var(--pe-border-strong); }
+.pe-rollup-count { font-family: var(--pe-font-display); font-weight: 700;
+                   font-size: 20px; color: var(--pe-ink-label); }
+
+/* code block — mono, dark-green well. Use <div> rows with
+   white-space:pre, not <pre>, so long lines wrap predictably. */
+.pe-code { background: #03130f; border: 1px solid #1c4a3a; border-radius: var(--pe-r-md);
+           padding: 13px 15px; font-family: var(--pe-font-mono); font-size: 11.5px;
+           line-height: 1.75; color: #7fe3a5; overflow-x: auto; }
+.pe-code .cmt { color: #4f9c76; }
+.pe-code .add { color: var(--pe-warn-ink); }
+.pe-code .del { color: #ef8478; }
+
+/* crew portrait */
+.pe-crew      { display: flex; gap: 12px; flex-wrap: wrap; }
+.pe-crew-card { display: flex; align-items: center; gap: 11px;
+                border: 1px solid var(--pe-border); border-radius: var(--pe-r-lg);
+                background: var(--pe-well); padding: 10px 14px 10px 10px; }
+.pe-crew-card img { width: 38px; height: 38px; border-radius: 50%; object-fit: cover;
+                    background: var(--pe-panel); flex: none; }
+.pe-crew-name { font-family: var(--pe-font-display); font-weight: 600; font-size: 13px; color: var(--pe-ink-2); }
+.pe-crew-role { font-family: var(--pe-font-mono); font-size: 10px; color: var(--pe-ink-faint); }
+

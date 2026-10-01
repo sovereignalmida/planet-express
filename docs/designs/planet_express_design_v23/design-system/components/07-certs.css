@@ -1,0 +1,55 @@
+/* Planet Express design system · certificate vault · .cert-*, .cols-certs
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* certificate vault */
+.cert-expiring-chip {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600; color: var(--cp-amber-text);
+  background: rgba(245,184,32,.12); border: 1px solid rgba(245,184,32,.35); border-radius: 20px; padding: 2px 9px;
+}
+.cert-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.cert-card {
+  border: 1px solid var(--cp-panel-border); border-radius: 12px; padding: 14px 16px;
+  background: var(--cp-panel-bg);
+}
+.cert-card.renew_soon { border-color: rgba(245,184,32,.4); }
+.cert-card.expiring, .cert-card.expired { border-color: rgba(239,60,46,.45); background: rgba(239,60,46,.05); }
+.cert-card.error { border-color: rgba(239,60,46,.4); background: rgba(239,60,46,.06); }
+.cert-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.cert-led { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--cp-green); box-shadow: 0 0 7px var(--cp-green); }
+.cert-card.renew_soon .cert-led { background: var(--cp-amber); box-shadow: 0 0 7px var(--cp-amber); }
+.cert-card.expiring .cert-led, .cert-card.expired .cert-led { background: var(--cp-crit); box-shadow: 0 0 7px var(--cp-crit); }
+.cert-card.error .cert-led { background: var(--cp-crit-text); box-shadow: 0 0 9px var(--cp-crit-text); animation: critpulse .9s ease-in-out infinite; }
+.cert-card.unknown .cert-led { background: var(--faint3); box-shadow: none; }
+.cert-domain {
+  font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 15px; color: var(--cp-text); flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cert-card.error .cert-domain { color: var(--cp-crit-text); }
+.cert-error-msg { margin: 0 0 9px; font-size: 12.5px; line-height: 1.6; color: #e8b3ac; }
+.cert-badge {
+  font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 700; letter-spacing: .04em;
+  border-radius: 20px; padding: 2px 9px; color: var(--cp-green-text); background: rgba(111,207,95,.12);
+  border: 1px solid rgba(111,207,95,.35);
+}
+.cert-card.renew_soon .cert-badge { color: var(--cp-amber-text); background: rgba(245,184,32,.14); border-color: rgba(245,184,32,.4); }
+.cert-card.expiring .cert-badge, .cert-card.expired .cert-badge { color: var(--cp-crit-text); background: rgba(239,60,46,.14); border-color: rgba(239,60,46,.4); }
+.cert-card.error .cert-badge { color: var(--cp-crit-text); background: rgba(239,60,46,.14); border-color: rgba(239,60,46,.45); }
+.cert-card.unknown .cert-badge { color: var(--faint2); background: rgba(255,255,255,.04); border-color: var(--cp-panel-border); }
+.cert-countdown {
+  font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 26px; color: var(--cp-green-text);
+  line-height: 1; margin-bottom: 8px;
+}
+.cert-card.renew_soon .cert-countdown { color: var(--cp-amber-text); }
+.cert-card.expiring .cert-countdown, .cert-card.expired .cert-countdown { color: var(--cp-crit-text); }
+.cert-countdown-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 600; color: var(--faint2);
+  letter-spacing: .06em; margin-left: 6px;
+}
+.cert-bar-track { height: 5px; border-radius: 20px; background: var(--cp-inset-bg); border: 1px solid var(--cp-panel-border); overflow: hidden; margin-bottom: 12px; }
+.cert-bar-fill { height: 100%; border-radius: 20px; background: var(--cp-green); box-shadow: 0 0 10px rgba(111,207,95,.5); }
+.cert-card.renew_soon .cert-bar-fill { background: var(--cp-amber); box-shadow: 0 0 10px rgba(245,184,32,.5); }
+.cert-card.expiring .cert-bar-fill, .cert-card.expired .cert-bar-fill { background: var(--cp-crit); box-shadow: 0 0 10px rgba(239,60,46,.5); }
+.cert-stats { display: flex; flex-direction: column; gap: 6px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; padding-top: 9px; border-top: 1px dashed var(--border-hair); }
+.cert-card.error .cert-stats { border-top-color: rgba(239,60,46,.25); }
+.cert-stat-row { display: flex; justify-content: space-between; gap: 10px; color: var(--faint2); letter-spacing: .04em; }
+.cert-stat-row span:last-child { color: var(--text2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; letter-spacing: normal; }
+
