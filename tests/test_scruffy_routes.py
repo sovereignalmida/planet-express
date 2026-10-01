@@ -1297,13 +1297,24 @@ def test_the_crew_log_is_still_refreshed_even_though_it_left_the_live_region(tmp
     assert 'getElementById("crew-panel")' in script
 
 
-def test_the_header_still_wraps_on_a_narrow_screen(tmp_path, monkeypatch):
+def test_the_header_still_wraps_before_the_single_row_runs_out_of_space(tmp_path, monkeypatch):
     """The 54px single row only fits on a wide screen. Collapsing the header without a wrapping
-    fallback pushed the tabs and both buttons off the right edge on a phone."""
+    fallback pushed the tabs and both buttons off the right edge on a phone.
+
+    The breakpoint is 1560 because that is what the row measures, not because it is a round
+    number. Rendered with the nav in place, the single-row topbar needs 1536px for nine tabs
+    and needed 1465px for eight -- so the old 1180 left every viewport from 1181 to 1465
+    clipping the right-hand controls, with LOG going off the edge first, before the Hosts tab
+    was added. A breakpoint below what the row needs is not a fallback, it is a gap.
+    """
     css = (Path(__file__).resolve().parent.parent / "static" / "cockpit.css").read_text()
-    narrow = css[css.index("@media (max-width: 1180px)"):]
+    narrow = css[css.index("@media (max-width: 1560px)"):]
     assert "flex-wrap: wrap" in narrow
     assert "overflow-x: auto" in narrow
+    # Nine tabs today. A tenth needs the measurement redone, not the number nudged.
+    # `class="tab active"` is one of them, so match the class rather than the literal string.
+    dashboard = (Path(__file__).resolve().parent.parent / "templates" / "dashboard.html").read_text()
+    assert len(re.findall(r'class="tab(?: active)?"', dashboard)) == 9
 
 
 def test_config_panel_is_persistent_and_loaded_by_javascript(tmp_path, monkeypatch):
