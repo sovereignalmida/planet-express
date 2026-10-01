@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-10-01
+
+### Fixed
+- **The Other hosts screen is reachable.** 2.5.0 shipped the screen and its route with no
+  link to either, so `/hosts` could only be reached by typing the URL. It is a nav item now.
+  Adding it also fixed the tab click handler, which bound every `.tab` and would have passed
+  `undefined` for a link, deactivating every panel and racing the navigation.
+- **The header stopped clipping its right-hand controls.** The single-row topbar wraps below
+  1560px rather than 1180px. Measured, not guessed: the row needs 1536px for nine tabs and
+  needed 1465px for eight, so every viewport between 1181 and 1465 was already pushing the
+  log button off the right edge before this release added a tab.
+
 ## [2.5.0] - 2026-10-01
 
 ### Added
