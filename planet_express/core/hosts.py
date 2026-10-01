@@ -33,6 +33,13 @@ from planet_express.core.numbers import finite
 # undetermined and which this module deliberately never reads.
 STALE_AFTER = 120
 
+# How far ahead of us a reading may be stamped and still be treated as clock skew. NTP-synced
+# hosts sit within a second or two of each other, and a fleet reporting every 60s cannot
+# explain a reading two intervals in the future as skew -- past this, the timestamp is not
+# trustworthy enough to date the reading at all. Bounding it is what stops a fast-clocked host
+# reading `current` forever; see liveness().
+SKEW_TOLERANCE = STALE_AFTER
+
 # The local set has to be big enough that the answer does not turn on one coincidence:
 # `beszel-agent` alone exists on every host in the fleet.
 MIN_LOCAL_NAMES = 5
@@ -190,10 +197,19 @@ def liveness(updated, *, now: float, reason: str | None = None) -> Liveness:
     at = parse_timestamp(updated)
     if at is None:
         return Liveness(UNKNOWN, reason or "no reading", None)
-    # Clock skew between hosts is real and small. A reading stamped slightly ahead of us is
-    # the freshest thing we have, not an anomaly worth hiding a host over, so the age floors
-    # at zero instead of going negative or turning the host unknown.
-    age = max(now - at, 0.0)
+    ahead = at - now
+    # Clock skew between hosts is real and small, so a reading stamped slightly ahead of us is
+    # the freshest thing we have and its age floors at zero rather than going negative.
+    #
+    # But the floor is bounded. Unbounded, a host whose clock runs fast reads `current`
+    # forever: its age pins at zero no matter how long ago the agent actually died, and
+    # nothing on the page ever looks wrong. That is this project's recurring bug inverted --
+    # not absent data rendered as present, but untrustworthy data rendered as fresh, which is
+    # worse because it is silent. Past the tolerance we cannot date the reading at all, so it
+    # is unknown, which is the honest answer.
+    if ahead > SKEW_TOLERANCE:
+        return Liveness(UNKNOWN, reason or f"reading is stamped {int(ahead)}s in the future", None)
+    age = max(-ahead, 0.0)
     if age > STALE_AFTER:
         return Liveness(STALE, reason or f"reading is {int(age)}s old", age)
     return Liveness(CURRENT, reason, age)

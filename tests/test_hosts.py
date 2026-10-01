@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from planet_express.core.hosts import (
     CURRENT,
     MIN_LOCAL_NAMES,
+    SKEW_TOLERANCE,
     STALE,
     STALE_AFTER,
     UNKNOWN,
@@ -320,3 +321,34 @@ def test_module_does_no_io():
     for forbidden in ("import socket", "import httpx", "import requests", "import docker",
                       "import subprocess", "urlopen", "open(", "Path("):
         assert forbidden not in source, f"hosts.py must stay pure: found {forbidden!r}"
+
+
+# --- clock skew is tolerated, but bounded -------------------------------------------------
+# Unbounded, the age floor makes a fast-clocked host read `current` forever: its age pins at
+# zero however long ago its agent died. Found by running liveness() at extremes rather than by
+# reading it -- neither review caught it.
+
+def test_small_skew_ahead_is_tolerated_and_reads_current():
+    for ahead in (0.5, 2.0, SKEW_TOLERANCE):
+        lv = liveness(1_000_000.0 + ahead, now=1_000_000.0)
+        assert lv.state == CURRENT, ahead
+        assert lv.age == 0.0
+
+
+def test_a_reading_far_in_the_future_is_unknown_not_current():
+    for ahead, label in ((3600, "an hour"), (86_400, "a day"), (31_536_000, "a year")):
+        lv = liveness(1_000_000.0 + ahead, now=1_000_000.0)
+        assert lv.state == UNKNOWN, f"{label} ahead must not read current"
+        assert lv.age is None, "an undateable reading has no age"
+        assert "future" in lv.reason
+
+
+def test_the_skew_boundary_is_exact():
+    now = 1_000_000.0
+    assert liveness(now + SKEW_TOLERANCE, now=now).state == CURRENT
+    assert liveness(now + SKEW_TOLERANCE + 1, now=now).state == UNKNOWN
+
+
+def test_a_caller_supplied_reason_still_wins_for_a_future_reading():
+    lv = liveness(1_000_000.0 + 86_400, now=1_000_000.0, reason="collector down")
+    assert lv.state == UNKNOWN and lv.reason == "collector down"
