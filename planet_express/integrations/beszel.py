@@ -352,15 +352,35 @@ def _metrics_from(stats: Mapping) -> HostMetrics:
     )
 
 
-def _container_from(row: Mapping) -> RemoteContainer | None:
-    """One `containers` row, or None when there is nothing there to identify.
+# Measured against the local docker socket on 2026-10-01, every container on the host: code 2
+# was `healthy` 43 times out of 43, code 0 was a container with no healthcheck 33 times out of
+# 33. No counterexamples. Nothing was unhealthy or starting at the time, so the codes those
+# states use are NOT in this table and must not be inferred from the ordering -- the whole
+# reason this needed measuring is that guessing at an undocumented integer is the
+# `t`-means-two-things mistake. An unmapped code is unknown, which is honest.
+HEALTH_CODES: dict[int, str | None] = {
+    0: None,        # no healthcheck declared: absent, not unhealthy
+    2: "healthy",
+}
 
-    `health` is passed through only when the collector sent a word. The capture carries it as
-    an integer code (0 and 2 both occur) whose mapping could not be checked against ground
-    truth, and an undecoded code rendered as a health state is the `t`-means-two-things
-    mistake with a different letter. An unreadable code is unknown, which is honest; guessing
-    that 2 means healthy is not.
+
+def _health(value) -> str | None:
+    """A health word, or None when we cannot say.
+
+    The collector sends a word on some agent versions and an integer code on others, so both
+    arrive. A word passes through. A code is translated only where it was measured; anything
+    else is None rather than a guess rendered as a state.
     """
+    word = _text(value)
+    if word is not None:
+        return word
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return HEALTH_CODES.get(value)
+
+
+def _container_from(row: Mapping) -> RemoteContainer | None:
+    """One `containers` row, or None when there is nothing there to identify."""
     name = _text(row.get("name"))
     if name is None:
         return None
@@ -368,7 +388,7 @@ def _container_from(row: Mapping) -> RemoteContainer | None:
         name=name,
         image=_text(row.get("image")),
         status=_text(row.get("status")),
-        health=_text(row.get("health")),
+        health=_health(row.get("health")),
         cpu=_number(row.get("cpu")),
         memory=_number(row.get("memory")),
         net=_number(row.get("net")),

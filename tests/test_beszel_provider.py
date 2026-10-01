@@ -508,15 +508,15 @@ def test_containers_decode_to_pe_types_with_the_measured_counts():
 def test_updatable_is_a_tri_state_and_an_undecodable_health_code_is_unknown():
     hub = _Hub()
     rows = [r for r in hub.rows["containers"] if r["system"] == UNRAID_ID]
-    rows[0].update(updatable=None, health=2)       # the capture's own integer health code
+    rows[0].update(updatable=None, health=7)       # a code never seen on the host
     rows[1].update(updatable=True, health="healthy")
     rows[2].update(updatable="yes", health=None)
     decoded = {c.name: c for c in _provider(hub).containers(UNRAID_ID).containers}
     by_name = [rows[0]["name"], rows[1]["name"], rows[2]["name"]]
     assert decoded[by_name[0]].updatable is None
-    # 0 and 2 both occur in the capture and the mapping could not be checked against ground
-    # truth. An undecoded code rendered as a health state is the `t`-means-two-things mistake
-    # with a different letter, so it is unknown.
+    # Codes 0 and 2 were measured against the docker socket and now decode; see HEALTH_CODES.
+    # Any other code is still unknown rather than inferred from the ordering, which is the
+    # `t`-means-two-things mistake with a different letter.
     assert decoded[by_name[0]].health is None
     assert decoded[by_name[1]].updatable is True and decoded[by_name[1]].health == "healthy"
     assert decoded[by_name[2]].updatable is None   # "yes" is not an answer the collector gives
@@ -874,3 +874,46 @@ def test_no_pocketbase_record_escapes_the_module():
     for container in _provider(_Hub()).containers(LOCAL_ID).containers:
         assert all(isinstance(v, (str, float, int, bool, type(None)))
                    for v in vars(container).values())
+
+
+# --- health codes, only where they were measured ------------------------------------------
+# Measured on the local docker socket 2026-10-01: code 2 was `healthy` 43/43, code 0 was a
+# container with no healthcheck 33/33. Nothing was unhealthy or starting, so those codes are
+# deliberately absent and must not be inferred from the ordering.
+
+def test_measured_health_codes_decode():
+    from planet_express.integrations.beszel import _health
+    assert _health(2) == "healthy"
+    assert _health(0) is None, "no healthcheck is absent, not a state"
+
+
+def test_unmeasured_health_codes_are_unknown_not_guessed():
+    from planet_express.integrations.beszel import _health
+    for code in (1, 3, 4, 99, -1):
+        assert _health(code) is None, f"code {code} was never measured and must not be invented"
+
+
+def test_a_health_word_still_passes_through():
+    from planet_express.integrations.beszel import _health
+    assert _health("healthy") == "healthy"
+    assert _health("unhealthy") == "unhealthy"
+    assert _health("starting") == "starting"
+
+
+def test_health_booleans_are_not_treated_as_codes():
+    from planet_express.integrations.beszel import _health
+    assert _health(True) is None and _health(False) is None
+
+
+def test_the_fixture_decodes_the_way_the_host_measured():
+    import json
+    from pathlib import Path
+
+    from planet_express.integrations.beszel import _health
+    rows = json.loads(
+        (Path(__file__).resolve().parent / "fixtures" / "beszel" / "containers.json").read_text()
+    )["items"]
+    decoded = [_health(r.get("health")) for r in rows]
+    assert decoded.count("healthy") == sum(1 for r in rows if r.get("health") == 2)
+    assert all(d in (None, "healthy") for d in decoded)
+    assert decoded.count("healthy") > 0, "the capture must still contain healthy containers"
