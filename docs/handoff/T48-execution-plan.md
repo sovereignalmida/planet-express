@@ -16,7 +16,7 @@ The main checkout `code/planet-express` belongs to another session; do not work 
 | S1 | core types, locality predicate, staleness — pure, no I/O | **done** — `planet_express/core/hosts.py`, `tests/test_hosts.py` |
 | S2 | `BeszelHubProvider` + a fixture provider built from real captured data | **done** — `planet_express/integrations/beszel.py`, `tests/test_beszel_provider.py` (branch `t48/s2-provider`) |
 | S3 | config inventory: schema, validation, secrets | **done** — merged into `t48/multi-host` |
-| S4 | wire into the dashboard data path, off the scan's critical path | not started |
+| S4 | wire into the dashboard data path, off the scan's critical path | **done** — cached background fleet view, apply-time pin validation, and rough `/hosts` route |
 | S5 | real templates from Chris's design | blocked: needs S4's rough shape first |
 | S6 | ship prep: CHANGELOG, version, deploy script, INSTALL | not started |
 

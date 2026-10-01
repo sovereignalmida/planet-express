@@ -87,6 +87,7 @@ class ConfigService:
         sensitive_edits_enabled: bool = False,
         notify: Callable[[str], None] | None = None,
         loaded_sha256: str | None = None,
+        multi_host_pin_validator: Callable[[object], str | None] | None = None,
     ):
         self._state = state
         self._config_path = config_path
@@ -97,6 +98,7 @@ class ConfigService:
         # SHA-256 of the config bytes this process actually loaded. The file's own sha changes
         # at write time, before the re-exec, so only this says whether a change is active yet.
         self._loaded_sha256 = loaded_sha256
+        self._multi_host_pin_validator = multi_host_pin_validator
 
     @property
     def sensitive_edits_enabled(self) -> bool:
@@ -187,9 +189,19 @@ class ConfigService:
         draft_data, errors = _draft_bytes(text)
         if errors:
             return self._refused(operator, "invalid", errors=errors)
-        _draft, errors = validate_config_text(text)
+        draft, errors = validate_config_text(text)
         if errors:
             return self._refused(operator, "invalid", errors=errors)
+        # Schema validation cannot do this: deriving the local collector system needs the
+        # Docker socket and the collector.  Keep it at apply time, before any bytes change on
+        # disk, so a pin can never quietly override evidence and duplicate the local host.
+        if self._multi_host_pin_validator is not None:
+            pin_error = self._multi_host_pin_validator(draft.multi_host)
+            if pin_error:
+                return self._refused(
+                    operator, "invalid",
+                    errors=[{"loc": "multi_host.local_system_id", "msg": pin_error}],
+                )
         if not self._state.try_begin_mutation(_MUTATION_OWNER, require_idle=True):
             return self._refused(operator, "busy", reason=self._state.busy_reason)
 

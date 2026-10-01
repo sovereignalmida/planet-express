@@ -70,6 +70,21 @@ def load_update_history() -> UpdateHistory | None:
     return _load(config.UPDATE_HISTORY_FILE, UpdateHistory)
 
 
+def local_container_names() -> tuple[str, ...] | None:
+    """The local Docker evidence already collected by the monitor, or ``None`` if absent.
+
+    The web worker does not have Docker access.  A partial ``updates`` snapshot also did not
+    collect containers, so its empty default must not become the very different claim that
+    this machine currently has zero containers.
+    """
+    monitor = load_monitor()
+    if monitor is None or monitor.mode not in _MODES_WITH_CONTAINERS:
+        return None
+    return tuple(container["name"] for container in monitor.containers
+                 if isinstance(container, dict) and isinstance(container.get("name"), str)
+                 and container["name"])
+
+
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 

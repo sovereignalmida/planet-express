@@ -52,6 +52,7 @@ from planet_express.application.chat_service import (
 )
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
+from planet_express.application.multi_host import pin_error, provider_for
 from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
@@ -2666,7 +2667,20 @@ def _reexec_core(tg: TelegramClient) -> None:
     reexec()
 
 
+def _local_docker_container_names() -> tuple[str, ...] | None:
+    """Docker evidence for the apply-time locality-pin check; failures stay inconclusive."""
+    try:
+        containers = leela.check_containers()
+    except Exception:  # noqa: BLE001 -- a collector pin must not turn Docker trouble into a crash
+        log.warning("Could not read local containers for multi-host locality validation")
+        return None
+    return tuple(container["name"] for container in containers
+                 if isinstance(container, dict) and isinstance(container.get("name"), str)
+                 and container["name"])
+
+
 def build_config_service(state, tg, store, *, sensitive_edits_enabled: bool) -> ConfigService:
+    host_provider = provider_for(config.beszel_credentials)
     return ConfigService(
         state,
         config_path=config.CONFIG_FILE,
@@ -2675,6 +2689,8 @@ def build_config_service(state, tg, store, *, sensitive_edits_enabled: bool) -> 
         sensitive_edits_enabled=sensitive_edits_enabled,
         notify=lambda message: tg.send(message, req_timeout=10),
         loaded_sha256=config.CONFIG_SHA256,
+        multi_host_pin_validator=lambda multi_host: pin_error(
+            multi_host, host_provider, _local_docker_container_names),
     )
 
 

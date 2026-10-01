@@ -34,6 +34,7 @@ import config
 import dashboard_data
 import web_auth
 from config_io import validate_config_text
+from planet_express.application.multi_host import FleetCache, provider_for
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
 from planet_express.widgets.fetcher import WidgetFetcher
@@ -129,7 +130,8 @@ def register_template_helpers(app) -> None:
     app.add_template_filter(_extra_host_count, "extra_host_count")
 
 
-def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
+def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=None,
+               host_cache=None) -> Flask:
     environ = os.environ if environ is None else environ
     secret = environ.get("PE_DASHBOARD_SECRET_KEY", "")
     if len(secret) < 32:
@@ -279,6 +281,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
     app.jinja_env.globals["csrf_token"] = csrf_token
 
     register_template_helpers(app)
+
+    # Constructing the cache is inert. Its first view starts a daemon refresh and returns the
+    # already-held answer, so a dead hub cannot make a page request wait.
+    fleet_cache = host_cache or FleetCache(
+        config.MULTI_HOST,
+        host_provider or provider_for(config.beszel_credentials),
+        dashboard_data.local_container_names,
+    )
 
     def airlock(state="default", status=None, note=None):
         status = status or {}
@@ -839,6 +849,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time) -> Flask:
         return render_template("execution.html", execution_id=execution_id)
 
     app.add_url_rule("/", "index", partial(index, core))
+    app.add_url_rule("/hosts", "hosts", partial(hosts, fleet_cache))
     app.add_url_rule("/api/widget", view_func=widget)
     return app
 
@@ -1027,6 +1038,11 @@ def index(core=None):
 
 def widget():
     return jsonify(dashboard_data.summarize_health())
+
+
+def hosts(fleet_cache):
+    """The intentionally plain S4 surface for real multi-host data."""
+    return render_template("hosts.html", fleet=fleet_cache.view())
 
 
 def main() -> None:

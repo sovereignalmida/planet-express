@@ -20,6 +20,8 @@ from werkzeug.datastructures import MultiDict
 import casa_scruffy
 import config
 import web_auth
+from planet_express.application.multi_host import FleetView, HostCard
+from planet_express.core.hosts import Liveness, RemoteContainer
 from planet_express.integrations.rpc import RpcError
 
 PASSPHRASE = "a long test passphrase"
@@ -96,6 +98,35 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     assert b"dashboard.css" not in resp.data
     assert b"lamp-rail" not in resp.data
     assert b"osc-gauge" not in resp.data
+
+
+def test_hosts_route_renders_the_deliberately_plain_real_data_shape():
+    class Cache:
+        def view(self):
+            return FleetView((
+                HostCard("current", "Current host", "https://current.example", True,
+                         Liveness("current"), containers=(RemoteContainer("one"),),
+                         containers_liveness=Liveness("current")),
+                HostCard("stale", "Stale host", None, True, Liveness("stale", "old", 121),
+                         containers=(), containers_liveness=Liveness("current")),
+                HostCard("unknown", "Unknown host", None, True, Liveness("unknown", "unreadable"),
+                         containers=None, containers_liveness=Liveness("unknown", "unreadable")),
+                HostCard("new", "New host", None, False, Liveness("current"),
+                         containers=(), containers_liveness=Liveness("current")),
+            ), "local")
+
+    now = [1800000000.0]
+    app = casa_scruffy.create_app(ENV, host_cache=Cache(), rpc_call=FakeRpc(), clock=lambda: now[0])
+    app.testing = True
+    client = app.test_client()
+    assert login(client, now).status_code == 302
+    response = client.get("/hosts")
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    for text in ("Current host", "Stale host", "Unknown host", "unconfigured host",
+                 "zero containers", "Containers: unknown", "https://current.example"):
+        assert text in page
+    assert "cockpit.css" not in page
 
 
 def test_index_renders_real_findings(tmp_path, monkeypatch):

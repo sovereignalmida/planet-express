@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planet Express — Other hosts</title>
+</head>
+<body>
+  <main>
+    <h1>Other hosts</h1>
+    <p>This is the deliberately plain T48 data surface. It has no controls.</p>
+    {% if fleet.locality_reason %}<p>Locality: {{ fleet.locality_reason }}</p>{% endif %}
+    {% if not fleet.cards %}<p>No remote hosts are configured.</p>{% endif %}
+    {% for host in fleet.cards %}
+      <section>
+        <h2>{{ host.name }}{% if not host.configured %} — unconfigured host{% endif %}</h2>
+        {% if host.link %}<p><a href="{{ host.link }}" rel="noopener noreferrer">Open this host</a></p>{% else %}<p>No configured host link.</p>{% endif %}
+        <p>Liveness: <strong>{{ host.liveness.state }}</strong>{% if host.liveness.reason %} — {{ host.liveness.reason }}{% endif %}{% if host.liveness.age is not none %} ({{ host.liveness.age|round|int }} seconds old){% endif %}</p>
+        <p>Collector status: {{ host.status if host.status is not none else "unknown" }}</p>
+        <h3>Hardware</h3>
+        {% if host.details %}
+          <dl>
+            <dt>Hostname</dt><dd>{{ host.details.hostname if host.details.hostname is not none else "unknown" }}</dd>
+            <dt>CPU</dt><dd>{{ host.details.cpu_model if host.details.cpu_model is not none else "unknown" }}</dd>
+            <dt>Cores / threads</dt><dd>{{ host.details.cores if host.details.cores is not none else "unknown" }} / {{ host.details.threads if host.details.threads is not none else "unknown" }}</dd>
+            <dt>Memory bytes</dt><dd>{{ host.details.memory_bytes if host.details.memory_bytes is not none else "unknown" }}</dd>
+            <dt>OS</dt><dd>{{ host.details.os_name if host.details.os_name is not none else "unknown" }}</dd>
+          </dl>
+        {% else %}<p>Hardware: unknown.</p>{% endif %}
+        <h3>Metrics</h3>
+        {% if host.metrics %}
+          <dl>
+            <dt>CPU %</dt><dd>{{ host.metrics.cpu_pct if host.metrics.cpu_pct is not none else "unknown" }}</dd>
+            <dt>Memory %</dt><dd>{{ host.metrics.mem_pct if host.metrics.mem_pct is not none else "unknown" }}</dd>
+            <dt>Memory used / total GiB</dt><dd>{{ host.metrics.mem_used_gib if host.metrics.mem_used_gib is not none else "unknown" }} / {{ host.metrics.mem_total_gib if host.metrics.mem_total_gib is not none else "unknown" }}</dd>
+            <dt>Disk used / total GiB</dt><dd>{{ host.metrics.disk_used_gib if host.metrics.disk_used_gib is not none else "unknown" }} / {{ host.metrics.disk_total_gib if host.metrics.disk_total_gib is not none else "unknown" }}</dd>
+            <dt>Disk %</dt><dd>{{ host.metrics.disk_pct if host.metrics.disk_pct is not none else "unknown" }}</dd>
+            <dt>Load</dt><dd>{{ host.metrics.load if host.metrics.load is not none else "unknown" }}</dd>
+            <dt>Temperatures</dt><dd>{{ host.metrics.temps if host.metrics.temps is not none else "unknown" }}</dd>
+          </dl>
+        {% else %}<p>Metrics: unknown.</p>{% endif %}
+        <h3>Containers</h3>
+        {% if host.containers is none %}
+          <p>Containers: unknown{% if host.containers_liveness and host.containers_liveness.reason %} — {{ host.containers_liveness.reason }}{% endif %}</p>
+        {% elif not host.containers %}
+          <p>Containers: none reported (zero containers).</p>
+        {% else %}
+          <ul>
+          {% for container in host.containers %}
+            <li><strong>{{ container.name }}</strong> — image: {{ container.image if container.image is not none else "unknown" }}, status: {{ container.status if container.status is not none else "unknown" }}, health: {{ container.health if container.health is not none else "unknown" }}, CPU: {{ container.cpu if container.cpu is not none else "unknown" }}, memory: {{ container.memory if container.memory is not none else "unknown" }}, network: {{ container.net if container.net is not none else "unknown" }}, ports: {{ container.ports if container.ports is not none else "unknown" }}, update available: {{ container.updatable if container.updatable is not none else "unknown" }}</li>
+          {% endfor %}
+          </ul>
+        {% endif %}
+      </section>
+    {% endfor %}
+  </main>
+</body>
+</html>
