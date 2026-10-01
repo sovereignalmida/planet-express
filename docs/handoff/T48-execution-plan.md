@@ -12,10 +12,10 @@ The main checkout `code/planet-express` belongs to another session; do not work 
 
 | slice | what | state |
 |-------|------|-------|
-| S0 | host prereq: beszel survives reboot + a read-only account | **handed to Chris** |
+| S0 | host prereq: beszel survives reboot + a read-only account | **done** — verified 2026-10-01 |
 | S1 | core types, locality predicate, staleness — pure, no I/O | **done** — `planet_express/core/hosts.py`, `tests/test_hosts.py` |
 | S2 | `BeszelHubProvider` + a fixture provider built from real captured data | not started |
-| S3 | config inventory: schema, validation, secrets | **done** on `t48/s3-config` |
+| S3 | config inventory: schema, validation, secrets | **done** — merged into `t48/multi-host` |
 | S4 | wire into the dashboard data path, off the scan's critical path | not started |
 | S5 | real templates from Chris's design | blocked: needs S4's rough shape first |
 | S6 | ship prep: CHANGELOG, version, deploy script, INSTALL | not started |
@@ -105,6 +105,16 @@ Also: `system_id` is constrained to `[A-Za-z0-9_-]{1,64}` because S2 interpolate
 chooses whose numbers get rendered, and that failure is silent.
 
 ### S4 — wiring
+
+**Carried forward from S3, and it must not be dropped.** The spec requires that a
+`local_system_id` pinned in config and disagreeing with derivation is refused at apply
+time. That check could not live in `config_schema.py`, which does no I/O by design,
+while derivation needs the local docker socket. So it is S4's, and if S4 does not
+implement it the rule silently never runs: a wrong pin would be accepted by config
+validation and then quietly override the derived answer, which is the duplicate-host
+bug the derivation exists to prevent. S3 refuses a pin alongside an empty `hosts`
+list, and accepts a pin naming no inventory entry on purpose -- requiring a match
+would force the local host into the inventory, and every inventory entry renders.
 - Off the monitoring scan's critical path. The icon warmer taught this three times:
   budget it, bound it, then take it off the path entirely.
 - Collector down renders every configured host unknown; the local host keeps
