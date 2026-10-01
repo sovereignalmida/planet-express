@@ -748,9 +748,46 @@ def _usable_id(value) -> bool:
     return isinstance(value, str) and bool(_SYSTEM_ID_RE.fullmatch(value))
 
 
+def _container_updated(value) -> float | None:
+    """A container row's ``updated`` timestamp, including captured Unix milliseconds.
+
+    PocketBase's HTTP API normally supplies a date string, but the real container capture
+    stores ``updated`` as Unix milliseconds. ``parse_timestamp()`` intentionally refuses that
+    huge value as a seconds timestamp; here it is a measured collector representation, so
+    normalize it before using it solely to order duplicate records.
+    """
+    parsed = parse_timestamp(value)
+    if parsed is not None:
+        return parsed
+    if finite(value, 1e15) and abs(float(value)) > 1e12:
+        return float(value) / 1000
+    return None
+
+
 def _containers_from(rows: Iterable[Mapping]) -> tuple[RemoteContainer, ...]:
-    decoded = (_container_from(row) for row in rows if isinstance(row, Mapping))
-    return tuple(c for c in decoded if c is not None)
+    """Decode one current row for each container name on each system.
+
+    Beszel retains a stale record when a container is recreated. Docker names are unique per
+    host, so duplicate names in one system are one container, not two: retain the record with
+    the newest usable ``updated`` value. A row whose timestamp cannot be read is never allowed
+    to replace one that can, because uncertainty must not win over a known newer record.
+    """
+    by_container: dict[tuple[str | None, str], tuple[RemoteContainer, float | None]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        container = _container_from(row)
+        if container is None:
+            continue
+        system = row.get("system")
+        system_id = system if isinstance(system, str) else None
+        key = (system_id, container.name)
+        updated = _container_updated(row.get("updated"))
+        previous = by_container.get(key)
+        if previous is None or (updated is not None
+                                and (previous[1] is None or updated > previous[1])):
+            by_container[key] = (container, updated)
+    return tuple(container for container, _updated in by_container.values())
 
 
 def _with_details(host: Host, details: HostDetails | None) -> Host:

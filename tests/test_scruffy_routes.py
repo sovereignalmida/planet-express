@@ -100,10 +100,10 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     assert b"osc-gauge" not in resp.data
 
 
-def _hosts_page(cards):
+def _hosts_page(cards, locality_reason=None):
     class Cache:
         def view(self):
-            return FleetView(tuple(cards), "local")
+            return FleetView(tuple(cards), "local", locality_reason)
 
     now = [1800000000.0]
     app = casa_scruffy.create_app(ENV, host_cache=Cache(), rpc_call=FakeRpc(), clock=lambda: now[0])
@@ -137,6 +137,20 @@ def test_hosts_all_unknown_has_one_nothing_can_be_read_verdict():
     assert "NOTHING CAN BE READ" in page
     assert "SOME HOSTS ARE NOT READING" not in page
     assert page.count("NO CONTACT") == 3
+
+
+def test_hosts_with_no_configured_entries_says_the_feature_is_not_set_up():
+    page = _hosts_page(()).get_data(as_text=True)
+    assert "OTHER HOSTS NOT CONFIGURED" in page
+    assert "No other hosts are configured." in page
+    assert "multi_host block in config.yaml" in page
+    assert "OTHER HOSTS READING" not in page
+
+
+def test_hosts_page_explains_when_unconfigured_rows_are_withheld():
+    reason = "locality is unknown; unconfigured rows are withheld"
+    page = _hosts_page((), locality_reason=reason).get_data(as_text=True)
+    assert reason in page
 
 
 def test_hosts_zero_containers_is_not_unreadable_containers():

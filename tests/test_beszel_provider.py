@@ -494,7 +494,7 @@ def test_a_host_with_no_containers_is_empty_and_a_host_that_could_not_be_read_is
 def test_containers_decode_to_pe_types_with_the_measured_counts():
     provider = _provider(_Hub())
     assert len(provider.containers(LOCAL_ID).containers) == 85
-    assert len(provider.containers(UNRAID_ID).containers) == 6
+    assert len(provider.containers(UNRAID_ID).containers) == 5
     unraid = {c.name: c for c in provider.containers(UNRAID_ID).containers}
     assert "beszel-agent" in unraid                # the one name every host in the fleet has
     adguard = unraid["CASA_ADGUARD_SECONDARY"]
@@ -809,6 +809,28 @@ def test_the_fixture_provider_reads_the_capture_into_pe_types():
                for r in reading.hosts)
     assert len(provider.containers(LOCAL_ID).containers) == 85
     assert provider.containers(SOLAR_ID).containers == ()
+
+
+def test_fixture_unraid_container_rows_dedupe_recreated_beszel_agent():
+    containers = FixtureHostProvider().containers(UNRAID_ID).containers
+    assert len(containers) == 5
+    agent, = (container for container in containers if container.name == "beszel-agent")
+    assert agent.cpu == 0.01
+    assert agent.memory == 9.31
+
+
+def test_newest_container_row_wins_and_unusable_timestamp_cannot_displace_it():
+    rows = (
+        {"system": UNRAID_ID, "name": "beszel-agent", "updated": "2026-10-01 10:00:00Z",
+         "cpu": 1.0, "memory": 10.0},
+        {"system": UNRAID_ID, "name": "beszel-agent", "updated": "2026-10-01 10:01:00Z",
+         "cpu": 2.0, "memory": 20.0},
+        {"system": UNRAID_ID, "name": "beszel-agent", "updated": "not a timestamp",
+         "cpu": 3.0, "memory": 30.0},
+    )
+    container, = beszel._containers_from(rows)
+    assert container.cpu == 2.0
+    assert container.memory == 20.0
 
 
 def test_the_fixture_provider_picks_each_system_s_own_newest_1m_row(tmp_path):

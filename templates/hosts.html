@@ -14,7 +14,8 @@
 {% set unknown = configured | selectattr('liveness.state', 'equalto', 'unknown') | list %}
 {% set unconfigured = fleet.cards | rejectattr('configured') | list %}
 {% set all_unknown = configured and unknown | length == configured | length %}
-{% if all_unknown %}{% set verdict_level, orb, verdict = 'unknown', '?', 'NOTHING CAN BE READ' %}{% set verdict_detail = 'The collector cannot provide a reading for any configured host. These are unknown, not zero and not healthy.' %}
+{% if not configured %}{% set verdict_level, orb, verdict = 'unknown', '?', 'OTHER HOSTS NOT CONFIGURED' %}{% set verdict_detail = 'No other hosts are configured. Add them to the multi_host block in config.yaml before Planet Express can read a remote host.' %}
+{% elif all_unknown %}{% set verdict_level, orb, verdict = 'unknown', '?', 'NOTHING CAN BE READ' %}{% set verdict_detail = 'The collector cannot provide a reading for any configured host. These are unknown, not zero and not healthy.' %}
 {% elif stale or unknown %}{% set verdict_level, orb, verdict = 'warn', '!', 'SOME HOSTS ARE NOT READING' %}{% set verdict_detail = current|length|string ~ ' reading now · ' ~ stale|length|string ~ ' stale · ' ~ unknown|length|string ~ ' unknown. Stale and unknown values are never drawn as live.' %}
 {% else %}{% set verdict_level, orb, verdict = 'ok', '✓', current|length|string ~ ' OTHER HOSTS READING' %}{% set verdict_detail = 'Every other configured host reported recently. This screen is read-only.' %}{% endif %}
 <div class="pe-app" data-screen-label="Other hosts"><div class="pe-wrap">
@@ -23,6 +24,7 @@
     <section class="pe-verdict {{ verdict_level }}" aria-label="Fleet verdict"><div class="pe-verdict-orb">{{ orb }}</div><div class="pe-verdict-text"><h2>{{ verdict }}</h2><p>{{ verdict_detail }}</p></div><div class="pe-verdict-tally">{% if current %}<span class="pe-chip ok">{{ current|length }} CURRENT</span>{% endif %}{% if stale %}<span class="pe-chip warn">{{ stale|length }} STALE</span>{% endif %}{% if unknown %}<span class="pe-chip {{ 'crit' if all_unknown else 'warn' }}">{{ unknown|length }} UNKNOWN</span>{% endif %}{% if unconfigured %}<span class="pe-chip info">{{ unconfigured|length }} NOT CONFIGURED</span>{% endif %}</div></section>
     <section class="pe-panel" aria-label="Other hosts from Beszel">
       <div class="pe-panel-head"><h3>OTHER HOSTS · BESZEL</h3><span class="pe-chip info">READ-ONLY</span><div class="pe-spacer"></div><span class="pe-panel-note">source: beszel hub API · observe only</span></div>
+      {% if fleet.locality_reason %}<div class="pe-footnote warn">{{ fleet.locality_reason }}</div>{% endif %}
       <div class="pe-grid" style="--pe-track:370px">
       {% for host in fleet.cards if host.configured %}
         {% set live = host.liveness.state in ('current', 'stale') %}{% set is_stale = host.liveness.state == 'stale' %}{% set details = host.details %}{% set metrics = host.metrics %}
