@@ -411,9 +411,11 @@ class _Failure(Exception):
 
 
 def _header_safe(value: str) -> bool:
-    """HTTP carries header values as latin-1 with no line breaks. Checked before the value is
-    sent so an unusable credential is a fixed reason, never an encoder exception whose message
-    names a character of the secret and its position. Same check the widget fetcher makes."""
+    """HTTP carries header values as latin-1 with no line breaks. Applied to the session token,
+    which is the one value this module puts in a header, so an unusable one is a fixed reason
+    rather than an encoder exception whose message names a character of the secret and its
+    position. Same check the widget fetcher makes, for the same reason. NOT applied to the
+    identity and password: those go only into a JSON body, see _authenticate()."""
     if "\r" in value or "\n" in value:
         return False
     try:
@@ -575,9 +577,13 @@ class BeszelHubProvider:
         identity, password = self._credentials()
         if not identity or not password:
             raise _Failure(NOT_CONFIGURED)
-        if not _header_safe(identity) or not _header_safe(password):
-            # Reason names neither value and no part of either.
-            raise _Failure("the configured collector credentials cannot be sent over HTTP")
+        # No header-safety check on these two, deliberately. They go into the UTF-8 JSON body
+        # below and never into a header, and json.dumps() is ASCII-only output that escapes
+        # every control character -- so a CR or LF in a password cannot forge a request line,
+        # and a non-Latin-1 character is not a problem to solve. An earlier draft applied the
+        # widget fetcher's header check here, which would have rendered a perfectly valid
+        # password with an accent in it as "not configured" forever (Codex review, S2). The
+        # token the hub answers with IS a header value, and that one is still checked.
         try:
             answer = self._request(
                 "POST", "/api/collections/users/auth-with-password", attempt,

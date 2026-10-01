@@ -619,13 +619,27 @@ def test_credentials_that_are_not_configured_are_a_reason_and_not_a_request():
     assert hub.paths == []
 
 
-def test_credentials_that_cannot_be_sent_over_http_are_refused_before_they_are_sent():
+@pytest.mark.parametrize("password", ["pässwörd-with-an-accent", "pass\r\nX-Evil: 1",
+                                      "pass word", 'quote"and\\backslash'])
+def test_a_password_the_operator_chose_is_sent_as_json_and_not_as_a_header(password):
+    """The identity and password go into a UTF-8 JSON body, never into a header, so the widget
+    fetcher's latin-1 rule does not apply to them. Applying it anyway rendered a valid password
+    with an accent in it as permanently unauthenticated (Codex review, S2). json.dumps() escapes
+    every control character and emits ASCII, so a CR or LF cannot forge a request line either.
+    """
     hub = _Hub()
-    reading = _provider(hub, credentials=lambda: (IDENTITY, "pass\r\nX-Evil: 1")).hosts()
-    assert reading.liveness.state == UNKNOWN
-    assert hub.paths == []
-    # The reason is fixed text: it names neither value and no character of either.
-    assert "pass" not in reading.liveness.reason and "Evil" not in reading.liveness.reason
+    reading = _provider(hub, credentials=lambda: (IDENTITY, password)).hosts()
+    assert reading.liveness.state == CURRENT
+    assert json.loads(hub.bodies[0]) == {"identity": IDENTITY, "password": password}
+    assert hub.bodies[0].decode("ascii")        # escaped on the wire, whatever was configured
+
+
+def test_a_token_that_cannot_go_in_a_header_is_a_reason_and_not_an_encoder_crash():
+    # The token IS a header value, so this one is checked -- and the reason names no part of it.
+    hub = _Hub(token="tok\r\nX-Evil: 1")
+    reading = _provider(hub).hosts()
+    assert reading.liveness.reason == AUTH_REFUSED
+    assert "Evil" not in reading.liveness.reason
 
 
 def test_an_auth_refusal_is_a_reason_naming_no_credential():
