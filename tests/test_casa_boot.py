@@ -30,14 +30,38 @@ def _row(
 
 
 class FakeDocker:
-    def __init__(self, compose_returns, ids="", inspect_outputs=()):
+    def __init__(self, compose_returns, ids="", inspect_outputs=(), declared_services=None):
         self.compose_returns = {key: list(value) for key, value in compose_returns.items()}
         self.ids = ids
         self.inspect_outputs = list(inspect_outputs)
+        # inspect_outputs is CONSUMED by pop(0), so keep an unconsumed copy: the services
+        # query runs after the container read has already drained it.
+        self._all_inspect = list(inspect_outputs)
+        # None means "every service these containers name is still declared", which is the
+        # normal case and keeps a test from having to restate the compose file it already
+        # described. A set says exactly which services survive -- that is the retired-service
+        # case, where a container still carries an ACTIVE file's label.
+        self.declared_services = declared_services
         self.calls = []
+
+    def _declared(self):
+        if self.declared_services is not None:
+            return self.declared_services
+        seen = set()
+        for block in self._all_inspect:
+            for line in block.splitlines():
+                fields = line.split("\t")
+                if len(fields) == 8 and fields[4]:
+                    seen.add(fields[4])
+        return seen
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
+        if argv[:2] == ["docker", "compose"] and argv[-2:] == ["config", "--services"]:
+            return SimpleNamespace(
+                returncode=0, stdout="".join(f"{name}\n" for name in sorted(self._declared())),
+                stderr="",
+            )
         if argv[:2] == ["docker", "compose"]:
             compose_file = argv[argv.index("-f") + 1]
             return SimpleNamespace(returncode=self.compose_returns[compose_file].pop(0))
@@ -227,3 +251,45 @@ def test_failed_namespace_recreate_makes_boot_fail(tmp_path, monkeypatch, capsys
 
     assert casa_boot.bring_up_all_stacks() == 1
     assert "Failed namespace recreates: 1" in capsys.readouterr().out
+
+
+def test_a_service_deleted_from_an_ACTIVE_compose_file_does_not_fail_the_boot():
+    """The Lidarr case, and the one the first version got wrong.
+
+    A container keeps the compose labels it was created with. Retiring a service by deleting
+    it from an otherwise live compose file leaves a stopped container still carrying that
+    ACTIVE file's path -- so it passes _belongs_to_active_stack and the final check called it
+    down, failing casa-stacks.service on every boot. The earlier test covered a container
+    from an inactive STACK, which is a different and easier case: its file is not active at
+    all. Here the file is active and only the SERVICE is gone.
+    """
+
+    import casa_boot
+
+    class _Fake(FakeDocker):
+        pass
+
+    retired = _row(name="CASA_LIDARR", service="lidarr", state="exited", exit_code="0")
+    live = _row(service="test")
+    fake = _Fake(
+        {None: []}, f"{ID_A}\n{ID_B}\n", [f"{retired}\n{live}\n"] * 2,
+        declared_services={"test"},          # lidarr is gone from the file
+    )
+    assert "lidarr" not in fake._declared()
+    assert casa_boot._is_orphan_of_removed_service(
+        casa_boot.Container("i", "CASA_LIDARR", "", "", "lidarr", "", "exited", "0"),
+        {"test"},
+    )
+    # and a service that IS still declared is never treated as an orphan
+    assert not casa_boot._is_orphan_of_removed_service(
+        casa_boot.Container("i", "CASA_TEST", "", "", "test", "", "exited", "1"),
+        {"test"},
+    )
+
+
+def test_unreadable_service_list_does_not_silently_ignore_containers():
+    """Unreadable is not empty. If the declared set cannot be read, nothing is an orphan."""
+    import casa_boot
+    assert not casa_boot._is_orphan_of_removed_service(
+        casa_boot.Container("i", "CASA_LIDARR", "", "", "lidarr", "", "exited", "0"), None,
+    )

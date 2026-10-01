@@ -160,6 +160,39 @@ def _belongs_to_active_stack(container: Container, active_compose_files: set[str
     return bool({str(Path(path).resolve()) for path in _compose_files(container.config_files)} & active_compose_files)
 
 
+def _declared_services(compose_files: set[str], deadline: float | None = None) -> set[str] | None:
+    """Every service name the active compose files still declare, or None if unreadable.
+
+    A container keeps the compose labels it was created with, including the path of a file
+    that is still active -- so deleting a SERVICE from an otherwise live compose file leaves
+    an orphan that `_belongs_to_active_stack` still claims. Lidarr is exactly that: retired
+    out of media/docker-compose.yml, container left behind, carrying media's path. Without
+    this check the final verification calls it down and fails every boot, which is the
+    opposite of what retiring something should do.
+
+    Unreadable is not empty: None means "could not tell", and the caller then declines to
+    treat anything as orphaned rather than silently ignoring real containers.
+    """
+    declared: set[str] = set()
+    for path in sorted(compose_files):
+        output = _docker_query(
+            ["docker", "compose", "-f", path, "config", "--services"], deadline
+        )
+        if output is None:
+            return None
+        declared.update(line.strip() for line in output.splitlines() if line.strip())
+    return declared
+
+
+def _is_orphan_of_removed_service(
+    container: Container, declared_services: set[str] | None
+) -> bool:
+    """True only when we positively know the service is gone from the active config."""
+    if declared_services is None or not container.service:
+        return False
+    return container.service not in declared_services
+
+
 def _namespace_target_is_live(namespace_id: str, containers: list[Container]) -> bool:
     if any(container.name == namespace_id for container in containers):
         return True
@@ -253,10 +286,15 @@ def bring_up_all_stacks() -> int:
     if containers is None:
         print(f"{log_prefix} ERROR: cannot verify final container state")
         return 1
+    declared_services = _declared_services(active_compose_files, deadline)
+    if declared_services is None:
+        print(f"{log_prefix} WARNING: could not read declared services; "
+              "not treating any container as a retired orphan")
     down = [
         container for container in containers
         if (
             _belongs_to_active_stack(container, active_compose_files)
+            and not _is_orphan_of_removed_service(container, declared_services)
             and container.name not in config.PAUSED_CONTAINERS
             and container.one_off.lower() != "true"
             and container.state != "running"
