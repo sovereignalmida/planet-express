@@ -124,3 +124,26 @@ def test_slow_provider_never_blocks_a_hosts_render():
     assert first.cards[0].liveness.reason == REFRESH_PENDING
     assert started.wait(1)
     release.set()
+
+
+def test_a_pin_unblocks_unconfigured_rows_when_docker_evidence_is_missing():
+    """The gate is locality-KNOWN, not locality-DERIVED.
+
+    A pin exists precisely for hosts where docker evidence is absent or ambiguous. Gating the
+    unconfigured rows on the derivation alone withheld them on exactly those hosts: the pin
+    established locality and the rows stayed hidden anyway.
+    """
+    view = FleetCache(inventory(pin=LOCAL), Provider(include_unconfigured=True),
+                      lambda: None)._collect()
+    assert view.locality_id == LOCAL
+    assert view.locality_reason is None
+    ids = [card.id for card in view.cards]
+    assert LOCAL not in ids, "the pinned local system is still excluded from remote entries"
+    assert UNCONFIGURED in ids, "a pin makes locality known, so the rows are no longer withheld"
+
+
+def test_with_neither_derivation_nor_pin_the_rows_stay_withheld():
+    view = FleetCache(inventory(), Provider(include_unconfigured=True), lambda: None)._collect()
+    assert view.locality_id is None
+    assert UNCONFIGURED not in [card.id for card in view.cards], \
+        "locality unknown: an unconfigured row could be this host about to render twice"

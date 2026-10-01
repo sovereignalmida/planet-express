@@ -25,6 +25,8 @@
             <dt>Cores / threads</dt><dd>{{ host.details.cores if host.details.cores is not none else "unknown" }} / {{ host.details.threads if host.details.threads is not none else "unknown" }}</dd>
             <dt>Memory bytes</dt><dd>{{ host.details.memory_bytes if host.details.memory_bytes is not none else "unknown" }}</dd>
             <dt>OS</dt><dd>{{ host.details.os_name if host.details.os_name is not none else "unknown" }}</dd>
+            <dt>Architecture</dt><dd>{{ host.details.arch if host.details.arch is not none else "unknown" }}</dd>
+            <dt>Kernel</dt><dd>{{ host.details.kernel if host.details.kernel is not none else "unknown" }}</dd>
           </dl>
         {% else %}<p>Hardware: unknown.</p>{% endif %}
         <h3>Metrics</h3>

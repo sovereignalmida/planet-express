@@ -215,7 +215,13 @@ class FleetCache:
 
         # The collector's names are display text only.  It never supplies a link and it is
         # intentionally impossible for this module to reach the execution/action packages.
-        if derived is not None:
+        #
+        # The gate is `local_id`, not `derived`.  Rows are withheld while locality is
+        # UNKNOWN, and a pin is one of the two ways it becomes known -- gating on the
+        # derivation alone suppressed every unconfigured row on exactly the hosts a pin
+        # exists to rescue, where docker evidence is absent or ambiguous.  The pin cannot
+        # contradict a successful derivation: that is refused at config apply time.
+        if local_id is not None:
             for system_id, reading in readings.items():
                 if system_id in configured_ids or system_id == local_id:
                     continue
