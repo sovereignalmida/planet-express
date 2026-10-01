@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-10-01
+
+### Added
+- **Other hosts, observed through the existing Beszel hub.** Planet Express can now show the
+  configured hosts on the LAN with their current stats and container lists, and link out to
+  each host's own UI. Those cards are deliberately read-only: the host running Planet Express
+  remains the one local card, read from its Docker socket, with all of its existing controls.
+- **A host inventory in `multi_host`.** A configured entry supplies the stable Beszel system id,
+  the display name and the optional outbound link, so a host still has a name, a row and a link
+  when the collector cannot answer. The new `BESZEL_USER` and `BESZEL_PASSWORD` credentials
+  live only in the root-only `/etc/planetexpress-dashboard.env`, never in `config.yaml` and
+  never in the browser.
+
+### Changed
+- **Which Beszel system is local is derived from evidence, not declared in configuration.**
+  Planet Express compares every reported container-name set with the names from its local Docker
+  socket, with a minimum evidence threshold and a margin over the runner-up, so the system it
+  already controls cannot appear again as a remote card. `multi_host.local_system_id` is an
+  optional pin for an inconclusive derivation, but an apply is refused when that pin disagrees
+  with conclusive Docker evidence instead of letting configuration silently override it.
+- **A host that cannot be read is unknown, not absent and not zero.** Configured entries keep
+  their identity and render the reason when the hub cannot be reached, when the host's timestamp
+  cannot be trusted, or when the account cannot see it. Setup failures are equally explicit:
+  no credentials, refused credentials, and an account that authenticated but is listed on no
+  system are different conditions with different fixes; the last returns HTTP 200 with an empty
+  list and is otherwise indistinguishable from an empty fleet. A real host with no containers
+  remains a real empty list rather than an unreadable one.
+
+### Security
+- **Remote data cannot become a control.** Remote container labels are not ingested, no remote
+  value reaches the action layer, and this observation-only slice adds no action or execution
+  capability.
+
+## [2.4.0] - 2026-09-29
+
+### Added
+- **Stack controls in the dashboard.** The drawer can bring a stack UP or DOWN and restart an
+  individual service, using the typed steps that already existed instead of asking an operator
+  to phrase the same request in chat. The surface asks core what it costs rather than carrying
+  its own list of actions or risk classes, so policy cannot quietly drift between the two.
+- **An elevated dashboard session for direct R2 and R3 requests.** Re-entering the operator
+  passphrase grants a short, sliding window bound to that browser's device token, the current
+  operator epoch and the stored passphrase fingerprint; a reset therefore invalidates it. The
+  window renews only when an action actually spent elevation, rather than whenever a request
+  happened to succeed.
+
+### Changed
+- **The direct-request ceiling is now per origin.** The dashboard may default to R1–R3 because
+  requests above R1 require elevation there, while Telegram remains at R1 because a chat message
+  cannot prove the same elevated session. Changing that ceiling is itself checked in core under
+  the mutation lock, so an unelevated config edit cannot grant the authority it then uses.
+
+### Fixed
+- **A QR rendering failure no longer leaves a credential reset half-done or unexplained.** A
+  failed `qrencode` is non-fatal after the new credentials are written, and both a command that
+  cannot start and one that starts but exits nonzero now tell the operator that the QR code was
+  not drawn instead of abandoning the reset or silently omitting the result.
+
+## [2.3.0] - 2026-09-28
+
+### Added
+- **Widgets for every locally running app that has a measured API.** The dashboard grew from five
+  widgets to fourteen, using the live applications rather than guessed documentation and keeping
+  unverified image matches out of the registry. Numeric values are normalised through one bounded
+  path so malformed JSON cannot turn a panel into a plausible but wrong count or byte total.
+- **Application icons across the dashboard.** Core resolves an icon for each container, warms a
+  cache outside the scan's critical path, and records the result for the drawer, detail view,
+  widget headers and router pills. A slow or stuck icon server therefore cannot hold a monitoring
+  scan indefinitely, and a detail page can still render its icon map without a live core RPC.
+
+### Security
+- **An icon label may select a sanctioned slug, never make the dashboard fetch a URL.** Icon
+  downloads are restricted to the pinned HTTPS source, bounded for the whole exchange and size,
+  verified as PNG by their bytes, and served only after core has cached them. This keeps the
+  project's first outbound internet path from becoming a label-controlled request or script
+  surface.
+
 ## [2.2.1] - 2026-09-28
 
 ### Fixed

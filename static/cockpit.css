@@ -2633,3 +2633,11 @@ a.net-pill { text-decoration: none; }
 .pe-stack-act[disabled]:hover, .pe-svc-act[disabled]:hover {
   color: var(--pe-ink-dim); border-color: var(--pe-border-strong);
 }
+
+/* ---------- other hosts (T48 S5) ---------- */
+/* Unknown cards carry their diagnosis and must not inherit the no-data fade. */
+.pe-card.none.reasoned { opacity: 1; }
+.pe-link-out { font: 10px var(--pe-font-mono); letter-spacing: .08em;
+               color: var(--pe-accent-ink); text-decoration: none; border-bottom: 0; white-space: nowrap; }
+.pe-link-out:hover { color: var(--pe-accent-hi); border-bottom: 0; }
+.pe-card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

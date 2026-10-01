@@ -53,6 +53,11 @@ def _read_secrets() -> tuple[str, ...]:
     for accessor in (
         config.anthropic_api_key, config.openai_api_key,
         config.telegram_credentials, config.adguard_credentials,
+        # The beszel service account (T48). Listed here for the same reason the AdGuard pair
+        # is: it is a configured credential, so if it ever appears in command output or a
+        # diagnosis prompt it is withheld by literal match, independent of whether the line
+        # happened to carry a key name a scanner would recognise.
+        config.beszel_credentials,
     ):
         try:
             credentials = accessor()

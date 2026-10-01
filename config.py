@@ -97,6 +97,7 @@ LAN_ONLY_DOMAIN = _cfg.lan_only_domain
 LAUNCH_LINKS = [link.model_dump() for link in _cfg.links]
 AUTONOMY = _cfg.autonomy
 BACKUP_JOBS = _cfg.backup_jobs
+MULTI_HOST = _cfg.multi_host
 
 
 def active_stack_dirs() -> list[Path]:
@@ -146,6 +147,25 @@ def adguard_credentials() -> tuple[str, str]:
     Network tab should degrade to "not configured" rather than take down dashboard
     rendering."""
     return os.environ.get("ADGUARD_USERNAME", ""), os.environ.get("ADGUARD_PASSWORD", "")
+
+def beszel_credentials() -> tuple[str, str]:
+    """Return (BESZEL_USER, BESZEL_PASSWORD) for the read-only beszel service account the
+    multi-host view reads the collector with (T48). Loaded from
+    /etc/planetexpress-dashboard.env, root-only, for the same reason adguard_credentials()
+    above is: casa-dashboard.service.template keeps the LLM API key and the Telegram bot
+    token out of this process's environment, so a LAN-scoped read-only account gets that
+    separate optional env file rather than riding along in the main secrets file.
+
+    NEVER config.yaml. The config file is world-ish-readable by design (the dashboard's own
+    user gets an ACL on it), it is editable through the dashboard's config editor, and its
+    full text is returned over RPC by ConfigService.get() -- three ways a password in it
+    would be readable by something that has no business reading it.
+
+    Optional, like adguard_credentials(): returns ("", "") on a missing value instead of
+    raising, so an install that has not created the account yet renders every configured host
+    as unreachable-with-a-reason rather than taking down dashboard rendering.
+    """
+    return os.environ.get("BESZEL_USER", ""), os.environ.get("BESZEL_PASSWORD", "")
 
 def telegram_bot_username() -> str:
     """Return TELEGRAM_BOT_USERNAME for the dashboard's "Approve via Telegram" deep

@@ -287,6 +287,28 @@ Unraid reports an empty `os_name`, and its agent is 0.17.0 against 0.20.0 elsewh
 A missing field renders as unknown, never as a zero or a blank that looks like a
 measurement. Same rule as a missing host.
 
+### beszel does not promise a stable API
+
+`beszel.dev/guide/rest-api` documents no schema. It defers entirely to PocketBase and
+states that the structure and content of returned data **may change in minor
+releases**. So nothing here is documented upstream: the `containers.health` codes, the
+`systems.info` keys, `updated` semantics and the stats buckets were all established by
+measuring a live host, which is the only source of truth that exists for them.
+
+Two consequences. PE must treat every field as possibly-absent and degrade to unknown
+rather than failing — which is the posture the provider already takes. And the beszel
+images should be **pinned to explicit versions rather than `:latest`**, because a minor
+release can change field shapes under a container that now restarts automatically. That
+is a host decision for Chris, recorded here and in the deploy notes rather than taken.
+
+### Readings are aged on the stats row, not on `systems.updated`
+
+Stated earlier in this spec as `systems.updated`, and corrected here. The hub keeps
+touching the system record after an agent stops reporting, so `systems.updated` can stay
+fresh for a host that is no longer sending anything — a host that looks current while
+being silent. The age therefore comes from the newest `1m` stats row's `created`, which
+only moves when a reading actually arrives. Pinned by a test in S2.
+
 ### The staleness threshold has a measured basis
 
 The `1m` bucket is a 60-second interval, so "older than twice the collection

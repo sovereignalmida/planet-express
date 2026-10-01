@@ -9,6 +9,13 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from planet_express.application import config_service
+from planet_express.application.multi_host import pin_error
+from planet_express.core.hosts import CURRENT, Host, Liveness, RemoteContainer
+from planet_express.integrations.beszel import (
+    ContainerReading,
+    FleetReading,
+    HostReading,
+)
 
 ConfigService = config_service.ConfigService
 
@@ -63,7 +70,8 @@ def digest(text):
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def make_service(tmp_path, *, sensitive=False, busy=False, activate=None, notify=None):
+def make_service(tmp_path, *, sensitive=False, busy=False, activate=None, notify=None,
+                 pin_validator=None):
     path = tmp_path / "config.yaml"
     live = dump()
     path.write_text(live)
@@ -77,6 +85,7 @@ def make_service(tmp_path, *, sensitive=False, busy=False, activate=None, notify
     service = ConfigService(
         state, config_path=path, activate=activate or default_activate, store=store,
         sensitive_edits_enabled=sensitive, notify=notify,
+        multi_host_pin_validator=pin_validator,
     )
     return service, path, state, store, activated, live
 
@@ -132,6 +141,13 @@ def test_sensitive_fields_require_switch(field, value, tmp_path):
 @pytest.mark.parametrize(("field", "value"), [
     ("stacks_root", "/elsewhere"), ("mounts", {"other.mount": "/other"}),
     ("lan_only_domain", "internal.example"),
+    # The multi-host inventory (T48) is host wiring: which other machines PE reads, and the
+    # URLs it offers as buttons for them. Deliberately in neither EDITABLE_FIELDS nor
+    # SENSITIVE_FIELDS, so it is locked rather than dashboard-editable until someone decides
+    # otherwise on purpose -- this parametrize is what makes that a decision instead of an
+    # accident of which set a new field was left out of.
+    ("multi_host", {"hosts": [{"system_id": "ptf3tn2gzpg913i", "name": "CASA UNRAID",
+                               "link": None}], "local_system_id": None}),
 ])
 @pytest.mark.parametrize("sensitive", [False, True])
 def test_host_wiring_is_always_locked(field, value, sensitive, tmp_path):
@@ -140,6 +156,37 @@ def test_host_wiring_is_always_locked(field, value, sensitive, tmp_path):
     assert result.status == "locked" and result.locked_fields == [field]
     assert "edit on the host" in result.reason
     assert path.read_text() == live
+
+
+def test_apply_refuses_a_locality_pin_that_disagrees_with_docker_evidence(tmp_path):
+    """This must be an apply-time refusal, not a runtime pin override and duplicate card."""
+    local_names = ("a", "b", "c", "d", "e")
+
+    class Provider:
+        def hosts(self):
+            return FleetReading(Liveness(CURRENT), (
+                HostReading(Host("local"), liveness=Liveness(CURRENT)),
+                HostReading(Host("remote"), liveness=Liveness(CURRENT)),
+            ))
+
+        def containers(self, system_id):
+            names = local_names if system_id == "local" else ("beszel-agent",)
+            return ContainerReading(system_id, Liveness(CURRENT),
+                                    tuple(RemoteContainer(name) for name in names))
+
+    provider = Provider()
+    validator = lambda multi_host: pin_error(multi_host, provider, lambda: local_names)
+    service, path, _, store, _, live = make_service(tmp_path, pin_validator=validator)
+    draft = BASE | {"multi_host": {
+        "hosts": [{"system_id": "remote", "name": "Remote", "link": None}],
+        "local_system_id": "remote",
+    }}
+    result = service.apply(dump(draft), base_sha256=digest(live), operator="alice")
+    assert result.status == "invalid"
+    assert result.errors[0]["loc"] == "multi_host.local_system_id"
+    assert "disagrees" in result.errors[0]["msg"]
+    assert path.read_text() == live
+    assert store.events[-1][0] == "config.apply_refused"
 
 
 def test_mixed_editable_and_locked_is_atomic(tmp_path):

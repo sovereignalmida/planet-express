@@ -1,0 +1,174 @@
+# T48 execution plan and live state
+
+Spec: `T48-multi-host-spec.md`. Read it first; it is measured against the live hub
+and its decisions are settled. This file is the execution state. **Update the status
+table in the same commit as the work** — a session that picks this up cold must be
+able to trust it.
+
+Branch `t48/multi-host`, worktree `/home/chris/Projects/casalab/code/pe-t48`.
+The main checkout `code/planet-express` belongs to another session; do not work there.
+
+## Status
+
+| slice | what | state |
+|-------|------|-------|
+| S0 | host prereq: beszel survives reboot + a read-only account | **done** — verified 2026-10-01 |
+| S1 | core types, locality predicate, staleness — pure, no I/O | **done** — `planet_express/core/hosts.py`, `tests/test_hosts.py` |
+| S2 | `BeszelHubProvider` + a fixture provider built from real captured data | **done** — `planet_express/integrations/beszel.py`, `tests/test_beszel_provider.py` (branch `t48/s2-provider`) |
+| S3 | config inventory: schema, validation, secrets | **done** — merged into `t48/multi-host` |
+| S4 | wire into the dashboard data path, off the scan's critical path | **done** — cached background fleet view, apply-time pin validation, and rough `/hosts` route |
+| S5 | real templates from Chris's design | **done** — V2.5-OTHER-HOSTS |
+| S6 | ship prep: CHANGELOG, version, deploy script, INSTALL | **done** — v2.5.0 |
+
+## Division of labour, and why
+
+The Anthropic weekly window is the binding constraint (76% used on 2026-10-01, resets
+Oct 5 05:00Z, Pro plan, stop at 5% remaining). Codex runs on a separate provider
+quota (`gpt-5.6-terra`, ChatGPT auth), and Chris has cloud credits that are separate
+again. So:
+
+- **Opus (this session):** slice boundaries, the trust boundary, reading findings,
+  integration judgement. Never mechanical work.
+- **Cloud agents:** bulk implementation per slice, against the slice contract below.
+- **Codex:** `codex review --commit <sha>` before every landing. Standing project
+  gate, not optional. Read every finding; fix it or record why not.
+
+## Slice contracts
+
+Each slice: its own commit, its own Codex review, tests that fail if the guard is
+removed. Nothing lands with a known finding unrecorded.
+
+### S1 — core, pure, no I/O
+`planet_express/core/hosts.py`.
+
+- Types PE owns, never PocketBase records: `Host` (id, name, link, status, updated,
+  details), `HostDetails` (hostname, cores, threads, arch, kernel, cpu_model,
+  memory_bytes, os_name), `HostMetrics` (cpu_pct, mem_pct, mem_used_gib,
+  mem_total_gib, disk_pct, disk_used_gib, disk_total_gib, load, temps),
+  `RemoteContainer` (name, image, status, health, cpu, memory, net, ports, updatable).
+- `Liveness`: one of `current`, `stale`, `unknown`, with the reason and the age.
+  `STALE_AFTER = 120` seconds, which is twice the measured 1m bucket interval.
+- `locality(local_names, by_system) -> str | None`, exactly as the spec states:
+  coverage over the **local** set, `>= 0.5` and `>= 3x` the runner-up, not attempted
+  below 5 local names, ambiguity returns None. Pure function, no docker, no network.
+- Absent is not zero. Every optional field is `None`, never `0` or `""`.
+
+Tests must cover: the measured case (85/85 vs 1 vs 0 resolves), a tie, two hosts
+inside the 3x margin, fewer than 5 local names, an empty remote set, and a host whose
+only overlap is `beszel-agent`.
+
+### S2 — the provider
+`planet_express/integrations/beszel.py`.
+
+- `HostProvider` protocol: `hosts()` and `containers(system_id)`. Returns S1 types.
+- `BeszelHubProvider`: token auth via
+  `POST /api/collections/users/auth-with-password`; the four queries exactly as the
+  spec writes them, **with** `filter=(system='<id>')` and `sort=-created`. A query
+  missing its filter is the bug that paints one host's numbers on another.
+- Never reads `systems.info`. `system_details.memory` is bytes; `stats.m` is GiB.
+- Every failure maps to `unknown` with a reason. Timeouts bounded. No retry storm.
+- `FixtureHostProvider` reading captured JSON, used by the tests and by S4 until the
+  read-only account exists.
+
+Three judgement calls S4 inherits, none of them in the spec:
+
+- `hosts()` returns a `FleetReading` and `containers()` a `ContainerReading`, each carrying a
+  `Liveness` beside the data, because "no containers" and "nobody could read the containers"
+  had to be different values rather than the same empty tuple. `containers` is `None` for an
+  unreadable host and `()` for CASA SOLAR ASSISTANT, which really has none.
+- A reading is aged on the stats row's own `created`, not on `systems.updated`. The question
+  the renderer asks is how old the NUMBERS are, and the hub keeps touching the system record.
+- Container `health` arrives as an integer code (0 and 2 both occur in the capture) whose
+  mapping could not be checked against ground truth, so it decodes to None rather than to a
+  guessed word. A string health, which a newer agent may send, passes through. Decoding the
+  code needs the same treatment `info` got and did not get: a measurement against the host.
+
+Fixtures come from real measured data, committed under `tests/fixtures/beszel/`.
+Capture them with the SQLite read recipe in the spec; scrub nothing except anything
+secret (there is nothing secret in these four collections).
+
+### S3 — config
+`config_schema.py`.
+
+- `multi_host.hosts`: list of `{system_id, name, link}`. No per-entry local flag.
+- `multi_host.local_system_id`: optional pin. Pinned and disagreeing with derivation
+  is a validation failure refused at apply time.
+- Unique `system_id` across entries. Empty list means PE does not query the collector
+  at all.
+- **No rule may depend on `model_fields_set`.** Config is compared by dumped value,
+  so presence-dependent meaning is invisible to the diff and changeable by deleting a
+  line. T47's sharpest finding.
+- Credentials from `/etc/planetexpress-dashboard.env`, root-only, never `config.yaml`.
+
+Built on `t48/s3-config`. Two judgement calls S4 inherits, neither of them in the spec:
+
+- A pin with an **empty** `hosts` list is a validation failure. The collector is never
+  queried, so the pin can never apply, and this project refuses inert settings rather
+  than ignoring them (same convention as a ceiling written for an origin that cannot
+  originate anything). A pin naming an id the inventory does **not** list is accepted and
+  is the expected spelling — requiring a match would force the local host into the
+  inventory, and every inventory entry renders.
+- `multi_host` is in neither `EDITABLE_FIELDS` nor `SENSITIVE_FIELDS`, so a dashboard
+  edit to it is locked with "edit on the host". That is the safe default for a field that
+  names other machines and supplies clickable URLs for them; pinned by a test so making
+  it dashboard-editable has to be a decision.
+
+Also: `system_id` is constrained to `[A-Za-z0-9_-]{1,64}` because S2 interpolates it into
+`filter=(system='<id>')`. A quote or `&&` there is an injection into the expression that
+chooses whose numbers get rendered, and that failure is silent.
+
+### S4 — wiring
+
+**Carried forward from S3, and it must not be dropped.** The spec requires that a
+`local_system_id` pinned in config and disagreeing with derivation is refused at apply
+time. That check could not live in `config_schema.py`, which does no I/O by design,
+while derivation needs the local docker socket. So it is S4's, and if S4 does not
+implement it the rule silently never runs: a wrong pin would be accepted by config
+validation and then quietly override the derived answer, which is the duplicate-host
+bug the derivation exists to prevent. S3 refuses a pin alongside an empty `hosts`
+list, and accepts a pin naming no inventory entry on purpose -- requiring a match
+would force the local host into the inventory, and every inventory entry renders.
+- Off the monitoring scan's critical path. The icon warmer taught this three times:
+  budget it, bound it, then take it off the path entirely.
+- Collector down renders every configured host unknown; the local host keeps
+  rendering from the docker socket and must not gain a beszel dependency.
+- The local system is excluded from remote entries by derived id. Unconfigured
+  collector rows are withheld while locality is unknown.
+- A rough template is in scope here, deliberately ugly: Chris designs against a real
+  shape, not a prose brief.
+
+### S5 — screens
+Gated on Chris. The brief goes out when S4 renders real data. It needs: a host card,
+a remote container list, a stale/unknown state, a zero-container host (Solar
+Assistant is real and reports none), and an unconfigured-host state.
+
+### S6 — ship
+CHANGELOG, version bump, deploy script from `docs/handoff/deploy-template.sh`,
+INSTALL notes for the beszel account and the env vars. Chris runs the deploy; an
+agent never does.
+
+## Hard rules
+
+- Design seal: first 582 lines of `static/cockpit.css` stay byte-identical,
+  sha256 `aa913168cde1ff5d`. Check it at every change.
+- `scripts/check_design_system.py` must stay green. If it fails, change the design
+  copy, never `static/cockpit.css`.
+- Nothing added to `actions.REGISTRY`. Phase one is observe-only; a capability needs
+  its own spec.
+- No remote value reaches the action layer or `actions.resolve_stack_target()`.
+- Never log the agent `TOKEN`, the hub's `id_ed25519`, or the account password.
+- Host mutations are Chris's to run. Prepare a script, hand one command, verify
+  read-only over SSH.
+
+## S0, handed to Chris on 2026-10-01
+
+1. `/tmp/t48-prereq.sh` on the host — uncomments `restart: unless-stopped` on
+   `beszel` and `beszel-agent` only (wiki-go's commented copy at line 350 is left
+   alone; the script aborts if it would change anything else), validates the compose
+   file, recreates just those two containers, verifies the hub answers.
+2. In beszel's UI: create a user, set role `readonly`, and add it to all four
+   systems — the `listRule` scopes to systems the account is listed on, so creating
+   it is not enough. Then put its credentials in
+   `/etc/planetexpress-dashboard.env` as `BESZEL_USER` and `BESZEL_PASSWORD`.
+
+Neither blocks S1–S4: the fixture provider carries the work until the account exists.

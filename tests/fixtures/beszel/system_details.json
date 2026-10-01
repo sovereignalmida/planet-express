@@ -1,0 +1,68 @@
+{
+  "items": [
+    {
+      "arch": "aarch64",
+      "cores": 4,
+      "cpu": "Cortex-A53",
+      "hostname": "solar-assistant",
+      "id": "7y4fosy0ebhtk9x",
+      "kernel": "6.6.31+rpt-rpi-v8",
+      "memory": 951398400,
+      "os": 0,
+      "os_name": "Debian GNU/Linux 12 (bookworm)",
+      "podman": 0,
+      "system": "7y4fosy0ebhtk9x",
+      "threads": 4,
+      "updated": "2026-09-29 20:17:13.727937246 +0000 UTC"
+    },
+    {
+      "arch": "x86_64",
+      "cores": 4,
+      "cpu": "Intel(R) Core(TM) i5-4430S CPU @ 2.70GHz",
+      "hostname": "casamediaserver",
+      "id": "n7n7ppta55karj9",
+      "kernel": "7.0.0-31-generic",
+      "memory": 16688291840,
+      "os": 0,
+      "os_name": "Ubuntu 24.04.4 LTS",
+      "podman": 0,
+      "system": "n7n7ppta55karj9",
+      "threads": 4,
+      "updated": "2026-09-29 20:17:02.585270332 +0000 UTC"
+    },
+    {
+      "arch": "x86_64",
+      "cores": 2,
+      "cpu": "AMD Athlon(tm) II Neo N36L Dual-Core Processor",
+      "hostname": "CASASERVER",
+      "id": "ptf3tn2gzpg913i",
+      "kernel": "6.18.38-Unraid",
+      "memory": 8209977344,
+      "os": 0,
+      "os_name": "",
+      "podman": 0,
+      "system": "ptf3tn2gzpg913i",
+      "threads": 2,
+      "updated": "2026-10-01 10:17:26.553069568 +0000 UTC"
+    },
+    {
+      "arch": "x86_64",
+      "cores": 2,
+      "cpu": "Intel(R) Core(TM)2 Duo CPU     P8600  @ 2.40GHz",
+      "hostname": "casamacmini",
+      "id": "vw53pk01zei80wt",
+      "kernel": "6.14.0-37-generic",
+      "memory": 3836772352,
+      "os": 0,
+      "os_name": "Ubuntu 24.04.2 LTS",
+      "podman": 0,
+      "system": "vw53pk01zei80wt",
+      "threads": 2,
+      "updated": "2026-09-29 20:17:00.416275798 +0000 UTC"
+    }
+  ],
+  "page": 1,
+  "perPage": 500,
+  "totalItems": 4,
+  "totalPages": 1
+}

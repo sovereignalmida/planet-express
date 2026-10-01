@@ -20,6 +20,8 @@ from werkzeug.datastructures import MultiDict
 import casa_scruffy
 import config
 import web_auth
+from planet_express.application.multi_host import FleetView, HostCard
+from planet_express.core.hosts import HostDetails, HostMetrics, Liveness
 from planet_express.integrations.rpc import RpcError
 
 PASSPHRASE = "a long test passphrase"
@@ -96,6 +98,91 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     assert b"dashboard.css" not in resp.data
     assert b"lamp-rail" not in resp.data
     assert b"osc-gauge" not in resp.data
+
+
+def _hosts_page(cards, locality_reason=None):
+    class Cache:
+        def view(self):
+            return FleetView(tuple(cards), "local", locality_reason)
+
+    now = [1800000000.0]
+    app = casa_scruffy.create_app(ENV, host_cache=Cache(), rpc_call=FakeRpc(), clock=lambda: now[0])
+    app.testing = True
+    client = app.test_client()
+    assert login(client, now).status_code == 302
+    return client.get("/hosts")
+
+
+def test_hosts_route_escapes_unconfigured_remote_name_and_uses_cockpit():
+    hostile = "Remote <script>alert(1)</script>"
+    response = _hosts_page((
+        HostCard("new", hostile, None, False, Liveness("current"), containers=(),
+                 containers_liveness=Liveness("current")),
+    ))
+    assert response.status_code == 200
+    page = response.get_data(as_text=True)
+    assert "Remote &lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert "<script>alert(1)</script>" not in page
+    assert "shown as text only" in page
+    assert "cockpit.css" in page
+
+
+def test_hosts_all_unknown_has_one_nothing_can_be_read_verdict():
+    cards = tuple(
+        HostCard(str(i), f"Unknown {i}", None, True, Liveness("unknown", "collector unreachable"),
+                 containers=None, containers_liveness=Liveness("unknown", "collector unreachable"))
+        for i in range(3)
+    )
+    page = _hosts_page(cards).get_data(as_text=True)
+    assert "NOTHING CAN BE READ" in page
+    assert "SOME HOSTS ARE NOT READING" not in page
+    assert page.count("NO CONTACT") == 3
+
+
+def test_hosts_with_no_configured_entries_says_the_feature_is_not_set_up():
+    page = _hosts_page(()).get_data(as_text=True)
+    assert "OTHER HOSTS NOT CONFIGURED" in page
+    assert "No other hosts are configured." in page
+    assert "multi_host block in config.yaml" in page
+    assert "OTHER HOSTS READING" not in page
+
+
+def test_hosts_page_explains_when_unconfigured_rows_are_withheld():
+    reason = "locality is unknown; unconfigured rows are withheld"
+    page = _hosts_page((), locality_reason=reason).get_data(as_text=True)
+    assert reason in page
+
+
+def test_hosts_zero_containers_is_not_unreadable_containers():
+    zero = HostCard("zero", "Zero containers", None, True, Liveness("current"),
+                    details=HostDetails(os_name=None),
+                    metrics=HostMetrics(cpu_pct=0, mem_pct=0, disk_pct=0, load=(0.1, 0.2, 0.3)),
+                    containers=(), containers_liveness=Liveness("current"))
+    unknown = HostCard("unknown", "Unreadable containers", None, True,
+                       Liveness("unknown", "collector unreachable"), containers=None,
+                       containers_liveness=Liveness("unknown", "collector unreachable"))
+    stale = HostCard("stale", "Stale host", None, True, Liveness("stale", "old", 121),
+                     metrics=HostMetrics(cpu_pct=21, mem_pct=22, disk_pct=23), containers=(),
+                     containers_liveness=Liveness("current"))
+    page = _hosts_page((zero, stale, unknown)).get_data(as_text=True)
+    assert "No containers on this host. It runs none; that is normal here, not a failed read." in page
+    assert "CONTAINERS</span><span class=\"pe-value none\">unreadable" in page
+    assert "2m ago" in page
+    assert "not reported" in page  # os_name stays absent, never rendered as zero
+
+
+def test_hosts_unknown_reason_cards_have_distinct_explanations():
+    cards = (
+        HostCard("contact", "No contact", None, True, Liveness("unknown", "collector unreachable")),
+        HostCard("permission", "No permission", None, True,
+                 Liveness("unknown", "account not permitted; listed no systems")),
+        HostCard("clock", "Bad clock", None, True,
+                 Liveness("unknown", "timestamp is unusable")),
+    )
+    page = _hosts_page(cards).get_data(as_text=True)
+    for text in ("NO CONTACT", "NOT PERMITTED", "CLOCK UNUSABLE", "⌁", "⛨", "◷",
+                 "returned success with an empty list", "timestamp cannot be trusted"):
+        assert text in page
 
 
 def test_index_renders_real_findings(tmp_path, monkeypatch):
