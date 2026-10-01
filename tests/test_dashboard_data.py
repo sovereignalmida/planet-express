@@ -882,6 +882,7 @@ def test_backup_job_subset_and_legacy_template(tmp_path, monkeypatch):
         monkeypatch.setattr(config, constant, tmp_path / constant)
     app = Flask(__name__, template_folder=str(Path(__file__).resolve().parent.parent / 'templates'))
     app.add_url_rule('/logout', endpoint='logout', view_func=lambda: '', methods=['POST'])
+    app.add_url_rule('/hosts', endpoint='hosts', view_func=lambda: '')
     app.jinja_env.globals['csrf_token'] = lambda: ''
     register_template_helpers(app)
     now = datetime.now(timezone.utc)

@@ -528,7 +528,7 @@
     if (shown) loadConfig();
   }
   window.addEventListener("hashchange", loadIfShown);
-  document.querySelectorAll(".tab").forEach(button => button.addEventListener("click", () => {
+  document.querySelectorAll(".tab[data-tab]").forEach(button => button.addEventListener("click", () => {
     document.body.classList.toggle("config-active", button.dataset.tab === "config");
     if (button.dataset.tab === "config") loadConfig();
   }));
