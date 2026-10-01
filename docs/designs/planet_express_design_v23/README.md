@@ -5,7 +5,7 @@ Everything the dashboard's visual layer needs, in one place. Built against `sove
 Start here, then read `system/README.md`.
 
 ## Status: what is built, what is not
-- **Shipped:** V1, V2.1, V2.2 (`v2.2.0`), V2.3 app icons (`v2.3.0`). Stack control is the repo's `v2.4.0` (`archive/planet_express_design_v22/handoffs/V2.4-STACK-CONTROL.md`, renamed from V2.3-STACK-CONTROL).
+- **Shipped:** V1, V2.1, V2.2 (`v2.2.0`), V2.3 app icons (`v2.3.0`). Stack control is the repo's `v2.4.0` (`handoffs/V2.4-STACK-CONTROL.md`, renamed from V2.3-STACK-CONTROL).
 - **Not built yet:** `V3-COCKPIT-RESKIN.md`, `SERVICES-STACK-CARDS.md`, `BACKUPS-TAB-FIXES.md`.
 - **The code is authoritative.** Three decisions in the V2.2/V2.3 handoffs were reverted for security and are now corrected in the handoffs themselves (PNG-only icons, slug-only `planetexpress.icon`, the four-part widget-key guard). Each cites the code that enforces it.
 - **The seal.** The first 582 lines of `static/cockpit.css` are sealed (sha256 `aa913168cde1ff5d`). When a design copy and the repo disagree, the design copy is changed to match the repo, never the reverse.
@@ -80,3 +80,10 @@ These are design artefacts, not source. Open them in a browser to read exact spa
 **No shell command ever reaches the UI.** Fix steps render `description` only. The `assert "command" not in json.dumps(result)` guard test stays green.
 
 **No hardcoded hex in templates.** Everything is a `var(--pe-*)`. If you're reaching for a literal, the token is missing — add it to `:root`.
+
+## Deferred: optional token cleanup
+`design-system/components/23-elevation.css` hardcodes a hex border and an rgba backdrop. Two tokens
+would replace them: `--pe-warn-line-deep` and `--pe-scrim`. Deliberately not done: it changes
+`static/cockpit.css` (outside the sealed first 582 lines, so allowed) and the design system with it,
+and nothing needs it yet. Do it if a new screen reuses either value, then regenerate the split and run
+`scripts/check_design_system.py`.
