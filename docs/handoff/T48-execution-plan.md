@@ -14,7 +14,7 @@ The main checkout `code/planet-express` belongs to another session; do not work 
 |-------|------|-------|
 | S0 | host prereq: beszel survives reboot + a read-only account | **done** — verified 2026-10-01 |
 | S1 | core types, locality predicate, staleness — pure, no I/O | **done** — `planet_express/core/hosts.py`, `tests/test_hosts.py` |
-| S2 | `BeszelHubProvider` + a fixture provider built from real captured data | not started |
+| S2 | `BeszelHubProvider` + a fixture provider built from real captured data | **done** — `planet_express/integrations/beszel.py`, `tests/test_beszel_provider.py` (branch `t48/s2-provider`) |
 | S3 | config inventory: schema, validation, secrets | **done** — merged into `t48/multi-host` |
 | S4 | wire into the dashboard data path, off the scan's critical path | not started |
 | S5 | real templates from Chris's design | blocked: needs S4's rough shape first |
@@ -69,6 +69,19 @@ only overlap is `beszel-agent`.
 - Every failure maps to `unknown` with a reason. Timeouts bounded. No retry storm.
 - `FixtureHostProvider` reading captured JSON, used by the tests and by S4 until the
   read-only account exists.
+
+Three judgement calls S4 inherits, none of them in the spec:
+
+- `hosts()` returns a `FleetReading` and `containers()` a `ContainerReading`, each carrying a
+  `Liveness` beside the data, because "no containers" and "nobody could read the containers"
+  had to be different values rather than the same empty tuple. `containers` is `None` for an
+  unreadable host and `()` for CASA SOLAR ASSISTANT, which really has none.
+- A reading is aged on the stats row's own `created`, not on `systems.updated`. The question
+  the renderer asks is how old the NUMBERS are, and the hub keeps touching the system record.
+- Container `health` arrives as an integer code (0 and 2 both occur in the capture) whose
+  mapping could not be checked against ground truth, so it decodes to None rather than to a
+  guessed word. A string health, which a newer agent may send, passes through. Decoding the
+  code needs the same treatment `info` got and did not get: a measurement against the host.
 
 Fixtures come from real measured data, committed under `tests/fixtures/beszel/`.
 Capture them with the SQLite read recipe in the spec; scrub nothing except anything
