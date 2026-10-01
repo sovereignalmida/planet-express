@@ -1,60 +1,69 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Planet Express — Other hosts</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ asset('cockpit.css') }}">
 </head>
 <body>
-  <main>
-    <h1>Other hosts</h1>
-    <p>This is the deliberately plain T48 data surface. It has no controls.</p>
-    {% if fleet.locality_reason %}<p>Locality: {{ fleet.locality_reason }}</p>{% endif %}
-    {% if not fleet.cards %}<p>No remote hosts are configured.</p>{% endif %}
-    {% for host in fleet.cards %}
-      <section>
-        <h2>{{ host.name }}{% if not host.configured %} — unconfigured host{% endif %}</h2>
-        {% if host.link %}<p><a href="{{ host.link }}" rel="noopener noreferrer">Open this host</a></p>{% else %}<p>No configured host link.</p>{% endif %}
-        <p>Liveness: <strong>{{ host.liveness.state }}</strong>{% if host.liveness.reason %} — {{ host.liveness.reason }}{% endif %}{% if host.liveness.age is not none %} ({{ host.liveness.age|round|int }} seconds old){% endif %}</p>
-        <p>Collector status: {{ host.status if host.status is not none else "unknown" }}</p>
-        <h3>Hardware</h3>
-        {% if host.details %}
-          <dl>
-            <dt>Hostname</dt><dd>{{ host.details.hostname if host.details.hostname is not none else "unknown" }}</dd>
-            <dt>CPU</dt><dd>{{ host.details.cpu_model if host.details.cpu_model is not none else "unknown" }}</dd>
-            <dt>Cores / threads</dt><dd>{{ host.details.cores if host.details.cores is not none else "unknown" }} / {{ host.details.threads if host.details.threads is not none else "unknown" }}</dd>
-            <dt>Memory bytes</dt><dd>{{ host.details.memory_bytes if host.details.memory_bytes is not none else "unknown" }}</dd>
-            <dt>OS</dt><dd>{{ host.details.os_name if host.details.os_name is not none else "unknown" }}</dd>
-            <dt>Architecture</dt><dd>{{ host.details.arch if host.details.arch is not none else "unknown" }}</dd>
-            <dt>Kernel</dt><dd>{{ host.details.kernel if host.details.kernel is not none else "unknown" }}</dd>
-          </dl>
-        {% else %}<p>Hardware: unknown.</p>{% endif %}
-        <h3>Metrics</h3>
-        {% if host.metrics %}
-          <dl>
-            <dt>CPU %</dt><dd>{{ host.metrics.cpu_pct if host.metrics.cpu_pct is not none else "unknown" }}</dd>
-            <dt>Memory %</dt><dd>{{ host.metrics.mem_pct if host.metrics.mem_pct is not none else "unknown" }}</dd>
-            <dt>Memory used / total GiB</dt><dd>{{ host.metrics.mem_used_gib if host.metrics.mem_used_gib is not none else "unknown" }} / {{ host.metrics.mem_total_gib if host.metrics.mem_total_gib is not none else "unknown" }}</dd>
-            <dt>Disk used / total GiB</dt><dd>{{ host.metrics.disk_used_gib if host.metrics.disk_used_gib is not none else "unknown" }} / {{ host.metrics.disk_total_gib if host.metrics.disk_total_gib is not none else "unknown" }}</dd>
-            <dt>Disk %</dt><dd>{{ host.metrics.disk_pct if host.metrics.disk_pct is not none else "unknown" }}</dd>
-            <dt>Load</dt><dd>{{ host.metrics.load if host.metrics.load is not none else "unknown" }}</dd>
-            <dt>Temperatures</dt><dd>{{ host.metrics.temps if host.metrics.temps is not none else "unknown" }}</dd>
-          </dl>
-        {% else %}<p>Metrics: unknown.</p>{% endif %}
-        <h3>Containers</h3>
-        {% if host.containers is none %}
-          <p>Containers: unknown{% if host.containers_liveness and host.containers_liveness.reason %} — {{ host.containers_liveness.reason }}{% endif %}</p>
-        {% elif not host.containers %}
-          <p>Containers: none reported (zero containers).</p>
+{% set configured = fleet.cards | selectattr('configured') | list %}
+{% set current = configured | selectattr('liveness.state', 'equalto', 'current') | list %}
+{% set stale = configured | selectattr('liveness.state', 'equalto', 'stale') | list %}
+{% set unknown = configured | selectattr('liveness.state', 'equalto', 'unknown') | list %}
+{% set unconfigured = fleet.cards | rejectattr('configured') | list %}
+{% set all_unknown = configured and unknown | length == configured | length %}
+{% if all_unknown %}{% set verdict_level, orb, verdict = 'unknown', '?', 'NOTHING CAN BE READ' %}{% set verdict_detail = 'The collector cannot provide a reading for any configured host. These are unknown, not zero and not healthy.' %}
+{% elif stale or unknown %}{% set verdict_level, orb, verdict = 'warn', '!', 'SOME HOSTS ARE NOT READING' %}{% set verdict_detail = current|length|string ~ ' reading now · ' ~ stale|length|string ~ ' stale · ' ~ unknown|length|string ~ ' unknown. Stale and unknown values are never drawn as live.' %}
+{% else %}{% set verdict_level, orb, verdict = 'ok', '✓', current|length|string ~ ' OTHER HOSTS READING' %}{% set verdict_detail = 'Every other configured host reported recently. This screen is read-only.' %}{% endif %}
+<div class="pe-app" data-screen-label="Other hosts"><div class="pe-wrap">
+  <header class="pe-masthead"><img src="{{ url_for('static', filename='logo.png') }}" alt="Planet Express"><div><div class="pe-kicker">SYSADMIN CONSOLE · casamediaserver</div><h1>PLANET EXPRESS</h1></div></header>
+  <main class="pe-tabbody">
+    <section class="pe-verdict {{ verdict_level }}" aria-label="Fleet verdict"><div class="pe-verdict-orb">{{ orb }}</div><div class="pe-verdict-text"><h2>{{ verdict }}</h2><p>{{ verdict_detail }}</p></div><div class="pe-verdict-tally">{% if current %}<span class="pe-chip ok">{{ current|length }} CURRENT</span>{% endif %}{% if stale %}<span class="pe-chip warn">{{ stale|length }} STALE</span>{% endif %}{% if unknown %}<span class="pe-chip {{ 'crit' if all_unknown else 'warn' }}">{{ unknown|length }} UNKNOWN</span>{% endif %}{% if unconfigured %}<span class="pe-chip info">{{ unconfigured|length }} NOT CONFIGURED</span>{% endif %}</div></section>
+    <section class="pe-panel" aria-label="Other hosts from Beszel">
+      <div class="pe-panel-head"><h3>OTHER HOSTS · BESZEL</h3><span class="pe-chip info">READ-ONLY</span><div class="pe-spacer"></div><span class="pe-panel-note">source: beszel hub API · observe only</span></div>
+      <div class="pe-grid" style="--pe-track:370px">
+      {% for host in fleet.cards if host.configured %}
+        {% set live = host.liveness.state in ('current', 'stale') %}{% set is_stale = host.liveness.state == 'stale' %}{% set details = host.details %}{% set metrics = host.metrics %}
+        {% if live %}
+          {% set max_pct = [metrics.cpu_pct if metrics and metrics.cpu_pct is not none else 0, metrics.mem_pct if metrics and metrics.mem_pct is not none else 0, metrics.disk_pct if metrics and metrics.disk_pct is not none else 0] | max %}{% set level = 'crit' if max_pct >= 95 else 'high' if max_pct >= 90 else 'warn' if max_pct >= 80 else 'ok' %}
+          {% set age = host.liveness.age|round|int if is_stale else none %}{% set age_human = (age // 60)|string ~ 'm' if age is not none and age >= 60 else age|string ~ 's' if age is not none else 'not reported' %}
+          <article class="pe-card {{ 'warn' if is_stale else level }}">
+            <div class="pe-card-head"><span class="pe-led {{ 'warn' if is_stale else level }}"></span><span class="pe-card-title sm">{{ host.name }}</span><div class="pe-spacer"></div><span class="pe-badge {{ 'warn' if is_stale else 'ok' }}">{{ 'STALE · ' ~ age_human if is_stale else 'CURRENT' }}</span></div>
+            {% if is_stale %}<div class="pe-hero"><span class="pe-hero-num warn">{{ age_human }} ago</span><span class="pe-hero-label">SINCE LAST READING</span></div>{% else %}<div class="pe-hero"><span class="pe-hero-num {{ level }}">{{ metrics.cpu_pct|round|int if metrics and metrics.cpu_pct is not none else 'not reported' }}{{ '%' if metrics and metrics.cpu_pct is not none else '' }}</span><span class="pe-hero-label">CPU</span></div>{% endif %}
+            <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin:2px 0 12px"><span class="pe-card-sub">{{ details.cores if details and details.cores is not none else 'not reported' }}C / {{ details.threads if details and details.threads is not none else 'not reported' }}T · {{ details.arch if details and details.arch is not none else 'not reported' }} · {{ details.os_name if details and details.os_name is not none else 'not reported' }}</span>{% if host.link %}<a class="pe-link-out" href="{{ host.link }}" rel="noopener noreferrer">OPEN ↗</a>{% endif %}</div>
+            <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">
+              {% for label, value in [('CPU', metrics.cpu_pct if metrics else none), ('MEMORY', metrics.mem_pct if metrics else none), ('DISK', metrics.disk_pct if metrics else none)] %}{% set meter = 'crit' if value is not none and value >= 95 else 'high' if value is not none and value >= 90 else 'warn' if value is not none and value >= 80 else 'ok' %}
+              <div><div class="pe-readout-row" style="margin-bottom:5px"><span class="pe-label">{{ label }}</span><span class="pe-value {{ 'dim' if is_stale else meter if value is not none else 'none' }}">{{ value|round|int ~ '%' if value is not none else 'not reported' }}</span></div><div class="pe-bar"><div class="pe-bar-fill {{ '' if is_stale else meter }}" style="width:{{ value|round|int if value is not none else 0 }}%"></div></div></div>{% endfor %}
+            </div>
+            <div class="pe-readout">
+              <div class="pe-readout-row"><span class="pe-label">LOAD 1 · 5 · 15</span><span class="pe-value {{ 'dim' if is_stale else '' }}">{{ metrics.load|map('round', 2)|join(' · ') if metrics and metrics.load is not none else 'not reported' }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">MEMORY</span><span class="pe-value {{ 'dim' if is_stale else '' }}">{{ metrics.mem_used_gib|round(1) ~ ' / ' ~ metrics.mem_total_gib|round(1) ~ ' GiB' if metrics and metrics.mem_used_gib is not none and metrics.mem_total_gib is not none else 'not reported' }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">DISK</span><span class="pe-value {{ 'dim' if is_stale else '' }}">{{ metrics.disk_used_gib|round(1) ~ ' / ' ~ metrics.disk_total_gib|round(1) ~ ' GiB' if metrics and metrics.disk_used_gib is not none and metrics.disk_total_gib is not none else 'not reported' }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">OS</span><span class="pe-value {{ 'dim' if is_stale else 'none' if not details or details.os_name is none else '' }}">{{ details.os_name if details and details.os_name is not none else 'not reported' }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">ARCH · KERNEL</span><span class="pe-value {{ 'dim' if is_stale else '' }}">{{ details.arch if details and details.arch is not none else 'not reported' }} · {{ details.kernel if details and details.kernel is not none else 'not reported' }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">CPU MODEL</span><span class="pe-value {{ 'dim' if is_stale else 'none' if not details or details.cpu_model is none else '' }}">{{ details.cpu_model if details and details.cpu_model is not none else 'not reported' }}</span></div>
+            </div>
+            {% if metrics and metrics.temps %}<div class="pe-footnote">{% for sensor, temp in metrics.temps|dictsort %}{{ sensor }} {{ temp|round(1) }}°C{{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}
+            <div class="pe-readout" style="margin-top:14px"><div class="pe-readout-row"><span class="pe-label">{{ 'CONTAINERS · LAST KNOWN' if is_stale else 'CONTAINERS' }}</span><span class="pe-value {{ 'dim' if is_stale or host.containers == () else 'none' if host.containers is none else 'crit' if host.containers|selectattr('health', 'equalto', 'unhealthy')|list else '' }}">{{ 'unreadable' if host.containers is none and host.containers_liveness and host.containers_liveness.state == 'unknown' else 'not reported' if host.containers is none else host.containers|length ~ (' · ' ~ host.containers|selectattr('health', 'equalto', 'unhealthy')|list|length ~ ' unhealthy' if host.containers|selectattr('health', 'equalto', 'unhealthy')|list else '') }}</span></div>
+              {% if host.containers == () %}<div class="pe-stack-note">No containers on this host. It runs none; that is normal here, not a failed read.</div>{% endif %}
+              {% if host.containers %}<div class="pe-service-chips">{% for container in host.containers[:6] %}<span class="pe-chip-svc {{ 'idle' if is_stale else 'crit' if container.health == 'unhealthy' else '' }}" title="{{ container.name }} · {{ container.status if container.status is not none else 'not reported' }} · {{ container.health if container.health is not none else 'not reported' }}"><span class="pe-dot-svc {{ 'idle' if is_stale else 'crit' if container.health == 'unhealthy' else '' }}" style="width:8px;height:8px"></span>{{ container.name }}{% if container.updatable %}<strong>UPDATE</strong>{% endif %}</span>{% endfor %}</div>{% endif %}
+              {% if host.containers and host.containers|length > 6 %}<div class="pe-rollup" style="padding:8px 12px"><span class="pe-rollup-count" style="font-size:15px">+{{ host.containers|length - 6 }}</span><span style="color:var(--pe-ink-label);font-size:12px">more containers · expand</span></div>{% endif %}
+            </div>{% if is_stale %}<div class="pe-footnote warn">Last known values. Nothing on this card is live until the host reports again.</div>{% endif %}
+          </article>
         {% else %}
-          <ul>
-          {% for container in host.containers %}
-            <li><strong>{{ container.name }}</strong> — image: {{ container.image if container.image is not none else "unknown" }}, status: {{ container.status if container.status is not none else "unknown" }}, health: {{ container.health if container.health is not none else "unknown" }}, CPU: {{ container.cpu if container.cpu is not none else "unknown" }}, memory: {{ container.memory if container.memory is not none else "unknown" }}, network: {{ container.net if container.net is not none else "unknown" }}, ports: {{ container.ports if container.ports is not none else "unknown" }}, update available: {{ container.updatable if container.updatable is not none else "unknown" }}</li>
-          {% endfor %}
-          </ul>
+          {% set reason = (host.liveness.reason or '')|lower %}
+          {% if 'authenticated this account' in reason or 'not permitted' in reason or 'listed no systems' in reason %}{% set badge, glyph, title, explanation, check = 'NOT PERMITTED', '⛨', 'The collector account is not permitted to see this host.', 'The hub returned success with an empty list. That does not mean there are no hosts.', 'Check: list this collector account on the host in Beszel.' %}
+          {% elif 'timestamp' in reason or 'future' in reason or 'no reading' in reason %}{% set badge, glyph, title, explanation, check = 'CLOCK UNUSABLE', '◷', 'The host reported, but its timestamp cannot be trusted.', 'Its age cannot be calculated, so no reading is presented as live.', 'Check: correct the host clock and collector timestamp.' %}
+          {% else %}{% set badge, glyph, title, explanation, check = 'NO CONTACT', '⌁', 'No readable contact with this host.', 'No usable reading is available for it.', 'Check: the host agent and its reachability.' %}{% endif %}
+          <article class="pe-card none reasoned"><div class="pe-card-head"><span class="pe-led idle"></span><span class="pe-card-title sm" style="color:var(--pe-ink-body)">{{ host.name }}</span><div class="pe-spacer"></div><span class="pe-badge {{ 'crit' if badge == 'NO CONTACT' else 'warn' }}">{{ badge }}</span></div><div class="pe-sensor-dark" style="margin-bottom:14px"><div class="glyph">{{ glyph }}</div><p><strong style="color:var(--pe-ink-2)">{{ title }}</strong><br>{{ explanation }}</p></div><div class="pe-readout" style="border-top:none;padding-top:0"><div class="pe-readout-row"><span class="pe-label">CPU · MEM · DISK</span><span class="pe-value none">unreadable</span></div><div class="pe-readout-row"><span class="pe-label">LAST GOOD READING</span><span class="pe-value dim">unreadable</span></div><div class="pe-readout-row"><span class="pe-label">CONTAINERS</span><span class="pe-value none">unreadable</span></div></div><div class="pe-footnote">{{ check }}</div>{% if host.link %}<div style="margin-top:12px"><a class="pe-link-out" href="{{ host.link }}" rel="noopener noreferrer">OPEN HOST UI ↗</a></div>{% endif %}</article>
         {% endif %}
-      </section>
-    {% endfor %}
+      {% endfor %}
+      {% for host in fleet.cards if not host.configured %}<article class="pe-card none reasoned"><div class="pe-card-head"><span class="pe-led idle"></span><span class="pe-card-title sm pe-mono" title="{{ host.name }}">“{{ host.name }}”</span><div class="pe-spacer"></div><span class="pe-badge">NOT CONFIGURED</span></div><div class="pe-stack-note">Known to the collector, not yet set up here. No link and no readings until it is listed in this dashboard’s config.</div><div class="pe-dashed-footer" style="margin-top:14px;padding-top:12px"><span class="pe-led idle"></span>name supplied by the remote host · shown as text only</div></article>{% endfor %}
+      </div>
+      <div class="pe-dashed-footer"><span class="pe-led idle"></span>casamediaserver is not listed here. Its containers and controls are on Overview.</div>
+    </section>
   </main>
-</body>
-</html>
+</div></div>
+</body></html>
