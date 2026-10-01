@@ -2,7 +2,7 @@
 
 Written 2026-09-29 against the code at `v2.3.0`. Everything below was read out of the
 implementation, not carried over from a design package; where the v22 package's
-`V2.3-STACK-CONTROL.md` says something different, this is what the code does.
+`V2.4-STACK-CONTROL.md` says something different, this is what the code does.
 
 **Owner decision, 2026-09-29: R2 and R3 from the dashboard, behind an elevated session.**
 Telegram keeps everything it does today, but stops being the only way to authorise anything.

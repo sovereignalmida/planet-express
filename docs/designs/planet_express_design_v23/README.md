@@ -5,7 +5,7 @@ Everything the dashboard's visual layer needs, in one place. Built against `sove
 Start here, then read `system/README.md`.
 
 ## Status: what is built, what is not
-- **Shipped:** V1, V2.1, V2.2 (`v2.2.0`), V2.3 app icons (`v2.3.0`). Stack control is the repo's `v2.4.0` (`planet_express_design_v22/handoffs/V2.3-STACK-CONTROL.md`, filed under the old label).
+- **Shipped:** V1, V2.1, V2.2 (`v2.2.0`), V2.3 app icons (`v2.3.0`). Stack control is the repo's `v2.4.0` (`planet_express_design_v22/handoffs/V2.4-STACK-CONTROL.md`, renamed from V2.3-STACK-CONTROL).
 - **Not built yet:** `V3-COCKPIT-RESKIN.md`, `SERVICES-STACK-CARDS.md`, `BACKUPS-TAB-FIXES.md`.
 - **The code is authoritative.** Three decisions in the V2.2/V2.3 handoffs were reverted for security and are now corrected in the handoffs themselves (PNG-only icons, slug-only `planetexpress.icon`, the four-part widget-key guard). Each cites the code that enforces it.
 - **The seal.** The first 582 lines of `static/cockpit.css` are sealed (sha256 `aa913168cde1ff5d`). When a design copy and the repo disagree, the design copy is changed to match the repo, never the reverse.
