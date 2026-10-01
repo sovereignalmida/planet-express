@@ -141,21 +141,48 @@ from the local docker socket, which does not depend on beszel at all.
   already renders from the docker socket with working controls. Taking every
   `list_hosts()` result as a remote entry shows this host twice: once controllable
   and once as read-only remote data, with two sets of numbers collected different
-  ways that will not agree. The inventory's local flag marks that system id, and it
-  is excluded from remote entries. Matching on name or address instead would be
-  wrong: the name is editable in beszel's UI and the address can change.
+  ways that will not agree.
 
-  **The inventory must be validated, because the two rules above fight.** If the
-  inventory omits the local entry, or flags the wrong system id as local, then the
-  hub's local system matches nothing — and the rule that surfaces unlisted hosts
-  then renders it as an unconfigured remote host, next to the docker-backed one.
-  The duplicate comes back, caused by the mechanism meant to make new agents
-  visible. So the schema enforces, whenever the inventory is non-empty: system ids
-  unique across entries, and exactly one entry flagged local. Violations are a
-  config validation failure refused at apply time, not a silent fallback — PE
-  already refuses a config that does not validate, and this belongs there rather
-  than in rendering. An empty inventory is valid and means no remote hosts at all,
-  with the local host rendering from the docker socket exactly as it does today.
+  **Which system is local is derived, not declared.** Three review rounds were
+  spent trying to validate an operator-declared `local: true` flag, and each fix
+  left a way for the flag to be wrong: unique ids and a single flag are cardinality
+  checks, and they pass happily when the flag points at the wrong system. A
+  declared answer to a question PE can answer itself is a defect generator.
+
+  PE already knows its own containers exactly, from the docker socket. So the local
+  system is the one whose reported container set matches that. Measured on
+  2026-10-01:
+
+  | system               | container names shared with the local docker socket |
+  |----------------------|-----------------------------------------------------|
+  | casamediaserver      | 85 of 85 — exact                                    |
+  | CASA UNRAID          | 1                                                   |
+  | CASA MAC MINI        | 0                                                   |
+  | CASA SOLAR ASSISTANT | 0                                                   |
+
+  The separation is not close, but note the Unraid 1: that is `beszel-agent`, a
+  container name that exists on every host. So the test is **proportional** overlap,
+  never any-overlap — the winning system must cover a large majority of local
+  container names and beat the runner-up by a wide margin. Name and address are not
+  identity: beszel's name is editable in its UI and addresses change.
+
+  Config may still pin the local system id, for an operator who needs to override.
+  If it is pinned and derivation disagrees, that is a config validation failure
+  refused at apply time — loudly, because one of the two is wrong and PE cannot
+  tell which.
+
+  **If locality cannot be determined, no remote host renders at all.** Fail closed.
+  No dominant match — collector unreachable, a partial answer, or a local host
+  running too few containers to discriminate — means PE renders zero remote entries
+  and says why, rather than guessing and risking the duplicate. The rule that
+  surfaces unlisted hosts applies only to systems positively determined not to be
+  local.
+
+  **An empty inventory means PE does not query the collector.** Not "queries it and
+  shows nothing" — that is the state where every returned row is unlisted, including
+  the local one, and the surface-unlisted rule would recreate the duplicate. Off
+  means no request, so there are no rows for any rule to act on, and the local host
+  renders from the docker socket exactly as it does today.
 
 ## What it must not do
 
