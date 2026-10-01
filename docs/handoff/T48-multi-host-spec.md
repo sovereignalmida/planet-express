@@ -201,6 +201,82 @@ from the local docker socket, which does not depend on beszel at all.
   means no request, so there are no rows for any rule to act on, and the local host
   renders from the docker socket exactly as it does today.
 
+## The read contract
+
+Measured against the live hub on 2026-10-01. PE reads four collections over HTTP on
+localhost and nothing else.
+
+**Auth.** `POST /api/collections/users/auth-with-password` with `identity` and
+`password` returns a token. Confirmed present: an empty body answers 400 with
+per-field validation, not 404. Credentials from
+`/etc/planetexpress-dashboard.env`. Every collection PE reads has a `listRule` of
+the form `@request.auth.id != "" && users.id ?= @request.auth.id`, so the account
+sees only systems it is listed on — it must be added to each system's `users`
+relation, which is a step beyond creating it.
+
+**`systems`** — identity and liveness. Fields `id`, `name`, `host`, `port`,
+`status`, `updated`. `status` is one of up/down/paused/pending. `updated` is the
+staleness input.
+
+**`system_details`** — hardware, and all of it named. `hostname`, `cores`,
+`threads`, `arch`, `kernel`, `cpu` (model string), `memory`, `os_name`, `podman`.
+This is what a host card shows.
+
+**`system_stats`** — the time series. A `stats` JSON blob plus a `type` column that
+buckets it. Buckets present: `1m`, `10m`, `20m`, `120m`, `480m`. PE reads the newest
+`1m` row per system for current values. Note the `1m` bucket only retains about 85
+minutes; the longer buckets are history and phase one does not need them.
+
+**`containers`** — `name`, `image`, `status`, `health`, `cpu`, `memory`, `net`,
+`ports`, `updatable`, `system`. No labels, which is why remote labels cannot reach
+the icon path.
+
+`?expand=system` works and `perPage=500` is accepted.
+
+### Decoded stats keys, verified against the host
+
+| key  | meaning                       | check against ground truth |
+|------|-------------------------------|----------------------------|
+| `cpu`| CPU percent                   | —                          |
+| `m`  | memory total, **GiB**         | 15.54 vs 15.5              |
+| `mu` | memory used, GiB              | —                          |
+| `mp` | memory used percent           | 51.25 vs 51.47             |
+| `d`  | disk total, GiB               | 136.45 vs 136.4            |
+| `du` | disk used, GiB                | 109.52 vs 109.5            |
+| `dp` | disk used percent             | 84.6 vs 85                 |
+| `la` | load averages, 3 values       | 4.12/4.52/5.1 vs 4.40/4.57/5.11 |
+| `t`  | map of sensor name → °C       | `acpitz` 27.8 vs 27.8      |
+| `s`/`su` | swap total / used, GiB    | —                          |
+| `dr`/`dw`| disk read / write         | —                          |
+| `b`  | network sent / recv           | —                          |
+| `ni` | per-interface counters        | —                          |
+| `cpus`| per-core percent             | 4 values on a 4-thread host|
+
+Note `memory` in `system_details` is **bytes** (16688291840) while `m` in `stats` is
+**GiB** (15.54). Same quantity, different unit in different tables.
+
+### Do not read `systems.info`
+
+`systems` also carries an `info` JSON summary with single-letter keys. PE must not
+depend on it. Several keys could not be decoded against ground truth, and one is
+actively dangerous: **`t` is the integer `4` in `info` and a sensor-name→temperature
+map in `stats`.** The same letter means different things in two blobs of the same
+application. Anything reverse-engineered from abbreviations in an app we do not
+control is a silent-breakage source on the next agent update, and `system_details`
+already provides the same facts under real names.
+
+### Fields can be empty
+
+Unraid reports an empty `os_name`, and its agent is 0.17.0 against 0.20.0 elsewhere.
+A missing field renders as unknown, never as a zero or a blank that looks like a
+measurement. Same rule as a missing host.
+
+### The staleness threshold has a measured basis
+
+The `1m` bucket is a 60-second interval, so "older than twice the collection
+interval" is 120 seconds. That number comes from the bucket type, not from guessing
+at `info.dt`, whose meaning is undetermined.
+
 ## What it must not do
 
 - Must not put remote containers in the same list as local ones in a way that lets
@@ -255,8 +331,18 @@ one.
   phase two. Decide after phase one is live.
 - The Unraid `homepage` instance. Out of scope here but the homepage retirement is
   not finished while it runs.
-- Solar Assistant reports zero containers and is the one host still in SSH-listener
-  mode. Worth understanding why before phase two assumes WebSocket everywhere.
-- Agent version skew: Unraid on 0.17.0, everything else on 0.20.0.
+- Solar Assistant reports zero containers because it is not a docker host: an
+  aarch64 Debian 12 appliance with 951 MB of RAM. Its `system_details` are complete
+  and its stats are current, so it is a first-class host that simply has no
+  containers — which is the case the UI has to render without looking broken. Closed
+  as a question, kept as a UI requirement.
+- It is also the one host still answering on 45876 while the other three have shut
+  their listeners down, and it reports fine either way. The conclusion for phase two
+  is not "find out why" but "the hub serves both modes, so anything replacing the
+  hub must too."
+- Agent version skew: Unraid on 0.17.0, everything else on 0.20.0, and Unraid is
+  the host with the empty `os_name`. Older agents report less, which is a reason the
+  renderer treats absent fields as unknown rather than assuming every host answers
+  every field.
 - Whether `updatable` should surface in PE. beszel already computes it, and we
   did that work by hand on 2026-10-01.
