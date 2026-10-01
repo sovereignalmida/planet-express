@@ -371,3 +371,36 @@ def test_no_superlinear_path(build):
     redact(text)
     elapsed = time.perf_counter() - start
     assert elapsed < 5.0, f"{elapsed:.2f}s -- an unbounded regex repetition is back"
+
+
+# ── T48: the beszel service account is a configured credential like any other ─────
+def test_the_beszel_account_is_in_the_literal_snapshot(monkeypatch):
+    """The collector's password must never reach a log, a prompt or a step record.
+
+    Being withheld by the key scan is not enough on its own: that only fires on a line that
+    happens to carry a recognisable key name. Listing the accessor means the VALUE is withheld
+    wherever it appears, which is the backstop the AdGuard pair already has.
+    """
+    module, calls = _snapshot(monkeypatch, {
+        "anthropic_api_key": "", "openai_api_key": "",
+        "telegram_credentials": ("", ""), "adguard_credentials": ("", ""),
+        "beszel_credentials": ("pe-readonly", "beszel-account-password"),
+    })
+    assert calls.count("beszel_credentials") == 1
+    assert module.redact("auth-with-password beszel-account-password pe-readonly") == (
+        f"auth-with-password {REDACTED} {REDACTED}")
+    assert "beszel-account-password" not in module.redact(
+        'BESZEL_PASSWORD=beszel-account-password\n{"password":"beszel-account-password"}')
+
+
+def test_a_missing_beszel_account_does_not_break_redaction(monkeypatch):
+    """Optional, like AdGuard's: an install without the account yet still redacts everything
+    else, rather than snapshotting "" and matching every position in every line."""
+    module, calls = _snapshot(monkeypatch, {
+        "anthropic_api_key": "provider-secret", "openai_api_key": "",
+        "telegram_credentials": ("", ""), "adguard_credentials": ("", ""),
+        "beszel_credentials": ("", ""),
+    })
+    assert "beszel_credentials" in calls
+    assert module.redact("ordinary output") == "ordinary output"
+    assert module.redact("provider-secret") == REDACTED
