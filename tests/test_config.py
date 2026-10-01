@@ -485,6 +485,10 @@ def test_a_host_link_must_be_http(link):
 
 @pytest.mark.parametrize('system_id', [
     "ptf3tn'||1==1", 'has space', 'a&&b', 'x' * 65, '', 'quote"d',
+    # A TRAILING NEWLINE, which `$` accepts and `fullmatch` does not (Codex review, S3). It
+    # names no system, so the host it was written for stays unknown forever with nothing
+    # visibly wrong -- the same class of silent failure as an unfiltered per-system read.
+    'ptf3tn2gzpg913i\n', '\nptf3tn2gzpg913i',
 ])
 def test_a_system_id_with_filter_syntax_in_it_is_refused(system_id):
     """This value is interpolated into the collector query that selects WHICH host's numbers

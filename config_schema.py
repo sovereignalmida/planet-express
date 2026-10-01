@@ -150,7 +150,10 @@ _SYSTEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 def _validate_system_id(value: str) -> str:
-    if not _SYSTEM_ID_RE.match(value):
+    # fullmatch, not match: `$` also matches the position before a FINAL newline, so
+    # `match()` accepted "abc\n" -- an id that looks validated and names no system, leaving
+    # that host unknown forever with nothing to point at (Codex review, S3).
+    if not _SYSTEM_ID_RE.fullmatch(value):
         raise ValueError(
             "a system id must be 1-64 characters of letters, digits, '-' or '_' "
             f"(beszel's systems.id), got {value!r}")
