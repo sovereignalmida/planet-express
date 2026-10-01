@@ -132,6 +132,13 @@ def test_sensitive_fields_require_switch(field, value, tmp_path):
 @pytest.mark.parametrize(("field", "value"), [
     ("stacks_root", "/elsewhere"), ("mounts", {"other.mount": "/other"}),
     ("lan_only_domain", "internal.example"),
+    # The multi-host inventory (T48) is host wiring: which other machines PE reads, and the
+    # URLs it offers as buttons for them. Deliberately in neither EDITABLE_FIELDS nor
+    # SENSITIVE_FIELDS, so it is locked rather than dashboard-editable until someone decides
+    # otherwise on purpose -- this parametrize is what makes that a decision instead of an
+    # accident of which set a new field was left out of.
+    ("multi_host", {"hosts": [{"system_id": "ptf3tn2gzpg913i", "name": "CASA UNRAID",
+                               "link": None}], "local_system_id": None}),
 ])
 @pytest.mark.parametrize("sensitive", [False, True])
 def test_host_wiring_is_always_locked(field, value, sensitive, tmp_path):

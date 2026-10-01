@@ -15,7 +15,7 @@ The main checkout `code/planet-express` belongs to another session; do not work 
 | S0 | host prereq: beszel survives reboot + a read-only account | **handed to Chris** |
 | S1 | core types, locality predicate, staleness — pure, no I/O | not started |
 | S2 | `BeszelHubProvider` + a fixture provider built from real captured data | not started |
-| S3 | config inventory: schema, validation, secrets | not started |
+| S3 | config inventory: schema, validation, secrets | **done** on `t48/s3-config` |
 | S4 | wire into the dashboard data path, off the scan's critical path | not started |
 | S5 | real templates from Chris's design | blocked: needs S4's rough shape first |
 | S6 | ship prep: CHANGELOG, version, deploy script, INSTALL | not started |
@@ -86,6 +86,23 @@ secret (there is nothing secret in these four collections).
   so presence-dependent meaning is invisible to the diff and changeable by deleting a
   line. T47's sharpest finding.
 - Credentials from `/etc/planetexpress-dashboard.env`, root-only, never `config.yaml`.
+
+Built on `t48/s3-config`. Two judgement calls S4 inherits, neither of them in the spec:
+
+- A pin with an **empty** `hosts` list is a validation failure. The collector is never
+  queried, so the pin can never apply, and this project refuses inert settings rather
+  than ignoring them (same convention as a ceiling written for an origin that cannot
+  originate anything). A pin naming an id the inventory does **not** list is accepted and
+  is the expected spelling — requiring a match would force the local host into the
+  inventory, and every inventory entry renders.
+- `multi_host` is in neither `EDITABLE_FIELDS` nor `SENSITIVE_FIELDS`, so a dashboard
+  edit to it is locked with "edit on the host". That is the safe default for a field that
+  names other machines and supplies clickable URLs for them; pinned by a test so making
+  it dashboard-editable has to be a decision.
+
+Also: `system_id` is constrained to `[A-Za-z0-9_-]{1,64}` because S2 interpolates it into
+`filter=(system='<id>')`. A quote or `&&` there is an injection into the expression that
+chooses whose numbers get rendered, and that failure is silent.
 
 ### S4 — wiring
 - Off the monitoring scan's critical path. The icon warmer taught this three times:

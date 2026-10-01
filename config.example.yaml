@@ -103,3 +103,40 @@ links: []
 #     zone: lan
 #   - name: CASA_JELLYFIN           # network_mode: host
 #     href: https://jellyfin.casalan.com
+
+# Other hosts (v2.4, T48). The expected-host inventory: the hosts besides this one that
+# PE should show. Empty -- the default -- means PE queries no collector at all and this
+# host renders exactly as it did before the feature existed.
+#
+# This list is config rather than collector output on purpose. A host that is only known
+# from the collector's answer has no name, no link and no row the moment the collector
+# cannot answer for it, so it silently vanishes just when something is wrong. Every entry
+# here renders whatever the collector says, with live values filled in by system_id and an
+# unknown state plus a reason when they cannot be read.
+#
+# system_id is beszel's `systems.id`, which is the stable handle -- the display name is
+# editable in beszel's UI and the address can change, so neither is an identity. name is
+# what PE shows. link is that host's own UI and is optional (http:// or https:// only); a
+# host without one gets no button rather than a dead one.
+#
+# No entry says whether it is the local host. PE derives that from the container names it
+# already reads off the local docker socket, because a declared answer to a derivable
+# question is just a way for the config to be wrong. local_system_id is the single override
+# for an install where derivation cannot decide; a pin that contradicts a successful
+# derivation is refused when the config is applied.
+#
+# The collector's credentials are NOT here. BESZEL_USER and BESZEL_PASSWORD go in
+# /etc/planetexpress-dashboard.env, root-only, like the other dashboard-only values.
+multi_host:
+  hosts: []
+# multi_host:
+#   hosts:
+#     - system_id: ptf3tn2gzpg913i
+#       name: CASA UNRAID
+#       link: https://unraid.casalan.com
+#     - system_id: vw53pk01zei80wt
+#       name: CASA MAC MINI
+#     - system_id: 7y4fosy0ebhtk9x        # no containers: not a docker host
+#       name: CASA SOLAR ASSISTANT
+#       link: http://192.168.1.154
+#   local_system_id: n7n7ppta55karj9      # only if derivation cannot decide
