@@ -155,6 +155,59 @@ and never across a shared network namespace. Treat that as hardening, not a guar
 compose file you approve decides what a container runs, so only approve compose files you
 would trust with the key.
 
+## Other hosts through beszel
+
+Planet Express can read an existing beszel hub's PocketBase API over HTTP to show other
+hosts. beszel continues collecting; its own UI becomes something you no longer need to
+visit. Nothing changes on the monitored hosts or their agents.
+
+First, make beszel reliable enough to depend on: add `restart: unless-stopped` to both the
+`beszel` and `beszel-agent` services in their compose file. Those lines commonly ship
+commented out, which is acceptable while beszel is an occasional dashboard but means neither
+service survives a reboot.
+
+Create a beszel user with the `readonly` role, then add that user to **every** system Planet
+Express should see. This is a separate, essential step: the systems list rule is
+`@request.auth.id != "" && users.id ?= @request.auth.id`, so an account sees only systems
+that explicitly list it. A user assigned to no systems authenticates successfully and gets
+HTTP 200 with an empty list, which otherwise looks exactly like a fleet with no hosts. beszel's
+own `admin` role is not a PocketBase superuser: the `users` collection limits ordinary accounts
+to listing themselves. Use the superuser identity from the `/_/` console to grant the user
+access across systems.
+
+Put that account in `/etc/planetexpress-dashboard.env` (root-owned, read by
+`casa-dashboard.service`), then restart the dashboard as in [Container widget
+keys](#container-widget-keys):
+
+```sh
+BESZEL_USER=...
+BESZEL_PASSWORD=...
+```
+
+As with widget keys, these credentials never belong in `config.yaml` and never reach the
+browser.
+
+Declare the hosts PE should render in `config.yaml`:
+
+```yaml
+multi_host:
+  hosts:
+    - system_id: ptf3tn2gzpg913i
+      name: CASA UNRAID
+      link: https://unraid.casalan.com
+  local_system_id: n7n7ppta55karj9  # optional pin, only if derivation cannot decide
+```
+
+`system_id` is beszel's stable `systems.id`: the name is editable in beszel's UI and addresses
+change, so neither identifies a host. `name` is PE's display name and `link` is that host's own
+UI (omit it when there is no UI to link to). An empty `hosts` list disables multi-host entirely:
+PE does not query the collector at all.
+
+There is deliberately no per-host “this is local” flag. PE compares each system's reported
+container names with its own Docker socket to derive which system is local; asking for a
+declared answer would only create a configuration value that can be wrong. Use the one optional
+`local_system_id` pin only where that derivation cannot decide.
+
 ## What this does not cover
 
 - **No authentication on the web dashboard.** It's read-only and meant for a LAN-trust
