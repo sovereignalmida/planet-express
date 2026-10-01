@@ -13,12 +13,15 @@ connection direction is the opposite of what it looks like.
 
 beszel is already deployed and already watching four hosts:
 
-| name                 | address       | agent  | containers reported |
-|----------------------|---------------|--------|---------------------|
-| casamediaserver      | 192.168.1.94  | 0.20.0 | 85                  |
-| CASA UNRAID          | 192.168.1.171 | 0.17.0 | 5                   |
-| CASA MAC MINI        | 192.168.1.79  | 0.20.0 | 6                   |
-| CASA SOLAR ASSISTANT | 192.168.1.154 | 0.20.0 | 0 (stats only)      |
+| system id         | name                 | address       | agent  | containers reported |
+|-------------------|----------------------|---------------|--------|---------------------|
+| `n7n7ppta55karj9` | casamediaserver      | 192.168.1.94  | 0.20.0 | 85 — **this host**  |
+| `ptf3tn2gzpg913i` | CASA UNRAID          | 192.168.1.171 | 0.17.0 | 5                   |
+| `vw53pk01zei80wt` | CASA MAC MINI        | 192.168.1.79  | 0.20.0 | 6                   |
+| `7y4fosy0ebhtk9x` | CASA SOLAR ASSISTANT | 192.168.1.154 | 0.20.0 | 0 (stats only)      |
+
+Those ids are `systems.id` and are the stable handle. The name is editable in
+beszel's UI and the address can change, so neither is an identity.
 
 The hub runs in the `services` stack on :8090, behind traefik at
 `beszel.casalan.com`. The local agent runs `network_mode: host` with
@@ -93,6 +96,27 @@ answer is rendered as unknown, not dropped from the list. This is the
 project: an empty container list, unreadable labels, cancelled downloads, and
 containers that were simply not seen.
 
+**Which means the host list is configuration, not collector output.** Stating the
+rule above is not enough to get it: if the only source of host identity is the
+collector's answer, then a host absent from that answer has no name, no link and no
+row, and it silently disappears — which is the bug, not the fix. A collector that
+is down takes the whole list with it, and a dashboard restart loses even the memory
+that the host existed.
+
+So PE carries an **expected-host inventory** in config: for each host, the beszel
+system id (stable, `systems.id`), a display name, the URL of that host's own UI,
+and whether it is the local host. PE renders that inventory. Live values are looked
+up per host by system id and filled in; a host the collector does not answer for
+renders from the inventory with its state as unknown and the reason shown. The
+inventory is also the only source of the outbound link — beszel stores no link, and
+a link is exactly the field we would not want a remote host to be able to set.
+
+A host the collector reports that the inventory does not list is surfaced, not
+hidden: a new agent appearing should be visible rather than silently ignored. It
+renders with its collector-supplied name and no link, flagged as unconfigured.
+Names from the collector are display-only text and get the same treatment as any
+other remote string.
+
 **beszel being down is the whole-fleet unreachable case, not an error page.** PE
 renders every host as unknown with the reason, and the local host keeps rendering
 from the local docker socket, which does not depend on beszel at all.
@@ -108,9 +132,18 @@ from the local docker socket, which does not depend on beszel at all.
   be added to each system's `users` relation. Credentials go in
   `/etc/planetexpress-dashboard.env`, root-only, like every other secret.
 - Remote hosts surfaced as their own entries, each with a link to that host's own
-  UI, carrying stats and container list but no controls.
+  UI from the inventory, carrying stats and container list but no controls.
 - The local host keeps its existing behaviour untouched. It reads the docker
   socket directly and must not start depending on beszel.
+
+  **And it must not appear twice.** The hub's own system list includes
+  `casamediaserver` at 192.168.1.94, which is this machine — the same host PE
+  already renders from the docker socket with working controls. Taking every
+  `list_hosts()` result as a remote entry shows this host twice: once controllable
+  and once as read-only remote data, with two sets of numbers collected different
+  ways that will not agree. The inventory's local flag marks that system id, and it
+  is excluded from remote entries. Matching on name or address instead would be
+  wrong: the name is editable in beszel's UI and the address can change.
 
 ## What it must not do
 
