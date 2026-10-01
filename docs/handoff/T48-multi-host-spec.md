@@ -218,20 +218,36 @@ relation, which is a step beyond creating it.
 `status`, `updated`. `status` is one of up/down/paused/pending. `updated` is the
 staleness input.
 
-**`system_details`** — hardware, and all of it named. `hostname`, `cores`,
-`threads`, `arch`, `kernel`, `cpu` (model string), `memory`, `os_name`, `podman`.
-This is what a host card shows.
+**`system_details`** — hardware, and all of it named. `system` (the relation),
+`hostname`, `cores`, `threads`, `arch`, `kernel`, `cpu` (model string), `memory`,
+`os_name`, `podman`. One row per system, verified 1:1 across all four. This is what
+a host card shows.
 
-**`system_stats`** — the time series. A `stats` JSON blob plus a `type` column that
-buckets it. Buckets present: `1m`, `10m`, `20m`, `120m`, `480m`. PE reads the newest
-`1m` row per system for current values. Note the `1m` bucket only retains about 85
-minutes; the longer buckets are history and phase one does not need them.
+**`system_stats`** — the time series. `system` (the relation), a `stats` JSON blob,
+and a `type` column that buckets it. Buckets present: `1m`, `10m`, `20m`, `120m`,
+`480m`. PE reads the newest `1m` row **for that system**. The `1m` bucket retains
+about 85 minutes; the longer buckets are history and phase one does not need them.
 
-**`containers`** — `name`, `image`, `status`, `health`, `cpu`, `memory`, `net`,
-`ports`, `updatable`, `system`. No labels, which is why remote labels cannot reach
-the icon path.
+**`containers`** — `system` (the relation), `name`, `image`, `status`, `health`,
+`cpu`, `memory`, `net`, `ports`, `updatable`. No labels, which is why remote labels
+cannot reach the icon path.
 
-`?expand=system` works and `perPage=500` is accepted.
+### Every per-system read is filtered and sorted explicitly
+
+Each of the three child collections carries a `system` relation, and a read that
+omits it is not merely incomplete — it silently attaches the wrong host's data.
+"The newest `1m` row" without a filter returns the newest row in the *fleet*. At
+the time of writing that row belongs to CASA MAC MINI, so an unfiltered read would
+paint the Mac Mini's CPU, memory and disk onto whichever card was being rendered,
+with no error anywhere.
+
+    GET /api/collections/system_details/records?filter=(system='<id>')&perPage=1
+    GET /api/collections/system_stats/records?filter=(system='<id>'%26%26type='1m')&sort=-created&perPage=1
+    GET /api/collections/containers/records?filter=(system='<id>')&perPage=500
+
+The `sort=-created` is required, not a default: without it the ordering is
+unspecified and "newest" is whatever the server returns first. `?expand=system`
+works and `perPage=500` is accepted.
 
 ### Decoded stats keys, verified against the host
 
