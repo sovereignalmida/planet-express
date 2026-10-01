@@ -29,7 +29,7 @@ def seal(path: Path) -> str:
 
 
 def lines(css: str) -> Counter:
-    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     return Counter(re.sub(r"\s+", " ", l).strip() for l in css.splitlines() if l.strip())
 
 
