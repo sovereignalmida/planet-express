@@ -56,7 +56,7 @@
     if (scanning()) pollWhileScanning();
     else scanPollTries = 0;             // a finished scan gives the next one a full budget
 
-    document.querySelectorAll(".tab").forEach(function (btn) {
+    document.querySelectorAll(".tab[data-tab]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         setActiveTab(btn.dataset.tab);
         window.location.hash = btn.dataset.tab;

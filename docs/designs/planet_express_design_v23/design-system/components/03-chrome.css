@@ -158,8 +158,15 @@ body {
 /* The 54px single row only fits eight tabs plus the status line and two buttons on a wide
    screen. Below that the bar wraps to two rows and the tab strip scrolls sideways, rather
    than pushing navigation off the right edge -- the old header wrapped at 640px and losing
-   that would have made the dashboard unusable on a phone. */
-@media (max-width: 1180px) {
+   that would have made the dashboard unusable on a phone.
+
+   1560, not 1180, and the old number was already too small. Measured with the nav rendered:
+   the single-row topbar needs 1536px for nine tabs and needed 1465px for eight, so every
+   viewport between 1181 and 1465 was clipping the right-hand controls before the Hosts tab
+   existed -- LOG goes off the edge first, which is why it was easy to miss. Wrapping is the
+   graceful outcome and overflowing is not, so the breakpoint sits above the widest the row
+   actually needs. */
+@media (max-width: 1560px) {
   .topbar {
     height: auto; min-height: 54px; flex-wrap: wrap; row-gap: 8px; padding: 8px 14px;
   }
