@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <title>Planet Express — Dashboard</title>
+  <link rel="stylesheet" href="../design-system/styles.css">
+</helmet>
+<div class="scanline" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+
+<sc-if value="{{ isDash }}" hint-placeholder-val="{{ true }}">
+<div class="{{ shellClass }}">
+  <div id="dashboard-live">
+  <header class="topbar">
+    <img class="header-logo" src="../assets/logo.png" alt="Planet Express">
+    <div class="header-brand">
+      <span class="wordmark">PLANET EXPRESS</span>
+      <span class="tagline">casalan.com · ship computer</span>
+    </div>
+    <nav class="tabs">
+      <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="8">
+        <button class="{{ t.cls }}" type="button" onClick="{{ t.go }}">{{ t.label }}</button>
+      </sc-for>
+    </nav>
+    <div class="topbar-spacer"></div>
+    <div class="header-status">
+      <span class="led-dot status-warning"></span>
+      <span>pipeline idle · scanned 4 min ago</span>
+    </div>
+    <span class="scan-group"><button class="refresh-btn scan-btn" type="button">SCAN ✈</button></span>
+    <form class="pe-logout"><button class="refresh-btn logout-btn" type="button">LOG OUT</button></form>
+  </header>
+
+  <div class="body-grid">
+    <main class="main-col">
+
+      <div class="{{ panelCls.overview }}" data-screen-label="Overview">
+        <section class="overview-tiles" aria-label="System summary">
+          <div class="overview-tile warn">
+            <span class="overview-tile-head"><span>FLEET</span><span>{{ fleet.note }}</span></span>
+            <span class="overview-tile-line"><span class="overview-tile-hero">{{ fleet.up }}</span><span class="overview-tile-sub">/ {{ fleet.total }} running</span></span>
+            <span class="overview-fleet-dots">
+              <sc-for list="{{ fleet.cells }}" as="c" hint-placeholder-count="40"><span class="overview-dot {{ c }}"></span></sc-for>
+            </span>
+          </div>
+          <button class="overview-tile overview-hull-tile high" type="button" onClick="{{ go.actions }}">
+            <span class="overview-tile-head"><span>HULL</span><span>2 open</span></span>
+            <span class="overview-tile-hero">2</span>
+            <span class="overview-hull-pills"><span>0 CRIT</span><span>2 HIGH</span><span>1 PLANS</span></span>
+          </button>
+          <button class="overview-tile ok" type="button" onClick="{{ go.backups }}">
+            <span class="overview-tile-head"><span>BACKUPS</span><span>weekly</span></span>
+            <span class="overview-tile-line"><span class="overview-tile-hero">2d</span><span class="overview-tile-sub">since snapshot</span></span>
+            <span class="overview-tile-detail">next Sun 03:00 · 3 certs · soonest 9d</span>
+          </button>
+          <button class="overview-tile ok" type="button" onClick="{{ go.network }}">
+            <span class="overview-tile-head"><span>NETWORK</span><span>traefik</span></span>
+            <span class="overview-tile-line"><span class="overview-tile-hero">{{ net.routers }}</span><span class="overview-tile-sub">routers · {{ net.down }} down</span></span>
+            <span class="overview-tile-detail">AdGuard 18.4% blocked · 11ms</span>
+          </button>
+          <div class="overview-tile ok">
+            <span class="overview-tile-head"><span>SYSTEM</span><span>up 23d</span></span>
+            <span class="overview-tile-line"><span class="overview-tile-hero">1.42</span><span class="overview-tile-sub">load · 1.31 · 1.18</span></span>
+            <span class="overview-memory"><span>MEM</span><span class="overview-memory-track"><span style="width: 58%"></span></span><span>37.1G / 64G</span></span>
+          </div>
+        </section>
+
+        <div class="overview-control-grid">
+          <section class="panel pe-services-panel overview-services is-density-dots" aria-label="Services">
+            <div class="pe-services-head">
+              <h2>SERVICES</h2>
+              <span class="pe-services-summary">{{ svc.summary }}</span>
+              <span class="pe-services-spacer"></span>
+              <span class="overview-attention">ATTENTION {{ svc.attention }}</span>
+            </div>
+            <div class="pe-stack-grid">
+              <sc-for list="{{ stacks }}" as="s" hint-placeholder-count="15">
+                <article class="pe-card pe-stack-card {{ s.level }}" onClick="{{ s.open }}">
+                  <div class="pe-stack-head">
+                    <button type="button" class="pe-stack-name pe-stack-open">{{ s.name }}</button><span class="pe-stack-spacer"></span>
+                    <sc-if value="{{ s.showLinks }}" hint-placeholder-val="{{ false }}"><span class="pe-tile-links">↗ {{ s.launchable }}</span></sc-if>
+                    <span class="pe-stack-tally {{ s.level }}">{{ s.up }}/{{ s.total }}</span>
+                  </div>
+                  <div class="pe-service-dots">
+                    <sc-for list="{{ s.members }}" as="m" hint-placeholder-count="4"><a class="pe-dot-svc {{ m.level }}" title="{{ m.service }}" onClick="{{ m.openDot }}"></a></sc-for>
+                  </div>
+                </article>
+              </sc-for>
+            </div>
+          </section>
+
+          <div class="overview-side">
+            <section class="panel overview-disk">
+              <div class="overview-panel-head"><h3>DISK</h3><span>{{ diskCount }} mounts · fullest first</span></div>
+              <sc-for list="{{ disks }}" as="d" hint-placeholder-count="5">
+                <div class="overview-disk-row">
+                  <span>{{ d.mount }}</span>
+                  <span class="overview-disk-track"><span class="{{ d.level }}" style="width: {{ d.w }}"></span></span>
+                  <span class="{{ d.level }}">{{ d.pct }}</span>
+                </div>
+              </sc-for>
+            </section>
+            <section class="panel overview-errors">
+              <div class="overview-panel-head"><h3>RECENT ERRORS</h3><span></span></div>
+              <p class="errors-diagnosis">immich-machine-learning was OOM-killed twice; the rest is noise.</p>
+              <div class="errors-terminal">
+                <sc-for list="{{ errors }}" as="e" hint-placeholder-count="4">
+                  <div class="errors-terminal-line"><span class="ts">{{ e.ts }}</span> <span class="host">casa</span> <span class="proc">{{ e.proc }}</span> <span class="msg">{{ e.msg }}</span></div>
+                </sc-for>
+              </div>
+            </section>
+            <aside class="overview-professor">
+              <img src="../assets/characters/futurama/farnsworth.png" alt="Professor Farnsworth">
+              <p>Good news, everyone! Thirty-seven containers are fine. The other one is merely dying.</p>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <div class="{{ panelCls.backups }}" data-screen-label="Backups">
+        <section class="panel alarm-banner verdict-strip ok">
+          <div class="alarm-orb">✓</div>
+          <div class="alarm-text">
+            <p class="alarm-title">BACKUPS CURRENT</p>
+            <p class="alarm-sub">Weekly snapshot 2 days old, next run Sunday 03:00. One certificate needs renewing within 9 days.</p>
+          </div>
+          <div class="alarm-chips">
+            <span class="alarm-chip ok">1/1 JOBS OK</span>
+            <span class="alarm-chip ok">1/1 TIMERS ARMED</span>
+            <span class="alarm-chip info">3 CERTS</span>
+          </div>
+        </section>
+        <div class="backups-split">
+          <section class="panel">
+            <div class="panel-head-row">
+              <h3>COLD STORAGE · BORG</h3>
+              <span class="status-chip ok">COLLECTED</span>
+              <div class="tabs-spacer"></div>
+              <span class="panel-head-summary">daily disabled on purpose</span>
+            </div>
+            <div class="cryo-grid">
+              <div class="cryo-pod fresh">
+                <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">WEEKLY</span><span class="cryo-cadence">every 7d</span><span class="cryo-badge">FRESH</span></div>
+                <div class="cryo-main">
+                  <div class="cryo-hero"><span class="cryo-hero-num">2d 6h</span><span class="cryo-hero-label">SINCE LAST SNAPSHOT</span></div>
+                  <div class="cryo-window-track"><div class="cryo-window-fill" style="width: 32%;"></div></div>
+                  <div class="cryo-window-caption">32% of the 7d window used</div>
+                </div>
+                <div class="cryo-side">
+                  <div class="cryo-stats">
+                    <div class="cryo-stat-row"><span>NEXT RUN</span><span>in 4d 18h</span></div>
+                    <div class="cryo-stat-row"><span>RESULT</span><span>success · exit 0</span></div>
+                    <div class="cryo-stat-row"><span>LAST RUN</span><span>Sun 03:00 · 41m</span></div>
+                  </div>
+                  <div class="cryo-footnote">unit idle between runs (oneshot) — normal</div>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head-row">
+              <h3>CERTIFICATE VAULT</h3>
+              <span class="status-chip ok">COLLECTED</span>
+              <span class="panel-head-summary">3 collected</span>
+              <span class="cert-expiring-chip">2 need attention</span>
+            </div>
+            <div class="cert-grid">
+              <sc-for list="{{ certs }}" as="c" hint-placeholder-count="3">
+                <div class="cert-card {{ c.tier }}">
+                  <div class="cert-card-head"><span class="cert-led"></span><span class="cert-domain">{{ c.domain }}</span><span class="cert-badge">{{ c.badge }}</span></div>
+                  <div class="cert-countdown">{{ c.days }}d<span class="cert-countdown-label">UNTIL EXPIRY</span></div>
+                  <div class="cert-bar-track"><div class="cert-bar-fill" style="width: {{ c.w }};"></div></div>
+                  <div class="cert-stats">
+                    <div class="cert-stat-row"><span>SOURCE FILE</span><span>{{ c.file }}</span></div>
+                    <div class="cert-stat-row"><span>ISSUER</span><span>{{ c.issuer }}</span></div>
+                    <div class="cert-stat-row"><span>{{ c.sanCount }} SANs</span><span>{{ c.sans }}</span></div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div class="{{ panelCls.network }}" data-screen-label="Network">
+        <section class="panel net-adguard">
+          <div class="net-adguard-id"><h3>ADGUARD</h3><span class="status-chip ok">LIVE</span></div>
+          <div class="net-stat"><span class="net-stat-label">QUERIES · 24H</span><span class="net-stat-value">142,816</span></div>
+          <div class="net-stat"><span class="net-stat-label">BLOCKED</span><span class="net-stat-value ok">26,278 <small>18.4%</small></span></div>
+          <div class="net-stat"><span class="net-stat-label">AVG RESPONSE</span><span class="net-stat-value">11<small>ms</small></span></div>
+          <div class="net-split">
+            <div class="net-split-labels"><span>ALLOWED</span><span>BLOCKED</span></div>
+            <div class="net-split-bar"><span class="allowed" style="width: 81.6%"></span><span class="blocked"></span></div>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="net-head-row">
+            <h3>ROUTING MATRIX</h3>
+            <span class="net-count">{{ net.routers }} routers · {{ net.names }} names · {{ net.merged }} LAN twins merged · {{ net.down }} down</span>
+            <div class="tabs-spacer"></div>
+            <div class="net-legend">
+              <span>docker = untagged</span>
+              <span><b class="net-tag file">FILE</b> file provider</span>
+              <span><b class="net-tag ext">EXT</b> external</span>
+              <span><b class="net-tag lan">+LAN</b> LAN twin merged</span>
+            </div>
+            <input class="net-filter" placeholder="filter routers…" autocomplete="off">
+          </div>
+          <sc-for list="{{ zones }}" as="z" hint-placeholder-count="3">
+            <div class="net-zone">
+              <div class="net-zone-label"><span class="net-zone-name">{{ z.name }}</span><span class="net-zone-count">{{ z.count }} routers</span></div>
+              <div class="net-pills">
+                <sc-for list="{{ z.pills }}" as="p" hint-placeholder-count="8">
+                  <a class="{{ p.cls }}" title="{{ p.host }}"><span class="net-pill-led"></span><sc-if value="{{ p.showIcon }}" hint-placeholder-val="{{ false }}"><img class="pe-icon-bare xs" src="{{ p.icon }}" alt="" width="13" height="13"></sc-if>{{ p.name }}<sc-if value="{{ p.tag }}" hint-placeholder-val="{{ false }}"><b class="net-tag {{ p.tagCls }}">{{ p.tag }}</b></sc-if><sc-if value="{{ p.lan }}" hint-placeholder-val="{{ false }}"><b class="net-tag lan">+LAN</b></sc-if><sc-if value="{{ p.down }}" hint-placeholder-val="{{ false }}"><b class="net-tag down">DOWN</b></sc-if></a>
+                </sc-for>
+              </div>
+            </div>
+          </sc-for>
+        </section>
+      </div>
+
+    </main>
+  </div>
+  </div>
+
+  <div class="{{ dockCls.actions }}" data-screen-label="Actions">
+    <div class="actions-split">
+      <div class="actions-col">
+        <section class="panel">
+          <div class="panel-head-row"><h2>FLIGHT AUTHORISATION</h2><span class="panel-head-note">typed actions</span></div>
+          <div class="approval-empty">
+            <img src="../assets/characters/futurama/hermes.png" alt="">
+            <div class="approval-empty-copy">
+              <div class="approval-empty-title">NOTHING TO AUTHORISE</div>
+              <div class="approval-empty-sub">Hermes has no plan waiting for a decision.</div>
+            </div>
+          </div>
+          <div class="approval-recent-label">RECENT DECISIONS</div>
+          <sc-for list="{{ recent }}" as="r" hint-placeholder-count="2">
+            <div class="approval-recent {{ r.level }}">
+              <span class="approval-recent-led"></span>
+              <div class="approval-recent-main"><div class="approval-recent-title">{{ r.title }}</div><div class="approval-recent-meta">{{ r.meta }}</div></div>
+              <span class="approval-recent-badge">{{ r.badge }}</span>
+            </div>
+          </sc-for>
+        </section>
+      </div>
+      <div class="actions-col">
+        <section class="panel">
+          <div class="panel-head-row">
+            <h2>INCIDENT CONSOLE</h2><span class="panel-head-note">reconciled evidence</span>
+            <div class="tabs-spacer"></div>
+            <div class="incident-filter"><button class="incident-filter-btn is-active" type="button">OPEN</button><button class="incident-filter-btn" type="button">RESOLVED</button></div>
+          </div>
+          <div class="incident-cards">
+            <sc-for list="{{ incidents }}" as="i" hint-placeholder-count="2">
+              <div class="incident-entry">
+                <div class="incident-row">
+                  <span class="incident-severity {{ i.sevCls }}">{{ i.sev }}</span>
+                  <div class="incident-row-main"><div class="incident-row-title">{{ i.title }}</div><div class="incident-row-where">{{ i.where }}</div></div>
+                  <span class="incident-row-when">{{ i.when }}</span><span class="incident-row-tick"></span>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+        <section class="panel">
+          <h3 class="action-hull-title">HULL DIAGNOSTICS</h3>
+          <div class="alarm-banner high">
+            <div class="alarm-orb">⚠</div>
+            <div class="alarm-text"><p class="alarm-title">HIGH ALERT</p><p class="alarm-sub">2 high-severity findings need attention</p></div>
+            <div class="alarm-chips">
+              <span class="alarm-chip crit zero">CRIT 0</span><span class="alarm-chip high">HIGH 2</span><span class="alarm-chip med">MED 1</span><span class="alarm-chip low">LOW 3</span>
+            </div>
+          </div>
+          <div class="hull-cards">
+            <sc-for list="{{ findings }}" as="f" hint-placeholder-count="3">
+              <div class="hull-card {{ f.sevCls }}"><span class="hull-dot"></span><div class="hull-card-body">
+                <span class="hull-card-sev">{{ f.sev }}</span><div class="hull-card-resource">{{ f.resource }}</div><p class="hull-card-desc">{{ f.desc }}</p>
+              </div></div>
+            </sc-for>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="{{ dockCls.history }}" data-screen-label="History">
+    <div class="history-split">
+      <section class="history-runs">
+        <div class="panel-head-row"><h3>DEPLOYMENT MANIFEST</h3><span class="deploy-summary-chip">6 runs · 1 rolled back</span></div>
+        <div class="deploy-runs">
+          <sc-for list="{{ runs }}" as="r" hint-placeholder-count="6">
+            <button type="button" class="{{ r.cls }}" onClick="{{ r.pick }}">
+              <div class="deploy-run-head"><span class="deploy-run-led"></span><span class="deploy-run-stack">{{ r.stack }}</span><span class="pe-spacer"></span><span class="deploy-run-date">{{ r.date }}</span></div>
+              <div class="deploy-run-figures"><span class="deploy-run-n">{{ r.n }}</span><span class="deploy-run-n-label">{{ r.label }}</span><span class="pe-spacer"></span><span class="deploy-run-span">{{ r.span }}</span></div>
+              <div class="deploy-run-bars"><sc-for list="{{ r.bars }}" as="b" hint-placeholder-count="4"><span class="deploy-run-bar {{ b }}"></span></sc-for></div>
+            </button>
+          </sc-for>
+        </div>
+      </section>
+      <aside class="history-detail">
+        <div class="run-detail-head"><span class="run-detail-eyebrow">CANARY RUN</span><span class="pe-spacer"></span><span class="run-detail-badge {{ run.badgeCls }}">{{ run.badge }}</span></div>
+        <div><div class="run-detail-title">{{ run.stack }}</div><div class="run-detail-range">{{ run.date }} · {{ run.span }}</div></div>
+        <div class="run-detail-stats">
+          <div class="run-detail-well"><div class="run-detail-well-label">SERVICES</div><div class="run-detail-well-value">{{ run.total }}</div></div>
+          <div class="run-detail-well"><div class="run-detail-well-label">CLEAN</div><div class="run-detail-well-value ok">{{ run.clean }}</div></div>
+          <div class="run-detail-well"><div class="run-detail-well-label">ROLLED BACK</div><div class="run-detail-well-value {{ run.rbCls }}">{{ run.rb }}</div></div>
+        </div>
+        <div class="run-timeline">
+          <sc-for list="{{ run.rows }}" as="t" hint-placeholder-count="4">
+            <div class="run-timeline-row {{ t.cls }}"><span class="run-timeline-tick">{{ t.tick }}</span><span class="run-timeline-service">{{ t.svc }}</span><span class="run-timeline-time">{{ t.time }}</span></div>
+          </sc-for>
+        </div>
+        <div class="run-detail-note"><img src="../assets/characters/futurama/zoidberg.png" alt="">Zoidberg pulls, tests, and rolls back what bites.</div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="{{ dockCls.chat }}" data-screen-label="Chat">
+    <div class="chat-split">
+      <section class="panel chat-ask">
+        <div class="panel-head-row"><h2>ASK THE SHIP</h2><div class="tabs-spacer"></div><span class="chat-quota">7 of 20 left today</span></div>
+        <p class="chat-notice">Read-only checks. It can propose a plan, never run one.</p>
+        <form id="chat-form">
+          <textarea id="chat-question" maxlength="2000" placeholder="Why is immich slow this morning?"></textarea>
+          <button class="pe-btn chat-ask-btn" type="button">ASK ⏎</button>
+        </form>
+        <div class="chat-history-label">THIS SESSION</div>
+        <ol class="chat-history">
+          <li><button class="chat-history-row is-selected" type="button"><div class="chat-history-q">Why is immich slow this morning?</div><div class="chat-history-meta">09:12 · 4 checks · 38s</div></button></li>
+          <li><button class="chat-history-row" type="button"><div class="chat-history-q">Did the weekly borg run finish?</div><div class="chat-history-meta">08:47 · 2 checks · 11s</div></button></li>
+        </ol>
+      </section>
+      <section class="panel chat-answer">
+        <div class="chat-answer-head">
+          <img src="../assets/characters/futurama/amy.png" alt="">
+          <div class="chat-answer-heading"><h2>Why is immich slow this morning?</h2><div class="chat-answer-meta">Amy · 4 read-only checks · 38s</div></div>
+          <span class="chat-answer-badge warn">degraded</span>
+        </div>
+        <div class="chat-verdict warn">immich-machine-learning was OOM-killed twice overnight and is restarting. Thumbnails and search queue behind it; the web app itself is fine.</div>
+        <div class="chat-prose">
+          <p>The container hit its 4 GB memory limit at 02:14 and 06:51 while re-indexing faces after last night's import of 3,200 photos. Each restart drops the job queue back to the start.</p>
+          <p>Raising the limit to 6 GB, or pausing face detection until the import settles, would stop the loop. Either needs a plan you approve.</p>
+        </div>
+        <div class="chat-evidence-section">
+          <div class="chat-evidence-label">EVIDENCE</div>
+          <ul class="chat-evidence-grid">
+            <sc-for list="{{ evidence }}" as="e" hint-placeholder-count="4">
+              <li class="chat-evidence-card {{ e.cls }}"><div class="chat-evidence-head"><span class="chat-evidence-tick">{{ e.tick }}</span><span class="chat-evidence-name">{{ e.name }}</span><span class="pe-spacer"></span><span class="chat-evidence-exit">{{ e.exit }}</span></div><div class="chat-evidence-result">{{ e.result }}</div></li>
+            </sc-for>
+          </ul>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="{{ dockCls.config }}" data-screen-label="Config">
+    <div class="config-split">
+      <div class="config-rules">
+        <div class="pe-verdict ok">
+          <div class="pe-verdict-orb" aria-hidden="true">✓</div>
+          <div class="pe-verdict-text"><h2>CONFIG LIVE · MATCHES DISK</h2><p>Core loaded this file 23 days ago.</p></div>
+        </div>
+        <section class="pe-card config-policy">
+          <div class="pe-card-head"><h3 class="pe-card-title sm">WHAT MAY CHANGE HERE</h3></div>
+          <p class="config-path"><code>/etc/planetexpress/config.yaml</code></p>
+          <div class="config-field-groups">
+            <sc-for list="{{ fieldGroups }}" as="g" hint-placeholder-count="3">
+              <div class="config-field-group"><div class="config-group-label">{{ g.label }}</div>
+                <div class="config-result-chips"><sc-for list="{{ g.keys }}" as="k" hint-placeholder-count="3"><span class="config-chip {{ g.cls }}">{{ k }}</span></sc-for></div>
+              </div>
+            </sc-for>
+          </div>
+        </section>
+      </div>
+      <section class="pe-card config-editor-card">
+        <div class="pe-card-head config-editor-head"><h3 class="pe-card-title sm">CONFIG.YAML</h3><span class="config-dirty">SAVED</span><span class="pe-spacer"></span><span class="config-line-count">{{ configCount }} lines</span></div>
+        <div class="config-editor-shell">
+          <div class="config-gutter"><sc-for list="{{ configLines }}" as="l" hint-placeholder-count="16"><div class="config-gutter-line">{{ l.n }}</div></sc-for></div>
+          <div class="config-tints"><sc-for list="{{ configLines }}" as="l" hint-placeholder-count="16"><div class="config-tint-line {{ l.cls }}"></div></sc-for></div>
+          <div id="config-editor"><sc-for list="{{ configLines }}" as="l" hint-placeholder-count="16"><div>{{ l.text }}</div></sc-for></div>
+        </div>
+        <div class="config-actions"><button type="button" class="pe-btn">CHECK</button><button type="button" class="pe-btn">REVERT</button><span class="pe-spacer"></span><button type="button" class="pe-btn warn" disabled>REVIEW CHANGES</button></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="{{ dockCls.crew }}" data-screen-label="Crew">
+    <section class="panel crew-layout">
+      <div class="crew-main">
+        <div class="crew-head"><h2>CREW</h2><span>8 aboard · who does what</span></div>
+        <div class="crew-cards">
+          <sc-for list="{{ crew }}" as="c" hint-placeholder-count="8">
+            <article class="crew-card"><img class="crew-portrait" src="{{ c.img }}" alt="{{ c.name }}"><h3>{{ c.name }}</h3><div class="crew-role">{{ c.role }}</div><p>{{ c.text }}</p></article>
+          </sc-for>
+        </div>
+      </div>
+      <aside class="computer-log">
+        <h2>SHIP'S COMPUTER LOG</h2>
+        <ul>
+          <li><span>› overview</span>Thirty-seven containers are fine. The other one is merely dying.</li>
+          <li><span>› backups</span>The weekly snapshot is two days old. Nobody panic.</li>
+          <li><span>› network</span>Twenty-eight routers, one of them on fire.</li>
+          <li><span>› actions</span>Nothing to sign. Hermes is disappointed.</li>
+        </ul>
+      </aside>
+    </section>
+  </div>
+
+  <footer><p>Planet Express — authenticated LAN dashboard · auto-refreshes every 60s · held together by good news</p></footer>
+
+  <sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+    <aside class="pe-drawer" aria-label="Stack drawer">
+      <div class="pe-drawer-head">
+        <span class="pe-drawer-led head {{ drawer.level }}"></span>
+        <div class="pe-drawer-title"><strong>{{ drawer.name }}</strong><span>{{ drawer.total }} containers · {{ drawer.launchable }} launchable · {{ drawer.up }}/{{ drawer.total }} online</span></div>
+        <button class="pe-drawer-close" type="button" onClick="{{ closeDrawer }}" aria-label="Close">×</button>
+      </div>
+      <div class="pe-drawer-filters">
+        <button type="button" class="pe-drawer-filter active">ALL {{ drawer.total }}</button>
+        <button type="button" class="pe-drawer-filter">LAUNCHABLE {{ drawer.launchable }}</button>
+        <span class="pe-drawer-spacer"></span>
+        <button type="button" class="pe-stack-act">UP</button>
+        <button type="button" class="pe-stack-act warn">DOWN</button>
+      </div>
+      <div class="pe-drawer-rows">
+        <sc-for list="{{ drawer.members }}" as="m" hint-placeholder-count="6">
+          <div class="pe-drawer-row {{ m.level }}">
+            <sc-if value="{{ showIcons }}" hint-placeholder-val="{{ true }}">
+              <span class="pe-icon sm"><sc-if value="{{ m.hasIcon }}" hint-placeholder-val="{{ true }}"><img src="{{ m.icon }}" alt="" width="28" height="28" loading="lazy"></sc-if><sc-if value="{{ m.noIcon }}" hint-placeholder-val="{{ false }}"><span class="pe-icon-mono">{{ m.mono }}</span></sc-if><span class="pe-icon-led {{ m.level }}"></span></span>
+            </sc-if>
+            <sc-if value="{{ noIcons }}" hint-placeholder-val="{{ false }}"><span class="pe-drawer-led {{ m.level }}"></span></sc-if>
+            <a class="pe-drawer-name" onClick="{{ m.openDetail }}"><span>{{ m.service }}</span><span class="pe-drawer-host {{ m.hostCls }}">{{ m.hostLabel }}</span></a>
+            <span class="pe-drawer-actions">
+              <sc-if value="{{ m.lan }}" hint-placeholder-val="{{ false }}"><a class="pe-launch primary" href="{{ m.lan }}" target="_blank" rel="noopener">LAN ↗</a></sc-if>
+              <sc-if value="{{ m.web }}" hint-placeholder-val="{{ false }}"><a class="pe-launch neutral" href="{{ m.web }}" target="_blank" rel="noopener">WEB ↗</a></sc-if>
+              <sc-if value="{{ m.widget }}" hint-placeholder-val="{{ false }}"><span class="pe-launch-widget" title="has a live widget">◉</span></sc-if>
+              <button type="button" class="pe-svc-act">RESTART</button>
+            </span>
+          </div>
+        </sc-for>
+      </div>
+      <div class="pe-drawer-foot">{{ drawerFoot }}</div>
+    </aside>
+  </sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{ isDetail }}" hint-placeholder-val="{{ false }}">
+<main class="container-detail" data-screen-label="Container detail">
+  <header>
+    <a class="refresh-btn" onClick="{{ backToOverview }}">‹ OVERVIEW</a>
+    <sc-if value="{{ showIcons }}" hint-placeholder-val="{{ true }}">
+      <span class="pe-icon lg"><sc-if value="{{ det.hasIcon }}" hint-placeholder-val="{{ true }}"><img src="{{ det.icon }}" alt="" width="40" height="40"></sc-if><sc-if value="{{ det.noIcon }}" hint-placeholder-val="{{ false }}"><span class="pe-icon-mono">{{ det.mono }}</span></sc-if></span>
+    </sc-if>
+    <div class="pe-detail-title"><h1>{{ det.service }}</h1><p>{{ det.stack }} · <span>{{ det.image }}</span></p></div>
+    <sc-if value="{{ det.showLaunch }}" hint-placeholder-val="{{ false }}">
+      <span class="container-launch"><sc-if value="{{ det.lan }}" hint-placeholder-val="{{ false }}"><a class="pe-launch primary" href="{{ det.lan }}" target="_blank" rel="noopener">OPEN ↗</a></sc-if><sc-if value="{{ det.web }}" hint-placeholder-val="{{ false }}"><a class="pe-launch neutral" href="{{ det.web }}" target="_blank" rel="noopener">WEB ↗</a></sc-if></span>
+    </sc-if>
+  </header>
+  <section class="pe-verdict {{ det.verdictCls }}">
+    <div class="pe-verdict-orb" aria-hidden="true">●</div>
+    <div class="pe-verdict-text"><h2>{{ det.verdict }}</h2></div>
+  </section>
+  <sc-if value="{{ det.hasWidget }}" hint-placeholder-val="{{ false }}">
+    <section class="pe-widget" aria-label="Live widget">
+      <div class="pe-widget-head">
+        <span class="pe-widget-led ok"></span>
+        <sc-if value="{{ showIcons }}" hint-placeholder-val="{{ true }}"><img class="pe-icon-bare md" src="{{ det.icon }}" alt=""></sc-if>
+        <span class="pe-widget-name">{{ det.widgetName }}</span><span class="pe-widget-via">via {{ det.via }} · 14s ago</span><span class="pe-widget-spacer"></span><span class="pe-widget-ro">READ-ONLY</span>
+      </div>
+      <div class="pe-widget-stats" style="--pe-widget-cols: {{ det.cols }}">
+        <sc-for list="{{ det.stats }}" as="s" hint-placeholder-count="4"><div class="pe-widget-stat"><span class="pe-widget-k">{{ s.k }}</span><strong class="pe-widget-v {{ s.level }}">{{ s.v }}</strong></div></sc-for>
+      </div>
+      <div class="pe-widget-rows">
+        <span class="pe-widget-k">{{ det.rowsLabel }}</span>
+        <sc-for list="{{ det.rows }}" as="r" hint-placeholder-count="3">
+          <div class="pe-widget-row"><span class="pe-widget-row-title">{{ r.title }}</span><span class="pe-widget-bar"><span style="width: {{ r.w }}"></span></span><span class="pe-widget-pct">{{ r.pct }}</span></div>
+        </sc-for>
+      </div>
+    </section>
+  </sc-if>
+  <section class="container-vitals" aria-label="Vitals">
+    <div class="pe-card"><h2>CPU</h2><strong class="container-hero">{{ det.cpu }}%</strong><progress max="100" value="{{ det.cpu }}"></progress></div>
+    <div class="pe-card"><h2>MEMORY</h2><strong class="container-hero">{{ det.mem }}%</strong><progress max="100" value="{{ det.mem }}"></progress></div>
+  </section>
+  <section class="pe-card"><h2>FACTS</h2><dl class="container-facts">
+    <dt>HEALTH</dt><dd>{{ det.health }}</dd>
+    <dt>RESTART POLICY</dt><dd>unless-stopped (max retries: 0)</dd>
+    <dt>RESTART COUNT</dt><dd>{{ det.restarts }}</dd>
+    <dt>PORTS</dt><dd>{{ det.ports }}</dd>
+    <dt>IMAGE</dt><dd>{{ det.image }}</dd>
+  </dl></section>
+  <section class="{{ det.logCls }}">
+    <header class="pe-logwell-head"><span class="led-dot status-{{ det.verdictCls }}"></span><h4>LOGS</h4><span>last 200 lines</span>
+      <sc-if value="{{ det.hasWidget }}" hint-placeholder-val="{{ false }}"><button class="pe-log-toggle" type="button" onClick="{{ toggleLogs }}">{{ logToggleLabel }}</button></sc-if>
+    </header>
+    <div class="pe-logwell-body">
+      <sc-for list="{{ det.logs }}" as="l" hint-placeholder-count="6"><div class="container-log-line">{{ l }}</div></sc-for>
+    </div>
+  </section>
+  <div class="container-bottom"><button class="pe-btn warn" type="button">RESTART ⟳</button></div>
+</main>
+</sc-if>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;version&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;2.1&quot;,&quot;2.2&quot;,&quot;2.3&quot;],&quot;default&quot;:&quot;2.3&quot;,&quot;tsType&quot;:&quot;'2.1'|'2.2'|'2.3'&quot;},&quot;tab&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;overview&quot;,&quot;backups&quot;,&quot;network&quot;,&quot;actions&quot;,&quot;history&quot;,&quot;chat&quot;,&quot;config&quot;,&quot;crew&quot;],&quot;default&quot;:&quot;overview&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const CDN = 'https://cdn.jsdelivr.net/gh/selfhst/icons/png/';
+const SLUG = { adguard: 'adguard-home', 'immich-server': 'immich', 'immich-ml': 'immich', 'paperless-ngx': 'paperless-ngx', 'home-assistant': 'home-assistant' };
+const NOICON = ['recyclarr', 'unpackerr', 'casa-agent', 'immich-redis', 'immich-db', 'paperless-redis', 'paperless-db'];
+// [service, host|null, level, lan?, web?, widget?]
+const RAW = [
+  ['immich', [['immich-server','photos.casalan.com','ok',1,1,1],['immich-ml',null,'crit'],['immich-db',null,'ok'],['immich-redis',null,'ok']]],
+  ['paperless', [['paperless-ngx','docs.casalan.com','warn',1,0,0],['paperless-db',null,'ok'],['paperless-redis',null,'ok']]],
+  ['media', [['sonarr','tv.casalan.com','ok',1,1,1],['radarr','movies.casalan.com','ok',1,1,1],['prowlarr','prowlarr.casalan.com','ok',1,0,1],['bazarr','bazarr.casalan.com','ok',1,0,0],['recyclarr',null,'ok'],['unpackerr',null,'ok']]],
+  ['downloads', [['sabnzbd','sab.casalan.com','ok',1,0,1],['qbittorrent','qbit.casalan.com','ok',1,0,1],['gluetun',null,'ok']]],
+  ['jellyfin', [['jellyfin','watch.casalan.com','ok',1,1,1],['jellyseerr','requests.casalan.com','ok',1,1,0]]],
+  ['traefik', [['traefik','traefik.casalan.com','ok',1,0,0],['adguard','adguard.casalan.com','ok',1,0,1]]],
+  ['home', [['home-assistant','ha.casalan.com','ok',1,1,0],['mosquitto',null,'ok'],['zigbee2mqtt','z2m.casalan.com','ok',1,0,0]]],
+  ['monitoring', [['grafana','grafana.casalan.com','ok',1,0,0],['prometheus',null,'ok'],['uptime-kuma','status.casalan.com','ok',1,1,0]]],
+  ['vault', [['vaultwarden','vault.casalan.com','ok',1,1,0]]],
+  ['books', [['audiobookshelf','books.casalan.com','ok',1,1,0],['calibre-web','read.casalan.com','ok',1,0,0]]],
+  ['kitchen', [['mealie','recipes.casalan.com','ok',1,1,0]]],
+  ['reader', [['miniflux','rss.casalan.com','ok',1,0,0],['karakeep','keep.casalan.com','ok',1,0,0]]],
+  ['sync', [['syncthing','sync.casalan.com','ok',1,0,0],['nextcloud','cloud.casalan.com','ok',1,1,0]]],
+  ['ops', [['portainer','portainer.casalan.com','ok',1,0,0],['dozzle','logs.casalan.com','ok',1,0,0],['watchtower',null,'ok']]],
+  ['planetexpress', [['casa-agent',null,'ok']]],
+];
+const RANK = { crit: 0, warn: 1, ok: 2 };
+const WIDGETS = {
+  sonarr: { name: 'SONARR', via: 'sonarr API v3', stats: [{k:'SERIES',v:'214'},{k:'MISSING',v:'7',level:'warn'},{k:'QUEUE',v:'3'},{k:'NEXT AIRING',v:'Thu'}], rowsLabel: 'QUEUE', rows: [['Severance S02E08',72],['The Bear S04E02',31],['Andor S02E11',8]] },
+  radarr: { name: 'RADARR', via: 'radarr API v3', stats: [{k:'MOVIES',v:'1,148'},{k:'MISSING',v:'12',level:'warn'},{k:'QUEUE',v:'1'}], rowsLabel: 'QUEUE', rows: [['Dune: Part Two',54]] },
+  jellyfin: { name: 'JELLYFIN', via: 'jellyfin API', stats: [{k:'STREAMING',v:'2'},{k:'TRANSCODING',v:'1',level:'warn'},{k:'LIBRARY',v:'9.4k'}], rowsLabel: 'NOW PLAYING', rows: [['Leela · The Expanse S3E4',41],['Fry · Futurama S7E1',87]] },
+  'immich-server': { name: 'IMMICH', via: 'immich API', stats: [{k:'PHOTOS',v:'61.2k'},{k:'VIDEOS',v:'3.1k'},{k:'JOBS',v:'3,204',level:'warn'}], rowsLabel: 'JOBS', rows: [['Face detection',12],['Thumbnails',64]] },
+  adguard: { name: 'ADGUARD', via: 'adguard API', stats: [{k:'QUERIES',v:'142.8k'},{k:'BLOCKED',v:'18.4%'},{k:'AVG',v:'11ms'}], rowsLabel: 'TOP BLOCKED', rows: [['doubleclick.net',22],['app-measurement.com',14]] },
+  prowlarr: { name: 'PROWLARR', via: 'prowlarr API v1', stats: [{k:'INDEXERS',v:'9'},{k:'FAILING',v:'0',level:'ok'},{k:'GRABS 24H',v:'31'}], rowsLabel: 'INDEXERS', rows: [['NZBgeek',100],['DrunkenSlug',96]] },
+  sabnzbd: { name: 'SABNZBD', via: 'sabnzbd API', stats: [{k:'SPEED',v:'41 MB/s'},{k:'QUEUE',v:'2'},{k:'LEFT',v:'6.2 GB'}], rowsLabel: 'QUEUE', rows: [['Severance.S02E08.2160p',72],['Andor.S02E11.1080p',8]] },
+  qbittorrent: { name: 'QBITTORRENT', via: 'qbittorrent WebUI API', stats: [{k:'DOWN',v:'8.1 MB/s'},{k:'UP',v:'2.4 MB/s'},{k:'ACTIVE',v:'4'}], rowsLabel: 'ACTIVE', rows: [['debian-13.1-amd64.iso',93]] },
+};
+const icon = s => CDN + (SLUG[s] || s) + '.png';
+const TAB_LIST = [['overview','Overview'],['backups','Backups'],['network','Network'],['actions','Actions'],['history','History'],['chat','Chat'],['config','Config'],['crew','Crew']];
+const DOCKS = ['actions','history','chat','config','crew'];
+
+class Component extends DCLogic {
+  state = { tab: this.props.tab ?? 'overview', drawer: null, detail: null, run: 0, logsOpen: false };
+
+  member(stack, [service, host, level, lan, web, widget], links) {
+    const noIcon = NOICON.includes(service);
+    return {
+      service, level, host, stack,
+      lan: links && lan ? 'https://' + host : '', web: links && web ? 'https://' + host.replace('casalan.com', 'casalan.net') : '',
+      widget: links && !!widget, launchable: !!lan,
+      hostLabel: host || '— no route', hostCls: host ? '' : 'none',
+      icon: icon(service), hasIcon: !noIcon, noIcon, mono: service.replace(/[^a-z]/g, '').slice(0, 2).toUpperCase(),
+      openDot: e => { e.stopPropagation(); this.setState({ detail: { stack, service }, drawer: null }); },
+      openDetail: () => this.setState({ detail: { stack, service }, drawer: null }),
+    };
+  }
+
+  renderVals() {
+    const v = String(this.props.version ?? '2.3');
+    const links = v !== '2.1', icons = v === '2.3';
+    const tab = this.state.tab;
+    const stacks = RAW.map(([name, ms]) => {
+      const members = ms.map(m => this.member(name, m, links));
+      const up = members.filter(m => m.level !== 'crit').length;
+      const level = members.reduce((a, m) => RANK[m.level] < RANK[a] ? m.level : a, 'ok');
+      const launchable = members.filter(m => m.launchable).length;
+      return { name, members, up, total: members.length, level, launchable, showLinks: links && launchable > 0,
+        open: () => links && this.setState({ drawer: name }) };
+    }).sort((a, b) => RANK[a.level] - RANK[b.level]);
+    const all = stacks.flatMap(s => s.members);
+    const total = all.length, up = all.filter(m => m.level !== 'crit').length;
+    const go = Object.fromEntries(TAB_LIST.map(([k]) => [k, () => this.setState({ tab: k, drawer: null })]));
+    const panelCls = {}, dockCls = {};
+    TAB_LIST.forEach(([k]) => { panelCls[k] = 'tab-panel' + (tab === k ? ' active' : ''); dockCls[k] = 'tab-panel ' + k + '-dock' + (tab === k ? ' active' : ''); });
+
+    const pills = (zone) => all.filter(m => m.host && zone.test(m.service)).map(m => ({
+      name: m.service, host: m.host, down: m.level === 'crit', lan: !!m.lan && m.service.length % 3 === 0,
+      tag: m.service === 'traefik' ? 'FILE' : '', tagCls: 'file', icon: m.icon, showIcon: icons && m.hasIcon,
+      cls: 'net-pill' + (links ? ' is-link' : '') + (m.level === 'crit' ? ' down' : ''),
+    }));
+    const zones = [
+      { name: 'casalan.com', pills: pills(/./) },
+      { name: 'external', pills: [{ name: 'proxmox', host: 'pve.casalan.com', tag: 'EXT', tagCls: 'ext', cls: 'net-pill' + (links ? ' is-link' : ''), showIcon: icons, icon: icon('proxmox') }, { name: 'nas', host: 'nas.casalan.com', tag: 'EXT', tagCls: 'ext', cls: 'net-pill' + (links ? ' is-link' : ''), showIcon: icons, icon: icon('synology') }] },
+    ].map(z => ({ ...z, count: z.pills.length }));
+    const routers = zones.reduce((a, z) => a + z.count, 0);
+
+    const RUNS = [
+      { stack: 'media', date: 'Sun 04:10', span: '6m', total: 6, rb: 0 }, { stack: 'immich', date: 'Sun 04:16', span: '9m', total: 4, rb: 1 },
+      { stack: 'jellyfin', date: 'Sun 04:25', span: '3m', total: 2, rb: 0 }, { stack: 'home', date: 'Sun 04:28', span: '4m', total: 3, rb: 0 },
+      { stack: 'monitoring', date: 'Sun 04:32', span: '3m', total: 3, rb: 0 }, { stack: 'books', date: 'Sun 04:35', span: '2m', total: 2, rb: 0 },
+    ];
+    const runs = RUNS.map((r, i) => ({ ...r, n: r.total - r.rb, label: r.rb ? 'clean · ' + r.rb + ' rolled back' : 'clean',
+      cls: 'deploy-run' + (r.rb ? ' alert' : '') + (i === this.state.run ? ' is-selected' : ''),
+      bars: Array.from({ length: r.total }, (_, j) => j < r.rb ? 'alert' : ''), pick: () => this.setState({ run: i }) }));
+    const sel = RUNS[this.state.run], sm = RAW.find(s => s[0] === sel.stack)[1];
+    const run = { ...sel, clean: sel.total - sel.rb, badge: sel.rb ? 'ROLLED BACK' : 'CLEAN', badgeCls: sel.rb ? 'alert' : '', rbCls: sel.rb ? 'alert' : 'ok',
+      rows: sm.map((m, j) => ({ svc: m[0], cls: j === 1 && sel.rb ? 'alert' : '', tick: j === 1 && sel.rb ? '↺' : '✓', time: '+' + (j * 47 + 31) + 's' })) };
+
+    const d = stacks.find(s => s.name === this.state.drawer);
+    let det = null;
+    if (this.state.detail) {
+      const m = all.find(x => x.service === this.state.detail.service);
+      const w = links && WIDGETS[m.service];
+      det = { ...m, image: 'lscr.io/linuxserver/' + m.service + ':latest', showLaunch: links && (m.lan || m.web),
+        verdictCls: m.level, verdict: m.level === 'crit' ? 'CRASH LOOPING' : m.level === 'warn' ? 'STARTING — HEALTHCHECK PENDING' : 'RUNNING CLEAN',
+        hasWidget: !!w, widgetName: w ? w.name : '', via: w ? w.via : '', stats: w ? w.stats : [], cols: w ? String(w.stats.length) : '3',
+        rowsLabel: w ? w.rowsLabel : '', rows: w ? w.rows.map(([title, p]) => ({ title, w: p + '%', pct: p + '%' })) : [],
+        cpu: m.level === 'crit' ? 97 : 6, mem: m.level === 'crit' ? 99 : 23, health: m.level === 'crit' ? 'unhealthy' : 'healthy',
+        restarts: m.level === 'crit' ? '14' : '0', ports: m.host ? '8989/tcp' : '—',
+        logCls: 'pe-logwell ' + m.level + (w && !this.state.logsOpen ? ' is-collapsed' : ''),
+        logs: ['[Info] Bootstrap: Starting ' + m.service, '[Info] Database: Migration complete', '[Info] Api: Listening on :8989', '[Info] RssSync: 3 reports processed', '[Info] Housekeeping: done in 212ms'] };
+    }
+
+    return {
+      isDash: !det, isDetail: !!det, det: det || {},
+      shellClass: DOCKS.includes(tab) ? 'detached-tab' : '',
+      showIcons: icons, noIcons: !icons,
+      tabs: TAB_LIST.map(([k, label]) => ({ label, cls: 'tab' + (tab === k ? ' active' : ''), go: go[k] })),
+      go, panelCls, dockCls,
+      fleet: { up, total, note: (total - up) + ' down · 1 starting', cells: all.map(m => m.level === 'crit' ? 'down' : m.level === 'warn' ? 'degraded' : 'ok') },
+      net: { routers, names: routers - 3, merged: 3, down: 1 },
+      svc: { summary: stacks.length + ' stacks · ' + up + ' of ' + total + ' online' + (links ? ' · ' + all.filter(m => m.launchable).length + ' launchable' : '') + ' · worst first', attention: stacks.filter(s => s.level !== 'ok').length },
+      stacks,
+      disks: [['/mnt/media', 87, 'high'], ['/', 64, 'ok'], ['/mnt/photos', 58, 'ok'], ['/mnt/backup', 41, 'ok'], ['/boot/efi', 3, 'ok']].map(([mount, p, level]) => ({ mount, level, w: p + '%', pct: p + '%' })),
+      diskCount: '5',
+      errors: [['06:51:12', 'kernel', 'Out of memory: Killed process 48211 (python3)'], ['06:51:13', 'dockerd', 'immich-ml exited 137'], ['02:14:40', 'kernel', 'Out of memory: Killed process 31877 (python3)'], ['01:02:09', 'traefik', 'unable to reach docs.casalan.com backend']].map(([ts, proc, msg]) => ({ ts, proc, msg })),
+      certs: [['vault.casalan.com', 9, 'expiring', 'EXPIRING', 'vault.crt', 2], ['casalan.com', 24, 'renew_soon', 'RENEW SOON', 'casalan.crt', 3], ['*.casalan.com', 61, 'valid', 'VALID', 'wildcard.crt', 2]].map(([domain, days, tier, badge, file, n]) => ({ domain, days, tier, badge, file, issuer: "Let's Encrypt R11", sanCount: n, sans: n === 3 ? 'casalan.com, www.casalan.com, mail.casalan.com' : domain + ', ' + domain.replace('*.', ''), w: Math.round(days / 90 * 100) + '%' })),
+      zones,
+      recent: [{ level: 'ok', title: 'Restart immich-ml', meta: 'approved by chris · 06:58 · ran clean', badge: 'APPROVED' }, { level: 'crit', title: 'Prune unused images (14.2 GB)', meta: 'denied by chris · yesterday · "not during the import"', badge: 'DENIED' }],
+      incidents: [{ sev: 'HIGH', sevCls: 'severity-high', title: 'immich-machine-learning OOM-killed twice', where: 'immich / immich-ml', when: 'opened 06:51' }, { sev: 'MED', sevCls: 'severity-medium', title: 'paperless-ngx healthcheck pending for 9m', where: 'paperless / paperless-ngx', when: 'opened 09:02' }],
+      findings: [{ sevCls: 'sev-high', sev: 'HIGH', resource: 'immich / immich-ml', desc: 'Restart loop: 14 restarts in 7 hours, each ending in exit 137 (out of memory).' }, { sevCls: 'sev-high', sev: 'HIGH', resource: 'vault.casalan.com', desc: 'Certificate expires in 9 days and the file provider will not renew it.' }, { sevCls: 'sev-medium', sev: 'MEDIUM', resource: '/mnt/media', desc: '87% used; at the current rate it fills in about 5 weeks.' }],
+      runs, run,
+      evidence: [{ cls: 'bad', tick: '✗', name: 'docker inspect immich-ml', exit: 'exit 0', result: 'OOMKilled=true · RestartCount=14' }, { cls: '', tick: '✓', name: 'journalctl -k --since 00:00', exit: 'exit 0', result: '2 oom-kill events' }, { cls: '', tick: '✓', name: 'docker stats immich-server', exit: 'exit 0', result: 'cpu 4% · mem 1.2 GiB' }, { cls: '', tick: '✓', name: 'immich jobs API', exit: 'exit 0', result: 'faceDetection waiting 3,204' }],
+      fieldGroups: [{ label: 'EDITABLE', cls: 'editable', keys: ['scan.interval', 'notify.quiet_hours', 'canary.window'] }, { label: 'SENSITIVE', cls: 'sensitive', keys: ['telegram.chat_id'] }, { label: 'LOCKED', cls: 'locked', keys: ['policy.ceiling', 'auth.*'] }],
+      configLines: ['scan:', '  interval: 15m', '  full_every: 4h', 'notify:', '  telegram:', '    chat_id: "••••••"', '  quiet_hours: 23:00-07:00', 'canary:', '  window: Sun 04:00', '  rollback_after: 10m', 'policy:', '  ceiling: R2', 'auth:', '  totp: required', '  session: 12h', ''].map((text, i) => ({ n: i + 1, text, cls: /policy|ceiling|auth|totp|session/.test(text) ? 'locked' : '' })),
+      configCount: '16',
+      crew: [['farnsworth', 'Prof. Farnsworth', "ship's computer", 'Narrates the state of the ship. Knows everything, worries anyway.'], ['leela', 'Leela', 'system monitor', 'Watches the fleet and writes the plans.'], ['hermes', 'Hermes', 'plan analyst', 'Checks every plan before anyone gets asked to approve it.'], ['bender', 'Bender', 'action executor', 'Runs authorised plans. Only authorised ones.'], ['zoidberg', 'Dr. Zoidberg', 'canary updates', 'Pulls new images, tests them, rolls back if they bite.'], ['amy', 'Amy', 'diagnostician', 'Digs through logs and evidence for chat answers.'], ['fry', 'Fry', 'onboarding', 'Walks new stacks aboard and learns their names.'], ['zapp', 'Zapp Brannigan', 'this dashboard', 'Commands from the bridge. Sees everything, approves things, takes credit for all of it.']].map(([f, name, role, text]) => ({ img: '../assets/characters/futurama/' + f + '.png', name, role, text })),
+      drawerOpen: !!d, drawer: d || { members: [] },
+      drawerFoot: icons ? 'The icon is the app; the dot on its corner is health. Letters mean no icon matched. No button means no Traefik route. ◉ means a live widget.' : 'No button means no Traefik route (databases, workers). ◉ means a live widget in the detail view.',
+      closeDrawer: () => this.setState({ drawer: null }),
+      backToOverview: () => this.setState({ detail: null, tab: 'overview' }),
+      toggleLogs: () => this.setState(s => ({ logsOpen: !s.logsOpen })),
+      logToggleLabel: this.state.logsOpen ? 'hide logs' : 'tail logs',
+    };
+  }
+}
+</script>
+</body>
+</html>

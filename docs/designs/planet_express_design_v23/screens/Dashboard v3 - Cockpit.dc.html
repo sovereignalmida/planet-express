@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <title>Planet Express — v3 Cockpit</title>
+  <link rel="stylesheet" href="../design-system/styles.css">
+</helmet>
+<div class="scanline" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+<header class="topbar">
+  <img class="header-logo" src="../assets/logo.png" alt="Planet Express">
+  <div class="header-brand"><span class="wordmark">PLANET EXPRESS</span><span class="tagline">casalan.com · ship computer</span></div>
+  <nav class="tabs">
+    <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4"><button class="{{ t.cls }}" type="button" onClick="{{ t.go }}">{{ t.label }}</button></sc-for>
+  </nav>
+  <div class="topbar-spacer"></div>
+  <div class="header-status"><span class="led-dot"></span><span>pipeline idle · scanned 4 min ago</span></div>
+  <span class="scan-group"><button class="refresh-btn scan-btn" type="button">SCAN ✈</button></span>
+</header>
+
+<div class="body-grid">
+  <main class="main-col">
+
+    <div class="{{ panel.overview }}" data-screen-label="v3 Overview">
+      <section class="panel panel-green">
+        <span class="fleet-label">REACTOR CORE · CONTAINER FLEET</span>
+        <div class="fleet-row">
+          <div>
+            <div class="fleet-eyebrow">CONTAINERS ONLINE</div>
+            <div class="fleet-count"><span class="fleet-num">70</span><span class="fleet-total">/ 70</span><span class="fleet-suffix">nominal</span></div>
+            <div class="fleet-sub">70 online · 0 degraded · 0 down · 0 paused</div>
+          </div>
+          <div class="fleet-matrix-wrap">
+            <div class="fleet-matrix"><sc-for list="{{ cells }}" as="c" hint-placeholder-count="70"><span class="fleet-cell {{ c }}"></span></sc-for></div>
+            <div class="reactor-legend">
+              <span class="reactor-legend-item"><span class="reactor-legend-swatch online"></span>online</span>
+              <span class="reactor-legend-item"><span class="reactor-legend-swatch degraded"></span>degraded</span>
+              <span class="reactor-legend-item"><span class="reactor-legend-swatch down"></span>down</span>
+              <span class="reactor-legend-item"><span class="reactor-legend-swatch paused"></span>paused</span>
+            </div>
+          </div>
+        </div>
+        <div class="fleet-footer">Good news, everyone! Every reactor cell is glowing the correct colour.</div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head-row"><h3>HULL DIAGNOSTICS</h3><span class="panel-head-summary">last full scan 2h ago</span></div>
+        <div class="alarm-banner medium">
+          <div class="alarm-orb">!</div>
+          <div class="alarm-text"><p class="alarm-title">CAUTION</p><p class="alarm-sub">1 finding worth a look</p></div>
+          <div class="alarm-chips"><span class="alarm-chip crit zero">CRIT 0</span><span class="alarm-chip high zero">HIGH 0</span><span class="alarm-chip med">MED 1</span><span class="alarm-chip low">LOW 4</span></div>
+        </div>
+        <div class="hull-cards">
+          <div class="hull-card sev-medium"><span class="hull-dot"></span><div class="hull-card-body"><span class="hull-card-sev">MEDIUM</span><div class="hull-card-resource">/mnt/media</div><p class="hull-card-desc">87% used; at the current rate it fills in about 5 weeks.</p></div></div>
+        </div>
+        <details class="hull-drawer">
+          <summary class="hull-drawer-toggle"><span class="hull-drawer-caret">▸</span>4 low-severity notes · informational · non-blocking</summary>
+        </details>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head-row"><h3>DISK</h3><span class="panel-head-summary">5 mounts</span></div>
+        <div class="grid-head cols-disk"><span>MOUNT</span><span>SOURCE</span><span>USED</span></div>
+        <sc-for list="{{ disks }}" as="d" hint-placeholder-count="5">
+          <div class="grid-row cols-disk">
+            <span class="cell-mono cell-mount">{{ d.mount }}</span><span class="cell-mono cell-source">{{ d.src }}</span>
+            <span class="disk-bar-row"><span class="disk-bar-track"><span class="disk-bar-fill {{ d.level }}" style="width: {{ d.w }}; display: block"></span></span><span class="disk-pct">{{ d.w }}</span></span>
+          </div>
+        </sc-for>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head-row"><h3>SYSTEM</h3><span class="system-online-chip"><span class="dot-sm-green"></span>ONLINE · up 23d</span></div>
+        <div class="stat-tiles">
+          <div class="stat-tile"><div class="stat-tile-eyebrow">LOAD 1M</div><div class="stat-tile-value">1.42 <span class="dim">/ 16</span></div><div class="stat-tile-sub">5m 1.31 · 15m 1.18</div></div>
+          <div class="stat-tile"><div class="stat-tile-eyebrow">CPU</div><div class="stat-tile-value">9%</div><div class="stat-tile-sub">Ryzen 9 5950X</div></div>
+          <div class="stat-tile"><div class="stat-tile-eyebrow">KERNEL</div><div class="stat-tile-value">6.8.12</div><div class="stat-tile-sub">Debian 13</div></div>
+        </div>
+        <div class="mem-label-row"><span class="system-stat-label">MEMORY</span><span class="cell-mono cell-dim">37.1G used · 18.0G cache · 8.9G free</span></div>
+        <div class="mem-bar"><span class="mem-bar-used" style="width: 58%"></span><span class="mem-bar-buffcache" style="width: 28%"></span></div>
+        <div class="mem-legend"><span class="mem-legend-item"><span class="mem-swatch used"></span>used</span><span class="mem-legend-item"><span class="mem-swatch buffcache"></span>buff/cache</span><span class="mem-legend-item"><span class="mem-swatch free"></span>free</span></div>
+      </section>
+
+      <section class="errors-panel">
+        <div class="panel-head-row"><h3>RECENT ERRORS</h3><span class="errors-count-pill">2 in the last hour</span></div>
+        <p class="errors-diagnosis">Traefik lost its backend for paperless twice while it restarted. Nothing else.</p>
+        <div class="errors-terminal">
+          <div class="errors-terminal-line"><span class="ts">09:02:11</span> <span class="host">casa</span> <span class="proc">traefik</span> <span class="msg">unable to reach docs.casalan.com backend</span></div>
+          <div class="errors-terminal-line"><span class="ts">09:01:40</span> <span class="host">casa</span> <span class="proc">traefik</span> <span class="msg">unable to reach docs.casalan.com backend</span></div>
+        </div>
+      </section>
+    </div>
+
+    <div class="{{ panel.backups }}" data-screen-label="v3 Backups">
+      <section class="panel">
+        <div class="panel-head-row"><h3>COLD STORAGE · BORG</h3><span class="status-chip ok">COLLECTED</span></div>
+        <div class="cryo-grid">
+          <div class="cryo-pod fresh">
+            <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">WEEKLY</span><span class="cryo-cadence">every 7d</span><span class="cryo-badge">FRESH</span></div>
+            <div class="cryo-hero"><span class="cryo-hero-num">2d 6h</span><span class="cryo-hero-label">SINCE LAST SNAPSHOT</span></div>
+            <div class="cryo-window-track"><div class="cryo-window-fill" style="width: 32%;"></div></div>
+            <div class="cryo-window-caption">32% of the 7d window used</div>
+            <div class="cryo-stats">
+              <div class="cryo-stat-row"><span>NEXT RUN</span><span>in 4d 18h</span></div>
+              <div class="cryo-stat-row"><span>RESULT</span><span>success · exit 0</span></div>
+              <div class="cryo-stat-row"><span>LAST RUN</span><span>Sun 03:00 · 41m</span></div>
+            </div>
+            <div class="cryo-footnote">unit idle between runs (oneshot) — normal</div>
+          </div>
+          <div class="cryo-pod nodata">
+            <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">DAILY</span><span class="cryo-badge">NO DATA</span></div>
+            <div class="cryo-stats">
+              <div class="cryo-stat-row"><span>NEXT RUN</span><span>—</span></div>
+              <div class="cryo-stat-row"><span>RESULT</span><span>—</span></div>
+              <div class="cryo-stat-row"><span>LAST RUN</span><span>—</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head-row"><h3>CERTIFICATE VAULT</h3><span class="status-chip ok">COLLECTED</span><span class="panel-head-summary">3 collected</span><span class="cert-expiring-chip">1 needs attention</span></div>
+        <div class="cert-grid">
+          <sc-for list="{{ certs }}" as="c" hint-placeholder-count="3">
+            <div class="cert-card {{ c.tier }}">
+              <div class="cert-card-head"><span class="cert-led"></span><span class="cert-domain">{{ c.domain }}</span><span class="cert-badge">{{ c.badge }}</span></div>
+              <div class="cert-countdown">{{ c.days }}d<span class="cert-countdown-label">UNTIL EXPIRY</span></div>
+              <div class="cert-bar-track"><div class="cert-bar-fill" style="width: {{ c.w }};"></div></div>
+              <div class="cert-stats"><div class="cert-stat-row"><span>SOURCE FILE</span><span>{{ c.file }}</span></div><div class="cert-stat-row"><span>ISSUER</span><span>Let's Encrypt R11</span></div></div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </div>
+
+    <div class="{{ panel.network }}" data-screen-label="v3 Network">
+      <section class="panel">
+        <div class="net-head-row"><h3>ROUTING MATRIX</h3><span class="net-count">{{ routerCount }} routers · all up</span><div class="tabs-spacer"></div><input class="net-filter" placeholder="filter routers…"></div>
+        <div class="grid-head cols-net"><span>ROUTER</span><span>RULE</span><span>SERVICE</span><span>STATUS</span></div>
+        <sc-for list="{{ routers }}" as="r" hint-placeholder-count="10">
+          <div class="grid-row cols-net">
+            <span class="cell-mono cell-router">{{ r.name }}</span><span class="cell-mono cell-rule">Host(`{{ r.host }}`)</span><span class="cell-mono cell-service">{{ r.svc }}</span>
+            <span class="status-ok"><span class="dot-sm"></span>UP</span>
+          </div>
+        </sc-for>
+      </section>
+    </div>
+
+    <div class="{{ panel.actions }}" data-screen-label="v3 Actions">
+      <div class="telegram-banner"><span class="glyph">✈</span><span class="msg">Leela sent a plan to Telegram at 09:04. Approve it there or here; whichever comes first wins.</span></div>
+      <section class="panel panel-amber">
+        <div class="plan-eyebrow">PENDING PLAN · LEELA · 09:04</div>
+        <h3>Restart paperless-ngx</h3>
+        <p class="plan-diagnosis">Healthcheck has been pending for <span class="hl">9m</span>; the last two starts timed out waiting on <span class="hl">paperless-db</span>.</p>
+        <ul class="plan-fix-list"><li>Restart <span class="hl">paperless-ngx</span> once the database answers.</li><li>Verify the healthcheck passes within 2 minutes.</li></ul>
+        <div class="plan-actions">
+          <button class="btn-approve" type="button">APPROVE PLAN</button>
+          <div class="plan-actions-row"><button class="btn-dismiss" type="button">DISMISS</button><span class="btn-soon">EDIT <span class="soon-badge">SOON</span></span></div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head-row"><h3>DEPLOYMENT MANIFEST</h3><span class="deploy-summary-chip"><span class="dot"></span>3 runs · all clean</span></div>
+        <div class="deploy-runs">
+          <sc-for list="{{ runs }}" as="r" hint-placeholder-count="3">
+            <div class="deploy-run">
+              <div class="deploy-run-head">
+                <span class="deploy-glyph">✓</span>
+                <div><div class="deploy-run-title">{{ r.stack }} · <b>{{ r.n }} updated</b></div><div class="deploy-run-sub">{{ r.date }} · canary window {{ r.span }}</div></div>
+                <div class="deploy-run-count"><div class="n">{{ r.n }}/{{ r.n }}</div><div class="lbl">CLEAN</div></div>
+              </div>
+              <div class="chip-board"><sc-for list="{{ r.svcs }}" as="s" hint-placeholder-count="3"><span class="deploy-chip"><span class="svc">{{ s }}</span><span class="t">✓</span></span></sc-for></div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </div>
+
+  </main>
+</div>
+<footer><p>Planet Express — authenticated LAN dashboard · v3 cockpit reskin, as shipped</p></footer>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;tab&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;overview&quot;,&quot;backups&quot;,&quot;network&quot;,&quot;actions&quot;],&quot;default&quot;:&quot;overview&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const TABS = [['overview','Overview'],['backups','Backups'],['network','Network'],['actions','Actions']];
+const ROUTERS = [['sonarr','tv'],['radarr','movies'],['prowlarr','prowlarr'],['sabnzbd','sab'],['qbittorrent','qbit'],['jellyfin','watch'],['jellyseerr','requests'],['immich','photos'],['paperless','docs'],['vaultwarden','vault'],['home-assistant','ha'],['grafana','grafana']];
+class Component extends DCLogic {
+  state = { tab: this.props.tab ?? 'overview' };
+  renderVals() {
+    const tab = this.state.tab;
+    const panel = Object.fromEntries(TABS.map(([k]) => [k, 'tab-panel' + (tab === k ? ' active' : '')]));
+    return {
+      tabs: TABS.map(([k, label]) => ({ label, cls: 'tab' + (tab === k ? ' active' : ''), go: () => this.setState({ tab: k }) })),
+      panel,
+      cells: Array.from({ length: 70 }, () => ''),
+      disks: [['/mnt/media', '/dev/md0', 87, 'high'], ['/', '/dev/nvme0n1p2', 64, 'mid'], ['/mnt/photos', '/dev/sdb1', 58, 'low'], ['/mnt/backup', 'nas:/borg', 41, 'low'], ['/boot/efi', '/dev/nvme0n1p1', 3, 'low']].map(([mount, src, p, level]) => ({ mount, src, level, w: p + '%' })),
+      certs: [['vault.casalan.com', 9, 'expiring', 'EXPIRING', 'vault.crt'], ['casalan.com', 54, 'valid', 'VALID', 'casalan.crt'], ['*.casalan.com', 61, 'valid', 'VALID', 'wildcard.crt']].map(([domain, days, tier, badge, file]) => ({ domain, days, tier, badge, file, w: Math.round(days / 90 * 100) + '%' })),
+      routers: ROUTERS.map(([svc, sub]) => ({ name: svc + '@docker', host: sub + '.casalan.com', svc })),
+      routerCount: String(ROUTERS.length),
+      runs: [{ stack: 'media', n: 4, date: 'Sun 04:10', span: '6m', svcs: ['sonarr', 'radarr', 'prowlarr', 'bazarr'] }, { stack: 'jellyfin', n: 2, date: 'Sun 04:25', span: '3m', svcs: ['jellyfin', 'jellyseerr'] }, { stack: 'monitoring', n: 3, date: 'Sun 04:32', span: '3m', svcs: ['grafana', 'prometheus', 'uptime-kuma'] }],
+    };
+  }
+}
+</script>
+</body>
+</html>

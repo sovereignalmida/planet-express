@@ -1,0 +1,119 @@
+/* Planet Express design system · deployment manifest, actions banner
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* deployment manifest */
+.deploy-summary-chip {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 600; color: var(--cp-green-text);
+  background: rgba(111,207,95,.1); border: 1px solid rgba(111,207,95,.3); border-radius: 20px; padding: 3px 11px;
+}
+.deploy-summary-chip.alert { color: var(--cp-crit-text); background: rgba(239,60,46,.1); border-color: rgba(239,60,46,.35); }
+.deploy-summary-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+
+.deploy-runs { display: flex; flex-direction: column; gap: 16px; }
+.deploy-run { border: 1px solid var(--cp-panel-border); border-radius: 12px; padding: 16px 18px; background: var(--cp-panel-bg); }
+.deploy-run.alert { border-color: rgba(239,60,46,.4); background: rgba(239,60,46,.04); }
+.deploy-run-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.deploy-glyph {
+  width: 36px; height: 36px; border-radius: 9px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(111,207,95,.14); color: var(--cp-green-text); font-size: 17px;
+}
+.deploy-run.alert .deploy-glyph { background: rgba(239,60,46,.14); color: var(--cp-crit-text); }
+.deploy-run-title { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 14px; color: var(--cream); }
+.deploy-run-title b { color: var(--cp-green-text); font-weight: 700; }
+.deploy-run.alert .deploy-run-title b { color: var(--cp-crit-text); }
+.deploy-run-sub { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint); margin-top: 2px; }
+.deploy-run-count { margin-left: auto; text-align: right; }
+.deploy-run-count .n { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 20px; color: var(--text); }
+.deploy-run-count .lbl { font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--faint2); letter-spacing: .06em; }
+
+.deploy-timeline { position: relative; height: 26px; margin: 14px 0 4px; }
+.deploy-timeline-track { position: absolute; top: 50%; left: 4px; right: 4px; height: 2px; background: var(--border-hair); transform: translateY(-50%); }
+.deploy-timeline-node {
+  position: absolute; top: 50%; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--cp-green); box-shadow: 0 0 6px var(--cp-green); transform: translate(-50%,-50%);
+}
+.deploy-timeline-node.bad { background: var(--cp-crit); box-shadow: 0 0 6px var(--cp-crit); }
+.deploy-timeline-end { position: absolute; top: 50%; transform: translateY(-50%); font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--faint2); }
+.deploy-timeline-end.tl-start { left: 0; }
+.deploy-timeline-end.tl-end { right: 0; }
+.deploy-timeline-caption { text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--faint2); margin-bottom: 14px; }
+
+.chip-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+.deploy-chip {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 7px 10px; border-radius: 8px;
+  background: var(--cp-inset-bg); border: 1px solid var(--cp-panel-border); color: var(--text2);
+}
+.deploy-chip .svc { color: var(--cp-green-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deploy-chip .t { color: var(--faint2); flex: none; }
+.deploy-chip.bad { border-color: rgba(239,60,46,.35); background: rgba(239,60,46,.06); }
+.deploy-chip.bad .svc { color: var(--cp-crit-text); }
+
+/* actions banner */
+.telegram-banner {
+  display: flex; align-items: center; gap: 12px; border: 1px solid #23364a; border-radius: 12px;
+  background: rgba(86,182,224,.06); padding: 13px 16px;
+}
+
+.telegram-banner .glyph { font-size: 18px; line-height: 1; }
+.telegram-banner .msg { font-size: 12.5px; color: var(--text3); line-height: 1.5; }
+
+.plan-eyebrow {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--faint); letter-spacing: .08em;
+  margin-bottom: 5px;
+}
+
+.plan-diagnosis { margin: 0 0 10px; font-size: 12.5px; line-height: 1.55; color: var(--text2); }
+.plan-diagnosis .hl { font-family: 'JetBrains Mono', monospace; color: var(--amber-text); }
+
+.plan-fix-list { margin: 0 0 16px; padding-left: 16px; font-size: 12.5px; line-height: 1.7; color: var(--text2); }
+.plan-fix-list .hl { font-family: 'JetBrains Mono', monospace; color: var(--green-text); }
+
+.plan-actions { display: flex; flex-direction: column; gap: 9px; }
+
+.btn-approve {
+  display: block; text-align: center; text-decoration: none; appearance: none; cursor: pointer;
+  border: 1px solid var(--green-dim); background: rgba(70,201,90,.14);
+  color: var(--green-text); font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 13px;
+  padding: 10px; border-radius: 9px; transition: all .15s;
+}
+
+.btn-approve:hover { background: rgba(70,201,90,.24); }
+
+.plan-actions-row { display: flex; gap: 9px; }
+
+.btn-dismiss {
+  flex: 1; appearance: none; cursor: pointer; border: 1px solid #23303e; background: transparent;
+  color: var(--muted); font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 12.5px;
+  padding: 9px; border-radius: 9px; transition: all .15s;
+}
+
+.btn-dismiss:hover { border-color: #3a4656; color: var(--text2); }
+
+.btn-soon {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+  border: 1px dashed #23303e; border-radius: 9px; color: var(--faint3); font-size: 11.5px; font-weight: 600;
+  cursor: not-allowed;
+}
+
+.soon-badge {
+  font-family: 'JetBrains Mono', monospace; font-size: 9px; background: #1a2531; border-radius: 4px;
+  padding: 1px 5px; color: var(--faint);
+}
+
+.hidden { display: none !important; }
+
+footer {
+  text-align: center; padding: 0 26px 34px; position: relative; z-index: 2;
+}
+
+footer p {
+  margin: 0; font-size: 12px; color: var(--faint3); font-family: 'JetBrains Mono', monospace;
+}
+
+@media (max-width: 640px) {
+  .grid-head, .grid-row { font-size: 11px; }
+  .cols-net, .cols-updates, .cols-backups { grid-template-columns: 1fr; gap: 4px; }
+}
+

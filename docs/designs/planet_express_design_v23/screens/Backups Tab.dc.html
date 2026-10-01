@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <title>Planet Express — Backups tab</title>
+  <link rel="stylesheet" href="../design-system/styles.css">
+</helmet>
+<div class="scanline" aria-hidden="true"></div>
+<div class="body-grid">
+  <div class="pe-kicker">BACKUPS TAB · STATE 1 · COLLECTED, ONE JOB BEHIND</div>
+  <div class="tab-panel active" data-screen-label="Backups · collected">
+    <section class="panel alarm-banner verdict-strip warn">
+      <div class="alarm-orb">!</div>
+      <div class="alarm-text"><p class="alarm-title">WEEKLY SNAPSHOT RUNNING LATE</p><p class="alarm-sub">The last run succeeded 8 days ago, past its 7-day cadence. The timer is armed for tonight 03:00.</p></div>
+      <div class="alarm-chips"><span class="alarm-chip crit">0/1 JOBS OK</span><span class="alarm-chip ok">1/1 TIMERS ARMED</span><span class="alarm-chip info">3 CERTS</span></div>
+    </section>
+    <div class="backups-split">
+      <section class="panel">
+        <div class="panel-head-row"><h3>COLD STORAGE · BORG</h3><span class="status-chip ok">COLLECTED</span><div class="tabs-spacer"></div><span class="panel-head-summary">daily disabled on purpose</span></div>
+        <div class="cryo-grid">
+          <div class="cryo-pod stale">
+            <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">WEEKLY</span><span class="cryo-cadence">every 7d</span><span class="cryo-badge">STALE</span></div>
+            <div class="cryo-main">
+              <div class="cryo-hero"><span class="cryo-hero-num">8d 2h</span><span class="cryo-hero-label">SINCE LAST SNAPSHOT</span></div>
+              <div class="cryo-window-track"><div class="cryo-window-fill" style="width: 100%;"></div></div>
+              <div class="cryo-window-caption">window exceeded by 1d 2h</div>
+            </div>
+            <div class="cryo-side">
+              <div class="cryo-stats">
+                <div class="cryo-stat-row"><span>NEXT RUN</span><span>tonight 03:00</span></div>
+                <div class="cryo-stat-row"><span>RESULT</span><span>success · exit 0</span></div>
+                <div class="cryo-stat-row"><span>LAST RUN</span><span>Sep 22 03:00 · 44m</span></div>
+              </div>
+              <div class="cryo-footnote">last run succeeded, but this job is running behind its 7d cadence</div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head-row"><h3>CERTIFICATE VAULT</h3><span class="status-chip ok">COLLECTED</span><span class="panel-head-summary">3 collected</span><span class="cert-expiring-chip">2 need attention</span></div>
+        <div class="cert-grid">
+          <sc-for list="{{ certs }}" as="c" hint-placeholder-count="3">
+            <div class="cert-card {{ c.tier }}">
+              <div class="cert-card-head"><span class="cert-led"></span><span class="cert-domain">{{ c.domain }}</span><span class="cert-badge">{{ c.badge }}</span></div>
+              <div class="cert-countdown">{{ c.days }}d<span class="cert-countdown-label">UNTIL EXPIRY</span></div>
+              <div class="cert-bar-track"><div class="cert-bar-fill" style="width: {{ c.w }};"></div></div>
+              <div class="cert-stats">
+                <div class="cert-stat-row"><span>SOURCE FILE</span><span>{{ c.file }}</span></div>
+                <div class="cert-stat-row"><span>ISSUER</span><span>Let's Encrypt R11</span></div>
+                <div class="cert-stat-row"><span>{{ c.n }} SANs</span><span>{{ c.sans }}</span></div>
+              </div>
+            </div>
+          </sc-for>
+          <div class="cert-card error">
+            <div class="cert-card-head"><span class="cert-led"></span><span class="cert-domain">UNREADABLE</span><span class="cert-badge">ERROR</span></div>
+            <p class="cert-error-msg">PEM parse failed: no certificate block in legacy.crt</p>
+            <div class="cert-stats"><div class="cert-stat-row"><span>SOURCE FILE</span><span>legacy.crt</span></div></div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="pe-kicker">STATE 2 · LAST SCAN DIDN'T READ BACKUPS</div>
+  <div class="tab-panel active" data-screen-label="Backups · awaiting scan">
+    <section class="panel alarm-banner verdict-strip unknown">
+      <div class="alarm-orb">?</div>
+      <div class="alarm-text"><p class="alarm-title">BACKUP STATUS UNKNOWN</p><p class="alarm-sub">Last scan ran <span class="mono-inline">(mode: quick)</span>, which doesn't read backup or certificate state. This is not a failure — it's a blind spot. Full scans run automatically every few hours, and SCAN ✈ in the header runs one now.</p></div>
+      <a class="verdict-action" href="#">CHECK AGAIN ⟳</a>
+    </section>
+    <div class="backups-split">
+      <section class="panel">
+        <div class="panel-head-row"><h3>COLD STORAGE · BORG</h3><span class="status-chip">AWAITING FULL SCAN</span><div class="tabs-spacer"></div><span class="panel-head-summary">daily disabled on purpose</span></div>
+        <div class="cryo-grid">
+          <div class="cryo-pod nodata">
+            <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">WEEKLY</span><span class="cryo-badge">NO DATA</span></div>
+            <div class="cryo-stats">
+              <div class="cryo-stat-row"><span>NEXT RUN</span><span>—</span></div>
+              <div class="cryo-stat-row"><span>RESULT</span><span>—</span></div>
+              <div class="cryo-stat-row"><span>LAST RUN</span><span>—</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head-row"><h3>CERTIFICATE VAULT</h3><span class="status-chip">AWAITING FULL SCAN</span><span class="panel-head-summary">Traefik file provider · ACME disabled on this host</span></div>
+        <p class="muted-body">Not available — last scan <span class="mono-inline">(mode: quick)</span> didn't collect certificate data. Available after the next full scan.</p>
+      </section>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      certs: [['vault.casalan.com', 9, 'expiring', 'EXPIRING', 'vault.crt', 2], ['casalan.com', 24, 'renew_soon', 'RENEW SOON', 'casalan.crt', 3], ['*.casalan.com', 61, 'valid', 'VALID', 'wildcard.crt', 2]]
+        .map(([domain, days, tier, badge, file, n]) => ({ domain, days, tier, badge, file, n, sans: n === 3 ? 'casalan.com, www, mail' : domain + ', ' + domain.replace('*.', ''), w: Math.round(days / 90 * 100) + '%' })),
+    };
+  }
+}
+</script>
+</body>
+</html>

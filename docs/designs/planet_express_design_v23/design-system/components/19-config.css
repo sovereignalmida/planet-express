@@ -1,0 +1,58 @@
+/* Planet Express design system · Config: rules left, editor right
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ── Config: rules left, a full-height editor right (T45.5) ─────────────────────
+   The three editor layers below share one font stack, one font-size and one
+   line-height. If those ever diverge the tints drift off their lines, so they are
+   set once on the shell and inherited. */
+.config-dock { position: relative; z-index: 2; padding: 14px 18px 18px; }
+.config-split {
+  /* A definite height, not min-height: the editor has to be a capped scrolling region, and a
+     min-height row still grows to whatever its tallest child wants. grid-template-rows caps
+     the row itself so the card's min-height:0 can take effect. */
+  display: grid; grid-template-columns: 400px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr);
+  gap: 12px; align-items: stretch; height: calc(100dvh - 104px);
+}
+.config-rules { overflow-y: auto; }
+.config-rules { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.config-path { margin: 0 0 4px; }
+.config-path code { color: var(--pe-accent-ink); font: 10px var(--pe-font-mono); word-break: break-all; }
+
+.config-editor-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; padding: 0; }
+.config-editor-head, .config-actions { flex: none; }
+.config-editor-head { padding: 11px 15px; border-bottom: 1px solid var(--pe-border-dash); margin: 0; }
+.config-line-count { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+
+.config-editor-shell {
+  /* min-height:0 is what makes flex:1 actually cap this box. Without it the shell grows with
+     the file, the textarea never scrolls, and a long config pushes the CHECK / REVERT /
+     REVIEW toolbar off the bottom of the page -- the one thing this tab must keep reachable. */
+  position: relative; flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 44px minmax(0, 1fr);
+  background: var(--pe-code-bg, #03130f); overflow: hidden;
+  font-family: var(--pe-font-mono); font-size: 11px; line-height: 1.7;
+}
+.config-gutter, .config-tints, #config-editor {
+  font: inherit; padding: 12px 0; overflow: hidden; margin: 0;
+}
+.config-gutter { text-align: right; color: #2f5a48; overflow-y: hidden; }
+.config-gutter-line { padding-right: 12px; }
+.config-tints { grid-column: 2; grid-row: 1; }
+.config-tint-line { height: calc(1em * 1.7); }
+.config-tint-line.locked { background: var(--pe-crit-bg); box-shadow: inset 2px 0 0 var(--pe-crit-line); }
+#config-editor {
+  grid-column: 2; grid-row: 1; position: relative; z-index: 1;
+  border: 0; resize: none; background: transparent; color: var(--pe-ink-2);
+  white-space: pre; overflow: auto; padding-left: 0;
+}
+#config-editor:focus { outline: none; }
+.config-actions {
+  display: flex; align-items: center; gap: 8px; padding: 11px 15px;
+  border-top: 1px solid var(--pe-border-dash); background: var(--pe-surface);
+}
+
+@media (max-width: 1024px) {
+  .config-split { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; height: auto; }
+  .config-rules { overflow-y: visible; }
+  .config-editor-shell { min-height: 420px; }
+}
+

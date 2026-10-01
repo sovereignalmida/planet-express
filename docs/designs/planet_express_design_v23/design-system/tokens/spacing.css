@@ -1,0 +1,12 @@
+/* Planet Express design system · space, radii, track
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+:root {
+  /* ---------- 7. SPACE / SHAPE ---------- */
+  --pe-r-sm: 6px;  --pe-r-md: 9px;  --pe-r-lg: 12px;
+  --pe-r-xl: 14px; --pe-r-pill: 20px;
+  --pe-gap-tight: 9px;  --pe-gap: 14px;  --pe-gap-loose: 18px;
+  --pe-pad-card: 16px 18px;
+  --pe-pad-panel: 18px 20px;
+  --pe-track: 300px;  /* min column width for every status grid */
+}
+@media (max-width: 720px) { :root { --pe-track: 100%; } }

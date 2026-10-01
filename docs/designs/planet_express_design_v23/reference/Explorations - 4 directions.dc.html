@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bungee&family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0d0f14;font-family:'Space Grotesk',system-ui,sans-serif}
+  .dv-turn{padding:44px 48px 40px;scroll-margin-top:16px}
+  .dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 26px}
+  .dv-tid{font:700 10px 'JetBrains Mono',monospace;padding:3px 7px;background:#eae2cf;color:#141414;border-radius:4px;text-decoration:none}
+  .dv-tname{font:600 13px/1.3 'Space Grotesk',sans-serif;color:#cdd8e8}
+  .dv-tname a{color:#f5b820}
+  .dv-opts{display:flex;flex-wrap:wrap;gap:40px;align-items:flex-start}
+  .dv-opt{flex:none;display:flex;flex-direction:column;gap:11px;scroll-margin-top:16px}
+  .dv-oid{font:700 10.5px 'JetBrains Mono',monospace;padding:3px 7px;background:rgba(255,255,255,.1);color:#e6edf5;border-radius:5px;text-decoration:none}
+  .dv-olabel{display:flex;align-items:baseline;gap:9px;font:400 12px/1.35 'Space Grotesk',sans-serif;color:rgba(230,237,245,.6)}
+  .dv-opt:target .dv-oid{background:#22bcd8;color:#04121a}
+  .dv-card{overflow:hidden;border-radius:16px}
+  .dv-next{margin:26px 0 0;font:12.5px/1.6 'Space Grotesk',sans-serif;color:rgba(230,237,245,.5)}
+  .dv-next a{color:#f5b820;text-decoration:none}
+  a{color:#22bcd8;text-decoration:none}
+  a:hover{color:#5fd6e8}
+
+  /* shared motion */
+  @keyframes led{0%,100%{opacity:1}50%{opacity:.3}}
+  @keyframes scanmove{0%{transform:translateY(-100%)}100%{transform:translateY(1400px)}}
+  @keyframes crtflick{0%,100%{opacity:.05}50%{opacity:.11}}
+  @keyframes beacon{0%,100%{opacity:.35;box-shadow:0 0 6px currentColor}50%{opacity:1;box-shadow:0 0 22px currentColor}}
+  @keyframes needle{0%,100%{transform:rotate(-38deg)}25%{transform:rotate(-6deg)}55%{transform:rotate(-24deg)}80%{transform:rotate(-14deg)}}
+  @keyframes reactor{0%,100%{opacity:.82}50%{opacity:1}}
+  @keyframes crawl{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+  @keyframes sheen{0%{background-position:-220% 0}100%{background-position:220% 0}}
+  @keyframes chromapop{0%{transform:translateY(10px) scale(.96);opacity:0}100%{transform:none;opacity:1}}
+  /* rotating gag subtitle (6 lines) */
+  @keyframes gagcycle{
+    0%,13%{opacity:1;transform:translateY(0)} 16%,100%{opacity:0;transform:translateY(-6px)}
+  }
+  .gag{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;white-space:nowrap;animation:gagcycle 15s linear infinite;opacity:0}
+  .gag:nth-child(1){animation-delay:0s}.gag:nth-child(2){animation-delay:2.5s}
+  .gag:nth-child(3){animation-delay:5s}.gag:nth-child(4){animation-delay:7.5s}
+  .gag:nth-child(5){animation-delay:10s}.gag:nth-child(6){animation-delay:12.5s}
+  .osc{stroke-dasharray:3 4;animation:led 1.4s linear infinite}
+</style>
+</helmet>
+
+<!-- ================= TURN 1 ================= -->
+<section class="dv-turn" id="t1">
+  <div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">v2 &mdash; full theme-park &middot; two divergent directions</span></div>
+  <div class="dv-opts">
+
+    <!-- ===================== 1a  COCKPIT CONSOLE ===================== -->
+    <div class="dv-opt" id="1a">
+      <div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Cockpit Console &mdash; you're flying the ship: brushed-metal bezels, rivets, oscilloscope load gauge, klaxon severities, crew monitors</div>
+      <div class="dv-card" style="width:840px;font-family:'Space Grotesk',sans-serif;background:radial-gradient(900px 500px at 80% -10%, rgba(53,197,216,.08), transparent 55%),radial-gradient(700px 500px at 10% 120%, rgba(245,184,32,.05), transparent 55%),#080b14;border:1px solid #24344c;position:relative;">
+        <!-- CRT scan overlay -->
+        <div aria-hidden="true" style="pointer-events:none;position:absolute;inset:0;z-index:9;background:repeating-linear-gradient(180deg, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.16) 2px 4px);mix-blend-mode:multiply;"></div>
+
+        <!-- cockpit control strip -->
+        <div style="display:flex;align-items:center;gap:18px;padding:16px 22px;background:linear-gradient(180deg,#182234,#0d1626);border-bottom:2px solid #24344c;position:relative;box-shadow:inset 0 -2px 0 rgba(0,0,0,.5);">
+          <div style="position:absolute;left:9px;top:9px;width:7px;height:7px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#5c6f8a,#1a2436);box-shadow:0 1px 1px rgba(0,0,0,.6)"></div>
+          <div style="position:absolute;right:9px;top:9px;width:7px;height:7px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#5c6f8a,#1a2436);box-shadow:0 1px 1px rgba(0,0,0,.6)"></div>
+          <div style="width:46px;height:46px;border-radius:50%;background:radial-gradient(circle at 40% 32%, #f3e8cd, #d4c199);border:2px solid #ef6f5e;display:flex;align-items:center;justify-content:center;position:relative;box-shadow:0 0 0 2px #0c1017, 0 0 18px rgba(239,111,94,.35);flex:none;">
+            <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:16px;color:#c22a1f;">PE</span>
+          </div>
+          <div>
+            <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.13em;color:#e9edf4;line-height:1;">PLANET&nbsp;EXPRESS</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;letter-spacing:.05em;margin-top:4px;">SHIP COMPUTER v3000 &middot; crew replaceable, containers aren't</div>
+          </div>
+          <div style="flex:1"></div>
+          <!-- oscilloscope load gauge -->
+          <div style="width:118px;height:56px;border-radius:8px;background:#04140f;border:1px solid #1c4a3a;overflow:hidden;position:relative;box-shadow:inset 0 0 14px rgba(53,197,216,.15)">
+            <svg viewBox="0 0 118 56" width="118" height="56" style="display:block">
+              <line x1="0" y1="28" x2="118" y2="28" stroke="#123b2e" stroke-width="1"/>
+              <polyline class="osc" points="0,30 12,24 22,34 34,18 46,36 58,22 70,30 82,15 94,33 106,26 118,29" fill="none" stroke="#39d67f" stroke-width="1.6"/>
+            </svg>
+            <span style="position:absolute;left:7px;top:5px;font-family:'JetBrains Mono',monospace;font-size:8px;color:#2f9c72;letter-spacing:.1em;">LOAD 1.02</span>
+          </div>
+          <!-- chunky button -->
+          <button style="appearance:none;cursor:pointer;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.04em;color:#04140f;background:linear-gradient(180deg,#6fcf5f,#3f9a34);border:none;border-radius:9px;padding:11px 16px;box-shadow:0 4px 0 #256b1f, 0 6px 10px rgba(0,0,0,.5);">↻ SCAN</button>
+        </div>
+
+        <!-- status lamp rail -->
+        <div style="display:flex;align-items:center;gap:22px;padding:9px 22px;background:#0a1220;border-bottom:1px solid #16233a;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.06em;">
+          <span style="display:inline-flex;align-items:center;gap:7px;color:#8fe6a0"><span style="width:8px;height:8px;border-radius:50%;background:#6fcf5f;color:#6fcf5f;animation:beacon 2.4s ease-in-out infinite"></span>PIPELINE IDLE</span>
+          <span style="display:inline-flex;align-items:center;gap:7px;color:#f5c94a"><span style="width:8px;height:8px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 1.7s ease-in-out infinite"></span>PLAN p1 PENDING</span>
+          <span style="display:inline-flex;align-items:center;gap:7px;color:#6f849e"><span style="width:8px;height:8px;border-radius:50%;background:#35c5d8;color:#35c5d8;animation:beacon 3s ease-in-out infinite"></span>SENSORS NOMINAL</span>
+          <div style="flex:1"></div>
+          <span style="color:#4a5c76;border:1px solid #1c2c44;border-radius:5px;padding:3px 8px;">READ-ONLY &middot; LAN-TRUST</span>
+        </div>
+
+        <div style="display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:18px;padding:20px 22px;">
+          <div style="min-width:0;display:flex;flex-direction:column;gap:16px;">
+
+            <!-- reactor / fleet gauge -->
+            <div style="border-radius:12px;background:linear-gradient(180deg,#101d16,#0a1420);border:1px solid #1c4a3a;padding:18px 20px;position:relative;box-shadow:inset 0 1px 0 rgba(111,207,95,.12), inset 0 0 30px rgba(0,0,0,.4);">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.14em;color:#3f7a5c;">REACTOR CORE &middot; CONTAINER FLEET</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#2f9c72;">70/70 ONLINE</span>
+              </div>
+              <div style="display:flex;align-items:flex-end;gap:22px;">
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:56px;line-height:.85;color:#6fcf5f;text-shadow:0 0 30px rgba(111,207,95,.55);">70<span style="font-size:22px;color:#3f7a5c;font-weight:600">/70</span></div>
+                <div style="flex:1;display:flex;flex-wrap:wrap;gap:4px;">
+                  <sc-for list="{{ cellsA }}" as="c" hint-placeholder-count="70"><span style="width:13px;height:13px;border-radius:2px;background:#5fc94f;box-shadow:0 0 6px rgba(111,207,95,.6);animation:reactor 3s ease-in-out infinite;animation-delay:{{ c.d }}"></span></sc-for>
+                </div>
+              </div>
+            </div>
+
+            <!-- klaxon findings -->
+            <div style="border-radius:12px;background:#0c1524;border:1px solid #1c2c44;padding:16px 18px;">
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+                <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.1em;color:#dfe7f2;">HULL DIAGNOSTICS</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;color:#f5c94a;background:rgba(245,184,32,.1);border:1px solid rgba(245,184,32,.35);border-radius:6px;padding:3px 9px;"><span style="width:7px;height:7px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 1.2s ease-in-out infinite"></span>1 MEDIUM</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:13px;background:rgba(245,184,32,.05);border-left:3px solid #f5b820;border-radius:0 8px 8px 0;padding:11px 14px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#f5c94a;flex:none;">⚠ BACKUPS</span>
+                <span style="font-size:12.5px;color:#b7c4d6;line-height:1.5;">Marked inactive despite prior successful runs &mdash; scheduler may be off. Plan <span style="color:#f5c94a">p1</span> ready.</span>
+              </div>
+            </div>
+
+            <!-- disk gauges -->
+            <div style="border-radius:12px;background:#0c1524;border:1px solid #1c2c44;padding:16px 18px;">
+              <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.1em;color:#dfe7f2;">STORAGE BAYS</span>
+              <div style="margin-top:12px;display:flex;flex-direction:column;gap:11px;">
+                <sc-for list="{{ disksA }}" as="d" hint-placeholder-count="4">
+                  <div style="display:grid;grid-template-columns:150px 1fr 40px;gap:12px;align-items:center;">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#9fb0c6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ d.mount }}</span>
+                    <div style="height:9px;border-radius:5px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:{{ d.width }};background:{{ d.color }};box-shadow:0 0 8px {{ d.color }};"></div></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:700;color:#c3d0e2;text-align:right;">{{ d.pct }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <!-- crew monitors -->
+          <div style="display:flex;flex-direction:column;gap:14px;">
+            <div style="border-radius:12px;background:linear-gradient(180deg,#0e1a2c,#0a1220);border:1px solid #1c3a52;overflow:hidden;">
+              <div style="padding:9px 13px;background:rgba(53,197,216,.08);border-bottom:1px solid #16233a;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;color:#6fd3e0;display:flex;align-items:center;gap:7px;"><span style="width:7px;height:7px;border-radius:50%;background:#35c5d8;color:#35c5d8;animation:beacon 2s ease-in-out infinite"></span>SHIP COMPUTER</div>
+              <div style="padding:13px;">
+                <div style="border-radius:9px;overflow:hidden;background:#03130f;border:1px solid #1c4a3a;position:relative;">
+                  <div style="padding:11px 12px;font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.55;color:#7fe3a5;text-shadow:0 0 8px rgba(111,207,95,.4);">&gt; PROF. FARNSWORTH<br><span style="color:#4f9c76">Good news! 70/70 alive, 20d up. Mind those 3 sudo auth failures&mdash;something keeps poking my own dashboard.</span></div>
+                  <div style="pointer-events:none;position:absolute;inset:0;background:repeating-linear-gradient(180deg,transparent 0 2px,rgba(0,0,0,.25) 2px 3px);"></div>
+                </div>
+              </div>
+            </div>
+            <div style="border-radius:12px;background:#0c1524;border:1px solid #1c2c44;padding:13px;">
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;color:#4f6684;margin-bottom:11px;">CREW MONITORS</div>
+              <div style="display:flex;flex-direction:column;gap:9px;">
+                <sc-for list="{{ crew }}" as="m" hint-placeholder-count="4">
+                  <div style="display:flex;align-items:center;gap:9px;">
+                    <div style="width:26px;height:26px;border-radius:6px;background:{{ m.c }};display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:10px;color:#04140f;flex:none;box-shadow:0 0 8px {{ m.c }}55;">{{ m.i }}</div>
+                    <div style="min-width:0;"><div style="font-size:11.5px;font-weight:600;color:#dfe7f2;">{{ m.n }}</div><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#5f7391;">{{ m.r }}</div></div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== 1b  OPENING TITLE / TV BROADCAST ===================== -->
+    <div class="dv-opt" id="1b">
+      <div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Opening Title / Broadcast &mdash; the show's title card: chrome logotype, rotating gag subtitle, TV bug, news-crawl ticker of updates</div>
+      <div class="dv-card" style="width:840px;font-family:'Space Grotesk',sans-serif;background:radial-gradient(1200px 600px at 50% -20%, #1b6a86, #0a2f45 45%, #06141f 90%);border:1px solid #12455f;position:relative;">
+        <!-- starfield dots -->
+        <div aria-hidden="true" style="pointer-events:none;position:absolute;inset:0;z-index:0;background-image:radial-gradient(1.5px 1.5px at 12% 18%,#bfe9f2 40%,transparent),radial-gradient(1.5px 1.5px at 78% 12%,#fff 40%,transparent),radial-gradient(1px 1px at 42% 30%,#cdeaf2 40%,transparent),radial-gradient(1.5px 1.5px at 88% 40%,#fff 40%,transparent),radial-gradient(1px 1px at 24% 42%,#bfe9f2 40%,transparent),radial-gradient(1px 1px at 62% 22%,#fff 40%,transparent);opacity:.55;"></div>
+        <!-- TV broadcast bug -->
+        <div style="position:absolute;top:16px;right:18px;z-index:5;display:flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.1em;color:#ffd7cf;background:rgba(239,111,94,.18);border:1px solid rgba(239,111,94,.5);border-radius:20px;padding:4px 11px;"><span style="width:7px;height:7px;border-radius:50%;background:#ef6f5e;animation:led 1.3s ease-in-out infinite"></span>LIVE &middot; ch.9̸9</div>
+
+        <!-- title card hero -->
+        <div style="position:relative;z-index:2;padding:38px 30px 26px;text-align:center;animation:chromapop .5s ease both;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.5em;color:#7fd6e8;margin-bottom:14px;">IN THE YEAR 2026</div>
+          <div style="font-family:'Bungee',sans-serif;font-size:52px;line-height:.94;letter-spacing:.01em;background:linear-gradient(180deg,#fff 6%,#efe2c0 30%,#caa758 52%,#fff7e6 60%,#b98f3e 82%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 3px 0 #6e4d16) drop-shadow(0 5px 7px rgba(0,0,0,.55));">PLANET<br>EXPRESS</div>
+          <!-- rotating gag subtitle -->
+          <div style="position:relative;height:26px;margin-top:16px;font-family:'Chakra Petch',sans-serif;font-weight:600;font-size:14px;letter-spacing:.02em;color:#ffd7cf;">
+            <span class="gag">Now with 100% more uptime</span>
+            <span class="gag">As monitored by 5 concerned users</span>
+            <span class="gag">Bite my shiny green containers</span>
+            <span class="gag">70 of 70 &middot; a personal best</span>
+            <span class="gag">Warning: contains one (1) medium finding</span>
+            <span class="gag">Crew is replaceable &middot; containers aren't</span>
+          </div>
+        </div>
+
+        <!-- chyron: fleet status lower-third -->
+        <div style="position:relative;z-index:2;margin:0 24px;display:flex;align-items:stretch;border-radius:10px 10px 0 0;overflow:hidden;box-shadow:0 6px 20px rgba(0,0,0,.4);">
+          <div style="background:linear-gradient(180deg,#ef6f5e,#c9452f);color:#fff5ef;font-family:'Bungee',sans-serif;font-size:13px;letter-spacing:.04em;padding:14px 18px;display:flex;align-items:center;">FLEET STATUS</div>
+          <div style="flex:1;background:linear-gradient(180deg,#0c2c3e,#082230);display:flex;align-items:center;gap:20px;padding:12px 20px;">
+            <div style="display:flex;align-items:baseline;gap:8px;"><span style="font-family:'Bungee',sans-serif;font-size:34px;color:#6fdf6a;text-shadow:0 0 22px rgba(111,223,106,.5);">70</span><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#7fbfd4;">/70 healthy</span></div>
+            <div style="flex:1;display:flex;flex-wrap:wrap;gap:3px;">
+              <sc-for list="{{ cellsB }}" as="c" hint-placeholder-count="70"><span style="width:9px;height:9px;border-radius:2px;background:#5fdf5a;box-shadow:0 0 5px rgba(111,223,106,.6)"></span></sc-for>
+            </div>
+          </div>
+        </div>
+
+        <!-- broadcast content panels -->
+        <div style="position:relative;z-index:2;background:#071823;padding:20px 24px;display:grid;grid-template-columns:minmax(0,1fr) 250px;gap:18px;">
+          <div style="display:flex;flex-direction:column;gap:14px;min-width:0;">
+            <!-- breaking finding -->
+            <div style="border-radius:10px;overflow:hidden;background:#0b2534;border:1px solid #124055;">
+              <div style="background:linear-gradient(90deg,#f5b820,#e09a12);color:#3a2a04;font-family:'Bungee',sans-serif;font-size:11px;letter-spacing:.04em;padding:7px 14px;">⚠ SPECIAL REPORT</div>
+              <div style="padding:13px 15px;font-size:13px;color:#c7d6e2;line-height:1.55;">Backups reported <b style="color:#ffd27a">inactive</b> despite prior successful runs. The Professor recommends plan <span style="font-family:'JetBrains Mono',monospace;color:#ffd27a">p1</span> &mdash; re-enable scheduling, run a full scan, verify certs.</div>
+            </div>
+            <!-- disk as broadcast bars -->
+            <div style="border-radius:10px;background:#0b2534;border:1px solid #124055;padding:14px 16px;">
+              <div style="font-family:'Bungee',sans-serif;font-size:11px;letter-spacing:.03em;color:#7fd6e8;margin-bottom:12px;">STORAGE REPORT</div>
+              <div style="display:flex;flex-direction:column;gap:10px;">
+                <sc-for list="{{ disksB }}" as="d" hint-placeholder-count="4">
+                  <div style="display:grid;grid-template-columns:140px 1fr 38px;gap:11px;align-items:center;">
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#9fc3d4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ d.mount }}</span>
+                    <div style="height:10px;border-radius:6px;background:#06202c;overflow:hidden;"><div style="height:100%;width:{{ d.width }};background:{{ d.color }}"></div></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;color:#d5e3ec;text-align:right;">{{ d.pct }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <!-- anchor desk: professor -->
+          <div style="display:flex;flex-direction:column;gap:12px;">
+            <div style="border-radius:10px;overflow:hidden;background:linear-gradient(180deg,#0e3040,#0a2230);border:1px solid #1c5a72;">
+              <div style="padding:8px 12px;background:rgba(127,214,232,.1);font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.1em;color:#7fd6e8;display:flex;align-items:center;gap:7px;"><span style="width:7px;height:7px;border-radius:50%;background:#ef6f5e;animation:led 1.3s ease-in-out infinite"></span>ON AIR</div>
+              <div style="padding:13px;">
+                <div style="display:flex;align-items:center;gap:9px;margin-bottom:10px;"><div style="width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 40% 35%,#e8f0f7,#a9bccd);border:2px solid #7fd6e8;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;color:#28495c;">PF</div><div><div style="font-size:12.5px;font-weight:700;color:#eef4fa;">Prof. Farnsworth</div><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#6f96a8;">live &middot; slightly worried</div></div></div>
+                <div style="font-size:12px;line-height:1.5;color:#bcd3df;font-style:italic;">&ldquo;Good news, everyone! Seventy of seventy, alive and well.&rdquo;</div>
+              </div>
+            </div>
+            <div style="border-radius:10px;background:#0b2534;border:1px solid #124055;padding:12px;">
+              <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;color:#5f8698;margin-bottom:9px;">CREW</div>
+              <div style="display:flex;flex-wrap:wrap;gap:7px;">
+                <sc-for list="{{ crew }}" as="m" hint-placeholder-count="4"><span style="display:inline-flex;align-items:center;gap:6px;font-size:10.5px;color:#cfe0ea;background:#0e3040;border-radius:14px;padding:3px 9px 3px 4px;"><span style="width:16px;height:16px;border-radius:50%;background:{{ m.c }};display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:8px;color:#04140f;">{{ m.i }}</span>{{ m.n }}</span></sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- news crawl ticker -->
+        <div style="position:relative;z-index:2;display:flex;align-items:stretch;background:#040e14;border-top:2px solid #ef6f5e;overflow:hidden;">
+          <div style="background:#ef6f5e;color:#fff5ef;font-family:'Bungee',sans-serif;font-size:10px;letter-spacing:.05em;padding:9px 13px;display:flex;align-items:center;flex:none;z-index:2;">UPDATES</div>
+          <div style="flex:1;overflow:hidden;position:relative;display:flex;align-items:center;">
+            <div style="display:flex;white-space:nowrap;font-family:'JetBrains Mono',monospace;font-size:11px;color:#8fb8c8;animation:crawl 26s linear infinite;">
+              <span style="padding:9px 0;">{{ ticker }}</span><span style="padding:9px 0;">{{ ticker }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <p class="dv-next">Try next: "go deep on <a class="dv-oid" href="#1a">1a</a> &mdash; build all four tabs" &middot; "<a class="dv-oid" href="#1b">1b</a> but keep the cockpit crew monitors from <a class="dv-oid" href="#1a">1a</a>" &middot; "mash them up" &middot; "more restrained on <a class="dv-oid" href="#1b">1b</a>"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  diskColor(p){ return p>=80?'#ef6f5e':p>=60?'#f5b820':'#6fcf5f'; }
+  renderVals(){
+    const disks=[
+      {mount:'/',pct:76},{mount:'/casamedia',pct:54},
+      {mount:'/immichPhotos',pct:58},{mount:'/home',pct:37},
+    ].map(d=>({mount:d.mount,width:d.pct+'%',pct:d.pct+'%',color:this.diskColor(d.pct)}));
+    const crew=[
+      {n:'Leela',r:'system monitor',i:'L',c:'#8f6fd0'},
+      {n:'Hermes',r:'issue analyzer',i:'H',c:'#6fcf5f'},
+      {n:'Bender',r:'action executor',i:'B',c:'#9fb0c6'},
+      {n:'Zoidberg',r:'auto-patcher',i:'Z',c:'#ef6f5e'},
+    ];
+    const svcs=['meilisearch','lubelogger','db','bentopdf','wiki-go','web','mealiev2','ghost','dozzle','chrome','beszel-agent','actual_server','planka','homepage','erugo'];
+    const ticker = svcs.map(s=>'✓ '+s+' updated').join('     •     ')+'     •     ';
+    return {
+      disksA:disks, disksB:disks, crew, ticker,
+      cellsA:Array.from({length:70},(_,i)=>({d:(i%9*0.18).toFixed(2)+'s'})),
+      cellsB:Array.from({length:70},(_,i)=>({i})),
+    };
+  }
+}
+</script>
+</body>
+</html>

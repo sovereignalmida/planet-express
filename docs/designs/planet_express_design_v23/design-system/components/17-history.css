@@ -1,0 +1,80 @@
+/* Planet Express design system · History run cards + sticky detail
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ── History: run cards and a sticky detail pane (T45.4) ────────────────────────
+   Was full-width rows in which one service's dot floated in 2,000px of timeline. */
+.history-dock { position: relative; z-index: 2; padding: 14px 18px 18px; }
+.history-split { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; align-items: start; }
+.history-runs { min-width: 0; display: flex; flex-direction: column; gap: 11px; }
+.deploy-runs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.deploy-run {
+  appearance: none; cursor: pointer; text-align: left; min-width: 0;
+  display: flex; flex-direction: column; gap: 9px; padding: 12px 14px;
+  border: 1px solid var(--pe-border); border-left: 3px solid var(--pe-ok-line);
+  border-radius: 12px; background: var(--pe-panel); color: var(--pe-ink); font: inherit;
+}
+.deploy-run.alert { border-left-color: var(--pe-crit-line); background: linear-gradient(180deg, var(--pe-crit-bg), var(--pe-panel)); }
+.deploy-run.is-selected { border-color: var(--pe-accent); border-left-color: var(--pe-accent); background: linear-gradient(180deg, var(--pe-accent-bg), var(--pe-panel)); }
+.deploy-run-head { display: flex; align-items: center; gap: 8px; }
+.deploy-run-led { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--pe-ok); }
+.deploy-run.alert .deploy-run-led { background: var(--pe-crit); }
+.deploy-run-stack { color: var(--pe-ink); font: 700 14px var(--pe-font-display); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deploy-run-date { color: var(--pe-ink-label); font: 9.5px var(--pe-font-mono); }
+.deploy-run-figures { display: flex; align-items: baseline; gap: 7px; }
+.deploy-run-n { color: var(--pe-ok-ink); font: 700 22px/1 var(--pe-font-display); }
+.deploy-run.alert .deploy-run-n { color: var(--pe-crit-ink); }
+.deploy-run-n-label { color: var(--pe-ink-faint); font: 9.5px var(--pe-font-mono); }
+.deploy-run-span { color: var(--pe-ink-dim); font: 9.5px var(--pe-font-mono); }
+.deploy-run-bars { display: flex; gap: 3px; }
+.deploy-run-bar { flex: 1; max-width: 28px; height: 4px; border-radius: 2px; background: var(--pe-ok); }
+.deploy-run-bar.alert { background: var(--pe-crit); }
+.pe-spacer { flex: 1; }
+
+.history-detail {
+  position: sticky; top: 12px; min-width: 0; display: flex; flex-direction: column; gap: 13px;
+  padding: 15px 17px; border: 1px solid var(--pe-accent); border-radius: 12px;
+  background: linear-gradient(180deg, var(--pe-accent-bg), var(--pe-panel));
+}
+.run-detail-head { display: flex; align-items: center; gap: 9px; }
+.run-detail-eyebrow { color: var(--pe-accent-ink); font: 9.5px var(--pe-font-mono); letter-spacing: .12em; }
+.run-detail-badge {
+  padding: 2px 8px; border: 1px solid var(--pe-ok-line); border-radius: var(--pe-r-pill);
+  color: var(--pe-ok-ink); font: 700 9px var(--pe-font-mono); letter-spacing: .1em;
+}
+.run-detail-badge.alert { border-color: var(--pe-crit-line); color: var(--pe-crit-ink); }
+.run-detail-title { color: var(--pe-ink); font: 700 20px var(--pe-font-display); overflow-wrap: anywhere; }
+.run-detail-range { margin-top: 3px; color: var(--pe-ink-label); font: 10.5px var(--pe-font-mono); }
+.run-detail-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.run-detail-well { padding: 9px 11px; border: 1px solid var(--pe-border-dash); border-radius: 9px; background: var(--pe-well); }
+.run-detail-well-label { color: var(--pe-ink-faint); font: 9px var(--pe-font-mono); }
+.run-detail-well-value { margin-top: 2px; color: var(--pe-ink); font: 700 18px var(--pe-font-display); }
+.run-detail-well-value.ok { color: var(--pe-ok-ink); }
+.run-detail-well-value.alert { color: var(--pe-crit-ink); }
+.run-timeline { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; }
+.run-timeline-row {
+  display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; gap: 10px; align-items: center;
+  padding: 7px 0; border-bottom: 1px dashed var(--pe-border-dash);
+}
+.run-timeline-tick {
+  width: 16px; height: 16px; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--pe-ok-line); border-radius: 50%; background: var(--pe-ok-bg);
+  color: var(--pe-ok-ink); font-size: 9px;
+}
+.run-timeline-row.alert .run-timeline-tick { border-color: var(--pe-crit-line); background: var(--pe-crit-bg); color: var(--pe-crit-ink); }
+.run-timeline-service { color: var(--pe-ink-2); font: 11px var(--pe-font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-timeline-time { color: var(--pe-ink-label); font: 10px var(--pe-font-mono); }
+.run-detail-note {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px dashed var(--pe-border-strong); border-radius: 10px; background: var(--pe-well);
+  color: var(--pe-ink-label); font: 10px var(--pe-font-mono);
+}
+.run-detail-note img { width: 26px; height: 26px; flex: none; border-radius: 50%; object-fit: cover; }
+
+@media (max-width: 1024px) {
+  .history-split { grid-template-columns: minmax(0, 1fr); }
+  .history-detail { position: static; }
+  .deploy-runs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .deploy-runs { grid-template-columns: minmax(0, 1fr); }
+}
+

@@ -1,0 +1,67 @@
+/* Planet Express design system · airlock, persistent tab docks, config dock
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* Airlock: one column on phones and a focused panel on larger screens. */
+.pe-airlock { width: min(100%, 430px); min-height: 100dvh; margin: auto;
+              padding: 40px 26px; display: flex; flex-direction: column;
+              justify-content: center; gap: 24px; position: relative; }
+.pe-airlock-brand { text-align: center; }
+.pe-airlock-brand img { height: 74px; width: auto; }
+.pe-airlock h1 { font-family: var(--pe-font-display); font-size: 23px; letter-spacing: .09em; }
+.pe-airlock h2 { font-family: var(--pe-font-display); font-size: 14px; }
+.pe-airlock-fields, .pe-airlock form { display: flex; flex-direction: column; gap: 13px; }
+.pe-airlock .pe-input { width: 100%; min-width: 0; }
+.pe-airlock .pe-input:focus { outline: 2px solid var(--pe-accent); outline-offset: 2px; }
+.pe-airlock .pe-btn { min-height: 54px; width: 100%; }
+.pe-airlock-trust { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; }
+.pe-airlock-trust input { accent-color: var(--pe-accent); }
+.pe-airlock-warning, .pe-airlock-clock strong { color: var(--pe-warn); }
+.pe-airlock-clock { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.pe-airlock-clock strong { font-size: 44px; font-family: var(--pe-font-display); }
+.pe-airlock-clock progress { width: 100%; accent-color: var(--pe-warn); }
+.pe-logout { margin: 0; }
+.pe-logout button { min-height: 44px; cursor: pointer; }
+
+/* Tabs whose panels are persistent siblings of the replaceable dashboard snapshot: the live
+   region's grid has no content for them, so it is hidden rather than left standing empty.
+   DETACHED_TABS in dashboard.js is the list; these two per-tab rules predate it and are kept
+   because config.js toggles .config-active on a path of its own. */
+.detached-tab #dashboard-live > .body-grid { display: none; }
+.chat-active #dashboard-live > .body-grid { display: none; }
+#chat-panel { padding: 22px 26px 40px; position: relative; z-index: 2; }
+#chat-form { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; margin-top: 18px; }
+#chat-question { width: 100%; box-sizing: border-box; resize: vertical; padding: 12px;
+  background: var(--cp-inset-bg); color: var(--text2); border: 1px solid var(--panel-border);
+  border-radius: 6px; font: inherit; }
+#chat-transcript { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
+#chat-transcript p, #chat-transcript h3, #chat-transcript pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#chat-transcript pre { max-height: 320px; overflow: auto; }
+#chat-transcript summary { cursor: pointer; }
+#chat-transcript p, #chat-transcript details { margin: 12px 0; }
+#chat-ask:disabled { opacity: .5; cursor: wait; }
+
+/* Config editor is a persistent sibling of the replaceable dashboard snapshot. */
+.config-active #dashboard-live > .body-grid { display: none; }
+.config-shell { display: flex; flex-direction: column; gap: 18px; }
+.config-policy, .config-editor-card, .config-outcome { display: flex; flex-direction: column; gap: 14px; }
+.config-path { margin: 0; overflow-wrap: anywhere; color: var(--pe-ink-body); }
+.config-path span, .config-group-label { font: 10px var(--pe-font-mono); letter-spacing: .09em; color: var(--pe-ink-faint); }
+.config-path code { color: var(--pe-accent-ink); }
+.config-field-groups { display: grid; gap: 12px; }
+.config-field-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.config-chip { display: inline-flex; align-items: center; min-height: 28px; padding: 3px 9px;
+  border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-pill); background: var(--pe-well);
+  color: var(--pe-ink-dim); font: 10px var(--pe-font-mono); overflow-wrap: anywhere; }
+.config-chip.editable { color: var(--pe-ok-ink); border-color: var(--pe-ok-line); }
+.config-chip.sensitive { color: var(--pe-warn-ink); border-color: var(--pe-warn-line); }
+.config-chip.locked { color: var(--pe-crit-ink); border-color: var(--pe-crit-line); }
+#config-editor { width: 100%; min-height: 54vh; box-sizing: border-box; resize: vertical; padding: 14px;
+  border: 1px solid var(--pe-border-strong); border-radius: var(--pe-r-md); background: #03130f;
+  color: #9adfb3; font: 12px/1.65 var(--pe-font-mono); tab-size: 2; }
+#config-editor:focus { outline: 2px solid var(--pe-accent); outline-offset: 2px; }
+.config-dirty { color: var(--pe-ok-ink); font: 10px var(--pe-font-mono); letter-spacing: .08em; }
+.config-dirty.is-dirty { color: var(--pe-warn-ink); }
+.config-actions, .config-sheet-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.config-actions .pe-btn { min-height: 44px; }
+.config-actions #config-review { margin-left: auto; }
+.config-actions button:disabled, .config-sheet-actions button:disabled { opacity: .45; cursor: wait; }
+

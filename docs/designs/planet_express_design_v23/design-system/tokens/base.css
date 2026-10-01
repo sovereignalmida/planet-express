@@ -1,0 +1,16 @@
+/* Planet Express design system · reset + base
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ---------- 8. RESET / BASE ---------- */
+body {
+  margin: 0;
+  background: var(--pe-bg);
+  color: var(--pe-ink);
+  font-family: var(--pe-font-body);
+  font-size: 14px;
+  line-height: 1.6;
+}
+a { color: var(--pe-accent-ink); text-decoration: none; border-bottom: 1px solid rgba(95,214,232,.3); }
+a:hover { color: var(--pe-accent-hi); border-bottom-color: var(--pe-accent-hi); }
+h1,h2,h3,h4 { font-family: var(--pe-font-display); font-weight: 700; margin: 0; letter-spacing: .02em; }
+code, pre, .pe-mono { font-family: var(--pe-font-mono); }
+p { text-wrap: pretty; }

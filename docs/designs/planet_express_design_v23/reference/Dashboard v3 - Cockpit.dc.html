@@ -1,0 +1,767 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#060912}
+  a{color:#5fd6e8;text-decoration:none} a:hover{color:#9be8f4}
+  ::selection{background:rgba(111,207,95,.3)}
+  ::-webkit-scrollbar{width:11px;height:11px}
+  ::-webkit-scrollbar-thumb{background:#1c2c44;border-radius:8px;border:2px solid #060912}
+  ::-webkit-scrollbar-track{background:transparent}
+  @keyframes led{0%,100%{opacity:1}50%{opacity:.3}}
+  @keyframes beacon{0%,100%{opacity:.4;box-shadow:0 0 5px currentColor}50%{opacity:1;box-shadow:0 0 20px currentColor}}
+  @keyframes reactor{0%,100%{opacity:.8}50%{opacity:1}}
+  @keyframes oscdash{to{stroke-dashoffset:-140}}
+  @keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(500%)}}
+  @keyframes bootin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @keyframes flick{0%,100%{opacity:.06}50%{opacity:.12}}
+  @keyframes deathflash{0%,100%{box-shadow:0 0 0 1px rgba(239,60,46,.5), 0 0 22px rgba(239,60,46,.3)}50%{box-shadow:0 0 0 2px rgba(255,90,70,1), 0 0 48px rgba(239,60,46,.8)}}
+  @keyframes critpulse{0%,100%{transform:scale(1);filter:brightness(1)}50%{transform:scale(1.07);filter:brightness(1.25)}}
+</style>
+</helmet>
+<div style="min-height:100vh;background:radial-gradient(1000px 560px at 82% -10%, rgba(53,197,216,.07), transparent 55%),radial-gradient(760px 520px at 6% 118%, rgba(245,184,32,.05), transparent 55%),#080b14;font-family:'Space Grotesk',system-ui,sans-serif;color:#dfe7f2;position:relative;overflow:hidden;">
+
+  <!-- CRT scan overlay -->
+  <div aria-hidden="true" style="pointer-events:none;position:fixed;inset:0;z-index:60;background:repeating-linear-gradient(180deg, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.12) 2px 4px);mix-blend-mode:multiply;"></div>
+  <div aria-hidden="true" style="pointer-events:none;position:fixed;inset:0;z-index:59;background:radial-gradient(120% 120% at 50% 50%, transparent 62%, rgba(0,0,0,.45));"></div>
+
+  <!-- ===== COCKPIT CONTROL STRIP ===== -->
+  <header style="display:flex;align-items:center;gap:18px;padding:16px 24px;background:linear-gradient(180deg,#182234,#0d1626);border-bottom:2px solid #24344c;position:relative;z-index:2;box-shadow:inset 0 -2px 0 rgba(0,0,0,.5);">
+    <div style="position:absolute;left:10px;top:10px;width:7px;height:7px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#5c6f8a,#1a2436);box-shadow:0 1px 1px rgba(0,0,0,.6)"></div>
+    <div style="position:absolute;left:10px;bottom:10px;width:7px;height:7px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#5c6f8a,#1a2436);box-shadow:0 1px 1px rgba(0,0,0,.6)"></div>
+    <div style="position:relative;flex:none;">
+      <div style="width:50px;height:50px;border-radius:50%;border:2px solid #ef6f5e;overflow:hidden;background:radial-gradient(circle at 50% 40%, #16283a, #0a1220);box-shadow:0 0 0 2px #0c1017, 0 0 20px rgba(239,111,94,.35);">
+        <img src="static/logo.png" alt="Planet Express" style="width:100%;height:100%;object-fit:contain;display:block;" />
+      </div>
+      <span style="position:absolute;width:9px;height:9px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 9px #6fcf5f;right:-2px;top:2px;border:1.5px solid #0c1017;"></span>
+    </div>
+    <div>
+      <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:21px;letter-spacing:.13em;color:#eef4fa;line-height:1;">PLANET&nbsp;EXPRESS</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;letter-spacing:.05em;margin-top:5px;">SHIP COMPUTER v3000 · crew replaceable, containers aren't</div>
+    </div>
+    <div style="flex:1"></div>
+    <!-- oscilloscope load gauge -->
+    <div style="width:132px;height:58px;border-radius:9px;background:#03130f;border:1px solid #1c4a3a;overflow:hidden;position:relative;box-shadow:inset 0 0 16px rgba(53,197,216,.12)">
+      <svg viewBox="0 0 132 58" width="132" height="58" style="display:block">
+        <line x1="0" y1="30" x2="132" y2="30" stroke="#123b2e" stroke-width="1"/>
+        <polyline points="0,32 14,25 26,37 40,18 54,39 68,23 82,32 96,15 110,36 122,27 132,31" fill="none" stroke="#39d67f" stroke-width="1.7" stroke-dasharray="140" style="filter:drop-shadow(0 0 3px rgba(57,214,127,.7));animation:oscdash 2.4s linear infinite"/>
+      </svg>
+      <span style="position:absolute;left:8px;top:6px;font-family:'JetBrains Mono',monospace;font-size:8px;color:#2f9c72;letter-spacing:.1em;">LOAD {{ loadNow }}</span>
+      <span style="position:absolute;right:8px;bottom:5px;font-family:'JetBrains Mono',monospace;font-size:7.5px;color:#1f6b4f;">1m·5m·15m</span>
+    </div>
+    <!-- chunky scan button -->
+    <button onClick="{{ refresh }}" style="appearance:none;cursor:pointer;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.05em;color:#04140f;background:linear-gradient(180deg,#6fcf5f,#3f9a34);border:none;border-radius:10px;padding:12px 18px;box-shadow:0 4px 0 #256b1f, 0 6px 12px rgba(0,0,0,.5);transition:all .1s;" style-hover="filter:brightness(1.08)" style-active="transform:translateY(3px);box-shadow:0 1px 0 #256b1f, 0 2px 6px rgba(0,0,0,.5)">↻ SCAN</button>
+  </header>
+
+  <!-- scan progress -->
+  <sc-if value="{{ scanning }}" hint-placeholder-val="{{ false }}">
+    <div style="height:2px;background:#0a1220;position:relative;overflow:hidden;z-index:2;">
+      <div style="position:absolute;top:0;left:0;height:100%;width:22%;background:linear-gradient(90deg,transparent,#6fcf5f,transparent);animation:shimmer 1s linear infinite;"></div>
+    </div>
+  </sc-if>
+
+  <!-- ===== STATUS LAMP RAIL + TABS ===== -->
+  <div style="display:flex;align-items:center;gap:20px;padding:10px 24px;background:#0a1220;border-bottom:1px solid #16233a;position:relative;z-index:2;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.06em;">
+    <span style="display:inline-flex;align-items:center;gap:7px;color:#8fe6a0"><span style="width:8px;height:8px;border-radius:50%;background:#6fcf5f;color:#6fcf5f;animation:beacon 2.4s ease-in-out infinite"></span>PIPELINE IDLE</span>
+    <span style="display:inline-flex;align-items:center;gap:7px;color:#f5c94a"><span style="width:8px;height:8px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 1.7s ease-in-out infinite"></span>PLAN p1 PENDING</span>
+    <span style="display:inline-flex;align-items:center;gap:7px;color:#7fbfd4"><span style="width:8px;height:8px;border-radius:50%;background:#35c5d8;color:#35c5d8;animation:beacon 3s ease-in-out infinite"></span>SENSORS NOMINAL</span>
+    <div style="flex:1"></div>
+    <span style="color:#5f7391;">last scan {{ lastScan }}</span>
+  </div>
+
+  <nav style="display:flex;gap:10px;padding:14px 24px 0;position:relative;z-index:2;">
+    <button onClick="{{ goOverview }}" style="{{ ovTab }}">OVERVIEW</button>
+    <button onClick="{{ goBackups }}" style="{{ buTab }}">BACKUPS</button>
+    <button onClick="{{ goNetwork }}" style="{{ neTab }}">NETWORK</button>
+    <button onClick="{{ goActions }}" style="{{ acTab }}">ACTIONS</button>
+    <div style="flex:1"></div>
+    <div style="align-self:center;font-family:'JetBrains Mono',monospace;font-size:10px;color:#4a5c76;border:1px solid #1c2c44;border-radius:6px;padding:5px 11px;letter-spacing:.06em;">READ-ONLY · LAN-TRUST</div>
+  </nav>
+
+  <!-- ===== BODY ===== -->
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:20px;padding:20px 24px 42px;position:relative;z-index:2;align-items:start;">
+    <main style="min-width:0;display:flex;flex-direction:column;gap:16px;">
+
+      <!-- ============ OVERVIEW ============ -->
+      <sc-if value="{{ isOverview }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex;flex-direction:column;gap:16px;animation:bootin .3s ease both;">
+
+          <!-- reactor core / fleet -->
+          <section style="border-radius:13px;background:linear-gradient(180deg,#101d16,#0a1420);border:1px solid #1c4a3a;padding:20px 22px;position:relative;box-shadow:inset 0 1px 0 rgba(111,207,95,.12), inset 0 0 34px rgba(0,0,0,.4);">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:.14em;color:#3f7a5c;">REACTOR CORE · CONTAINER FLEET</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#2f9c72;">70 ONLINE · 0 DEGRADED · 0 DOWN</span>
+            </div>
+            <div style="display:flex;align-items:flex-end;gap:24px;flex-wrap:wrap;">
+              <div>
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:58px;line-height:.82;color:#6fcf5f;text-shadow:0 0 32px rgba(111,207,95,.55);">70<span style="font-size:24px;color:#3f7a5c;font-weight:600">/70</span></div>
+                <div style="font-size:14px;color:#8fe6a0;font-weight:600;margin-top:8px;">containers healthy</div>
+              </div>
+              <div style="flex:1;min-width:280px;display:flex;flex-wrap:wrap;gap:5px;">
+                <sc-for list="{{ cells }}" as="c" hint-placeholder-count="70"><span style="width:15px;height:15px;border-radius:3px;background:{{ c.bg }};box-shadow:0 0 6px {{ c.glow }};animation:reactor 3s ease-in-out infinite;animation-delay:{{ c.d }};"></span></sc-for>
+              </div>
+            </div>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.05em;">
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:9px;height:9px;border-radius:2px;background:#5fc94f;box-shadow:0 0 5px rgba(111,207,95,.5);"></span>online</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:9px;height:9px;border-radius:2px;background:#f5b820;box-shadow:0 0 5px rgba(245,184,32,.5);"></span>degraded</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:9px;height:9px;border-radius:2px;background:#ef3c2e;box-shadow:0 0 5px rgba(239,60,46,.5);"></span>down</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:9px;height:9px;border-radius:2px;background:#8c96a0;"></span>paused</span>
+            </div>
+            <div style="margin-top:14px;padding-top:13px;border-top:1px dashed #16332a;font-size:12.5px;color:#5f8474;">Stack completeness: <span style="color:#7fa593;">not available until the next full scan.</span></div>
+          </section>
+
+          <!-- hull diagnostics / threat panel -->
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">HULL DIAGNOSTICS</h3>
+              <div style="flex:1"></div>
+              <sc-if value="{{ preview }}" hint-placeholder-val="{{ false }}"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:#f4ad63;background:rgba(240,134,74,.1);border:1px solid rgba(240,134,74,.35);border-radius:6px;padding:2px 8px;">{{ previewLabel }}</span></sc-if>
+              <button onClick="{{ cyclePreview }}" style="appearance:none;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.06em;color:#5f7391;background:transparent;border:1px solid #1c2c44;border-radius:7px;padding:5px 10px;transition:all .12s;" style-hover="border-color:#2a4a66;color:#9fb0c6;">cycle preview ⟳</button>
+            </div>
+
+            <!-- master alarm — appearance driven by worst active severity -->
+            <div style="{{ hull.banner }}">
+              <div aria-hidden="true" style="pointer-events:none;position:absolute;inset:0;background:repeating-linear-gradient(180deg,transparent 0 2px,rgba(0,0,0,.06) 2px 3px);"></div>
+              <div style="{{ hull.orb }}">{{ hull.glyph }}</div>
+              <div style="min-width:0;position:relative;">
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;letter-spacing:.05em;color:{{ hull.fg }};">{{ hull.title }}</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#9fb0c6;margin-top:4px;">{{ hull.sub }}</div>
+              </div>
+              <div style="flex:1"></div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;position:relative;">
+                <sc-for list="{{ chips }}" as="ch" hint-placeholder-count="4"><span style="{{ ch.style }}">{{ ch.n }} {{ ch.k }}</span></sc-for>
+              </div>
+            </div>
+
+            <!-- crit / high / med finding cards -->
+            <sc-if value="{{ hasMaterial }}" hint-placeholder-val="{{ true }}">
+              <div style="margin-top:13px;display:flex;flex-direction:column;gap:9px;">
+                <sc-for list="{{ findings }}" as="f" hint-placeholder-count="1">
+                  <div style="{{ f.card }}">
+                    <div style="display:flex;align-items:center;gap:9px;margin-bottom:5px;flex-wrap:wrap;">
+                      <span style="{{ f.dot }}"></span>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;letter-spacing:.06em;color:{{ f.col }};">{{ f.sevLabel }}</span>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#c3d0e2;">{{ f.resource }}</span>
+                      <sc-if value="{{ f.example }}" hint-placeholder-val="{{ false }}"><span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;letter-spacing:.1em;color:#5f7391;border:1px solid #24384c;border-radius:5px;padding:1px 6px;">PREVIEW</span></sc-if>
+                    </div>
+                    <div style="font-size:12.5px;color:#b7c4d6;line-height:1.5;">{{ f.desc }}</div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <!-- low-severity drawer (folded so it can't drown the signal) -->
+            <sc-if value="{{ hasLow }}" hint-placeholder-val="{{ true }}">
+              <div onClick="{{ toggleLow }}" style="margin-top:13px;cursor:pointer;display:flex;align-items:center;gap:10px;border:1px solid #16233a;border-radius:9px;background:#0a1220;padding:11px 14px;transition:border-color .12s;" style-hover="border-color:#2a4a66;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">{{ lowCaret }}</span>
+                <span style="width:7px;height:7px;border-radius:50%;background:#35c5d8;box-shadow:0 0 6px #35c5d8;flex:none;"></span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#7fbfd4;">{{ lowCount }} low-severity notes</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4f6684;">informational · non-blocking</span>
+              </div>
+              <sc-if value="{{ lowOpen }}" hint-placeholder-val="{{ false }}">
+                <div style="margin-top:8px;border:1px dashed #1c2c44;border-radius:9px;background:#08101c;padding:13px 15px;font-size:12px;color:#6f849e;line-height:1.6;">Low-severity findings don't affect flight status — the Professor keeps them off the main board on purpose. Run a full scan for the itemized list with resources and remediation notes.</div>
+              </sc-if>
+            </sc-if>
+
+            <!-- all clear -->
+            <sc-if value="{{ allClear }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f7a5c;">No findings at any severity. The Professor is suspicious, but pleased.</div>
+            </sc-if>
+          </section>
+
+          <!-- storage bays -->
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <h3 style="margin:0 0 14px;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">STORAGE BAYS</h3>
+            <div style="display:grid;grid-template-columns:1.5fr 1.3fr 230px;gap:14px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;padding-bottom:9px;border-bottom:1px solid #16233a;">
+              <span>MOUNT</span><span>SOURCE</span><span>USED</span>
+            </div>
+            <sc-for list="{{ disks }}" as="d" hint-placeholder-count="8">
+              <div style="display:grid;grid-template-columns:1.5fr 1.3fr 230px;gap:14px;align-items:center;padding:11px 0;border-bottom:1px solid #101a2a;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#c3d0e2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ d.mount }}</span>
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#6f849e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ d.source }}</span>
+                <div style="display:flex;align-items:center;gap:11px;">
+                  <div style="flex:1;height:8px;border-radius:5px;background:#08101c;border:1px solid #16233a;overflow:hidden;"><div style="height:100%;width:{{ d.width }};background:{{ d.color }};box-shadow:0 0 8px {{ d.color }};"></div></div>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:700;color:#c3d0e2;width:38px;text-align:right;">{{ d.pctText }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </section>
+
+          <!-- system panel -->
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">SYSTEM</h3>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#8fe6a0;border:1px solid rgba(111,207,95,.3);border-radius:6px;padding:3px 8px;background:rgba(111,207,95,.08);display:inline-flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span>casamediaserver</span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px;">
+              <div style="border:1px solid #16233a;border-radius:10px;background:#08101c;padding:13px 15px;box-shadow:inset 0 0 20px rgba(0,0,0,.35);">
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.1em;margin-bottom:7px;">UPTIME</div>
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:600;font-size:19px;color:#eef4fa;">20d 23h 50m</div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;margin-top:4px;">since Jul 02 · 16:26</div>
+              </div>
+              <div style="border:1px solid #16233a;border-radius:10px;background:#08101c;padding:13px 15px;box-shadow:inset 0 0 20px rgba(0,0,0,.35);">
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.1em;margin-bottom:7px;">LOAD AVG</div>
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:600;font-size:19px;color:#8fe6a0;">1.02 <span style="color:#5f7391;font-size:14px;">/ 1.03 / 1.03</span></div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;margin-top:4px;">1m · 5m · 15m</div>
+              </div>
+              <div style="border:1px solid #16233a;border-radius:10px;background:#08101c;padding:13px 15px;box-shadow:inset 0 0 20px rgba(0,0,0,.35);">
+                <div style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.1em;margin-bottom:7px;">SESSIONS</div>
+                <div style="font-family:'Chakra Petch',sans-serif;font-weight:600;font-size:19px;color:#eef4fa;">5 <span style="color:#5f7391;font-size:14px;">users</span></div>
+                <div style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;margin-top:4px;">local time 16:16:30</div>
+              </div>
+            </div>
+            <div style="margin-bottom:7px;display:flex;align-items:baseline;justify-content:space-between;">
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#4f6684;letter-spacing:.08em;">MEMORY</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:12px;color:#c3d0e2;">10Gi <span style="color:#5f7391;">used / 15Gi total · 5.1Gi available</span></span>
+            </div>
+            <div style="display:flex;height:11px;border-radius:6px;overflow:hidden;background:#08101c;border:1px solid #16233a;margin-bottom:11px;">
+              <div style="width:67%;background:#6fcf5f;box-shadow:0 0 10px rgba(111,207,95,.5);"></div>
+              <div style="width:23%;background:rgba(53,197,216,.5);"></div>
+            </div>
+            <div style="display:flex;gap:18px;flex-wrap:wrap;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#6f849e;">
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:#6fcf5f;"></span>used 10Gi</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:rgba(53,197,216,.5);"></span>buff/cache 5.6Gi</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:#08101c;border:1px solid #23303e;"></span>free 476Mi</span>
+              <span>shared 658Mi</span>
+            </div>
+          </section>
+
+          <!-- recent errors terminal -->
+          <section style="border-radius:13px;background:linear-gradient(180deg, rgba(245,184,32,.04), #0c1524);border:1px solid #3a2f18;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">RECENT ERRORS</h3>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;color:#f5c94a;background:rgba(245,184,32,.12);border:1px solid rgba(245,184,32,.4);border-radius:20px;padding:2px 10px;">3</span>
+            </div>
+            <p style="margin:0 0 14px;font-size:12.5px;color:#c3b48a;line-height:1.55;">3 auth failures — a sudo restart of <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">casa-dashboard.service</span> is prompting for a password it can't supply non-interactively.</p>
+            <div style="background:#03130f;border:1px solid #1c4a3a;border-radius:10px;padding:13px 15px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.75;color:#4f9c76;overflow-x:auto;position:relative;">
+              <div aria-hidden="true" style="pointer-events:none;position:absolute;inset:0;background:repeating-linear-gradient(180deg,transparent 0 2px,rgba(0,0,0,.22) 2px 3px)"></div>
+              <sc-for list="{{ errors }}" as="e" hint-placeholder-count="3">
+                <div style="white-space:nowrap;margin:2px 0;position:relative;"><span style="color:#2f6b4f;">{{ e.ts }}</span> <span style="color:#5fd6e8;">{{ e.host }}</span> <span style="color:#c3b48a;">{{ e.proc }}</span> <span style="color:#7fe3a5;">{{ e.msg }}</span></div>
+              </sc-for>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ============ BACKUPS ============ -->
+      <sc-if value="{{ isBackups }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:16px;animation:bootin .3s ease both;">
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:13px;margin-bottom:6px;flex-wrap:wrap;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">COLD STORAGE</h3>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#f5c94a;border:1px solid rgba(245,184,32,.3);border-radius:6px;padding:3px 8px;background:rgba(245,184,32,.08);display:inline-flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 1.6s ease-in-out infinite"></span>SENSORS DORMANT</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">2 pods · borg</span>
+            </div>
+            <p style="margin:0 0 16px;font-size:12.5px;color:#6f849e;line-height:1.6;">Pod telemetry not collected — last scan ran <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">(mode: status)</span>. Run a full scan to read job state, results, and last-run times.</p>
+
+            <!-- cryo pods -->
+            <div style="display:flex;gap:14px;flex-wrap:wrap;">
+              <sc-for list="{{ pods }}" as="p" hint-placeholder-count="2">
+                <div style="flex:1;min-width:230px;border-radius:13px;border:1px solid #24384c;background:linear-gradient(180deg,#0e1f2b,#0a1420);padding:16px 18px;position:relative;overflow:hidden;">
+                  <div aria-hidden="true" style="pointer-events:none;position:absolute;left:-30%;top:-60%;width:160%;height:120%;background:radial-gradient(closest-side, rgba(53,197,216,.12), transparent 70%);"></div>
+                  <div style="position:relative;display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+                    <span style="width:8px;height:8px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 2.2s ease-in-out infinite;"></span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;letter-spacing:.14em;color:#7f95a8;">DORMANT</span>
+                    <div style="flex:1"></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">{{ p.cadence }}</span>
+                  </div>
+                  <div style="position:relative;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:22px;color:#cfe6ee;letter-spacing:.03em;">{{ p.name }}</div>
+                  <div style="position:relative;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;margin-top:3px;">backup job</div>
+                  <div style="position:relative;margin-top:14px;padding-top:13px;border-top:1px dashed #1c3344;display:flex;flex-direction:column;gap:9px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">STATE</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#7f95a8;">awaiting scan</span></div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">RESULT</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;"><span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">LAST RUN</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f5470;">—</span></div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <div style="display:flex;align-items:center;gap:10px;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#5f7391;padding-top:15px;margin-top:15px;border-top:1px dashed #16233a;">
+              <span style="width:8px;height:8px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 1.6s ease-in-out infinite"></span>full scan queued via plan <span style="color:#f5c94a">p1</span> — approve it in the side console to thaw these pods.
+            </div>
+          </section>
+
+          <!-- certificate vault -->
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:13px;margin-bottom:12px;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">CERTIFICATE VAULT</h3>
+              <span style="{{ certChipStyle }}">{{ certChip }}</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;">{{ certCount }}</span>
+              <button type="button" onClick="{{ toggleCerts }}" style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.08em;color:#7f95a8;background:#08101c;border:1px solid #24384c;border-radius:6px;padding:4px 10px;cursor:pointer;" style-hover="color:#cfe6ee;border-color:#35c5d8;">TOGGLE STATE</button>
+            </div>
+
+            <sc-if value="{{ certsOpen }}" hint-placeholder-val="{{ true }}">
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:12px;">
+                <sc-for list="{{ certs }}" as="c" hint-placeholder-count="6">
+                  <div style="{{ c.card }}">
+                    <div style="display:flex;align-items:center;gap:9px;">
+                      <span style="{{ c.led }}"></span>
+                      <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:15px;color:#eef4fa;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.domain }}</span>
+                      <div style="flex:1"></div>
+                      <span style="{{ c.badge }}">{{ c.tier }}</span>
+                    </div>
+                    <div style="display:flex;align-items:baseline;gap:8px;">
+                      <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:22px;color:{{ c.col }};line-height:1;">{{ c.daysText }}</span>
+                      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.08em;">UNTIL EXPIRY</span>
+                    </div>
+                    <div style="height:5px;border-radius:20px;background:#08101c;border:1px solid #16233a;overflow:hidden;">
+                      <div style="{{ c.bar }}"></div>
+                    </div>
+                    <div style="display:flex;flex-direction:column;gap:6px;padding-top:9px;border-top:1px dashed #16233a;">
+                      <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">RESOLVER</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#9fb0c6;">{{ c.resolver }}</span></div>
+                      <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">ISSUER</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#7f95a8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.issuer }}</span></div>
+                      <div style="display:flex;justify-content:space-between;gap:10px;"><span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:#4f6684;letter-spacing:.08em;">{{ c.sanCount }}</span><span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;color:#5f7391;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ c.sanList }}</span></div>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ certsSealed }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:center;gap:15px;border:1px dashed #24384c;border-radius:11px;background:#08101c;padding:16px 18px;">
+                <div style="width:44px;height:44px;border-radius:11px;border:1px solid #24384c;background:rgba(53,197,216,.06);display:flex;align-items:center;justify-content:center;font-size:20px;color:#5f7391;flex:none;">⛨</div>
+                <p style="margin:0;font-size:12.5px;color:#6f849e;line-height:1.6;">TLS certificate telemetry not collected this scan <span style="font-family:'JetBrains Mono',monospace;color:#9fb0c6;">(mode: status)</span>. Expiry windows and issuers unlock after the next full scan.</p>
+              </div>
+            </sc-if>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ============ NETWORK ============ -->
+      <sc-if value="{{ isNetwork }}" hint-placeholder-val="{{ false }}">
+        <div style="animation:bootin .3s ease both;">
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:13px;margin-bottom:12px;flex-wrap:wrap;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">ROUTING MATRIX</h3>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#5f7391;">showing {{ netShown }} of {{ netTotal }}</span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;color:#8fe6a0;background:rgba(111,207,95,.08);border:1px solid rgba(111,207,95,.3);border-radius:20px;padding:3px 10px;display:inline-flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span>all enabled</span>
+              <div style="flex:1"></div>
+              <input value="{{ netQuery }}" onInput="{{ onNetQuery }}" placeholder="filter routers…" style="appearance:none;background:#08101c;border:1px solid #1c2c44;border-radius:8px;color:#dfe7f2;font-family:'JetBrains Mono',monospace;font-size:12px;padding:8px 12px;width:230px;outline:none;" style-focus="border-color:#1c4a3a;box-shadow:0 0 0 2px rgba(111,207,95,.12)" />
+            </div>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;letter-spacing:.05em;">
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:#5fd6e8;"></span>docker</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:#f5c94a;"></span>internal</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;"><span style="width:8px;height:8px;border-radius:2px;background:#b58ff0;"></span>file</span>
+              <span style="color:#3a4c66;">· click a node to expand its route</span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(212px,1fr));gap:11px;">
+              <sc-for list="{{ routers }}" as="r" hint-placeholder-count="18">
+                <div onClick="{{ r.toggle }}" style="cursor:pointer;border:1px solid #16233a;border-radius:10px;background:#0a1220;padding:11px 13px;transition:border-color .12s,box-shadow .12s;position:relative;overflow:hidden;{{ r.dyn }}" style-hover="border-color:#2a4a66;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;">
+                    <span style="width:7px;height:7px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 7px #6fcf5f;flex:none;animation:beacon 3s ease-in-out infinite;"></span>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:8.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:{{ r.provCol }};">{{ r.prov }}</span>
+                    <div style="flex:1"></div>
+                    <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#4f6684;">{{ r.caret }}</span>
+                  </div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:12.5px;font-weight:600;color:#5fd6e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r.short }}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#6f849e;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ r.host }} <span style="color:#3f5470;">{{ r.extra }}</span></div>
+                  <sc-if value="{{ r.open }}" hint-placeholder-val="{{ false }}">
+                    <div style="margin-top:11px;padding-top:11px;border-top:1px dashed #1c3324;display:flex;flex-direction:column;gap:10px;">
+                      <div>
+                        <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;color:#3f7a5c;margin-bottom:4px;">RULE</div>
+                        <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.55;color:#c3b48a;word-break:break-all;">{{ r.rule }}</div>
+                      </div>
+                      <div style="display:flex;gap:26px;flex-wrap:wrap;">
+                        <div>
+                          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;color:#3f7a5c;margin-bottom:4px;">SERVICE</div>
+                          <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#c3d0e2;">{{ r.service }}</div>
+                        </div>
+                        <div>
+                          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;color:#3f7a5c;margin-bottom:4px;">ROUTER</div>
+                          <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#c3d0e2;">{{ r.router }}</div>
+                        </div>
+                        <div>
+                          <div style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.1em;color:#3f7a5c;margin-bottom:4px;">STATUS</div>
+                          <div style="font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:700;color:#8fe6a0;">enabled</div>
+                        </div>
+                      </div>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+
+      <!-- ============ ACTIONS ============ -->
+      <sc-if value="{{ isActions }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:16px;animation:bootin .3s ease both;">
+          <div style="display:flex;align-items:center;gap:12px;border:1px solid #1c4a52;border-radius:12px;background:rgba(53,197,216,.06);padding:13px 16px;">
+            <span style="font-size:18px;line-height:1;">✈</span>
+            <div style="font-size:12.5px;color:#b7c4d6;line-height:1.5;">Actions currently execute through Telegram — <span style="font-family:'JetBrains Mono',monospace;color:#5fd6e8;">{{ botHandle }}</span>. In-dashboard execution is on the way; this view is your read-only audit trail for now.</div>
+          </div>
+          <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:18px 20px;">
+            <div style="display:flex;align-items:center;gap:13px;margin-bottom:16px;flex-wrap:wrap;">
+              <h3 style="margin:0;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;letter-spacing:.1em;color:#eef4fa;">DEPLOYMENT MANIFEST</h3>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11.5px;color:#5f7391;">most recent run</span>
+              <div style="flex:1"></div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;color:#8fe6a0;background:rgba(111,207,95,.08);border:1px solid rgba(111,207,95,.3);border-radius:20px;padding:3px 11px;display:inline-flex;align-items:center;gap:6px;"><span style="width:6px;height:6px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 6px #6fcf5f;"></span>{{ runCount }} services · all updated</span>
+            </div>
+
+            <!-- run entry -->
+            <div style="border:1px solid #1c4a3a;border-left:3px solid #6fcf5f;border-radius:0 12px 12px 0;background:linear-gradient(180deg,#101d16,#0a1420);padding:16px 18px;margin-bottom:18px;box-shadow:inset 0 0 30px rgba(0,0,0,.35);">
+              <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+                <div style="width:40px;height:40px;border-radius:10px;background:rgba(111,207,95,.1);border:1px solid #2f6b3a;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:19px;color:#8fe6a0;flex:none;box-shadow:0 0 14px rgba(111,207,95,.2);">↑</div>
+                <div style="min-width:0;">
+                  <div style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:14px;color:#eef4fa;letter-spacing:.04em;"><span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">services</span> stack · batch update</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#5f7391;margin-top:4px;">Jul 19, 2026 · {{ runStart }} → {{ runEnd }} WEST · {{ runSpan }}</div>
+                </div>
+                <div style="flex:1"></div>
+                <div style="text-align:right;"><span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:30px;color:#6fcf5f;text-shadow:0 0 20px rgba(111,207,95,.45);">{{ runCount }}</span><span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#3f7a5c;margin-left:5px;">svcs</span></div>
+              </div>
+              <!-- timeline strip -->
+              <div style="position:relative;margin-top:16px;">
+                <div style="position:absolute;left:4px;right:4px;top:50%;height:2px;transform:translateY(-50%);background:linear-gradient(90deg,#1c4a3a,#6fcf5f 50%,#1c4a3a);"></div>
+                <div style="position:relative;display:flex;justify-content:space-between;align-items:center;">
+                  <sc-for list="{{ updates }}" as="u" hint-placeholder-count="20">
+                    <span title="{{ u.service }} · {{ u.time }}" style="width:9px;height:9px;border-radius:50%;background:#6fcf5f;box-shadow:0 0 8px #6fcf5f;border:2px solid #0a1420;flex:none;"></span>
+                  </sc-for>
+                </div>
+              </div>
+              <div style="display:flex;justify-content:space-between;margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:10px;color:#3f5470;">
+                <span>{{ runStart }}</span><span style="color:#2f6b4f;">every ~2 min · all exit 0</span><span>{{ runEnd }}</span>
+              </div>
+            </div>
+
+            <!-- service chip board -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(192px,1fr));gap:9px;">
+              <sc-for list="{{ updates }}" as="u" hint-placeholder-count="20">
+                <div style="display:flex;align-items:center;gap:9px;border:1px solid #16233a;border-radius:9px;background:#0a1220;padding:9px 11px;">
+                  <span style="width:17px;height:17px;border-radius:50%;background:rgba(111,207,95,.14);border:1px solid #2f6b3a;color:#8fe6a0;display:flex;align-items:center;justify-content:center;font-size:9px;flex:none;">✓</span>
+                  <span style="flex:1;min-width:0;font-family:'JetBrains Mono',monospace;font-size:12px;color:#c3d0e2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{{ u.service }}</span>
+                  <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;flex:none;">{{ u.time }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </section>
+        </div>
+      </sc-if>
+    </main>
+
+    <!-- ===== SIDE CONSOLE ===== -->
+    <aside style="position:sticky;top:20px;display:flex;flex-direction:column;gap:14px;">
+      <!-- ship computer CRT -->
+      <section style="border-radius:13px;background:linear-gradient(180deg,#0e1a2c,#0a1220);border:1px solid #1c3a52;overflow:hidden;">
+        <div style="padding:10px 14px;background:rgba(53,197,216,.08);border-bottom:1px solid #16233a;font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;color:#6fd3e0;display:flex;align-items:center;gap:7px;"><span style="width:7px;height:7px;border-radius:50%;background:#35c5d8;color:#35c5d8;animation:beacon 2s ease-in-out infinite"></span>SHIP COMPUTER</div>
+        <div style="padding:14px;">
+          <div style="display:flex;align-items:center;gap:11px;margin-bottom:12px;">
+            <div style="width:42px;height:42px;border-radius:50%;border:2px solid #35c5d8;overflow:hidden;background:radial-gradient(circle at 50% 35%, #16283a, #0a1220);flex:none;box-shadow:0 0 12px rgba(53,197,216,.3);"><img src="static/characters/futurama/farnsworth.png" alt="Prof. Farnsworth" style="width:100%;height:100%;object-fit:cover;object-position:center top;display:block;" /></div>
+            <div>
+              <div style="font-weight:700;font-size:13.5px;color:#eef4fa;">Prof. Farnsworth</div>
+              <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;">agent · online · slightly worried</div>
+            </div>
+          </div>
+          <div style="position:relative;background:#03130f;border:1px solid #1c4a3a;border-radius:10px;padding:13px 14px;font-family:'JetBrains Mono',monospace;font-size:11.5px;line-height:1.6;color:#7fe3a5;text-shadow:0 0 6px rgba(111,207,95,.3);overflow:hidden;">
+            <span style="color:#4f9c76;">&gt;</span> {{ profLine }}
+            <div aria-hidden="true" style="pointer-events:none;position:absolute;inset:0;background:repeating-linear-gradient(180deg,transparent 0 2px,rgba(0,0,0,.22) 2px 3px)"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- plan p1 -->
+      <section style="border-radius:13px;background:linear-gradient(180deg, rgba(245,184,32,.05), #0a1220);border:1px solid #3a3320;overflow:hidden;">
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid #2a2718;background:rgba(8,16,28,.5);">
+          <span style="width:8px;height:8px;border-radius:50%;background:#f5b820;color:#f5b820;animation:beacon 1.6s ease-in-out infinite"></span>
+          <span style="font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:12px;letter-spacing:.1em;color:#f5c94a;">PLAN p1 · PENDING</span>
+        </div>
+        <div style="padding:15px;">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;letter-spacing:.08em;margin-bottom:5px;">DIAGNOSIS</div>
+          <p style="margin:0 0 13px;font-size:12.5px;line-height:1.55;color:#c3d0e2;">Backups look inactive though they ran fine before — the scheduler for the <span style="font-family:'JetBrains Mono',monospace;color:#f5c94a;">services</span> stack may be switched off.</p>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:#5f7391;letter-spacing:.08em;margin-bottom:5px;">PROPOSED FIX</div>
+          <ul style="margin:0 0 16px;padding-left:16px;font-size:12.5px;line-height:1.7;color:#c3d0e2;">
+            <li>Re-enable backup scheduling for <span style="font-family:'JetBrains Mono',monospace;color:#8fe6a0;">services</span></li>
+            <li>Kick off a full scan (mode: full)</li>
+            <li>Verify next run + certificates</li>
+          </ul>
+          <sc-if value="{{ planPending }}" hint-placeholder-val="{{ true }}">
+            <div style="display:flex;flex-direction:column;gap:9px;">
+              <button onClick="{{ approvePlan }}" style="appearance:none;cursor:pointer;font-family:'Chakra Petch',sans-serif;font-weight:700;font-size:13px;letter-spacing:.03em;color:#04140f;background:linear-gradient(180deg,#6fcf5f,#3f9a34);border:none;border-radius:10px;padding:11px;box-shadow:0 3px 0 #256b1f;transition:all .1s;" style-hover="filter:brightness(1.08)" style-active="transform:translateY(2px);box-shadow:0 1px 0 #256b1f">APPROVE VIA TELEGRAM ✈</button>
+              <div style="display:flex;gap:9px;">
+                <button onClick="{{ dismissPlan }}" style="flex:1;appearance:none;cursor:pointer;border:1px solid #23303e;background:transparent;color:#8b98a8;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:12.5px;padding:9px;border-radius:9px;transition:all .15s;" style-hover="border-color:#3a4656;color:#c3d0e2;">Dismiss</button>
+                <div style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;border:1px dashed #23303e;border-radius:9px;color:#4a5c76;font-size:11.5px;font-weight:600;cursor:not-allowed;">Execute here <span style="font-family:'JetBrains Mono',monospace;font-size:9px;background:#16233a;border-radius:4px;padding:1px 5px;color:#5f7391;">SOON</span></div>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ planApproved }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:flex-start;gap:10px;border:1px solid #1c4a3a;background:rgba(111,207,95,.08);border-radius:10px;padding:12px;">
+              <span style="font-size:15px;line-height:1.2;">✈</span>
+              <div style="font-size:12.5px;color:#8fe6a0;line-height:1.5;">Sent to <span style="font-family:'JetBrains Mono',monospace;">{{ botHandle }}</span> — tap 👍 in Telegram to let me run it.</div>
+            </div>
+          </sc-if>
+        </div>
+      </section>
+
+      <!-- crew monitors -->
+      <section style="border-radius:13px;background:#0c1524;border:1px solid #1c2c44;padding:13px 14px;">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.12em;color:#4f6684;margin-bottom:12px;">CREW MONITORS</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <sc-for list="{{ crew }}" as="m" hint-placeholder-count="7">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="width:32px;height:32px;border-radius:8px;overflow:hidden;flex:none;background:radial-gradient(circle at 50% 35%, #16283a, #0a1220);border:1px solid {{ m.c }};box-shadow:0 0 9px {{ m.glow }};"><img src="{{ m.portrait }}" alt="{{ m.n }}" style="width:100%;height:100%;object-fit:cover;object-position:center top;display:block;" /></div>
+              <div style="min-width:0;"><div style="font-size:12px;font-weight:600;color:#dfe7f2;">{{ m.n }}</div><div style="font-family:'JetBrains Mono',monospace;font-size:9px;color:#5f7391;">{{ m.r }}</div></div>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <footer style="text-align:center;padding:0 24px 34px;position:relative;z-index:2;">
+    <p style="margin:0;font-size:11.5px;color:#3a4c66;font-family:'JetBrains Mono',monospace;">PLANET EXPRESS · read-only · no auth · LAN-trust · auto-refresh 60s · held together by good news</p>
+  </footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:920}}">
+class Component extends DCLogic {
+  state = { active:'overview', scanning:false, lastScan:'2026-07-23T16:16:27.887136+00:00', netQuery:'', planApproved:false, expanded:null, sev:'live', lowOpen:false };
+
+  tabStyle(name){
+    const on = this.state.active===name;
+    return [
+      "appearance:none","cursor:pointer",
+      "font-family:'Chakra Petch',sans-serif","font-weight:700","font-size:12px","letter-spacing:.08em",
+      "padding:10px 18px","border-radius:9px 9px 0 0","transition:all .12s",
+      "border:1px solid "+(on?"#1c4a3a":"#16233a"),
+      "border-bottom:"+(on?"2px solid #6fcf5f":"1px solid #16233a"),
+      "background:"+(on?"linear-gradient(180deg,#101d16,#0a1420)":"#0a1220"),
+      "color:"+(on?"#8fe6a0":"#6f849e"),
+      "box-shadow:"+(on?"0 0 18px rgba(111,207,95,.15)":"none"),
+    ].join(";");
+  }
+  goOverview=()=>this.setState({active:'overview'});
+  goBackups =()=>this.setState({active:'backups'});
+  goNetwork =()=>this.setState({active:'network'});
+  goActions =()=>this.setState({active:'actions'});
+  refresh=()=>{ if(this.state.scanning)return; this.setState({scanning:true});
+    setTimeout(()=>{ const iso=new Date().toISOString().replace('Z','')+'00+00:00'; this.setState({scanning:false,lastScan:iso}); },2200); };
+  onNetQuery=(e)=>this.setState({netQuery:e.target.value});
+  toggleRouter=(id)=>this.setState(s=>({expanded:s.expanded===id?null:id}));
+  toggleLow=()=>this.setState(s=>({lowOpen:!s.lowOpen}));
+  cyclePreview=()=>{const o=['live','crit','high','med','none'];const i=o.indexOf(this.state.sev);this.setState({sev:o[(i+1)%o.length]});};
+  approvePlan=()=>this.setState({planApproved:true});
+  dismissPlan=()=>this.setState({planApproved:true});
+  diskColor(p){ return p>=80?'#ef6f5e':p>=60?'#f5b820':'#6fcf5f'; }
+
+  renderVals(){
+    const a=this.state.active;
+    const errors=[
+      {ts:'Jul 23 16:05:28',host:'casamediaserver',proc:'sudo[785667]:',msg:'pam_unix(sudo:auth): conversation failed'},
+      {ts:'Jul 23 16:05:28',host:'casamediaserver',proc:'sudo[785667]:',msg:'pam_unix(sudo:auth): auth could not identify password for [casaroot]'},
+      {ts:'Jul 23 16:05:52',host:'casamediaserver',proc:'sudo[786528]:',msg:'casaroot : a password is required ; PWD=/home/casaroot/apps/planetexpress ; USER=root ; COMMAND=/usr/bin/systemctl restart casa-dashboard.service'},
+    ];
+    const disks=[
+      {mount:'/',source:'/dev/sdb2',pct:76},
+      {mount:'/home',source:'/dev/sdb3',pct:37},
+      {mount:'/media/casaroot/CMSSTORAGE',source:'/dev/sda',pct:4},
+      {mount:'/home/casaroot/casafast',source:'/dev/sdc',pct:18},
+      {mount:'/casamedia',source:'//192.168.1.171/data',pct:54},
+      {mount:'/erugo',source:'//192.168.1.171/erugo',pct:54},
+      {mount:'/immichPhotos',source:'//192.168.1.171/immichPhotos',pct:58},
+      {mount:'/urphotos',source:'//192.168.1.171/urphotos',pct:58},
+    ].map(d=>({...d,width:d.pct+'%',pctText:d.pct+'%',color:this.diskColor(d.pct)}));
+
+    const allRouters=[
+      ['actual@docker',"Host(`actual.casalan.com`) || Host(`actual.casaalmida.com`)",'actual'],
+      ['adguard@docker',"Host(`adguard.casalan.com`)",'adguard'],
+      ['adventurelog-admin@docker',"(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && (PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/accounts`))",'adventurelog-admin'],
+      ['adventurelog@docker',"(Host(`travel.casalan.com`) || Host(`travel.casaalmida.com`)) && !(PathPrefix(`/media`) || PathPrefix(`/admin`) || PathPrefix(`/static`) || PathPrefix(`/accounts`))",'adventurelog'],
+      ['api@internal',"PathPrefix(`/api`)",'api@internal'],
+      ['audio@docker',"Host(`audio.casalan.com`) || Host(`audio.casaalmida.com`)",'audiobookshelf-media'],
+      ['bazarr@docker',"Host(`bazarr.casalan.com`)",'bazarr'],
+      ['beszel@docker',"Host(`beszel.casalan.com`)",'beszel'],
+      ['billarr@docker',"Host(`billarr.casalan.com`) || Host(`billarr.casaalmida.com`)",'billarr'],
+      ['blog@docker',"Host(`blog.chrisalmida.com`)",'ghost-services'],
+      ['dashboard@internal',"PathPrefix(`/`)",'dashboard@internal'],
+      ['dockge@docker',"Host(`dockge.casalan.com`)",'dockge'],
+      ['dozzle@docker',"Host(`dozzle.casalan.com`)",'dozzle'],
+      ['erugo@docker',"Host(`share.casalan.com`) || Host(`share.casaalmida.com`)",'erugo'],
+      ['homepage@docker',"Host(`home.casalan.com`)",'homepage'],
+      ['immich@docker',"Host(`immich.casalan.com`) || Host(`immich.casaalmida.com`)",'immich-server-media'],
+      ['immichtools@docker',"Host(`immichtools.casalan.com`)",'immichtools'],
+      ['jellyfin@file',"Host(`jellyfin.casalan.com`)",'jellyfin'],
+      ['kara@docker',"Host(`karakeep.casalan.com`) || Host(`karakeep.casaalmida.com`)",'kara'],
+      ['lidarr@docker',"Host(`lidarr.casalan.com`)",'lidarr'],
+      ['lubelogger@docker',"Host(`auto.casalan.com`) || Host(`auto.casaalmida.com`)",'lubelogger'],
+      ['mealie@docker',"Host(`mealie.casalan.com`) || Host(`mealie.casaalmida.com`)",'mealiev2-services'],
+      ['miniflux@docker',"Host(`rss.casalan.com`) || Host(`rss.casaalmida.com`)",'miniflux'],
+      ['musicassistant@file',"Host(`musicassistant.casalan.com`)",'musicassistant'],
+      ['myservice@file',"Host(`app.casaalmida.com`)",'homeunraid'],
+      ['navidrome-lan@docker',"Host(`music.casalan.com`)",'navidrome'],
+      ['navidrome@docker',"Host(`music.casaalmida.com`)",'navidrome'],
+      ['opnsense@file',"Host(`opnsense.casalan.com`)",'opnsense'],
+      ['overseer@docker',"Host(`overseer.casaalmida.com`)",'overseer-svc'],
+      ['pdf@docker',"Host(`pdf.casalan.com`)",'pdf'],
+      ['pinepods@docker',"Host(`pine.casalan.com`) || Host(`pine.casaalmida.com`)",'pinepods'],
+      ['planetexpress@file',"Host(`planetexpress.casalan.com`)",'planetexpress'],
+    ].map(r=>({router:r[0],rule:r[1],service:r[2]}));
+    const q=this.state.netQuery.trim().toLowerCase();
+    const filtered=q?allRouters.filter(r=>(r.router+' '+r.rule+' '+r.service).toLowerCase().includes(q)):allRouters;
+    const provColor={docker:'#5fd6e8',internal:'#f5c94a',file:'#b58ff0'};
+    const routers=filtered.map(r=>{
+      const provider=r.router.split('@')[1]||'';
+      const short=r.router.split('@')[0];
+      const hm=r.rule.match(/Host\(`([^`]+)`\)/);
+      const pm=r.rule.match(/PathPrefix\(`([^`]+)`\)/);
+      const host=hm?hm[1]:(pm?pm[1]:r.service);
+      const hc=(r.rule.match(/Host\(/g)||[]).length;
+      const open=this.state.expanded===r.router;
+      return { ...r, provider, short, host,
+        prov:provider||'—',
+        provCol:provColor[provider]||'#6f849e',
+        extra:hc>1?('+'+(hc-1)+' host'+(hc>2?'s':'')):'',
+        open,
+        caret:open?'▾':'▸',
+        dyn:open?'grid-column:1 / -1;border-color:#1c4a3a;box-shadow:0 0 22px rgba(111,207,95,.14);':'',
+        toggle:()=>this.toggleRouter(r.router),
+      };
+    });
+
+    const updates=[
+      ['2026-07-19T05:52:17.425971+00:00','meilisearch'],['2026-07-19T05:50:25.348728+00:00','lubelogger'],
+      ['2026-07-19T05:48:33.327796+00:00','db'],['2026-07-19T05:46:41.073420+00:00','bentopdf'],
+      ['2026-07-19T05:44:49.000962+00:00','adventurelog-frontend'],['2026-07-19T05:42:56.518259+00:00','wiki-go'],
+      ['2026-07-19T05:41:04.312811+00:00','web'],['2026-07-19T05:39:12.282986+00:00','mealiev2'],
+      ['2026-07-19T05:37:18.858759+00:00','ghost'],['2026-07-19T05:34:53.006928+00:00','dozzle'],
+      ['2026-07-19T05:33:00.938426+00:00','chrome'],['2026-07-19T05:31:08.355123+00:00','beszel-agent'],
+      ['2026-07-19T05:29:16.234572+00:00','adventurelog-backend'],['2026-07-19T05:27:23.680879+00:00','actual_server'],
+      ['2026-07-19T05:25:31.626041+00:00','planka'],['2026-07-19T05:23:39.114775+00:00','lubepg'],
+      ['2026-07-19T05:21:47.012132+00:00','homepage'],['2026-07-19T05:19:48.984757+00:00','erugo'],
+      ['2026-07-19T05:17:56.833719+00:00','beszel'],['2026-07-19T05:16:04.771234+00:00','adventurelog-db'],
+    ].map(u=>({when:u[0],stack:'services',service:u[1],time:u[0].slice(11,19)}));
+    const runCount=updates.length;
+    const runEnd=updates[0].time;
+    const runStart=updates[updates.length-1].time;
+    const runSpan='~36 min';
+
+    const crew=[
+      {n:'Leela',r:'system monitor',img:'leela',c:'#8f6fd0',glow:'rgba(143,111,208,.5)'},
+      {n:'Hermes',r:'issue analyzer',img:'hermes',c:'#6fcf5f',glow:'rgba(111,207,95,.5)'},
+      {n:'Bender',r:'action executor',img:'bender',c:'#9fb0c6',glow:'rgba(159,176,198,.5)'},
+      {n:'Dr. Zoidberg',r:'canary-tested auto-patcher',img:'zoidberg',c:'#ef6f5e',glow:'rgba(239,111,94,.5)'},
+      {n:'Amy',r:'diagnostician & researcher',img:'amy',c:'#f28ec0',glow:'rgba(242,142,192,.5)'},
+      {n:'Fry',r:'onboarding',img:'fry',c:'#f5b820',glow:'rgba(245,184,32,.5)'},
+      {n:'Scruffy',r:'observes and does nothing',img:'scruffy',c:'#c9a24a',glow:'rgba(201,162,74,.5)'},
+    ].map(m=>({...m,portrait:'static/characters/futurama/'+m.img+'.png'}));
+
+    const botHandle='@casafarnsworthbot';
+    // reactor cells — 4-way container state → colour (real: ctx.containers.cells)
+    const cellColor={online:['#5fc94f','rgba(111,207,95,.55)'],degraded:['#f5b820','rgba(245,184,32,.65)'],down:['#ef3c2e','rgba(239,60,46,.7)'],paused:['#8c96a0','rgba(140,150,160,.3)']};
+    const cellStates=Array(70).fill('online');
+    const cells=cellStates.map((s,i)=>{const cc=cellColor[s]||cellColor.online;return {d:(i%9*0.18).toFixed(2)+'s',bg:cc[0],glow:cc[1]};});
+
+    // ---- hull diagnostics: severity-driven threat panel ----
+    const base="border-radius:13px;padding:16px 18px;position:relative;overflow:hidden;display:flex;align-items:center;gap:16px;";
+    const preview=this.state.sev!=='live';
+    const realCounts={crit:0,high:0,med:1,low:21};
+    let worst;
+    if(preview) worst=this.state.sev;
+    else worst=realCounts.crit?'crit':realCounts.high?'high':realCounts.med?'med':realCounts.low?'low':'none';
+    const counts=preview
+      ? {crit:worst==='crit'?1:0,high:worst==='high'?1:0,med:worst==='med'?1:0,low:worst==='low'?21:0}
+      : realCounts;
+    const cfg={
+      crit:{title:'CRITICAL FAULT',fg:'#ff6a5a',glyph:'⚠',orb:'#ef3c2e',orbFg:'#fff',flash:true,banner:base+"border:1px solid #ef3c2e;background:linear-gradient(180deg,#2a0d0c,#160a0c);animation:deathflash .9s ease-in-out infinite;"},
+      high:{title:'HIGH ALERT',fg:'#f4ad63',glyph:'⚠',orb:'#f0864a',orbFg:'#180a04',flash:false,banner:base+"border:1px solid #f0864a;background:linear-gradient(180deg,#241610,#120c0a);box-shadow:0 0 26px rgba(240,134,74,.22);"},
+      med:{title:'CAUTION',fg:'#f5c94a',glyph:'!',orb:'#f5b820',orbFg:'#1a1304',flash:false,banner:base+"border:1px solid #3a2f18;background:linear-gradient(180deg,rgba(245,184,32,.07),#0c1524);"},
+      low:{title:'MINOR NOTES',fg:'#7fbfd4',glyph:'i',orb:'#35c5d8',orbFg:'#04141a',flash:false,banner:base+"border:1px solid #1c2c44;background:#0c1524;"},
+      none:{title:'ALL SYSTEMS NOMINAL',fg:'#8fe6a0',glyph:'✓',orb:'#6fcf5f',orbFg:'#04140f',flash:false,banner:base+"border:1px solid #1c4a3a;background:linear-gradient(180deg,#101d16,#0a1420);"},
+    };
+    const c=cfg[worst];
+    const pl=(n)=>n===1?'':'s';
+    let hsub;
+    if(worst==='crit') hsub=counts.crit+' critical fault'+pl(counts.crit)+' — immediate action required';
+    else if(worst==='high') hsub=counts.high+' high-severity issue'+pl(counts.high)+' — needs attention soon';
+    else if(worst==='med') hsub=counts.med+' issue'+pl(counts.med)+' needs attention'+(counts.low?' · '+counts.low+' minor':'');
+    else if(worst==='low') hsub=counts.low+' low-severity note'+pl(counts.low)+' — informational, nothing blocking';
+    else hsub='No active faults. Fly safe.';
+    const orbStyle="width:58px;height:58px;border-radius:14px;flex:none;display:flex;align-items:center;justify-content:center;font-family:'Chakra Petch',sans-serif;font-size:26px;font-weight:700;color:"+c.orbFg+";background:"+c.orb+";box-shadow:0 0 22px "+c.orb+"99;"+(c.flash?"animation:critpulse .9s ease-in-out infinite;":"");
+    const hull={banner:c.banner,orb:orbStyle,glyph:c.glyph,title:c.title,fg:c.fg,sub:hsub};
+    const chipDef=[['CRIT',counts.crit,'#ef8478','rgba(239,60,46,.1)','rgba(239,60,46,.35)'],['HIGH',counts.high,'#f4ad63','rgba(240,134,74,.1)','rgba(240,134,74,.35)'],['MED',counts.med,'#f5c94a','rgba(245,184,32,.12)','rgba(245,184,32,.4)'],['LOW',counts.low,'#7fbfd4','rgba(53,197,216,.1)','rgba(53,197,216,.3)']];
+    const chips=chipDef.map(a=>({k:a[0],n:a[1],style:"font-family:'JetBrains Mono',monospace;font-size:10.5px;font-weight:700;border-radius:20px;padding:3px 10px;color:"+a[2]+";background:"+a[3]+";border:1px solid "+a[4]+";"+(a[1]===0?"opacity:.35;":"")}));
+    const sevMeta={crit:{label:'CRITICAL',col:'#ff6a5a',line:'#ef3c2e',bg:'rgba(239,60,46,.06)'},high:{label:'HIGH',col:'#f4ad63',line:'#f0864a',bg:'rgba(240,134,74,.05)'},medium:{label:'MEDIUM',col:'#f5c94a',line:'#f5b820',bg:'rgba(245,184,32,.04)'}};
+    const realFindings=[{sev:'medium',resource:'backups',desc:'Marked inactive despite prior successful runs, so scheduling/automation may be disabled. Plan p1 is standing by.'}];
+    let material;
+    if(preview){
+      const map={crit:'crit',high:'high',med:'medium'};
+      material=(worst==='crit'||worst==='high'||worst==='med')?[{sev:map[worst],resource:'example.resource',desc:'Example of a '+sevMeta[map[worst]].label.toLowerCase()+'-severity finding — shown so you can see how this tier renders.',example:true}]:[];
+    } else material=realFindings;
+    const findings=material.map(f=>{const m=sevMeta[f.sev]||sevMeta.medium;return {...f,sevLabel:m.label,col:m.col,card:"border:1px solid #16233a;border-left:3px solid "+m.line+";background:"+m.bg+";border-radius:0 9px 9px 0;padding:12px 15px;",dot:"width:8px;height:8px;border-radius:50%;flex:none;background:"+m.col+";box-shadow:0 0 8px "+m.col+";"+(f.sev==='crit'?"animation:critpulse .8s ease-in-out infinite;":"")};});
+    const hasMaterial=findings.length>0;
+    const hasLow=counts.low>0;
+    const allClear=worst==='none';
+    const previewLabel=preview?('preview: '+worst):'';
+    const lowCaret=this.state.lowOpen?'▾':'▸';
+
+    let profLine;
+    if(this.state.scanning) profLine="Scanning the entire ship! Hold your hydrogen — this'll only take a moment, unless it takes several.";
+    else if(this.state.planApproved) profLine="Splendid! I've wired plan p1 off to Telegram. Do go tap the little thumb, would you? No hands in the dashboard. Yet.";
+    else if(a==='overview') profLine="Good news, everyone! 70/70 alive, 20d uptime. Mind those 3 sudo auth failures — something keeps poking my own dashboard without the password. And see plan p1 on the backups.";
+    else if(a==='backups') profLine="Backups? Oh my. Last scan ran 'status' mode, so I've collected precisely nothing. Approve p1 and I'll run a proper full scan to fret over.";
+    else if(a==='network') profLine="Routers, every last one enabled and behaving. Traefik is my second-favourite plumbing — right after the ship's coolant loop.";
+    else profLine="Everything's been updated and nothing exploded! I carry out fixes over Telegram, "+botHandle+", while the good people bolt hands onto this dashboard.";
+
+    this.toggleCerts=this.toggleCerts||(()=>this.setState(s=>({certsOpen:s.certsOpen===false})));
+    // ---- certificate vault (dummy COLLECTED data) ----
+    const certsOpen=this.state.certsOpen!==false;
+    const certRaw=[
+      {domain:'casa.farnsworth.dev',sans:['casa.farnsworth.dev','*.casa.farnsworth.dev'],resolver:'letsencrypt',issuer:"Let's Encrypt R11",days:64},
+      {domain:'wiki.farnsworth.dev',sans:['wiki.farnsworth.dev'],resolver:'letsencrypt',issuer:"Let's Encrypt R11",days:64},
+      {domain:'ghost.farnsworth.dev',sans:['ghost.farnsworth.dev','blog.farnsworth.dev'],resolver:'letsencrypt',issuer:"Let's Encrypt R11",days:26},
+      {domain:'planka.farnsworth.dev',sans:['planka.farnsworth.dev'],resolver:'letsencrypt',issuer:"Let's Encrypt R11",days:64},
+      {domain:'vpn.farnsworth.dev',sans:['vpn.farnsworth.dev'],resolver:'cloudflare',issuer:"Let's Encrypt E6",days:5},
+      {domain:'nas.local',sans:['nas.local','nas.farnsworth.dev'],resolver:'internal-ca',issuer:'Planet Express Internal CA',days:311},
+    ];
+    const certTier=(d)=>d<=7?{col:'#ff6a5a',line:'#ef3c2e',bg:'rgba(239,60,46,.06)',label:'EXPIRING',pulse:true}
+      :d<=30?{col:'#f5c94a',line:'#f5b820',bg:'rgba(245,184,32,.05)',label:'RENEW SOON',pulse:false}
+      :{col:'#8fe6a0',line:'#3f8f5a',bg:'rgba(111,207,95,.04)',label:'VALID',pulse:false};
+    const certs=certRaw.map(c0=>{const t=certTier(c0.days);const pct=Math.max(4,Math.min(100,Math.round(c0.days/90*100)));return {
+      ...c0,sanList:c0.sans.join(' · '),sanCount:c0.sans.length+' SAN'+(c0.sans.length===1?'':'s'),
+      tier:t.label,col:t.col,daysText:c0.days+'d',
+      card:"border-radius:12px;border:1px solid #1c2c44;border-left:3px solid "+t.line+";background:"+t.bg+";padding:14px 16px;display:flex;flex-direction:column;gap:10px;",
+      led:"width:8px;height:8px;border-radius:50%;flex:none;background:"+t.col+";box-shadow:0 0 9px "+t.col+";"+(t.pulse?"animation:critpulse .9s ease-in-out infinite;":""),
+      badge:"font-family:'JetBrains Mono',monospace;font-size:9.5px;font-weight:700;letter-spacing:.1em;color:"+t.col+";border:1px solid "+t.col+"55;border-radius:20px;padding:2px 9px;",
+      bar:"height:100%;width:"+pct+"%;border-radius:20px;background:"+t.col+";box-shadow:0 0 10px "+t.col+"88;",
+    };});
+    const certSoon=certRaw.filter(x=>x.days<=30).length;
+    const certChip=certSoon?certSoon+' expiring within 30d':'all healthy';
+    const certChipStyle="font-family:'JetBrains Mono',monospace;font-size:10px;border-radius:6px;padding:3px 8px;"+(certSoon
+      ?"color:#f5c94a;border:1px solid rgba(245,184,32,.3);background:rgba(245,184,32,.08);"
+      :"color:#8fe6a0;border:1px solid rgba(111,207,95,.3);background:rgba(111,207,95,.08);");
+
+    return {
+      errors, disks, routers, updates, crew, profLine, botHandle, cells,
+      certs, certsOpen, certsSealed:!certsOpen, certCount:certRaw.length+' collected',
+      certChip, certChipStyle, toggleCerts:this.toggleCerts,
+      runCount, runStart, runEnd, runSpan,
+      pods:[{name:'daily',cadence:'24h cycle'},{name:'weekly',cadence:'7d cycle'}],
+      hull, chips, findings, hasMaterial, hasLow, allClear,
+      lowCount:counts.low, lowOpen:this.state.lowOpen, lowCaret,
+      preview, previewLabel, toggleLow:this.toggleLow, cyclePreview:this.cyclePreview,
+      loadNow:this.state.scanning?'----':'1.02',
+      isOverview:a==='overview', isBackups:a==='backups', isNetwork:a==='network', isActions:a==='actions',
+      ovTab:this.tabStyle('overview'), buTab:this.tabStyle('backups'), neTab:this.tabStyle('network'), acTab:this.tabStyle('actions'),
+      scanning:this.state.scanning, lastScan:this.state.lastScan, netQuery:this.state.netQuery,
+      netShown:routers.length, netTotal:allRouters.length,
+      planApproved:this.state.planApproved, planPending:!this.state.planApproved,
+      refresh:this.refresh, goOverview:this.goOverview, goBackups:this.goBackups, goNetwork:this.goNetwork, goActions:this.goActions,
+      onNetQuery:this.onNetQuery, approvePlan:this.approvePlan, dismissPlan:this.dismissPlan,
+    };
+  }
+}
+</script>
+</body>
+</html>

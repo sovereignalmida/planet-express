@@ -1,0 +1,232 @@
+/* Planet Express design system · panels, fleet hero, hull diagnostics (alarm-banner, hull-card), findings pills
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ── Panels ──────────────────────────────────────────────────────────── */
+.panel {
+  border: 1px solid var(--panel-border); border-radius: var(--pe-r-lg); background: var(--panel-bg);
+  padding: 13px 14px;
+}
+
+.panel-green {
+  border-color: var(--cp-reactor-border);
+  background: var(--cp-reactor-grad);
+  padding: 22px 24px; position: relative; overflow: hidden;
+}
+
+.panel-amber {
+  border-color: #3a3320;
+  background: linear-gradient(180deg, rgba(244,185,66,.05), rgba(16,22,30,.6));
+  overflow: hidden;
+}
+
+.panel h2, .panel h3 {
+  margin: 0; font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 15px;
+  letter-spacing: .08em; color: var(--cream);
+}
+
+.panel-head-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.panel-head-summary { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint2); }
+.panel-head-note { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--faint2); }
+
+.status-chip {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--amber);
+  border: 1px solid rgba(244,185,66,.3); border-radius: 5px; padding: 2px 7px;
+  background: rgba(244,185,66,.08);
+}
+
+.status-chip.ok { color: var(--green-text); border-color: rgba(70,201,90,.3); background: rgba(70,201,90,.08); }
+
+.muted-body { margin: 0; font-size: 13px; color: var(--muted2); line-height: 1.6; }
+
+.mono-inline { font-family: 'JetBrains Mono', monospace; color: var(--muted); }
+
+/* fleet hero */
+.fleet-label {
+  position: absolute; right: 16px; top: 16px; font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; color: var(--green-dim2); letter-spacing: .1em;
+}
+
+.fleet-row { display: flex; align-items: flex-end; gap: 26px; flex-wrap: wrap; }
+
+.fleet-eyebrow {
+  font-size: 12px; color: var(--muted2); letter-spacing: .14em;
+  font-family: 'JetBrains Mono', monospace; margin-bottom: 6px;
+}
+
+.fleet-count { display: flex; align-items: baseline; gap: 10px; }
+
+.fleet-num {
+  font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 52px; line-height: .9;
+  color: var(--green-bright); text-shadow: 0 0 26px rgba(70,201,90,.4);
+}
+
+.fleet-num.warn { color: var(--amber); text-shadow: 0 0 26px rgba(244,185,66,.35); }
+.fleet-num.crit { color: var(--red-text); text-shadow: 0 0 26px rgba(226,59,46,.35); }
+
+.fleet-total { font-family: 'Chakra Petch', sans-serif; font-weight: 600; font-size: 26px; color: var(--faint); }
+
+.fleet-suffix { font-size: 15px; color: var(--green-text); font-weight: 600; margin-left: 4px; }
+
+.fleet-sub { margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--faint); }
+
+.fleet-matrix-wrap { flex: 1; min-width: 280px; }
+
+.fleet-matrix { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.fleet-cell {
+  width: 15px; height: 15px; border-radius: 3px;
+  background: #5fc94f; box-shadow: 0 0 5px rgba(95,201,79,.7);
+  animation: reactor 2.6s ease-in-out infinite;
+}
+
+.fleet-cell.degraded { background: #f5b820; box-shadow: 0 0 5px rgba(245,184,32,.7); }
+.fleet-cell.down { background: #ef3c2e; box-shadow: 0 0 5px rgba(239,60,46,.7); }
+.fleet-cell.paused { background: #8c96a0; box-shadow: none; animation: none; }
+
+.reactor-legend {
+  display: flex; gap: 16px; flex-wrap: wrap; margin-top: 12px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--cp-dim1);
+}
+.reactor-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.reactor-legend-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.reactor-legend-swatch.online { background: #5fc94f; box-shadow: 0 0 5px rgba(95,201,79,.6); }
+.reactor-legend-swatch.degraded { background: #f5b820; box-shadow: 0 0 5px rgba(245,184,32,.6); }
+.reactor-legend-swatch.down { background: #ef3c2e; box-shadow: 0 0 5px rgba(239,60,46,.6); }
+.reactor-legend-swatch.paused { background: #8c96a0; }
+
+.fleet-footer {
+  margin-top: 16px; padding-top: 14px; border-top: 1px dashed #1c2b1f;
+  font-size: 12.5px; color: var(--faint);
+}
+
+/* ── Hull Diagnostics (findings) ────────────────────────────────────── */
+.alarm-banner {
+  display: flex; align-items: center; gap: 16px; border-radius: 13px; padding: 16px 18px;
+  position: relative; overflow: hidden; margin-bottom: 16px; flex-wrap: wrap;
+}
+.alarm-orb {
+  width: 58px; height: 58px; border-radius: 14px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Chakra Petch', sans-serif; font-size: 26px; font-weight: 700;
+}
+.alarm-text { flex: 1; min-width: 180px; }
+.alarm-title {
+  font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 17px; letter-spacing: .04em;
+  margin: 0 0 3px;
+}
+.alarm-sub { font-size: 12.5px; margin: 0; opacity: .92; }
+.alarm-chips { display: flex; gap: 7px; flex-wrap: wrap; }
+
+.alarm-banner.crit {
+  border: 1px solid rgba(239,60,46,.5);
+  background: linear-gradient(135deg, rgba(239,60,46,.22), rgba(16,22,30,.6));
+  animation: deathflash 1.4s ease-in-out infinite;
+}
+.alarm-banner.crit .alarm-orb { background: rgba(239,60,46,.9); color: #fff0ee; box-shadow: 0 0 22px rgba(239,60,46,.6); animation: critpulse .9s ease-in-out infinite; }
+.alarm-banner.crit .alarm-title { color: #ff6a5a; }
+.alarm-banner.crit .alarm-sub { color: #ffb3ab; }
+
+.alarm-banner.high {
+  border: 1px solid rgba(240,134,74,.45);
+  background: linear-gradient(135deg, rgba(240,134,74,.16), rgba(16,22,30,.55));
+}
+.alarm-banner.high .alarm-orb { background: rgba(240,134,74,.85); color: #2a1608; box-shadow: 0 0 18px rgba(240,134,74,.5); }
+.alarm-banner.high .alarm-title { color: #f4ad63; }
+.alarm-banner.high .alarm-sub { color: #f0c19a; }
+
+.alarm-banner.medium {
+  border: 1px solid rgba(245,184,32,.4);
+  background: linear-gradient(135deg, rgba(245,184,32,.1), rgba(16,22,30,.5));
+}
+.alarm-banner.medium .alarm-orb { background: rgba(245,184,32,.8); color: #2a2007; box-shadow: 0 0 14px rgba(245,184,32,.4); }
+.alarm-banner.medium .alarm-title { color: #f5c94a; }
+.alarm-banner.medium .alarm-sub { color: var(--muted2); }
+
+.alarm-banner.low {
+  border: 1px solid var(--cp-panel-border);
+  background: rgba(53,197,216,.05);
+}
+.alarm-banner.low .alarm-orb { background: rgba(53,197,216,.16); color: var(--cp-teal-text); box-shadow: none; }
+.alarm-banner.low .alarm-title { color: var(--cp-teal-text); }
+.alarm-banner.low .alarm-sub { color: var(--muted2); }
+
+.alarm-banner.none {
+  border: 1px solid var(--green-dim);
+  background: rgba(70,201,90,.06);
+}
+.alarm-banner.none .alarm-orb { background: rgba(70,201,90,.18); color: var(--green-text); box-shadow: none; }
+.alarm-banner.none .alarm-title { color: var(--green-text); }
+.alarm-banner.none .alarm-sub { color: var(--muted2); }
+
+.alarm-chip {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; border-radius: 20px; padding: 3px 10px;
+}
+.alarm-chip.crit { color: #ef8478; background: rgba(239,60,46,.1); border: 1px solid rgba(239,60,46,.35); }
+.alarm-chip.high { color: #f4ad63; background: rgba(240,134,74,.1); border: 1px solid rgba(240,134,74,.35); }
+.alarm-chip.med { color: #f5c94a; background: rgba(245,184,32,.12); border: 1px solid rgba(245,184,32,.4); }
+.alarm-chip.low { color: #7fbfd4; background: rgba(53,197,216,.1); border: 1px solid rgba(53,197,216,.3); }
+.alarm-chip.zero { opacity: .35; }
+
+.hull-cards { display: flex; flex-direction: column; gap: 8px; }
+.hull-card {
+  border: 1px solid #16233a; border-left: 3px solid var(--cp-amber); border-radius: 0 9px 9px 0;
+  padding: 12px 15px; display: flex; align-items: flex-start; gap: 10px;
+  background: rgba(245,184,32,.04);
+}
+.hull-card.sev-critical { border-left-color: var(--cp-crit); background: rgba(239,60,46,.06); }
+.hull-card.sev-high { border-left-color: var(--cp-orange); background: rgba(240,134,74,.05); }
+.hull-card.sev-medium { border-left-color: var(--cp-amber); background: rgba(245,184,32,.04); }
+.hull-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none; margin-top: 4px;
+  background: var(--cp-amber); box-shadow: 0 0 8px var(--cp-amber);
+}
+.hull-card.sev-critical .hull-dot { background: var(--cp-crit); box-shadow: 0 0 8px var(--cp-crit); animation: critpulse .8s ease-in-out infinite; }
+.hull-card.sev-high .hull-dot { background: var(--cp-orange); box-shadow: 0 0 8px var(--cp-orange); }
+.hull-card-body { flex: 1; }
+.hull-card-sev {
+  font-family: 'JetBrains Mono', monospace; font-size: 10.5px; font-weight: 700; letter-spacing: .06em;
+}
+.hull-card.sev-critical .hull-card-sev { color: var(--cp-crit-text); }
+.hull-card.sev-high .hull-card-sev { color: var(--cp-orange-text); }
+.hull-card.sev-medium .hull-card-sev { color: var(--cp-amber-text); }
+.hull-card.sev-unknown .hull-card-sev { color: var(--faint); }
+.hull-card-resource { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--cp-teal-text); margin: 2px 0 4px; }
+.hull-card-desc { font-size: 12.5px; color: var(--text2); line-height: 1.5; margin: 0; }
+
+.hull-drawer {
+  margin-top: 6px; border: 1px dashed var(--border-hair); border-radius: 9px; overflow: hidden;
+}
+.hull-drawer-toggle {
+  appearance: none; cursor: pointer; width: 100%; text-align: left; border: none; background: transparent;
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--cp-dim1);
+  padding: 10px 14px; display: flex; align-items: center; gap: 8px;
+}
+.hull-drawer-toggle:hover { color: var(--text2); }
+.hull-drawer-caret { transition: transform .15s; }
+.hull-drawer.open .hull-drawer-caret { transform: rotate(90deg); }
+.hull-drawer-body { display: none; padding: 4px 14px 12px; border-top: 1px solid var(--border-hair); }
+.hull-drawer.open .hull-drawer-body { display: block; }
+
+.dashed-footer {
+  display: flex; align-items: center; gap: 10px; font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--faint2); padding-top: 14px; border-top: 1px dashed var(--border-hair);
+  margin-top: 4px;
+}
+
+.dot-amber {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 7px var(--amber);
+  flex: none;
+}
+
+/* findings pills */
+.findings-pills { display: flex; gap: 7px; flex-wrap: wrap; }
+
+.fpill {
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; font-weight: 600;
+  border-radius: 20px; padding: 3px 11px;
+}
+
+.fpill.critical { color: var(--red-text); background: rgba(226,59,46,.12); border: 1px solid rgba(226,59,46,.3); }
+.fpill.high { color: var(--orange); background: rgba(240,134,74,.12); border: 1px solid rgba(240,134,74,.3); }
+.fpill.medium { color: var(--amber); background: rgba(244,185,66,.14); border: 1px solid rgba(244,185,66,.4); }
+.fpill.low { color: var(--cyan); background: rgba(86,182,224,.12); border: 1px solid rgba(86,182,224,.3); }
+

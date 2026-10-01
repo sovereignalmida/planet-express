@@ -1,0 +1,76 @@
+/* Planet Express design system · v2.3 app icons: .pe-icon, .pe-icon-led, .pe-icon-mono, .pe-icon-bare
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* ============================================================
+   APP ICONS (v2.3)
+   The icon is the app; the dot on its corner is health. Letters mean no icon
+   matched, which is the ordinary outcome for a custom app, not a failure -- so
+   the monogram fills the same frame and the column of names stays aligned.
+   Icon colours are never tinted: an orange Prowlarr logo must not read as a
+   warning, which is exactly why health moved off the glyph and onto a corner.
+   ============================================================ */
+.pe-icon {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #101b2c;
+  border: 1px solid var(--pe-border);
+  border-radius: var(--pe-r-sm);
+}
+.pe-icon img { position: absolute; inset: 14%; width: 72%; height: 72%; object-fit: contain; }
+.pe-icon-mono {
+  font-family: var(--pe-font-display);
+  font-weight: 700;
+  color: var(--pe-ink-label);
+  letter-spacing: .02em;
+}
+/* A stopped container: the logo recedes, the row's own red still carries the state. */
+.pe-drawer-row.crit .pe-icon img,
+.pe-drawer-row.down .pe-icon img { opacity: .4; }
+
+/* 28px -- drawer rows */
+.pe-icon.sm { width: 28px; height: 28px; border-radius: 7px; }
+.pe-icon.sm .pe-icon-mono { font-size: 12px; }
+/* 40px -- container detail header (36 on mobile, below) */
+.pe-icon.lg { width: 40px; height: 40px; border-radius: 10px; }
+.pe-icon.lg .pe-icon-mono { font-size: 16px; }
+
+/* The health LED rides the tile's bottom-right corner, ringed in the surface colour
+   behind it so it reads as a separate object rather than part of the logo. */
+.pe-icon .pe-icon-led {
+  position: absolute; right: -3px; bottom: -3px;
+  width: 9px; height: 9px; border-radius: 50%;
+  border: 2px solid var(--pe-panel);
+  background: var(--pe-idle);
+}
+.pe-icon.lg .pe-icon-led { width: 10px; height: 10px; }
+.pe-icon .pe-icon-led.ok   { background: var(--pe-ok); }
+.pe-icon .pe-icon-led.warn { background: var(--pe-warn); }
+.pe-icon .pe-icon-led.high { background: var(--pe-high); }
+.pe-icon .pe-icon-led.crit { background: var(--pe-crit); animation: pe-critpulse .9s infinite; }
+
+/* 18px -- widget headers, and 13px -- router pills. Bare glyph, no tile: at that size a
+   frame is noise, and both sit inside something that already has a border. */
+.pe-icon-bare { flex: none; object-fit: contain; }
+.pe-icon-bare.xs { width: 13px; height: 13px; }
+.pe-icon-bare.md { width: 18px; height: 18px; }
+
+/* Container detail header: back link on its own line, then icon · title · launch.
+   No LED on this tile -- unlike a drawer row, this page already states health in the
+   verdict orb below, and two indicators that can disagree are worse than one. */
+.container-detail header {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px; align-items: center;
+}
+/* justify-self, or the anchor stretches the full grid width and the back link
+   becomes a button-shaped bar across the top of the page. */
+.container-detail header > a.refresh-btn { grid-column: 1 / -1; justify-self: start; }
+.pe-detail-title { min-width: 0; }
+.pe-detail-title h1, .pe-detail-title p { margin: 0; }
+
+@media (max-width: 720px) {
+  .pe-icon.lg { width: 36px; height: 36px; border-radius: 9px; }
+  .pe-icon.lg .pe-icon-mono { font-size: 14px; }
+}
+

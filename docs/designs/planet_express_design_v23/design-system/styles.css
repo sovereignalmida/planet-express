@@ -1,0 +1,32 @@
+/* Planet Express design system — single entry point. Link this.
+   Order matches static/cockpit.css, so the cascade is identical. */
+@import url('tokens/colors.css');
+@import url('tokens/typography.css');
+@import url('tokens/spacing.css');
+@import url('tokens/base.css');
+@import url('tokens/motion.css');
+@import url('tokens/aliases.css');
+@import url('components/01-primitives.css');
+@import url('components/02-action-screens.css');
+@import url('components/03-chrome.css');
+@import url('components/04-panels-hull.css');
+@import url('components/05-data-system.css');
+@import url('components/06-cryo.css');
+@import url('components/07-certs.css');
+@import url('components/08-network.css');
+@import url('components/09-manifest-banner.css');
+@import url('components/10-docks.css');
+@import url('components/11-crew-chrome.css');
+@import url('components/12-stack-cards.css');
+@import url('components/13-approvals.css');
+@import url('components/14-overview.css');
+@import url('components/15-backups-layout.css');
+@import url('components/16-actions-incidents.css');
+@import url('components/17-history.css');
+@import url('components/18-chat.css');
+@import url('components/19-config.css');
+@import url('components/20-launch-links.css');
+@import url('components/21-widgets.css');
+@import url('components/22-app-icons.css');
+@import url('components/23-elevation.css');
+@import url('components/24-stack-controls.css');

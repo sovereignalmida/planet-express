@@ -1,0 +1,43 @@
+/* Planet Express design system · cold storage · .cryo-*
+   Source: sovereignalmida/planet-express static/cockpit.css (main @3c11d659). Verbatim; split by section. */
+/* cold storage / cryo pods */
+.cryo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.cryo-pod {
+  position: relative; overflow: hidden; border-radius: 13px; padding: 16px 18px;
+  border: 1px solid var(--cp-panel-border); border-left: 3px solid var(--cp-panel-border);
+  background: var(--cp-panel-bg);
+}
+.cryo-pod.fresh { border-left-color: var(--cp-green); background: linear-gradient(180deg, rgba(111,207,95,.08), var(--cp-panel-bg)); }
+.cryo-pod.stale { border-left-color: var(--cp-amber); background: linear-gradient(180deg, rgba(245,184,32,.09), var(--cp-panel-bg)); }
+.cryo-pod.overdue, .cryo-pod.failed { border-left-color: var(--cp-crit); background: linear-gradient(180deg, rgba(239,60,46,.09), var(--cp-panel-bg)); }
+.cryo-pod.nodata { border: 1px dashed var(--cp-panel-border); border-left: 1px dashed var(--cp-panel-border); background: var(--cp-inset-bg); opacity: .62; }
+.cryo-pod-head { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+.cryo-led { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint3); }
+.cryo-pod.fresh .cryo-led { background: var(--cp-green); box-shadow: 0 0 9px var(--cp-green); }
+.cryo-pod.stale .cryo-led { background: var(--cp-amber); box-shadow: 0 0 9px var(--cp-amber); animation: beacon 1.8s ease-in-out infinite; }
+.cryo-pod.overdue .cryo-led, .cryo-pod.failed .cryo-led { background: var(--cp-crit); box-shadow: 0 0 9px var(--cp-crit); animation: critpulse .9s ease-in-out infinite; }
+.cryo-name { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 20px; color: var(--cp-text); letter-spacing: .03em; }
+.cryo-cadence { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--faint2); }
+.cryo-badge {
+  margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 9.5px; font-weight: 700; letter-spacing: .1em;
+  border-radius: 20px; padding: 2px 9px; border: 1px solid var(--cp-panel-border); color: var(--faint2);
+}
+.cryo-pod.fresh .cryo-badge { color: var(--cp-green-text); border-color: rgba(111,207,95,.4); }
+.cryo-pod.stale .cryo-badge { color: var(--cp-amber-text); border-color: rgba(245,184,32,.45); }
+.cryo-pod.overdue .cryo-badge, .cryo-pod.failed .cryo-badge { color: var(--cp-crit-text); border-color: rgba(239,60,46,.45); }
+.cryo-hero { display: flex; align-items: baseline; gap: 9px; }
+.cryo-hero-num { font-family: 'Chakra Petch', sans-serif; font-weight: 700; font-size: 34px; line-height: 1; color: var(--cp-green-text); }
+.cryo-pod.stale .cryo-hero-num { color: var(--cp-amber-text); }
+.cryo-pod.overdue .cryo-hero-num, .cryo-pod.failed .cryo-hero-num { color: var(--cp-crit-text); }
+.cryo-hero-label { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--faint2); letter-spacing: .08em; }
+.cryo-window-track { height: 5px; border-radius: 20px; background: var(--cp-inset-bg); border: 1px solid var(--cp-panel-border); overflow: hidden; margin-top: 11px; }
+.cryo-window-fill { height: 100%; border-radius: 20px; background: var(--cp-green); box-shadow: 0 0 10px rgba(111,207,95,.55); }
+.cryo-pod.stale .cryo-window-fill { background: var(--cp-amber); box-shadow: 0 0 10px rgba(245,184,32,.6); }
+.cryo-pod.overdue .cryo-window-fill, .cryo-pod.failed .cryo-window-fill { background: var(--cp-crit); box-shadow: 0 0 10px rgba(239,60,46,.6); }
+.cryo-window-caption { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--faint2); margin-top: 6px; }
+.cryo-stats { display: flex; flex-direction: column; gap: 9px; font-family: 'JetBrains Mono', monospace; font-size: 11px; margin-top: 14px; padding-top: 13px; border-top: 1px dashed var(--border-hair); }
+.cryo-stat-row { display: flex; justify-content: space-between; gap: 10px; color: var(--faint2); letter-spacing: .04em; }
+.cryo-stat-row span:last-child { color: var(--text2); text-align: right; letter-spacing: normal; }
+.cryo-stat-row .cryo-bad { color: var(--cp-crit-text); }
+.cryo-footnote { margin-top: 11px; font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: var(--faint3); line-height: 1.5; }
+
