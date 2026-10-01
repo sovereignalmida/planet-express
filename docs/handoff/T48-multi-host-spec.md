@@ -145,6 +145,18 @@ from the local docker socket, which does not depend on beszel at all.
   is excluded from remote entries. Matching on name or address instead would be
   wrong: the name is editable in beszel's UI and the address can change.
 
+  **The inventory must be validated, because the two rules above fight.** If the
+  inventory omits the local entry, or flags the wrong system id as local, then the
+  hub's local system matches nothing — and the rule that surfaces unlisted hosts
+  then renders it as an unconfigured remote host, next to the docker-backed one.
+  The duplicate comes back, caused by the mechanism meant to make new agents
+  visible. So the schema enforces, whenever the inventory is non-empty: system ids
+  unique across entries, and exactly one entry flagged local. Violations are a
+  config validation failure refused at apply time, not a silent fallback — PE
+  already refuses a config that does not validate, and this belongs there rather
+  than in rendering. An empty inventory is valid and means no remote hosts at all,
+  with the local host rendering from the docker socket exactly as it does today.
+
 ## What it must not do
 
 - Must not put remote containers in the same list as local ones in a way that lets
@@ -161,6 +173,12 @@ from the local docker socket, which does not depend on beszel at all.
   write path to another host's state.
 - Must not log or render the agent `TOKEN`, the hub's `id_ed25519`, or the service
   account password.
+- Must not let any part of the inventory's meaning depend on `model_fields_set`.
+  Config changes are compared by dumped **value**, so a rule that turns on whether
+  a field was written is invisible to the diff: it could be changed by deleting a
+  line, with no diff, no locked field and no passphrase. That was the sharpest
+  finding of T47 and the fix was to remove presence-dependence entirely. An
+  inventory is a list of explicit entries for exactly this reason.
 
 ## The acting path, specced and not built
 
