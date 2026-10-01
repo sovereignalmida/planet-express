@@ -13,7 +13,7 @@ The main checkout `code/planet-express` belongs to another session; do not work 
 | slice | what | state |
 |-------|------|-------|
 | S0 | host prereq: beszel survives reboot + a read-only account | **handed to Chris** |
-| S1 | core types, locality predicate, staleness — pure, no I/O | not started |
+| S1 | core types, locality predicate, staleness — pure, no I/O | **done** — `planet_express/core/hosts.py`, `tests/test_hosts.py` |
 | S2 | `BeszelHubProvider` + a fixture provider built from real captured data | not started |
 | S3 | config inventory: schema, validation, secrets | not started |
 | S4 | wire into the dashboard data path, off the scan's critical path | not started |
