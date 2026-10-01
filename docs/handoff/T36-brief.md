@@ -25,7 +25,7 @@ that screen.
   visibility-gated polling, UI mounted **outside `#dashboard-live`** so the 60s swap can't destroy a
   draft or an in-flight apply.
 - `static/cockpit.css` §16 (`.pe-sheet*`, `.pe-verdict*`, `.pe-card` levels, `.pe-logwell`).
-- `docs/designs/planet_express_design_v20/system/ACTION-SCREENS.md` cross-cutting rules (there is no
+- `docs/designs/archive/planet_express_design_v20/system/ACTION-SCREENS.md` cross-cutting rules (there is no
   config mockup; follow the cockpit vocabulary and the two-step confirm sheet used by restart).
 
 ## Required behaviour

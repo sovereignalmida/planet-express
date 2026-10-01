@@ -12,10 +12,10 @@ service (~3,900px of scroll at 390px wide), every row repeating `running(healthy
 worst-first, with status words only where something is wrong.
 
 ## Read first
-- `docs/designs/planet_express_design_v20/handoffs/SERVICES-STACK-CARDS.md` — the spec. Its visual
+- `docs/designs/archive/planet_express_design_v20/handoffs/SERVICES-STACK-CARDS.md` — the spec. Its visual
   reference `reference/Services Grid - Stack Cards.dc.html` gives exact spacing/colour; don't lift its
   inline-styled markup.
-- `docs/designs/planet_express_design_v20/system/DATA-CONTRACT.md` § "Stack rollup".
+- `docs/designs/archive/planet_express_design_v20/system/DATA-CONTRACT.md` § "Stack rollup".
 - `dashboard_data.py`: `summarize_services()` (current flat list), `_container_state()` (reactor
   cells), `summarize_pipeline_status()`, `_MODES_WITH_STACK_COMPLETENESS`.
 - `casa_leela.py` ~`:348-375` — where each service's `status` (`healthy|failing|unknown`) and `state`

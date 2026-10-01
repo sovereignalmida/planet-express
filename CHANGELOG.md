@@ -81,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.1.0] - 2026-09-25
 
-A layout pass over all eight tabs, implementing `docs/designs/planet_express_design_v21/handoffs/
+A layout pass over all eight tabs, implementing `docs/designs/archive/planet_express_design_v21/handoffs/
 V2.1-ABOVE-THE-FOLD.md`. The design system itself is unchanged — `static/cockpit.css`'s first 582
 lines stay byte-identical to the v20 package. Every tab's primary content now sits above the fold
 at 1440×900; measurements are in `docs/handoff/T45-brief.md`.

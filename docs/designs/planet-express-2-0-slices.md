@@ -42,7 +42,7 @@ in Telegram; whichever of you taps first wins, exactly once, and the other card 
 - Dashboard reached over VPN/Tailscale, with a login (D1).
 - Compose editor explicitly not chosen (D2).
 - Reuse ladder: no new dependency where Flask/Werkzeug or stdlib covers it.
-- **Visual source of truth:** `docs/designs/planet_express_design_v20/`. It has the `cockpit.css`
+- **Visual source of truth:** `docs/designs/archive/planet_express_design_v20/`. It has the `cockpit.css`
   token system, `ACTION-SCREENS.md` (login, container detail, approval, execution: 20 states), and
   `DATA-CONTRACT.md`. The reference `.dc.html` files are ground truth for spacing and state
   treatment; their markup is never copied into templates.
@@ -1447,7 +1447,7 @@ tasks against `ACTION-SCREENS.md`.
 ### Overview design follow-ups
 
 - [x] **T34 (P2, CC: ~1 session)** — dashboard — ✅ done 2026-09-21 — Overview SERVICES panel as
-  stack cards, per `docs/designs/planet_express_design_v20/handoffs/SERVICES-STACK-CARDS.md`. Scope
+  stack cards, per `docs/designs/archive/planet_express_design_v20/handoffs/SERVICES-STACK-CARDS.md`. Scope
   and acceptance tests: `docs/handoff/T34-brief.md`. Web side only; no RPC, Leela or core change.
   - `dashboard_data.summarize_services()` now returns a per-stack rollup (`up`/`total`/`level`/`note`
     + members) sorted worst-first, then biggest, then name. Member levels derive from Leela's

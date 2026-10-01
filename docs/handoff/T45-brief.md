@@ -1,7 +1,7 @@
 # T45 — v2.1 above-the-fold layout pass
 
-Source spec: `docs/designs/planet_express_design_v21/handoffs/V2.1-ABOVE-THE-FOLD.md`
-Visual reference: `docs/designs/planet_express_design_v21/reference/Dashboard v2.1 - Above the Fold.dc.html`
+Source spec: `docs/designs/archive/planet_express_design_v21/handoffs/V2.1-ABOVE-THE-FOLD.md`
+Visual reference: `docs/designs/archive/planet_express_design_v21/reference/Dashboard v2.1 - Above the Fold.dc.html`
 
 The design system (`system/cockpit.css`, 582 lines) is byte-identical to the v20 copy already
 in `static/cockpit.css`. Nothing in the system changes. Everything here lands in our adapter

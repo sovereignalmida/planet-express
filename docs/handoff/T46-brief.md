@@ -3,11 +3,11 @@
 > **Resume here.** Branch `claude/pensive-keller-bj1gkg`, last pushed at the commit that
 > added this note; no PR is open. Read "Before 2.2 ships" at the end of this file first: it
 > lists the open owner decisions, the live-host checks, and the Codex pass that has not run.
-> The design spec is `docs/designs/planet_express_design_v22/handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md`;
+> The design spec is `docs/designs/archive/planet_express_design_v22/handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md`;
 > the design harness is `python scripts/design_preview.py --port 8773` (fixtures, no host).
 
-Source spec: `docs/designs/planet_express_design_v22/handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md`
-Visual reference: `docs/designs/planet_express_design_v22/reference/Dashboard v2.2 - Launch Links and Widgets.dc.html`
+Source spec: `docs/designs/archive/planet_express_design_v22/handoffs/V2.2-LAUNCH-LINKS-AND-WIDGETS.md`
+Visual reference: `docs/designs/archive/planet_express_design_v22/reference/Dashboard v2.2 - Launch Links and Widgets.dc.html`
 
 The v2.2 design system is byte-identical to v2.1's; only `DATA-CONTRACT.md` moved. So this is
 again adapter layer plus backend derivation, with no re-skin.
