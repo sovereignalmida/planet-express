@@ -1,0 +1,9 @@
+# Paired with fixtures/compose/network/docker-compose.yml. CASA_QBIT is the cross-project half
+# of the real incident: it shares CASA_GLUETON's namespace from a *different* compose project,
+# which `network_mode: service:x` cannot express (compose only resolves `service:` within one
+# project) -- that gap is exactly why this project never caught it before Phase 1.
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent
+    container_name: CASA_QBIT
+    network_mode: container:CASA_GLUETON
