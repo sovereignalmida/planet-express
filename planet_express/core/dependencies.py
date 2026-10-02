@@ -112,6 +112,28 @@ class DependencyGraph:
         key = f"{stack}/{service}"
         return tuple(d for d in self.dependencies if d.source == key)
 
+    def ordering_violations(self, stack_order: dict) -> tuple[Dependency, ...]:
+        """Cross-project `depends_on`/`namespace` edges whose target's stack is ordered at or
+        after its source's stack in `stack_order` (a `{stack_name: position}` mapping, e.g.
+        the index a boot sequence would bring each stack up in) -- the dependency cannot be
+        guaranteed ready first. Same-project edges are excluded: one `docker compose up -d`
+        brings up a whole project's services together, so within-stack order isn't something
+        a stack-level boot sequence controls at all. A stack `stack_order` doesn't mention is
+        skipped, not treated as a violation -- absence is not a position."""
+        violations = []
+        for d in self.dependencies:
+            if d.kind not in ("depends_on", "namespace") or not d.cross_project:
+                continue
+            source_stack = d.source.split("/", 1)[0]
+            target_stack = d.target.split("/", 1)[0]
+            source_idx = stack_order.get(source_stack)
+            target_idx = stack_order.get(target_stack)
+            if source_idx is None or target_idx is None:
+                continue
+            if target_idx >= source_idx:
+                violations.append(d)
+        return tuple(violations)
+
 
 class Detector(Protocol):
     name: str

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config
+from planet_express.execution import dependency_dryrun
 
 log_prefix = "[casa_boot]"
 BOOT_TIMEOUT_SECONDS = 270
@@ -249,7 +250,6 @@ def repair_dead_namespace_references(
 
 
 def bring_up_all_stacks() -> int:
-    deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS
     stacks = config.active_stack_dirs()
     # "network" (Traefik/DNS/Gluetun) goes first — everything else routes through
     # it, so it's the one real ordering guarantee worth keeping. Everything else
@@ -261,6 +261,25 @@ def bring_up_all_stacks() -> int:
     }
     print(f"{log_prefix} {len(stacks)} active stack(s): {', '.join(s.name for s in stacks)}")
 
+    # v3 Phase 1 dry run: log what the dependency graph sees, change nothing. Wiring it into
+    # actual ordering is a separate, later change (docs/designs/phase-1-state-model.md,
+    # non-goals). Three things make this inert rather than merely intended to be:
+    # (1) a copy of `stacks` is passed, so nothing here can reorder or clear the list that
+    #     drives the real loop below, even if a future summarize() tried to;
+    # (2) the real BOOT_TIMEOUT_SECONDS deadline is computed *after* this block, so however
+    #     long this diagnostic takes, it cannot shrink the budget the real docker compose
+    #     calls get -- codex review caught that the deadline used to be set before this ran,
+    #     which would have let a slow dry run eat into the real retry window;
+    # (3) only ordinary exceptions are caught, not SystemExit/KeyboardInterrupt -- an operator's
+    #     Ctrl-C during a hung diagnostic must still stop the script, which is more important
+    #     than this specific guarantee.
+    try:
+        for line in dependency_dryrun.summarize(list(stacks)):
+            print(f"{log_prefix} {line}")
+    except Exception as error:  # noqa: BLE001 -- a dry run must never break a real boot
+        print(f"{log_prefix} [dry-run graph] ERROR (ignored): {error}")
+
+    deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS
     failed: list[Path] = []
     for stack_dir in stacks:
         compose_file = stack_dir / "docker-compose.yml"

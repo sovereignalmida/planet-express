@@ -182,6 +182,33 @@ def test_all_healthy_path_performs_zero_recreates(tmp_path, monkeypatch):
     assert not _force_recreates(fake)
 
 
+def test_slow_dry_run_does_not_shrink_the_real_boot_timeout(tmp_path, monkeypatch):
+    """A codex-review regression test: the deadline used for real docker compose calls must be
+    computed *after* the dependency-graph dry run, so however long that diagnostic takes, it
+    cannot eat into the budget the real retry/verify path gets."""
+    _, compose_file = _stack(tmp_path, monkeypatch)
+    healthy = _row(config_files=compose_file, service="test")
+    fake = _install(monkeypatch, FakeDocker(
+        {compose_file: [0]}, f"{ID_A}\n", [f"{healthy}\n", f"{healthy}\n"],
+    ))
+
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(casa_boot.time, "monotonic", lambda: clock["t"])
+
+    def slow_summarize(stacks):
+        clock["t"] += 200.0  # simulate a dry run that took 200s
+        return ["[dry-run graph] simulated slow pass"]
+
+    monkeypatch.setattr(casa_boot.dependency_dryrun, "summarize", slow_summarize)
+
+    assert casa_boot.bring_up_all_stacks() == 0
+    up_timeouts = [
+        kwargs["timeout"] for argv, kwargs in fake.calls
+        if argv[:2] == ["docker", "compose"] and "up" in argv and "timeout" in kwargs
+    ]
+    assert up_timeouts and min(up_timeouts) > casa_boot.BOOT_TIMEOUT_SECONDS - 5
+
+
 def test_dead_reference_from_an_inactive_stack_is_not_recreated(tmp_path, monkeypatch):
     active, _ = _stack(tmp_path, monkeypatch)
     inactive_file = str(tmp_path / "retired" / "docker-compose.yml")

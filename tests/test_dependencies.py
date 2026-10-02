@@ -63,6 +63,34 @@ def test_what_must_be_healthy_before_qbittorrent_starts():
     assert must_be_healthy[0].target == "network/gluetun"
 
 
+# --- ordering_violations() ------------------------------------------------------------------
+
+
+def test_ordering_violations_correct_order_is_not_a_violation():
+    graph = deps.discover((load("network"), load("media")))
+    assert graph.ordering_violations({"network": 0, "media": 1}) == ()
+
+
+def test_ordering_violations_wrong_order_is_a_violation():
+    graph = deps.discover((load("network"), load("media")))
+    violations = graph.ordering_violations({"network": 1, "media": 0})
+    assert len(violations) == 1
+    assert violations[0].source == "media/qbittorrent"
+
+
+def test_ordering_violations_equal_position_is_a_violation():
+    """Docstring says "at or after"; two stacks claiming the same position is not a guarantee
+    the target comes first, so it must count as a violation too, not pass silently."""
+    graph = deps.discover((load("network"), load("media")))
+    violations = graph.ordering_violations({"network": 0, "media": 0})
+    assert len(violations) == 1
+
+
+def test_ordering_violations_unknown_stack_is_skipped_not_a_violation():
+    graph = deps.discover((load("network"), load("media")))
+    assert graph.ordering_violations({"network": 0}) == ()
+
+
 # --- namespace detector: declines vs. unresolved ------------------------------------------
 
 
