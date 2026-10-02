@@ -25,6 +25,17 @@ class _Window:
     reason = "borg backup"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_files(monkeypatch, tmp_path):
+    """Every `PipelineState` here is real, and its `_persist()` really writes
+    `config.STATE_STATUS` on every transition -- `admit_pipeline_run()` alone triggers it,
+    which is most tests in this file. See the regression test below (originally the one gap
+    in this file) for the incident this caused when the suite ran inside a live deployed
+    checkout instead of a sandboxed clone. Blanket-isolated here rather than per-test."""
+    monkeypatch.setattr(fw.config, "STATE_STATUS", tmp_path / "run_status.json")
+    monkeypatch.setattr(fw.config, "STATE_MONITOR", tmp_path / "monitor.json")
+
+
 def _state(maintenance=lambda: None):
     return fw.PipelineState(maintenance=maintenance)
 
@@ -91,7 +102,15 @@ def test_run_pipeline_refuses_and_says_so_when_it_admits_itself(monkeypatch):
 
 def test_an_already_admitted_run_does_not_ask_for_the_slot_again(monkeypatch):
     """The slot is RUNNING when the thread starts, so a second admission would refuse its
-    own caller's scan -- the button would report started and nothing would happen."""
+    own caller's scan -- the button would report started and nothing would happen.
+
+    Only `leela.run_status` was mocked here; `run_pipeline` itself ran for real, including its
+    `config.STATE_MONITOR.write_text(...)` -- and `config.STATE_DIR` defaults to a path
+    relative to `config.py`'s own location on disk, not to this test's CASA_CONFIG. Running the
+    suite inside a live deployed checkout (not a sandboxed clone) made that default resolve to
+    the real production state directory, so this test's near-empty mocked snapshot overwrote
+    the real `state/latest_monitor.json` and broke the live dashboard's fleet count. Now covered
+    by this file's `_isolate_state_files` autouse fixture, like everything else here."""
     state = _state()
     assert fw.admit_pipeline_run(state).ok
     monkeypatch.setattr(fw.leela, "run_status", Mock(return_value={
