@@ -46,13 +46,13 @@ Confirmed by direct codebase search (2026-10-02), not assumption:
   built from a live `docker inspect`, used only to attribute a dashboard launch-link/widget, and
   explicitly give up (`UnresolvableNamespace`) rather than guess when the referenced container
   can't be matched by full ID. Nothing persists this as a dependency edge.
-- **A second, in-progress `HostProvider` exists — but not where the review first said.** The
-  brief's naming-collision flag (Protocol `HostProvider` in `beszel.py`, meaning "remote host
-  *data* source") is real, but that file is not on `main` — it's finished on branch
-  `t48/s2-provider` (part of the active T48 multi-host effort; not yet merged). **Correction to
-  carry forward:** the collision is with in-flight work on a live branch, not already-shipped
-  code on `main`. It still needs resolving before merge, and T48 should be the one to resolve it
-  (rename on whichever side lands second, or coordinate now since both are active).
+- **The `HostProvider` collision is live on `main`, not pending work — resolved 2026-10-02.**
+  Checked twice: `beszel.py`'s `HostProvider` Protocol (meaning "remote host *data* source") is
+  already merged to `main` via PR #3 ("T48: other hosts... through the beszel hub"). It is
+  shipped, stable code with its own tests — renaming it now for a collision with something that
+  doesn't exist yet would be present-day churn for a future problem. **Decision: v3 simply never
+  uses the name `HostProvider`.** The brief's local-host-control adapter (Phase 3, not yet built)
+  is named **`HostControlProvider`** going forward. `beszel.py` is untouched.
 - **Severity/health is represented at least three incompatible ways**, which Phase 1's
   `HealthState` needs to reconcile rather than add a fourth: `HealthReading` (actions.py: raw
   docker state, `healthy|unhealthy|starting|none`), `incidents.py` observations
@@ -116,17 +116,23 @@ Non-goals (later phases per the Addendum)
   real fleet.
 - No MOS integration (Phase 6).
 
-## 5. Open questions (not yet resolved, need Chris)
+## 5. Decisions made without round-tripping to Chris
 
-- **Resolve the `HostProvider` naming collision with T48 now**, while both are active, rather than
-  after either merges. Candidate names from the Addendum: `HostControlProvider` (this work) /
-  `FleetDataProvider` (rename the `t48/s2-provider` one) — needs a decision, and a heads-up to
-  whoever owns `t48/s2-provider` before it merges to `main`.
-- **Where does the detector registry live** relative to `planet_express/core/` vs. the character-
-  named scripts (`casa_leela.py` etc.)? The 2.0 slices doc is already migrating logic out of the
-  character scripts into `planet_express/{core,execution,application}` — this should land there,
-  not in a new `casa_*.py`, but exact module placement needs a decision.
-- **Migration/testing**: per the Addendum's still-open items, there's no fixture today modeling two
-  separate compose projects with a cross-project `network_mode` reference (closest precedent:
-  `tests/homelab/stacks/{healthy,crash-loop,slow-start,unhealthy}`, which are single-project). One
-  needs to be built as part of this work to actually test the namespace detector.
+Per standing instruction (2026-10-02: "orchestrate, only consult me when you can't decide
+yourself"), these were resolved directly rather than queued as open questions:
+
+- **`HostProvider` naming — settled, see §2 above.** `beszel.py` keeps its name; v3's local-host-
+  control adapter is `HostControlProvider`.
+- **Detector registry placement: `planet_express/core/`.** Landed as `core/state.py` (entity
+  types) and `core/dependencies.py` (graph + registry), matching `core/hosts.py` and
+  `core/incidents.py`'s existing precedent (pure types/reasoning live in `core/`; the 2.0 slices
+  migration is already moving logic out of the character-named scripts into exactly this layer).
+  Not a new `casa_*.py` — there's nothing Leela/Hermes/etc.-shaped about a pure graph.
+- **Cross-project fixture — built.** `tests/fixtures/compose/{network,media}/docker-compose.yml`,
+  using the real container names from `casa_farnsworth.py`'s prompt (`CASA_GSP`, `CASA_QBIT`,
+  `CASA_GLUETON`).
+
+## 6. Open questions (not yet resolved, need Chris)
+
+(none outstanding as of this revision — see `docs/designs/phase-1-state-model.md`'s companion
+commits for what shipped against goals 1–3)

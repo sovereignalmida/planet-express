@@ -132,6 +132,46 @@ def test_depends_on_unknown_target_is_unresolved():
     assert graph.unresolved[0].reason == "no service 'nonexistent' in stack 's'"
 
 
+# --- shared mount detector ------------------------------------------------------------------
+
+
+def test_shared_bind_mount_cross_project():
+    a = stack("media", {"tubearchivist": {"volumes": ["/mnt/main/youtube:/youtube"]}})
+    b = stack("backup", {"borg": {"volumes": [{"type": "bind", "source": "/mnt/main/youtube", "target": "/data"}]}})
+    graph = deps.discover((a, b))
+    assert graph.dependencies == (
+        deps.Dependency(
+            kind="shared_mount", source="backup/borg", target="media/tubearchivist",
+            cross_project=True, detector="shared_mount", detail="/mnt/main/youtube",
+        ),
+    )
+    assert not graph.unresolved
+
+
+def test_shared_bind_mount_same_project_not_cross_project():
+    a = stack("media", {
+        "a": {"volumes": ["/mnt/main/media:/data"]},
+        "b": {"volumes": ["/mnt/main/media:/data:ro"]},
+    })
+    graph = deps.discover((a,))
+    assert len(graph.dependencies) == 1
+    assert graph.dependencies[0].cross_project is False
+
+
+def test_named_volume_is_not_indexed_as_a_bind_mount():
+    a = stack("media", {"a": {"volumes": ["config:/config"]}})
+    b = stack("backup", {"b": {"volumes": ["config:/config"]}})
+    graph = deps.discover((a, b))
+    assert not graph.dependencies
+    assert not graph.unresolved
+
+
+def test_unshared_mount_produces_no_edge():
+    a = stack("media", {"a": {"volumes": ["/mnt/main/media:/data"]}})
+    graph = deps.discover((a,))
+    assert not graph.dependencies
+
+
 # --- parsing --------------------------------------------------------------------------------
 
 

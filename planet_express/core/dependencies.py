@@ -67,7 +67,14 @@ def load_compose_stack(name: str, content: str) -> ComposeStack:
 class Dependency:
     """One discovered edge. `source`/`target` are `"<stack>/<service>"`. `cross_project` is
     True exactly when source and target are not in the same `ComposeStack` -- this is the field
-    the Gluetun incident needed and didn't have."""
+    the Gluetun incident needed and didn't have.
+
+    Not every `kind` means the same thing as an edge: `depends_on` and `namespace` are real
+    start-order constraints (source cannot come up correctly before target). `shared_mount` is
+    informational and symmetric -- two services sharing a path are a coupled failure domain
+    (one going read-only can make the other misbehave), not an ordering rule; `source`/`target`
+    for that kind is just alphabetical, not "depends on." A boot-ordering caller should filter
+    to `kind in ("depends_on", "namespace")`."""
 
     kind: str
     source: str
@@ -97,8 +104,10 @@ class DependencyGraph:
     unresolved: tuple[UnresolvedDependency, ...]
 
     def for_service(self, stack: str, service: str) -> tuple[Dependency, ...]:
-        """Dependencies where `<stack>/<service>` is the source -- what must be healthy before
-        this one starts. The hook `casa_boot.py` (or its successor) calls at boot time."""
+        """Every edge naming `<stack>/<service>` as source, any kind. A caller that wants "what
+        must be healthy before this starts" (the hook `casa_boot.py`'s successor would call)
+        filters this to `kind in ("depends_on", "namespace")` -- see `Dependency`'s docstring on
+        why `shared_mount` is not an ordering edge."""
         key = f"{stack}/{service}"
         return tuple(d for d in self.dependencies if d.source == key)
 
@@ -282,7 +291,68 @@ class NamespaceReferenceDetector:
         return tuple(found), tuple(unresolved)
 
 
-DETECTORS: tuple[Detector, ...] = (DependsOnDetector(), NamespaceReferenceDetector())
+class SharedMountDetector:
+    """Two services that bind-mount the same host path, same project or not, are coupled even
+    with no `depends_on` and no shared namespace: `/media/youtube` going unreadable is exactly
+    the storage-dependency failure mode SS9 of the Architecture Brief names explicitly
+    (TubeArchivist writing into an empty directory instead of failing cleanly).
+
+    Deliberately narrow for this first cut: only **bind mounts to an absolute host path** are
+    indexed (`source: /…` in long form, or `/…:/…` in short form). A top-level named volume
+    (`media-library:/data`) is not indexed -- compose scopes those to one project by default,
+    so cross-project named-volume sharing is a real but rarer case, left for a later detector
+    rather than guessed at here. There is nothing to leave `UnresolvedDependency` for: two
+    sources either match exactly or they don't, there is no reference syntax to fail to resolve.
+    """
+
+    name = "shared_mount"
+
+    def _bind_sources(self, svc: dict) -> set[str]:
+        sources: set[str] = set()
+        for entry in svc.get("volumes") or []:
+            if isinstance(entry, str):
+                source = entry.split(":", 1)[0]
+            elif isinstance(entry, dict):
+                source = entry.get("source") if entry.get("type", "bind") == "bind" else None
+            else:
+                continue
+            if isinstance(source, str) and source.startswith("/") and len(source) > 1:
+                sources.add(source)
+        return sources
+
+    def detect(
+        self, stacks: tuple[ComposeStack, ...]
+    ) -> tuple[tuple[Dependency, ...], tuple[UnresolvedDependency, ...]]:
+        by_path: dict[str, list[str]] = {}
+        for stack in stacks:
+            for svc_name, svc in stack.services.items():
+                if not isinstance(svc, dict):
+                    continue
+                key = f"{stack.name}/{svc_name}"
+                for path in self._bind_sources(svc):
+                    by_path.setdefault(path, []).append(key)
+
+        found: list[Dependency] = []
+        for path, keys in by_path.items():
+            ordered = sorted(set(keys))
+            for i, source in enumerate(ordered):
+                for target in ordered[i + 1 :]:
+                    found.append(
+                        Dependency(
+                            kind="shared_mount",
+                            source=source,
+                            target=target,
+                            cross_project=source.split("/", 1)[0] != target.split("/", 1)[0],
+                            detector=self.name,
+                            detail=path,
+                        )
+                    )
+        return tuple(found), ()
+
+
+DETECTORS: tuple[Detector, ...] = (
+    DependsOnDetector(), NamespaceReferenceDetector(), SharedMountDetector(),
+)
 
 
 def discover(

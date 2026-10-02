@@ -111,9 +111,9 @@ class BackupJob:
 
 @dataclass(frozen=True)
 class Host:
-    """The machine PE is running on. Thin by design -- Phase 3 is where a `HostProvider`
-    (name pending resolution of the collision with `integrations/beszel.py`'s existing
-    `HostProvider`, per the Addendum) decides how this gets populated on a given host."""
+    """The machine PE is running on. Thin by design -- Phase 3 is where a `HostControlProvider`
+    (named to avoid colliding with `integrations/beszel.py`'s existing `HostProvider`, which
+    means "remote host data source" and is unrelated) decides how this gets populated."""
 
     name: str
     stacks: tuple[str, ...] = field(default_factory=tuple)
