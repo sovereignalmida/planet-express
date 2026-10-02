@@ -31,6 +31,19 @@ from notifier import FakeNotifier
 COMMANDS = object()   # the canary pass is stubbed out; only the lock is under test
 
 
+@pytest.fixture(autouse=True)
+def _isolate_state_files(monkeypatch, tmp_path):
+    """Every `PipelineState` here is real, and its `_persist()` really writes
+    `config.STATE_STATUS` on every transition -- `admit_pipeline_run()`/`try_begin_mutation()`
+    alone trigger it, which is most tests in this file. `config.STATE_DIR` defaults relative to
+    `config.py`'s own location on disk, not to this file's CASA_CONFIG, so running this suite
+    inside a live deployed checkout (not a sandboxed clone) would write real production state --
+    exactly the mechanism that overwrote `state/latest_monitor.json` via STATE_MONITOR (see
+    test_scan_on_demand.py's regression test). Blanket-isolated here rather than per-test."""
+    monkeypatch.setattr(fw.config, "STATE_STATUS", tmp_path / "run_status.json")
+    monkeypatch.setattr(fw.config, "STATE_MONITOR", tmp_path / "monitor.json")
+
+
 def _state():
     return fw.PipelineState()
 
