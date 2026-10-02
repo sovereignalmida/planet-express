@@ -22,6 +22,7 @@ relationship semantics at runtime.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -350,8 +351,96 @@ class SharedMountDetector:
         return tuple(found), ()
 
 
+_ROUTER_SERVICE_LABEL = re.compile(r"^traefik\.http\.routers\.([^.]+)\.service$")
+_SERVICE_DECLARATION_LABEL = re.compile(r"^traefik\.http\.services\.([^.]+)\.loadbalancer\.")
+
+
+class TraefikRouterDetector:
+    """A router's labels can live on a different container than the service they route to --
+    exactly the case `actions.py`'s `parse_router_owners()` docstring already names: "qbit's
+    labels have to live on gluetun" (qbittorrent shares gluetun's namespace, so Traefik only
+    sees gluetun's ports; its router labels have to be declared there instead). Compose-level
+    equivalent of that same attribution problem, found here instead of from a live `docker
+    inspect`: a router's labels name its target service explicitly
+    (`traefik.http.routers.<r>.service=<name>`), and <name> is declared by *some* service's
+    `traefik.http.services.<name>.loadbalancer...` labels, possibly in a different stack.
+
+    A router with no explicit `.service=` label routes to a service of its own container's
+    name (Traefik's own default) -- nothing cross-referenced, so no edge. An explicit
+    `.service=` naming something no known service declares is unresolved, same policy as the
+    namespace detector."""
+
+    name = "traefik_router"
+
+    @staticmethod
+    def _labels(svc: dict) -> dict[str, str]:
+        raw = svc.get("labels")
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items()}
+        if isinstance(raw, list):
+            pairs = (str(item).split("=", 1) for item in raw if isinstance(item, str) and "=" in str(item))
+            return {k: v for k, v in pairs}
+        return {}
+
+    def detect(
+        self, stacks: tuple[ComposeStack, ...]
+    ) -> tuple[tuple[Dependency, ...], tuple[UnresolvedDependency, ...]]:
+        declares: dict[str, tuple[str, str]] = {}
+        for stack in stacks:
+            for svc_name, svc in stack.services.items():
+                if not isinstance(svc, dict):
+                    continue
+                for label in self._labels(svc):
+                    m = _SERVICE_DECLARATION_LABEL.match(label)
+                    if m:
+                        declares[m.group(1)] = (stack.name, svc_name)
+
+        found: list[Dependency] = []
+        unresolved: list[UnresolvedDependency] = []
+        for stack in stacks:
+            for svc_name, svc in stack.services.items():
+                if not isinstance(svc, dict):
+                    continue
+                labels = self._labels(svc)
+                for label, target_service in labels.items():
+                    m = _ROUTER_SERVICE_LABEL.match(label)
+                    if not m:
+                        continue
+                    router = m.group(1)
+                    owner = declares.get(target_service)
+                    source = f"{stack.name}/{svc_name}"
+                    if owner is None:
+                        unresolved.append(
+                            UnresolvedDependency(
+                                stack=stack.name,
+                                service=svc_name,
+                                field=label,
+                                value=target_service,
+                                reason=(
+                                    f"router {router!r} names service {target_service!r}, "
+                                    "which no known service's labels declare"
+                                ),
+                                detector=self.name,
+                            )
+                        )
+                        continue
+                    owner_stack, owner_service = owner
+                    found.append(
+                        Dependency(
+                            kind="traefik_router",
+                            source=source,
+                            target=f"{owner_stack}/{owner_service}",
+                            cross_project=owner_stack != stack.name,
+                            detector=self.name,
+                            detail=f"router {router} -> service {target_service}",
+                        )
+                    )
+        return tuple(found), tuple(unresolved)
+
+
 DETECTORS: tuple[Detector, ...] = (
     DependsOnDetector(), NamespaceReferenceDetector(), SharedMountDetector(),
+    TraefikRouterDetector(),
 )
 
 

@@ -172,6 +172,54 @@ def test_unshared_mount_produces_no_edge():
     assert not graph.dependencies
 
 
+# --- traefik router -> service detector -----------------------------------------------------
+
+
+def test_router_service_label_cross_project():
+    """qbit's labels have to live on gluetun -- the compose-time version of the exact case
+    actions.py's parse_router_owners() docstring describes."""
+    network = stack("network", {
+        "gluetun": {
+            "labels": [
+                "traefik.http.routers.qbit.service=qbit",
+                "traefik.http.services.gluetun.loadbalancer.server.port=8080",
+            ],
+        },
+    })
+    media = stack("media", {
+        "qbittorrent": {
+            "labels": {"traefik.http.services.qbit.loadbalancer.server.port": "8081"},
+        },
+    })
+    graph = deps.discover((network, media))
+    router_edges = [d for d in graph.dependencies if d.kind == "traefik_router"]
+    assert router_edges == [
+        deps.Dependency(
+            kind="traefik_router", source="network/gluetun", target="media/qbittorrent",
+            cross_project=True, detector="traefik_router",
+            detail="router qbit -> service qbit",
+        ),
+    ]
+    assert not graph.unresolved
+
+
+def test_router_with_no_service_label_produces_no_edge():
+    s = stack("s", {"web": {"labels": ["traefik.http.routers.web.rule=Host(`x`)"]}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "traefik_router"]
+    assert not graph.unresolved
+
+
+def test_router_service_label_naming_unknown_service_is_unresolved():
+    s = stack("s", {"web": {"labels": {"traefik.http.routers.web.service": "ghost"}}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "traefik_router"]
+    unresolved = [u for u in graph.unresolved if u.detector == "traefik_router"]
+    assert len(unresolved) == 1
+    assert "ghost" in unresolved[0].value
+    assert "no known service's labels declare" in unresolved[0].reason
+
+
 # --- parsing --------------------------------------------------------------------------------
 
 
