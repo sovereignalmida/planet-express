@@ -248,6 +248,18 @@ def test_router_service_label_naming_unknown_service_is_unresolved():
     assert "no known service's labels declare" in unresolved[0].reason
 
 
+def test_internal_traefik_service_is_not_unresolved():
+    """Found against the real fleet: traefik.http.routers.traefik.service=api@internal is a
+    normal, correct label naming Traefik's own compiled-in API router -- never backed by any
+    container, so it must not be reported as a missing reference."""
+    s = stack("network", {"traefik": {"labels": {
+        "traefik.http.routers.traefik.service": "api@internal",
+    }}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "traefik_router"]
+    assert not [u for u in graph.unresolved if u.detector == "traefik_router"]
+
+
 def test_ambiguous_service_name_is_unresolved_not_arbitrarily_picked():
     """Two services both declaring traefik.http.services.shared...: resolving to whichever was
     iterated last would make the graph depend on argument order. Must surface as ambiguous."""

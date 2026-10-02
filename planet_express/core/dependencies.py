@@ -398,7 +398,10 @@ class TraefikRouterDetector:
     whichever was iterated last would make the graph depend on argument order, the exact
     silent-arbitrary-resolution this whole module exists to refuse. A router naming its own
     container's declared service is valid Traefik config but not a real inter-service edge,
-    so it is skipped rather than reported as a self-dependency."""
+    so it is skipped rather than reported as a self-dependency. A `.service=` naming one of
+    Traefik's own compiled-in services (`api@internal`, `dashboard@internal`, ...) is skipped
+    too, not unresolved: found against the real fleet, where `traefik.http.routers.traefik.
+    service=api@internal` is a normal, correct label that nothing will ever declare."""
 
     name = "traefik_router"
 
@@ -440,6 +443,12 @@ class TraefikRouterDetector:
                     if not m:
                         continue
                     router = m.group(1)
+                    # Traefik's own compiled-in service (api, dashboard, noop, acme-http, ...):
+                    # never backed by any container by Traefik's own design, so nothing will
+                    # ever declare it. Not unresolved -- a provider namespace this detector
+                    # correctly doesn't own, not an ambiguous reference.
+                    if target_service.endswith("@internal"):
+                        continue
                     owners = sorted(declares.get(target_service, set()))
                     source = f"{stack.name}/{svc_name}"
                     if not owners:
