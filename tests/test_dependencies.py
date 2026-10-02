@@ -220,6 +220,46 @@ def test_router_service_label_naming_unknown_service_is_unresolved():
     assert "no known service's labels declare" in unresolved[0].reason
 
 
+def test_ambiguous_service_name_is_unresolved_not_arbitrarily_picked():
+    """Two services both declaring traefik.http.services.shared...: resolving to whichever was
+    iterated last would make the graph depend on argument order. Must surface as ambiguous."""
+    a = stack("a", {"first": {"labels": {"traefik.http.services.shared.loadbalancer.server.port": "80"}}})
+    b = stack("b", {"second": {"labels": {"traefik.http.services.shared.loadbalancer.server.port": "81"}}})
+    r = stack("r", {"router": {"labels": {"traefik.http.routers.r.service": "shared"}}})
+
+    forward = deps.discover((a, b, r))
+    backward = deps.discover((b, a, r))
+    for graph in (forward, backward):
+        assert not [d for d in graph.dependencies if d.kind == "traefik_router"]
+        unresolved = [u for u in graph.unresolved if u.detector == "traefik_router"]
+        assert len(unresolved) == 1
+        assert "2 different services declare" in unresolved[0].reason
+
+
+def test_multiple_loadbalancer_labels_on_one_service_is_one_declarer_not_two():
+    """A real service commonly carries several .loadbalancer.* labels (port, passhostheader,
+    ...) -- must not be misread as two different services declaring the same name."""
+    s = stack("s", {"web": {"labels": {
+        "traefik.http.routers.web.service": "web",
+        "traefik.http.services.web.loadbalancer.server.port": "80",
+        "traefik.http.services.web.loadbalancer.passhostheader": "true",
+    }}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "traefik_router"]
+    assert not [u for u in graph.unresolved if u.detector == "traefik_router"]
+
+
+def test_router_naming_its_own_container_service_is_not_an_edge():
+    """Valid Traefik config, not an inter-service dependency -- must not appear as a self-edge."""
+    s = stack("s", {"web": {"labels": {
+        "traefik.http.routers.web.service": "web",
+        "traefik.http.services.web.loadbalancer.server.port": "80",
+    }}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "traefik_router"]
+    assert not [u for u in graph.unresolved if u.detector == "traefik_router"]
+
+
 # --- parsing --------------------------------------------------------------------------------
 
 

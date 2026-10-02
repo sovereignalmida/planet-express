@@ -89,7 +89,18 @@ def test_no_healthcheck_and_no_restarts_is_healthy():
     assert result == HealthState(condition="healthy")
 
 
-def test_starting_healthcheck_with_no_restarts_is_healthy():
-    """Mirrors container_health()'s own rule: "starting" doesn't fail a fresh container."""
+def test_starting_healthcheck_maps_to_unknown_not_healthy():
+    """Deliberate departure from container_health() (which treats "starting" as OK, a narrower
+    "did the action succeed" question) -- matches incidents.py's own ("unknown", None) read of
+    the same raw state, so from_observation and from_docker_reading agree."""
     result = health.from_docker_reading(error=None, status="running", restart_count=0, health="starting")
-    assert result.condition == "healthy"
+    assert result.condition == "unknown"
+    assert result.severity is None
+
+
+def test_restart_churn_outranks_starting():
+    """Positive evidence of a problem beats "no signal yet"."""
+    result = health.from_docker_reading(
+        error=None, status="running", restart_count=2, health="starting", baseline_restarts=0,
+    )
+    assert result.condition == "degraded"

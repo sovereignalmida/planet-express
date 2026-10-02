@@ -368,7 +368,11 @@ class TraefikRouterDetector:
     A router with no explicit `.service=` label routes to a service of its own container's
     name (Traefik's own default) -- nothing cross-referenced, so no edge. An explicit
     `.service=` naming something no known service declares is unresolved, same policy as the
-    namespace detector."""
+    namespace detector -- and so is a name two different services both declare: picking
+    whichever was iterated last would make the graph depend on argument order, the exact
+    silent-arbitrary-resolution this whole module exists to refuse. A router naming its own
+    container's declared service is valid Traefik config but not a real inter-service edge,
+    so it is skipped rather than reported as a self-dependency."""
 
     name = "traefik_router"
 
@@ -385,7 +389,10 @@ class TraefikRouterDetector:
     def detect(
         self, stacks: tuple[ComposeStack, ...]
     ) -> tuple[tuple[Dependency, ...], tuple[UnresolvedDependency, ...]]:
-        declares: dict[str, tuple[str, str]] = {}
+        # A set, not a list: one service commonly carries several `.loadbalancer.*` labels
+        # (server.port, passhostheader, ...), and counting each label as its own declarer would
+        # falsely report a single real declarer as an ambiguous pair of itself.
+        declares: dict[str, set[tuple[str, str]]] = {}
         for stack in stacks:
             for svc_name, svc in stack.services.items():
                 if not isinstance(svc, dict):
@@ -393,7 +400,7 @@ class TraefikRouterDetector:
                 for label in self._labels(svc):
                     m = _SERVICE_DECLARATION_LABEL.match(label)
                     if m:
-                        declares[m.group(1)] = (stack.name, svc_name)
+                        declares.setdefault(m.group(1), set()).add((stack.name, svc_name))
 
         found: list[Dependency] = []
         unresolved: list[UnresolvedDependency] = []
@@ -407,9 +414,9 @@ class TraefikRouterDetector:
                     if not m:
                         continue
                     router = m.group(1)
-                    owner = declares.get(target_service)
+                    owners = sorted(declares.get(target_service, set()))
                     source = f"{stack.name}/{svc_name}"
-                    if owner is None:
+                    if not owners:
                         unresolved.append(
                             UnresolvedDependency(
                                 stack=stack.name,
@@ -424,7 +431,25 @@ class TraefikRouterDetector:
                             )
                         )
                         continue
-                    owner_stack, owner_service = owner
+                    if len(owners) > 1:
+                        unresolved.append(
+                            UnresolvedDependency(
+                                stack=stack.name,
+                                service=svc_name,
+                                field=label,
+                                value=target_service,
+                                reason=(
+                                    f"router {router!r} names service {target_service!r}, "
+                                    f"which {len(owners)} different services declare: "
+                                    + ", ".join(f"{s}/{n}" for s, n in owners)
+                                ),
+                                detector=self.name,
+                            )
+                        )
+                        continue
+                    owner_stack, owner_service = owners[0]
+                    if (owner_stack, owner_service) == (stack.name, svc_name):
+                        continue  # a router naming its own container's service: not an edge
                     found.append(
                         Dependency(
                             kind="traefik_router",

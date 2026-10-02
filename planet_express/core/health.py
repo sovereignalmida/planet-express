@@ -66,9 +66,18 @@ def from_docker_reading(
     baseline_restarts: int = 0,
 ) -> HealthState:
     """The fields of `actions.py`'s `HealthReading` -> `HealthState`, mirroring
-    `container_health()`'s exact branch order and verdicts (not imported directly: `core` does
-    not depend on `execution`, so this takes the same primitives `read_health()` already
-    returns rather than the dataclass itself)."""
+    `container_health()`'s branch order and verdicts, with one deliberate departure: a
+    `health="starting"` reading maps to `unknown` here, not `healthy`. `container_health()`
+    treats "starting" as OK because its question is narrower -- "did the action I just took
+    fail" -- and failing a container mid-grace-period would be a false negative on every
+    verification. `incidents.py` already treats the same raw state as `("unknown", None)`
+    ("healthcheck is starting"). Goal 4 is one `HealthState` regardless of which source fed
+    it, so this follows `incidents.py`'s more conservative read; callers that specifically
+    need the narrower "did the action succeed" question keep using `container_health()`
+    directly rather than going through this reconciliation at all.
+
+    Not imported directly: `core` does not depend on `execution`, so this takes the same
+    primitives `read_health()` already returns rather than the dataclass itself."""
     if error is not None:
         return HealthState(condition="unknown", reason=f"inspect failed: {error}")
     if status != "running":
@@ -77,8 +86,12 @@ def from_docker_reading(
         return HealthState(condition="unhealthy", severity="high", reason="healthcheck failing")
     restarts = restart_count - baseline_restarts
     if restarts >= 1:
+        # Observed churn outranks "no signal yet": a restarting-and-starting container is
+        # degraded, not merely unknown.
         return HealthState(
             condition="degraded", severity="medium",
             reason=f"restarted {restarts}x during watch window",
         )
+    if health == "starting":
+        return HealthState(condition="unknown", reason="healthcheck is starting")
     return HealthState(condition="healthy")
