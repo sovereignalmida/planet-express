@@ -288,6 +288,198 @@ def test_router_naming_its_own_container_service_is_not_an_edge():
     assert not [u for u in graph.unresolved if u.detector == "traefik_router"]
 
 
+# --- env-var reference detector (Immich/redis/database -- the real gap with no depends_on) --
+
+
+def test_bare_hostname_env_var_match():
+    """REDIS_HOST: redis -- the simplest real case, and the one triggering this detector."""
+    s = stack("media", {
+        "immich": {"environment": {"REDIS_HOSTNAME": "redis"}},
+        "redis": {},
+        "database": {},
+    })
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert edges == [
+        deps.Dependency(
+            kind="env_reference", source="media/immich", target="media/redis",
+            cross_project=False, detector="env_reference", detail="REDIS_HOSTNAME='redis'",
+        ),
+    ]
+
+
+def test_url_embedded_host_env_var_match():
+    s = stack("media", {
+        "immich": {"environment": ["DB_URL=postgres://user:pass@database:5432/immich"]},
+        "database": {},
+    })
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+    assert edges[0].target == "media/database"
+
+
+def test_non_connection_key_is_ignored():
+    """CACHE_DRIVER: redis names a backend type, not a hostname -- the key doesn't look
+    connection-shaped, so this must not be flagged."""
+    s = stack("media", {"immich": {"environment": {"CACHE_DRIVER": "redis"}}, "redis": {}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+
+
+def test_external_hostname_is_not_flagged_and_not_unresolved():
+    """A value naming no known service is an external host, not ambiguous -- no edge, and
+    (unlike namespace/traefik) nothing to surface as unresolved either."""
+    s = stack("media", {"immich": {"environment": {"REDIS_HOST": "redis.example.com"}}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert not [u for u in graph.unresolved if u.detector == "env_reference"]
+
+
+def test_substring_false_positives_are_rejected():
+    """CURL contains URL, SERVERLESS contains SERVER -- neither is a real connection-shaped
+    key, and a plain substring search used to match both."""
+    s = stack("media", {
+        "a": {"environment": {"CURL_CA_BUNDLE": "redis", "SERVERLESS_MODE": "redis"}},
+        "redis": {},
+    })
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+
+
+def test_host_token_as_whole_word_still_matches():
+    """The token-boundary fix must not overcorrect: HOST as its own token (surrounded by
+    underscores) still counts, even inside a longer key."""
+    s = stack("media", {"a": {"environment": {"POSTGRES_HOST_AUTH_METHOD": "database"}}, "database": {}})
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+
+
+def test_bare_double_slash_in_a_path_is_not_a_url_authority():
+    """No scheme before the "//" -- this is a path, not a URL, and must not match."""
+    s = stack("media", {"a": {"environment": {"CONFIG_URI": "/config//redis/file"}}, "redis": {}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+
+
+def test_bare_host_port_form_matches():
+    s = stack("media", {"a": {"environment": {"REDIS_ADDR": "redis:6379"}}, "redis": {}})
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+    assert edges[0].target == "media/redis"
+
+
+def test_multi_host_uri_matches_every_host():
+    s = stack("media", {
+        "a": {"environment": {"MONGO_URL": "mongodb://mongo1:27017,mongo2:27017/db"}},
+        "mongo1": {}, "mongo2": {},
+    })
+    graph = deps.discover((s,))
+    targets = {d.target for d in graph.dependencies if d.kind == "env_reference"}
+    assert targets == {"media/mongo1", "media/mongo2"}
+
+
+def test_hostname_match_is_case_insensitive():
+    s = stack("media", {"a": {"environment": {"REDIS_HOST": "REDIS"}}, "redis": {}})
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+
+
+def test_multiple_env_vars_agreeing_on_one_target_produce_one_edge():
+    s = stack("media", {
+        "a": {"environment": {
+            "REDIS_HOST": "redis",
+            "REDIS_URL": "redis://redis:6379",
+        }},
+        "redis": {},
+    })
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+    assert "REDIS_HOST=" in edges[0].detail
+    assert "REDIS_URL=" in edges[0].detail
+
+
+def test_same_stack_service_wins_over_duplicate_name_elsewhere():
+    """Two unrelated stacks each have a service called redis -- a/app's local redis wins;
+    it must not also (or instead) point at b/redis."""
+    a = stack("a", {"app": {"environment": {"REDIS_HOST": "redis"}}, "redis": {}})
+    b = stack("b", {"redis": {}})
+    graph = deps.discover((a, b))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+    assert edges[0].target == "a/redis"
+    assert edges[0].cross_project is False
+
+
+def test_duplicate_name_across_stacks_with_no_local_match_is_ambiguous_and_skipped():
+    """No local redis in the referencing stack, and two unrelated stacks each have one --
+    genuinely ambiguous, must not guess either one."""
+    app = stack("app", {"web": {"environment": {"REDIS_HOST": "redis"}}})
+    a = stack("a", {"redis": {}})
+    b = stack("b", {"redis": {}})
+    graph = deps.discover((app, a, b))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+
+
+def test_same_stack_case_variant_duplicate_is_also_ambiguous_not_order_dependent():
+    """Two distinct service names in the SAME stack that both normalize to the same lowercase
+    name ('redis' and 'REDIS') must not pick one arbitrarily by insertion order either."""
+    s = stack("media", {
+        "app": {"environment": {"REDIS_HOST": "redis"}},
+        "redis": {}, "REDIS": {},
+    })
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+
+
+def test_url_authority_stops_at_query_string():
+    s = stack("media", {"a": {"environment": {"REDIS_URL": "redis://redis:6379?db=1"}}, "redis": {}})
+    graph = deps.discover((s,))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+    assert edges[0].target == "media/redis"
+
+
+def test_multi_host_uri_with_query_string_matches_all_hosts():
+    s = stack("media", {
+        "a": {"environment": {"MONGO_URL": "mongodb://mongo1:27017,mongo2:27017?replicaSet=rs0"}},
+        "mongo1": {}, "mongo2": {},
+    })
+    graph = deps.discover((s,))
+    targets = {d.target for d in graph.dependencies if d.kind == "env_reference"}
+    assert targets == {"media/mongo1", "media/mongo2"}
+
+
+def test_self_reference_is_not_an_edge():
+    s = stack("media", {"redis": {"environment": {"REDIS_HOSTNAME": "redis"}}})
+    graph = deps.discover((s,))
+    assert not [d for d in graph.dependencies if d.kind == "env_reference"]
+
+
+def test_cross_project_env_reference():
+    app = stack("app", {"web": {"environment": {"DATABASE_HOSTNAME": "database"}}})
+    data = stack("data", {"database": {}})
+    graph = deps.discover((app, data))
+    edges = [d for d in graph.dependencies if d.kind == "env_reference"]
+    assert len(edges) == 1
+    assert edges[0].cross_project is True
+    assert edges[0].target == "data/database"
+
+
+def test_env_reference_is_never_an_ordering_edge():
+    """Informational only -- must never feed ordering_violations(), since it's a heuristic
+    match, not a Docker-native guarantee."""
+    app = stack("app", {"web": {"environment": {"DATABASE_HOSTNAME": "database"}}})
+    data = stack("data", {"database": {}})
+    graph = deps.discover((app, data))
+    assert graph.ordering_violations({"app": 0, "data": 1}) == ()
+    assert graph.ordering_violations({"app": 1, "data": 0}) == ()
+
+
 # --- parsing --------------------------------------------------------------------------------
 
 

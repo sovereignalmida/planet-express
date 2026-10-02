@@ -74,8 +74,12 @@ class Dependency:
     start-order constraints (source cannot come up correctly before target). `shared_mount` is
     informational and symmetric -- two services sharing a path are a coupled failure domain
     (one going read-only can make the other misbehave), not an ordering rule; `source`/`target`
-    for that kind is just alphabetical, not "depends on." A boot-ordering caller should filter
-    to `kind in ("depends_on", "namespace")`."""
+    for that kind is just alphabetical, not "depends on." `env_reference` is informational too,
+    but directional: it is a heuristic match (a connection-shaped env var's value names another
+    known service), not a Docker-native guarantee the way `depends_on`/`namespace` are, so it is
+    never treated as an ordering constraint -- its purpose is surfacing an *undeclared*
+    relationship for a human to turn into a real `depends_on:`, not acting as one itself. A
+    boot-ordering caller should filter to `kind in ("depends_on", "namespace")`."""
 
     kind: str
     source: str
@@ -485,9 +489,130 @@ class TraefikRouterDetector:
         return tuple(found), tuple(unresolved)
 
 
+_CONNECTION_KEY_TOKENS = frozenset({
+    "HOST", "HOSTNAME", "URL", "URI", "DSN", "ADDR", "ADDRESS", "ENDPOINT", "SERVER", "CONNECTION",
+})
+_KEY_TOKEN_SPLIT = re.compile(r"[^A-Za-z0-9]+")
+# A real URI scheme before "//", not bare "//" anywhere in the value (which would also match
+# inside an unrelated path like "/config//redis/file").
+_URL_AUTHORITY = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://(?:[^@/,]*@)?([^/?#]+)")
+_HOST_PORT = re.compile(r"^([a-zA-Z0-9_.-]+):\d+$")
+_BARE_HOSTNAME = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
+
+def _is_connection_key(key: str) -> bool:
+    """Whole-token match, not substring: `POSTGRES_HOST_AUTH_METHOD` counts (HOST is a real
+    token there), but `CURL_CA_BUNDLE` and `SERVERLESS_MODE` do not (URL/SERVER are not; they
+    are letters inside a different word) -- a bare substring search matched both before this."""
+    tokens = {t.upper() for t in _KEY_TOKEN_SPLIT.split(key) if t}
+    return bool(tokens & _CONNECTION_KEY_TOKENS)
+
+
+def _candidate_hosts(value: str) -> set[str]:
+    """Every plausible hostname in `value`: the authority of a scheme-qualified URL (splitting
+    a multi-host authority like `mongo1:27017,mongo2:27017` on commas), or the whole value read
+    as a bare `host` or `host:port`. Lowercased, since DNS names are case-insensitive and so is
+    Compose's own service-name resolution."""
+    candidates: set[str] = set()
+    m = _URL_AUTHORITY.match(value)
+    segments = m.group(1).split(",") if m else [value]
+    for segment in (s.strip() for s in segments):
+        host_port = _HOST_PORT.match(segment)
+        if host_port:
+            candidates.add(host_port.group(1))
+        elif _BARE_HOSTNAME.match(segment):
+            candidates.add(segment)
+    return {c.lower() for c in candidates}
+
+
+class EnvVarReferenceDetector:
+    """The real gap this project found the hard way: a sibling like Immich depending on Redis
+    and Postgres is almost never declared with `depends_on:` in practice, and there is no
+    `network_mode`/mount/label signal for it either -- it only exists as an environment variable
+    whose value is another service's Compose name, which resolves because Compose's own DNS
+    makes every service reachable by that name. That is a structural fact about how Compose
+    resolves names, not a naming convention anyone chose -- unlike matching on a container-name
+    prefix (e.g. `IMMICH_*`), which is one operator's convention and would silently miss a stack
+    that doesn't follow it.
+
+    Deliberately a heuristic, and kept informational for it (see `Dependency`'s docstring): the
+    env var key must look connection-shaped (`HOST`, `URL`, `DSN`, ...) to even be considered,
+    and the value must name another known service. A value naming no known service (an external
+    host) is not flagged -- there is nothing ambiguous about it, so unlike the namespace/Traefik
+    detectors this one has no `UnresolvedDependency` case for *that*.
+
+    Compose service names are not unique across projects (e.g. two unrelated stacks can each
+    have a service called `redis`), so a bare name match is resolved with a preference order,
+    not a guess: a same-stack service of that name wins outright (that's what Compose's own
+    same-project DNS would actually resolve to); failing that, exactly one same-named service
+    anywhere else is used (cross-project); two or more same-named services with no local match
+    *is* genuinely ambiguous, and is skipped rather than picking one arbitrarily."""
+
+    name = "env_reference"
+
+    @staticmethod
+    def _env(svc: dict) -> dict[str, str]:
+        raw = svc.get("environment")
+        if isinstance(raw, dict):
+            return {str(k): str(v) for k, v in raw.items() if v is not None}
+        if isinstance(raw, list):
+            pairs = (str(item).split("=", 1) for item in raw if isinstance(item, str) and "=" in str(item))
+            return dict(pairs)
+        return {}
+
+    def detect(
+        self, stacks: tuple[ComposeStack, ...]
+    ) -> tuple[tuple[Dependency, ...], tuple[UnresolvedDependency, ...]]:
+        owners: dict[str, list[tuple[str, str]]] = {}
+        for stack in stacks:
+            for svc_name in stack.services:
+                owners.setdefault(svc_name.lower(), []).append((stack.name, svc_name))
+
+        # (source, target) -> the set of "KEY=value" strings that pointed at it, so one real
+        # relationship produces one edge even when several env vars agree on it.
+        evidence: dict[tuple[str, str], set[str]] = {}
+        cross_project: dict[tuple[str, str], bool] = {}
+
+        for stack in stacks:
+            for svc_name, svc in stack.services.items():
+                if not isinstance(svc, dict):
+                    continue
+                source = f"{stack.name}/{svc_name}"
+                for key, value in self._env(svc).items():
+                    if not _is_connection_key(key):
+                        continue
+                    for host in _candidate_hosts(value):
+                        same_stack = [o for o in owners.get(host, ()) if o[0] == stack.name]
+                        if same_stack:
+                            if len(same_stack) != 1:
+                                continue  # two service names normalize to the same one here too
+                            owner_stack, owner_service = same_stack[0]
+                            if (owner_stack, owner_service) == (stack.name, svc_name):
+                                continue  # a service naming itself isn't a dependency
+                        else:
+                            others = owners.get(host, ())
+                            if len(others) != 1:
+                                continue  # none, or ambiguous across stacks -- don't guess
+                            owner_stack, owner_service = others[0]
+                        target = f"{owner_stack}/{owner_service}"
+                        evidence.setdefault((source, target), set()).add(f"{key}={value!r}")
+                        cross_project[(source, target)] = owner_stack != stack.name
+
+        found = [
+            Dependency(
+                kind="env_reference", source=source, target=target,
+                cross_project=cross_project[(source, target)], detector=self.name,
+                detail=", ".join(sorted(details)),
+            )
+            for (source, target), details in evidence.items()
+        ]
+        found.sort(key=lambda d: (d.source, d.target))
+        return tuple(found), ()
+
+
 DETECTORS: tuple[Detector, ...] = (
     DependsOnDetector(), NamespaceReferenceDetector(), SharedMountDetector(),
-    TraefikRouterDetector(),
+    TraefikRouterDetector(), EnvVarReferenceDetector(),
 )
 
 
