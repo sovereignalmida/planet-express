@@ -17,8 +17,16 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
+      # 3.11/3.12 were the original floor/current-prod pair. 3.13/3.14 added 2026-10-02 as a
+      # real test of the "venv bound to /usr/bin/python3.12" portability debt flagged in the
+      # v3 Architecture Brief Addendum (§4's problem in the abstract, concretely blocking the
+      # live host's OS upgrade): nothing in requirements.txt or the codebase pins an upper
+      # bound, deploy.sh's own preflight only checks `>= (3, 11)`, and the full suite was
+      # already proven passing locally on 3.14.4 throughout the v3 session -- this matrix
+      # entry is what makes that a continuously-verified fact instead of a one-off local
+      # observation.
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
