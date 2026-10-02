@@ -182,6 +182,33 @@ def test_all_healthy_path_performs_zero_recreates(tmp_path, monkeypatch):
     assert not _force_recreates(fake)
 
 
+def test_slow_dry_run_does_not_shrink_the_real_boot_timeout(tmp_path, monkeypatch):
+    """A codex-review regression test: the deadline used for real docker compose calls must be
+    computed *after* the dependency-graph dry run, so however long that diagnostic takes, it
+    cannot eat into the budget the real retry/verify path gets."""
+    _, compose_file = _stack(tmp_path, monkeypatch)
+    healthy = _row(config_files=compose_file, service="test")
+    fake = _install(monkeypatch, FakeDocker(
+        {compose_file: [0]}, f"{ID_A}\n", [f"{healthy}\n", f"{healthy}\n"],
+    ))
+
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(casa_boot.time, "monotonic", lambda: clock["t"])
+
+    def slow_summarize(stacks):
+        clock["t"] += 200.0  # simulate a dry run that took 200s
+        return ["[dry-run graph] simulated slow pass"]
+
+    monkeypatch.setattr(casa_boot.dependency_dryrun, "summarize", slow_summarize)
+
+    assert casa_boot.bring_up_all_stacks() == 0
+    up_timeouts = [
+        kwargs["timeout"] for argv, kwargs in fake.calls
+        if argv[:2] == ["docker", "compose"] and "up" in argv and "timeout" in kwargs
+    ]
+    assert up_timeouts and min(up_timeouts) > casa_boot.BOOT_TIMEOUT_SECONDS - 5
+
+
 def test_dead_reference_from_an_inactive_stack_is_not_recreated(tmp_path, monkeypatch):
     active, _ = _stack(tmp_path, monkeypatch)
     inactive_file = str(tmp_path / "retired" / "docker-compose.yml")
@@ -293,3 +320,52 @@ def test_unreadable_service_list_does_not_silently_ignore_containers():
     assert not casa_boot._is_orphan_of_removed_service(
         casa_boot.Container("i", "CASA_LIDARR", "", "", "lidarr", "", "exited", "0"), None,
     )
+
+
+def test_bring_up_all_stacks_actually_reorders_a_wrong_baseline(tmp_path, monkeypatch):
+    """End-to-end proof, not just unit-level, and deliberately NOT using "network" as either
+    stack's name: casa_boot.py's own baseline sort hardcodes "network" first, so a test built
+    around it (an earlier version of this test did exactly this) can pass for the wrong reason
+    -- the hardcoded rule solving it before boot_order.py ever runs. Here the baseline's
+    alphabetical tie-break gets it backwards on its own (aconsumer < zprovider), so only a real
+    graph-driven reorder can produce the correct sequence."""
+    provider_dir = tmp_path / "zprovider"
+    provider_dir.mkdir()
+    provider_compose = provider_dir / "docker-compose.yml"
+    provider_compose.write_text(
+        "services:\n"
+        "  backend:\n"
+        "    container_name: CASA_PROVIDER\n"
+    )
+    consumer_dir = tmp_path / "aconsumer"
+    consumer_dir.mkdir()
+    consumer_compose = consumer_dir / "docker-compose.yml"
+    consumer_compose.write_text(
+        "services:\n"
+        "  frontend:\n"
+        "    container_name: CASA_CONSUMER\n"
+        "    network_mode: container:CASA_PROVIDER\n"
+    )
+    monkeypatch.setattr(config, "active_stack_dirs", lambda: [consumer_dir, provider_dir])
+
+    provider_row = _row(
+        container_id=ID_A, name="CASA_PROVIDER", config_files=str(provider_compose), service="backend",
+    )
+    consumer_row = _row(
+        container_id=ID_B, name="CASA_CONSUMER", config_files=str(consumer_compose), service="frontend",
+    )
+    fake = _install(monkeypatch, FakeDocker(
+        {str(provider_compose): [0], str(consumer_compose): [0]},
+        f"{ID_A}\n{ID_B}\n",
+        [f"{provider_row}\n{consumer_row}\n", f"{provider_row}\n{consumer_row}\n"],
+    ))
+
+    # Baseline sanity check: alphabetical-with-no-"network" tie-break gets this backwards on
+    # its own, which is the whole point of the test.
+    assert sorted([consumer_dir.name, provider_dir.name]) == ["aconsumer", "zprovider"]
+
+    assert casa_boot.bring_up_all_stacks() == 0
+
+    up_calls = [argv for argv, _ in fake.calls if argv[:2] == ["docker", "compose"] and "up" in argv]
+    compose_files_in_order = [argv[argv.index("-f") + 1] for argv in up_calls]
+    assert compose_files_in_order == [str(provider_compose), str(consumer_compose)]

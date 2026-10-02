@@ -1,0 +1,15 @@
+# Fixture modeling the real stacks/network project, trimmed to the services that matter for
+# the namespace-reference detector (see docs/designs/phase-1-state-model.md SS2 and
+# casa_farnsworth.py's PLAN_SYSTEM_PROMPT, which documents this exact coupling in prose).
+#
+# CASA_GSP shares CASA_GLUETON's network namespace, same project -- this is the
+# `network_mode: container:x` case a compose-aware human already expects to work.
+services:
+  gluetun:
+    image: qmcgaw/gluetun
+    container_name: CASA_GLUETON
+
+  gsp:
+    image: ghcr.io/example/gluetun-split-proxy
+    container_name: CASA_GSP
+    network_mode: container:CASA_GLUETON
