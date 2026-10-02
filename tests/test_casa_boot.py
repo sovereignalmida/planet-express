@@ -320,3 +320,52 @@ def test_unreadable_service_list_does_not_silently_ignore_containers():
     assert not casa_boot._is_orphan_of_removed_service(
         casa_boot.Container("i", "CASA_LIDARR", "", "", "lidarr", "", "exited", "0"), None,
     )
+
+
+def test_bring_up_all_stacks_actually_reorders_a_wrong_baseline(tmp_path, monkeypatch):
+    """End-to-end proof, not just unit-level, and deliberately NOT using "network" as either
+    stack's name: casa_boot.py's own baseline sort hardcodes "network" first, so a test built
+    around it (an earlier version of this test did exactly this) can pass for the wrong reason
+    -- the hardcoded rule solving it before boot_order.py ever runs. Here the baseline's
+    alphabetical tie-break gets it backwards on its own (aconsumer < zprovider), so only a real
+    graph-driven reorder can produce the correct sequence."""
+    provider_dir = tmp_path / "zprovider"
+    provider_dir.mkdir()
+    provider_compose = provider_dir / "docker-compose.yml"
+    provider_compose.write_text(
+        "services:\n"
+        "  backend:\n"
+        "    container_name: CASA_PROVIDER\n"
+    )
+    consumer_dir = tmp_path / "aconsumer"
+    consumer_dir.mkdir()
+    consumer_compose = consumer_dir / "docker-compose.yml"
+    consumer_compose.write_text(
+        "services:\n"
+        "  frontend:\n"
+        "    container_name: CASA_CONSUMER\n"
+        "    network_mode: container:CASA_PROVIDER\n"
+    )
+    monkeypatch.setattr(config, "active_stack_dirs", lambda: [consumer_dir, provider_dir])
+
+    provider_row = _row(
+        container_id=ID_A, name="CASA_PROVIDER", config_files=str(provider_compose), service="backend",
+    )
+    consumer_row = _row(
+        container_id=ID_B, name="CASA_CONSUMER", config_files=str(consumer_compose), service="frontend",
+    )
+    fake = _install(monkeypatch, FakeDocker(
+        {str(provider_compose): [0], str(consumer_compose): [0]},
+        f"{ID_A}\n{ID_B}\n",
+        [f"{provider_row}\n{consumer_row}\n", f"{provider_row}\n{consumer_row}\n"],
+    ))
+
+    # Baseline sanity check: alphabetical-with-no-"network" tie-break gets this backwards on
+    # its own, which is the whole point of the test.
+    assert sorted([consumer_dir.name, provider_dir.name]) == ["aconsumer", "zprovider"]
+
+    assert casa_boot.bring_up_all_stacks() == 0
+
+    up_calls = [argv for argv, _ in fake.calls if argv[:2] == ["docker", "compose"] and "up" in argv]
+    compose_files_in_order = [argv[argv.index("-f") + 1] for argv in up_calls]
+    assert compose_files_in_order == [str(provider_compose), str(consumer_compose)]

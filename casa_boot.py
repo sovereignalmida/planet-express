@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config
-from planet_express.execution import dependency_dryrun
+from planet_express.execution import boot_order, dependency_dryrun
 
 log_prefix = "[casa_boot]"
 BOOT_TIMEOUT_SECONDS = 270
@@ -251,33 +251,43 @@ def repair_dead_namespace_references(
 
 def bring_up_all_stacks() -> int:
     stacks = config.active_stack_dirs()
-    # "network" (Traefik/DNS/Gluetun) goes first — everything else routes through
-    # it, so it's the one real ordering guarantee worth keeping. Everything else
-    # runs in whatever order config.active_stack_dirs() returns; no artificial
-    # waits between them.
+    # Baseline order: "network" (Traefik/DNS/Gluetun) first, since everything else routes
+    # through it; everything else in whatever order config.active_stack_dirs() returns. This
+    # is a heuristic, not a measured guarantee — boot_order.order_stacks() below is what
+    # actually enforces real cross-project dependencies the dependency graph found; this sort
+    # only decides the tie-break order among stacks nothing constrains, and is also the
+    # fallback if that graph-derived ordering can't be computed for any reason.
     stacks.sort(key=lambda d: (d.name != "network", d.name))
     active_compose_files = {
         str((stack_dir / "docker-compose.yml").resolve()) for stack_dir in stacks
     }
     print(f"{log_prefix} {len(stacks)} active stack(s): {', '.join(s.name for s in stacks)}")
 
-    # v3 Phase 1 dry run: log what the dependency graph sees, change nothing. Wiring it into
-    # actual ordering is a separate, later change (docs/designs/phase-1-state-model.md,
-    # non-goals). Three things make this inert rather than merely intended to be:
-    # (1) a copy of `stacks` is passed, so nothing here can reorder or clear the list that
-    #     drives the real loop below, even if a future summarize() tried to;
-    # (2) the real BOOT_TIMEOUT_SECONDS deadline is computed *after* this block, so however
-    #     long this diagnostic takes, it cannot shrink the budget the real docker compose
-    #     calls get -- codex review caught that the deadline used to be set before this ran,
-    #     which would have let a slow dry run eat into the real retry window;
-    # (3) only ordinary exceptions are caught, not SystemExit/KeyboardInterrupt -- an operator's
-    #     Ctrl-C during a hung diagnostic must still stop the script, which is more important
-    #     than this specific guarantee.
+    # v3 Phase 1: log the full dependency-graph diagnostic (edge/unresolved detail), then act
+    # on it. Both calls share the guarantees codex review earned for the dry run that came
+    # first (docs/designs/phase-1-state-model.md): a copy of `stacks` goes in, so neither can
+    # reorder or clear the list a future bug might otherwise share; the real BOOT_TIMEOUT_SECONDS
+    # deadline is computed *after* both, so however long they take cannot shrink the budget the
+    # real docker compose calls get; only ordinary exceptions are caught, not SystemExit/
+    # KeyboardInterrupt, so an operator's Ctrl-C during a hang still stops the script.
     try:
         for line in dependency_dryrun.summarize(list(stacks)):
             print(f"{log_prefix} {line}")
     except Exception as error:  # noqa: BLE001 -- a dry run must never break a real boot
         print(f"{log_prefix} [dry-run graph] ERROR (ignored): {error}")
+
+    try:
+        # Computed into locals, not `stacks` directly: if printing an order_line somehow
+        # raised, `stacks` must still be exactly what the except branch's message claims it
+        # is -- the original order -- not whatever order_stacks() had already returned.
+        ordered, order_lines = boot_order.order_stacks(list(stacks))
+        for line in order_lines:
+            print(f"{log_prefix} {line}")
+        stacks = ordered
+    except Exception as error:  # noqa: BLE001 -- ordering must never break a real boot
+        print(f"{log_prefix} [boot-order] ERROR (ignored), using original order: {error}")
+    # active_compose_files is a set keyed by resolved path -- reordering `stacks` never adds
+    # or drops a stack, so it stays correct unchanged; not recomputed here on purpose.
 
     deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS
     failed: list[Path] = []

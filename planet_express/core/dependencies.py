@@ -23,6 +23,7 @@ relationship semantics at runtime.
 
 import logging
 import re
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -137,6 +138,63 @@ class DependencyGraph:
             if target_idx >= source_idx:
                 violations.append(d)
         return tuple(violations)
+
+    def stack_precedence(self, stack_names: Collection[str]) -> dict[str, set[str]]:
+        """`{stack: {stacks that must start before it}}`, from every cross-project
+        `depends_on`/`namespace` edge whose source and target stacks are both in
+        `stack_names`. A dependency naming a stack outside this set (retired, or simply not
+        part of this boot) is ignored -- there's nothing to enforce against a stack that isn't
+        starting. The basis for `stable_topological_order()` below; kept separate so the
+        reduction from "service-level graph" to "stack-level precedence" is its own named,
+        testable step."""
+        precedence: dict[str, set[str]] = {}
+        for d in self.dependencies:
+            if d.kind not in ("depends_on", "namespace") or not d.cross_project:
+                continue
+            source_stack = d.source.split("/", 1)[0]
+            target_stack = d.target.split("/", 1)[0]
+            if source_stack == target_stack:
+                continue
+            if source_stack not in stack_names or target_stack not in stack_names:
+                continue
+            precedence.setdefault(source_stack, set()).add(target_stack)
+        return precedence
+
+
+def stable_topological_order(
+    baseline: Sequence[str], must_precede: Mapping[str, Collection[str]]
+) -> list[str] | None:
+    """A reordering of `baseline` (same elements, nothing added or dropped) satisfying every
+    constraint in `must_precede` (`must_precede[x]` = stacks that must come before `x`),
+    preferring `baseline`'s own relative order wherever nothing constrains otherwise -- a
+    stable topological sort, so an unconstrained fleet reorders to exactly `baseline`.
+
+    Returns `None` on a cycle rather than guessing which constraint to break: a real cycle
+    means two stacks each need the other first, which is a contradiction in the data, not an
+    ordering problem this function can resolve. The caller falls back to `baseline` unchanged.
+
+    A constraint naming something outside `baseline` is ignored, not treated as unsatisfiable
+    -- `stack_precedence()` already filters to the active boot's stacks before calling this,
+    but this function doesn't trust that and refuses to let a dangling reference it can never
+    place masquerade as a cycle."""
+    universe = set(baseline)
+    precede = {
+        name: {p for p in precedents if p in universe}
+        for name, precedents in must_precede.items() if name in universe
+    }
+    remaining = list(baseline)
+    placed: set[str] = set()
+    result: list[str] = []
+    while remaining:
+        for i, name in enumerate(remaining):
+            if precede.get(name, set()) <= placed:
+                result.append(name)
+                placed.add(name)
+                del remaining[i]
+                break
+        else:
+            return None
+    return result
 
 
 class Detector(Protocol):
@@ -336,7 +394,10 @@ class SharedMountDetector:
 
     def _bind_sources(self, svc: dict) -> set[str]:
         sources: set[str] = set()
-        for entry in svc.get("volumes") or []:
+        raw = svc.get("volumes")
+        if not isinstance(raw, list):
+            return sources  # malformed (e.g. a scalar like `volumes: 1`), not a crash
+        for entry in raw:
             if isinstance(entry, str):
                 source = entry.split(":", 1)[0]
             elif isinstance(entry, dict):

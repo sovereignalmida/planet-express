@@ -91,6 +91,58 @@ def test_ordering_violations_unknown_stack_is_skipped_not_a_violation():
     assert graph.ordering_violations({"network": 0}) == ()
 
 
+# --- stack_precedence() and stable_topological_order() ---------------------------------------
+
+
+def test_stack_precedence_from_the_gluetun_fixture():
+    graph = deps.discover((load("network"), load("media")))
+    assert graph.stack_precedence({"network", "media"}) == {"media": {"network"}}
+
+
+def test_stack_precedence_ignores_a_stack_not_in_this_boot():
+    graph = deps.discover((load("network"), load("media")))
+    assert graph.stack_precedence({"media"}) == {}  # network isn't part of this boot
+
+
+def test_stack_precedence_ignores_same_project_and_informational_kinds():
+    s = stack("s", {
+        "a": {"depends_on": ["b"]},  # same-project: not stack-level precedence at all
+        "b": {},
+    })
+    graph = deps.discover((s,))
+    assert graph.stack_precedence({"s"}) == {}
+
+
+def test_stable_topological_order_no_constraints_returns_baseline_unchanged():
+    assert deps.stable_topological_order(["network", "media", "services"], {}) == [
+        "network", "media", "services",
+    ]
+
+
+def test_stable_topological_order_reorders_to_satisfy_a_constraint():
+    baseline = ["media", "network", "services"]  # wrong: media needs network first
+    result = deps.stable_topological_order(baseline, {"media": {"network"}})
+    assert result.index("network") < result.index("media")
+    assert result == ["network", "media", "services"]  # minimal move, rest stays put
+
+
+def test_stable_topological_order_preserves_order_among_unconstrained_stacks():
+    """media moves before network (the constraint); c and b, which are unconstrained, keep
+    their baseline position relative to everything else -- c stays first, b stays last."""
+    baseline = ["media", "c", "network", "b"]
+    result = deps.stable_topological_order(baseline, {"media": {"network"}})
+    assert result == ["c", "network", "media", "b"]
+
+
+def test_stable_topological_order_detects_a_cycle():
+    assert deps.stable_topological_order(["a", "b"], {"a": {"b"}, "b": {"a"}}) is None
+
+
+def test_stable_topological_order_ignores_a_constraint_naming_a_stack_not_in_baseline():
+    result = deps.stable_topological_order(["a", "b"], {"a": {"ghost"}})
+    assert result == ["a", "b"]
+
+
 # --- namespace detector: declines vs. unresolved ------------------------------------------
 
 
@@ -196,6 +248,14 @@ def test_named_volume_is_not_indexed_as_a_bind_mount():
 
 def test_unshared_mount_produces_no_edge():
     a = stack("media", {"a": {"volumes": ["/mnt/main/media:/data"]}})
+    graph = deps.discover((a,))
+    assert not graph.dependencies
+
+
+def test_malformed_scalar_volumes_does_not_crash():
+    """codex review: syntactically valid YAML (volumes: 1) must not raise -- malformed input,
+    not a crash."""
+    a = stack("media", {"a": {"volumes": 1}})
     graph = deps.discover((a,))
     assert not graph.dependencies
 
