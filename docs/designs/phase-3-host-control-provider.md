@@ -91,9 +91,9 @@ Non-goals (explicitly deferred, not forgotten)
   sketch, raises `NotImplementedError`, documented as genuinely future work.
 - **`get_cpu()`/`get_filesystems()`.** No existing collector. Same treatment:
   declared, not implemented, not faked.
-- **A second (e.g. `MosHostControlProvider`) implementation.** Blocked on an actual MOS test
-  host existing, per the Addendum's own "provider testability" open item. Nothing here should
-  claim portability until that exists.
+- **A second implementation.** Was blocked on an actual MOS test host existing, per the
+  Addendum's own "provider testability" open item -- now built, read-only, once that host existed
+  (see `docs/designs/mos-host-control-provider.md`).
 - **Host-type auto-detection / dispatch logic.** With one implementation, there's nothing to
   dispatch between yet.
 
