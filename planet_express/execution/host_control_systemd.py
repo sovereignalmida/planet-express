@@ -1,5 +1,7 @@
-"""SystemdHostControlProvider -- the one `HostControlProvider` implementation that exists
-today (v3 Phase 3, `docs/designs/phase-3-host-control-provider.md`).
+"""SystemdHostControlProvider -- the first `HostControlProvider` implementation (v3 Phase 3,
+`docs/designs/phase-3-host-control-provider.md`). A second, read-only implementation,
+`MosHostControlProvider`, exists in `host_control_mos.py` (`docs/designs/
+mos-host-control-provider.md`), proven against a real Devuan/sysvinit host.
 
 A faithful extraction, not new behavior: `is_service_running`/`start_service`/`stop_service`/
 `restart_service` reproduce exactly what `engine.py`'s `unit_active()`/`_unit_action()` already

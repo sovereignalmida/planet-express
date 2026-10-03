@@ -82,6 +82,55 @@ def test_unrecognized_text_is_unreadable_not_guessed(monkeypatch, provider):
     assert "unrecognized" in detail
 
 
+def test_reverse_disagreement_is_also_caught(monkeypatch, provider):
+    """Exit 3 (stopped) with "is running" text is the mirror image of the docker bug -- must
+    also refuse, not just the 0/"not running" direction."""
+    monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
+        ("service", "cron", "status"): (3, "cron is running.", ""),
+    }))
+    assert provider.is_service_running("cron") is None
+    state, detail = provider._raw_state("cron")
+    assert state is None
+    assert "disagree" in detail
+
+
+def test_unasserted_exit_code_falls_back_to_stopped_text(monkeypatch, provider):
+    monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
+        ("service", "docker", "status"): (2, "Docker is not running.", ""),
+    }))
+    assert provider.is_service_running("docker") is False
+
+
+def test_exit_code_4_also_falls_back_to_text(monkeypatch, provider):
+    monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
+        ("service", "docker", "status"): (4, "Docker is running.", ""),
+    }))
+    assert provider.is_service_running("docker") is True
+
+
+def test_timeout_is_unreadable_not_guessed(monkeypatch, provider):
+    monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
+        ("service", "ghost", "status"): (bender.RUN_ARGV_TIMEOUT_EXIT, "", "timed out"),
+    }))
+    assert provider.is_service_running("ghost") is None
+
+
+def test_status_read_uses_the_service_control_timeout_not_monitoring(monkeypatch, provider):
+    """`service <unit> status` is this provider's counterpart to `systemctl is-active`, which
+    host_control_systemd.py times at SERVICE_CONTROL_TIMEOUT_SECONDS -- not the shorter
+    monitoring-read timeout used for `uptime`/`free`/`tail`."""
+    seen = {}
+
+    def fake_run_argv(argv, timeout):
+        seen[tuple(argv)] = timeout
+        return (0, "x is running.", "")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    provider.is_service_running("x")
+    assert seen[("service", "x", "status")] == hcm.SERVICE_CONTROL_TIMEOUT_SECONDS
+    assert hcm.SERVICE_CONTROL_TIMEOUT_SECONDS != hcm.MONITORING_READ_TIMEOUT_SECONDS
+
+
 def test_not_running_matches_before_running_substring(monkeypatch, provider):
     """"is not running" contains the word "running" -- the not-running check must win, not the
     running regex matching first and misreading the stopped case."""
@@ -142,6 +191,16 @@ def test_get_host_logs_directory_shaped_log_is_an_honest_failure(monkeypatch, pr
 def test_get_host_logs_rejects_nonpositive_lines(provider):
     with pytest.raises(ValueError):
         provider.get_host_logs("x", lines=0)
+
+
+def test_get_host_logs_failure_is_redacted_and_clipped(monkeypatch, provider):
+    monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
+        ("tail", "-n", "5", "/var/log/x"): (1, "", "tail: PASSWORD=supersecret123: No such file"),
+    }))
+    lines = provider.get_host_logs("x", lines=5)
+    assert len(lines) == 1
+    assert "supersecret123" not in lines[0]
+    assert "[REDACTED]" in lines[0]
 
 
 # --- get_uptime_seconds / get_metrics: reused from the systemd provider, not reimplemented -----

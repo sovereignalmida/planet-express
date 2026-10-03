@@ -23,6 +23,7 @@ from planet_express.core.redact import redact
 from planet_express.execution.host_control_systemd import (
     MONITORING_READ_TIMEOUT_SECONDS,
     REASON_LIMIT,
+    SERVICE_CONTROL_TIMEOUT_SECONDS,
     SystemdHostControlProvider,
 )
 
@@ -62,9 +63,12 @@ class MosHostControlProvider:
         """Returns `(state, detail)` -- `state` is `"running"`/`"stopped"`/`None`. `detail` is
         only meaningful when `state` is `None`: either the text didn't parse, or it parsed but
         disagreed with an exit code that actually asserted something (see the design doc's
-        decision table) -- refusing rather than guessing which signal is right."""
+        decision table) -- refusing rather than guessing which signal is right. Uses
+        `SERVICE_CONTROL_TIMEOUT_SECONDS`, not the monitoring timeout -- `service <unit> status`
+        is this provider's counterpart to `systemctl is-active`, which `_raw_state()` in
+        `host_control_systemd.py` also times at that value, not the monitoring one."""
         rc, out, err = bender.run_argv(
-            ["service", unit, "status"], timeout=MONITORING_READ_TIMEOUT_SECONDS,
+            ["service", unit, "status"], timeout=SERVICE_CONTROL_TIMEOUT_SECONDS,
         )
         text = out.strip()
         text_state = _text_state(text)
