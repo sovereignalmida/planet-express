@@ -74,16 +74,20 @@ misread — the same fail-closed shape `is_service_running`'s docstring already 
 
 ## 4. Non-goals (this landing)
 
-- **No `start_service`/`stop_service`/`restart_service`.** These raise `NotImplementedError`, same
-  as `reboot()`/`shutdown()` already do. Reason: `SystemdHostControlProvider`'s mutating actions
-  are a *faithful extraction* of `engine.py`'s existing `_check_sudo_allowlist()` gate — a real,
-  already-reviewed security boundary this code mirrors exactly. No equivalent gate for `sudo
-  service <unit> <action>` exists anywhere in this codebase to extract from. Inventing one now —
-  deciding which services are mutable, what pattern a sudoers entry would match, how the allowlist
-  config shape extends — is a new security-relevant design decision, not a port, and doesn't belong
-  in the same landing as a read-path parity fix. This mirrors this project's existing rule:
-  declaring a capability with no backing implementation (see `host_control.py`'s own `reboot()`
-  docstring) rather than building ahead of a decision.
+> **Update (2026-10-03):** `start_service`/`stop_service`/`restart_service` were `NotImplemented`
+> in this doc's first revision, for the reason below. The gate has since been scoped
+> (`docs/designs/mos-sudo-gate-scoping.md`) and built, on Chris's explicit decision to build it
+> ahead of any call site existing — see that doc's §6. The original reasoning is left in place
+> because it's still why this landing didn't build the gate itself.
+
+- **No `start_service`/`stop_service`/`restart_service`, originally.** These raised
+  `NotImplementedError`, same as `reboot()`/`shutdown()` still do. Reason: `SystemdHostControlProvider`'s
+  mutating actions are a *faithful extraction* of `engine.py`'s existing `_check_sudo_allowlist()`
+  gate — a real, already-reviewed security boundary this code mirrors exactly. No equivalent gate
+  for `sudo service <unit> <action>` existed anywhere in this codebase to extract from at the time.
+  Inventing one — deciding which services are mutable, what pattern a sudoers entry would match,
+  how the allowlist config shape extends — was a new security-relevant design decision, not a port,
+  and didn't belong in the same landing as a read-path parity fix.
 - **No general directory-log tailing.** `get_host_logs()` runs `tail -n <lines> /var/log/<unit>` —
   correct for the services that log to a single flat file (`docker`, `cron`, `api`, `syslog`-style
   services). A unit whose log is a directory (`nginx`, `samba`, `wsddn` on this host) surfaces
@@ -99,7 +103,11 @@ misread — the same fail-closed shape `is_service_running`'s docstring already 
 ## 5. What this proves, and what it still doesn't
 
 This makes Phase 3's portability claim falsifiable for the first time, and it already caught one
-real bug the systemd-only version couldn't have surfaced (the docker-script exit-code lie). It
-does **not** yet prove the mutating half of the Protocol is portable — that's explicitly deferred
-to whatever lands the `service`-command sudo gate, a decision for Chris, not a default this doc
-assumes.
+real bug the systemd-only version couldn't have surfaced (the docker-script exit-code lie). As of
+the sudo gate landing (`docs/designs/mos-sudo-gate-scoping.md`), the mutating half of the Protocol
+is implemented too — `MosHostControlProvider._service_action()` mirrors
+`SystemdHostControlProvider._unit_action()`'s control flow exactly, gated by `config.yaml`'s
+`sudo_allowlist` under `host_control_provider: mos`. What's still unproven: there is still no real
+call site for either provider's mutating methods (Phase 3b, deferred since Phase 3's original
+landing), and installing Planet Express itself on a MOS host — a materially bigger, separate
+problem — remains out of scope (see the scoping doc's §4/§6).

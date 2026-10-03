@@ -2,11 +2,13 @@
 `docs/designs/mos-host-control-provider.md`), proving the Protocol against a real non-systemd
 host (Devuan/sysvinit, via MOS) for the first time.
 
-Read-only. `start_service`/`stop_service`/`restart_service` raise `NotImplementedError`, same as
-`reboot()`/`shutdown()` -- there is no existing sudo-allowlist gate for `service <unit> <action>`
-anywhere in this codebase to faithfully extract, unlike `SystemdHostControlProvider`'s mutating
-actions, which mirror `engine.py`'s already-reviewed `_check_sudo_allowlist()` exactly. Inventing
-a new gate is a security-relevant design decision, not a port (see the design doc's non-goals).
+`start_service`/`stop_service`/`restart_service` gate through `casa_bender._check_sudo_allowlist()`
+exactly like `SystemdHostControlProvider` does -- the gate itself now exists
+(`docs/designs/mos-sudo-gate-scoping.md`): `casa_bender.py`'s `_SUDO_SERVICE_RE` plus
+`config.HOST_CONTROL_PROVIDER == "mos"` branching, and `scripts/setup_wizard.py` renders the
+matching `/etc/sudoers.d/planetexpress` grant as `sudo service <unit> <action>` instead of
+`sudo systemctl <action> <unit>` -- note the unit and action swap position between the two, this
+module's sudo command must build the string in that order or the regex won't match.
 
 `get_uptime_seconds`/`get_metrics` reuse `host_control_systemd`'s parsing directly -- `uptime` and
 `free -h` behave identically on Devuan and Ubuntu, and both modules live in the same execution
@@ -86,23 +88,57 @@ class MosHostControlProvider:
             )
         return text_state, ""
 
-    def start_service(self, unit: str) -> ServiceActionResult:
-        raise NotImplementedError(
-            "no sudo-allowlist gate exists for 'service <unit> <action>' in this codebase -- "
-            "see the design doc's non-goals; this is a new capability decision, not a refactor"
+    def _service_action(self, action: str, unit: str) -> ServiceActionResult:
+        """Mirrors `SystemdHostControlProvider._unit_action()`'s control flow and effect
+        semantics exactly -- same two early-refusal points (`not_applied`: sudo-allowlist, or an
+        unreadable before-state), same "only a genuinely uncertain outcome is `unknown`" rule,
+        same unconditional-after-read requirement for `restart`. The sudo command is built as
+        `sudo service <unit> <action>` -- unit before action -- matching `casa_bender.py`'s
+        `_SUDO_SERVICE_RE`; building it the other way round would silently fail every allowlist
+        check regardless of what's declared in config.yaml."""
+        try:
+            bender._check_sudo_allowlist(f"sudo service {unit} {action}")
+        except bender.SafetyError as exc:
+            return ServiceActionResult(
+                ok=False, before=None, after=None, effect="not_applied",
+                detail=f"not in the sudo allowlist: {_clip(str(exc))}",
+            )
+        before, before_detail = self._raw_state(unit)
+        if before is None:
+            return ServiceActionResult(
+                ok=False, before=None, after=None, effect="not_applied",
+                detail=f"could not read the state of {unit}: {before_detail}",
+            )
+        rc, out, err = bender.run_argv(
+            ["sudo", "-n", "service", unit, action], timeout=SERVICE_CONTROL_TIMEOUT_SECONDS,
         )
+        if rc != 0:
+            return ServiceActionResult(
+                ok=False, before=before, after=None, effect="unknown",
+                detail=f"service {unit} {action} failed (exit {rc}): {_clip(err or out)}",
+            )
+        after, after_detail = self._raw_state(unit)
+        if after is None:
+            return ServiceActionResult(
+                ok=False, before=before, after=None, effect="unknown",
+                detail=f"could not read the state of {unit}: {after_detail}",
+            )
+        want_running = action in ("start", "restart")
+        ok = (after == "running") == want_running
+        if action == "restart":
+            effect = "applied"
+        else:
+            effect = "applied" if (before == "running") != (after == "running") else "not_applied"
+        return ServiceActionResult(ok=ok, before=before, after=after, effect=effect, detail=f"{unit} is {after}")
+
+    def start_service(self, unit: str) -> ServiceActionResult:
+        return self._service_action("start", unit)
 
     def stop_service(self, unit: str) -> ServiceActionResult:
-        raise NotImplementedError(
-            "no sudo-allowlist gate exists for 'service <unit> <action>' in this codebase -- "
-            "same as start_service() above"
-        )
+        return self._service_action("stop", unit)
 
     def restart_service(self, unit: str) -> ServiceActionResult:
-        raise NotImplementedError(
-            "no sudo-allowlist gate exists for 'service <unit> <action>' in this codebase -- "
-            "same as start_service() above"
-        )
+        return self._service_action("restart", unit)
 
     def get_host_logs(self, unit: str, *, lines: int) -> tuple[str, ...]:
         """Only correct for a unit whose log is a single flat file (confirmed for `docker`,

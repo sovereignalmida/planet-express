@@ -23,6 +23,12 @@ def allowlist(monkeypatch):
         globs=[SudoGlobGrant(glob="*.mount", actions=["start", "stop"])],
     )
     monkeypatch.setattr(bender, "SUDO_ALLOWLIST", fixture)
+    # Explicit, not assumed: this fixture's claim to be "config-independent" only holds if
+    # HOST_CONTROL_PROVIDER is pinned to the shape every test below actually exercises --
+    # an ambient "mos" value (e.g. from a hand-edited config.yaml on the machine running
+    # these tests) would otherwise silently flip which regex these commands are checked
+    # against, and every "no raise" test below would start raising for the wrong reason.
+    monkeypatch.setattr(bender, "HOST_CONTROL_PROVIDER", "systemd")
     return fixture
 
 
@@ -124,3 +130,93 @@ def test_denies_command_substitution_disguised_as_unit_name(allowlist):
     with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
         bender._check_sudo_allowlist(
             "sudo systemctl start `sudo${IFS}mount${IFS}-a`data.mount")
+
+
+# ── MOS: a different command family under HOST_CONTROL_PROVIDER == "mos" ───────────────
+# (docs/designs/mos-sudo-gate-scoping.md) -- unit/action swap position relative to
+# systemctl's shape, and only one shape is ever accepted per install.
+
+
+@pytest.fixture
+def mos_allowlist(monkeypatch):
+    fixture = SudoAllowlist(
+        units=[SudoUnitGrant(unit="docker", actions=["start", "stop", "restart"])],
+        globs=[SudoGlobGrant(glob="cron*", actions=["start", "stop"])],
+    )
+    monkeypatch.setattr(bender, "SUDO_ALLOWLIST", fixture)
+    monkeypatch.setattr(bender, "HOST_CONTROL_PROVIDER", "mos")
+    return fixture
+
+
+def test_mos_allowed_unit_restart(mos_allowlist):
+    bender._check_sudo_allowlist("sudo service docker restart")  # no raise
+
+
+def test_mos_allowed_glob_start(mos_allowlist):
+    bender._check_sudo_allowlist("sudo service cron-watchdog start")  # no raise
+
+
+def test_mos_denies_restart_on_glob_grant_without_that_action(mos_allowlist):
+    with pytest.raises(bender.SafetyError, match="not declared"):
+        bender._check_sudo_allowlist("sudo service cron-watchdog restart")
+
+
+def test_mos_denies_undeclared_unit(mos_allowlist):
+    with pytest.raises(bender.SafetyError, match="not declared"):
+        bender._check_sudo_allowlist("sudo service ssh restart")
+
+
+def test_mos_rejects_systemctl_shaped_command_even_if_declared(mos_allowlist):
+    """An install running "mos" must not also accept the systemd shape -- that would
+    grant a command surface this host's actual provider never issues, for a unit the
+    operator only ever reasoned about in `service`-command terms."""
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("sudo systemctl restart docker")
+
+
+def test_systemd_install_rejects_service_shaped_command(allowlist):
+    """The reverse of the above: a default ("systemd") install must not accept the
+    `service`-command shape even for an otherwise-declared unit name."""
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("sudo service casa-stacks.service restart")
+
+
+def test_mos_rejects_systemd_unit_charset(mos_allowlist):
+    """A unit name containing '.', valid for systemd, is not a valid /etc/init.d/*
+    script name -- the MOS regex's narrower charset must reject it outright rather
+    than silently matching a unit that could never exist on a sysvinit host."""
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("sudo service docker.service restart")
+
+
+def test_mos_rejects_reversed_argument_order(mos_allowlist):
+    """`sudo service <action> <unit>` (systemctl's order) must not parse as the MOS
+    shape just because both tokens happen to look unit-shaped."""
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("sudo service restart docker")
+
+
+def test_mos_denies_command_substitution_disguised_as_unit_name(mos_allowlist):
+    # Same PoC class an independent Codex review caught for the systemd regex, re-run
+    # against the MOS one: the narrower [A-Za-z0-9_-]+ charset has no '$', '(', ')', or
+    # whitespace in it at all, so this must be flatly rejected.
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist(
+            "sudo service $(sudo${IFS}mount${IFS}-a)docker restart")
+
+
+def test_mos_denies_smuggled_forbidden_command_in_compound(mos_allowlist):
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("sudo service docker restart && sudo mount -a")
+
+
+def test_mos_denies_sudo_on_later_line(mos_allowlist):
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("echo hi\nsudo mount -a")
+
+
+def test_mos_denies_extra_trailing_argument(mos_allowlist):
+    """The pattern is fully anchored ($ at the end) -- a plausible-looking command with
+    one extra token must not match just because it starts right."""
+    with pytest.raises(bender.SafetyError, match="not in the declared allowlist"):
+        bender._check_sudo_allowlist("sudo service docker restart now")

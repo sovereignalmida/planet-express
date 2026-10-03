@@ -92,10 +92,13 @@ Non-goals (explicitly deferred, not forgotten)
 - **`get_cpu()`/`get_filesystems()`.** No existing collector. Same treatment:
   declared, not implemented, not faked.
 - **A second implementation.** Was blocked on an actual MOS test host existing, per the
-  Addendum's own "provider testability" open item -- now built, read-only, once that host existed
-  (see `docs/designs/mos-host-control-provider.md`).
-- **Host-type auto-detection / dispatch logic.** With one implementation, there's nothing to
-  dispatch between yet.
+  Addendum's own "provider testability" open item -- now built, once that host existed (see
+  `docs/designs/mos-host-control-provider.md`), including its own sudo gate for mutating actions
+  (`docs/designs/mos-sudo-gate-scoping.md`).
+- **Host-type auto-detection / dispatch logic.** With one implementation, there was nothing to
+  dispatch between yet -- `config.yaml`'s `host_control_provider` field is now that dispatch
+  decision, added alongside the sudo gate (an install declares one provider explicitly; there is
+  still no auto-detection, by choice -- see the sudo-gate scoping doc).
 
 ## 5. The model
 

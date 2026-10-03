@@ -15,6 +15,7 @@ from setup_wizard import (
     _config_directory_command,
     _config_install_command,
     _config_ownership_commands,
+    _discover_init_scripts,
     _discover_mount_units,
     _docker_root_dir,
     _path_completer,
@@ -145,6 +146,71 @@ def test_sudoers_snippet_never_contains_a_bare_wildcard_rule():
     snippet = generate_sudoers_snippet("casaroot", allowlist, discovered_units=["data.mount"])
     assert all("*" not in rule for rule in _rule_portions(snippet))
     assert "stop data.mount" in snippet
+
+
+# ── provider="mos": a different command family, unit before action ───────────────────
+# (docs/designs/mos-sudo-gate-scoping.md) -- not just a renamed systemd rule.
+
+
+def test_sudoers_snippet_mos_unit_grant_reverses_argument_order():
+    allowlist = SudoAllowlist(units=[SudoUnitGrant(unit="docker", actions=["start", "stop"])])
+    snippet = generate_sudoers_snippet("casaroot", allowlist, provider="mos")
+    assert "casaroot ALL=(root) NOPASSWD: /usr/sbin/service docker start, " \
+        "/usr/sbin/service docker stop" in snippet
+    # The systemd shape must never leak into a "mos" install's generated grant.
+    assert "systemctl" not in snippet
+
+
+def test_sudoers_snippet_mos_glob_expands_against_discovered_init_scripts():
+    allowlist = SudoAllowlist(globs=[SudoGlobGrant(glob="cron*", actions=["restart"])])
+    snippet = generate_sudoers_snippet(
+        "casaroot", allowlist, discovered_units=["cron", "cron-watchdog", "nginx"], provider="mos",
+    )
+    assert "casaroot ALL=(root) NOPASSWD: /usr/sbin/service cron restart" in snippet
+    assert "casaroot ALL=(root) NOPASSWD: /usr/sbin/service cron-watchdog restart" in snippet
+    assert "nginx" not in snippet
+    assert all("*" not in rule for rule in _rule_portions(snippet))
+
+
+def test_sudoers_snippet_mos_skips_unit_grant_with_unsafe_name():
+    """codex review: a hand-edited config.yaml isn't charset-validated by the schema --
+    a unit name containing a space would otherwise render as extra, meaning-changing
+    tokens in the generated `/usr/sbin/service <unit> <action>` command."""
+    allowlist = SudoAllowlist(units=[SudoUnitGrant(unit="foo restart", actions=["start"])])
+    assert generate_sudoers_snippet("casaroot", allowlist, provider="mos") == ""
+
+
+def test_sudoers_snippet_mos_skips_glob_matched_unit_with_unsafe_name():
+    allowlist = SudoAllowlist(globs=[SudoGlobGrant(glob="foo*", actions=["start"])])
+    snippet = generate_sudoers_snippet(
+        "casaroot", allowlist, discovered_units=["foo restart", "foo-ok"], provider="mos",
+    )
+    assert "foo-ok" in snippet
+    assert "foo restart" not in snippet
+
+
+def test_discover_init_scripts_filters_out_unsafe_names(tmp_path, monkeypatch):
+    """A filename containing a space is a legal file on disk but not a valid MOS unit
+    name -- it must never reach the discovered-units list glob expansion checks against."""
+    import setup_wizard
+
+    init_d = tmp_path / "init.d"
+    init_d.mkdir()
+    for name in ("docker", "foo restart"):
+        script = init_d / name
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+    monkeypatch.setattr(setup_wizard, "Path", _fake_path_rerouting_etc_init_d(init_d))
+    assert _discover_init_scripts() == ["docker"]
+
+
+def test_sudoers_snippet_default_provider_is_systemd():
+    """Omitting `provider` must behave exactly as it always did -- every install
+    predating this field is a "systemd" install, and this default must not silently
+    change its generated grant."""
+    allowlist = SudoAllowlist(units=[SudoUnitGrant(unit="x.service", actions=["start"])])
+    assert generate_sudoers_snippet("casaroot", allowlist) == \
+        generate_sudoers_snippet("casaroot", allowlist, provider="systemd")
 
 
 # ── Regression tests for bugs found during this spec's own live verification: an
@@ -398,6 +464,46 @@ def test_docker_root_dir_falls_back_to_default_when_docker_missing(monkeypatch):
 
     monkeypatch.setattr("subprocess.run", fake_run)
     assert _docker_root_dir() == "/var/lib/docker"
+
+
+# ── _discover_init_scripts() -- the "mos" provider's equivalent of _discover_mount_units() ──
+
+
+def _fake_path_rerouting_etc_init_d(target: Path):
+    """_discover_init_scripts() calls Path("/etc/init.d") by its own module-global `Path` name --
+    patching that name to reroute exactly that one literal string to a real tmp_path directory
+    (or a nonexistent one, for the fails-open case) while leaving every other Path(...) call in
+    the module working normally."""
+    def fake_path(p, *args, **kwargs):
+        if str(p) == "/etc/init.d":
+            return target
+        return Path(p, *args, **kwargs)
+    return fake_path
+
+
+def test_discover_init_scripts_lists_executable_files_in_etc_init_d(tmp_path, monkeypatch):
+    import setup_wizard
+
+    init_d = tmp_path / "init.d"
+    init_d.mkdir()
+    for name in ("docker", "cron", "ssh"):
+        script = init_d / name
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+    (init_d / "README").write_text("not a script, and not executable")
+    monkeypatch.setattr(setup_wizard, "Path", _fake_path_rerouting_etc_init_d(init_d))
+    assert _discover_init_scripts() == ["cron", "docker", "ssh"]
+
+
+def test_discover_init_scripts_missing_directory_fails_open_to_empty(tmp_path, monkeypatch):
+    import setup_wizard
+
+    # True on every non-MOS host -- must not raise, same "no units discovered" shape
+    # _discover_mount_units() returns on its own errors.
+    monkeypatch.setattr(
+        setup_wizard, "Path", _fake_path_rerouting_etc_init_d(tmp_path / "does-not-exist"),
+    )
+    assert _discover_init_scripts() == []
 
 
 def test_collect_mounts_expands_tilde_and_rejects_relative(monkeypatch):

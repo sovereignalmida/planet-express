@@ -43,6 +43,11 @@ COMMAND_TIMEOUT_SECONDS = 120
 # operator declares it (and grants it at the OS level via sudoers.d) explicitly.
 SUDO_ALLOWLIST = config.SUDO_ALLOWLIST
 
+# Which command family _check_sudo_allowlist() accepts -- "systemd" (the default, every install
+# predating this field) or "mos". Same module-level-copy pattern as SUDO_ALLOWLIST above: a single
+# source of truth in config.py, easy to monkeypatch in tests without touching config.yaml.
+HOST_CONTROL_PROVIDER = config.HOST_CONTROL_PROVIDER
+
 # Anything other than `sudo systemctl <action> <unit>` was never a legitimate use of the sudo grant
 # this project asks for (docker needs no sudo — direct socket access).
 #
@@ -57,6 +62,18 @@ _SUDO_SYSTEMCTL_RE = re.compile(
     r"^sudo\s+systemctl\s+(start|stop|restart)\s+([A-Za-z0-9_.@:-]+)$", re.IGNORECASE
 )
 
+# `service <unit> <action>` for a Devuan/sysvinit MOS host (MosHostControlProvider,
+# docs/designs/mos-sudo-gate-scoping.md) — the unit and action swap position relative to
+# `sudo systemctl <action> <unit>` above, this is not a renamed copy of that regex. The
+# unit-name charset is narrower than systemd's on purpose: real /etc/init.d/* script names
+# on the live MOS VM are plain [A-Za-z0-9_-]+ (no '.', '@', ':' — those are systemd-unit
+# conventions init.d scripts don't use), and a looser charset borrowed "for safety margin"
+# would just reopen the shell-metacharacter bypass class the systemd regex above was
+# hardened against.
+_SUDO_SERVICE_RE = re.compile(
+    r"^sudo\s+service\s+([A-Za-z0-9_-]+)\s+(start|stop|restart)$", re.IGNORECASE
+)
+
 
 # ── Safety checks ─────────────────────────────────────────────────────────────
 class SafetyError(Exception):
@@ -69,12 +86,14 @@ class SudoScopeError(SafetyError):
     of a generic hard-fail (approving in chat could never make it actually run,
     since Bender executes headlessly with no TTY for a password prompt).
 
-    action/unit are set only when the command parsed as `sudo systemctl <action>
-    <unit>` but that (action, unit) pair just isn't declared -- the only shape
-    /grant can turn into a concrete config.yaml suggestion. A command that didn't
-    even parse that way (arbitrary sudo) has neither, since there's no unit to
-    suggest a grant for -- this project's sudo mechanism only ever covers
-    systemctl start/stop/restart on a declared unit."""
+    action/unit are set only when the command parsed as this install's configured
+    HostControlProvider shape (`sudo systemctl <action> <unit>`, or `sudo service
+    <unit> <action>` under HOST_CONTROL_PROVIDER == "mos") but that
+    (action, unit) pair just isn't declared -- the only shape /grant can turn into a
+    concrete config.yaml suggestion. A command that didn't even parse that way
+    (arbitrary sudo, or the other provider's shape) has neither, since there's no
+    unit to suggest a grant for -- this project's sudo mechanism only ever covers
+    start/stop/restart on a declared unit, in the one shape this install declared."""
 
     def __init__(self, message: str, command: str, action: str | None = None, unit: str | None = None):
         super().__init__(message)
@@ -119,18 +138,31 @@ def _check_sudo_allowlist(command: str) -> None:
     Deliberately checks for the word `sudo` *anywhere* in the segment, not just at the start --
     a wrapper like `env sudo mount -a` or `sh -c 'sudo mount -a'` would bypass a prefix-only check
     by never technically "starting with sudo" (a real gap an independent Codex review caught before
-    it shipped, back when these strings reached a shell)."""
+    it shipped, back when these strings reached a shell).
+
+    Which shape is accepted — `sudo systemctl <action> <unit>` or `sudo service <unit>
+    <action>` — is decided by `HOST_CONTROL_PROVIDER`, not by trying both: an
+    install declares exactly one HostControlProvider, and accepting the other shape too
+    would grant a command surface this host's provider never issues and the operator
+    never reasoned about (see docs/designs/mos-sudo-gate-scoping.md)."""
+    if HOST_CONTROL_PROVIDER == "mos":
+        pattern, shape = _SUDO_SERVICE_RE, "sudo service <unit> start|stop|restart"
+    else:
+        pattern, shape = _SUDO_SYSTEMCTL_RE, "sudo systemctl start|stop|restart <unit>"
     for segment in _split_command_segments(command):
         if not re.search(r"\bsudo\b", segment, re.IGNORECASE):
             continue
-        m = _SUDO_SYSTEMCTL_RE.match(segment)
+        m = pattern.match(segment)
         if not m:
             raise SudoScopeError(
-                f"Sudo command not in the declared allowlist (only 'sudo systemctl "
-                f"start|stop|restart <unit>' can ever be permitted): '{segment}'",
+                f"Sudo command not in the declared allowlist (only '{shape}' can ever "
+                f"be permitted): '{segment}'",
                 command=segment,
             )
-        action, unit = m.group(1), m.group(2)
+        if HOST_CONTROL_PROVIDER == "mos":
+            unit, action = m.group(1), m.group(2)
+        else:
+            action, unit = m.group(1), m.group(2)
         if not _sudo_action_allowed(unit, action):
             raise SudoScopeError(
                 f"Sudo action '{action}' on '{unit}' is not declared in "

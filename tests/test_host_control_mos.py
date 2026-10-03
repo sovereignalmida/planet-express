@@ -149,22 +149,148 @@ def test_error_text_is_redacted(monkeypatch, provider):
     assert "[REDACTED]" in detail
 
 
-# --- start/stop/restart: declared, not implemented --------------------------------------------
+# --- start/stop/restart: gated through casa_bender._check_sudo_allowlist(), same control -------
+# flow as SystemdHostControlProvider._unit_action() -- see docs/designs/mos-sudo-gate-scoping.md.
 
 
-def test_start_service_raises_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        provider.start_service("docker")
+def test_start_service_applies_when_it_goes_running(monkeypatch, provider):
+    """The before and after `service status` reads use identical argv, so a plain
+    FakeRunArgv keyed only by argv can't distinguish them -- call-count-aware instead,
+    same pattern test_host_control_systemd.py uses for the same reason."""
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    calls = {"n": 0}
+    responses = [(3, "docker is not running.", ""), (0, "docker is running.", "")]
+
+    def fake_run_argv(argv, timeout):
+        if argv[:2] == ["service", "docker"]:
+            value = responses[calls["n"]]
+            calls["n"] += 1
+            return value
+        assert argv == ["sudo", "-n", "service", "docker", "start"]
+        return (0, "", "")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.start_service("docker")
+    assert result.ok is True
+    assert result.before == "stopped"
+    assert result.after == "running"
+    assert result.effect == "applied"
 
 
-def test_stop_service_raises_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        provider.stop_service("docker")
+def test_start_service_not_applied_when_already_running(monkeypatch, provider):
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+
+    def fake_run_argv(argv, timeout):
+        if argv[:2] == ["service", "docker"]:
+            return (0, "docker is running.", "")
+        assert argv == ["sudo", "-n", "service", "docker", "start"]
+        return (0, "", "")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.start_service("docker")
+    assert result.ok is True
+    assert result.effect == "not_applied"
 
 
-def test_restart_service_raises_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        provider.restart_service("docker")
+def test_restart_service_effect_is_always_applied_on_success(monkeypatch, provider):
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
+        ("service", "docker", "status"): (0, "docker is running.", ""),
+        ("sudo", "-n", "service", "docker", "restart"): (0, "", ""),
+    }))
+    result = provider.restart_service("docker")
+    assert result.ok is True
+    assert result.effect == "applied"
+
+
+def test_outside_sudo_allowlist_never_runs_the_command(monkeypatch, provider):
+    def refuse(command):
+        raise bender.SafetyError(f"not allowed: {command}")
+
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", refuse)
+
+    def fake_run_argv(argv, timeout):
+        raise AssertionError(f"must not run: {argv!r}")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.stop_service("forbidden")
+    assert result.ok is False
+    assert "not in the sudo allowlist" in result.detail
+    assert result.effect == "not_applied"
+
+
+def test_unreadable_before_state_refuses_without_running_the_command(monkeypatch, provider):
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+
+    def fake_run_argv(argv, timeout):
+        if argv[:2] == ["service", "docker"]:
+            return (0, "something unexpected", "")  # unreadable text
+        raise AssertionError(f"must not run the mutating command: {argv!r}")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.stop_service("docker")
+    assert result.ok is False
+    assert result.before is None
+    assert result.after is None
+    assert result.effect == "not_applied"
+    assert "could not read the state of docker" in result.detail
+
+
+def test_command_failure_is_reported_with_before_state_known(monkeypatch, provider):
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+
+    def fake_run_argv(argv, timeout):
+        if argv[:2] == ["service", "docker"]:
+            return (0, "docker is running.", "")
+        assert argv == ["sudo", "-n", "service", "docker", "stop"]
+        return (1, "", "docker: command failed")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.stop_service("docker")
+    assert result.ok is False
+    assert result.before == "running"
+    assert result.after is None
+    assert "docker: command failed" in result.detail
+
+
+def test_restart_with_unreadable_after_is_unknown_not_applied(monkeypatch, provider):
+    """codex review of the systemd version caught this exact bug: restart must not get
+    an exemption from the after-read check just because the command itself succeeded."""
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    calls = {"n": 0}
+
+    def fake_run_argv(argv, timeout):
+        if argv[:2] == ["service", "docker"]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return (0, "docker is running.", "")
+            return (bender.RUN_ARGV_TIMEOUT_EXIT, "", "timed out")
+        assert argv == ["sudo", "-n", "service", "docker", "restart"]
+        return (0, "", "")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.restart_service("docker")
+    assert result.ok is False
+    assert result.after is None
+    assert result.effect == "unknown"
+
+
+def test_sudo_command_built_with_unit_before_action(monkeypatch, provider):
+    """The mutating argv must be ["sudo", "-n", "service", <unit>, <action>] -- unit
+    before action -- matching _SUDO_SERVICE_RE. Building it the other way round would
+    silently fail every allowlist check regardless of what's declared in config.yaml."""
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    seen_mutating = {}
+
+    def fake_run_argv(argv, timeout):
+        if argv[:2] == ["service", "docker"]:
+            return (0, "docker is running.", "")
+        seen_mutating["argv"] = argv
+        return (0, "", "")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    provider.restart_service("docker")
+    assert seen_mutating["argv"] == ["sudo", "-n", "service", "docker", "restart"]
 
 
 # --- get_host_logs ------------------------------------------------------------------------------

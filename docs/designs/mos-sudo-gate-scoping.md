@@ -1,10 +1,11 @@
 # Scoping: a sudo gate for `MosHostControlProvider`'s mutating actions
 
-Status: **SCOPING NOTE — not a design, no code**. Written to surface what deciding this actually
-involves, before anything is built. Parent docs: `phase-3-host-control-provider.md`,
-`mos-host-control-provider.md` (ships `MosHostControlProvider` read-only; its
-`start_service`/`stop_service`/`restart_service` raise `NotImplementedError` specifically because
-this gate doesn't exist yet).
+Status: **RESOLVED — built.** §1-4 below are the original scoping note, left as written (what
+deciding this actually involved, before anything existed). §6 records Chris's decisions and what
+was actually built from them. Parent docs: `phase-3-host-control-provider.md`,
+`mos-host-control-provider.md` (originally shipped `MosHostControlProvider` read-only, with its
+`start_service`/`stop_service`/`restart_service` raising `NotImplementedError` specifically because
+this gate didn't exist yet -- now implemented, see §6).
 
 ## 1. What the systemd gate actually is — two layers, generated from one source
 
@@ -101,3 +102,40 @@ Phase 3/MOS already have).
   near-term goal**: is that worth scoping as its own doc now, in parallel, rather than discovering
   it piecemeal while trying to finish the sudo gate? (§4 above is a first pass at naming what it
   would involve, not a plan.)
+
+## 6. Resolution (Chris, 2026-10-03)
+
+- **Build the gate now**, even with no call site yet. Proceeded.
+- **Add provider selection to config.yaml as part of this.** Proceeded.
+- **Don't scope "install PE on MOS" as its own thing right now** — stay on the real v3 work
+  rather than spend cycles on the eventuality itself; §4's boundary stands as written, just not
+  acted on yet.
+
+What was built, directly off §1-3's analysis:
+
+- `config_schema.py`: `PlanetExpressConfig.host_control_provider: Literal["systemd", "mos"] =
+  "systemd"` — the deferred dispatch decision §3 identified as the real blocker. Defaults to
+  `"systemd"` so every existing install's behavior is unchanged; re-exported as
+  `config.HOST_CONTROL_PROVIDER`.
+- `casa_bender.py`: `_SUDO_SERVICE_RE` (`^sudo\s+service\s+([A-Za-z0-9_-]+)\s+(start|stop|restart)$`
+  — unit before action, narrower charset, per §2) alongside the existing `_SUDO_SYSTEMCTL_RE`.
+  `_check_sudo_allowlist()` picks one pattern based on `config.HOST_CONTROL_PROVIDER` rather than
+  accepting both — an install declares exactly one provider, and accepting the other shape too
+  would grant a command surface this host's provider never issues.
+- `scripts/setup_wizard.py`: `generate_sudoers_snippet()` takes a `provider` argument and renders
+  `/usr/sbin/service <unit> <action>` instead of `/usr/bin/systemctl <action> <unit>` under
+  `"mos"`. `_discover_init_scripts()` lists real `/etc/init.d/*` names (a plain directory read, not
+  a subprocess call — there's no sysvinit command that enumerates init scripts the way `systemctl
+  list-units` does) for glob-to-exact-unit expansion, answering §5's glob question: built, not
+  skipped, since the schema already supports it generically and the discovery mechanism turned out
+  cheap. The interactive wizard now asks "is this a MOS host?" and validates unit names against
+  the narrower MOS charset when it is.
+- `planet_express/execution/host_control_mos.py`: `MosHostControlProvider._service_action()`
+  replaces the three `NotImplementedError`s, mirroring `SystemdHostControlProvider._unit_action()`'s
+  control flow and effect semantics exactly (same two early-refusal points, same `unknown` vs.
+  `not_applied` rule), built on `_raw_state()`'s existing exit-code/text cross-check for before/
+  after reads.
+- Left alone, per the resolution's third point: no init.d scripts for PE's own processes, no
+  remote-execution layer, nothing that would constitute "install PE on MOS." This gate lets a PE
+  install *running on a MOS host* control that host's own services — it does not let today's
+  Ubuntu-hosted PE reach into the test VM.
