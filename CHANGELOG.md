@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-10-03
+
+### Added
+- **`casa_boot` repairs a broken cold boot instead of only reporting it.** A dead
+  `network_mode: container:<id>` reference (the container it pointed at was recreated under a
+  new ID, e.g. after Gluetun restarts) is now detected and force-recreated; a stack that failed
+  its first `up -d` gets one retry. A retired service (deliberately stopped, e.g. Lidarr) no
+  longer fails the boot it was retired from.
+- **A normalized dependency graph, built from the real compose files on every boot.** Five
+  detectors (`depends_on`, `network_mode` namespace references — same-project and, for the
+  first time, cross-project — shared bind mounts, Traefik router→service, and environment
+  variables that name another service by hostname) feed a graph that `casa_boot.py` now
+  consults to order stacks, falling back to the previous network-first-then-alphabetical order
+  whenever nothing needs reordering or the graph can't be built. Proven against the real fleet
+  (102 edges, 0 unresolved) and a real reboot before landing.
+- **`HostControlProvider`, a host-control abstraction** (`planet_express/core/host_control.py`,
+  `planet_express/execution/host_control_systemd.py`) — a faithful, behavior-unchanged
+  extraction of the service-control and uptime/memory reads the engine and monitor already do,
+  behind an interface a future non-systemd host could implement. Not yet used by anything;
+  landed as tested, inert groundwork, not a behavior change.
+
+### Fixed
+- **A test could overwrite live monitoring data if the suite ever ran inside a deployed
+  checkout instead of a sandboxed clone.** `config.STATE_DIR` defaults relative to `config.py`'s
+  own file location, not to a test's `CASA_CONFIG` — one test's mocked snapshot wrote straight
+  over the real `state/latest_monitor.json` this way during this release's own validation.
+  Isolated with an autouse fixture in the two affected test files.
+
+### CI
+- **Python version matrix widened from 3.11/3.12 to 3.11/3.12/3.13/3.14.** Nothing in the
+  dependencies or the codebase actually required 3.12 specifically; this makes "does Planet
+  Express run on something newer" a continuously-verified fact instead of a one-off local
+  observation, ahead of a planned host OS upgrade.
+
 ## [2.5.1] - 2026-10-01
 
 ### Fixed
