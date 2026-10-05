@@ -950,28 +950,32 @@ def _last_journal_completion(unit: str) -> tuple[str, str]:
     dashboard_data._parse_systemd_local_time() expects exactly that format regardless of
     source; result is "success" or "failed" (empty string for either if no matching journal
     entry was found at all)."""
-    _, out, _ = _run(f"journalctl -u {unit} -o json --no-pager -n 200")
+    # Use provider for logs (normalized to list[str] across systemd/MOS)
+    provider = config.get_host_control()
+    log_lines = provider.get_host_logs(unit, lines=200)
+
     last_ts = None
     last_success = None
-    for line in out.splitlines():
+    for line in log_lines:
+        # Try to parse as JSON (systemd format) first, fall back to plain text search (MOS format)
         try:
             entry = json.loads(line)
-        except ValueError:
-            continue
-        message = entry.get("MESSAGE")
-        if not isinstance(message, str):
-            # journalctl -o json emits an explicit `"MESSAGE": null` for some entries
-            # (and a byte-array for non-UTF8 messages) -- .get(..., "") only covers a
-            # missing key, not a present key with a null/non-string value, so this
-            # crashed the whole pipeline run with "argument of type 'NoneType' is not
-            # iterable" the first time such an entry showed up in the last 200 lines.
-            continue
-        if f"Finished {unit}" in message:
-            last_ts = entry.get("__REALTIME_TIMESTAMP")
-            last_success = True
-        elif f"Failed to start {unit}" in message:
-            last_ts = entry.get("__REALTIME_TIMESTAMP")
-            last_success = False
+            message = entry.get("MESSAGE")
+            if not isinstance(message, str):
+                # journalctl -o json emits an explicit `"MESSAGE": null` for some entries
+                continue
+            if f"Finished {unit}" in message:
+                last_ts = entry.get("__REALTIME_TIMESTAMP")
+                last_success = True
+            elif f"Failed to start {unit}" in message:
+                last_ts = entry.get("__REALTIME_TIMESTAMP")
+                last_success = False
+        except (ValueError, AttributeError):
+            # Not JSON - try plain text search (MOS)
+            if f"Finished {unit}" in line:
+                last_success = True
+            elif f"Failed to start {unit}" in line:
+                last_success = False
     if last_ts is None:
         return "", ""
     try:
@@ -1047,15 +1051,22 @@ def check_backups() -> dict:
 
 
 def check_services() -> dict:
-    """Status of critical systemd services (startup).
+    """Status of critical services (startup) via HostControlProvider.
     Note: nebula.service and dnclient.service are both intentionally decommissioned —
     remote access is now via Tailscale on OPNsense (outside this host, not monitored here).
     dnclient retired 2026-07-04, see project_casaserver_reip_plan memory for context."""
     units = ["casa-stacks"]
     status = {}
+    provider = config.get_host_control()
     for unit in units:
-        _, out, _ = _run(f"systemctl is-active {unit}")
-        status[unit] = out.strip() or "unknown"
+        is_running = provider.is_service_running(unit)
+        # Convert bool/None to state string (active/inactive/unknown)
+        if is_running is None:
+            status[unit] = "unknown"
+        elif is_running:
+            status[unit] = "active"
+        else:
+            status[unit] = "inactive"
     return status
 
 
