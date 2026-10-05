@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import config
 import web_auth
 from scripts import revoke_devices
 
@@ -230,13 +231,19 @@ def main(argv=None):
             # Restart first so the old credentials stop working, then bump again to strand
             # anything issued during the gap.
             try:
-                subprocess.run(["sudo", "systemctl", "restart", RESTART_UNIT],
-                               check=True, capture_output=True)
+                # Use the correct restart command for the configured host type
+                if config.HOST_CONTROL_PROVIDER == "mos":
+                    restart_cmd = ["sudo", "service", RESTART_UNIT, "restart"]
+                    restart_hint = f"sudo service {RESTART_UNIT} restart"
+                else:
+                    restart_cmd = ["sudo", "systemctl", "restart", RESTART_UNIT]
+                    restart_hint = f"sudo systemctl restart {RESTART_UNIT}"
+                subprocess.run(restart_cmd, check=True, capture_output=True)
             except (subprocess.CalledProcessError, OSError) as exc:
                 raise SystemExit(
                     f"The passphrase was changed, but restarting {RESTART_UNIT} failed ({exc}).\n"
                     f"The old passphrase still works until it restarts. Run:\n"
-                    f"  sudo systemctl restart {RESTART_UNIT}\n"
+                    f"  {restart_hint}\n"
                     f"  scripts/revoke_devices.py {name}") from None
             try:
                 epoch = revoke_devices.revoke(name)
@@ -248,7 +255,10 @@ def main(argv=None):
                     f"  scripts/revoke_devices.py {name}") from None
             print(f"Restarted {RESTART_UNIT}. Device epoch for {name}: {epoch}.")
         if action != "reset":
-            print(f"Restart with: sudo systemctl restart {RESTART_UNIT}")
+            if config.HOST_CONTROL_PROVIDER == "mos":
+                print(f"Restart with: sudo service {RESTART_UNIT} restart")
+            else:
+                print(f"Restart with: sudo systemctl restart {RESTART_UNIT}")
         if action != "reset":
             print("scripts/revoke_devices.py <name> (run as the core user) signs out trusted "
                   "devices without changing a passphrase.")
