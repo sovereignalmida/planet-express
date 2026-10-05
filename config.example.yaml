@@ -58,6 +58,14 @@ sudo_allowlist:
   #   - glob: "*.mount"
   #     actions: [start, stop]
 
+# Which command family sudo_allowlist's grants above are rendered/checked against.
+# "systemd" -> `sudo systemctl <action> <unit>` (the default; every install predating
+# this field ran on systemd). "mos" -> `sudo service <unit> <action>` for a
+# Devuan/sysvinit MOS host -- note the unit and action swap position, it isn't just a
+# renamed command. Must match whichever HostControlProvider this install actually
+# runs on; see docs/designs/mos-sudo-gate-scoping.md.
+host_control_provider: systemd
+
 # Autonomy policy: only R0 reads are automatic; mutations require approval.
 # Limits apply to automation, never operator requests.
 # autonomy:

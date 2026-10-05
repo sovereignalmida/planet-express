@@ -1,11 +1,14 @@
 """HostControlProvider -- the interface between PE's reasoning and whatever actually controls
 the host a given install runs on (v3 Phase 3, `docs/designs/phase-3-host-control-provider.md`).
 
-Exactly one implementation exists today (`SystemdHostControlProvider`, in
-`planet_express/execution/host_control_systemd.py`) -- nothing here, or anywhere else, should
-read that as proof of portability. A second implementation needs an actual non-systemd host to
-prove itself against, which doesn't exist yet (the Architecture Brief Addendum's "provider
-testability" item).
+Two implementations exist: `SystemdHostControlProvider` (`planet_express/execution/
+host_control_systemd.py`) and `MosHostControlProvider` (`planet_express/execution/
+host_control_mos.py`, `docs/designs/mos-host-control-provider.md`), proven against a real
+Devuan/sysvinit MOS VM -- this closes the Architecture Brief Addendum's "provider testability"
+item. Both providers implement the full Protocol, reads and mutation -- `MosHostControlProvider`'s
+mutating actions gate through `casa_bender._check_sudo_allowlist()` exactly like the systemd
+provider's, under `config.yaml`'s `host_control_provider: mos`
+(`docs/designs/mos-sudo-gate-scoping.md`).
 
 `reboot()`/`shutdown()` are declared because the brief names them, not because anything backs
 them: no reboot/shutdown capability exists anywhere in this codebase today. A provider that

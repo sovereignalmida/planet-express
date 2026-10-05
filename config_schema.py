@@ -329,6 +329,17 @@ class PlanetExpressConfig(BaseModel):
     # explicitly declares them here. Enforced in casa_bender.py's _check_sudo_allowlist(),
     # independent of whatever a plan's LLM-generated commands claim to need.
     sudo_allowlist: SudoAllowlist = SudoAllowlist()
+    # Which command family sudo_allowlist's grants are rendered/checked against --
+    # "systemd" means `sudo systemctl <action> <unit>` (casa_bender.py's
+    # _SUDO_SYSTEMCTL_RE), "mos" means `sudo service <unit> <action>`
+    # (_SUDO_SERVICE_RE) -- note the argument order reverses between the two, it isn't
+    # just a renamed command. Defaults to "systemd": every install predating this field
+    # ran on systemd, and a fresh install's default (HostControlProvider's only other
+    # implementation today) should match that, not silently change behavior. See
+    # docs/designs/mos-sudo-gate-scoping.md for why this field has to exist before a
+    # MOS sudo gate can be built at all -- Phase 3 deliberately deferred host-type
+    # dispatch when only one provider existed; this is that deferred decision.
+    host_control_provider: Literal["systemd", "mos"] = "systemd"
 
     @field_validator("backup_jobs")
     @classmethod

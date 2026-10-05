@@ -107,37 +107,61 @@ def _sudoers_escape(text: str) -> str:
     return re.sub(r"([,:=\\])", r"\\\1", text)
 
 
+def _sudoers_command(provider: str, action: str, unit: str) -> str:
+    """The two command families a grant can render as -- argument order reverses between
+    them, this isn't a renamed copy. "systemd" matches casa_bender.py's
+    _SUDO_SYSTEMCTL_RE (`sudo systemctl <action> <unit>`); "mos" matches
+    _SUDO_SERVICE_RE (`sudo service <unit> <action>`), for a Devuan/sysvinit MOS host."""
+    if provider == "mos":
+        return f"/usr/sbin/service {unit} {action}"
+    return f"/usr/bin/systemctl {action} {unit}"
+
+
 def generate_sudoers_snippet(
-    run_user: str, allowlist: SudoAllowlist, discovered_units: list[str] = ()
+    run_user: str, allowlist: SudoAllowlist, discovered_units: list[str] = (), provider: str = "systemd"
 ) -> str:
     """Render a sudoers.d NOPASSWD grant matching a SudoAllowlist -- as closely as
     sudoers syntax allows -- to what casa_bender.py's _check_sudo_allowlist() actually
-    enforces.
+    enforces for this install's configured `host_control_provider` ("systemd" or "mos").
 
     Glob grants are deliberately NOT written into sudoers as a literal wildcard (e.g.
     "/usr/bin/systemctl stop *.mount"). sudoers matches '*' with fnmatch() against the
     whole remaining command-line string, which crosses whitespace -- an independent
     Codex review of this spec found that a rule like that also matches
     "systemctl stop ssh.service data.mount", since the trailing text still satisfies
-    "*.mount". Instead, each glob is expanded here against discovered_units (real
-    systemd unit names on the host at generation time) into one exact-unit rule per
-    match -- narrower than the code-level allowlist (which still uses fnmatch safely,
-    since casa_bender.py's regex guarantees the unit name it checks against a glob can
-    never contain whitespace), but that asymmetry is the safe direction: re-run the
-    wizard if a new mount unit should be covered, rather than have the OS grant
-    silently cover more than what was declared.
+    "*.mount". Instead, each glob is expanded here against discovered_units (real unit
+    names -- systemd units, or /etc/init.d/* script names under "mos" -- found on the
+    host at generation time) into one exact-unit rule per match -- narrower than the
+    code-level allowlist (which still uses fnmatch safely, since casa_bender.py's regex
+    guarantees the unit name it checks against a glob can never contain whitespace), but
+    that asymmetry is the safe direction: re-run the wizard if a new unit should be
+    covered, rather than have the OS grant silently cover more than what was declared.
 
-    Empty allowlist (or a glob matching nothing discovered) -> empty string."""
+    Empty allowlist (or a glob matching nothing discovered) -> empty string. Under
+    `provider="mos"`, a unit name outside `_MOS_UNIT_NAME_RE`'s charset is skipped (with a
+    warning) rather than escaped and emitted -- `_sudoers_escape()` only escapes sudoers
+    metacharacters (',', ':', '=', '\\'), not whitespace, and a space in a rendered
+    `/usr/sbin/service <unit> <action>` command shifts argument positions rather than
+    being a safely-quoted literal. `casa_bender.py`'s own `_SUDO_SERVICE_RE` would never
+    match such a unit anyway (an independent Codex review flagged this: a hand-edited
+    config.yaml, or a stray executable file under /etc/init.d/, could otherwise produce a
+    sudoers rule that grants something other than what was declared)."""
     lines = []
     for grant in allowlist.units:
+        if provider == "mos" and not _MOS_UNIT_NAME_RE.match(grant.unit):
+            print(f"  Note: unit {grant.unit!r} is not a valid MOS unit name "
+                  f"({_MOS_UNIT_NAME_RE.pattern}) -- no sudoers rule generated for it.")
+            continue
         unit = _sudoers_escape(grant.unit)
-        cmds = ", ".join(f"/usr/bin/systemctl {action} {unit}" for action in grant.actions)
+        cmds = ", ".join(_sudoers_command(provider, action, unit) for action in grant.actions)
         lines.append(f"{run_user} ALL=(root) NOPASSWD: {cmds}")
     for grant in allowlist.globs:
         matched = sorted(u for u in discovered_units if fnmatch.fnmatch(u, grant.glob))
+        if provider == "mos":
+            matched = [u for u in matched if _MOS_UNIT_NAME_RE.match(u)]
         for unit in matched:
             escaped_unit = _sudoers_escape(unit)
-            cmds = ", ".join(f"/usr/bin/systemctl {action} {escaped_unit}" for action in grant.actions)
+            cmds = ", ".join(_sudoers_command(provider, action, escaped_unit) for action in grant.actions)
             lines.append(f"{run_user} ALL=(root) NOPASSWD: {cmds}  # matched glob '{grant.glob}'")
     if not lines:
         return ""
@@ -266,6 +290,31 @@ def _discover_mount_units() -> list[str]:
     return [unit for unit, where in zip(units, wheres) if not where.startswith(docker_mount_prefixes)]
 
 
+def _discover_init_scripts() -> list[str]:
+    """The "mos" provider's equivalent of _discover_mount_units() -- real /etc/init.d/*
+    script names on this host, for glob-to-exact-unit expansion (see
+    generate_sudoers_snippet()'s docstring for why globs are never written to sudoers
+    literally). A plain directory listing, not a subprocess call: unlike
+    `systemctl list-units`, there's no sysvinit command that enumerates init scripts,
+    and the filesystem itself is the ground truth here. Any unexpected shape (the
+    directory doesn't exist -- true on every non-MOS host) fails open to an empty list,
+    the same "no units discovered" shape _discover_mount_units() returns on an error.
+    Filtered through `_MOS_UNIT_NAME_RE` -- an executable filename could in principle
+    contain a space or another sudoers-unsafe character; `generate_sudoers_snippet()`
+    filters again defensively, but there is no reason to let an unsafe name reach a glob
+    match at all when the filesystem is the one place this list comes from un-reviewed."""
+    init_d = Path("/etc/init.d")
+    try:
+        # A list, not a generator: iterdir() doesn't actually touch the filesystem until
+        # consumed, so a lazy generator here would defer a missing-directory
+        # FileNotFoundError past this try/except entirely -- it must be forced while
+        # still inside the block that's supposed to catch it.
+        names = [p.name for p in init_d.iterdir() if p.is_file() and os.access(p, os.X_OK)]
+    except OSError:
+        return []
+    return sorted(name for name in names if _MOS_UNIT_NAME_RE.match(name))
+
+
 def _mount_where(unit: str) -> str:
     try:
         result = subprocess.run(
@@ -288,6 +337,10 @@ VALID_ACTIONS = ("start", "stop", "restart")
 # units safety path entirely) would grant far more than Bender's own allowlist permits
 # -- and visudo -c has no opinion on this, since it's syntactically valid sudoers.
 _UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
+
+# The narrower charset real /etc/init.d/* script names actually use (no '.', '@', ':' --
+# those are systemd-unit conventions) -- matches casa_bender.py's _SUDO_SERVICE_RE.
+_MOS_UNIT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Requires at least two labels (rejects a bare TLD like "com", which would make every
 # /install-generated router match on suffix far more broadly than intended) and standard
@@ -334,27 +387,42 @@ def _prompt_actions(text: str, default: list[str]) -> list[str]:
         print(f"  Invalid action(s) {bad} -- must be from {VALID_ACTIONS}. Try again.")
 
 
-def _prompt_unit_name(text: str) -> str:
+def _prompt_unit_name(text: str, provider: str = "systemd") -> str:
+    pattern = _MOS_UNIT_NAME_RE if provider == "mos" else _UNIT_NAME_RE
     while True:
         unit = _prompt(text)
-        if not unit or _UNIT_NAME_RE.match(unit):
+        if not unit or pattern.match(unit):
             return unit
-        print(f"  Invalid unit name {unit!r} -- must match {_UNIT_NAME_RE.pattern} "
+        print(f"  Invalid unit name {unit!r} -- must match {pattern.pattern} "
               f"(same character set casa_bender.py itself enforces for a sudo target). "
               f"Try again.")
 
 
-def _collect_sudo_allowlist() -> dict:
+def _prompt_host_control_provider() -> str:
+    """Which command family this install's sudo_allowlist grants are gated/rendered
+    against -- see config_schema.py's host_control_provider docstring and
+    docs/designs/mos-sudo-gate-scoping.md. Defaults to "systemd": that's every
+    install's reality until MosHostControlProvider has an actual call site."""
+    if _prompt_yes_no(
+        "Is this install running on a Devuan/sysvinit MOS host (not Ubuntu/systemd)?",
+        default=False,
+    ):
+        return "mos"
+    return "systemd"
+
+
+def _collect_sudo_allowlist(provider: str = "systemd") -> dict:
+    unit_kind = "init.d script" if provider == "mos" else "systemd unit"
     if not _prompt_yes_no(
-        "Let Bender restart specific systemd units or mount units during an approved "
+        f"Let Bender restart specific {unit_kind}s or mount units during an approved "
         "remediation? (requires a matching sudoers.d grant)"
     ):
         return {"units": [], "globs": []}
 
     units = []
-    print("Add unit grants one at a time (exact systemd unit name). Blank to stop.")
+    print(f"Add unit grants one at a time (exact {unit_kind} name). Blank to stop.")
     while True:
-        unit = _prompt_unit_name("  Unit name")
+        unit = _prompt_unit_name("  Unit name", provider)
         if not unit:
             break
         actions = _prompt_actions("  Allowed actions for this unit", ["start", "stop", "restart"])
@@ -447,10 +515,11 @@ def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
     at all in that case, letting the OS-level grant and the code-level allowlist drift
     out of sync despite this being the exact guarantee INSTALL.md/config.example.yaml
     both document."""
-    discovered_units = _discover_mount_units()
+    discovered_units = _discover_init_scripts() if cfg.host_control_provider == "mos" else _discover_mount_units()
+    unit_kind = "init.d scripts" if cfg.host_control_provider == "mos" else "systemd units"
     for grant in cfg.sudo_allowlist.globs:
         if not any(fnmatch.fnmatch(u, grant.glob) for u in discovered_units):
-            print(f"  Note: glob '{grant.glob}' matched no systemd units on this host right "
+            print(f"  Note: glob '{grant.glob}' matched no {unit_kind} on this host right "
                   f"now -- no sudoers rule generated for it. Re-run the wizard once the unit "
                   f"exists if you need it covered.")
     # pwd.getpwuid(os.getuid()) rather than getpass.getuser(): an independent Codex
@@ -460,7 +529,9 @@ def reconcile_sudoers(cfg: PlanetExpressConfig) -> None:
     # uses `whoami`, i.e. the effective UID) -- generating a sudoers grant for the wrong
     # user, silently breaking every real sudo action Bender later tries to run.
     run_user = pwd.getpwuid(os.getuid()).pw_name
-    snippet = generate_sudoers_snippet(run_user, cfg.sudo_allowlist, discovered_units)
+    snippet = generate_sudoers_snippet(
+        run_user, cfg.sudo_allowlist, discovered_units, provider=cfg.host_control_provider,
+    )
     installed_new_grant = False
     if snippet:
         print(f"\nGenerated sudoers.d grant:\n{snippet}")
@@ -576,7 +647,8 @@ def main() -> None:
                 "Any containers that are intentionally stopped right now"
             )
             mounts = _collect_mounts()
-            sudo_allowlist = _collect_sudo_allowlist()
+            host_control_provider = _prompt_host_control_provider()
+            sudo_allowlist = _collect_sudo_allowlist(host_control_provider)
             lan_only_domain = _prompt_domain(
                 "LAN-only domain for the /install command's auto-router feature",
                 "casalan.com",
@@ -584,6 +656,7 @@ def main() -> None:
         else:
             paused_containers = []
             mounts = {}
+            host_control_provider = "systemd"
             sudo_allowlist = {"units": [], "globs": []}
             lan_only_domain = "casalan.com"
 
@@ -594,6 +667,7 @@ def main() -> None:
             "mounts": mounts,
             "exclude_services": [],
             "sudo_allowlist": sudo_allowlist,
+            "host_control_provider": host_control_provider,
             "lan_only_domain": lan_only_domain,
         }
 
