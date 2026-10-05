@@ -53,14 +53,19 @@ _STARTED_AT_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(
 
 
 def unit_active(unit: str) -> str:
-    """`systemctl is-active` exits non-zero for inactive/failed units, so only an empty answer or a
-    timeout means the state could not be read — never silently call that "stopped" (Codex review)."""
-    rc, out, err = bender.run_argv(["systemctl", "is-active", unit],
-                                   timeout=actions.DOCKER_TIMEOUT_SECONDS)
-    value = out.strip().splitlines()[-1].strip() if out.strip() else ""
-    if rc == bender.RUN_ARGV_TIMEOUT_EXIT or not value:
-        raise actions.TargetError(f"could not read the state of {unit}: {_clip(err) or 'no answer'}")
-    return value
+    """Get the active state of a service unit via the configured HostControlProvider.
+
+    Returns the string state (e.g., "active", "inactive", "failed"). Raises TargetError if the
+    state could not be read (provider returned None), preserving the semantics of the old
+    `systemctl is-active` path where timeout/missing data is never silently treated as "stopped".
+    """
+    provider = config.get_host_control()
+    state = provider.is_service_running(unit)
+    if state is None:
+        raise actions.TargetError(f"could not read the state of {unit}")
+    # is_service_running() returns bool; convert to the string states that callers expect
+    # ("active" or a non-"active" value). Treat any True as "active", False as "inactive".
+    return "active" if state else "inactive"
 
 
 def _clip(text: str) -> str:
@@ -481,31 +486,35 @@ class RunbookEngine:
 
     def _unit_action(self, execution_id, step, params, dispatch) -> StepOutcome:
         action, unit = params["action"], params["unit"]
+        # Policy check: allowlist still lives in casa_bender (policy layer stays separate)
         try:
             bender._check_sudo_allowlist(f"sudo systemctl {action} {unit}")
         except bender.SafetyError as exc:
             return self._refuse(f"not in the sudo allowlist: {_clip(str(exc))}")
-        try:
-            before = self._unit_active(unit)
-        except actions.TargetError as exc:
-            return self._refuse(str(exc))
-        dispatch({"active": before})
-        rc, out, err = self.svc._run_argv(["sudo", "-n", "systemctl", action, unit],
-                                          timeout=actions.DOCKER_TIMEOUT_SECONDS)
-        if rc != 0:
-            return StepOutcome("failed", "unknown", f"systemctl {action} failed (exit {rc}): {_clip(err or out)}")
-        try:
-            after = self._unit_active(unit)
-        except actions.TargetError as exc:
-            # The command ran; we just cannot confirm the result, so the effect is unknown.
-            return StepOutcome("failed", "unknown", str(exc))
-        want_active = action in ("start", "restart")
-        ok = (after == "active") == want_active
-        if action == "restart":
-            effect = "applied"
+
+        # Delegate to provider for the actual action (start/stop/restart)
+        # Provider handles: before-read, action execution, after-read, state comparison
+        provider = config.get_host_control()
+        if action == "start":
+            result = provider.start_service(unit)
+        elif action == "stop":
+            result = provider.stop_service(unit)
+        elif action == "restart":
+            result = provider.restart_service(unit)
         else:
-            effect = "applied" if (before == "active") != (after == "active") else "not_applied"
-        return StepOutcome("passed" if ok else "failed", effect, f"{unit} is {after}")
+            return self._refuse(f"unknown action: {action}")
+
+        # Dispatch before state from provider result
+        before_str = result.before if result.before else "unknown"
+        dispatch({"active": before_str})
+
+        # Provider returns: ok, before, after, effect, detail
+        # Convert to engine's StepOutcome
+        status = "passed" if result.ok else "failed"
+        reason = f"{unit} is {result.after or before_str}"
+        if result.detail:
+            reason = f"{reason}: {result.detail}"
+        return StepOutcome(status, result.effect, reason)
 
     # ── compose writes (slice 5b-4, design §4.6) ────────────────────────────
     def _compose_write(self, execution_id, step, params, dispatch, runbook) -> StepOutcome:
