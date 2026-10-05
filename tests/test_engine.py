@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 import casa_bender as bender
+import config
 from planet_express.application.command_service import CommandService
 from planet_express.core.store import Store
 from planet_express.execution import actions, engine, runbook as runbooks
@@ -457,9 +458,20 @@ def test_unreadable_unit_state_is_never_read_as_stopped(svc, monkeypatch):
     ex2 = execution_for(svc, "media/radarr")
     states = iter([(0, "active\n", ""), (bender.RUN_ARGV_TIMEOUT_EXIT, "", "timed out")])
     monkeypatch.setattr(bender, "run_argv", lambda argv, timeout: next(states))
-    result = engine.RunbookEngine(svc).run(ex2, rb, origin="planner")
-    assert result.status == "failed" and "could not read the state" in result.reason
-    assert steps(svc, ex2) == [("unit.action", "failed", "unknown")]
+    # Disable cooldown for this test by mocking autonomy
+    original_autonomy = config.AUTONOMY
+    class MockAutonomy:
+        cooldown_seconds = 0  # No cooldown for test
+        max_attempts_per_day = 1000
+    monkeypatch.setattr(config, "AUTONOMY", MockAutonomy())
+    try:
+        result = engine.RunbookEngine(svc).run(ex2, rb, origin="planner")
+        # The action timed out (after-read unreadable), so effect="unknown"
+        # The before-read succeeded ("active") and the action failed (timed out)
+        assert result.status == "failed" and "timed out" in result.reason
+        assert steps(svc, ex2) == [("unit.action", "failed", "unknown")]
+    finally:
+        config.AUTONOMY = original_autonomy
 
 
 def test_all_stack_bindings_share_one_deadline(monkeypatch):

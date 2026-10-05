@@ -18,6 +18,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
+import config
+
 import casa_leela
 
 
@@ -335,11 +337,18 @@ def _journal_line(message: str, realtime_us: int) -> str:
 
 
 def test_last_journal_completion_prefers_latest_success_over_older_ones(monkeypatch):
-    lines = "\n".join([
+    lines_str = "\n".join([
         _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 1_000_000_000_000),
         _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 2_000_000_000_000),
     ])
-    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
+    # Mock the provider's get_host_logs to return normalized tuple of lines
+    log_lines = tuple(lines_str.splitlines())
+    def mock_provider():
+        class MockProvider:
+            def get_host_logs(self, unit, lines=200):
+                return log_lines
+        return MockProvider()
+    monkeypatch.setattr(config, "get_host_control", mock_provider)
     last_run, result = casa_leela._last_journal_completion("weekly-borg-backup.service")
     assert last_run != ""
     assert result == "success"
@@ -350,11 +359,18 @@ def test_last_journal_completion_reports_a_later_failure_not_an_earlier_success(
     # daemon-reload/reboot after the *latest* run of this unit failed, the fallback must
     # not silently pick an older successful run instead -- that would misreport a broken
     # backup as healthy on the dashboard and to Hermes.
-    lines = "\n".join([
+    lines_str = "\n".join([
         _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 1_000_000_000_000),
         _journal_line("Failed to start weekly-borg-backup.service - Weekly Borg Backup.", 2_000_000_000_000),
     ])
-    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
+    # Mock the provider's get_host_logs to return normalized tuple of lines
+    log_lines = tuple(lines_str.splitlines())
+    def mock_provider():
+        class MockProvider:
+            def get_host_logs(self, unit, lines=200):
+                return log_lines
+        return MockProvider()
+    monkeypatch.setattr(config, "get_host_control", mock_provider)
     last_run, result = casa_leela._last_journal_completion("weekly-borg-backup.service")
     # The later (failed) entry's timestamp -- and its "failed" verdict -- win over the
     # earlier success.
