@@ -108,6 +108,25 @@ def active_stack_dirs() -> list[Path]:
         if p.parent.name not in FORBIDDEN_STACKS
     ]
 
+
+# ── Host control provider (lazy instantiation to avoid circular imports) ─────
+_HOST_CONTROL = None  # Lazy cache
+
+
+def get_host_control():
+    """Get the configured HostControlProvider (systemd or mos), lazily instantiated.
+
+    Uses lazy instantiation to break the circular import:
+    host_control_systemd/mos → casa_bender → config
+
+    Returns the cached instance on subsequent calls.
+    """
+    global _HOST_CONTROL
+    if _HOST_CONTROL is None:
+        from planet_express.core.host_control import get_host_control_provider
+        _HOST_CONTROL = get_host_control_provider(HOST_CONTROL_PROVIDER)
+    return _HOST_CONTROL
+
 # ── Credential helpers ────────────────────────────────────────────────────────
 def telegram_credentials() -> tuple[str, str]:
     """Return (TG_BOT_TOKEN, TG_CHAT_ID) for Planet Express's own Telegram bot, loaded

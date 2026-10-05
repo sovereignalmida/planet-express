@@ -72,3 +72,25 @@ class HostControlProvider(Protocol):
     def reboot(self) -> None: ...
 
     def shutdown(self) -> None: ...
+
+
+def get_host_control_provider(provider_type: str) -> HostControlProvider:
+    """Factory function to instantiate the appropriate HostControlProvider based on config.
+
+    Args:
+        provider_type: "systemd" or "mos" from config.host_control_provider
+
+    Returns:
+        An instantiated provider (SystemdHostControlProvider or MosHostControlProvider)
+
+    Raises:
+        ValueError: if provider_type is not recognized
+    """
+    if provider_type == "systemd":
+        from planet_express.execution.host_control_systemd import SystemdHostControlProvider
+        return SystemdHostControlProvider()
+    elif provider_type == "mos":
+        from planet_express.execution.host_control_mos import MosHostControlProvider
+        return MosHostControlProvider()
+    else:
+        raise ValueError(f"Unknown host control provider: {provider_type}. Must be 'systemd' or 'mos'.")
