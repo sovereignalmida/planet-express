@@ -305,7 +305,11 @@ def _discover_init_scripts() -> list[str]:
     match at all when the filesystem is the one place this list comes from un-reviewed."""
     init_d = Path("/etc/init.d")
     try:
-        names = (p.name for p in init_d.iterdir() if p.is_file() and os.access(p, os.X_OK))
+        # A list, not a generator: iterdir() doesn't actually touch the filesystem until
+        # consumed, so a lazy generator here would defer a missing-directory
+        # FileNotFoundError past this try/except entirely -- it must be forced while
+        # still inside the block that's supposed to catch it.
+        names = [p.name for p in init_d.iterdir() if p.is_file() and os.access(p, os.X_OK)]
     except OSError:
         return []
     return sorted(name for name in names if _MOS_UNIT_NAME_RE.match(name))
