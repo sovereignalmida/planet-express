@@ -5,6 +5,9 @@ Library functions used both by this file's CLI and by Farnsworth's Telegram
 /up, /down, /stacks, /mounts commands — one code path, not two copies of the
 same docker compose logic.
 
+Uses provider-based stack orchestration (SystemdStackOrchestrator for systemd
+systems, MosStackOrchestrator for MOS/sysvinit). Same UX, different backends.
+
 Companion to casa_boot.py, which only ever brings everything up once at boot
 time, gated on mount readiness. This is for ad-hoc operator use: bring one
 stack down for maintenance, bring it back up, or take everything down (e.g.
@@ -30,6 +33,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import casa_bender as bender
 import config
@@ -58,65 +62,75 @@ def enabled_borg_jobs() -> dict:
 def all_stack_dirs():
     """Every directory with a docker-compose.yml, forbidden or not -- used for
     `down`/`list`, where seeing/stopping a forbidden stack is the point."""
-    return [p.parent for p in sorted(config.STACKS_ROOT.glob("*/docker-compose.yml"))]
+    orchestrator = config.get_stack_orchestrator()
+    stacks = orchestrator.list_stacks()
+    return [config.STACKS_ROOT / name for name in stacks]
 
 
 def resolve_stack(name):
+    """Check if stack exists. Return stack dir or None."""
     compose = config.STACKS_ROOT / name / "docker-compose.yml"
     if not compose.exists():
         return None
     return compose.parent
 
 
-def _run_compose_captured(stack_dir, args, timeout=180):
-    compose_file = stack_dir / "docker-compose.yml"
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "-f", str(compose_file), *args],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"timed out after {timeout}s"
-    tail = (result.stdout + result.stderr).strip().splitlines()
-    return result.returncode == 0, "\n".join(tail[-6:])
-
-
 def stack_up(target: str) -> dict:
-    """target is a stack name or 'all'. Returns
-    {"ok": bool, "refused"/"not_found": bool, "results": [(name, ok, tail), ...]}"""
+    """Start one or all stacks using the configured orchestrator.
+
+    target: stack name or 'all'
+
+    Returns: {"ok": bool, "refused"/"not_found": bool, "results": [(name, ok, effect), ...]}
+    """
+    orchestrator = config.get_stack_orchestrator()
+
     if target == "all":
         stacks = config.active_stack_dirs()
         stacks.sort(key=lambda d: (d.name != "network", d.name))
+        stack_names = [s.name for s in stacks]
     else:
         if target in config.FORBIDDEN_STACKS:
             return {"ok": False, "refused": True, "results": []}
         stack_dir = resolve_stack(target)
         if stack_dir is None:
             return {"ok": False, "not_found": True, "results": []}
-        stacks = [stack_dir]
+        stack_names = [stack_dir.name]
 
     results = []
-    for stack_dir in stacks:
-        ok, tail = _run_compose_captured(stack_dir, ["up", "-d"])
-        results.append((stack_dir.name, ok, tail))
+    for stack_name in stack_names:
+        result = orchestrator.start_stack(stack_name)
+        # Maintain backward compatibility: (name, ok, effect_string)
+        results.append((stack_name, result.ok, result.effect))
+
     return {"ok": all(r[1] for r in results), "results": results}
 
 
 def stack_down(target: str) -> dict:
+    """Stop one or all stacks using the configured orchestrator.
+
+    target: stack name or 'all'
+
+    Returns: {"ok": bool, "not_found": bool, "results": [(name, ok, effect), ...]}
+    """
+    orchestrator = config.get_stack_orchestrator()
+
     if target == "all":
         stacks = all_stack_dirs()
         # tear down everything else before the ingress/DNS stack
         stacks.sort(key=lambda d: d.name == "network")
+        stack_names = [s.name for s in stacks]
     else:
         stack_dir = resolve_stack(target)
         if stack_dir is None:
             return {"ok": False, "not_found": True, "results": []}
-        stacks = [stack_dir]
+        stack_names = [stack_dir.name]
 
     results = []
-    for stack_dir in stacks:
-        ok, tail = _run_compose_captured(stack_dir, ["down"])
-        results.append((stack_dir.name, ok, tail))
+    for stack_name in stack_names:
+        result = orchestrator.stop_stack(stack_name)
+        # Maintain backward compatibility: (name, ok, effect_string)
+        results.append((stack_name, result.ok, result.effect))
+
     return {"ok": all(r[1] for r in results), "results": results}
 
 
