@@ -111,6 +111,7 @@ def active_stack_dirs() -> list[Path]:
 
 # ── Host control provider (lazy instantiation to avoid circular imports) ─────
 _HOST_CONTROL = None  # Lazy cache
+_STACK_ORCHESTRATOR = None  # Lazy cache
 
 
 def get_host_control():
@@ -126,6 +127,31 @@ def get_host_control():
         from planet_express.core.host_control import get_host_control_provider
         _HOST_CONTROL = get_host_control_provider(HOST_CONTROL_PROVIDER)
     return _HOST_CONTROL
+
+
+def get_stack_orchestrator():
+    """Get the stack orchestration provider (lazy-instantiated, cached).
+
+    Returns provider for Docker Compose stack management:
+    - SystemdStackOrchestrator for systemd systems (Ubuntu)
+    - MosStackOrchestrator for sysvinit systems (MOS)
+
+    Environment variables:
+    - MOS_API_BASE: MOS API base URL (default: http://localhost:998/api/v1)
+    - MOS_API_TOKEN: MOS authentication token (optional)
+    """
+    global _STACK_ORCHESTRATOR
+    if _STACK_ORCHESTRATOR is None:
+        if HOST_CONTROL_PROVIDER == "mos":
+            from planet_express.execution.mos_stack_orchestrator import MosStackOrchestrator
+            _STACK_ORCHESTRATOR = MosStackOrchestrator(
+                api_base_url=os.environ.get("MOS_API_BASE", "http://localhost:998/api/v1"),
+                auth_token=os.environ.get("MOS_API_TOKEN")
+            )
+        else:
+            from planet_express.execution.systemd_stack_orchestrator import SystemdStackOrchestrator
+            _STACK_ORCHESTRATOR = SystemdStackOrchestrator(STACKS_ROOT)
+    return _STACK_ORCHESTRATOR
 
 # ── Credential helpers ────────────────────────────────────────────────────────
 def telegram_credentials() -> tuple[str, str]:
