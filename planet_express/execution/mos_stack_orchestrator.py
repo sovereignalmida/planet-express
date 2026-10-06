@@ -71,15 +71,24 @@ class StackOrchestrationProvider(Protocol):
 class MosStackOrchestrator:
     """Docker Compose management via MOS REST API."""
 
-    def __init__(self, api_base_url: str = "http://localhost:998/api/v1", auth_token: str = None):
+    def __init__(self, api_base_url: str = "http://localhost:998/api/v1", auth_token: str = None, stacks_root: Path = None):
         """Initialize MOS orchestrator.
 
         Args:
             api_base_url: MOS API base URL (default: local MOS)
             auth_token: MOS authentication token (optional, uses session auth if not provided)
+            stacks_root: Root directory for stacks on MOS host (for local validation).
+                        Defaults to config.STACKS_ROOT for consistency with PE.
         """
         self.api_base_url = api_base_url
         self.auth_token = auth_token
+
+        if stacks_root is None:
+            # Import here to avoid circular dependency
+            import config
+            stacks_root = config.STACKS_ROOT
+
+        self.stacks_root = Path(stacks_root)
         self.client = httpx.Client(timeout=30.0, follow_redirects=True)
 
     def _headers(self) -> dict:
