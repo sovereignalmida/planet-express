@@ -43,8 +43,15 @@ start() {
 
     cd "$DAEMON_DIR"
 
+    # Source environment variables (Telegram credentials, etc.) and export them
+    if [ -r /etc/planetexpress.env ]; then
+        set -a  # Mark new variables as exported
+        . /etc/planetexpress.env
+        set +a  # Turn off auto-export
+    fi
+
     # Start PE in background with nohup to survive logout
-    nohup python3 -m planet_express.main > "$LOGFILE" 2>&1 &
+    nohup python3 casa_farnsworth.py > "$LOGFILE" 2>&1 &
     PID=$!
     echo "$PID" > "$PIDFILE"
 
