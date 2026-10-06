@@ -71,6 +71,8 @@ jobs:
           python -m pytest tests/ -v -k "provider or host_control" --tb=short
 
       - name: Validate both providers instantiate
+        env:
+          CASA_CONFIG: config.example.yaml
         run: |
           python3 << 'PYEOF'
           import sys
@@ -103,6 +105,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Verify sudo allowlist enforcement
+        env:
+          CASA_CONFIG: config.example.yaml
         run: |
           python3 << 'PYEOF'
           import sys
