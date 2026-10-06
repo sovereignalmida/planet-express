@@ -32,8 +32,13 @@ def state(tmp_path, monkeypatch):
             assert command == ["git", "describe", "--tags", "--always", "--dirty"]
             assert kwargs["cwd"] == snapshot.REPO
             return SimpleNamespace(returncode=0, stdout="v2-test-dirty\n")
-        assert command == ["systemctl", "show", "--property=ActiveState", "--value", "casa-planetexpress"]
-        return SimpleNamespace(returncode=0, stdout="inactive\n")
+        # Handle both systemd and sysvinit service check commands
+        if command[0] == "systemctl":
+            assert command == ["systemctl", "show", "--property=ActiveState", "--value", "casa-planetexpress"]
+            return SimpleNamespace(returncode=0, stdout="inactive\n")
+        # For fallback test, handle service command too
+        assert command == ["service", "casa-planetexpress", "status"]
+        return SimpleNamespace(returncode=3, stdout="")  # 3 = service stopped on sysvinit
 
     monkeypatch.setattr(snapshot.subprocess, "run", run)
     return data, config
@@ -150,9 +155,16 @@ def test_restore_success(state, capsys, monkeypatch, missing_systemctl):
 
     monkeypatch.setattr(snapshot, "create", pre_restore)
     if missing_systemctl:
-        def missing(*args, **kwargs):
-            raise FileNotFoundError("systemctl")
-        monkeypatch.setattr(snapshot.subprocess, "run", missing)
+        def missing_systemctl_fallback(command, **kwargs):
+            if command[0] == "git":
+                return SimpleNamespace(returncode=0, stdout="v2-test-dirty\n")
+            # Simulate systemctl not available, fallback to service (sysvinit/MOS)
+            if command[0] == "systemctl":
+                raise FileNotFoundError("systemctl")
+            if command[0] == "service":
+                return SimpleNamespace(returncode=3, stdout="")  # service stopped
+            raise AssertionError(f"Unexpected command: {command}")
+        monkeypatch.setattr(snapshot.subprocess, "run", missing_systemctl_fallback)
     assert snapshot.main(["restore", directory.name, "--yes", "--no-service-check"]) == 0
     assert "Restored" in capsys.readouterr().out
     assert db.read_bytes() == (directory / db.name).read_bytes()
@@ -238,9 +250,40 @@ def test_restore_requires_a_confirmed_stopped_core(state, capsys, monkeypatch, r
     database(data / "planetexpress.db")
     directory = create(capsys)
     config.write_bytes(b"current")
-    monkeypatch.setattr(snapshot.subprocess, "run", lambda *a, **k: result)
+    def mock_run(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="v2-test\n")
+        # For systemctl commands, return the parameterized result
+        if command[0] == "systemctl":
+            return result
+        raise AssertionError(f"Unexpected command: {command}")
+    monkeypatch.setattr(snapshot.subprocess, "run", mock_run)
     assert snapshot.main(["restore", str(directory), "--yes"]) == (1 if refused else 0)
     assert (config.read_bytes() == b"current") is refused
+
+
+def test_restore_on_sysvinit_detects_stopped_service(state, capsys, monkeypatch):
+    """On sysvinit/MOS, restore() correctly detects stopped service via service command."""
+    data, config = state
+    database(data / "planetexpress.db")
+    directory = create(capsys)
+    config.write_bytes(b"current")
+
+    def mock_sysvinit(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="v2-test\n")
+        # Simulate no systemctl (sysvinit)
+        if command[0] == "systemctl":
+            raise FileNotFoundError("systemctl not found")
+        # Fallback to service command (sysvinit returns 3 for stopped)
+        if command == ["service", "casa-planetexpress", "status"]:
+            return SimpleNamespace(returncode=3, stdout="")
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(snapshot.subprocess, "run", mock_sysvinit)
+    # Should succeed because service is stopped (exit code 3)
+    assert snapshot.main(["restore", str(directory), "--yes"]) == 0
+    assert "Restored" in capsys.readouterr().out
 
 
 def test_transitional_state_is_refused_even_with_no_service_check(state, capsys, monkeypatch):
@@ -350,3 +393,51 @@ def test_printed_config_command_is_shell_safe(tmp_path, capsys, monkeypatch):
     assert shutil.which("cp")
     assert _REAL_RUN(argv[1:], check=False).returncode == 0
     assert config.read_bytes() == b"snapshot"
+
+
+def test_restore_on_sysvinit_detects_stopped_service(state, capsys, monkeypatch):
+    """On sysvinit/MOS, restore() correctly detects stopped service via service command."""
+    data, config = state
+    database(data / "planetexpress.db")
+    directory = create(capsys)
+    config.write_bytes(b"current")
+
+    def mock_sysvinit(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="v2-test\n")
+        # Simulate no systemctl (sysvinit)
+        if command[0] == "systemctl":
+            raise FileNotFoundError("systemctl not found")
+        # Fallback to service command (sysvinit returns 3 for stopped)
+        if command == ["service", "casa-planetexpress", "status"]:
+            return SimpleNamespace(returncode=3, stdout="")
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(snapshot.subprocess, "run", mock_sysvinit)
+    # Should succeed because service is stopped (exit code 3)
+    assert snapshot.main(["restore", str(directory), "--yes"]) == 0
+    assert "Restored" in capsys.readouterr().out
+
+
+def test_restore_on_sysvinit_refuses_active_service(state, capsys, monkeypatch):
+    """On sysvinit/MOS, restore() refuses if service is active."""
+    data, config = state
+    database(data / "planetexpress.db")
+    directory = create(capsys)
+    config.write_bytes(b"current")
+
+    def mock_sysvinit_active(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(returncode=0, stdout="v2-test\n")
+        # Simulate no systemctl (sysvinit)
+        if command[0] == "systemctl":
+            raise FileNotFoundError("systemctl not found")
+        # Fallback to service command (sysvinit returns 0 for running)
+        if command == ["service", "casa-planetexpress", "status"]:
+            return SimpleNamespace(returncode=0, stdout="casa-planetexpress is running\n")
+        raise AssertionError(f"Unexpected command: {command}")
+
+    monkeypatch.setattr(snapshot.subprocess, "run", mock_sysvinit_active)
+    # Should refuse because service is active
+    assert snapshot.main(["restore", str(directory), "--yes"]) == 1
+    assert "stop casa-planetexpress" in capsys.readouterr().err

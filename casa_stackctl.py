@@ -167,23 +167,41 @@ def _systemctl_show(unit: str, *props: str) -> dict:
 
 
 def check_backups() -> list[dict]:
-    """Last-run result + last/next trigger time for each Borg backup job, straight from
-    systemd (`systemctl show`) -- deliberately not journalctl, which needs a password on
-    this host (only casa-stacks.service actions and *.mount start/stop are NOPASSWD), and
-    not the Borg repo itself, so this never needs the backup passphrase in the agent's
-    hands. Result=success/failure comes from the service unit; trigger times come from the
-    timer unit, since the oneshot service unit resets between runs."""
+    """Last-run result + last/next trigger time for each Borg backup job.
+
+    On systemd: read directly from `systemctl show` service/timer units
+    (Result, ExecMainStatus, LastTriggerUSec, NextElapseUSecRealtime).
+
+    On sysvinit/MOS: check if backup service is running via provider,
+    return graceful fallback for timing since timer units don't exist."""
     results = []
+
+    # Check which provider we're using
+    provider = config.get_host_control()
+    is_systemd = provider.__class__.__name__ == "SystemdHostControlProvider"
+
     for label, (service, timer) in enabled_borg_jobs().items():
-        svc = _systemctl_show(service, "Result", "ExecMainStatus")
-        tmr = _systemctl_show(timer, "LastTriggerUSec", "NextElapseUSecRealtime")
-        results.append({
-            "label": label,
-            "result": svc.get("Result", "unknown"),
-            "exit_status": svc.get("ExecMainStatus", "?"),
-            "last_run_at": tmr.get("LastTriggerUSec", "unknown"),
-            "next_run_at": tmr.get("NextElapseUSecRealtime", "unknown"),
-        })
+        if is_systemd:
+            # systemd: read full properties from service/timer units
+            svc = _systemctl_show(service, "Result", "ExecMainStatus")
+            tmr = _systemctl_show(timer, "LastTriggerUSec", "NextElapseUSecRealtime")
+            results.append({
+                "label": label,
+                "result": svc.get("Result", "unknown"),
+                "exit_status": svc.get("ExecMainStatus", "?"),
+                "last_run_at": tmr.get("LastTriggerUSec", "unknown"),
+                "next_run_at": tmr.get("NextElapseUSecRealtime", "unknown"),
+            })
+        else:
+            # sysvinit/MOS: check service status, timer properties not available
+            is_running = provider.is_service_running(service)
+            results.append({
+                "label": label,
+                "result": "running" if is_running else "stopped",
+                "exit_status": "N/A (sysvinit)",
+                "last_run_at": "N/A (no timer unit)",
+                "next_run_at": "N/A (no timer unit)",
+            })
     return results
 
 

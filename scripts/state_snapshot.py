@@ -122,17 +122,34 @@ def list_snapshots():
 def restore(snapshot, *, yes=False, no_service_check=False, skip_config=False):
     if not yes:
         raise ValueError("Restore requires --yes; it discards changes made after the snapshot")
-    # Require POSITIVE proof the core is stopped. `is-active` exits non-zero for
+    # Require POSITIVE proof the core is stopped. On systemd, `is-active` exits non-zero for
     # "deactivating" and for a failed bus connection alike, and treating either as "stopped"
     # would replace a database the core may still be writing to (Codex review, T23).
+    # On sysvinit/MOS, use `service` command instead.
+    state = None
     try:
+        # Try systemd first
         result = subprocess.run(
             ["systemctl", "show", "--property=ActiveState", "--value", "casa-planetexpress"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=5,
         )
-        state = result.stdout.strip() if result.returncode == 0 else None
-    except FileNotFoundError:
-        state = None
+        if result.returncode == 0:
+            state = result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # systemctl not available or timed out, try sysvinit
+        try:
+            result = subprocess.run(
+                ["service", "casa-planetexpress", "status"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            # On sysvinit, exit code 0 = running, 3/non-zero = stopped
+            if result.returncode == 0:
+                state = "active"
+            else:
+                state = "inactive"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            state = None
+
     if state == "active" or state in ("activating", "deactivating", "reloading"):
         raise ValueError(f"Core service is {state}; stop casa-planetexpress first")
     if state not in _STOPPED_STATES and not no_service_check:
