@@ -72,6 +72,10 @@ def _run(cmd: str, timeout: int = 120) -> tuple[int, str, str]:
         return 1, "", str(e)
 
 
+def _compose() -> str:
+    return shlex.join(config.compose_argv())
+
+
 # ── Discovery ──────────────────────────────────────────────────────────────────
 def eligible_stacks() -> list[Path]:
     """Every stack config.py considers active (forbidden stacks already excluded),
@@ -81,7 +85,7 @@ def eligible_stacks() -> list[Path]:
 
 def stack_services(stack_dir: Path) -> list[str]:
     exit_code, out, err = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml config --services"
+        f"{_compose()} -f {stack_dir}/docker-compose.yml config --services"
     )
     if exit_code != 0:
         log.warning(f"Could not list services for {stack_dir.name}: {err}")
@@ -109,7 +113,7 @@ def service_image_id(stack_dir: Path, service: str) -> str | None:
     which is not necessarily the same as what the compose-referenced tag resolves to
     locally (see service_image_ref/local_image_id below)."""
     exit_code, out, _err = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml images -q {service}"
+        f"{_compose()} -f {stack_dir}/docker-compose.yml images -q {service}"
     )
     if exit_code != 0 or not out.strip():
         return None
@@ -120,7 +124,7 @@ def service_image_ref(stack_dir: Path, service: str) -> str | None:
     """The image reference (e.g. 'amir20/dozzle:latest') this service resolves to per
     its compose config — not what's running, what the compose file/env vars say."""
     exit_code, out, _err = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml config --images {service}"
+        f"{_compose()} -f {stack_dir}/docker-compose.yml config --images {service}"
     )
     if exit_code != 0 or not out.strip():
         return None
@@ -290,7 +294,7 @@ def _report_failed_update(stack_dir: Path, service: str, tg: TelegramClient | No
     """Today's rollback message and Amy escalation, unchanged in shape."""
     stack_name = stack_dir.name
     _, logs_out, _ = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml logs --tail 50 {service}")
+        f"{_compose()} -f {stack_dir}/docker-compose.yml logs --tail 50 {service}")
     action = {
         "rolled_back": "rolled back to the previous image successfully",
         "rollback_failed": "⚠️ rollback ALSO failed — needs manual attention now",
@@ -327,7 +331,7 @@ def canary_update_service(
     old_id = service_image_id(stack_dir, service)
     image_ref = service_image_ref(stack_dir, service)
     exit_code, _out, err = _run(
-        f"docker compose -f {stack_dir}/docker-compose.yml pull {service}",
+        f"{_compose()} -f {stack_dir}/docker-compose.yml pull {service}",
         timeout=PULL_TIMEOUT_SECONDS,
     )
     if exit_code != 0:
