@@ -318,7 +318,7 @@ def check_stack_completeness() -> list[dict]:
             })
 
         rc, services_out, err = _run(
-            ["docker", "compose", "-f", str(compose_file), "config", "--services"]
+            [*config.compose_argv(), "-f", str(compose_file), "config", "--services"]
         )
         expected_services = [s.strip() for s in services_out.splitlines() if s.strip()]
         if rc or not expected_services:
@@ -327,7 +327,7 @@ def check_stack_completeness() -> list[dict]:
             continue
 
         rc, ps_out, err = _run(
-            ["docker", "compose", "-f", str(compose_file), "ps", "-a", "--format", "json"]
+            [*config.compose_argv(), "-f", str(compose_file), "ps", "-a", "--format", "json"]
         )
         try:
             if rc:

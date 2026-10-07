@@ -319,7 +319,7 @@ class RunbookEngine:
             return self._refuse(f"inspect failed: {_clip(before.error)}")
         was_running = before.status == "running"
         dispatch({"running": was_running})
-        argv = ["docker", "compose", "-f", str(actions.compose_file(target.stack)), verb, target.service]
+        argv = [*config.compose_argv(), "-f", str(actions.compose_file(target.stack)), verb, target.service]
         rc, out, err = self.svc._run_argv(argv, timeout=actions.DOCKER_TIMEOUT_SECONDS)
         if rc != 0:
             return StepOutcome("failed", "unknown", f"{verb} command failed (exit {rc}): {_clip(err or out)}")

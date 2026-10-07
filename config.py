@@ -109,6 +109,12 @@ def active_stack_dirs() -> list[Path]:
     ]
 
 
+def compose_argv() -> list[str]:
+    """argv prefix for Docker Compose. MOS ships the standalone `docker-compose` binary and has no
+    `docker compose` CLI plugin; every other host uses the plugin."""
+    return ["docker-compose"] if HOST_CONTROL_PROVIDER == "mos" else ["docker", "compose"]
+
+
 # ── Host control provider (lazy instantiation to avoid circular imports) ─────
 _HOST_CONTROL = None  # Lazy cache
 _STACK_ORCHESTRATOR = None  # Lazy cache
@@ -130,27 +136,13 @@ def get_host_control():
 
 
 def get_stack_orchestrator():
-    """Get the stack orchestration provider (lazy-instantiated, cached).
-
-    Returns provider for Docker Compose stack management:
-    - SystemdStackOrchestrator for systemd systems (Ubuntu)
-    - MosStackOrchestrator for sysvinit systems (MOS)
-
-    Environment variables:
-    - MOS_API_BASE: MOS API base URL (default: http://localhost:998/api/v1)
-    - MOS_API_TOKEN: MOS authentication token (optional)
-    """
+    """Compose-file stack orchestrator (lazy, cached). Stacks are files under STACKS_ROOT on every
+    host, which is also what the engine, boot and monitoring read; only the compose argv differs
+    on MOS (see compose_argv)."""
     global _STACK_ORCHESTRATOR
     if _STACK_ORCHESTRATOR is None:
-        if HOST_CONTROL_PROVIDER == "mos":
-            from planet_express.execution.mos_stack_orchestrator import MosStackOrchestrator
-            _STACK_ORCHESTRATOR = MosStackOrchestrator(
-                api_base_url=os.environ.get("MOS_API_BASE", "http://localhost:998/api/v1"),
-                auth_token=os.environ.get("MOS_API_TOKEN")
-            )
-        else:
-            from planet_express.execution.systemd_stack_orchestrator import SystemdStackOrchestrator
-            _STACK_ORCHESTRATOR = SystemdStackOrchestrator(STACKS_ROOT)
+        from planet_express.execution.systemd_stack_orchestrator import SystemdStackOrchestrator
+        _STACK_ORCHESTRATOR = SystemdStackOrchestrator(STACKS_ROOT)
     return _STACK_ORCHESTRATOR
 
 # ── Credential helpers ────────────────────────────────────────────────────────

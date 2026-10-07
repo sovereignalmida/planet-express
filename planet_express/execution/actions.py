@@ -60,7 +60,7 @@ _COMPOSE_IDENTITIES_FORMAT = (
 def service_container(stack_dir: Path, service: str) -> str | None:
     """Name of the (first) container compose runs for `service`, or None."""
     rc, out, _err = bender.run_argv(
-        ["docker", "compose", "-f", f"{stack_dir}/docker-compose.yml", "ps", "-q", service],
+        [*config.compose_argv(), "-f", f"{stack_dir}/docker-compose.yml", "ps", "-q", service],
         timeout=DOCKER_TIMEOUT_SECONDS,
     )
     if rc != 0 or not out.strip():
@@ -299,7 +299,7 @@ def resolve_target(
     services = entry[0] if entry is not None and clock() - entry[1] <= COMPOSE_SERVICES_TTL_SECONDS else None
     if services is None:
         rc, out, _err = bender.run_argv(
-            ["docker", "compose", "-f", str(compose), "config", "--services"], timeout=remaining()
+            [*config.compose_argv(), "-f", str(compose), "config", "--services"], timeout=remaining()
         )
         if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
             raise TargetTimeout("host slow, retry")
@@ -318,7 +318,7 @@ def resolve_target(
         raise TargetError(f"stack {stack!r} has no service {service!r}")
 
     rc, out, _err = bender.run_argv(
-        ["docker", "compose", "-f", str(compose), "ps", "-a", "-q", service], timeout=remaining()
+        [*config.compose_argv(), "-f", str(compose), "ps", "-a", "-q", service], timeout=remaining()
     )
     if rc == bender.RUN_ARGV_TIMEOUT_EXIT:
         raise TargetTimeout("host slow, retry")
@@ -454,14 +454,14 @@ def stack_argv(action: str, stack: str) -> list[str]:
         verb = ["down"]
     else:
         raise ValueError(f"not a compose stack action: {action}")
-    return ["docker", "compose", "-f", str(compose_file(stack)), *verb]
+    return [*config.compose_argv(), "-f", str(compose_file(stack)), *verb]
 
 
 def stack_container_ids(stack: str, *, timeout=DOCKER_TIMEOUT_SECONDS) -> tuple[int, list[str]]:
     """The project's containers by NAME (inspectable like IDs, and readable in the failure reasons
     that reach Telegram and the dashboard; 64-hex IDs were not — VM rehearsal, T37)."""
     rc, out, _err = bender.run_argv(
-        ["docker", "compose", "-f", str(compose_file(stack)), "ps", "-a", "--format", "{{.Name}}"],
+        [*config.compose_argv(), "-f", str(compose_file(stack)), "ps", "-a", "--format", "{{.Name}}"],
         timeout=timeout,
     )
     return rc, [line.strip() for line in out.splitlines() if line.strip()]
@@ -539,7 +539,7 @@ def verify_stack_down(
 
 
 def restart_argv(target: Target) -> list[str]:
-    return ["docker", "compose", "-f", str(compose_file(target.stack)), "restart", target.service]
+    return [*config.compose_argv(), "-f", str(compose_file(target.stack)), "restart", target.service]
 
 
 # ── canary image references (slice 5b-3) ────────────────────────────────────────
@@ -551,7 +551,7 @@ def normalize_image_id(image_id: str) -> str:
 
 def compose_images_argv(stack: str, service: str) -> list[str]:
     """The image id the RUNNING container for this service uses — the rollback target."""
-    return ["docker", "compose", "-f", str(compose_file(stack)), "images", "-q", service]
+    return [*config.compose_argv(), "-f", str(compose_file(stack)), "images", "-q", service]
 
 
 def compose_config_images_argv(stack: str, service: str) -> list[str]:
@@ -565,13 +565,13 @@ def compose_config_images_argv(stack: str, service: str) -> list[str]:
     `docker tag <gluetun's image> traefik:v3.6.25`, and Traefik spent four hours exiting with
     "command is unknown: --configFile". Use this only to CHECK a reference, never to pick one.
     """
-    return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--images", service]
+    return [*config.compose_argv(), "-f", str(compose_file(stack)), "config", "--images", service]
 
 
 def compose_config_json_argv(stack: str, service: str) -> list[str]:
     """Compose's resolved config as JSON. Keyed by service, so one service's image can be read
     exactly -- which `--images` cannot do, because it flattens the related set into lines."""
-    return ["docker", "compose", "-f", str(compose_file(stack)), "config", "--format", "json",
+    return [*config.compose_argv(), "-f", str(compose_file(stack)), "config", "--format", "json",
             service]
 
 
@@ -621,13 +621,13 @@ def is_canary_reference(reference: str | None) -> bool:
 
 
 def compose_pull_argv(stack: str, service: str) -> list[str]:
-    return ["docker", "compose", "-f", str(compose_file(stack)), "pull", service]
+    return [*config.compose_argv(), "-f", str(compose_file(stack)), "pull", service]
 
 
 def compose_up_pinned_argv(stack: str, service: str) -> list[str]:
     """Recreate one service from the image the reference already points to locally — never a fresh
     pull, so phase 2 deploys exactly the image phase 1 resolved (design §4.5)."""
-    return ["docker", "compose", "-f", str(compose_file(stack)), "up", "-d", "--pull", "never",
+    return [*config.compose_argv(), "-f", str(compose_file(stack)), "up", "-d", "--pull", "never",
             service]
 
 

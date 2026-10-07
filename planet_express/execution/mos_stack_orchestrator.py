@@ -162,13 +162,7 @@ class MosStackOrchestrator:
             data = response.json()
 
             # MOS returns stack state; "up" = running
-            state = data.get("state", "unknown")
-            if state in ("up", "running"):
-                return "running"
-            elif state in ("down", "stopped"):
-                return "stopped"
-            else:
-                return "stopped"
+            return "running" if data.get("running") else "stopped"
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 return "not-found"
@@ -214,7 +208,7 @@ class MosStackOrchestrator:
             # MOS API expects the YAML as a field in the request
             payload = {
                 "name": name,
-                "compose": compose_yaml,
+                "yaml": compose_yaml,
                 "description": f"Stack created by Planet Express"
             }
 

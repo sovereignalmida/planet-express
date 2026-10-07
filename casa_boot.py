@@ -70,7 +70,7 @@ def _timeout(limit: int, deadline: float | None) -> float | None:
 
 def _run_compose(compose_files: list[str], args: list[str], deadline: float | None = None) -> int:
     """Run one bounded Compose command and return its exit status."""
-    argv = ["docker", "compose"]
+    argv = list(config.compose_argv())
     for compose_file in compose_files:
         argv.extend(["-f", compose_file])
     argv.extend(args)
@@ -177,7 +177,7 @@ def _declared_services(compose_files: set[str], deadline: float | None = None) -
     declared: set[str] = set()
     for path in sorted(compose_files):
         output = _docker_query(
-            ["docker", "compose", "-f", path, "config", "--services"], deadline
+            [*config.compose_argv(), "-f", path, "config", "--services"], deadline
         )
         if output is None:
             return None

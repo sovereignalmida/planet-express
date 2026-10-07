@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import casa_bender as bender
+import config
 from planet_express.execution import actions
 
 
@@ -53,7 +54,7 @@ class Binder:
 
     def services(self, stack: str, *, timeout: float) -> list[str]:
         out = self._checked(
-            ["docker", "compose", "-f", str(actions.compose_file(stack)), "config", "--services"],
+            [*config.compose_argv(), "-f", str(actions.compose_file(stack)), "config", "--services"],
             timeout, f"the services of {stack}",
         )
         services = sorted({line.strip() for line in out.splitlines() if line.strip()})
@@ -97,7 +98,7 @@ class Binder:
         """`stack.up`'s outputs: exactly one container per approved service (design §4.2 staged
         bindings); a missing or duplicated service fails rather than guessing."""
         out = self._checked(
-            ["docker", "compose", "-f", str(actions.compose_file(stack)), "ps", "-a",
+            [*config.compose_argv(), "-f", str(actions.compose_file(stack)), "ps", "-a",
              "--format", "{{.Service}}\t{{.Name}}\t{{.ID}}"],
             timeout, f"the containers of {stack}",
         )

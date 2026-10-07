@@ -75,7 +75,9 @@ class SystemdStackOrchestrator:
         if not compose_file.exists():
             return False, f"Compose file not found: {compose_file}"
 
-        cmd = ["docker", "compose", "-f", str(compose_file), *args]
+        import config
+
+        cmd = [*config.compose_argv(), "-f", str(compose_file), *args]
 
         try:
             result = subprocess.run(
