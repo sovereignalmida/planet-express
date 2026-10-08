@@ -19,7 +19,7 @@ LOGDIR=/var/log/casa-planetexpress
 LOGFILE=$LOGDIR/$NAME.log
 DAEMON_DIR="/root/planet-express"
 PYTHON="python3"
-GUNICORN="gunicorn"
+GUNICORN=""
 ENV_FILE="/etc/planetexpress-dashboard.env"
 WEB_USER="planetexpress-web"
 CASA_DASHBOARD_PORT=8420
@@ -28,6 +28,14 @@ if [ -r /etc/default/$NAME ]; then
     set -a
     . /etc/default/$NAME
     set +a
+fi
+
+# Default to the gunicorn next to the configured interpreter (a venv), else whatever is on PATH.
+if [ -z "$GUNICORN" ]; then
+    case "$PYTHON" in
+        /*) GUNICORN="$(dirname "$PYTHON")/gunicorn" ;;
+        *) GUNICORN="gunicorn" ;;
+    esac
 fi
 
 . /lib/lsb/init-functions
