@@ -109,13 +109,22 @@ def test_a_held_window_blocks_the_prune_loudly_and_names_the_way_out(ready, stat
     assert "SETTLE" in message
 
 
-def test_the_same_held_window_is_announced_once_a_day_not_every_scan(ready, state, tmp_path):
+_PCT = {"v": 91}
+
+
+def test_the_same_held_window_is_announced_once_a_day_not_every_scan(ready, state, tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.setattr(fw, "_root_disk_alert",
+                        lambda snap: {"used_pct": _PCT["v"], "alert": "high"})
     from planet_express.core.store import INDEFINITE_EXPIRY
     store = _store(tmp_path)
     _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
     commands, notifier = Commands(store), FakeNotifier()
     for _ in range(3):
         fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert len(notifier.notifications) == 1
+    monkeypatch.setitem(_PCT, "v", 95)   # disk drifts; still the same block, still one alert
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
     assert len(notifier.notifications) == 1
     fw._blocked_prune_alerted["at"] -= fw.BLOCKED_PRUNE_REALERT_SECONDS + 1
     fw.maybe_run_safe_prune({}, notifier, state, commands)

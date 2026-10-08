@@ -1073,27 +1073,30 @@ BLOCKED_PRUNE_REALERT_SECONDS = 24 * 3600
 _blocked_prune_alerted: dict = {"text": None, "at": 0.0}
 
 
-def _should_alert_blocked_prune(message: str) -> bool:
+def _should_alert_blocked_prune(key: str) -> bool:
     now = time.time()
     last = _blocked_prune_alerted
-    if last["text"] == message and now - last["at"] < BLOCKED_PRUNE_REALERT_SECONDS:
+    if last["text"] == key and now - last["at"] < BLOCKED_PRUNE_REALERT_SECONDS:
         return False
-    last["text"], last["at"] = message, now
+    last["text"], last["at"] = key, now
     return True
 
 
-def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> str | None:
-    """Why a prune the disk needs is not happening, and the way out -- or None when the block is
+def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[str, str] | None:
+    """(throttle key, text), or None. The key names the block -- which windows, or an unreadable
+    table -- and not the disk percentage in the text, which drifts and must not defeat the
+    throttle. Why a prune the disk needs is not happening, and the way out -- or None when the block is
     only a canary inside its ordinary grace period, which closes by itself in minutes and is not
     news. An unreadable table is news: the block is real and nobody can see why."""
     try:
         windows = commands._store.open_rollback_candidates(time.time())
     except Exception:  # noqa: BLE001 -- the block itself is the news; the detail is a bonus
         log.exception("Could not read the rollback windows to explain a blocked prune")
-        return (f"🧹 *Safe prune is blocked*\n"
-                f"Root disk is at {disk_alert['used_pct']}% and the rollback-window table could not "
-                f"be read, so no image is pruned. Check the Planet Express core database; the "
-                f"dashboard cannot list or settle windows while it is unreadable.")
+        return "unreadable", (
+            f"🧹 *Safe prune is blocked*\n"
+            f"Root disk is at {disk_alert['used_pct']}% and the rollback-window table could not "
+            f"be read, so no image is pruned. Check the Planet Express core database; the "
+            f"dashboard cannot list or settle windows while it is unreadable.")
     if all(row["expires_at"] < INDEFINITE_EXPIRY for row in windows):
         # Only canaries inside their ordinary grace period -- or none at all, because the window
         # that blocked the gate closed between its read and this one. Neither is news.
@@ -1109,7 +1112,8 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> str | 
                      f"({row['execution_id']}{', held until a human settles it' if held else ''})")
     lines.append("A held window never expires: check the service is healthy, then SETTLE it "
                  "on the dashboard (it asks for your passphrase again).")
-    return "\n".join(lines)
+    key = ",".join(sorted(f"{row['execution_id']}:{row['step_n']}" for row in windows))
+    return key, "\n".join(lines)
 
 
 def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState",
@@ -1138,9 +1142,9 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         log.warning("Safe-prune skipped: an update rollback window is still open")
         # Silent for eleven days on casaserver (2026-09-27 to 10-08): a held window blocks every
         # prune on the host and nothing said so. Disk pressure is real here, so say why.
-        message = _blocked_prune_message(disk_alert, commands)
-        if message is not None and _should_alert_blocked_prune(message):
-            notifier.notify(message)
+        blocked = _blocked_prune_message(disk_alert, commands)
+        if blocked is not None and _should_alert_blocked_prune(blocked[0]):
+            notifier.notify(blocked[1])
         return
 
     owner = "safe-prune"

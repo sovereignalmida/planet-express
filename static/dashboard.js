@@ -624,6 +624,11 @@
         var freshHull = fresh.getElementById("hull-diagnostics-panel");
         var currentHull = document.getElementById("hull-diagnostics-panel");
         if (freshHull && currentHull) currentHull.innerHTML = freshHull.innerHTML;
+        // A window can appear or become held after page load; this panel is the only way out of
+        // a held one, so it follows the refresh (bindInteractions rebinds its buttons).
+        var freshWindows = fresh.getElementById("rollback-candidates-panel");
+        var currentWindows = document.getElementById("rollback-candidates-panel");
+        if (freshWindows && currentWindows) currentWindows.innerHTML = freshWindows.innerHTML;
         applyHashTab();
         bindInteractions();
         return true;
