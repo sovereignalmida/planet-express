@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from planet_express.setup.handlers import HANDLERS, Context, Proceed, Refuse, Satisfied, StepFailure
-from planet_express.setup.host import HostError
+from planet_express.setup.host import HostError, RealHost
 from planet_express.setup.journal import Journal, make_redactor
 
 
@@ -43,12 +43,20 @@ class ApplyResult:
 
 
 class _Lock:
-    def __init__(self, path: Path):
-        self.path, self._fd = path, None
+    """An exclusive lock file in the (validated) journal root. Opened relative to the directory descriptor,
+    never following a symlink, so a pre-planted file cannot redirect it."""
+
+    def __init__(self, directory: Path, trusted_uids=frozenset({0})):
+        self.path, self._trusted, self._fd = Path(directory) / "apply.lock", trusted_uids, None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        host = RealHost(self._trusted)
+        directory = host.open_private_dir(str(self.path.parent), create=True)
+        try:
+            flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            self._fd = os.open("apply.lock", flags, 0o600, dir_fd=directory)
+        finally:
+            os.close(directory)
         try:
             fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -78,7 +86,7 @@ def _describe_drift(approved: dict, fresh: dict) -> str:
 
 def apply(plan, *, host, journal_root: str | Path, replan, handlers=HANDLERS,
           evidence_ids: tuple[int, int] = (0, 0), evidence_dir: str | None = None,
-          dry_run: bool = False) -> ApplyResult:
+          dry_run: bool = False, trusted_uids: frozenset[int] | set[int] = frozenset({0})) -> ApplyResult:
     """Run `plan`. `replan()` rebuilds a plan from fresh discovery and the same answers (the drift check).
 
     `evidence_dir` is where backups of replaced files go. It is on the host's filesystem (the host makes it),
@@ -92,21 +100,27 @@ def apply(plan, *, host, journal_root: str | Path, replan, handlers=HANDLERS,
         # Refused up front: a plan is never half-applied because the build cannot do its last step.
         return ApplyResult("refused", plan_id, reason=f"this build cannot apply: {', '.join(unsupported)}")
 
-    fresh = replan()
-    fresh_public = fresh.to_public()
-    if fresh_public["plan_id"] != plan_id:
-        return ApplyResult("refused", plan_id,
-                           reason=f"the host changed since the plan was reviewed ({_describe_drift(public, fresh_public)}); "
-                                  "review the new plan")
     if dry_run:
+        # Read-only: no lock, no journal. The drift check is still done so the checks describe the plan reviewed.
+        if replan().to_public()["plan_id"] != plan_id:
+            return ApplyResult("refused", plan_id, reason="the host changed since the plan was reviewed; review the new plan")
         return _dry_run(plan, host, handlers, plan_id)
 
     root = Path(journal_root)
     try:
-        with _Lock(root / "apply.lock"):
-            return _run(plan, public, host, root, handlers, evidence_ids, evidence_dir)
+        with _Lock(root, trusted_uids):
+            # Checked INSIDE the lock: two applies that start together must not both pass the check and then
+            # take turns, the second running a plan that the first has already made stale.
+            fresh_public = replan().to_public()
+            if fresh_public["plan_id"] != plan_id:
+                return ApplyResult("refused", plan_id,
+                                   reason=f"the host changed since the plan was reviewed ({_describe_drift(public, fresh_public)}); "
+                                          "review the new plan")
+            return _run(plan, public, host, root, handlers, evidence_ids, evidence_dir, trusted_uids)
     except Busy as exc:
         return ApplyResult("refused", plan_id, reason=str(exc))
+    except HostError as exc:
+        return ApplyResult("refused", plan_id, reason=f"the journal directory is not trustworthy: {exc}")
 
 
 def _dry_run(plan, host, handlers, plan_id) -> ApplyResult:
@@ -136,13 +150,13 @@ class _NoJournal:
         return {}
 
 
-def _run(plan, public, host, root, handlers, evidence_ids, evidence_dir) -> ApplyResult:
+def _run(plan, public, host, root, handlers, evidence_ids, evidence_dir, trusted_uids) -> ApplyResult:
     plan_id = public["plan_id"]
-    journal = Journal(root, plan_id, redact=make_redactor(plan.secrets))
+    journal = Journal(root, plan_id, redact=make_redactor(plan.secrets), trusted_uids=trusted_uids)
     journal.save_plan(public)
+    # Backups of replaced files go here. It is created only when a backup is first needed, so a run in which
+    # everything is already satisfied changes nothing on the host.
     evidence_dir = evidence_dir or f"{journal.directory}/evidence"
-    if host.lstat(evidence_dir) is None:
-        host.mkdir(evidence_dir, 0o700, *evidence_ids)
     journal.append("apply_started", steps=len(plan.steps))
 
     def stop(step_id, reason, effect="not_applied"):

@@ -182,9 +182,13 @@ class FileWrite:
         except HostError as exc:
             return Refuse(str(exc))
         if existing == wanted:
-            if p["has_secrets"] and current.perms & 0o077:
-                return Refuse(f"{path} already has the planned content but is readable by others "
-                              f"(mode {current.perms:04o}); fix its permissions by hand")
+            # The bytes are right; the file is only "as planned" if its mode and owner are too. A config the
+            # service user is meant to read, left root:root 0600, would otherwise be reported as success.
+            planned_mode = int(p["mode"], 8)
+            if current.perms != planned_mode or (current.uid, current.gid) != ids:
+                return Refuse(f"{path} has the planned content but is mode {current.perms:04o} owned by "
+                              f"{current.uid}:{current.gid}, and the plan says mode {p['mode']} owned by "
+                              f"{ids[0]}:{ids[1]} ({p['owner']}:{p['group']}); fix that by hand or remove the file")
             return Satisfied(f"{path} already has the planned content")
         if p["if_exists"] == "keep":
             return Satisfied(f"{path} exists and is kept, not overwritten")
@@ -208,6 +212,8 @@ class FileWrite:
         if current is not None:
             backup = f"{ctx.step.id}.bak"
             backup_path = f"{ctx.evidence_dir}/{backup}"
+            if ctx.host.lstat(ctx.evidence_dir) is None:
+                ctx.host.mkdir(ctx.evidence_dir, 0o700, *ctx.evidence_ids)
             if ctx.host.lstat(backup_path) is None:
                 ctx.host.copy_private(path, ctx.evidence_dir, backup, *ctx.evidence_ids)
             elif sha256(ctx.host.read_bytes(backup_path)) != previous:

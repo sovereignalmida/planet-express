@@ -178,6 +178,31 @@ class RealHost:
         finally:
             os.close(fd)
 
+    def open_private_dir(self, path: str, *, create: bool = False) -> int:
+        """An open descriptor for a directory this tool may trust with its own state, or `HostError`.
+
+        The whole real path must be trustworthy (every ancestor owned by a trusted uid, none writable by
+        group or other, the directory itself included, with no sticky exception) and it must be opened
+        without following a symlink at the end. `create` makes missing components (0700 for the last,
+        0755 for intermediate ones). The caller closes the descriptor and does everything relative to it."""
+        if create:
+            self._make_missing(path)
+        with self._parent_fd(path, mutating=True) as fd:
+            st = os.fstat(fd)
+            if st.st_mode & 0o022:
+                raise HostError(f"{path} is writable by group or other; refusing to keep state in it")
+            return os.dup(fd)
+
+    def _make_missing(self, path: str, private: bool = True) -> None:
+        """Create `path` and any missing parents. Only the final component is private (0700); a parent made on
+        the way is just a route to it (0755)."""
+        if os.path.lexists(path):
+            return
+        parent = os.path.dirname(path.rstrip("/")) or "/"
+        if not os.path.lexists(parent):
+            self._make_missing(parent, private=False)
+        self.mkdir(path, 0o700 if private else 0o755, os.geteuid(), os.getegid())
+
     # -- mutations ----------------------------------------------------------------------------------
     def mkdir(self, path: str, mode: int, uid: int, gid: int) -> Stat:
         parent, name = _split(path)

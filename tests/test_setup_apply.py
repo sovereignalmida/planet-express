@@ -106,7 +106,7 @@ def test_a_host_that_drifted_since_review_runs_nothing_and_says_what_changed(tmp
     result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: other)
     assert result.status == "refused" and "changed since the plan was reviewed" in result.reason
     assert "new step: dir.ensure /etc/extra" in result.reason
-    assert host.mutations == 0 and not (tmp_path / "j").exists()
+    assert host.mutations == 0 and not list((tmp_path / "j").glob("*/events.jsonl"))      # no step, no journal
 
 
 def test_an_unapplicable_or_unsupported_plan_is_refused_before_anything_runs(tmp_path):
@@ -122,7 +122,7 @@ def test_an_unapplicable_or_unsupported_plan_is_refused_before_anything_runs(tmp
 
 def test_a_second_apply_while_one_is_running_is_refused(tmp_path):
     plan, host = standard_plan(), fresh_host()
-    with _Lock(tmp_path / "j" / "apply.lock"):
+    with _Lock(tmp_path / "j"):
         result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
     assert result.status == "refused" and "another apply" in result.reason and host.mutations == 0
 
@@ -196,7 +196,7 @@ def test_a_secrets_file_with_the_right_content_but_loose_permissions_is_refused_
     plan = standard_plan()
     result = apply(make_plan(list(plan.steps)[2:], plan.secrets), host=host, journal_root=tmp_path / "j",
                    replan=lambda: make_plan(list(plan.steps)[2:], plan.secrets))
-    assert result.status == "stopped" and "readable by others" in result.reason
+    assert result.status == "stopped" and "mode 0644" in result.reason and "plan says mode 0600" in result.reason
 
 
 def test_a_missing_secret_value_refuses_rather_than_writing_the_placeholder(tmp_path):
@@ -441,3 +441,121 @@ def test_the_executor_and_handlers_work_on_a_real_filesystem(tmp_path):
     result = _apply(again, host=host, journal_root=tmp_path / "j3", replan=lambda: again,
                     evidence_ids=(os.getuid(), os.getgid()), evidence_dir=str(tmp_path / "ev" / "plan3"))
     assert result.status == "stopped" and secret_file.read_text() == "outside"
+
+
+# -- Codex review of A1 ----------------------------------------------------------------------------------------
+
+
+def test_the_drift_check_happens_while_the_lock_is_held_so_two_applies_cannot_both_pass_it(tmp_path):
+    """P1: two applies that start together must not both pass the check and then take turns."""
+    plan, host = standard_plan(), fresh_host()
+    inner_results = []
+
+    def replan_that_races():
+        # While the first apply is mid drift-check, a second apply starts. If the check ran before the lock,
+        # this second one would get the lock; it must be refused as busy instead.
+        inner_results.append(apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan))
+        return plan
+
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=replan_that_races).status == "done"
+    assert [r.status for r in inner_results] == ["refused"] and "another apply" in inner_results[0].reason
+
+
+def test_a_plan_that_goes_stale_while_waiting_for_the_lock_is_not_run(tmp_path):
+    plan, host = standard_plan(), fresh_host()
+    stale = make_plan(list(plan.steps) + [step(4, "dir.ensure", "/etc/changed-meanwhile", path="/etc/changed-meanwhile")],
+                      {"tok": SECRET})
+    calls = []
+
+    def replan():
+        calls.append(1)
+        return stale if len(calls) >= 1 else plan                       # the host changed before we got the lock
+    result = apply(plan, host=host, journal_root=tmp_path / "j", replan=replan)
+    assert result.status == "refused" and host.mutations == 0
+
+
+def _journal_root_attack(tmp_path, kind):
+    """Build a hostile journal location and return the path a victim would be induced to use."""
+    target = tmp_path / "attacker-chosen"
+    target.mkdir()
+    root = tmp_path / "j"
+    if kind == "symlinked-root-to-an-open-directory":
+        target.chmod(0o777)                          # somewhere other users can write: an attacker's drop point
+        root.symlink_to(target)
+    elif kind == "writable-root":
+        root.mkdir()
+        root.chmod(0o777)
+    elif kind == "symlinked-plan-dir":
+        root.mkdir(mode=0o700)
+        plan_id = standard_plan().to_public()["plan_id"]
+        (root / plan_id).symlink_to(target)
+    elif kind == "symlinked-events":
+        root.mkdir(mode=0o700)
+        plan_id = standard_plan().to_public()["plan_id"]
+        (root / plan_id).mkdir(mode=0o700)
+        (target / "loot").write_text("original")
+        (root / plan_id / "events.jsonl").symlink_to(target / "loot")
+    return root, target
+
+
+@pytest.mark.parametrize("kind", ["symlinked-root-to-an-open-directory", "writable-root", "symlinked-plan-dir",
+                                  "symlinked-events"])
+def test_a_hostile_journal_location_is_refused_and_nothing_is_written_through_it(tmp_path, kind):
+    """P1: the journal is written as root, so a pre-planted symlink or open directory must not redirect it."""
+    root, target = _journal_root_attack(tmp_path, kind)
+    before = {p.name: p.read_text() for p in target.rglob("*") if p.is_file()}
+    plan, host = standard_plan(), fresh_host()
+    result = apply(plan, host=host, journal_root=root, replan=lambda: plan)
+    assert result.status == "refused" and "not trustworthy" in result.reason, (kind, result)
+    assert host.mutations == 0                                          # not one step ran
+    assert {p.name: p.read_text() for p in target.rglob("*") if p.is_file()} == before
+
+
+def test_the_journal_and_lock_are_private_when_everything_is_in_order(tmp_path):
+    plan, host = standard_plan(), fresh_host()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    import stat as st
+    modes = {p.name: st.S_IMODE(p.stat().st_mode) for p in (tmp_path / "j").rglob("*") if p.is_file()}
+    assert modes["events.jsonl"] == 0o600 and modes["apply.lock"] == 0o600 and modes["plan.json"] == 0o600
+    assert st.S_IMODE((tmp_path / "j").stat().st_mode) == 0o700
+
+
+# -- metadata is part of "satisfied" ---------------------------------------------------------------------------
+
+
+def identical_file_plan(**over):
+    params = dict(path="/etc/pe.conf", content="same\n", mode="0640", owner="svc", group="svc", expect_absent=True)
+    params.update(over)
+    return make_plan([step(1, "file.write", "/etc/pe.conf", **params)])
+
+
+@pytest.mark.parametrize("mode, uid, gid, complaint", [
+    (0o600, 1000, 1000, "mode 0600"),            # right owner, mode too tight for the service group
+    (0o640, 0, 0, "owned by 0:0"),               # right mode, wrong owner: the service cannot read it
+    (0o666, 1000, 1000, "mode 0666"),            # looser than planned
+])
+def test_a_file_with_the_planned_bytes_but_the_wrong_owner_or_mode_is_not_called_satisfied(tmp_path, mode, uid, gid, complaint):
+    """P2: a config planned as service-readable must not 'succeed' while left root:root 0600."""
+    host = fresh_host()
+    host.add_file("/etc/pe.conf", b"same\n", mode=mode, uid=uid, gid=gid)
+    plan = identical_file_plan()
+    result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
+    assert result.status == "stopped" and complaint in result.reason and "planned" in result.reason
+    assert host.nodes["/etc/pe.conf"].mode == mode                      # reported, not silently changed
+
+
+def test_a_file_with_the_planned_bytes_and_the_planned_metadata_is_satisfied(tmp_path):
+    host = fresh_host()
+    host.add_file("/etc/pe.conf", b"same\n", mode=0o640, uid=1000, gid=1000)
+    plan = identical_file_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    assert host.mutations == 0
+
+
+def test_a_kept_file_with_different_bytes_is_still_kept_whatever_its_metadata(tmp_path):
+    """keep means we leave it; the metadata promise only applies to a file that is what we planned."""
+    host = fresh_host()
+    host.add_file("/etc/pe.conf", b"theirs\n", mode=0o600, uid=0, gid=0)
+    plan = identical_file_plan(if_exists="keep", expect_absent=False, expected_sha256=sha("theirs\n"))
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    assert host.nodes["/etc/pe.conf"].data == b"theirs\n"
