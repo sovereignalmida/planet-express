@@ -19,8 +19,18 @@ LOGFILE=$LOGDIR/$NAME.log
 DAEMON_USER="root"
 DAEMON_DIR="/root/planet-express"
 
-# Read config file if it exists
-[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+PYTHON="python3"
+ENV_FILE="/etc/planetexpress.env"
+WEB_USER="planetexpress-web"
+RPC_GROUP="planetexpress-rpc"
+
+# Read config file if it exists. Anything it assigns (PYTHON, DAEMON_DIR, ENV_FILE, CASA_*) is
+# exported to the daemon; on MOS point these at persistent storage, since / is RAM.
+if [ -r /etc/default/$NAME ]; then
+    set -a
+    . /etc/default/$NAME
+    set +a
+fi
 
 # Ensure log directory exists
 mkdir -p "$LOGDIR"
@@ -43,15 +53,17 @@ start() {
 
     cd "$DAEMON_DIR"
 
-    # Source environment variables (Telegram credentials, etc.) and export them
-    if [ -r /etc/planetexpress.env ]; then
-        set -a  # Mark new variables as exported
-        . /etc/planetexpress.env
-        set +a  # Turn off auto-export
-    fi
+    # The dashboard talks to core over a root-owned socket gated by this user and group. MOS keeps
+    # / in RAM, so they have to be recreated on every boot.
+    getent group "$RPC_GROUP" >/dev/null || groupadd -r "$RPC_GROUP"
+    getent group "$WEB_USER" >/dev/null || groupadd -r "$WEB_USER"
+    id "$WEB_USER" >/dev/null 2>&1 || \
+        useradd -r -g "$WEB_USER" -G "$RPC_GROUP" -s /bin/false -M "$WEB_USER"
+    mkdir -p /run/planetexpress
 
-    # Start PE in background with nohup to survive logout
-    nohup python3 casa_farnsworth.py > "$LOGFILE" 2>&1 &
+    # envfile_exec.py reads the env file the way systemd does; `. file` would expand `$`.
+    nohup "$PYTHON" scripts/envfile_exec.py "$ENV_FILE" -- "$PYTHON" casa_farnsworth.py \
+        > "$LOGFILE" 2>&1 < /dev/null &
     PID=$!
     echo "$PID" > "$PIDFILE"
 
