@@ -1463,7 +1463,8 @@ def test_index_shows_open_canary_windows_from_core(tmp_path, monkeypatch):
     assert login(client, now).status_code == 302
     # FakeRpc treats a list as a queue of responses, so the row list is queued as one response
     rpc.results["canary.candidates"] = [[
-        {"stack": "media", "service": "sonarr", "old_image_id": "a" * 64,
+        {"execution_id": "a" * 12, "step_n": 1,
+         "stack": "media", "service": "sonarr", "old_image_id": "a" * 64,
          "image_reference": "nginx:1.27", "recorded_at": "2026-09-23T12:00:00+01:00",
          "expires_at": "when a human closes it"},
     ]]
@@ -1472,6 +1473,25 @@ def test_index_shows_open_canary_windows_from_core(tmp_path, monkeypatch):
     assert ("canary.candidates", {}) in rpc.calls
     assert b"OPEN ROLLBACK CANDIDATES" in resp.data and b"sonarr" in resp.data
     assert b"when a human closes it" in resp.data
+    assert b'data-settle-window' in resp.data and b'data-execution="aaaaaaaaaaaa"' in resp.data
+
+
+def test_canary_settle_uses_the_session_operator_and_requires_csrf(chat_client):
+    client, rpc, _, _ = chat_client
+    rpc.results["canary.settle"] = {"outcome": "settled", "message": "ok"}
+    token = csrf(client)
+    rpc.calls.clear()
+
+    no_token = client.post("/api/canary/aaaaaaaaaaaa/1/settle")
+    assert no_token.status_code == 400 and not rpc.calls
+    bad = client.post("/api/canary/not-an-id/1/settle", data={"csrf_token": token})
+    assert bad.status_code == 400 and not rpc.calls
+
+    response = client.post("/api/canary/aaaaaaaaaaaa/1/settle",
+                           data={"csrf_token": token, "operator": "someone-else"})
+    assert response.status_code == 200 and response.get_json()["outcome"] == "settled"
+    assert rpc.calls[-1] == ("canary.settle", {"execution_id": "a" * 12, "step_n": 1,
+                                               "operator": "alice"})
 
 
 def test_index_still_renders_when_core_cannot_answer(tmp_path, monkeypatch):

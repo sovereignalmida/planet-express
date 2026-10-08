@@ -44,9 +44,36 @@
   // a refresh (or a real reload) should keep a dismissed plan hidden, but a *different*
   // plan ID (new pending plan) should always show up regardless of a past dismissal.
 
+  // Close a held canary rollback window. Confirmed first: it releases the update's old image to
+  // the next prune, which is the only thing that could restore the service.
+  function settleWindow(btn) {
+    var label = btn.dataset.label;
+    if (!window.confirm("Close the rollback window for " + label + "? Its old image becomes " +
+        "prunable, so confirm the service is healthy first.")) return;
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    btn.disabled = true;
+    fetch("/api/canary/" + encodeURIComponent(btn.dataset.execution) + "/" +
+          encodeURIComponent(btn.dataset.step) + "/settle", {
+      method: "POST", cache: "no-store",
+      body: new URLSearchParams({ csrf_token: meta ? meta.content : "" })
+    }).then(function (r) {
+      return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+    }).then(function (res) {
+      if (!res.ok) throw new Error(res.data.error || "host slow, retry");
+      window.alert(res.data.message || "Done.");
+      if (typeof refreshDashboard === "function") refreshDashboard();
+    }).catch(function (error) {
+      btn.disabled = false;
+      window.alert(error.message);
+    });
+  }
+
   // Everything in here binds to DOM nodes -- must re-run after every refresh swap
   // (fresh nodes from the fetched HTML have no listeners of their own yet).
   function bindInteractions() {
+    document.querySelectorAll("[data-settle-window]").forEach(function (btn) {
+      btn.addEventListener("click", function () { settleWindow(btn); });
+    });
     var scanBtn = document.getElementById("scan-btn");
     if (scanBtn && !scanBtn.disabled) {
       scanBtn.addEventListener("click", function () { startScan(scanBtn); });

@@ -614,6 +614,9 @@ def run_diagnostic(command: str) -> tuple[int, str, str]:
 SAFE_PRUNE_STEPS = [
     ("image prune", ["docker", "image", "prune", "-a", "-f"]),
     ("network prune", ["docker", "network", "prune", "-f"]),
+    # Unused build cache only (BuildKit never prunes a layer an in-flight build holds). 3.4G on
+    # casaserver, 2026-10-08, that nothing else ever reclaimed.
+    ("builder prune", ["docker", "builder", "prune", "-a", "-f"]),
 ]
 
 

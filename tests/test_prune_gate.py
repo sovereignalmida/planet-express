@@ -89,6 +89,37 @@ def test_an_open_rollback_window_stops_the_prune(ready, state, tmp_path):
     assert commands.runs == []
 
 
+def test_a_held_window_blocks_the_prune_loudly_and_names_the_way_out(ready, state, tmp_path):
+    # 2026-09-27 to 10-08, casaserver: a held window blocked every prune for eleven days and the
+    # only trace was an info line while the disk sat at 84%.
+    from planet_express.core.store import INDEFINITE_EXPIRY
+    store = _store(tmp_path)
+    execution_id = _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
+    commands, notifier = Commands(store), FakeNotifier()
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert commands.runs == []
+    [message] = notifier.notifications
+    assert "Safe prune is blocked" in message and "91%" in message
+    assert "media/sonarr" in message and execution_id in message and "held" in message
+    assert "SETTLE" in message
+
+
+def test_settling_a_held_window_lets_the_prune_run(ready, state, tmp_path):
+    from planet_express.core.store import INDEFINITE_EXPIRY
+    store = _store(tmp_path)
+    execution_id = _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
+    assert store.settle_rollback_candidate(execution_id, 1, "alice")
+    commands = Commands(store)
+    fw.maybe_run_safe_prune({}, FakeNotifier(), state, commands)
+    assert commands.runs == [("system", "prune:safe")]
+
+
+def test_an_unreadable_window_still_says_the_prune_is_blocked(ready, state):
+    notifier = FakeNotifier()
+    fw.maybe_run_safe_prune({}, notifier, state, Unreadable())
+    assert any("Safe prune is blocked" in m for m in notifier.notifications)
+
+
 def test_an_expired_window_no_longer_stops_the_prune(ready, state, tmp_path):
     store = _store(tmp_path)
     _open_candidate(store, expires_at=1.0)

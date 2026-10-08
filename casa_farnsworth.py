@@ -44,6 +44,7 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
+from planet_express.core.store import INDEFINITE_EXPIRY
 from planet_express.application import compose_plans, planner
 from planet_express.application.chat_service import (
     MAX_ANSWER_CHARS,
@@ -1067,6 +1068,26 @@ def _has_active_rollback_candidates(commands: CommandService) -> bool:
         return True
 
 
+def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> str:
+    """Why a prune the disk needs is not happening, and the way out. Best effort: the windows
+    are named when they can be read, and the message goes out regardless."""
+    try:
+        windows = commands._store.open_rollback_candidates(time.time())
+    except Exception:  # noqa: BLE001 -- the block itself is the news; the detail is a bonus
+        windows = []
+    lines = [
+        "🧹 *Safe prune is blocked*",
+        f"Root disk is at {disk_alert['used_pct']}% but an update rollback window is open, "
+        f"and no image is pruned while one is.",
+    ]
+    for row in windows[:5]:
+        held = row["expires_at"] >= INDEFINITE_EXPIRY
+        lines.append(f"• {TelegramClient.s(row['stack'])}/{TelegramClient.s(row['service'])} "
+                     f"({row['execution_id']}{', held until a human settles it' if held else ''})")
+    lines.append("Check the service is healthy, then SETTLE the window on the dashboard.")
+    return "\n".join(lines)
+
+
 def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState",
                          commands: CommandService | None = None) -> None:
     """Prune Docker images/networks when root disk pressure is real AND every container
@@ -1089,7 +1110,10 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         log.info("Safe-prune skipped: typed execution is unavailable (command service not started)")
         return
     if _has_active_rollback_candidates(commands):
-        log.info("Safe-prune skipped: an update rollback window is still open")
+        log.warning("Safe-prune skipped: an update rollback window is still open")
+        # Silent for eleven days on casaserver (2026-09-27 to 10-08): a held window blocks every
+        # prune on the host and nothing said so. Disk pressure is real here, so say why.
+        notifier.notify(_blocked_prune_message(disk_alert, commands))
         return
 
     owner = "safe-prune"

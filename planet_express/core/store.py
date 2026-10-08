@@ -1556,6 +1556,23 @@ class Store:
                 (self._clock(), execution_id, step_n),
             ).rowcount == 1
 
+    def settle_rollback_candidate(self, execution_id: str, step_n: int, operator: str) -> bool:
+        """A human closes an open window (held or not): the old image may now be pruned.
+
+        Closing and recording who did it are one write, so a window can never be released without
+        the audit event. False when the window does not exist or is already closed.
+        """
+        with self._write() as conn:
+            closed = conn.execute(
+                "UPDATE rollback_candidates SET closed_at=? "
+                "WHERE execution_id=? AND step_n=? AND closed_at IS NULL",
+                (self._clock(), execution_id, step_n),
+            ).rowcount == 1
+            if closed:
+                self._event(conn, "canary.window_settled", execution_id=execution_id,
+                            step_n=step_n, operator=operator)
+            return closed
+
     def open_rollback_candidates(self, now: float) -> list[dict]:
         """The windows still holding an image back from a prune, for the dashboard (slice 5b-3)."""
         with self._connect() as conn:

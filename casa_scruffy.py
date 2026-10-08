@@ -331,6 +331,10 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
                                "not_found": (404, "Execution not found")}.get(
                                    error.code, (503, "Execution unavailable; try again shortly"))
             return jsonify(error=message), status
+        if request.path.startswith("/api/canary/"):
+            status, message = {"bad_request": (400, "Invalid rollback window request")}.get(
+                error.code, (503, "Core unavailable; try again shortly"))
+            return jsonify(error=message), status
         if request.path.startswith("/api/incidents"):
             status, message = {"bad_request": (400, "Invalid incident request"),
                                "not_found": (404, "Incident not found")}.get(
@@ -838,6 +842,13 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     @app.post("/api/executions/<execution_id>/rollback")
     def execution_rollback(execution_id):
         return jsonify(core("execution.rollback", _execution_control(execution_id)))
+
+    @app.post("/api/canary/<execution_id>/<int:step_n>/settle")
+    def canary_settle(execution_id, step_n):
+        if re.fullmatch(r"[0-9a-f]{12}", execution_id) is None:
+            raise RpcError("Invalid execution ID", "bad_request")
+        return jsonify(core("canary.settle", {
+            "execution_id": execution_id, "step_n": step_n, "operator": g.operator}))
 
     def _execution_control(execution_id):
         if re.fullmatch(r"[0-9a-f]{12}", execution_id) is None:

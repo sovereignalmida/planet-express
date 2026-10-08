@@ -525,17 +525,23 @@
           {% if ctx.rollback_candidates %}
           <section class="panel">
             <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
-            <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
-              <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span>
+            <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr 0.8fr;">
+              <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span><span></span>
             </div>
             {% for r in ctx.rollback_candidates %}
-            <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr;">
+            <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr 0.8fr;">
               <span class="cell-mono cell-dim">{{ r.stack }}</span>
               <span class="cell-mono cell-service">{{ r.service }}</span>
               <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
               <span class="cell-mono cell-when">{{ r.expires_at }}</span>
+              <button type="button" class="pe-btn" data-settle-window
+                      data-execution="{{ r.execution_id }}" data-step="{{ r.step_n }}"
+                      data-label="{{ r.stack }}/{{ r.service }}">SETTLE</button>
             </div>
             {% endfor %}
+            <p class="cell-dim" style="margin-top: 12px;">While a window is open, safe-prune is
+              blocked on this host. Settling releases that update's old image to the next prune,
+              so check the service is healthy first.</p>
           </section>
           {% endif %}
         </div>
