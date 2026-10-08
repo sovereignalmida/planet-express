@@ -287,7 +287,8 @@ def _build(b: _Builder) -> None:
         # config, and the snapshot tool records an absent config without complaint.
         b.snapshot_id = b.add(
             "state.snapshot", "Snapshot the current state first", a.install_dir,
-            {"install_dir": a.install_dir, "run_user": a.run_as},
+            {"install_dir": a.install_dir, "run_user": a.run_as,
+             "env": {"CASA_CONFIG": p["config"], "CASA_DATA_DIR": p["data"]}},
             b.text("Takes a snapshot of the current config and state so this install can be rolled back. "
                    "It reads what is there and writes only the snapshot."))
 
@@ -315,7 +316,7 @@ def _build(b: _Builder) -> None:
 
     env_id = b.add(
         "python.env", "Create the Python environment", p["venv"],
-        {"install_dir": a.install_dir, "venv_dir": p["venv"], "bootstrap_pip": mos},
+        {"install_dir": a.install_dir, "venv_dir": p["venv"], "run_user": a.run_as, "bootstrap_pip": mos},
         b.text(f"Creates a virtualenv at {p['venv']} and installs requirements.txt into it."
                + (" Pip is downloaded into it first (MOS ships Python without ensurepip)." if mos else "")),
         depends_on=tuple(dir_ids[:2]))

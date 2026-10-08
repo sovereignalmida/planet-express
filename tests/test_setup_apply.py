@@ -15,7 +15,11 @@ from planet_express.setup.apply import Busy, _Lock
 from planet_express.setup.apply import apply as _apply
 from planet_express.setup.host import RunResult
 from planet_express.setup.journal import Journal
+from planet_express.setup.handlers import HANDLERS
 from planet_express.setup.plan import Plan, Step
+
+# A build that can only apply directories, to test what happens with a kind it cannot.
+DIRS_ONLY = {"dir.ensure": HANDLERS["dir.ensure"]}
 from planet_express.setup.steps import CATALOGUE
 
 # Backups go on the (fake) host's own filesystem, as they do in real use.
@@ -114,8 +118,10 @@ def test_an_unapplicable_or_unsupported_plan_is_refused_before_anything_runs(tmp
     blocked = Plan("fresh", (), (), (), ("Docker is not installed",), {})
     assert apply(blocked, host=host, journal_root=tmp_path / "j", replan=lambda: blocked).status == "refused"
     unsupported = make_plan([step(1, "dir.ensure", "/etc/pe", path="/etc/pe"),
-                             step(2, "python.env", "/opt/venv", install_dir="/opt/pe", venv_dir="/opt/venv")])
-    result = apply(unsupported, host=host, journal_root=tmp_path / "j", replan=lambda: unsupported)
+                             step(2, "python.env", "/opt/venv", install_dir="/opt/pe", venv_dir="/opt/venv",
+                                  run_user="svc")])
+    result = apply(unsupported, host=host, journal_root=tmp_path / "j", replan=lambda: unsupported,
+                   handlers=DIRS_ONLY)
     assert result.status == "refused" and "python.env" in result.reason
     assert host.mutations == 0                                           # not even the first, supported step ran
 
@@ -386,8 +392,9 @@ def test_reconcile_never_removes_a_file_that_merely_looks_like_ours_but_was_not_
 
 def test_dry_run_reports_steps_this_build_cannot_apply_instead_of_refusing(tmp_path):
     plan = make_plan([step(1, "dir.ensure", "/etc/pe", path="/etc/pe"),
-                      step(2, "python.env", "/opt/venv", install_dir="/opt/pe", venv_dir="/opt/venv")])
-    result = apply(plan, host=fresh_host(), journal_root=tmp_path / "j", replan=lambda: plan, dry_run=True)
+                      step(2, "python.env", "/opt/venv", install_dir="/opt/pe", venv_dir="/opt/venv", run_user="svc")])
+    result = apply(plan, host=fresh_host(), journal_root=tmp_path / "j", replan=lambda: plan, dry_run=True,
+                   handlers=DIRS_ONLY)
     assert result.status == "dry_run" and result.checks[1]["check"] == "not implemented"
 
 

@@ -321,8 +321,10 @@ class RealHost:
 
     # -- commands -----------------------------------------------------------------------------------
     def run(self, argv: list[str], *, timeout: float = 60, as_user: str | None = None,
-            env: dict[str, str] | None = None, cwd: str | None = None) -> RunResult:
-        """An argv, never a shell, with a minimal environment. `as_user` drops privileges first."""
+            env: dict[str, str] | None = None, cwd: str | None = None, umask: int | None = None) -> RunResult:
+        """An argv, never a shell, with a minimal environment. `as_user` drops privileges first; `umask` fixes
+        the mask the child creates files with (a virtualenv built under a root shell's 077 would be unreadable
+        to the services that must run from it)."""
         if not argv or not all(isinstance(a, str) for a in argv):
             raise HostError("a command is a non-empty list of strings")
         environment = dict(_MINIMAL_ENV)
@@ -338,7 +340,8 @@ class RealHost:
                 raise HostError(f"cannot run as {as_user}: not root")
         try:
             done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False,
-                                  env=environment, cwd=cwd, stdin=subprocess.DEVNULL)
+                                  env=environment, cwd=cwd, stdin=subprocess.DEVNULL,
+                                  preexec_fn=(lambda: os.umask(umask)) if umask is not None else None)
         except FileNotFoundError:
             return RunResult(127, "", f"{argv[0]}: not found")
         except subprocess.TimeoutExpired:

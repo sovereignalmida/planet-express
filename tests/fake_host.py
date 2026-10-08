@@ -33,6 +33,9 @@ class FakeHost:
         self.command_results: dict[tuple, RunResult] = {}
         self.run_as: list[str | None] = []
         self.envs: list[dict] = []
+        self.matchers: list = []
+        self.umasks: list = []
+        self.cwds: list = []
         self.mutations = 0
         self.nodes["/"] = _Node("dir", 0o755, 0, 0, self._next())
 
@@ -57,6 +60,10 @@ class FakeHost:
 
     def add_symlink(self, path, target):
         self.nodes[path] = _Node("symlink", 0o777, 0, 0, self._next(), target=target)
+
+    def on(self, match, result):
+        """Script every command `match(argv)` accepts: a RunResult, or a function (host, argv) -> RunResult."""
+        self.matchers.append((match, result))
 
     def tree(self) -> dict:
         """A comparable snapshot: path -> (kind, perms, uid, gid, data)."""
@@ -202,13 +209,20 @@ class FakeHost:
         del self.nodes[key]
 
     # -- commands ------------------------------------------------------------------------------------------
-    def run(self, argv, *, timeout=60, as_user=None, env=None, cwd=None):
+    def run(self, argv, *, timeout=60, as_user=None, env=None, cwd=None, umask=None):
         if not argv or not all(isinstance(a, str) for a in argv):
             raise HostError("a command is a non-empty list of strings")
         self.commands.append(list(argv))
         self.run_as.append(as_user)
         self.envs.append(dict(env or {}))
-        return self.command_results.get(tuple(argv), RunResult(0, ""))
+        self.umasks.append(umask)
+        self.cwds.append(cwd)
+        self.mutations += 1
+        result = next((r for match, r in self.matchers if match(list(argv))), None)
+        if result is None:
+            result = self.command_results.get(tuple(argv), RunResult(0, ""))
+        # A scripted command may be a function, so it can have side effects on the fake (create a venv, ...).
+        return result(self, list(argv)) if callable(result) else result
 
 
 class FaultyHost:

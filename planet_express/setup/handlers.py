@@ -315,4 +315,127 @@ class VerifySmoke:
     reconcile = verify
 
 
-HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke()}
+# ----------------------------------------------------------------------------------------------------------
+class StateSnapshot:
+    """The safety net before changing an install that already has state: `scripts/state_snapshot.py`, which is
+    standard-library only (so it needs no virtualenv) and is what deploy.sh runs."""
+
+    def check(self, ctx):
+        p = ctx.step.params
+        script = f"{p['install_dir']}/scripts/state_snapshot.py"
+        found = ctx.host.lstat(script)
+        if found is None or found.kind != "file":
+            return Refuse(f"{script} is missing, so no snapshot can be taken; the checkout is incomplete")
+        if ctx.host.lookup_user(p["run_user"]) is None:
+            return Refuse(f"no such user: {p['run_user']}")
+        return Proceed()
+
+    def act(self, ctx):
+        p = ctx.step.params
+        result = ctx.host.run(["python3", f"{p['install_dir']}/scripts/state_snapshot.py", "create", "--label", p["label"]],
+                              timeout=300, as_user=p["run_user"], env=dict(p["env"]), cwd=p["install_dir"])
+        if result.rc != 0:
+            tail = (result.err or result.out).strip().splitlines()[-2:]
+            raise StepFailure(f"the snapshot failed (exit {result.rc}): {' | '.join(tail)[:300]}", "unknown")
+        lines = [line for line in result.out.splitlines() if line.strip()]
+        path = lines[-1].strip() if lines else ""
+        data_dir = p["env"].get("CASA_DATA_DIR", "")
+        # The script prints the new snapshot's path. Trust it only if it is where snapshots live.
+        if not data_dir or not path.startswith(f"{data_dir}/snapshots/"):
+            raise StepFailure("the snapshot script reported a location outside the data directory", "unknown")
+        ctx.evidence(snapshot=path)
+        ctx.log(f"snapshot taken at {path}")
+
+    def verify(self, ctx) -> Effect:
+        taken = [e["snapshot"] for e in ctx.prior_evidence() if "snapshot" in e]
+        if not taken:
+            return "not_applied"
+        made = ctx.host.lstat(taken[-1])
+        manifest = ctx.host.lstat(f"{taken[-1]}/manifest.json")
+        return "applied" if made is not None and made.kind == "dir" and manifest is not None else "unknown"
+
+    # After a crash with no record of a snapshot, taking another is harmless: names are timestamped.
+    reconcile = verify
+
+
+# ----------------------------------------------------------------------------------------------------------
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"       # unpinned, as deploy.sh's own bootstrap is
+REQUIRED_MODULES = "import yaml, pydantic, flask"          # what the setup and dashboard code need at least
+_FETCH = "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])"
+
+
+class PythonEnv:
+    """A virtualenv for the install, built by the service user (as deploy.sh does) with a fixed umask, so the
+    dashboard's own account can read what it must run from. Setup installs; it does not upgrade, so an
+    environment that already imports its dependencies is left alone."""
+
+    def _python(self, p) -> str:
+        return f"{p['venv_dir']}/bin/python"
+
+    def _imports_ok(self, ctx) -> bool:
+        p = ctx.step.params
+        if ctx.host.lstat(self._python(p)) is None:
+            return False
+        return ctx.host.run([self._python(p), "-c", REQUIRED_MODULES], as_user=p["run_user"], timeout=60).rc == 0
+
+    def check(self, ctx):
+        p = ctx.step.params
+        requirements = f"{p['install_dir']}/{p['requirements']}"
+        found = ctx.host.lstat(requirements)
+        if found is None or found.kind != "file":
+            return Refuse(f"{requirements} is missing")
+        if ctx.host.lookup_user(p["run_user"]) is None:
+            return Refuse(f"no such user: {p['run_user']}")
+        probe = ctx.host.run(["python3", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
+                             as_user=p["run_user"], timeout=30)
+        if probe.rc == 127:
+            return Refuse("python3 was not found")
+        if probe.rc != 0:
+            return Refuse("python3 is older than 3.11, which this project needs")
+        if self._imports_ok(ctx):
+            return Satisfied(f"{p['venv_dir']} already has its dependencies")
+        return Proceed()
+
+    def act(self, ctx):
+        p = ctx.step.params
+        python, user, cwd = self._python(p), p["run_user"], p["install_dir"]
+        created = ctx.host.lstat(python) is None
+        if created:
+            ctx.evidence(phase="creating_venv", venv_dir=p["venv_dir"])
+            args = ["python3", "-m", "venv"] + (["--without-pip"] if p["bootstrap_pip"] else []) + [p["venv_dir"]]
+            made = ctx.host.run(args, as_user=user, cwd=cwd, timeout=300, umask=0o022)
+            if made.rc != 0:
+                raise StepFailure(f"creating the virtualenv failed: {self._tail(made)}", "unknown")
+            top = ctx.host.lstat(p["venv_dir"])
+            if top is not None:
+                ctx.evidence(created_venv=p["venv_dir"], **top.identity)
+            ctx.log(f"created the virtualenv {p['venv_dir']}")
+        if p["bootstrap_pip"] and ctx.host.run([python, "-m", "pip", "--version"], as_user=user, timeout=30).rc != 0:
+            script = f"{p['venv_dir']}/get-pip.py"
+            got = ctx.host.run(["python3", "-c", _FETCH, GET_PIP_URL, script], as_user=user, cwd=cwd, timeout=120)
+            if got.rc != 0:
+                raise StepFailure(f"fetching pip failed (does this host have internet access?): {self._tail(got)}", "unknown")
+            installed = ctx.host.run([python, script, "--quiet", "--disable-pip-version-check"],
+                                     as_user=user, cwd=cwd, timeout=300, umask=0o022)
+            ctx.host.unlink(script)
+            if installed.rc != 0:
+                raise StepFailure(f"installing pip failed: {self._tail(installed)}", "unknown")
+            ctx.log("bootstrapped pip into the virtualenv")
+        deps = ctx.host.run([python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "-r",
+                             f"{p['install_dir']}/{p['requirements']}"], as_user=user, cwd=cwd, timeout=900, umask=0o022)
+        if deps.rc != 0:
+            raise StepFailure(f"installing the requirements failed: {self._tail(deps)}", "unknown")
+        ctx.log("installed the requirements")
+
+    @staticmethod
+    def _tail(result) -> str:
+        return " | ".join((result.err or result.out).strip().splitlines()[-2:])[:300]
+
+    def verify(self, ctx) -> Effect:
+        return "applied" if self._imports_ok(ctx) else "not_applied"
+
+    reconcile = verify
+
+
+HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke(),
+            "state.snapshot": StateSnapshot(), "python.env": PythonEnv()}

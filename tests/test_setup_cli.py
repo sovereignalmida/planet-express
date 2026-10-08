@@ -57,8 +57,10 @@ def test_dry_run_prints_what_each_check_says_and_changes_nothing(wired, capsys, 
     code = cli.main(["apply", "--answers", answers, "--plan-id", plan_id, "--dry-run", "--journal-dir", str(journal)])
     out = json.loads(capsys.readouterr().out)
     assert code == 0 and out["status"] == "dry_run" and not journal.exists()
-    kinds = {c["kind"]: c["check"] for c in out["checks"]}
-    assert kinds["python.env"] == "not implemented"      # this build cannot apply every kind yet
+    from planet_express.setup.handlers import HANDLERS
+    for check in out["checks"]:
+        # A kind this build has no handler for is reported as such, never silently skipped or refused.
+        assert (check["check"] == "not implemented") == (check["kind"] not in HANDLERS), check
 
 
 def test_the_journal_lives_on_the_pool_on_mos_and_in_var_lib_elsewhere():

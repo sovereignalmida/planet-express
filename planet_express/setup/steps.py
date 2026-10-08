@@ -73,6 +73,7 @@ class DirEnsure(_Params):
 class PythonEnv(_Params):
     install_dir: AbsPath
     venv_dir: AbsPath
+    run_user: Name                  # the environment is built by the service user, as deploy.sh does
     requirements: str = "requirements.txt"
     # MOS ships Python without ensurepip, so pip is fetched into the venv from the network.
     bootstrap_pip: bool = False
@@ -162,6 +163,15 @@ class StateSnapshot(_Params):
     install_dir: AbsPath
     label: Name = "pre-setup"
     run_user: Name
+    # CASA_DATA_DIR and CASA_CONFIG: where the snapshot reads from and writes to.
+    env: dict[Name, AbsPath]
+
+    @model_validator(mode="after")
+    def _only_casa_paths(self):
+        bad = [k for k in self.env if not k.startswith("CASA_")]
+        if bad:
+            raise ValueError(f"only CASA_* variables may be set: {bad}")
+        return self
 
 
 class ServiceEnable(_Params):
