@@ -5,8 +5,11 @@ Everything the dashboard's visual layer needs, in one place. Built against `sove
 Start here, then read `system/README.md`.
 
 ## Status: what is built, what is not
-- **Shipped:** V1, V2.1, V2.2 (`v2.2.0`), V2.3 app icons (`v2.3.0`). Stack control is the repo's `v2.4.0` (`handoffs/V2.4-STACK-CONTROL.md`, renamed from V2.3-STACK-CONTROL).
-- **Not built yet:** `V3-COCKPIT-RESKIN.md`, `SERVICES-STACK-CARDS.md`, `BACKUPS-TAB-FIXES.md`.
+- **Shipped:** V1, V2.1, V2.2 (`v2.2.0`), V2.3 app icons (`v2.3.0`), V2.4 stack control (`v2.4.0`, `handoffs/V2.4-STACK-CONTROL.md`), V2.5 other hosts (`v2.5.0`/`v2.5.1`), and the cockpit re-skin, services stack cards and backups-tab fixes (`V3-COCKPIT-RESKIN.md`, `SERVICES-STACK-CARDS.md`, `BACKUPS-TAB-FIXES.md`).
+- **V3.1 Hosts in the dashboard shell** (`handoffs/V3.1-HOSTS.md`) is built and live on the `v3-production` branch. It supersedes `V2.5-OTHER-HOSTS.md`, which is kept for provenance.
+- **Crew avatars** (`assets/characters/futurama/avatar/`) are built: every portrait in the app uses them.
+- **Not built yet:** `V3.2-SETUP-WIZARD.md` (first-run browser setup; spec source `../installer-brief.md`).
+- **Branches:** v3 work lives on `v3-next` and is promoted to `v3-production`; `main` is still the v2.x line.
 - **The code is authoritative.** Three decisions in the V2.2/V2.3 handoffs were reverted for security and are now corrected in the handoffs themselves (PNG-only icons, slug-only `planetexpress.icon`, the four-part widget-key guard). Each cites the code that enforces it.
 - **The seal.** The first 582 lines of `static/cockpit.css` are sealed (sha256 `aa913168cde1ff5d`). When a design copy and the repo disagree, the design copy is changed to match the repo, never the reverse.
 
@@ -21,6 +24,11 @@ system/           the design system — this is what you implement against
   DATA-CONTRACT.md  context keys the templates need, and what's missing today
 
 handoffs/         point-in-time specs, newest first
+  V3.2-SETUP-WIZARD.md   first-run browser setup wizard: ten stages, four stories (not built)
+  V3.1-HOSTS.md          Hosts tab in the dashboard shell (built; supersedes V2.5-OTHER-HOSTS.md)
+  V2.5-OTHER-HOSTS.md    read-only fleet view (shipped as v2.5.0; superseded by V3.1)
+  V2.4-STACK-CONTROL.md  stack up/down from the dashboard (shipped as v2.4.0)
+  V2.3-APP-ICONS.md      app icons (shipped as v2.3.0)
   V2.2-LAUNCH-LINKS-AND-WIDGETS.md  ↗ links from Traefik routes + server-side app widgets; retires homepage
   V2.1-ABOVE-THE-FOLD.md   layout pass on every tab — control-panel Overview, Crew tab, 2-col layouts
   SERVICES-STACK-CARDS.md  Overview services panel → stack cards (88 containers / 15 stacks)
@@ -28,7 +36,7 @@ handoffs/         point-in-time specs, newest first
   V3-COCKPIT-RESKIN.md   the original cockpit re-skin spec
   V1-ORIGINAL.md         first-pass dashboard spec, kept for provenance
 
-assets/           logo + 8 crew portraits. Copy to static/
+assets/           logo, crew portraits, and the avatar/ set (256px head-and-shoulders). Copy to static/
 reference/        live design references — open in a browser
 ```
 
