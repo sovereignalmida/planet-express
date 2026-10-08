@@ -314,8 +314,9 @@ class _AtomicFile:
                   and (current.uid, current.gid) == ids)
             return "applied" if ok else "unknown"
         # Not what we wrote. Untouched if it is what we saw before, otherwise something else changed it.
-        before = next((e.get("previous_sha256") for e in reversed(ctx.prior_evidence()) if "previous_sha256" in e),
-                      p.get("expected_sha256"))
+        # Only this file's own evidence: a step that writes several files journals one record per file.
+        before = next((e.get("previous_sha256") for e in reversed(ctx.prior_evidence())
+                       if "previous_sha256" in e and e.get("path") == p["path"]), p.get("expected_sha256"))
         return "not_applied" if now == before else "unknown"
 
     def reconcile(self, ctx) -> Effect:
@@ -844,19 +845,47 @@ class ServiceInstall(_AtomicFile):
             have = sha256(ctx.host.read_bytes(d["path"]))
         except HostError as exc:
             return False, Refuse(str(exc))
-        if have == wanted or d["if_exists"] == "keep":
+        if have == wanted:
+            # Right bytes are not enough: both init scripts source this file as root, so a copy that someone
+            # else can write is a way to run their commands at service start.
+            if current.perms != 0o644 or (current.uid, current.gid) != (0, 0):
+                return False, Refuse(f"{d['path']} has the planned content but is mode {current.perms:04o} owned by "
+                                     f"{current.uid}:{current.gid}; it must be 0644 root:root. Fix that by hand or remove the file")
+            return False, None
+        if d["if_exists"] == "keep":
             return False, None
         reason = self._cas_violation(d, have, wanted)
         return (False, Refuse(reason)) if reason else (True, None)
 
+    def _systemd_state(self, ctx) -> tuple[str, bool] | None:
+        """(LoadState, NeedDaemonReload) as systemd reports them, or None if it cannot be asked."""
+        shown = ctx.host.run(["systemctl", "show", "-p", "LoadState", "-p", "NeedDaemonReload", ctx.step.params["name"]],
+                             timeout=30)
+        if shown.rc != 0:
+            return None
+        values = dict(line.split("=", 1) for line in shown.out.splitlines() if "=" in line)
+        return values.get("LoadState", ""), values.get("NeedDaemonReload", "no").strip() == "yes"
+
     def check(self, ctx):
         outcome = super().check(ctx)
-        if self._defaults(ctx) is None or isinstance(outcome, Refuse):
+        if isinstance(outcome, Refuse):
             return outcome
-        needed, refusal = self._defaults_todo(ctx)
-        if refusal:
-            return refusal
-        return Proceed() if needed and isinstance(outcome, Satisfied) else outcome
+        if self._defaults(ctx) is not None:
+            needed, refusal = self._defaults_todo(ctx)
+            if refusal:
+                return refusal
+            if needed and isinstance(outcome, Satisfied):
+                outcome = Proceed()
+        if ctx.step.params["flavour"] == "systemd" and isinstance(outcome, Satisfied):
+            # The unit is on disk; whether systemd has read it is a separate fact (a crash or a failed reload
+            # between the two must not be remembered as done).
+            state = self._systemd_state(ctx)
+            if state is not None and state[1]:
+                return Proceed()
+            if state is not None and state[0] != "loaded":
+                return Refuse(f"systemd cannot load {ctx.step.params['name']} (LoadState={state[0] or 'unknown'}); "
+                              "fix the unit before continuing")
+        return outcome
 
     def act(self, ctx):
         p = ctx.step.params
@@ -880,10 +909,20 @@ class ServiceInstall(_AtomicFile):
     def verify(self, ctx) -> Effect:
         outcome = super().verify(ctx)
         d = self._defaults(ctx)
+        if outcome == "applied" and ctx.step.params["flavour"] == "systemd":
+            state = self._systemd_state(ctx)
+            if state is None:
+                return "unknown"
+            if state[1] or state[0] != "loaded":
+                return "not_applied"
         if outcome == "applied" and d is not None:
             current = ctx.host.lstat(d["path"])
             if current is None:
                 return "not_applied"
+            if current.perms != 0o644 or (current.uid, current.gid) != (0, 0):
+                if d["if_exists"] == "replace" or sha256(ctx.host.read_bytes(d["path"])) == \
+                        sha256(ctx.step.params["defaults_content"].encode("utf-8")):
+                    return "unknown"
             if d["if_exists"] == "replace" and sha256(ctx.host.read_bytes(d["path"])) != \
                     sha256(ctx.step.params["defaults_content"].encode("utf-8")):
                 return "not_applied"
@@ -988,7 +1027,9 @@ class BootHookInstall:
         results = {f.reconcile(ctx) for f in self._files(ctx)}
         if results == {"applied"}:
             return "applied"
-        return "not_applied" if results == {"not_applied"} else "unknown"
+        # Some hooks done and some not is the ordinary shape of a crash between two renames. Re-running is safe:
+        # a finished hook is satisfied and a pending one is still guarded by its compare-and-swap.
+        return "not_applied" if results <= {"applied", "not_applied"} else "unknown"
 
 
 # ----------------------------------------------------------------------------------------------------------

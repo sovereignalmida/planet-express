@@ -26,9 +26,20 @@ def unit_plan(content="[Unit]\n", **over):
     return make_plan([step(1, "service.install", UNIT, **params)])
 
 
-def systemd_host():
+def systemd_host(load="loaded", need_reload=None):
+    """`need_reload` is a mutable {'yes': bool}: daemon-reload clears it, a unit written sets it."""
     host = fresh_host()
     host.add_dir("/etc/systemd/system")
+    host.reload_needed = need_reload if need_reload is not None else {"yes": False}
+
+    def show(h, argv):
+        return RunResult(0, f"LoadState={load}\nNeedDaemonReload={'yes' if h.reload_needed['yes'] else 'no'}\n")
+
+    def reload(h, argv):
+        h.reload_needed["yes"] = False
+        return RunResult(0, "")
+    host.on(lambda a: a[:2] == ["systemctl", "show"], show)
+    host.on(lambda a: a[:2] == ["systemctl", "daemon-reload"], reload)
     return host
 
 
@@ -274,3 +285,44 @@ def test_on_sysvinit_enable_is_only_a_start_and_boot_start_is_the_hooks_job(tmp_
     host.on(lambda a: a[:1] == [INIT], initd)
     assert run(enable_plan("sysvinit"), host, tmp_path, "a").status == "done" and not running["up"]
     assert run(enable_plan("sysvinit", start=True), host, tmp_path, "b").status == "done" and running["up"]
+
+
+# -- review findings (A2c) -----------------------------------------------------------------------------------
+def test_a_unit_on_disk_that_systemd_has_not_read_yet_is_reloaded_on_resume(tmp_path):
+    host = systemd_host()
+    host.add_file(UNIT, b"[Unit]\n")
+    host.reload_needed["yes"] = True                                   # as after a crash between rename and reload
+    plan = unit_plan(expect_absent=False, expected_sha256=sha("[Unit]\n"))
+    assert run(plan, host, tmp_path).status == "done"
+    assert ["systemctl", "daemon-reload"] in host.commands and host.reload_needed["yes"] is False
+
+
+def test_a_unit_systemd_cannot_load_is_not_reported_as_installed(tmp_path):
+    host = systemd_host(load="error")
+    result = run(unit_plan(), host, tmp_path)
+    assert result.status == "stopped" and "expected result" in result.reason
+
+
+def test_a_matching_defaults_file_with_the_wrong_owner_or_mode_is_refused(tmp_path):
+    host = init_host(defaults=b"PYTHON=/mnt/data/pe/venv/bin/python\n")
+    host.nodes["/etc/default/casa-dashboard"].mode = 0o666
+    result = run(init_plan(), host, tmp_path)
+    assert result.status == "stopped" and "must be 0644 root:root" in result.reason
+
+
+def test_a_crash_after_one_hook_and_before_the_next_resumes_instead_of_giving_up(tmp_path):
+    a, b = "#!/bin/sh\nA\n", "#!/bin/sh\nB\n"
+    plan = hook_plan(hooks={"post-start.sh": BODY, "shutdown.sh": BODY}, expect_absent=[],
+                     expected_sha256={"post-start.sh": sha(a), "shutdown.sh": sha(b)})
+
+    def build():
+        return hook_host(**{"post-start.sh": a, "shutdown.sh": b})
+    counter = FaultyHost(build())
+    assert run(plan, counter, tmp_path, "clean").status == "done"
+    for crash_at in range(1, counter.ops + 1):
+        for after in (False, True):
+            host, root = build(), f"m{crash_at}{int(after)}"
+            with pytest.raises(Crash):
+                run(plan, FaultyHost(host, crash_at=crash_at, after=after), tmp_path, root)
+            r = run(plan, host, tmp_path, root)
+            assert r.status == "done", (crash_at, after, r.reason)
