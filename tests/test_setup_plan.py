@@ -325,7 +325,7 @@ def test_the_mos_boot_hook_names_the_real_checkout_directory_not_an_assumed_one(
 
     def assignments(p):
         hook = by_kind(p, "boot_hook.install")[0].params["hooks"]["post-start.sh"]
-        return dict(re.findall(r"^(PE_HOME|CHECKOUT)=(\S+)", hook, re.MULTILINE))
+        return dict(re.findall(r"^\s*(PE_HOME|CHECKOUT)=(\S+)", hook, re.MULTILINE))
 
     assert assignments(plan(mos_report(), mos_answers())) == {"PE_HOME": "/mnt/data/pe", "CHECKOUT": "planet-express"}
     custom = plan(mos_report(), mos_answers(install_dir="/mnt/data/pe/custom"))
@@ -352,3 +352,101 @@ def test_a_kept_config_means_no_sudoers_is_derived_from_the_answers():
     assert any("kept config decides which units" in w for w in p.warnings)
     fresh = plan(systemd_report(), answers(tier="full", sudo_units=[{"unit": "plex.service"}]))
     assert "sudoers.install" in kinds(fresh)
+
+
+# -- A0: compare-and-swap expectations, the snapshot step, and a boot hook that merges ----------------
+
+
+def file_params(p, target):
+    return next(s for s in p.steps if s.target == target).params
+
+
+def test_a_new_file_is_expected_to_stay_absent_and_an_existing_one_to_keep_its_hash():
+    import hashlib
+    p = plan(systemd_report(), answers())
+    config = file_params(p, "/etc/planetexpress/config.yaml")
+    assert config["expect_absent"] is True and "expected_sha256" not in config
+    live = live_plan()
+    kept = file_params(live, "/home/pe/apps/pe/config.yaml")
+    assert kept["expected_sha256"] == hashlib.sha256(b"").hexdigest() and not kept.get("expect_absent")
+
+
+def test_a_replace_is_always_bound_to_what_planning_saw_on_mos():
+    for step in by_kind(plan(mos_report(), mos_answers()), "service.install"):
+        assert step.params["if_exists"] == "replace"
+        assert step.params.get("expect_absent") or step.params.get("expected_sha256")
+
+
+def test_a_file_that_exists_but_cannot_be_hashed_is_kept_not_replaced_with_a_warning():
+    report = mos_report(files={"/etc/init.d/casa-dashboard": "x"})
+    report["existing_pe"]["sha256"].pop("/etc/init.d/casa-dashboard")
+    p = plan(report, mos_answers())
+    dashboard = next(s for s in by_kind(p, "service.install") if s.params["name"] == "casa-dashboard")
+    assert dashboard.params["if_exists"] == "keep"
+    assert any("could not be read to compare" in w for w in p.warnings)
+
+
+def test_replacing_without_an_expectation_cannot_be_represented():
+    from planet_express.setup.steps import FileWrite, ServiceInstall, SudoersInstall
+    with pytest.raises(ValidationError, match="expectation"):
+        FileWrite(path="/etc/x", content="", if_exists="replace")
+    with pytest.raises(ValidationError, match="expectation"):
+        SudoersInstall(path="/etc/sudoers.d/x", content="", run_user="pe", if_exists="replace")
+    with pytest.raises(ValidationError, match="both absent and present"):
+        FileWrite(path="/etc/x", content="", expect_absent=True, expected_sha256="0" * 64)
+    assert FileWrite(path="/etc/x", content="", if_exists="replace", expect_absent=True).expect_absent
+
+
+def test_an_existing_install_is_snapshotted_first_and_everything_waits_for_it():
+    p = live_plan()
+    assert p.steps[0].kind == "state.snapshot" and p.steps[0].risk == "R1"
+    assert "pre-setup" not in json.dumps(p.steps[0].preview)             # a description, never a command
+    assert all(p.steps[0].id in s.depends_on for s in p.steps[1:])
+    assert "state.snapshot" not in kinds(plan(systemd_report(), answers()))
+
+
+def test_the_boot_hook_is_a_merged_block_that_never_exits():
+    hook = by_kind(plan(mos_report(), mos_answers()), "boot_hook.install")[0]
+    assert hook.params["marker"] == "planetexpress"
+    for name, body in hook.params["hooks"].items():
+        assert not any(line.strip().startswith("exit") for line in body.splitlines()), name
+        assert not body.startswith("#!"), "a shebang belongs to the file, not to a merged block"
+    assert all("marked block" in f["merge"] for f in hook.preview["files"])
+    from planet_express.setup.steps import BootHookInstall
+    with pytest.raises(ValidationError, match="must not exit"):
+        BootHookInstall(dest_dir="/boot/optional/scripts", hooks={"post-start.sh": "do_things\nexit 0\n"})
+
+
+def test_an_existing_hook_file_is_reported_and_its_hash_is_carried_for_the_merge():
+    existing = "#!/bin/sh\necho my own boot command\n"
+    report = mos_report(files={"/boot/optional/scripts/post-start.sh": existing})
+    hook = by_kind(plan(report, mos_answers()), "boot_hook.install")[0]
+    import hashlib
+    assert hook.params["expected_sha256"] == {"post-start.sh": hashlib.sha256(existing.encode()).hexdigest()}
+    by_path = {f["path"]: f for f in hook.preview["files"]}
+    assert by_path["/boot/optional/scripts/post-start.sh"]["already_present"] is True
+    assert by_path["/boot/optional/scripts/shutdown.sh"]["already_present"] is False
+
+
+def test_a_hook_file_that_is_exactly_an_old_copy_of_ours_is_recognised_and_anything_else_is_merged_into():
+    from planet_express.setup.plan import LEGACY_HOOK_SHA256
+    hook_path = "/boot/optional/scripts/post-start.sh"
+    mine = mos_report(files={hook_path: "x"})
+    mine["existing_pe"]["sha256"][hook_path] = LEGACY_HOOK_SHA256["post-start.sh"][1]     # byte-identical to a shipped copy
+    ours = by_kind(plan(mine, mos_answers()), "boot_hook.install")[0]
+    assert "older copy of ours" in {f["path"]: f for f in ours.preview["files"]}[hook_path]["merge"]
+    theirs = by_kind(plan(mos_report(files={hook_path: "echo operator\n"}), mos_answers()), "boot_hook.install")[0]
+    assert "marked block" in {f["path"]: f for f in theirs.preview["files"]}[hook_path]["merge"]
+    assert theirs.params["legacy_sha256"] == LEGACY_HOOK_SHA256
+
+
+def test_the_legacy_hashes_are_the_real_shipped_versions():
+    """Guard against a typo in the list: the last whole-file post-start.sh and shutdown.sh are in it."""
+    import hashlib, subprocess
+    from planet_express.setup.plan import LEGACY_HOOK_SHA256
+    for name, commit in (("post-start.sh", "19eb14d"), ("shutdown.sh", "f4e4f17")):
+        shown = subprocess.run(["git", "show", f"{commit}:scripts/mos-boot/{name}"], cwd=REPO,
+                               capture_output=True, check=False)
+        if shown.returncode != 0:
+            pytest.skip("git history not available")
+        assert hashlib.sha256(shown.stdout).hexdigest() in LEGACY_HOOK_SHA256[name]

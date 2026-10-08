@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 import platform
 import shutil
@@ -9,6 +10,9 @@ import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+
+MAX_HASHED_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,16 @@ class SystemEnv:
 
     def exists(self, path: str) -> bool:
         return os.path.exists(path)
+
+    def sha256(self, path: str) -> str | None:
+        """Hash of the file's exact bytes, or None if it cannot be read or is too large to be one of
+        ours. Text reads are lossy, so a compare-and-swap must never be built on them."""
+        try:
+            if os.path.getsize(path) > MAX_HASHED_BYTES:
+                return None
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            return None
 
     def is_dir(self, path: str) -> bool:
         return os.path.isdir(path)

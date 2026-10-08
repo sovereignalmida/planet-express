@@ -36,7 +36,8 @@ Codex-found fixes), `scripts/render_template.render` for units.
 | `access.provision` | dashboard user, RPC group, read-only ACLs | R2 | partly | yes |
 | `dashboard.init` | dashboard env file, session secret, first operator | R2 | yes | yes |
 | `service.install` | systemd unit, or sysvinit script plus `/etc/default` | R2 | yes | yes |
-| `boot_hook.install` | MOS `/boot/optional/scripts/*.sh` | R3 (the boot image) | yes | yes |
+| `boot_hook.install` | merge a marked block into MOS `/boot/optional/scripts/*.sh`; never replace | R3 (the boot image) | yes | yes |
+| `state.snapshot` | snapshot an existing install's state first | R1 | yes | no |
 | `service.enable` | enable, and optionally start | R2 | yes | yes |
 | `verify.smoke` | read-only check that Leela can see Docker | R0 | n/a | no |
 

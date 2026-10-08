@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 Risk = Literal["R0", "R1", "R2", "R3", "R4"]
 
@@ -36,12 +36,31 @@ def _name(value: str) -> str:
 
 
 AbsPath = Annotated[str, AfterValidator(_absolute_path)]
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 Name = Annotated[str, AfterValidator(_name)]
 Mode = Annotated[str, Field(pattern=r"^0[0-7]{3}$")]
 
 
 class _Params(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class _Expecting(_Params):
+    """A step that may overwrite a file records what it expects to find, so `apply` can refuse when the
+    file changed after the operator reviewed the plan (compare-and-swap, as `compose.write` does).
+    Replacing without an expectation is not representable."""
+
+    if_exists: Literal["keep", "replace"] = "keep"
+    expect_absent: bool = False
+    expected_sha256: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _expectation_is_coherent(self):
+        if self.expect_absent and self.expected_sha256:
+            raise ValueError("a file cannot be expected both absent and present")
+        if self.if_exists == "replace" and not (self.expect_absent or self.expected_sha256):
+            raise ValueError("replacing a file needs the expectation it will be compared against")
+        return self
 
 
 class DirEnsure(_Params):
@@ -59,22 +78,20 @@ class PythonEnv(_Params):
     bootstrap_pip: bool = False
 
 
-class FileWrite(_Params):
+class FileWrite(_Expecting):
     path: AbsPath
     content: str
     mode: Mode = "0644"
     owner: Name = "root"
     group: Name = "root"
-    if_exists: Literal["keep", "replace"] = "keep"
     # True when `content` carries `{{secret:NAME}}` placeholders: previews mask them, mode stays tight.
     has_secrets: bool = False
 
 
-class SudoersInstall(_Params):
+class SudoersInstall(_Expecting):
     path: AbsPath
     content: str
     run_user: Name
-    if_exists: Literal["keep", "replace"] = "keep"
 
 
 class AccessProvision(_Params):
@@ -99,22 +116,46 @@ class DashboardInit(_Params):
     totp_ref: Name | None = None
 
 
-class ServiceInstall(_Params):
+class ServiceInstall(_Expecting):
+    # An installed unit may carry local edits (a mount gate on casa-stacks, say), so the default keeps it.
+    # MOS regenerates its init scripts from the pool at every boot, so it replaces.
     flavour: Literal["systemd", "sysvinit"]
     name: Name
     path: AbsPath
     content: str
-    # An installed unit may carry local edits (a mount gate on casa-stacks, say), so the default keeps it.
-    # MOS regenerates its init scripts from the pool at every boot, so it replaces.
-    if_exists: Literal["keep", "replace"] = "keep"
     # sysvinit only: /etc/default/<name>, which points the script at persistent paths.
     defaults_path: AbsPath | None = None
     defaults_content: str | None = None
 
 
 class BootHookInstall(_Params):
+    """Merge a marked block into each hook file; never replace the file. An operator's own commands
+    in post-start.sh must survive. `hooks` maps file name to the block body, which must not `exit`."""
+
     dest_dir: AbsPath
     hooks: dict[Name, str]
+    marker: Name = "planetexpress"
+    # The sha256 of each hook file as discovered, or absent from the map if it did not exist.
+    expected_sha256: dict[Name, Sha256] = {}
+    # Hashes of the whole-file versions this project once shipped for hand installation. A hook file that is
+    # byte-for-byte one of these is entirely ours, so it is replaced by the marked version; anything else is
+    # merged into, never replaced. Exact hashes, not a guess from the content.
+    legacy_sha256: dict[Name, list[Sha256]] = {}
+
+    @model_validator(mode="after")
+    def _blocks_cannot_end_the_script(self):
+        for name, body in self.hooks.items():
+            if any(line.split("#")[0].strip().startswith("exit") for line in body.splitlines()):
+                raise ValueError(f"{name}: a merged block must not exit; it would skip the operator's own commands")
+        return self
+
+
+class StateSnapshot(_Params):
+    """The safety net before changing an install that already has state, as deploy.sh does."""
+
+    install_dir: AbsPath
+    label: Name = "pre-setup"
+    run_user: Name
 
 
 class ServiceEnable(_Params):
@@ -146,5 +187,6 @@ CATALOGUE: dict[str, Kind] = {
     "service.install": Kind(ServiceInstall, "R2", True, True, "Install a service"),
     "boot_hook.install": Kind(BootHookInstall, "R3", True, True, "Install MOS boot hooks"),
     "service.enable": Kind(ServiceEnable, "R2", True, True, "Enable a service"),
+    "state.snapshot": Kind(StateSnapshot, "R1", True, False, "Snapshot the current state"),
     "verify.smoke": Kind(VerifySmoke, "R0", True, False, "Check Planet Express can see Docker"),
 }

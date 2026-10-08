@@ -138,20 +138,24 @@ its references when apply ends.
 - **Transport is a real decision (D1 below).** Over plain HTTP on the LAN, the token, the Telegram
   token and the passphrase cross the wire readable by anyone on the segment.
 
-## Plan changes `apply` needs first (slice A0)
+## Plan changes `apply` needs first (slice A0): done
 
-Found while designing, not yet in `plan`:
+Found while designing, and now built in `plan` and `discover`:
 
-1. **`state.snapshot` step** for existing installs. `deploy.sh` takes a pre-deploy snapshot when a venv
-   and a config or database exist; `plan` has no equivalent.
-2. **Boot hook merge.** The plan replaces `/boot/optional/scripts/post-start.sh` wholesale. That file
-   may hold the operator's own commands. The hook becomes a marked block
-   (`# BEGIN planetexpress` ... `# END planetexpress`) merged into whatever is there.
-3. **`file.write` for existing files needs the sha256 seen at planning**, not just a boolean, so the
-   compare-and-swap has something to compare. `discover` records it for the install files.
-4. **pip bootstrap.** `get-pip.py` comes from the network unpinned, and `requirements.txt` has no hashes.
-   That is today's `deploy.sh` behaviour, so this slice does not change it, but the plan preview should
-   show the URL and the doc records `--require-hashes` as future hardening.
+1. **`state.snapshot` step** for an existing install, first in the plan, and every other step depends on
+   it, so nothing changes before the safety net exists (`deploy.sh` does the same).
+2. **Compare-and-swap is in the type.** `file.write`, `sudoers.install` and `service.install` carry
+   `expect_absent` or `expected_sha256`, and a `replace` without one cannot be constructed. `discover`
+   records the sha256 of every present install file (`existing_pe.sha256`, a byte-exact hash, size-capped).
+   A file that exists but could not be hashed is kept, with a warning, rather than replaced unseen.
+3. **Boot hook merge.** `boot_hook.install` merges a `# BEGIN planetexpress` block into each hook file and
+   never replaces it. The blocks are functions that `return`; a block containing `exit` cannot be built,
+   because it would skip the operator's own commands after it. A hook file that is byte-for-byte one of
+   the whole-file versions this project once shipped (`LEGACY_HOOK_SHA256`, from git history) is entirely
+   ours and is replaced; anything else is merged into. Exact hashes, never a guess from the content.
+4. **pip bootstrap.** Unchanged and recorded: `get-pip.py` comes from the network unpinned, and
+   `requirements.txt` has no hashes, exactly as `deploy.sh` does today. `--require-hashes` is future
+   hardening, and the plan already warns that the host needs internet.
 
 ## Testing
 

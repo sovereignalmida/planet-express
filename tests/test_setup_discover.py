@@ -31,6 +31,10 @@ class FakeEnv:
     def exists(self, path):
         return path in self.files or path in self.dirs
 
+    def sha256(self, path):
+        import hashlib
+        return hashlib.sha256(self.files[path].encode()).hexdigest() if path in self.files else None
+
     def is_dir(self, path):
         return path in self.dirs
 

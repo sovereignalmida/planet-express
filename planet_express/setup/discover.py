@@ -257,6 +257,7 @@ KNOWN_SYSTEM_PATHS = (
     "/etc/systemd/system/casa-planetexpress.service", "/etc/systemd/system/casa-dashboard.service",
     "/etc/systemd/system/casa-stacks.service",
     "/etc/init.d/casa-planetexpress", "/etc/init.d/casa-dashboard",
+    "/boot/optional/scripts/post-start.sh", "/boot/optional/scripts/shutdown.sh",
 )
 INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env")
 
@@ -275,6 +276,9 @@ def _existing_pe(env, storage: dict) -> dict:
     if config_path:
         probes.append(config_path)
     present = {path: env.exists(path) for path in dict.fromkeys(probes)}
+    # What each present file held when we looked. `plan` carries it into the step so `apply` can refuse to
+    # replace a file that changed after the operator reviewed the plan (compare-and-swap).
+    hashes = {path: digest for path in present if present[path] and (digest := env.sha256(path))}
     config_path = config_path or ("/etc/planetexpress/config.yaml"
                                   if env.exists("/etc/planetexpress/config.yaml") else None)
     markers = {
@@ -286,7 +290,7 @@ def _existing_pe(env, storage: dict) -> dict:
     changelog = env.read(f"{install_dir}/CHANGELOG.md") if install_dir else None
     version = re.search(r"^## \[(\d+\.\d+\.\d+[^\]]*)\]", changelog or "", re.MULTILINE)
     return {"installed": any(markers.values()), **markers, "version": version.group(1) if version else None,
-            "install_dir": install_dir, "config_path": config_path, "present": present,
+            "install_dir": install_dir, "config_path": config_path, "present": present, "sha256": hashes,
             "forbidden_stacks": _config_forbidden_stacks(env.read(config_path) if config_path else None)}
 
 
