@@ -1,0 +1,40 @@
+  <header class="topbar">
+    <img class="header-logo" src="{{ url_for('static', filename='logo.png') }}" alt="Planet Express">
+    <div class="header-brand">
+      <span class="wordmark">PLANET EXPRESS</span>
+      <span class="tagline">casalan.com · ship computer</span>
+    </div>
+
+    <nav class="tabs">
+      {# On the dashboard the tabs switch panels in place (dashboard.js, data-tab). Anywhere else
+         (Hosts is its own page) they are plain links back to the dashboard at that tab. #}
+      {% for name, label in [("overview", "Overview"), ("backups", "Backups"), ("network", "Network"), ("actions", "Actions"), ("history", "History"), ("chat", "Chat"), ("config", "Config"), ("crew", "Crew")] %}
+      {% if page == "dashboard" %}<button class="tab{{ ' active' if loop.first }}" data-tab="{{ name }}" type="button">{{ label }}</button>
+      {% else %}<a class="tab" href="{{ url_for('index') }}#{{ name }}">{{ label }}</a>
+      {% endif %}{% endfor %}
+      <a class="tab{{ ' active' if page == 'hosts' }}" href="{{ url_for('hosts') }}">Hosts</a>
+    </nav>
+
+    <div class="topbar-spacer"></div>
+    <div class="header-status">
+      <span class="led-dot status-{{ ctx.health.status }}"></span>
+      <span>pipeline {{ ctx.pipeline_status.state }} · scanned {{ ctx.health.last_scan or "never" }}</span>
+    </div>
+    {% if page == "dashboard" %}
+    {# Server-rendered from the live pipeline state, so the 60s swap of #dashboard-live is
+       what puts the button back when a scan ends -- the client is optimistic in between,
+       never authoritative. It used to be <a href="/">, which reloaded the page and scanned
+       nothing. #}
+    <span class="scan-group">
+      <button class="refresh-btn scan-btn" type="button" id="scan-btn"
+              {% if ctx.pipeline_status.state == "running" %}data-scanning="1" disabled{% endif %}>
+        {{ "SCANNING…" if ctx.pipeline_status.state == "running" else "SCAN ✈" }}
+      </button>
+      <span class="scan-note" id="scan-note" role="status" aria-live="polite"></span>
+    </span>
+    {% endif %}
+    <form class="pe-logout" method="post" action="{{ url_for('logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="refresh-btn logout-btn" type="submit">LOG OUT</button>
+    </form>
+  </header>

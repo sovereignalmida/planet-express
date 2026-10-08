@@ -11,6 +11,7 @@
 .cryo-pod.stale { border-left-color: var(--cp-amber); background: linear-gradient(180deg, rgba(245,184,32,.09), var(--cp-panel-bg)); }
 .cryo-pod.overdue, .cryo-pod.failed { border-left-color: var(--cp-crit); background: linear-gradient(180deg, rgba(239,60,46,.09), var(--cp-panel-bg)); }
 .cryo-pod.nodata { border: 1px dashed var(--cp-panel-border); border-left: 1px dashed var(--cp-panel-border); background: var(--cp-inset-bg); opacity: .62; }
+.cryo-pod.nodata.reasoned { opacity: 1; }  /* .nodata is 62%: the reason text and its "Check:" line must stay readable (4.5:1) */
 .cryo-pod-head { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
 .cryo-led { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint3); }
 .cryo-pod.fresh .cryo-led { background: var(--cp-green); box-shadow: 0 0 9px var(--cp-green); }

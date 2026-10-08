@@ -2648,3 +2648,4 @@ a.net-pill { text-decoration: none; }
                color: var(--pe-accent-ink); text-decoration: none; border-bottom: 0; white-space: nowrap; }
 .pe-link-out:hover { color: var(--pe-accent-hi); border-bottom: 0; }
 .pe-card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cryo-pod.nodata.reasoned { opacity: 1; }  /* .nodata is 62%: the reason text and its "Check:" line must stay readable (4.5:1) */

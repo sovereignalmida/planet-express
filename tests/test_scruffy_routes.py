@@ -166,9 +166,36 @@ def test_hosts_zero_containers_is_not_unreadable_containers():
                      containers_liveness=Liveness("current"))
     page = _hosts_page((zero, stale, unknown)).get_data(as_text=True)
     assert "No containers on this host. It runs none; that is normal here, not a failed read." in page
-    assert "CONTAINERS</span><span class=\"pe-value none\">unreadable" in page
+    assert "<span>CONTAINERS</span><span>unreadable</span>" in page
     assert "2m ago" in page
     assert "not reported" in page  # os_name stays absent, never rendered as zero
+
+
+def test_hosts_renders_in_the_dashboard_shell_not_a_standalone_page():
+    """V3.1: Hosts keeps the topbar and tabs, so landing on it does not drop the operator out of the
+    app. The old standalone shell (pe-wrap/pe-masthead) is gone."""
+    page = _hosts_page(()).get_data(as_text=True)
+    assert '<header class="topbar">' in page
+    assert 'class="tab active" href="/hosts"' in page
+    assert "pe-wrap" not in page and "pe-masthead" not in page
+    # The other tabs are links back to the dashboard at that tab, not buttons with no script behind them.
+    assert 'href="/#backups"' in page and 'data-tab=' not in page
+    # The pipeline pill is server-rendered; SCAN needs dashboard.js, which this page does not load.
+    assert "header-status" in page and "pipeline " in page
+    assert 'id="scan-btn"' not in page and "dashboard.js" not in page
+    assert 'action="/logout"' in page
+
+
+def test_hosts_dashboard_tabs_are_buttons_and_hosts_is_a_link():
+    """The shared _topbar.html: on the dashboard the tabs switch panels in place."""
+    from flask import render_template_string
+    app = casa_scruffy.create_app(ENV, host_cache=None, rpc_call=FakeRpc(), clock=lambda: 1800000000.0)
+    with app.test_request_context("/"):
+        out = render_template_string(
+            '{% set page = "dashboard" %}{% include "_topbar.html" %}',
+            ctx={"health": {"status": "ok", "last_scan": None}, "pipeline_status": {"state": "idle"}})
+    assert 'data-tab="overview"' in out and 'class="tab active" data-tab="overview"' in out
+    assert 'class="tab" href="/hosts"' in out and 'id="scan-btn"' in out
 
 
 def test_hosts_unknown_reason_cards_have_distinct_explanations():
@@ -1313,8 +1340,9 @@ def test_the_header_still_wraps_before_the_single_row_runs_out_of_space(tmp_path
     assert "overflow-x: auto" in narrow
     # Nine tabs today. A tenth needs the measurement redone, not the number nudged.
     # `class="tab active"` is one of them, so match the class rather than the literal string.
-    dashboard = (Path(__file__).resolve().parent.parent / "templates" / "dashboard.html").read_text()
-    assert len(re.findall(r'class="tab(?: active)?"', dashboard)) == 9
+    # The tabs come from the shared _topbar.html partial, so count them in the rendered page.
+    html = _render_with_certs(tmp_path, monkeypatch, [])
+    assert len(re.findall(r'class="tab(?: active)?"', html)) == 9
 
 
 def test_config_panel_is_persistent_and_loaded_by_javascript(tmp_path, monkeypatch):

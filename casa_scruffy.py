@@ -1041,8 +1041,13 @@ def widget():
 
 
 def hosts(fleet_cache):
-    """The intentionally plain S4 surface for real multi-host data."""
-    return render_template("hosts.html", fleet=fleet_cache.view())
+    """Other hosts, rendered inside the dashboard shell. `ctx` carries only what the shared header
+    reads (the pipeline pill); the rest of the dashboard context is not built for this page."""
+    ctx = {
+        "health": dashboard_data.summarize_health(),
+        "pipeline_status": dashboard_data.summarize_pipeline_status(),
+    }
+    return render_template("hosts.html", fleet=fleet_cache.view(), ctx=ctx)
 
 
 def main() -> None:
