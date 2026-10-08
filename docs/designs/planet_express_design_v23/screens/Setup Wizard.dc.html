@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <title>Planet Express — Setup (V3.2)</title>
+  <link rel="stylesheet" href="../design-system/styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>a{color:var(--pe-accent-ink);text-decoration:none}a:hover{color:var(--pe-accent-hi)}input{color:var(--pe-ink-2);font-family:var(--pe-font-mono)}input::placeholder{color:var(--pe-ink-ghost)}</style>
+</helmet>
+<div class="pe-app" data-screen-label="Setup wizard">
+  <div class="pe-wrap" style="gap:18px">
+
+    <header class="pe-masthead">
+      <img src="../assets/logo.png" alt="Planet Express">
+      <div><div class="pe-kicker">FIRST-RUN SETUP</div><h1>PLANET EXPRESS</h1></div>
+      <div style="flex:1"></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <span class="pe-chip warn">SETUP MODE · CLOSES IN {{ window.left }}</span>
+        <span class="pe-chip info">LAN ONLY · {{ window.addr }}</span>
+      </div>
+    </header>
+
+    <sc-if value="{{ ex }}" hint-placeholder-val="{{ false }}">
+      <div class="pe-card crit">
+        <div class="pe-card-head"><span class="pe-led crit"></span><span class="pe-card-title sm">SETUP IS REACHABLE FROM OUTSIDE YOUR LAN</span><div class="pe-spacer"></div><span class="pe-badge crit">ACTION NEEDED</span></div>
+        <p style="margin:0;font-size:13px;line-height:1.55;color:var(--pe-ink-body)">This page runs as root and can write sudoers. A probe from a public address answered. Close the port-forward to <span class="pe-value">{{ window.addr }}</span> before continuing. Planet Express will not proceed past this screen while it is open.</p>
+      </div>
+    </sc-if>
+
+    <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:flex-start">
+
+      <aside class="pe-panel" style="flex:1 1 230px;max-width:290px;min-width:0">
+        <div class="pe-panel-head"><h3>PROGRESS</h3><div class="pe-spacer"></div><span class="pe-panel-note">{{ progress }}</span></div>
+        <div class="pe-rail">
+          <sc-for list="{{ stages }}" as="s" hint-placeholder-count="10">
+            <div class="pe-rail-item" style="cursor:pointer" onClick="{{ s.go }}">
+              <div class="pe-rail-gutter"><span class="{{ s.marker }}">{{ s.mark }}</span><span class="{{ s.line }}"></span></div>
+              <div style="min-width:0;padding-bottom:4px">
+                <div class="pe-rail-text" style="{{ s.textStyle }}">{{ s.label }}</div>
+                <div class="pe-label">{{ s.who }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+      </aside>
+
+      <main class="pe-tabbody" style="flex:999 1 440px;min-width:0">
+
+        <div style="display:flex;gap:14px;align-items:center">
+          <sc-if value="{{ head.fry }}" hint-placeholder-val="{{ true }}"><img src="../assets/characters/futurama/avatar/fry.png" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--pe-panel);box-shadow:0 0 0 2px var(--pe-border-strong);flex:none"></sc-if>
+          <sc-if value="{{ head.leela }}" hint-placeholder-val="{{ false }}"><img src="../assets/characters/futurama/avatar/leela.png" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--pe-panel);box-shadow:0 0 0 2px var(--pe-border-strong);flex:none"></sc-if>
+          <sc-if value="{{ head.farnsworth }}" hint-placeholder-val="{{ false }}"><img src="../assets/characters/futurama/avatar/farnsworth.png" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--pe-panel);box-shadow:0 0 0 2px var(--pe-border-strong);flex:none"></sc-if>
+          <sc-if value="{{ head.bender }}" hint-placeholder-val="{{ false }}"><img src="../assets/characters/futurama/avatar/bender.png" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--pe-panel);box-shadow:0 0 0 2px var(--pe-border-strong);flex:none"></sc-if>
+          <sc-if value="{{ head.hermes }}" hint-placeholder-val="{{ false }}"><img src="../assets/characters/futurama/avatar/hermes.png" alt="" style="width:72px;height:72px;border-radius:50%;object-fit:cover;background:var(--pe-panel);box-shadow:0 0 0 2px var(--pe-border-strong);flex:none"></sc-if>
+          <div style="min-width:0"><div class="pe-kicker">{{ head.kicker }}</div><h2 style="margin:2px 0 0;font-size:22px;letter-spacing:.04em">{{ head.title }}</h2></div>
+        </div>
+        <p style="margin:0;font-size:13.5px;line-height:1.6;color:var(--pe-ink-body);text-wrap:pretty;max-width:68ch">{{ head.blurb }}</p>
+
+        <!-- 1 WELCOME -->
+        <sc-if value="{{ at.welcome }}" hint-placeholder-val="{{ true }}">
+          <section class="pe-card ok">
+            <div class="pe-card-head"><span class="pe-led ok"></span><span class="pe-card-title sm">DETECTED</span><div class="pe-spacer"></div><span class="pe-badge ok">{{ scn.pathBadge }}</span></div>
+            <div class="pe-readout" style="border-top:none;padding-top:0">
+              <div class="pe-readout-row"><span class="pe-label">HOST</span><span class="pe-value">{{ scn.host }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">INIT</span><span class="pe-value">{{ scn.init }}</span></div>
+              <div class="pe-readout-row"><span class="pe-label">PATH</span><span class="pe-value">{{ scn.pathLine }}</span></div>
+            </div>
+          </section>
+          <sc-if value="{{ scn.isRepair }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
+              <button type="button" class="{{ rep.repairCls }}" onClick="{{ rep.setRepair }}">REPAIR</button>
+              <button type="button" class="{{ rep.uninstCls }}" onClick="{{ rep.setUninst }}">UNINSTALL</button>
+            </div>
+          </sc-if>
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>HOW SETUP MODE WORKS</h3></div>
+            <div class="pe-steps">
+              <div class="pe-step"><span class="pe-step-idx">01</span><span class="pe-step-text">This page opened from a one-time token URL printed in your terminal. It expires; the countdown is in the header.</span></div>
+              <div class="pe-step"><span class="pe-step-idx">02</span><span class="pe-step-text">It listens on the LAN only. Nothing changes on this machine until you approve the plan.</span></div>
+              <div class="pe-step"><span class="pe-step-idx">03</span><span class="pe-step-text">Setup mode closes itself when the wizard finishes. To close it early, press Ctrl-C in the terminal that printed the URL.</span></div>
+            </div>
+          </section>
+        </sc-if>
+
+        <!-- 2 SCAN -->
+        <sc-if value="{{ at.scan }}" hint-placeholder-val="{{ false }}">
+          <div class="pe-verdict {{ scan.level }}">
+            <div class="pe-verdict-orb">{{ scan.orb }}</div>
+            <div class="pe-verdict-text"><h2>{{ scan.title }}</h2><p>{{ scan.detail }}</p></div>
+            <div class="pe-verdict-tally"><sc-for list="{{ scan.chips }}" as="c" hint-placeholder-count="3"><span class="{{ c.cls }}">{{ c.text }}</span></sc-for></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:9px">
+            <sc-for list="{{ scan.checks }}" as="c" hint-placeholder-count="6">
+              <div class="{{ c.cls }}" style="{{ c.style }}">
+                <span class="{{ c.led }}"></span>
+                <div style="flex:1;min-width:0">
+                  <div class="pe-check-label" style="font-size:13px">{{ c.label }}</div>
+                  <div class="pe-check-meta" style="margin-top:3px;white-space:normal;line-height:1.5">{{ c.detail }}</div>
+                  <sc-if value="{{ c.hasFix }}" hint-placeholder-val="{{ false }}"><div style="margin-top:7px;font-size:12.5px;line-height:1.5;color:var(--pe-ink-body)">{{ c.fix }}</div></sc-if>
+                </div>
+                <span class="{{ c.badgeCls }}">{{ c.badge }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <sc-if value="{{ scan.blocked }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><button type="button" class="pe-btn warn" onClick="{{ scan.recheck }}">RE-CHECK ⟳</button><span class="pe-panel-note">Planet Express guides this fix; it will not perform it for you.</span></div>
+          </sc-if>
+          <sc-if value="{{ scan.isAdopt }}" hint-placeholder-val="{{ false }}">
+            <div class="pe-footnote">Adopting a homelab is <strong style="color:var(--pe-ink-2)">observe-only</strong> by default. Nothing here is changed until you opt in, per stack, on the next screens.</div>
+          </sc-if>
+        </sc-if>
+
+        <!-- 3 WHERE -->
+        <sc-if value="{{ at.where }}" hint-placeholder-val="{{ false }}">
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>INSTALL LOCATION</h3><div class="pe-spacer"></div><span class="{{ where.persistCls }}">{{ where.persistText }}</span></div>
+            <div class="pe-field"><label>INSTALL PATH</label><div class="pe-input" style="letter-spacing:0;font-size:13px">{{ where.path }}</div></div>
+            <sc-if value="{{ where.hasPools }}" hint-placeholder-val="{{ false }}">
+              <div class="pe-readout" style="margin-top:14px">
+                <div class="pe-label" style="margin-bottom:4px">PERSISTENT POOLS DETECTED</div>
+                <sc-for list="{{ where.pools }}" as="p" hint-placeholder-count="2"><div class="pe-readout-row"><span class="pe-value">{{ p.name }} · {{ p.mount }}</span><span class="pe-value dim">{{ p.free }} free</span></div></sc-for>
+              </div>
+            </sc-if>
+            <div class="pe-footnote">{{ where.note }}</div>
+          </section>
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>STACKS</h3><span class="pe-chip info">{{ where.stackSummary }}</span><div class="pe-spacer"></div><span class="pe-panel-note">root: {{ where.root }}</span></div>
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <sc-for list="{{ where.stacks }}" as="s" hint-placeholder-count="5">
+                <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;border:1px solid var(--pe-border);border-radius:var(--pe-r-md);background:var(--pe-well);padding:10px 12px">
+                  <span class="pe-led {{ s.led }}"></span>
+                  <div style="flex:1 1 150px;min-width:0"><div class="pe-value" style="font-size:12.5px">{{ s.name }}</div><div class="pe-label">{{ s.meta }}</div></div>
+                  <div style="display:flex;gap:6px">
+                    <sc-for list="{{ s.opts }}" as="o" hint-placeholder-count="3"><button type="button" class="{{ o.cls }}" onClick="{{ o.go }}">{{ o.label }}</button></sc-for>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <sc-if value="{{ where.hasMore }}" hint-placeholder-val="{{ false }}"><div class="pe-footnote">+{{ where.more }} more stacks, all set to <strong style="color:var(--pe-ink-2)">WATCH</strong>. They stay untouched unless you change them.<span style="margin-left:10px"><a href="#" onClick="{{ where.expand }}">{{ where.expandLabel }}</a></span></div></sc-if>
+            <div class="pe-footnote"><strong style="color:var(--pe-ink-2)">MANAGE</strong> lets Planet Express act on the stack once you grant a power next. <strong style="color:var(--pe-ink-2)">WATCH</strong> only reads. <strong style="color:var(--pe-ink-2)">IGNORE</strong> hides it entirely.</div>
+          </section>
+        </sc-if>
+
+        <!-- 4 POWERS -->
+        <sc-if value="{{ at.powers }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <sc-for list="{{ caps }}" as="c" hint-placeholder-count="5">
+              <div class="{{ c.cls }}" style="{{ c.style }}" onClick="{{ c.go }}">
+                <span class="{{ c.led }}"></span>
+                <div style="flex:1;min-width:0">
+                  <div class="pe-check-label" style="font-size:14px">{{ c.title }}</div>
+                  <div style="margin-top:3px;font-size:12.5px;line-height:1.5;color:var(--pe-ink-body)">{{ c.desc }}</div>
+                  <div class="pe-check-meta" style="margin-top:6px;white-space:normal">{{ c.needs }}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"><span class="{{ c.riskCls }}">{{ c.risk }}</span><span class="{{ c.stateCls }}">{{ c.state }}</span></div>
+              </div>
+            </sc-for>
+          </div>
+          <div class="pe-sensor-dark">
+            <div class="glyph">⛨</div>
+            <p>{{ powersNote }}</p>
+          </div>
+        </sc-if>
+
+        <!-- 5 TELEGRAM -->
+        <sc-if value="{{ at.tg }}" hint-placeholder-val="{{ false }}">
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>1 · CREATE A BOT</h3></div>
+            <div class="pe-steps">
+              <div class="pe-step"><span class="pe-step-idx">01</span><span class="pe-step-text">Message <span class="pe-value">@BotFather</span> in Telegram and send <span class="pe-value">/newbot</span>.</span></div>
+              <div class="pe-step"><span class="pe-step-idx">02</span><span class="pe-step-text">Copy the token it gives you and paste it below. It is stored in a root-only file and never shown again.</span></div>
+            </div>
+            <div class="pe-field" style="margin-top:14px"><label>BOT TOKEN</label><div class="pe-input" style="letter-spacing:.1em;font-size:14px;color:var(--pe-ink-dim)">{{ tg.tokenShown }}</div></div>
+          </section>
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>2 · FIND YOUR CHAT</h3><div class="pe-spacer"></div><span class="{{ tg.badgeCls }}">{{ tg.badge }}</span></div>
+            <div class="{{ tg.cardCls }}" style="{{ tg.cardStyle }}">
+              <span class="{{ tg.led }}"></span>
+              <div style="flex:1;min-width:0"><div class="pe-check-label" style="font-size:13.5px">{{ tg.title }}</div><div class="pe-check-meta" style="margin-top:3px;white-space:normal;line-height:1.5">{{ tg.detail }}</div></div>
+              <sc-if value="{{ tg.spin }}" hint-placeholder-val="{{ false }}"><span class="pe-spinner"></span></sc-if>
+            </div>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:12px">
+              <sc-for list="{{ tg.actions }}" as="a" hint-placeholder-count="2"><button type="button" class="{{ a.cls }}" onClick="{{ a.go }}">{{ a.label }}</button></sc-for>
+            </div>
+            <div class="pe-footnote">Detection is a button, not a background poll: one place where setup can fail, and you see it. Skipping is safe, but you will approve fixes on the dashboard only, with no phone prompt.</div>
+          </section>
+        </sc-if>
+
+        <!-- 6 OPERATOR -->
+        <sc-if value="{{ at.op }}" hint-placeholder-val="{{ false }}">
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>OPERATOR</h3><span class="pe-panel-note">the account you will log in with</span></div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap">
+              <div class="pe-field" style="flex:1 1 200px"><label>NAME</label><div class="pe-input" style="letter-spacing:0;font-size:14px">{{ op.name }}</div></div>
+              <div class="pe-field" style="flex:1 1 200px"><label>PASSPHRASE</label><div class="pe-input" style="letter-spacing:.25em;font-size:14px">••••••••••••••</div></div>
+            </div>
+            <div class="pe-footnote">Passphrase strength: <strong style="color:var(--pe-ok-ink)">strong</strong> · 4 words · never stored in plain text, never shown again.</div>
+          </section>
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>AUTHENTICATOR</h3><div class="pe-spacer"></div><span class="{{ op.badgeCls }}">{{ op.badge }}</span></div>
+            <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">
+              <div style="width:150px;height:150px;border:1px dashed var(--pe-border-strong);border-radius:var(--pe-r-lg);background:var(--pe-well);display:flex;align-items:center;justify-content:center;text-align:center;flex:none" data-om-raster="true"><span class="pe-label">QR CODE<br>RENDERED BY<br>THE SERVER</span></div>
+              <div style="flex:1 1 220px;min-width:0;display:flex;flex-direction:column;gap:12px">
+                <div class="pe-field"><label>OR ENTER THIS CODE MANUALLY</label><div class="pe-input" style="letter-spacing:.12em;font-size:13px">{{ op.manual }}</div></div>
+                <div class="pe-field {{ op.fieldCls }}"><label>VERIFY WITH ONE CODE</label>
+                  <div class="{{ op.totpCls }}"><sc-for list="{{ op.cells }}" as="c" hint-placeholder-count="6"><div class="{{ c.cls }}">{{ c.v }}</div></sc-for></div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap"><sc-for list="{{ op.actions }}" as="a" hint-placeholder-count="2"><button type="button" class="{{ a.cls }}" onClick="{{ a.go }}">{{ a.label }}</button></sc-for></div>
+              </div>
+            </div>
+          </section>
+          <sc-if value="{{ op.verified }}" hint-placeholder-val="{{ false }}">
+            <section class="pe-card warn">
+              <div class="pe-card-head"><span class="pe-led warn"></span><span class="pe-card-title sm">RECOVERY CODES · SHOWN ONCE</span><div class="pe-spacer"></div><span class="pe-badge warn">WRITE THESE DOWN</span></div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;font-family:var(--pe-font-mono);font-size:13px;color:var(--pe-ink-2)">
+                <sc-for list="{{ op.recovery }}" as="r" hint-placeholder-count="8"><span>{{ r }}</span></sc-for>
+              </div>
+              <div class="pe-footnote">They cannot be shown again. There is no password reset; with three operators, another operator can re-enrol you.</div>
+            </section>
+          </sc-if>
+        </sc-if>
+
+        <!-- 7 LLM -->
+        <sc-if value="{{ at.llm }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <sc-for list="{{ llm.opts }}" as="o" hint-placeholder-count="3"><button type="button" class="{{ o.cls }}" onClick="{{ o.go }}">{{ o.label }}</button></sc-for>
+          </div>
+          <sc-if value="{{ llm.hasKey }}" hint-placeholder-val="{{ true }}">
+            <section class="pe-panel">
+              <div class="pe-panel-head"><h3>{{ llm.name }} KEY</h3><div class="pe-spacer"></div><span class="pe-badge ok">STORED ROOT-ONLY</span></div>
+              <div class="pe-field"><label>API KEY</label><div class="pe-input" style="letter-spacing:.1em;font-size:14px;color:var(--pe-ink-dim)">sk-••••••••••••••••••••••</div></div>
+              <div class="pe-footnote">Written to <span class="pe-value">/etc/planetexpress.env</span> (mode 600). Never to <span class="pe-value">config.yaml</span>, never echoed back, masked in the plan.</div>
+            </section>
+          </sc-if>
+          <div class="{{ llm.noteCls }}"><span class="{{ llm.noteLed }}"></span><div style="flex:1;font-size:13px;line-height:1.55;color:var(--pe-ink-body)">{{ llm.note }}</div></div>
+        </sc-if>
+
+        <!-- 8 PLAN -->
+        <sc-if value="{{ at.plan }}" hint-placeholder-val="{{ false }}">
+          <section class="pe-attrib ok">
+            <img src="../assets/characters/futurama/avatar/farnsworth.png" alt="" style="width:56px;height:56px">
+            <div><div class="pe-attrib-name">Good news, everyone: here is the plan.</div><div class="pe-attrib-meta">{{ plan.summary }}</div></div>
+          </section>
+          <sc-for list="{{ plan.groups }}" as="g" hint-placeholder-count="4">
+            <section class="pe-panel">
+              <div class="pe-panel-head"><h3>{{ g.name }}</h3><span class="pe-chip">{{ g.count }}</span></div>
+              <div style="display:flex;flex-direction:column;gap:9px">
+                <sc-for list="{{ g.steps }}" as="s" hint-placeholder-count="2">
+                  <div style="border:1px solid var(--pe-border);border-radius:var(--pe-r-md);background:var(--pe-well);overflow:hidden">
+                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:11px 13px;cursor:pointer" onClick="{{ s.toggle }}">
+                      <span class="pe-step-idx" style="margin:0">{{ s.idx }}</span>
+                      <div style="flex:1 1 200px;min-width:0"><div style="font-size:13px;color:var(--pe-ink-2)">{{ s.title }}</div><div class="pe-label" style="margin-top:2px">{{ s.target }}</div></div>
+                      <span class="{{ s.riskCls }}">{{ s.risk }}</span>
+                      <span class="{{ s.revCls }}">{{ s.rev }}</span>
+                      <span class="pe-value dim">{{ s.caret }}</span>
+                    </div>
+                    <sc-if value="{{ s.open }}" hint-placeholder-val="{{ false }}">
+                      <div style="border-top:1px dashed var(--pe-border-dash);padding:11px 13px;display:flex;flex-direction:column;gap:8px">
+                        <div style="font-size:12.5px;line-height:1.5;color:var(--pe-ink-body)">{{ s.why }}</div>
+                        <div class="pe-output" style="white-space:pre-wrap">{{ s.preview }}</div>
+                        <sc-if value="{{ s.root }}" hint-placeholder-val="{{ false }}"><span class="pe-label">NEEDS ROOT · SETUP MODE RUNS AS ROOT</span></sc-if>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </section>
+          </sc-for>
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>WILL NOT TOUCH</h3><span class="pe-chip ok">GUARANTEES</span></div>
+            <div class="pe-steps"><sc-for list="{{ plan.never }}" as="n" hint-placeholder-count="3"><div class="pe-step"><span class="pe-step-idx" style="color:var(--pe-ok-ink)">✓</span><span class="pe-step-text">{{ n }}</span></div></sc-for></div>
+          </section>
+        </sc-if>
+
+        <!-- 9 INSTALL -->
+        <sc-if value="{{ at.install }}" hint-placeholder-val="{{ false }}">
+          <div class="pe-verdict {{ inst.level }}">
+            <div class="pe-verdict-orb">{{ inst.orb }}</div>
+            <div class="pe-verdict-text"><h2>{{ inst.title }}</h2><p>{{ inst.detail }}</p></div>
+          </div>
+          <div class="pe-bar"><div class="{{ inst.barCls }}" style="{{ inst.barStyle }}"></div></div>
+          <div class="pe-split" style="--x:0">
+            <div class="pe-rail">
+              <sc-for list="{{ inst.steps }}" as="s" hint-placeholder-count="8">
+                <div class="pe-rail-item">
+                  <div class="pe-rail-gutter"><span class="{{ s.marker }}">{{ s.mark }}</span><span class="{{ s.line }}"></span></div>
+                  <div style="min-width:0;padding-bottom:6px">
+                    <div class="pe-rail-text">{{ s.title }}</div>
+                    <div class="pe-rail-meta">{{ s.meta }}</div>
+                    <sc-if value="{{ s.hasErr }}" hint-placeholder-val="{{ false }}"><div class="pe-output crit" style="white-space:pre-wrap">{{ s.err }}</div></sc-if>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+            <div class="{{ inst.logCls }}" style="min-height:240px">
+              <div class="pe-logwell-head"><span class="{{ inst.logLed }}"></span><h4>{{ inst.logTitle }}</h4><div class="pe-spacer"></div><span class="pe-panel-note">streamed · survives reload</span></div>
+              <div class="pe-logwell-body">
+                <sc-for list="{{ inst.log }}" as="l" hint-placeholder-count="8"><div class="pe-logline"><span class="{{ l.cls }}">{{ l.t }}</span> {{ l.m }}</div></sc-for>
+                <sc-if value="{{ inst.caret }}" hint-placeholder-val="{{ false }}"><div class="pe-logline"><span class="pe-caret">▌</span></div></sc-if>
+              </div>
+            </div>
+          </div>
+          <sc-if value="{{ inst.failed }}" hint-placeholder-val="{{ false }}">
+            <div class="pe-hint"><img src="../assets/characters/futurama/avatar/bender.png" alt="" style="width:56px;height:56px"><div><div class="pe-hint-kicker">NOTHING FURTHER WILL RUN</div><p>{{ inst.failNote }}</p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button type="button" class="pe-btn warn" onClick="{{ inst.retry }}">RETRY STEP</button><button type="button" class="pe-btn" onClick="{{ inst.toPlan }}">BACK TO PLAN</button></div></div></div>
+          </sc-if>
+          <div class="pe-footnote">Closing this tab does not stop or undo anything. Come back to the same URL and setup resumes from the last completed step.</div>
+        </sc-if>
+
+        <!-- 10 DONE -->
+        <sc-if value="{{ at.done }}" hint-placeholder-val="{{ false }}">
+          <div class="pe-verdict ok">
+            <div class="pe-verdict-orb">✓</div>
+            <div class="pe-verdict-text"><h2>{{ done.title }}</h2><p>{{ done.detail }}</p></div>
+            <div class="pe-verdict-tally"><span class="pe-chip ok">{{ done.passed }} CHECKS PASSED</span><span class="pe-chip info">SETUP MODE CLOSED</span></div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:9px">
+            <sc-for list="{{ done.checks }}" as="c" hint-placeholder-count="6"><div class="pe-check passed"><span class="pe-led ok"></span><span class="pe-check-label">{{ c.label }}</span><span class="pe-check-meta">{{ c.meta }}</span></div></sc-for>
+          </div>
+          <section class="pe-panel">
+            <div class="pe-panel-head"><h3>NEXT THREE THINGS</h3></div>
+            <div class="pe-steps"><sc-for list="{{ done.next }}" as="n" hint-placeholder-count="3"><div class="pe-step"><span class="pe-step-idx">{{ n.i }}</span><span class="pe-step-text">{{ n.t }}</span></div></sc-for></div>
+          </section>
+          <section class="pe-attrib ok"><img src="../assets/characters/futurama/avatar/hermes.png" alt="" style="width:56px;height:56px"><div><div class="pe-attrib-name">Report filed by Hermes</div><div class="pe-attrib-meta">{{ done.filed }}</div></div></section>
+        </sc-if>
+
+        <!-- nav -->
+        <div style="display:flex;gap:10px;flex-wrap:wrap;border-top:1px dashed var(--pe-border-dash);padding-top:16px;align-items:center">
+          <button type="button" class="pe-btn" style="{{ nav.backStyle }}" onClick="{{ nav.back }}">← BACK</button>
+          <div style="flex:1"></div>
+          <sc-if value="{{ nav.hasNote }}" hint-placeholder-val="{{ false }}"><span class="pe-panel-note">{{ nav.note }}</span></sc-if>
+          <sc-if value="{{ nav.hasSkip }}" hint-placeholder-val="{{ false }}"><button type="button" class="pe-btn" onClick="{{ nav.skip }}">SKIP</button></sc-if>
+          <button type="button" class="{{ nav.nextCls }}" style="{{ nav.nextStyle }}" onClick="{{ nav.next }}">{{ nav.nextLabel }}</button>
+        </div>
+      </main>
+    </div>
+
+    <section class="pe-panel" style="border-style:dashed">
+      <div class="pe-panel-head"><h3>DESIGN PREVIEW</h3><span class="pe-panel-note">not product UI · do not ship</span></div>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="pe-label" style="width:96px">STORY</span><sc-for list="{{ pv.scns }}" as="b" hint-placeholder-count="4"><button type="button" class="{{ b.cls }}" onClick="{{ b.go }}">{{ b.label }}</button></sc-for></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="pe-label" style="width:96px">TELEGRAM</span><sc-for list="{{ pv.tgs }}" as="b" hint-placeholder-count="4"><button type="button" class="{{ b.cls }}" onClick="{{ b.go }}">{{ b.label }}</button></sc-for></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="pe-label" style="width:96px">INSTALL</span><sc-for list="{{ pv.insts }}" as="b" hint-placeholder-count="3"><button type="button" class="{{ b.cls }}" onClick="{{ b.go }}">{{ b.label }}</button></sc-for></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><span class="pe-label" style="width:96px">EXPOSURE</span><sc-for list="{{ pv.exs }}" as="b" hint-placeholder-count="2"><button type="button" class="{{ b.cls }}" onClick="{{ b.go }}">{{ b.label }}</button></sc-for></div>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { scn: 'mos', step: 0, tg: 'idle', inst: 'running', ex: false, resolved: false, repMode: 'repair', caps: { restart: true, stack: true, update: false, prune: false }, modes: {}, expanded: false, llm: 'anthropic', totp: 'idle', open: {}, tgSkipped: false };
+
+  renderVals() {
+    const S = this.state, set = o => this.setState(o);
+    const IMG = n => '../assets/characters/futurama/avatar/' + n + '.png';
+    const scnKey = S.scn;
+
+    // ---- stories ----
+    const SC = {
+      mos: { label: 'FRESH · MOS', pathBadge: 'FRESH INSTALL', host: 'mos-vm · MOS 1.x · x86_64', init: 'mos (/ is RAM)', pathLine: 'Fresh install, persistent pool required', isRepair: false, isAdopt: false,
+        root: '/mnt/pool/stacks', path: '/mnt/pool/planet-express', persistText: 'PERSISTENT', persistOk: true,
+        note: 'On MOS, / lives in RAM. PE and its data go on a pool; boot hooks in /boot/optional/scripts restore it. Compose is the standalone docker-compose.',
+        pools: [{ name: 'pool1', mount: '/mnt/pool1', free: '1.4 TiB' }],
+        stacks: [{ name: 'nginx-demo', meta: 'template · 1 container · created by setup', mode: 'manage' }], moreStacks: 0 },
+      ubuntu: { label: 'FRESH · UBUNTU', pathBadge: 'FRESH INSTALL', host: 'nas-01 · Ubuntu 24.04 · x86_64', init: 'systemd', pathLine: 'Fresh install, systemd units and service user', isRepair: false, isAdopt: false,
+        root: '/home/chris/stacks', path: '/opt/planet-express', persistText: 'PERSISTENT', persistOk: true,
+        note: 'systemd host. Planet Express installs units, a service user (planetexpress-web) and a sudoers entry limited to the powers you grant.',
+        pools: [], stacks: [{ name: 'nginx-demo', meta: 'template · 1 container · created by setup', mode: 'manage' }], moreStacks: 0 },
+      adopt: { label: 'ADOPT HOMELAB', pathBadge: 'ADOPT EXISTING', host: 'casamediaserver · Debian 13 · x86_64', init: 'systemd', pathLine: 'Docker already running: 15 stacks, 88 containers', isRepair: false, isAdopt: true,
+        root: '/home/chris/stacks', path: '/opt/planet-express', persistText: 'PERSISTENT', persistOk: true,
+        note: 'Found by discovery. Edit anything: detected values are suggestions, not decisions.',
+        pools: [], stacks: [
+          { name: 'media', meta: '24 containers · Sonarr, Radarr, Jellyfin…', mode: 'watch' },
+          { name: 'network', meta: '9 containers · includes Traefik (ingress)', mode: 'watch', ingress: true },
+          { name: 'monitoring', meta: '7 containers', mode: 'watch' },
+          { name: 'photos', meta: '6 containers · Immich', mode: 'watch' },
+          { name: 'wiki-go', meta: '2 containers · no restart policy', mode: 'ignore' }], moreStacks: 10 },
+      repair: { label: 'REPAIR / UNINSTALL', pathBadge: 'EXISTING INSTALL', host: 'casamediaserver · Debian 13 · x86_64', init: 'systemd', pathLine: 'Planet Express 2.6.0 found at /opt/planet-express', isRepair: true, isAdopt: false,
+        root: '/home/chris/stacks', path: '/opt/planet-express', persistText: 'PERSISTENT', persistOk: true,
+        note: 'Existing configuration is read, not overwritten. Only differences are proposed.',
+        pools: [], stacks: [{ name: 'media', meta: '24 containers · already managed', mode: 'manage' }, { name: 'network', meta: '9 containers · ingress', mode: 'watch', ingress: true }, { name: 'monitoring', meta: '7 containers · already managed', mode: 'manage' }], moreStacks: 12 }
+    };
+    const sc = SC[scnKey];
+    const uninst = scnKey === 'repair' && S.repMode === 'uninstall';
+
+    // ---- checks ----
+    const ck = (id, label, st, detail, fix) => ({ id, label, st, detail, fix });
+    const CHECKS = {
+      mos: [
+        ck(1, 'OS and init system', 'ok', 'MOS 1.x, init: mos, x86_64'),
+        ck(2, 'Persistent storage', S.resolved ? 'ok' : 'blocked', S.resolved ? 'pool1 · /mnt/pool1 · 1.4 TiB free' : 'No pool found. / is RAM: Planet Express would vanish at the next reboot.', S.resolved ? '' : 'Create a pool in the MOS UI (or via its API), then re-check. I can guide it; I will not create one for you.'),
+        ck(3, 'Docker', 'warn', 'Installed, not enabled, and not pointed at a pool.', 'Plan step 02 enables it through the MOS API and sets its data root to the pool.'),
+        ck(4, 'Compose', 'ok', 'standalone docker-compose 2.x (not the plugin)'),
+        ck(5, 'Stacks and containers', 'ok', '0 stacks. A first-stack template will be offered.'),
+        ck(6, 'Ports', 'ok', '8421 free for the dashboard'),
+        ck(7, 'Privileges', 'ok', 'Running as root in setup mode')],
+      ubuntu: [
+        ck(1, 'OS and init system', 'ok', 'Ubuntu 24.04, systemd, x86_64'),
+        ck(2, 'Docker', S.resolved ? 'ok' : 'blocked', S.resolved ? 'Docker 27.3, running' : 'Docker is not installed.', S.resolved ? '' : 'Install Docker Engine from Docker’s apt repository, then re-check. I guide this step; I do not install Docker for you.'),
+        ck(3, 'Compose', S.resolved ? 'ok' : 'warn', S.resolved ? 'docker compose plugin 2.29' : 'Unknown until Docker is present.'),
+        ck(4, 'Persistent storage', 'ok', '/opt on ext4, 212 GiB free'),
+        ck(5, 'Stacks and containers', 'ok', '0 stacks. A first-stack template will be offered.'),
+        ck(6, 'Ports', 'ok', '8421 free for the dashboard'),
+        ck(7, 'sudo and privileges', 'ok', 'Running as root in setup mode; acl package present')],
+      adopt: [
+        ck(1, 'OS and init system', 'ok', 'Debian 13, systemd, x86_64'),
+        ck(2, 'Docker and Compose', 'ok', 'Docker 27.3 · compose plugin 2.29'),
+        ck(3, 'Stacks found', 'ok', '15 stacks, 88 containers under /home/chris/stacks'),
+        ck(4, 'Mounts', 'ok', '5 mounts found: /mnt/media is 87% used'),
+        ck(5, 'Backups', 'ok', 'borg weekly timer found; daily disabled on purpose'),
+        ck(6, 'Ports', 'warn', 'Traefik owns :80 and :443. Expected: Planet Express reads it and never touches it.'),
+        ck(7, 'Existing Planet Express', 'ok', 'None found'),
+        ck(8, 'sudo and privileges', 'ok', 'Running as root in setup mode')],
+      repair: [
+        ck(1, 'Existing install', 'ok', 'Planet Express 2.6.0 at /opt/planet-express'),
+        ck(2, 'Core service', 'ok', 'casa-planetexpress.service active'),
+        ck(3, 'Dashboard service user', S.resolved ? 'ok' : 'blocked', S.resolved ? 'planetexpress-web present' : 'planetexpress-web is missing. The dashboard cannot read its files.', S.resolved ? '' : 'The repair plan recreates it with read-only access to exactly the files it needs.'),
+        ck(4, 'Config', 'warn', 'config.yaml valid; 2 keys differ from the current example.', 'Differences are shown in the plan. Your values are never overwritten.'),
+        ck(5, 'Secrets', 'ok', '/etc/planetexpress.env present, mode 600'),
+        ck(6, 'Docker and Compose', 'ok', 'Docker 27.3 · compose plugin 2.29')]
+    };
+    const cks = CHECKS[scnKey];
+    const nOk = cks.filter(c => c.st === 'ok').length, nW = cks.filter(c => c.st === 'warn').length, nB = cks.filter(c => c.st === 'blocked').length;
+    const scan = {
+      level: nB ? 'crit' : nW ? 'warn' : 'ok', orb: nB ? '⛨' : nW ? '!' : '✓',
+      title: nB ? 'ONE THING BLOCKS SETUP' : nW ? 'READY, WITH NOTES' : 'EVERYTHING LOOKS READY',
+      detail: nB ? 'Fix it, or override where allowed, then re-check. Nothing has been changed.' : 'Leela found nothing that stops setup. Nothing has been changed.',
+      chips: [{ cls: 'pe-chip ok', text: nOk + ' OK' }, ...(nW ? [{ cls: 'pe-chip warn', text: nW + ' NOTE' }] : []), ...(nB ? [{ cls: 'pe-chip crit', text: nB + ' BLOCKED' }] : [])],
+      checks: cks.map(c => ({
+        label: c.label, detail: c.detail, fix: c.fix || '', hasFix: !!c.fix,
+        cls: c.st === 'blocked' ? 'pe-check failed' : c.st === 'ok' ? 'pe-check passed' : 'pe-check',
+        style: c.st === 'warn' ? 'opacity:1;border:1px solid var(--pe-warn-line);background:var(--pe-well);align-items:flex-start' : 'align-items:flex-start',
+        led: 'pe-led ' + (c.st === 'blocked' ? 'crit' : c.st === 'warn' ? 'warn' : 'ok'),
+        badge: c.st === 'blocked' ? 'BLOCKED' : c.st === 'warn' ? 'NOTE' : 'OK', badgeCls: 'pe-badge ' + (c.st === 'blocked' ? 'crit' : c.st === 'warn' ? 'warn' : 'ok')
+      })),
+      blocked: nB > 0, recheck: () => set({ resolved: true }), isAdopt: sc.isAdopt
+    };
+
+    // ---- stages ----
+    const ST = [
+      { id: 'welcome', label: 'Welcome', who: 'FRY', img: 'fry', kicker: 'STEP 1 · FRY', title: 'WELCOME ABOARD', blurb: 'I am Fry. I will walk you through this. First I look at your machine, then I ask only what I cannot work out myself. Nothing changes until you approve a plan.' },
+      { id: 'scan', label: 'Scan', who: 'LEELA', img: 'leela', kicker: 'STEP 2 · LEELA', title: 'LEELA IS SCANNING YOUR SHIP', blurb: 'Read-only. Each row says what was found and, if something is wrong, how to fix or override it.' },
+      { id: 'where', label: 'Where it lives', who: 'FRY', img: 'fry', kicker: 'STEP 3 · FRY', title: 'WHERE PLANET EXPRESS LIVES', blurb: 'Install location, stacks root, and which stacks Planet Express may manage versus only watch.' },
+      { id: 'powers', label: 'What it may do', who: 'FRY', img: 'fry', kicker: 'STEP 4 · FRY', title: 'WHAT PLANET EXPRESS MAY DO', blurb: 'Pick powers. Observing is always on. Every other power is off until you switch it on, and each one says what host access it needs.' },
+      { id: 'tg', label: 'Telegram', who: 'FRY', img: 'fry', kicker: 'STEP 5 · FRY', title: 'TELEGRAM', blurb: 'Telegram is how you approve fixes from your phone. Paste the bot token, then send your bot any message and I will find the chat for you.' },
+      { id: 'op', label: 'Operator account', who: 'FRY', img: 'fry', kicker: 'STEP 6 · FRY', title: 'YOUR OPERATOR ACCOUNT', blurb: 'The first operator. A passphrase plus a 6-digit authenticator code. There is no sign-up and no reset.' },
+      { id: 'llm', label: 'LLM key', who: 'FRY', img: 'fry', kicker: 'STEP 7 · FRY', title: 'LLM (OPTIONAL)', blurb: 'Used for analysing findings and drafting plans. Optional, and you can add it later.' },
+      { id: 'plan', label: 'Review the plan', who: 'FARNSWORTH', img: 'farnsworth', kicker: 'STEP 8 · FARNSWORTH', title: 'REVIEW THE PLAN', blurb: 'Everything that will be created, written or started, in order. Open any step to see what it does and the exact file it writes.' },
+      { id: 'install', label: 'Install', who: 'BENDER', img: 'bender', kicker: 'STEP 9 · BENDER', title: 'BENDER IS ON IT', blurb: 'Approved steps run one at a time. A failed step stops everything after it; nothing further runs until you decide.' },
+      { id: 'done', label: 'Verify and done', who: 'HERMES', img: 'hermes', kicker: 'STEP 10 · HERMES', title: 'VERIFIED', blurb: 'The report: what is running, what was tested, and what to do next.' }
+    ];
+    const st = ST[S.step], at = {}; ST.forEach((x, i) => at[x.id] = i === S.step);
+    const head = { fry: st.img === 'fry', leela: st.img === 'leela', farnsworth: st.img === 'farnsworth', bender: st.img === 'bender', hermes: st.img === 'hermes', kicker: st.kicker, title: uninst && st.id === 'plan' ? 'REVIEW THE UNINSTALL PLAN' : st.title, blurb: st.blurb };
+    if (st.id === 'welcome' && scnKey === 'repair') head.blurb = 'Planet Express is already installed here. Pick repair to fix what is broken, or uninstall for a clean removal plan. Either way you see the plan first.';
+    const stages = ST.map((x, i) => ({
+      label: x.label, who: x.who, mark: i < S.step ? '✓' : (i === S.step ? '' : ''),
+      marker: 'pe-marker ' + (i < S.step ? 'done' : i === S.step ? 'active' : ''), line: 'pe-rail-line' + (i < S.step ? ' done' : ''),
+      textStyle: i === S.step ? 'color:var(--pe-ink-2);font-weight:600' : (i > S.step ? 'color:var(--pe-ink-faint)' : ''),
+      go: () => { if (i <= S.step) set({ step: i }); }
+    }));
+
+    // ---- where ----
+    const modeOf = s => S.modes[s.name] || s.mode;
+    const mkOpts = s => ['manage', 'watch', 'ignore'].map(m => ({ label: m.toUpperCase(), cls: 'pe-btn sm' + (modeOf(s) === m ? ' accent' : ''), go: () => set({ modes: { ...S.modes, [s.name]: m } }) }))
+      .filter(o => !(s.ingress && o.label === 'MANAGE'));
+    const extra = S.expanded ? Array.from({ length: sc.moreStacks }, (_, i) => ({ name: ['paperless', 'vaultwarden', 'home-assistant', 'grafana', 'uptime', 'ntfy', 'speedtest', 'adguard', 'dockge', 'wiki'][i % 10] + (i >= 10 ? '-' + i : ''), meta: '2–4 containers', mode: 'watch' })) : [];
+    const listed = [...sc.stacks, ...extra];
+    const ledOf = s => (modeOf(s) === 'manage' ? 'warn' : modeOf(s) === 'watch' ? 'ok' : 'idle');
+    const mgCount = listed.filter(s => modeOf(s) === 'manage').length;
+    const where = {
+      path: sc.path, root: sc.root, note: sc.note, persistText: sc.persistText, persistCls: 'pe-badge ok', hasPools: sc.pools.length > 0, pools: sc.pools,
+      stackSummary: scnKey === 'adopt' || scnKey === 'repair' ? '15 stacks · 88 containers' : '1 template stack',
+      stacks: listed.map(s => ({ name: s.name, meta: s.meta + (s.ingress ? ' · cannot be managed from the dashboard' : ''), led: ledOf(s), opts: mkOpts(s) })),
+      hasMore: sc.moreStacks > 0, more: S.expanded ? 0 : sc.moreStacks, expand: e => { e.preventDefault(); set({ expanded: !S.expanded }); },
+      expandLabel: S.expanded ? 'collapse' : 'show all'
+    };
+    if (S.expanded) where.hasMore = sc.moreStacks > 0, where.more = 0;
+
+    // ---- powers ----
+    const CAPS = [
+      { k: 'observe', title: 'Observe', desc: 'Monitor stacks, mounts and backups; show the dashboard; run diagnosis.', needs: 'Needs: read access to the Docker socket. No sudo.', risk: 'R0', fixed: true },
+      { k: 'restart', title: 'Restart containers', desc: 'Restart one container after you approve a plan.', needs: 'Needs: Docker access only. No sudo.', risk: 'R1' },
+      { k: 'stack', title: 'Stack up and down', desc: 'Bring a managed stack up or down. DOWN asks for your passphrase first.', needs: 'Needs: Docker access. Ingress stacks are never offered.', risk: 'R2' },
+      { k: 'update', title: 'Canary auto-update', desc: 'Update one service, verify it, and roll back automatically if it fails.', needs: 'Needs: Docker access; a weekly systemd timer.', risk: 'R2' },
+      { k: 'prune', title: 'Safe prune', desc: 'Remove dangling images and stopped one-off containers. Never volumes.', needs: 'Needs: sudo systemctl for the prune unit only.', risk: 'R2' }
+    ];
+    const caps = CAPS.map(c => {
+      const on = c.fixed || S.caps[c.k];
+      return { title: c.title, desc: c.desc, needs: c.needs, risk: c.risk, riskCls: 'pe-badge ' + (c.risk === 'R0' ? 'ok' : c.risk === 'R1' ? 'ok' : 'warn'),
+        state: c.fixed ? 'ALWAYS ON' : on ? 'ON' : 'OFF', stateCls: 'pe-chip ' + (on ? 'ok' : ''), led: 'pe-led ' + (on ? 'ok' : 'idle'),
+        cls: 'pe-check' + (on ? ' passed' : ''), style: 'cursor:' + (c.fixed ? 'default' : 'pointer') + ';align-items:flex-start;opacity:1',
+        go: () => { if (!c.fixed) set({ caps: { ...S.caps, [c.k]: !S.caps[c.k] } }); } };
+    });
+    const needsSudo = S.caps.prune;
+    const powersNote = sc.isAdopt || scnKey === 'repair' ? 'Adopting is observe-only until you switch a power on. A sudoers entry is written only if a power needs it' + (needsSudo ? ': the plan shows it in full.' : ', and none does right now.') : 'Nothing privileged is installed unless you pick a power that needs it' + (needsSudo ? '. The plan shows the exact sudoers file.' : '. None does right now.');
+
+    // ---- telegram ----
+    const TG = {
+      idle: { title: 'Waiting for a token', detail: 'Paste the bot token above, then press FIND MY CHAT.', led: 'pe-led idle', badge: 'NOT STARTED', badgeCls: 'pe-badge', cardCls: 'pe-check', cardStyle: 'opacity:1', spin: false, tokenShown: 'paste the token from BotFather', actions: [{ label: 'FIND MY CHAT', cls: 'pe-btn accent', go: () => set({ tg: 'waiting' }) }] },
+      waiting: { title: 'Send any message to your bot now', detail: 'Open Telegram, find your bot, say “hi”. Listening for up to 60 seconds.', led: 'pe-led warn', badge: 'LISTENING · 0:42', badgeCls: 'pe-badge warn', cardCls: 'pe-check running', cardStyle: '', spin: true, tokenShown: '1234567890:AAF••••••••••••••••••', actions: [{ label: 'CANCEL', cls: 'pe-btn', go: () => set({ tg: 'idle' }) }, { label: '(preview) DETECTED', cls: 'pe-btn sm', go: () => set({ tg: 'found' }) }, { label: '(preview) NOTHING CAME', cls: 'pe-btn sm', go: () => set({ tg: 'failed' }) }] },
+      found: { title: 'Found: Chris (private chat)', detail: 'chat id ending ···4411. Stored in /etc/planetexpress.env. Not shown again.', led: 'pe-led ok', badge: 'FOUND', badgeCls: 'pe-badge ok', cardCls: 'pe-check passed', cardStyle: '', spin: false, tokenShown: '1234567890:AAF••••••••••••••••••', actions: [{ label: 'SEND TEST MESSAGE', cls: 'pe-btn accent', go: () => set({ tg: 'tested' }) }] },
+      tested: { title: 'Test message delivered', detail: '“Fry here. Setup is talking to you.” arrived in 0.4s. Check your phone.', led: 'pe-led ok', badge: 'VERIFIED', badgeCls: 'pe-badge ok', cardCls: 'pe-check passed', cardStyle: '', spin: false, tokenShown: '1234567890:AAF••••••••••••••••••', actions: [{ label: 'SEND AGAIN', cls: 'pe-btn', go: () => set({ tg: 'tested' }) }] },
+      failed: { title: 'No message arrived in 60 seconds', detail: 'Either the token is wrong, the bot has not been messaged, or Telegram is unreachable from this machine. The token was accepted by Telegram, so it is probably the second.', led: 'pe-led crit', badge: 'NOT FOUND', badgeCls: 'pe-badge crit', cardCls: 'pe-check failed', cardStyle: '', spin: false, tokenShown: '1234567890:AAF••••••••••••••••••', actions: [{ label: 'TRY AGAIN', cls: 'pe-btn warn', go: () => set({ tg: 'waiting' }) }] }
+    };
+    const tg = TG[S.tg];
+
+    // ---- operator ----
+    const verified = S.totp === 'ok';
+    const code = S.totp === 'ok' ? '482913'.split('') : S.totp === 'bad' ? '123456'.split('') : ['', '', '', '', '', ''];
+    const op = {
+      name: 'Chris', manual: 'JBSW Y3DP EHPK 3PXP', verified,
+      badge: verified ? 'VERIFIED' : S.totp === 'bad' ? 'CODE REJECTED' : 'NOT VERIFIED', badgeCls: 'pe-badge ' + (verified ? 'ok' : S.totp === 'bad' ? 'crit' : ''),
+      fieldCls: S.totp === 'bad' ? 'is-rejected' : '', totpCls: 'pe-totp' + (S.totp === 'bad' ? ' is-rejected' : ''),
+      cells: code.map((v, i) => ({ v, cls: 'pe-totp-cell' + (S.totp === 'idle' && i === 0 ? ' is-focused' : '') })),
+      actions: [{ label: '(preview) CORRECT CODE', cls: 'pe-btn sm', go: () => set({ totp: 'ok' }) }, { label: '(preview) WRONG CODE', cls: 'pe-btn sm', go: () => set({ totp: 'bad' }) }],
+      recovery: ['4F7K-92QD', 'M2XT-8LNC', 'P9RA-31VW', 'H6ZE-77YB', 'C3JU-05KS', 'W8DG-6TQF', 'N1BV-4MXA', 'Y5LH-2RPE']
+    };
+
+    // ---- llm ----
+    const L = { anthropic: 'ANTHROPIC', openai: 'OPENAI', skip: 'SKIP' };
+    const llm = {
+      opts: Object.keys(L).map(k => ({ label: k === 'skip' ? 'SKIP FOR NOW' : L[k], cls: 'pe-btn' + (S.llm === k ? ' accent' : ''), go: () => set({ llm: k }) })),
+      hasKey: S.llm !== 'skip', name: S.llm === 'openai' ? 'OPENAI' : 'ANTHROPIC',
+      note: S.llm === 'skip' ? 'Without a key, Planet Express still monitors, shows the dashboard and proposes the fixes it already knows. It cannot analyse unfamiliar findings or answer “Ask the ship”. Add a key later in Config.' : 'Costs are bounded by the schedule: a status pass every 6 hours, deeper diagnosis only after a failed fix.',
+      noteCls: 'pe-check' + (S.llm === 'skip' ? '' : ' passed'), noteLed: 'pe-led ' + (S.llm === 'skip' ? 'warn' : 'ok')
+    };
+
+    // ---- plan ----
+    const P = (id, grp, title, target, risk, rev, root, why, preview) => ({ id, grp, title, target, risk, rev, root, why, preview });
+    const keepEnvNote = 'Secrets are written to a root-only file. The plan masks them.';
+    const base = {
+      mos: [
+        P('p1', 'Host', 'Create the persistent install directory', '/mnt/pool1/planet-express', 'R1', true, true, 'Everything Planet Express keeps lives here so it survives a reboot.', 'mkdir  /mnt/pool1/planet-express/{state,logs}\nowner: root:planetexpress'),
+        P('p2', 'Host', 'Enable Docker and point it at the pool', 'MOS API · docker.root_dir', 'R2', true, true, 'Docker is installed but off. This turns it on and moves its data off RAM.', 'docker.enabled   = true\ndocker.root_dir  = /mnt/pool1/docker'),
+        P('p3', 'Host', 'Install boot hooks', '/boot/optional/scripts', 'R1', true, true, 'MOS rebuilds / from RAM at boot. These hooks restore Planet Express.', 'post-start.sh   restores units, starts casa-planetexpress\nshutdown.sh     stops cleanly'),
+        P('p4', 'Config', 'Write config.yaml', '/mnt/pool1/planet-express/config.yaml', 'R1', true, true, 'Your answers from the earlier screens. No secrets in this file.', 'stacks_dir: /mnt/pool1/stacks\ncapabilities:\n  restart: ' + S.caps.restart + '\n  stack_control: ' + S.caps.stack + '\n  canary_update: ' + S.caps.update + '\n  safe_prune: ' + S.caps.prune),
+        P('p5', 'Secrets', 'Write the secrets file', '/etc/planetexpress.env (mode 600)', 'R1', true, true, keepEnvNote, 'TG_BOT_TOKEN=••••••••••••••••\nTG_CHAT_ID=••••4411\n' + (S.llm === 'skip' ? '# no LLM key' : (S.llm === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY') + '=••••••••••••')),
+        P('p6', 'Services', 'Create the first stack from a template', '/mnt/pool1/stacks/nginx-demo', 'R1', true, false, 'Gives the dashboard something to show.', 'nginx-demo/docker-compose.yml  (1 service, port 8088)'),
+        P('p7', 'Services', 'Install and start Planet Express', 'casa-planetexpress, casa-dashboard', 'R2', true, true, 'Renders the units from your answers and starts them.', 'unit files rendered from systemd/*.template\nenable + start casa-planetexpress\nenable + start casa-dashboard (port 8421)')
+      ],
+      ubuntu: [
+        P('p1', 'Host', 'Create the service user', 'planetexpress-web', 'R1', true, true, 'A separate unprivileged user for the dashboard, with read-only access to exactly the files it needs.', 'user: planetexpress-web (no shell, no home)\nACL: read /etc/planetexpress/config.yaml'),
+        P('p2', 'Config', 'Write config.yaml', '/etc/planetexpress/config.yaml', 'R1', true, true, 'Your answers from the earlier screens. No secrets in this file.', 'stacks_dir: /home/chris/stacks\ncapabilities:\n  restart: ' + S.caps.restart + '\n  stack_control: ' + S.caps.stack + '\n  canary_update: ' + S.caps.update + '\n  safe_prune: ' + S.caps.prune),
+        P('p3', 'Secrets', 'Write the secrets file', '/etc/planetexpress.env (mode 600)', 'R1', true, true, keepEnvNote, 'TG_BOT_TOKEN=••••••••••••••••\nTG_CHAT_ID=••••4411\n' + (S.llm === 'skip' ? '# no LLM key' : (S.llm === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY') + '=••••••••••••')),
+        P('p4', 'Services', 'Create the first stack from a template', '/home/chris/stacks/nginx-demo', 'R1', true, false, 'Gives the dashboard something to show.', 'nginx-demo/docker-compose.yml  (1 service, port 8088)'),
+        P('p5', 'Services', 'Install and start Planet Express', 'casa-planetexpress, casa-dashboard', 'R2', true, true, 'Renders the units from your answers and starts them.', 'unit files rendered from systemd/*.template\nenable + start casa-planetexpress\nenable + start casa-dashboard (port 8421)')
+      ],
+      adopt: [
+        P('p1', 'Host', 'Create the service user', 'planetexpress-web', 'R1', true, true, 'A separate unprivileged user for the dashboard, with read-only access to exactly the files it needs.', 'user: planetexpress-web (no shell, no home)\nACL: read /etc/planetexpress/config.yaml'),
+        P('p2', 'Config', 'Write config.yaml from what discovery found', '/etc/planetexpress/config.yaml', 'R1', true, true, 'Observe-only by default. Mounts and exclusions come from the scan.', 'stacks_dir: /home/chris/stacks\nmanaged_stacks: [' + listed.filter(s => modeOf(s) === 'manage').map(s => s.name).join(', ') + ']\nexcluded_stacks: [' + listed.filter(s => modeOf(s) === 'ignore').map(s => s.name).join(', ') + ']\nmounts: [/mnt/media, /, /mnt/photos, /mnt/backup, /boot/efi]'),
+        P('p3', 'Secrets', 'Write the secrets file', '/etc/planetexpress.env (mode 600)', 'R1', true, true, keepEnvNote, 'TG_BOT_TOKEN=••••••••••••••••\nTG_CHAT_ID=••••4411\n' + (S.llm === 'skip' ? '# no LLM key' : (S.llm === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY') + '=••••••••••••')),
+        P('p4', 'Services', 'Install and start Planet Express', 'casa-planetexpress, casa-dashboard', 'R2', true, true, 'Renders the units from your answers and starts them. No existing stack is touched.', 'unit files rendered from systemd/*.template\nenable + start casa-planetexpress\nenable + start casa-dashboard (port 8421)')
+      ],
+      repair: uninst ? [
+        P('p1', 'Stop', 'Stop Planet Express', 'casa-planetexpress, casa-dashboard', 'R2', true, true, 'Stops both units. Your stacks keep running.', 'stop + disable casa-planetexpress\nstop + disable casa-dashboard'),
+        P('p2', 'Remove', 'Remove unit files and the sudoers entry', '/etc/systemd/system, /etc/sudoers.d/planetexpress', 'R2', false, true, 'Removes the OS-level grant first so nothing privileged remains.', 'delete /etc/systemd/system/casa-planetexpress.service\ndelete /etc/systemd/system/casa-dashboard.service\ndelete /etc/sudoers.d/planetexpress'),
+        P('p3', 'Remove', 'Snapshot, then remove state and config', 'data/, /etc/planetexpress', 'R3', false, true, 'A snapshot is kept so this can be undone. This is the only step that cannot be undone without it.', 'snapshot → data/snapshots/pre-uninstall-<time>\nremove config.yaml, state, logs'),
+        P('p4', 'Remove', 'Remove the secrets file', '/etc/planetexpress.env', 'R2', false, true, 'Bot token and keys are deleted. Revoke the Telegram bot in BotFather as well.', 'delete /etc/planetexpress.env')
+      ] : [
+        P('p1', 'Repair', 'Recreate the dashboard service user', 'planetexpress-web', 'R1', true, true, 'The only broken thing. Read-only access to exactly the files the dashboard needs.', 'user: planetexpress-web (no shell, no home)\nACL: read /etc/planetexpress/config.yaml'),
+        P('p2', 'Repair', 'Add 2 keys missing from config.yaml', '/etc/planetexpress/config.yaml', 'R1', true, true, 'Diff only. Your existing values are kept.', '+ multi_host:\n+   hosts: []\n  (everything else unchanged)'),
+        P('p3', 'Repair', 'Restart the dashboard', 'casa-dashboard.service', 'R1', true, true, 'Picks up the recreated user.', 'restart casa-dashboard')
+      ]
+    };
+    const steps = base[scnKey];
+    const groups = [];
+    steps.forEach(s => { let g = groups.find(x => x.name === s.grp.toUpperCase()); if (!g) { g = { name: s.grp.toUpperCase(), steps: [] }; groups.push(g); } g.steps.push(s); });
+    let n = 0;
+    const plan = {
+      summary: steps.length + ' steps · ' + steps.filter(s => !s.rev).length + ' not reversible · nothing runs until you approve.',
+      groups: groups.map(g => ({ name: g.name, count: g.steps.length + (g.steps.length === 1 ? ' STEP' : ' STEPS'), steps: g.steps.map(s => { n++; const o = !!S.open[s.id]; return {
+        idx: String(n).padStart(2, '0'), title: s.title, target: s.target, risk: s.risk, riskCls: 'pe-badge ' + (s.risk === 'R3' ? 'crit' : s.risk === 'R2' ? 'warn' : 'ok'),
+        rev: s.rev ? 'REVERSIBLE' : 'NOT REVERSIBLE', revCls: 'pe-chip ' + (s.rev ? '' : 'warn'), caret: o ? '▾' : '▸', open: o, why: s.why, preview: s.preview, root: s.root,
+        toggle: () => set({ open: { ...S.open, [s.id]: !o } }) }; }) })),
+      never: scnKey === 'adopt' || scnKey === 'repair'
+        ? ['No existing stack is stopped, restarted, edited or removed.', 'Traefik and its routes are read, never changed.', 'Backup jobs and timers are read, never changed.']
+        : ['No stack outside the one template is created or changed.', 'No secret is written to config.yaml or shown after this screen.', 'No port is opened to the internet.']
+    };
+
+    // ---- install ----
+    const failAt = 3;
+    const nSteps = steps.length;
+    const inst = (() => {
+      const run = S.inst;
+      const cur = run === 'done' ? nSteps : (run === 'failed' ? failAt : Math.min(2, nSteps - 1));
+      const list = steps.map((s, i) => {
+        const done = i < cur, active = i === cur && run !== 'done', failed = run === 'failed' && i === cur;
+        return { title: s.title, meta: done ? 'done · ' + (0.4 + i * 0.7).toFixed(1) + 's' : failed ? 'failed' : active ? 'running…' : 'waiting',
+          marker: 'pe-marker ' + (done ? 'done' : failed ? 'failed' : active ? 'active' : ''), mark: done ? '✓' : failed ? '✕' : '', line: 'pe-rail-line' + (done ? ' done' : ''),
+          hasErr: failed, err: 'error: could not write /etc/planetexpress.env: filesystem is read-only\nexit 1' };
+      });
+      const logs = [];
+      steps.slice(0, Math.min(cur + (run === 'running' ? 1 : 0), nSteps)).forEach((s, i) => { logs.push({ t: '[' + String(i + 1).padStart(2, '0') + ']', m: 'started: ' + s.title, cls: '' }); if (i < cur) logs.push({ t: ' ok ', m: s.target, cls: '' }); });
+      if (run === 'failed') { logs.push({ t: 'ERR ', m: 'could not write /etc/planetexpress.env: filesystem is read-only', cls: 'crit' }, { t: 'STOP', m: 'nothing further will run', cls: 'warn' }); }
+      if (run === 'done') logs.push({ t: 'DONE', m: 'all ' + nSteps + ' steps ok · setup mode closing', cls: '' });
+      return {
+        level: run === 'failed' ? 'crit' : run === 'done' ? 'ok' : 'warn', orb: run === 'failed' ? '✕' : run === 'done' ? '✓' : '◌',
+        title: run === 'failed' ? 'FAILED AT STEP ' + String(failAt + 1).padStart(2, '0') : run === 'done' ? 'ALL STEPS COMPLETE' : 'STEP ' + String(cur + 1).padStart(2, '0') + ' OF ' + String(nSteps).padStart(2, '0'),
+        detail: run === 'failed' ? 'Steps before this one stay done. Nothing after it has run.' : run === 'done' ? 'Verifying next.' : 'Running one step at a time.',
+        barCls: 'pe-bar-fill ' + (run === 'failed' ? 'crit' : run === 'done' ? 'ok' : 'warn'), barStyle: 'width:' + Math.round((run === 'done' ? nSteps : cur + 0.5) / nSteps * 100) + '%',
+        steps: list, log: logs, caret: run === 'running', logCls: 'pe-logwell' + (run === 'failed' ? ' crit' : ''), logLed: 'pe-led ' + (run === 'failed' ? 'crit' : run === 'done' ? 'ok' : 'warn'),
+        logTitle: 'STEP LOG', failed: run === 'failed', failNote: 'The filesystem holding /etc is read-only, so the secrets file could not be written. Fix the mount, then retry this step. Your earlier answers are kept.',
+        retry: () => set({ inst: 'running' }), toPlan: () => set({ step: 7 })
+      };
+    })();
+
+    // ---- done ----
+    const chk = (label, meta) => ({ label, meta });
+    const done = {
+      title: uninst ? 'PLANET EXPRESS REMOVED' : scnKey === 'repair' ? 'REPAIRED AND VERIFIED' : 'PLANET EXPRESS IS ABOARD',
+      detail: uninst ? 'Services stopped, grants and files removed. Your stacks are untouched and still running.' : 'Everything below was tested just now, not assumed.',
+      checks: uninst ? [chk('Units stopped and disabled', 'inactive'), chk('Sudoers entry removed', 'gone'), chk('Your stacks still running', '24 of 24 online')] : [
+        chk('Core service running', 'casa-planetexpress · active'), chk('Dashboard reachable', 'http://192.168.1.20:8421 · 200 OK'),
+        ...(sc.isAdopt || scnKey === 'repair' ? [chk('First scan complete', '15 stacks · 88 containers read')] : [chk('First scan complete', '1 stack · 1 container read')]),
+        chk('Test message delivered', S.tgSkipped ? 'skipped' : 'Telegram · 0.4s'), chk('Operator can sign in', 'passphrase + TOTP verified'), chk('Setup mode closed', 'port closed, token revoked')],
+      passed: uninst ? 3 : 6,
+      next: uninst ? [{ i: '01', t: 'Revoke the Telegram bot in BotFather so the old token is dead.' }, { i: '02', t: 'Delete the install directory if you no longer want the snapshot.' }, { i: '03', t: 'Re-run this wizard any time to install again.' }]
+        : [{ i: '01', t: 'Open the dashboard and sign in as ' + op.name + '.' }, { i: '02', t: sc.isAdopt ? 'Pick one stack to manage when you are ready. Nothing is managed yet.' : 'Add your own stacks under ' + sc.root + '.' }, { i: '03', t: 'Run SCAN once and check Actions for the first proposed fix.' }],
+      filed: 'Installed ' + (uninst ? '0' : String(steps.length)) + ' steps · report saved to the install directory.'
+    };
+
+    // ---- nav ----
+    const blocked = at.scan && scan.blocked;
+    const tgOk = !at.tg || S.tg === 'tested' || S.tg === 'found';
+    const opOk = !at.op || verified;
+    const instOk = !at.install || S.inst === 'done';
+    const exBlock = S.ex;
+    const canNext = !blocked && opOk && instOk && !exBlock;
+    const labelNext = at.plan ? (uninst ? 'APPROVE UNINSTALL' : 'APPROVE & INSTALL ✈') : at.install ? 'CONTINUE TO REPORT' : at.done ? 'OPEN DASHBOARD ↗' : at.welcome ? "LET'S GO" : 'CONTINUE';
+    const nav = {
+      back: () => set({ step: Math.max(0, S.step - 1) }), backStyle: S.step === 0 || at.install || at.done ? 'visibility:hidden' : '',
+      next: () => { if (canNext && S.step < ST.length - 1) set({ step: S.step + 1, inst: at.plan ? 'running' : S.inst }); },
+      nextLabel: labelNext, nextCls: 'pe-btn ' + (at.plan ? 'warn' : 'accent'),
+      nextStyle: canNext ? '' : 'opacity:.4;pointer-events:none',
+      hasNote: !canNext || (at.tg && !tgOk), note: exBlock ? 'Close the outside exposure first' : blocked ? 'Resolve the blocked check to continue' : !opOk ? 'Verify the code to continue' : !instOk ? 'Waiting for install to finish' : '',
+      hasSkip: at.tg || at.llm, skip: () => set({ tgSkipped: at.tg, step: S.step + 1 })
+    };
+    if (at.tg) { nav.hasNote = false; nav.hasSkip = true; nav.nextStyle = tgOk ? '' : 'opacity:.4;pointer-events:none'; nav.next = () => { if (tgOk) set({ step: S.step + 1 }); }; }
+    if (at.llm) { nav.hasSkip = false; }
+
+    // ---- preview ----
+    const pb = (cond, label, go) => ({ label, cls: 'pe-btn sm' + (cond ? ' accent' : ''), go });
+    const pv = {
+      scns: Object.keys(SC).map(k => pb(S.scn === k, SC[k].label, () => set({ scn: k, step: 0, resolved: false, open: {}, expanded: false, modes: {}, repMode: 'repair' }))),
+      tgs: [['idle', 'IDLE'], ['waiting', 'LISTENING'], ['found', 'FOUND'], ['tested', 'TESTED'], ['failed', 'FAILED']].map(([k, l]) => pb(S.tg === k, l, () => set({ tg: k, step: 4 }))),
+      insts: [['running', 'RUNNING'], ['failed', 'FAILED'], ['done', 'DONE']].map(([k, l]) => pb(S.inst === k, l, () => set({ inst: k, step: 8 }))),
+      exs: [[false, 'LAN ONLY'], [true, 'EXPOSED']].map(([k, l]) => pb(S.ex === k, l, () => set({ ex: k })))
+    };
+
+    return {
+      window: { left: '28:41', addr: '192.168.1.20:8421' }, ex: S.ex,
+      progress: (S.step + 1) + ' / ' + ST.length, stages, head, at, scn: sc, rep: { repairCls: 'pe-btn' + (!uninst ? ' accent' : ''), uninstCls: 'pe-btn' + (uninst ? ' warn' : ''), setRepair: () => set({ repMode: 'repair' }), setUninst: () => set({ repMode: 'uninstall' }) },
+      scan, where, caps, powersNote, tg, op, llm, plan, inst, done, nav, pv
+    };
+  }
+}
+</script>
+</body>
+</html>
