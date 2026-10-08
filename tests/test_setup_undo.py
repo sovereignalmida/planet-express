@@ -359,7 +359,7 @@ def test_things_added_inside_a_created_venv_stop_the_undo(tmp_path):
     run_apply(plan, host, tmp_path)
     host.add_file(f"{VENV}/my-data", b"precious")
     result = run_undo(plan, host, tmp_path)
-    assert result.status == "stopped" and "my-data" in result.reason and f"{VENV}/my-data" in host.nodes
+    assert result.status == "stopped" and "changed since setup built it" in result.reason and f"{VENV}/my-data" in host.nodes
 
 
 def test_a_write_that_failed_later_is_still_undone_after_a_satisfied_retry(tmp_path):
@@ -399,3 +399,24 @@ def test_a_service_started_by_someone_else_after_a_failed_start_is_not_stopped(t
     host.commands.clear()
     assert run_undo(plan, host, tmp_path).status == "done"
     assert not [c for c in host.commands if c[1] in ("stop", "disable")] and state["active"]
+
+
+def test_content_added_deep_inside_a_created_venv_also_stops_the_undo(tmp_path):
+    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    host = host_with_checkout()
+    healthy_checks(host)
+    state = {"made": False}
+
+    def venv(h, argv):
+        venv_cmd(h, argv)
+        h.add_dir(f"{VENV}/bin", uid=1000, gid=1000)
+        return RunResult(0, "")
+    host.command_results[("python3", "-m", "venv", VENV)] = venv
+    host.on(lambda a: a[:2] == [PY, "-c"], lambda h, a: RunResult(0 if state["made"] else 1, ""))
+    host.on(lambda a: a[:3] == [PY, "-m", "pip"], lambda h, a: (state.update(made=True), RunResult(0, "pip"))[1])
+    plan = env_plan()
+    run_apply(plan, host, tmp_path)
+    host.add_file(f"{VENV}/bin/custom-tool", b"mine", mode=0o755)
+    result = run_undo(plan, host, tmp_path)
+    assert result.status == "stopped" and "changed since setup built it" in result.reason
+    assert f"{VENV}/bin/custom-tool" in host.nodes

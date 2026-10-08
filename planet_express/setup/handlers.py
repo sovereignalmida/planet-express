@@ -864,7 +864,6 @@ _CHECK_ENV = (
     "    if m.group(2) == '>=' and num(have) < num(m.group(3)): sys.exit(4)\n"
     "    if m.group(2) == '==' and num(have) != num(m.group(3)): sys.exit(4)\n"
 )
-_VENV_ENTRIES = frozenset({"bin", "lib", "lib64", "include", "pyvenv.cfg", "share", "etc", "get-pip.py"})
 _FETCH = "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])"
 
 
@@ -942,6 +941,11 @@ class PythonEnv:
         if deps.rc != 0:
             raise StepFailure(f"installing the requirements failed: {self._tail(deps)}", "unknown")
         ctx.log("installed the requirements")
+        if any("created_venv" in e for e in ctx.prior_evidence()):
+            try:
+                ctx.evidence(venv_digest=ctx.host.tree_digest(p["venv_dir"]))    # the proof undo will need
+            except HostError:
+                pass                                                              # undo then refuses to delete it
 
     @staticmethod
     def _tail(result) -> str:
@@ -960,10 +964,17 @@ class PythonEnv:
         found = ctx.host.lstat(entry["created_venv"])
         if found is None:
             return f"{entry['created_venv']} is already gone"
-        extra = sorted(set(ctx.host.listdir(entry["created_venv"])) - _VENV_ENTRIES)
-        if extra:
-            raise StepFailure(f"{entry['created_venv']} has things in it that a virtualenv does not "
-                              f"({', '.join(extra[:5])}); it is left in place rather than deleted")
+        recorded = [e["venv_digest"] for e in ctx.prior_evidence() if "venv_digest" in e]
+        if not recorded:
+            raise StepFailure(f"setup has no record of how {entry['created_venv']} looked when it finished building it, "
+                              "so it is not deleted")
+        try:
+            now = ctx.host.tree_digest(entry["created_venv"])
+        except HostError as exc:
+            raise StepFailure(str(exc)) from exc
+        if now != recorded[-1]:
+            raise StepFailure(f"{entry['created_venv']} has changed since setup built it (files or packages added or "
+                              "removed), so it is left in place rather than deleted")
         try:
             ctx.host.remove_tree(entry["created_venv"], {"dev": entry["dev"], "ino": entry["ino"]})
         except HostError as exc:

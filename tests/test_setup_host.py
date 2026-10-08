@@ -251,3 +251,18 @@ def test_remove_tree_refuses_a_file(env):
     with pytest.raises(HostError):
         env.host.remove_tree(path, env.host.lstat(path).identity)
     assert env.host.lstat(path) is not None
+
+
+def test_tree_digest_changes_when_the_tree_does_and_ignores_bytecode(env):
+    env.dir("t")
+    env.dir("t/lib")
+    env.file("t/lib/a", b"1")
+    first = env.host.tree_digest(f"{env.root}/t")
+    assert env.host.tree_digest(f"{env.root}/t") == first
+    env.dir("t/lib/__pycache__")
+    env.file("t/lib/__pycache__/a.pyc", b"x")
+    assert env.host.tree_digest(f"{env.root}/t") == first              # running the code makes these
+    env.file("t/lib/mine", b"precious")
+    assert env.host.tree_digest(f"{env.root}/t") != first
+    with pytest.raises(HostError):
+        env.host.tree_digest(f"{env.root}/missing")

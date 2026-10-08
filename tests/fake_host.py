@@ -214,6 +214,22 @@ class FakeHost:
         self._mutate()
         del self.nodes[key]
 
+    def tree_digest(self, path, limit=500_000):
+        import hashlib
+        parent, name = _split(path)
+        real = self._parent(parent, mutating=False).rstrip("/")
+        key = f"{real}/{name}"
+        if self.nodes.get(key) is None or self.nodes[key].kind != "dir":
+            raise HostError(f"cannot open {path}: Not a directory")
+        digest = hashlib.sha256()
+        for other in sorted(n for n in self.nodes if n.startswith(key + "/")):
+            rel = other[len(key) + 1:]
+            if "__pycache__" in rel.split("/") or rel.endswith(".pyc"):
+                continue
+            node = self.nodes[other]
+            digest.update(f"{rel}\0{node.kind}\0{len(node.data) if node.kind == 'file' else 0}\n".encode())
+        return digest.hexdigest()
+
     def remove_tree(self, path, identity):
         parent, name = _split(path)
         real = self._parent(parent, mutating=True).rstrip("/")

@@ -19,6 +19,7 @@ This module never imports `config`: setup runs before any config exists.
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import stat as stat_module
 import subprocess
@@ -331,6 +332,43 @@ class RealHost:
             except OSError as exc:
                 raise HostError(f"cannot remove {path}: {exc.strerror}") from exc
             os.fsync(fd)
+
+    def tree_digest(self, path: str, limit: int = 500_000) -> str:
+        """A fingerprint of a directory tree's shape: every entry's relative path, kind and (for files) size,
+        without following symlinks. Bytecode caches are left out because running the code creates them. Used to
+        prove, later, that a tree is still exactly what setup left."""
+        parent, name = _split(path)
+        digest, seen = hashlib.sha256(), [0]
+        with self._parent_fd(parent, mutating=False) as fd:
+            try:
+                top = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=fd)
+            except OSError as exc:
+                raise HostError(f"cannot open {path}: {exc.strerror}") from exc
+
+            def walk(handle: int, prefix: str) -> None:
+                for entry in sorted(os.listdir(handle)):
+                    if entry == "__pycache__" or entry.endswith(".pyc"):
+                        continue
+                    st = os.lstat(entry, dir_fd=handle)
+                    seen[0] += 1
+                    if seen[0] > limit:
+                        raise HostError(f"{path} has too many entries to fingerprint")
+                    kind = "dir" if stat_module.S_ISDIR(st.st_mode) else "link" if stat_module.S_ISLNK(st.st_mode) else "file"
+                    size = st.st_size if kind == "file" else 0
+                    digest.update(f"{prefix}{entry}\0{kind}\0{size}\n".encode("utf-8", "surrogateescape"))
+                    if kind == "dir":
+                        child = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=handle)
+                        try:
+                            walk(child, f"{prefix}{entry}/")
+                        finally:
+                            os.close(child)
+            try:
+                walk(top, "")
+            except OSError as exc:
+                raise HostError(f"cannot read {path}: {exc.strerror}") from exc
+            finally:
+                os.close(top)
+        return digest.hexdigest()
 
     def remove_tree(self, path: str, identity: dict) -> None:
         """Delete a directory tree that this tool created: `identity` (device and inode) must still be the
