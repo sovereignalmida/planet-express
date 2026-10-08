@@ -176,8 +176,40 @@ Built: `host.py` (`RealHost`, fd-relative and symlink-safe), `journal.py`, `hand
   above and a stale checkout on the VM, which now yields a blocked plan with a reason, not a traceback.
 - **Plan and apply must run as the same user**: root can read files (sudoers) that others cannot, so their
   plan ids differ. The CLI says so on a mismatch.
-- **Not yet applied by A1**: `python.env`, `sudoers.install`, `access.provision`, `dashboard.init`,
-  `service.install`, `service.enable`, `boot_hook.install`, `state.snapshot` (slice A2), and undo (A3).
+- **Every kind is now applied** (A2a to A2c) and every one has an undo (A3); see the next section.
+
+## A2 and A3 as built, and what Codex and the real hosts found
+
+- **One careful way to write a file** (`_AtomicFile`): compare-and-swap, backup, journaled intent, staged file,
+  atomic rename. `file.write`, `sudoers.install`, `dashboard.init`, `service.install` (and its
+  `/etc/default` file) and every `boot_hook.install` hook are all this, so a fix to it fixes all of them.
+- **Hooks are merged, per file.** A marked block is replaced in place or appended; half a block is refused;
+  a file that is one of our old whole-file copies (exact hash) is replaced. New hook files are 0600 because
+  MOS's `/boot` is vfat with `fmask=0177`. Several files in one step journal one record each, and verification
+  reads only its own file's evidence (a bug the crash sweep found).
+- **A unit on disk is not a unit systemd has read.** After a crash between the rename and `daemon-reload`, the
+  step would have been remembered as done. It now asks systemd (`LoadState`, `NeedDaemonReload`) and
+  re-reloads on resume. (Codex)
+- **MOS has no ACLs, so the allowlist is mode bits.** The dashboard's read grants cover only the code it serves,
+  `state` and the venv; every other top-level entry loses its "other" bits. The first version made the whole
+  checkout world-readable, including untracked env files. (Codex)
+- **`access.provision` is verified by reading back every grant**, not the first one. (Codex)
+- **`dir.ensure` can tighten.** Existing MOS `data` and `logs` directories lose group/other access (never gain
+  any); the old mode is journaled. (Codex)
+- **`python.env` judges the venv by its own interpreter** (3.11+) and every `requirements.txt` entry, not by a
+  few imports and not by the system python. (Codex)
+- **Undo** (`python -m planet_express.setup undo --plan-id ID`) goes newest step first and touches only what
+  the journal proves setup made: a file by device+inode and then content (an edited file stops the undo), a
+  directory by inode and emptiness, a tightened mode only if nobody changed it since, a service only if this
+  step started or enabled it. A replaced file is restored from its backup with its old mode and owner.
+  Accounts, group memberships and the pre-setup snapshot are named as *not undone*, not hidden. Undo is
+  resumable and idempotent; applying again after an undo re-runs the undone steps.
+- **A directory's creation is journaled before it happens**, so a crash between `mkdir` and the record still
+  leaves undo able to remove it. The whole-pipeline sweep (dirs, files, a replace, sudoers, a unit, hooks,
+  enable) crashes at every operation, resumes, and then undoes to the exact starting tree.
+- **Known limits.** A venv whose `venv` command died before its identity was journaled cannot be removed by
+  undo; packages installed into a pre-existing venv are not uninstalled. `/boot` (vfat) behaviour of
+  `chown`/rename is to be confirmed on the fresh MOS VM.
 
 ## Testing
 
@@ -198,8 +230,8 @@ Built: `host.py` (`RealHost`, fd-relative and symlink-safe), `journal.py`, `hand
 |---|---|
 | **A0** | the plan and discover changes above |
 | **A1** | `Host` (real and fake), journal, executor with drift check, lock, resume; handlers `dir.ensure`, `file.write`, `verify.smoke`; CLI `apply` |
-| **A2** | the remaining handlers: services, `sudoers.install`, `python.env`, `access.provision`, `dashboard.init`, `boot_hook.install`, `state.snapshot` |
-| **A3** | undo, retry, reconcile after a crash, `FaultyHost` sweep |
+| **A2** (done) | the remaining handlers: services, `sudoers.install`, `python.env`, `access.provision`, `dashboard.init`, `boot_hook.install`, `state.snapshot` |
+| **A3** | undo, retry, reconcile after a crash, `FaultyHost` sweep (done) |
 | **A4** | the server and wiring the screens (own design doc) |
 
 Every slice that touches `file.write`, `sudoers.install` or privilege goes through the Codex second
