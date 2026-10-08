@@ -73,7 +73,9 @@
   // (fresh nodes from the fetched HTML have no listeners of their own yet).
   function bindInteractions() {
     document.querySelectorAll("[data-settle-window]").forEach(function (btn) {
-      btn.addEventListener("click", function () { settleWindow(btn); });
+      // Assigned, not added: the windows panel sits outside the swapped region, so this runs
+      // again on the same buttons after every refresh and a listener would stack (Codex).
+      btn.onclick = function () { settleWindow(btn); };
     });
     var scanBtn = document.getElementById("scan-btn");
     if (scanBtn && !scanBtn.disabled) {
