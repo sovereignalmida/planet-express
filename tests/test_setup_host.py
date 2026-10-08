@@ -219,3 +219,14 @@ def test_faulty_host_crashes_before_or_after_the_chosen_operation(env):
     with pytest.raises(Crash):
         FaultyHost(inner, crash_at=1, after=True).mkdir(f"{env.root}/b", 0o755, UID, GID)
     assert inner.lstat(f"{env.root}/b").kind == "dir"                  # crashed after: it happened
+
+
+def test_chmod_dir_changes_a_directory_and_refuses_a_file_or_a_symlink(env):
+    env.dir("d", mode=0o755)
+    stat = env.host.chmod_dir(f"{env.root}/d", 0o700)
+    assert stat.perms == 0o700 and env.host.lstat(f"{env.root}/d").perms == 0o700
+    path = env.file("f")
+    with pytest.raises(HostError):
+        env.host.chmod_dir(path, 0o700)
+    with pytest.raises(HostError):
+        env.host.chmod_dir(f"{env.root}/missing", 0o700)

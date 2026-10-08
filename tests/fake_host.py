@@ -214,6 +214,16 @@ class FakeHost:
         self._mutate()
         del self.nodes[key]
 
+    def chmod_dir(self, path, mode):
+        parent, name = _split(path)
+        real = self._parent(parent, mutating=True).rstrip("/")
+        node = self.nodes.get(f"{real}/{name}")
+        if node is None or node.kind != "dir":
+            raise HostError(f"cannot open {path}: Not a directory")
+        self._mutate()
+        node.mode = mode
+        return self._stat(node)
+
     # -- commands ------------------------------------------------------------------------------------------
     def run(self, argv, *, timeout=60, as_user=None, env=None, cwd=None, umask=None):
         if not argv or not all(isinstance(a, str) for a in argv):
@@ -235,7 +245,7 @@ class FaultyHost:
     """Wraps a host and raises `Crash` when the Nth mutating operation is about to happen (`before`) or
     has just happened (`after`), so a test can stop the world between any two operations."""
 
-    MUTATING = ("mkdir", "stage_file", "commit_staged", "discard_staged", "copy_private", "unlink", "rmdir", "run")
+    MUTATING = ("mkdir", "stage_file", "commit_staged", "discard_staged", "copy_private", "unlink", "rmdir", "chmod_dir", "run")
 
     def __init__(self, inner, *, crash_at: int | None = None, after: bool = False):
         self._inner, self._crash_at, self._after, self.ops = inner, crash_at, after, 0

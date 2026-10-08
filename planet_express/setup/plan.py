@@ -299,8 +299,11 @@ def _build(b: _Builder) -> None:
     # data holds core's database and logs hold step output: private. The dashboard reads state, which holds
     # no secrets (the dashboard is denied the other two by ACL on systemd and by these modes on MOS).
     modes = {p["data"]: "0700", p["logs"]: "0700"} if mos else {}
-    dir_ids = [b.add("dir.ensure", f"Create {Path(d).name}/", d, {"path": d, "mode": modes.get(d, "0755"), **owner},
-                     b.text(f"Creates {d} (owner {a.run_as}, mode {modes.get(d, '0755')}) if it does not exist."),
+    dir_ids = [b.add("dir.ensure", f"Create {Path(d).name}/", d,
+                     {"path": d, "mode": modes.get(d, "0755"), **owner, **({"tighten": True} if d in modes else {})},
+                     b.text(f"Creates {d} (owner {a.run_as}, mode {modes.get(d, '0755')}) if it does not exist."
+                            + (" If it already exists with wider access, the extra access is removed (never added)."
+                               if d in modes else "")),
                      risk="R1", needs_root=mos)
                for d in dirs]
     config_dir = str(Path(p["config"]).parent)

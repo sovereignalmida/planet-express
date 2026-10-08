@@ -21,6 +21,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -54,7 +55,15 @@ class _Lock:
         directory = host.open_private_dir(str(self.path.parent), create=True)
         try:
             flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-            self._fd = os.open("apply.lock", flags, 0o600, dir_fd=directory)
+            try:
+                self._fd = os.open("apply.lock", flags, 0o600, dir_fd=directory)
+            except OSError as exc:
+                raise HostError(f"cannot open {self.path}: {exc.strerror}") from exc
+            st = os.fstat(self._fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_uid not in host.trusted_uids:
+                os.close(self._fd)
+                self._fd = None
+                raise HostError(f"{self.path} is not a regular file owned by a trusted account")
         finally:
             os.close(directory)
         try:

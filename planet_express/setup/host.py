@@ -192,6 +192,13 @@ class RealHost:
         0755 for intermediate ones). The caller closes the descriptor and does everything relative to it."""
         if create:
             self._make_missing(path)
+        try:
+            final = os.lstat(path.rstrip("/") or "/")
+        except OSError as exc:
+            raise HostError(f"cannot use {path}: {exc.strerror}") from exc
+        if stat_module.S_ISLNK(final.st_mode):
+            # realpath() below would quietly follow it to wherever it points.
+            raise HostError(f"{path} is a symlink; refusing to keep state behind one")
         with self._parent_fd(path, mutating=True) as fd:
             st = os.fstat(fd)
             if st.st_mode & 0o022:
@@ -323,6 +330,24 @@ class RealHost:
             except OSError as exc:
                 raise HostError(f"cannot remove {path}: {exc.strerror}") from exc
             os.fsync(fd)
+
+    def chmod_dir(self, path: str, mode: int) -> Stat:
+        """Set the permission bits of an existing directory, opened without following a symlink."""
+        parent, name = _split(path)
+        with self._parent_fd(parent, mutating=True) as fd:
+            try:
+                handle = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=fd)
+            except OSError as exc:
+                raise HostError(f"cannot open {path}: {exc.strerror}") from exc
+            try:
+                os.fchmod(handle, mode)
+                st = os.fstat(handle)
+            except OSError as exc:
+                raise HostError(f"cannot change the mode of {path}: {exc.strerror}") from exc
+            finally:
+                os.close(handle)
+            os.fsync(fd)
+        return Stat(st.st_mode, st.st_uid, st.st_gid, st.st_dev, st.st_ino, st.st_size)
 
     # -- commands -----------------------------------------------------------------------------------
     def run(self, argv: list[str], *, timeout: float = 60, as_user: str | None = None,

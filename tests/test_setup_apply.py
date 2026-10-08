@@ -492,6 +492,14 @@ def _journal_root_attack(tmp_path, kind):
     elif kind == "writable-root":
         root.mkdir()
         root.chmod(0o777)
+    elif kind == "symlinked-plan-dir-to-a-private-target":
+        root.mkdir(mode=0o700)                       # the target is itself trustworthy: the link is the problem
+        plan_id = standard_plan().to_public()["plan_id"]
+        (root / plan_id).symlink_to(target)
+    elif kind == "symlinked-lock":
+        root.mkdir(mode=0o700)
+        (target / "loot").write_text("original")
+        (root / "apply.lock").symlink_to(target / "loot")
     elif kind == "symlinked-plan-dir":
         root.mkdir(mode=0o700)
         plan_id = standard_plan().to_public()["plan_id"]
@@ -506,7 +514,7 @@ def _journal_root_attack(tmp_path, kind):
 
 
 @pytest.mark.parametrize("kind", ["symlinked-root-to-an-open-directory", "writable-root", "symlinked-plan-dir",
-                                  "symlinked-events"])
+                                  "symlinked-plan-dir-to-a-private-target", "symlinked-lock", "symlinked-events"])
 def test_a_hostile_journal_location_is_refused_and_nothing_is_written_through_it(tmp_path, kind):
     """P1: the journal is written as root, so a pre-planted symlink or open directory must not redirect it."""
     root, target = _journal_root_attack(tmp_path, kind)

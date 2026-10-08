@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 import re
 from dataclasses import dataclass
 from typing import Literal
@@ -126,7 +127,17 @@ class DirEnsure:
         found = self._missing(ctx.host, path)
         if isinstance(found, Refuse):
             return found
+        if not found and ctx.step.params.get("tighten"):
+            excess = self._excess(ctx)
+            if excess:
+                return Proceed()
         return Satisfied(f"{path} already exists") if not found else Proceed()
+
+    @staticmethod
+    def _excess(ctx) -> int:
+        """Permission bits the directory has that the plan does not allow (0 when it is as private as planned)."""
+        found = ctx.host.lstat(ctx.step.params["path"])
+        return 0 if found is None or found.kind != "dir" else found.perms & ~int(ctx.step.params["mode"], 8) & 0o7777
 
     def act(self, ctx):
         p = ctx.step.params
@@ -134,6 +145,15 @@ class DirEnsure:
         missing = self._missing(ctx.host, p["path"])
         if isinstance(missing, Refuse):
             raise StepFailure(missing.reason)
+        if not missing and p.get("tighten") and self._excess(ctx):
+            before = ctx.host.lstat(p["path"])
+            ctx.evidence(tightened_directory=p["path"], previous_mode=before.perms, **before.identity)
+            try:
+                after = ctx.host.chmod_dir(p["path"], before.perms & int(p["mode"], 8))
+            except HostError as exc:
+                raise StepFailure(str(exc)) from exc
+            ctx.log(f"tightened {p['path']} from {before.perms:04o} to {after.perms:04o}")
+            return
         for component in missing:
             try:
                 made = ctx.host.mkdir(component, int(p["mode"], 8), uid, gid)
@@ -144,7 +164,9 @@ class DirEnsure:
 
     def verify(self, ctx) -> Effect:
         st = ctx.host.lstat(ctx.step.params["path"])
-        return "applied" if st is not None and st.kind == "dir" else "not_applied"
+        if st is None or st.kind != "dir":
+            return "not_applied"
+        return "not_applied" if ctx.step.params.get("tighten") and self._excess(ctx) else "applied"
 
     reconcile = verify
 
@@ -521,8 +543,23 @@ class AccessProvision:
         for user in (p["run_user"], web):
             if not in_group(user, rpc):
                 commands.append(["usermod", "-aG", rpc, user])
-        commands += [["chmod", "-R", "a+rX", p["install_dir"]], ["chmod", "-R", "a+rX", p["venv_dir"]],
-                     ["chmod", "o+x", p["home_dir"]]]
+        # No ACLs here, so the same allowlist is expressed in mode bits: what the dashboard serves is made
+        # readable, and every other top-level entry (untracked env files, .git, data, logs) loses its "other"
+        # bits. It is the same rule web_access.py applies with a deny ACL, so a credential file left beside the
+        # code is never readable by the dashboard's account.
+        try:
+            from scripts.web_access import READABLE_DIRS, STATE_DIR
+        except ImportError as exc:
+            raise StepFailure(f"scripts/web_access.py could not be imported: {exc}") from exc
+        install = p["install_dir"]
+        commands.append(["chmod", "a+rx", install])
+        for entry in sorted(host.listdir(install)):
+            path = f"{install}/{entry}"
+            if entry == STATE_DIR or entry in READABLE_DIRS or entry.endswith(".py"):
+                commands.append(["chmod", "-R", "a+rX", path])
+            else:
+                commands.append(["chmod", "-R", "o-rwx", path])
+        commands += [["chmod", "-R", "a+rX", p["venv_dir"]], ["chmod", "o+x", p["home_dir"]]]
         return commands
 
     def check(self, ctx):
@@ -546,7 +583,10 @@ class AccessProvision:
                 raise StepFailure(f"`{command[0]}` failed (exit {result.rc}): {tail}", "unknown")
             ctx.log(f"ran {command[0]} {command[1] if len(command) > 1 else ''}".rstrip())
 
+    _ACL_FORMS = {"---": {"---"}, "x": {"--x"}, "rx": {"r-x"}, "rX": {"r-x", "r--"}, "r": {"r--"}}
+
     def verify(self, ctx) -> Effect:
+        """Every grant the plan makes, read back: a crash between two commands must not look finished."""
         p = ctx.step.params
         web, rpc = p["web_user"], p["rpc_group"]
         gid = ctx.host.lookup_group(rpc)
@@ -556,13 +596,33 @@ class AccessProvision:
             groups = ctx.host.user_groups(user)
             if groups is None or gid not in groups:
                 return "not_applied"
+        try:
+            commands = self._commands(ctx)
+        except (StepFailure, HostError):
+            return "unknown"
         if p["method"] == "acl":
-            shown = ctx.host.run(["getfacl", "-p", "--omit-header", p["install_dir"]], timeout=15)
-            if shown.rc != 0 or f"user:{web}:r-x" not in shown.out:
+            expected = {}
+            for command in commands:
+                if command[0] == "setfacl" and "-d" not in command and "-m" in command:
+                    expected[command[-1]] = command[command.index("-m") + 1].split(":")[-1]   # the last one wins
+            for path, perm in expected.items():
+                shown = ctx.host.run(["getfacl", "-p", "--omit-header", path], timeout=15)
+                entries = {line.split("#")[0].strip() for line in shown.out.splitlines()}
+                if shown.rc != 0 or not any(f"user:{web}:{form}" in entries for form in self._ACL_FORMS.get(perm, {perm})):
+                    return "not_applied"
+            return "applied"
+        # groups: the commands are chmods; judge the mode bits they were meant to produce.
+        for command in commands:
+            if command[0] != "chmod":
+                continue
+            path = command[-1]
+            found = ctx.host.lstat(path)
+            if found is None:
                 return "not_applied"
-        else:
-            top = ctx.host.lstat(p["home_dir"])
-            if top is None or not top.perms & 0o001:
+            if command[1:-1] == ["o-rwx"] or command[1:-1] == ["-R", "o-rwx"]:
+                if found.perms & 0o007:
+                    return "not_applied"
+            elif found.kind == "dir" and not found.perms & 0o001 or (found.kind == "file" and not found.perms & 0o004):
                 return "not_applied"
         return "applied"
 
@@ -628,7 +688,9 @@ class StateSnapshot:
         path = lines[-1].strip() if lines else ""
         data_dir = p["env"].get("CASA_DATA_DIR", "")
         # The script prints the new snapshot's path. Trust it only if it is where snapshots live.
-        if not data_dir or not path.startswith(f"{data_dir}/snapshots/"):
+        # Compared as a normalised path: `.../snapshots/../../elsewhere` starts with the right text and is not it.
+        if (not data_dir or posixpath.normpath(path) != path or posixpath.normpath(data_dir) != data_dir
+                or not path.startswith(f"{data_dir}/snapshots/")):
             raise StepFailure("the snapshot script reported a location outside the data directory", "unknown")
         ctx.evidence(snapshot=path)
         ctx.log(f"snapshot taken at {path}")
@@ -647,7 +709,20 @@ class StateSnapshot:
 
 # ----------------------------------------------------------------------------------------------------------
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"       # unpinned, as deploy.sh's own bootstrap is
-REQUIRED_MODULES = "import yaml, pydantic, flask"          # what the setup and dashboard code need at least
+# Run by the venv's own python: version floor, then each requirement installed and at least the named version.
+_CHECK_ENV = (
+    "import sys, json, re\n"
+    "from importlib import metadata\n"
+    "if sys.version_info < (3, 11): sys.exit(2)\n"
+    "def num(v): return tuple(int(x) for x in re.findall(r'\\d+', v.split('+')[0])[:4])\n"
+    "for line in json.loads(sys.argv[1]):\n"
+    "    m = re.fullmatch(r'([A-Za-z0-9_.-]+)\\s*(?:(>=|==)\\s*([0-9][^,;\\s]*))?', line)\n"
+    "    if not m: continue\n"
+    "    try: have = metadata.version(m.group(1))\n"
+    "    except metadata.PackageNotFoundError: sys.exit(3)\n"
+    "    if m.group(2) == '>=' and num(have) < num(m.group(3)): sys.exit(4)\n"
+    "    if m.group(2) == '==' and num(have) != num(m.group(3)): sys.exit(4)\n"
+)
 _FETCH = "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])"
 
 
@@ -660,10 +735,19 @@ class PythonEnv:
         return f"{p['venv_dir']}/bin/python"
 
     def _imports_ok(self, ctx) -> bool:
+        """The venv's own interpreter is new enough and every package in requirements.txt is installed at (at
+        least) the version it names. Judged by the venv, not by the system python that would build a new one."""
         p = ctx.step.params
         if ctx.host.lstat(self._python(p)) is None:
             return False
-        return ctx.host.run([self._python(p), "-c", REQUIRED_MODULES], as_user=p["run_user"], timeout=60).rc == 0
+        try:
+            wanted = ctx.host.read_bytes(f"{p['install_dir']}/{p['requirements']}").decode("utf-8")
+        except (HostError, UnicodeDecodeError):
+            return False
+        lines = [line.split("#")[0].strip() for line in wanted.splitlines()]
+        done = ctx.host.run([self._python(p), "-c", _CHECK_ENV, json.dumps([x for x in lines if x])],
+                            as_user=p["run_user"], timeout=60)
+        return done.rc == 0
 
     def check(self, ctx):
         p = ctx.step.params

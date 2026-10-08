@@ -276,14 +276,36 @@ def access_host(*, existing_accounts=False):
     host.on(lambda a: a[:1] == ["groupadd"], groupadd)
     host.on(lambda a: a[:1] == ["useradd"], useradd)
     host.on(lambda a: a[:1] == ["usermod"], usermod)
-    host.on(lambda a: a[:2] == ["getfacl", "-p"], RunResult(0, "user::rwx\\nuser:planetexpress-web:r-x\\n"))
+    host.acl = {}
+
+    def setfacl(h, argv):
+        if "-m" in argv and "-d" not in argv:
+            perm = argv[argv.index("-m") + 1].split(":")[-1]
+            h.acl[argv[-1]] = {"rX": "r-x", "rx": "r-x", "x": "--x", "r": "r--", "---": "---"}[perm]
+        return RunResult(0, "")
+
+    def getfacl(h, argv):
+        perm = h.acl.get(argv[-1])
+        return RunResult(0, "user::rwx\n" + (f"user:planetexpress-web:{perm}\n" if perm else "") + "group::r-x\n")
+
+    def chmod(h, argv):
+        mode, path = argv[-2], argv[-1]
+        targets = [n for n in h.nodes if n == path or (argv[1] == "-R" and n.startswith(path + "/"))]
+        for name in targets:
+            node = h.nodes[name]
+            if mode == "o-rwx":
+                node.mode &= ~0o007
+            elif mode in ("a+rX", "a+rx"):
+                node.mode |= 0o444 | (0o111 if node.kind == "dir" or node.mode & 0o111 else 0)
+            elif mode == "o+x":
+                node.mode |= 0o001
+        return RunResult(0, "")
+    host.on(lambda a: a[:1] == ["setfacl"] and a[1:2] != ["--version"], setfacl)
+    host.on(lambda a: a[:2] == ["getfacl", "-p"], getfacl)
+    host.on(lambda a: a[:1] == ["chmod"], chmod)
     host.add_dir("/mnt/data/pe", mode=0o750)
     host.add_dir("/mnt/data/pe/venv")
 
-    def make_traversable(h, argv):
-        h.nodes[argv[-1]].mode |= 0o001                      # chmod o+x, taking effect on the fake
-        return RunResult(0, "")
-    host.on(lambda a: a[:2] == ["chmod", "o+x"], make_traversable)
     return host
 
 
@@ -344,16 +366,60 @@ def test_accounts_that_already_exist_are_not_created_again(tmp_path):
 def test_on_mos_there_are_no_acls_and_only_the_code_the_venv_and_a_traversable_home_are_touched(tmp_path):
     install = "/mnt/data/pe/planet-express"
     host = access_host()
-    host.add_dir(install)
+    for entry in ("planet_express", "templates", "static", "venv", "data", "logs", "state"):
+        host.add_dir(f"{install}/{entry}")
+    host.add_file(f"{install}/casa_scruffy.py", b"")
+    host.add_file(f"{install}/.env.local", b"private", mode=0o644)
     plan = access_plan("groups", install_dir=install)
     result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
     assert result.status == "done", result.reason
     assert not any(c[0] in ("setfacl", "getfacl") for c in host.commands)
-    assert ["chmod", "-R", "a+rX", install] in host.commands and ["chmod", "o+x", "/mnt/data/pe"] in host.commands
-    # The strongest statement of "nothing private is made readable": these are the ONLY paths whose permissions
-    # change. The database, the logs, the config and the env files are not among them.
-    touched = {arg for c in host.commands if c[0] in ("chmod", "chgrp", "chown") for arg in c[1:] if arg.startswith("/")}
-    assert touched == {install, "/mnt/data/pe/venv", "/mnt/data/pe"}
+    assert ["chmod", "-R", "a+rX", f"{install}/planet_express"] in host.commands and ["chmod", "o+x", "/mnt/data/pe"] in host.commands
+    # The strongest statement of "nothing private is made readable": the only things that GAIN read access are
+    # the allowlisted code, state and the venv. Everything else in the checkout LOSES its "other" bits.
+    gained = {c[-1] for c in host.commands if c[0] == "chmod" and "a+rX" in c}
+    assert gained == {f"{install}/{e}" for e in ("planet_express", "templates", "static", "venv", "state", "casa_scruffy.py")} \
+        | {"/mnt/data/pe/venv"}
+    for private in ("data", "logs", ".env.local"):
+        assert ["chmod", "-R", "o-rwx", f"{install}/{private}"] in host.commands
+        assert host.nodes[f"{install}/{private}"].mode & 0o007 == 0
+    assert not any(a in ("/mnt/data/pe/config.yaml", "/mnt/data/pe/planetexpress.env") for c in host.commands for a in c)
+
+
+@pytest.mark.parametrize("after", [False, True])
+@pytest.mark.parametrize("method", ["acl", "groups"])
+def test_a_crash_between_two_grants_is_not_mistaken_for_a_finished_step(tmp_path, method, after):
+    """P1 from review: resuming must redo the grants that never happened, not trust the first one."""
+    install = "/mnt/data/pe/planet-express" if method == "groups" else INSTALL
+
+    def build():
+        host = access_host()
+        if method == "groups":
+            for entry in ("planet_express", "templates", "static", "venv", "data", "logs", "state"):
+                host.add_dir(f"{install}/{entry}")
+            host.add_file(f"{install}/.env.local", b"private", mode=0o644)
+        return host
+    plan = access_plan(method, **({"install_dir": install} if method == "groups" else {}))
+    clean = build()
+    counter = FaultyHost(clean)
+    assert apply(plan, host=counter, journal_root=tmp_path / "clean", replan=lambda: plan).status == "done"
+    for crash_at in range(1, counter.ops + 1):
+        host, root = build(), tmp_path / f"c{crash_at}"
+        with pytest.raises(Crash):
+            apply(plan, host=FaultyHost(host, crash_at=crash_at, after=after), journal_root=root, replan=lambda: plan)
+        assert apply(plan, host=host, journal_root=root, replan=lambda: plan).status == "done", crash_at
+        assert host.acl == clean.acl and {n: x.mode for n, x in host.nodes.items()} == {n: x.mode for n, x in clean.nodes.items()}, crash_at
+
+
+def test_an_acl_entry_that_is_missing_makes_the_step_not_applied(tmp_path):
+    host, plan = access_host(), access_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    from planet_express.setup.handlers import HANDLERS
+    from planet_express.setup.handlers import Context
+    from planet_express.setup.journal import Journal
+    host.acl.pop(f"{INSTALL}/data")                                   # one deny never landed
+    ctx = Context(host, Journal(tmp_path / "j", plan.to_public()["plan_id"]), plan.steps[0], {}, "")
+    assert HANDLERS["access.provision"].verify(ctx) == "not_applied"
 
 
 def test_setup_handlers_never_import_config():
@@ -366,3 +432,37 @@ def test_setup_handlers_never_import_config():
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": "."}
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
+
+
+# -- dir.ensure --tighten ------------------------------------------------------------------------------------------
+def tighten_plan():
+    return make_plan([step(1, "dir.ensure", "/pe/data", path="/pe/data", mode="0700", owner="svc", group="svc", tighten=True)])
+
+
+def test_an_existing_private_directory_that_is_too_open_is_tightened_and_the_old_mode_is_journaled(tmp_path):
+    host = fresh_host()
+    host.add_dir("/pe", mode=0o755)
+    host.add_dir("/pe/data", mode=0o755, uid=1000, gid=1000)
+    plan = tighten_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    assert (host.nodes["/pe/data"].mode, host.nodes["/pe/data"].uid) == (0o700, 1000)
+    evidence = Journal(tmp_path / "j", plan.to_public()["plan_id"]).steps()["s01"].evidence
+    assert any(e.get("previous_mode") == 0o755 for e in evidence)
+
+
+def test_a_directory_already_as_private_as_planned_is_not_touched(tmp_path):
+    host = fresh_host()
+    host.add_dir("/pe", mode=0o755)
+    host.add_dir("/pe/data", mode=0o700, uid=1000, gid=1000)
+    before, plan = host.mutations, tighten_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    assert host.mutations == before
+
+
+def test_tightening_never_adds_a_permission(tmp_path):
+    host = fresh_host()
+    host.add_dir("/pe", mode=0o755)
+    host.add_dir("/pe/data", mode=0o500, uid=1000, gid=1000)           # already narrower than 0700 in the w bit
+    plan = tighten_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    assert host.nodes["/pe/data"].mode == 0o500

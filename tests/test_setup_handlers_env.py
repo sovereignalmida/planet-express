@@ -6,7 +6,7 @@ import pytest
 from functools import partial
 
 from planet_express.setup.apply import apply as _apply
-from planet_express.setup.handlers import GET_PIP_URL, REQUIRED_MODULES
+from planet_express.setup.handlers import GET_PIP_URL
 from planet_express.setup.host import RunResult
 from test_setup_apply import fresh_host, make_plan, step
 
@@ -101,7 +101,7 @@ def venv_cmd(host, argv):
 
 def healthy_checks(host):
     host.command_results[("python3", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)")] = RunResult(0, "")
-    host.command_results[(PY, "-c", REQUIRED_MODULES)] = RunResult(0, "")
+    host.on(lambda a: a[:2] == [PY, "-c"], RunResult(0, ""))
 
 
 def test_a_fresh_environment_is_created_then_filled_by_the_service_user_with_a_fixed_umask(tmp_path):
@@ -202,7 +202,63 @@ def test_an_environment_that_cannot_import_after_installing_is_not_reported_as_b
     host = host_with_checkout()
     host.command_results[("python3", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)")] = RunResult(0, "")
     host.command_results[("python3", "-m", "venv", VENV)] = venv_cmd
-    host.command_results[(PY, "-c", REQUIRED_MODULES)] = RunResult(1, "", "ModuleNotFoundError: yaml")
+    host.on(lambda a: a[:2] == [PY, "-c"], RunResult(1, "", "ModuleNotFoundError: yaml"))
     plan = env_plan()
     result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
     assert result.status == "stopped" and "does not show the expected result" in result.reason
+
+
+def existing_venv():
+    host = host_with_checkout()
+    host.add_dir(VENV)
+    host.add_file(PY, b"", mode=0o755)
+    host.command_results[("python3", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)")] = RunResult(0, "")
+    return host
+
+
+def test_the_venv_check_runs_in_the_venv_and_carries_every_requirement(tmp_path):
+    host = existing_venv()
+    seen = []
+    host.on(lambda a: a[:2] == [PY, "-c"], lambda h, a: (seen.append(a), RunResult(0, ""))[1])
+    plan = env_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    script, wanted = seen[0][2], seen[0][3]
+    assert "sys.version_info < (3, 11)" in script and "flask" in wanted
+    assert not any("install" in c for c in host.commands)
+
+
+def test_an_old_or_incomplete_venv_is_not_trusted_and_gets_its_requirements_installed(tmp_path):
+    host = existing_venv()
+    state = {"fixed": False}
+
+    def check(h, argv):
+        return RunResult(0 if state["fixed"] else 3, "", "PackageNotFoundError: gunicorn")
+
+    def pip(h, argv):
+        state["fixed"] = True
+        return RunResult(0, "")
+    host.on(lambda a: a[:2] == [PY, "-c"], check)
+    host.on(lambda a: a[:3] == [PY, "-m", "pip"] and "install" in a, pip)
+    host.on(lambda a: a[:3] == [PY, "-m", "pip"] and "--version" in a, RunResult(0, "pip 24"))
+    plan = env_plan()
+    assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
+    assert any(c[:3] == [PY, "-m", "pip"] and "install" in c for c in host.commands)
+
+
+def test_a_snapshot_path_that_climbs_out_of_the_snapshots_directory_is_rejected(tmp_path):
+    host = host_with_checkout()
+    host.command_results[SNAPSHOT_CMD] = RunResult(0, f"{DATA}/snapshots/../../elsewhere\n")
+    plan = snapshot_plan()
+    result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
+    assert result.status == "stopped" and "outside the data directory" in result.reason
+
+
+def test_the_real_check_script_accepts_a_good_environment_and_rejects_a_missing_or_too_new_requirement():
+    import json
+    import subprocess
+    import sys
+    from planet_express.setup.handlers import _CHECK_ENV
+    run = lambda reqs: subprocess.run([sys.executable, "-c", _CHECK_ENV, json.dumps(reqs)], capture_output=True).returncode
+    assert run(["pydantic>=2.0", "pyyaml>=6.0", "# comment-free", "pytest>=1.0"]) == 0
+    assert run(["definitely-not-installed-pkg>=1"]) == 3
+    assert run(["pydantic>=999.0"]) == 4

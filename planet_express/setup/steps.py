@@ -68,6 +68,9 @@ class DirEnsure(_Params):
     mode: Mode = "0755"
     owner: Name = "root"
     group: Name = "root"
+    # For a directory that must be private: if it already exists with MORE access than `mode` allows, take the
+    # extra bits away. Only ever tightens; it never adds a permission, and never changes the owner.
+    tighten: bool = False
 
 
 class PythonEnv(_Params):
