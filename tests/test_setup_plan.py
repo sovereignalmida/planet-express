@@ -414,7 +414,8 @@ def test_the_boot_hook_is_a_merged_block_that_never_exits():
     assert all("marked block" in f["merge"] for f in hook.preview["files"])
     from planet_express.setup.steps import BootHookInstall
     with pytest.raises(ValidationError, match="must not exit"):
-        BootHookInstall(dest_dir="/boot/optional/scripts", hooks={"post-start.sh": "do_things\nexit 0\n"})
+        BootHookInstall(dest_dir="/boot/optional/scripts", hooks={"post-start.sh": "do_things\nexit 0\n"},
+                        expect_absent=["post-start.sh"])
 
 
 def test_an_existing_hook_file_is_reported_and_its_hash_is_carried_for_the_merge():
@@ -506,3 +507,32 @@ def test_a_default_file_that_exists_on_mos_is_bound_to_its_hash_not_called_absen
     p = plan(report, mos_answers())
     step = next(s for s in p.steps if s.target == "/mnt/data/pe/default/casa-dashboard")
     assert step.params["if_exists"] == "replace" and step.params["expected_sha256"] and not step.params.get("expect_absent")
+
+
+# -- Codex review of A0 -------------------------------------------------------------------------------------
+
+
+def test_any_detected_install_is_snapshotted_even_when_its_config_is_gone():
+    """State and a database can outlive the config; the snapshot tool records an absent config."""
+    report = discover(ubuntu(files={"/etc/planetexpress.env": ""}), repo_root="/opt/pe")
+    assert report["existing_pe"]["installed"] and not report["existing_pe"]["config"]
+    p = plan(report, answers())
+    assert p.steps[0].kind == "state.snapshot" and all(p.steps[0].id in s.depends_on for s in p.steps[1:])
+
+
+def test_boot_hooks_say_whether_they_are_absent_or_hashed_and_an_unreadable_one_blocks_the_plan():
+    absent = by_kind(plan(mos_report(), mos_answers()), "boot_hook.install")[0].params
+    assert sorted(absent["expect_absent"]) == ["post-start.sh", "shutdown.sh"] and absent["expected_sha256"] == {}
+    one = mos_report(files={"/boot/optional/scripts/post-start.sh": "echo mine\n"})
+    params = by_kind(plan(one, mos_answers()), "boot_hook.install")[0].params
+    assert params["expect_absent"] == ["shutdown.sh"] and list(params["expected_sha256"]) == ["post-start.sh"]
+    unreadable = mos_report(files={"/boot/optional/scripts/post-start.sh": "echo mine\n"})
+    unreadable["existing_pe"]["sha256"].pop("/boot/optional/scripts/post-start.sh")     # present, but nobody could read it
+    p = plan(unreadable, mos_answers())
+    assert not p.applicable and p.steps == () and "could not be read" in p.blocked[0]
+
+
+def test_a_hook_without_any_expectation_cannot_be_built():
+    from planet_express.setup.steps import BootHookInstall
+    with pytest.raises(ValidationError, match="needs an expectation"):
+        BootHookInstall(dest_dir="/boot/optional/scripts", hooks={"post-start.sh": "do_things\n"})

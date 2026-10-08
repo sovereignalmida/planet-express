@@ -135,7 +135,10 @@ class BootHookInstall(_Params):
     dest_dir: AbsPath
     hooks: dict[Name, str]
     marker: Name = "planetexpress"
-    # The sha256 of each hook file as discovered, or absent from the map if it did not exist.
+    # What each hook file looked like when the plan was made. A file in `expect_absent` must still not exist;
+    # a file in `expected_sha256` must still hash to that; a hook in neither cannot be merged into (the plan
+    # refuses to build that case rather than merge into a file nobody has read).
+    expect_absent: list[Name] = []
     expected_sha256: dict[Name, Sha256] = {}
     # Hashes of the whole-file versions this project once shipped for hand installation. A hook file that is
     # byte-for-byte one of these is entirely ours, so it is replaced by the marked version; anything else is
@@ -144,6 +147,9 @@ class BootHookInstall(_Params):
 
     @model_validator(mode="after")
     def _blocks_cannot_end_the_script(self):
+        unbound = [n for n in self.hooks if n not in self.expect_absent and n not in self.expected_sha256]
+        if unbound:
+            raise ValueError(f"{', '.join(unbound)}: a hook file needs an expectation (absent or a hash) before it is merged into")
         for name, body in self.hooks.items():
             if any(line.split("#")[0].strip().startswith("exit") for line in body.splitlines()):
                 raise ValueError(f"{name}: a merged block must not exit; it would skip the operator's own commands")

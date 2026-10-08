@@ -279,7 +279,9 @@ def _build(b: _Builder) -> None:
     mos = b.init == "mos"
 
     # An install that already has state gets a snapshot first, as deploy.sh does before it changes anything.
-    if b.d["existing_pe"]["installed"] and b.present(p["config"]):
+    if b.d["existing_pe"]["installed"]:
+        # Any detected install, not only one whose config survives: state and a database can outlive the
+        # config, and the snapshot tool records an absent config without complaint.
         b.snapshot_id = b.add(
             "state.snapshot", "Snapshot the current state first", a.install_dir,
             {"install_dir": a.install_dir, "run_user": a.run_as},
@@ -391,9 +393,16 @@ def _build(b: _Builder) -> None:
         hook_dir = "/boot/optional/scripts"
         known = b.d["existing_pe"].get("sha256", {})
         expected = {n: known[f"{hook_dir}/{n}"] for n in hooks if f"{hook_dir}/{n}" in known}
+        absent = [n for n in hooks if not b.present(f"{hook_dir}/{n}")]
+        unreadable = [n for n in hooks if b.present(f"{hook_dir}/{n}") and n not in expected]
+        if unreadable:
+            b.blocked.append(f"{', '.join(unreadable)} exists in {hook_dir} but could not be read, so setup cannot merge "
+                             "into it safely. Run setup as root so it can read the boot hooks.")
+            return                              # the specific reason above, not the generic one a half-built step would give
         hook_id = b.add(
             "boot_hook.install", "Restore Planet Express at every MOS boot", hook_dir,
-            {"dest_dir": hook_dir, "hooks": hooks, "expected_sha256": expected, "legacy_sha256": LEGACY_HOOK_SHA256},
+            {"dest_dir": hook_dir, "hooks": hooks, "expect_absent": absent, "expected_sha256": expected,
+             "legacy_sha256": LEGACY_HOOK_SHA256},
             {"type": "files", "files": [
                 {"path": f"{hook_dir}/{n}",
                  "merge": ("this is an older copy of ours, so the whole file is replaced"
@@ -527,4 +536,6 @@ def plan(discovery: dict, answers: SetupAnswers, *, repo_root: str | None = None
         return Plan(answers.story, (), tuple(b.warnings), (),
                     ("This checkout cannot produce a valid plan: " + str(first["msg"]).removeprefix("Value error, ")
                      + ". Update the checkout and try again.",))
+    if b.blocked:                              # raised while building steps: nothing is offered for approval
+        return Plan(answers.story, (), tuple(b.warnings), (), tuple(b.blocked))
     return Plan(answers.story, tuple(b.steps), tuple(b.warnings), tuple(b.not_touched), tuple(b.blocked), b.secrets)
