@@ -24,4 +24,9 @@ done
 /etc/init.d/casa-planetexpress start
 sleep 10
 /etc/init.d/casa-dashboard start
+
+# Optional soak monitor: runs only if the install carries it (see soak.sh).
+if [ -f "$PE_HOME/planet-express/scripts/mos-boot/soak.sh" ] && [ -d "$PE_HOME/soak" ]; then
+    setsid sh "$PE_HOME/planet-express/scripts/mos-boot/soak.sh" > /dev/null 2>&1 < /dev/null &
+fi
 exit 0
