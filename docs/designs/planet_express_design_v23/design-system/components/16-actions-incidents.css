@@ -60,7 +60,7 @@
    portrait under an empty list. */
 .incident-rollup[hidden] { display: none; }
 .incident-rollup { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: var(--pe-ink-label); font: 10px var(--pe-font-mono); }
-.incident-rollup img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; background: var(--pe-panel); }
+.incident-rollup img { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: var(--pe-panel); }
 
 @media (max-width: 720px) {
   .incident-row { grid-template-columns: 52px minmax(0, 1fr) 18px; }

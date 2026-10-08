@@ -199,7 +199,7 @@
   function emptyStrip() {
     const strip = node("div", "approval-empty");
     const portrait = document.createElement("img");
-    portrait.src = "/static/characters/futurama/bender.png";
+    portrait.src = "/static/characters/futurama/avatar/bender.png";
     portrait.alt = "";
     const copy = node("div", "approval-empty-copy");
     copy.append(node("div", "approval-empty-title", "NOTHING TO AUTHORISE"),

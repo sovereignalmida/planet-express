@@ -1975,7 +1975,7 @@ button.overview-tile:hover { border-color: var(--tile-level); }
   display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 8px 10px;
   border: 1px dashed var(--pe-border); border-radius: 12px; background: var(--pe-well);
 }
-.overview-professor img { width: 30px; height: 30px; flex: none; border-radius: 50%; object-fit: cover; }
+.overview-professor img { width: 40px; height: 40px; flex: none; border-radius: 50%; object-fit: cover; }
 .overview-professor p { margin: 0; color: var(--pe-ok-ink); font: 10.5px/1.35 var(--pe-font-mono); }
 .action-hull-dock { position: relative; z-index: 2; }
 .action-hull-title { margin-bottom: 14px; }
@@ -2088,7 +2088,7 @@ button.overview-tile:hover { border-color: var(--tile-level); }
    portrait under an empty list. */
 .incident-rollup[hidden] { display: none; }
 .incident-rollup { display: flex; align-items: center; gap: 10px; margin-top: 10px; color: var(--pe-ink-label); font: 10px var(--pe-font-mono); }
-.incident-rollup img { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; background: var(--pe-panel); }
+.incident-rollup img { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; background: var(--pe-panel); }
 
 @media (max-width: 720px) {
   .incident-row { grid-template-columns: 52px minmax(0, 1fr) 18px; }
@@ -2649,3 +2649,5 @@ a.net-pill { text-decoration: none; }
 .pe-link-out:hover { color: var(--pe-accent-hi); border-bottom: 0; }
 .pe-card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .cryo-pod.nodata.reasoned { opacity: 1; }  /* .nodata is 62%: the reason text and its "Check:" line must stay readable (4.5:1) */
+.pe-attrib img { width: 56px; height: 56px; }  /* crew avatars: 56px in attribution and hint cards; the sealed block keeps its 40px/32px */
+.pe-hint img { width: 56px; height: 56px; }

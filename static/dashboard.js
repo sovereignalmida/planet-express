@@ -333,7 +333,7 @@
 
       var note = el("div", "run-detail-note");
       var portrait = document.createElement("img");
-      portrait.src = "/static/characters/futurama/zoidberg.png";
+      portrait.src = "/static/characters/futurama/avatar/zoidberg.png";
       portrait.alt = "";
       note.appendChild(portrait);
       note.appendChild(el("span", "", "canary-tested by zoidberg · pulled, restarted, healthchecked"));

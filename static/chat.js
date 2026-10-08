@@ -137,7 +137,7 @@
     const head = el("div");
     head.className = "chat-answer-head";
     const portrait = document.createElement("img");
-    portrait.src = "/static/characters/futurama/farnsworth.png";
+    portrait.src = "/static/characters/futurama/avatar/farnsworth.png";
     portrait.alt = "";
     head.append(portrait);
     const heading = el("div");
@@ -342,7 +342,7 @@
     const well = el("div");
     well.className = "chat-answer-empty";
     const portrait = document.createElement("img");
-    portrait.src = "/static/characters/futurama/farnsworth.png";
+    portrait.src = "/static/characters/futurama/avatar/farnsworth.png";
     portrait.alt = "";
     well.append(portrait);
     const copy = el("div");

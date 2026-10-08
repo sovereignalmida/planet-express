@@ -84,7 +84,7 @@ button.overview-tile:hover { border-color: var(--tile-level); }
   display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 8px 10px;
   border: 1px dashed var(--pe-border); border-radius: 12px; background: var(--pe-well);
 }
-.overview-professor img { width: 30px; height: 30px; flex: none; border-radius: 50%; object-fit: cover; }
+.overview-professor img { width: 40px; height: 40px; flex: none; border-radius: 50%; object-fit: cover; }
 .overview-professor p { margin: 0; color: var(--pe-ok-ink); font: 10.5px/1.35 var(--pe-font-mono); }
 .action-hull-dock { position: relative; z-index: 2; }
 .action-hull-title { margin-bottom: 14px; }
