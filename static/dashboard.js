@@ -51,15 +51,27 @@
     if (!window.confirm("Close the rollback window for " + label + "? Its old image becomes " +
         "prunable, so confirm the service is healthy first.")) return;
     var meta = document.querySelector('meta[name="csrf-token"]');
+    var url = "/api/canary/" + encodeURIComponent(btn.dataset.execution) + "/" +
+              encodeURIComponent(btn.dataset.step) + "/settle";
+    function post() {
+      return fetch(url, {
+        method: "POST", cache: "no-store",
+        body: new URLSearchParams({ csrf_token: meta ? meta.content : "" })
+      }).then(function (r) {
+        return r.json().then(function (data) { return { r: r, data: data }; });
+      });
+    }
     btn.disabled = true;
-    fetch("/api/canary/" + encodeURIComponent(btn.dataset.execution) + "/" +
-          encodeURIComponent(btn.dataset.step) + "/settle", {
-      method: "POST", cache: "no-store",
-      body: new URLSearchParams({ csrf_token: meta ? meta.content : "" })
-    }).then(function (r) {
-      return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+    post().then(function (res) {
+      if (res.r.status === 401) { window.location.assign("/login?next=" + encodeURIComponent("/")); return null; }
+      if (res.data.reason === "elevation_required" && window.peElevate) {
+        return window.peElevate(res.data.error || "This needs your passphrase again.")
+          .then(function (ok) { return ok ? post() : null; });
+      }
+      return res;
     }).then(function (res) {
-      if (!res.ok) throw new Error(res.data.error || "host slow, retry");
+      if (!res) { btn.disabled = false; return; }
+      if (!res.r.ok) throw new Error(res.data.error || "host slow, retry");
       window.alert(res.data.message || "Done.");
       // The windows panel sits outside the live region the refresh swaps, so reload the page.
       window.location.reload();

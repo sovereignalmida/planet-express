@@ -1476,22 +1476,34 @@ def test_index_shows_open_canary_windows_from_core(tmp_path, monkeypatch):
     assert b'data-settle-window' in resp.data and b'data-execution="aaaaaaaaaaaa"' in resp.data
 
 
-def test_canary_settle_uses_the_session_operator_and_requires_csrf(chat_client):
+def test_canary_settle_needs_csrf_a_valid_id_and_an_elevated_session(chat_client):
     client, rpc, _, _ = chat_client
     rpc.results["canary.settle"] = {"outcome": "settled", "message": "ok"}
     token = csrf(client)
     rpc.calls.clear()
 
     no_token = client.post("/api/canary/aaaaaaaaaaaa/1/settle")
-    assert no_token.status_code == 400 and not rpc.calls
+    assert no_token.status_code == 400 and no_token.get_json() == {"error": "Invalid CSRF token"}
     bad = client.post("/api/canary/not-an-id/1/settle", data={"csrf_token": token})
     assert bad.status_code == 400 and not rpc.calls
 
+    # signed in is not enough: releasing a window lets the next prune remove the rollback image
+    unelevated = client.post("/api/canary/aaaaaaaaaaaa/1/settle", data={"csrf_token": token})
+    assert unelevated.status_code == 403
+    assert unelevated.get_json()["reason"] == "elevation_required" and not rpc.calls
+
+    assert _elevate(client).status_code == 200
     response = client.post("/api/canary/aaaaaaaaaaaa/1/settle",
                            data={"csrf_token": token, "operator": "someone-else"})
     assert response.status_code == 200 and response.get_json()["outcome"] == "settled"
     assert rpc.calls[-1] == ("canary.settle", {"execution_id": "a" * 12, "step_n": 1,
-                                               "operator": "alice"})
+                                               "operator": "alice"})  # the session's, not the form's
+
+
+def test_canary_settle_answers_json_when_signed_out():
+    client, _rpc, _now = make_client()
+    response = client.post("/api/canary/aaaaaaaaaaaa/1/settle")
+    assert response.status_code == 401 and response.get_json() == {"error": "Authentication required"}
 
 
 def test_index_still_renders_when_core_cannot_answer(tmp_path, monkeypatch):

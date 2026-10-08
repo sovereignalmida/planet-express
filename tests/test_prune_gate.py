@@ -104,6 +104,14 @@ def test_a_held_window_blocks_the_prune_loudly_and_names_the_way_out(ready, stat
     assert "SETTLE" in message
 
 
+def test_an_ordinary_grace_window_blocks_quietly(ready, state, tmp_path):
+    store = _store(tmp_path)
+    _open_candidate(store, expires_at=time_far_future())   # finite: closes by itself
+    commands, notifier = Commands(store), FakeNotifier()
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert commands.runs == [] and notifier.notifications == []
+
+
 def test_settling_a_held_window_lets_the_prune_run(ready, state, tmp_path):
     from planet_express.core.store import INDEFINITE_EXPIRY
     store = _store(tmp_path)
