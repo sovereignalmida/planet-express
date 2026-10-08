@@ -165,8 +165,21 @@ class ServiceEnable(_Params):
 
 
 class VerifySmoke(_Params):
+    """Run Leela's read-only status scan once, as the service user (not root) with the environment the
+    service will have, so it tests the permissions that matter."""
+
     install_dir: AbsPath
-    config_path: AbsPath
+    venv_dir: AbsPath
+    run_user: Name
+    # CASA_* paths only: the service's own configuration, nothing else reaches the process.
+    env: dict[Name, AbsPath]
+
+    @model_validator(mode="after")
+    def _only_casa_paths(self):
+        bad = [k for k in self.env if not k.startswith("CASA_")]
+        if bad:
+            raise ValueError(f"only CASA_* variables may be set: {bad}")
+        return self
 
 
 class Kind:

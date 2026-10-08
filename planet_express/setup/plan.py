@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from planet_express.setup.answers import FORBIDDEN_RISKS_BY_TIER, SetupAnswers
 from planet_express.setup.steps import CATALOGUE
@@ -107,6 +108,12 @@ class _Builder:
         A file that exists and whose hash we hold is expected to still have it; one that is absent is
         expected to stay absent. If it exists but could not be hashed we cannot prove it is unchanged, so a
         replace is downgraded to keep rather than risk overwriting something unseen."""
+        if path not in self.d["existing_pe"].get("present", {}):
+            # discover never looked at this path, so it cannot be claimed absent or unchanged. Keep-if-present
+            # is the only thing that is safe without having looked.
+            if wanted == "replace":
+                self.warnings.append(f"{path} was not checked by the scan, so it is kept if it exists, not replaced.")
+            return {"if_exists": "keep"}
         if not self.present(path):
             return {"if_exists": wanted, "expect_absent": True}
         digest = self.d["existing_pe"].get("sha256", {}).get(path)
@@ -426,7 +433,9 @@ def _build(b: _Builder) -> None:
                         b.text(f"Enables {n} at boot" + (" and starts it now." if start else "; it is not started now.")),
                         depends_on=tuple(install_ids)) for n, start in enable]
     b.add("verify.smoke", "Check Planet Express can see Docker", a.install_dir,
-          {"install_dir": a.install_dir, "config_path": p["config"]},
+          {"install_dir": a.install_dir, "venv_dir": p["venv"], "run_user": a.run_as,
+           "env": {"CASA_CONFIG": p["config"], "CASA_STATE_DIR": p["state"], "CASA_LOG_DIR": p["logs"],
+                   "CASA_DATA_DIR": p["data"]}},
           b.text("Runs Leela's read-only status scan once. It changes nothing."), depends_on=(env_id, config_id))
     _will_not_touch(b, p)
     if a.start_services and a.telegram is None:
@@ -509,5 +518,13 @@ def plan(discovery: dict, answers: SetupAnswers, *, repo_root: str | None = None
     _check_preconditions(b)
     if b.blocked:
         return Plan(answers.story, (), tuple(b.warnings), (), tuple(b.blocked))
-    _build(b)
+    try:
+        _build(b)
+    except ValidationError as exc:
+        # A step the catalogue refuses is a problem with this checkout (an old template or hook script), not
+        # something the operator can answer their way out of. Say so, plainly, instead of a traceback.
+        first = exc.errors()[0]
+        return Plan(answers.story, (), tuple(b.warnings), (),
+                    ("This checkout cannot produce a valid plan: " + str(first["msg"]).removeprefix("Value error, ")
+                     + ". Update the checkout and try again.",))
     return Plan(answers.story, tuple(b.steps), tuple(b.warnings), tuple(b.not_touched), tuple(b.blocked), b.secrets)

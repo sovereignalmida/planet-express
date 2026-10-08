@@ -157,6 +157,28 @@ Found while designing, and now built in `plan` and `discover`:
    `requirements.txt` has no hashes, exactly as `deploy.sh` does today. `--require-hashes` is future
    hardening, and the plan already warns that the host needs internet.
 
+## A1 as built, and what building it changed
+
+Built: `host.py` (`RealHost`, fd-relative and symlink-safe), `journal.py`, `handlers.py` (`dir.ensure`,
+`file.write`, `verify.smoke`), `apply.py` (lock, drift check, resume, reconcile), and the CLI
+(`python -m planet_express.setup apply`, with `--dry-run`). Testing found things the design had not:
+
+- **Journal the temp file's name before creating it.** Recording its identity afterwards cannot close the
+  window between the create and the record, and a crash there strands a file nothing proves is ours. The
+  handler picks the name, journals it, then creates it with `O_EXCL`; reconcile removes it by that name
+  (and by identity once recorded). The crash sweep, which kills the run at every mutating operation,
+  both before and after it, found this; it also now runs a double crash.
+- **A plan may only claim what the scan looked at.** The first real MOS dry run showed the plan calling a
+  file absent that `discover` had never probed. `discover` now probes every file `plan` can write, and `plan`
+  keeps (never claims absent or replaces) a path that is not in the probed set.
+- **`apply --dry-run` is how real hosts get checked safely.** It runs each step's read-only `check` and
+  changes nothing; kinds this build cannot apply yet are reported, not refused. It found the two defects
+  above and a stale checkout on the VM, which now yields a blocked plan with a reason, not a traceback.
+- **Plan and apply must run as the same user**: root can read files (sudoers) that others cannot, so their
+  plan ids differ. The CLI says so on a mismatch.
+- **Not yet applied by A1**: `python.env`, `sudoers.install`, `access.provision`, `dashboard.init`,
+  `service.install`, `service.enable`, `boot_hook.install`, `state.snapshot` (slice A2), and undo (A3).
+
 ## Testing
 
 - **Handler tests on `FakeHost`:** each handler's check, act, verify and inverse, including refusal when the

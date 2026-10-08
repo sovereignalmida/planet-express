@@ -258,8 +258,12 @@ KNOWN_SYSTEM_PATHS = (
     "/etc/systemd/system/casa-stacks.service",
     "/etc/init.d/casa-planetexpress", "/etc/init.d/casa-dashboard",
     "/boot/optional/scripts/post-start.sh", "/boot/optional/scripts/shutdown.sh",
+    "/etc/default/casa-planetexpress", "/etc/default/casa-dashboard",
 )
-INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env")
+# Beside a candidate install location. Every file `plan` may write has to be probed here or above: `plan`
+# only claims "absent" or "unchanged" about paths this report says it looked at.
+INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env",
+                 "default/casa-planetexpress", "default/casa-dashboard")
 
 
 def _existing_pe(env, storage: dict) -> dict:

@@ -450,3 +450,59 @@ def test_the_legacy_hashes_are_the_real_shipped_versions():
         if shown.returncode != 0:
             pytest.skip("git history not available")
         assert hashlib.sha256(shown.stdout).hexdigest() in LEGACY_HOOK_SHA256[name]
+
+
+def test_a_checkout_whose_hook_script_still_exits_gives_a_blocked_plan_not_a_traceback():
+    """Found on the real MOS VM, whose checkout predates the merge-safe hook scripts."""
+    def old_checkout(rel):
+        text = (Path(REPO) / rel).read_text()
+        return text + "\nexit 0\n" if rel.endswith("post-start.sh") else text
+    p = plan(mos_report(), mos_answers(), read=old_checkout)
+    assert not p.applicable and p.steps == ()
+    assert "cannot produce a valid plan" in p.blocked[0] and "must not exit" in p.blocked[0]
+    assert "Update the checkout" in p.blocked[0]
+
+
+def test_every_path_a_plan_makes_a_claim_about_was_actually_probed_by_discover():
+    """Found on the real MOS VM: discover had not looked at default/casa-dashboard, yet the plan called it
+    absent. A plan may only say a file is absent or unchanged if the scan checked that path."""
+    live_report = discover(ubuntu(files=LIVE_FILES), repo_root="/home/pe/apps/pe")
+    scenarios = [
+        (systemd_report(), answers(tier="full", sudo_units=[{"unit": "plex.service"}])),
+        (mos_report(), mos_answers()),
+        (mos_report(files={"/mnt/data/pe/default/casa-dashboard": "old"}), mos_answers()),
+        (live_report, answers(story="adopt", install_dir="/home/pe/apps/pe", telegram=None, llm=None, operator=None)),
+    ]
+    checked = 0
+    for report, scenario_answers in scenarios:
+        p = plan(report, scenario_answers)
+        assert p.applicable
+        probed = set(report["existing_pe"]["present"])
+        for step in p.steps:
+            if step.kind in ("file.write", "service.install", "sudoers.install"):
+                if step.params.get("expect_absent") or step.params.get("expected_sha256"):
+                    assert step.target in probed, step.target
+                    checked += 1
+    assert checked >= 12
+
+
+def test_an_unprobed_path_can_only_be_kept_never_claimed_absent_or_replaced():
+    report = mos_report()
+    report["existing_pe"]["present"].pop("/etc/init.d/casa-dashboard")           # as if the scan never looked
+    p = plan(report, mos_answers())
+    unit = next(s for s in by_kind(p, "service.install") if s.params["name"] == "casa-dashboard")
+    assert unit.params["if_exists"] == "keep" and not unit.params.get("expect_absent")
+    assert any("was not checked by the scan" in w for w in p.warnings)
+
+
+def test_discover_probes_the_default_files_the_mos_plan_writes():
+    present = mos_report()["existing_pe"]["present"]
+    for name in ("casa-planetexpress", "casa-dashboard"):
+        assert f"/mnt/data/pe/default/{name}" in present and f"/etc/default/{name}" in present
+
+
+def test_a_default_file_that_exists_on_mos_is_bound_to_its_hash_not_called_absent():
+    report = mos_report(files={"/mnt/data/pe/default/casa-dashboard": "hand written\n"})
+    p = plan(report, mos_answers())
+    step = next(s for s in p.steps if s.target == "/mnt/data/pe/default/casa-dashboard")
+    assert step.params["if_exists"] == "replace" and step.params["expected_sha256"] and not step.params.get("expect_absent")
