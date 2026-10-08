@@ -187,16 +187,11 @@ class DirEnsure:
         recorded = {e["created_directory"] for e in entries if "created_directory" in e}
         for entry in reversed(entries):
             if "creating_directory" in entry and entry["creating_directory"] not in recorded:
-                # Journaled intent without the identity that follows it: the process died in between. The
-                # directory exists only if the mkdir landed, and then it is empty and exactly as planned.
-                path, planned = entry["creating_directory"], ctx.step.params
-                found = ctx.host.lstat(path)
-                ids = _owner(ctx)
-                if (found is not None and found.kind == "dir" and not isinstance(ids, Refuse)
-                        and (found.uid, found.gid) == ids and found.perms == int(planned["mode"], 8)
-                        and not ctx.host.listdir(path)):
-                    ctx.host.rmdir(path)
-                    notes.append(f"removed {path}")
+                # Intent without the identity that follows creation: the process died, or mkdir failed. Nothing
+                # proves a directory at this path is setup's (an operator may have made it since), so it stays.
+                path = entry["creating_directory"]
+                if ctx.host.lstat(path) is not None:
+                    notes.append(f"{path} exists but setup cannot prove it made it, so it is left in place")
             elif "tightened_directory" in entry:
                 path = entry["tightened_directory"]
                 found = ctx.host.lstat(path)
@@ -417,11 +412,12 @@ class _AtomicFile:
         by_path: dict[str, list[dict]] = {}
         for intent in intents:
             by_path.setdefault(intent["path"], []).append(intent)
-        notes = [self._undo_path(ctx, path, candidates, staged) for path, candidates in reversed(by_path.items())]
+        committed = {e["path"] for e in entries if e.get("phase") == "committed"}
+        notes = [self._undo_path(ctx, path, candidates, staged, committed) for path, candidates in reversed(by_path.items())]
         self.after_inverse(ctx)
         return "; ".join(notes)
 
-    def _undo_path(self, ctx, path: str, candidates: list[dict], staged: dict) -> str:
+    def _undo_path(self, ctx, path: str, candidates: list[dict], staged: dict, committed: set) -> str:
         current = ctx.host.lstat(path)
         if current is None:
             if any(c["created_file"] for c in candidates):
@@ -437,6 +433,8 @@ class _AtomicFile:
         if ours is None:
             if any(c["previous_sha256"] == now for c in candidates if c["previous_sha256"]):
                 return f"{path} is already back to what it was"
+            if path not in committed:
+                return f"setup never wrote {path} (an attempt was abandoned before the rename), so it is left alone"
             raise StepFailure(f"{path} is not the file setup wrote; it was changed or replaced since, so it is left as it is")
         if now != ours["written_sha256"]:
             raise StepFailure(f"{path} was edited after setup wrote it; it is left as it is")
@@ -866,6 +864,7 @@ _CHECK_ENV = (
     "    if m.group(2) == '>=' and num(have) < num(m.group(3)): sys.exit(4)\n"
     "    if m.group(2) == '==' and num(have) != num(m.group(3)): sys.exit(4)\n"
 )
+_VENV_ENTRIES = frozenset({"bin", "lib", "lib64", "include", "pyvenv.cfg", "share", "etc", "get-pip.py"})
 _FETCH = "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])"
 
 
@@ -914,14 +913,17 @@ class PythonEnv:
         p = ctx.step.params
         python, user, cwd = self._python(p), p["run_user"], p["install_dir"]
         created = ctx.host.lstat(python) is None
+        directory_was_new = ctx.host.lstat(p["venv_dir"]) is None
         if created:
-            ctx.evidence(phase="creating_venv", venv_dir=p["venv_dir"])
+            ctx.evidence(phase="creating_venv", venv_dir=p["venv_dir"], directory_was_new=directory_was_new)
             args = ["python3", "-m", "venv"] + (["--without-pip"] if p["bootstrap_pip"] else []) + [p["venv_dir"]]
             made = ctx.host.run(args, as_user=user, cwd=cwd, timeout=300, umask=0o022)
             if made.rc != 0:
                 raise StepFailure(f"creating the virtualenv failed: {self._tail(made)}", "unknown")
             top = ctx.host.lstat(p["venv_dir"])
-            if top is not None:
+            if top is not None and directory_was_new:
+                # Only a directory that did not exist before is ours to remove later; one that was already
+                # there (empty, say) is not, whatever `venv` put into it.
                 ctx.evidence(created_venv=p["venv_dir"], **top.identity)
             ctx.log(f"created the virtualenv {p['venv_dir']}")
         if p["bootstrap_pip"] and ctx.host.run([python, "-m", "pip", "--version"], as_user=user, timeout=30).rc != 0:
@@ -958,6 +960,10 @@ class PythonEnv:
         found = ctx.host.lstat(entry["created_venv"])
         if found is None:
             return f"{entry['created_venv']} is already gone"
+        extra = sorted(set(ctx.host.listdir(entry["created_venv"])) - _VENV_ENTRIES)
+        if extra:
+            raise StepFailure(f"{entry['created_venv']} has things in it that a virtualenv does not "
+                              f"({', '.join(extra[:5])}); it is left in place rather than deleted")
         try:
             ctx.host.remove_tree(entry["created_venv"], {"dev": entry["dev"], "ino": entry["ino"]})
         except HostError as exc:
@@ -1233,6 +1239,8 @@ class ServiceEnable:
             if done.rc != 0:
                 raise StepFailure(f"enabling {p['name']} failed: "
                                   + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
+            if self._enabled(ctx, p):
+                ctx.evidence(enabled_done=p["name"])
         if p["start"] and not self._running(ctx, p):
             ctx.evidence(starting=p["name"])
             argv = ["systemctl", "start", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "start"]
@@ -1240,12 +1248,24 @@ class ServiceEnable:
             if done.rc != 0:
                 raise StepFailure(f"starting {p['name']} failed: "
                                   + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
+            if self._running(ctx, p):
+                ctx.evidence(started_done=p["name"])
 
     def verify(self, ctx) -> Effect:
         p = ctx.step.params
         return "applied" if self._enabled(ctx, p) and (not p["start"] or self._running(ctx, p)) else "not_applied"
 
-    reconcile = verify
+    def reconcile(self, ctx) -> Effect:
+        """After a crash the host decides; if it shows the transition this step began, that becomes the proof
+        undo needs (the process died between the command and writing it down)."""
+        outcome = self.verify(ctx)
+        p = ctx.step.params
+        entries = ctx.prior_evidence()
+        if any("enabling" in e for e in entries) and not any("enabled_done" in e for e in entries) and self._enabled(ctx, p):
+            ctx.evidence(enabled_done=p["name"])
+        if any("starting" in e for e in entries) and not any("started_done" in e for e in entries) and self._running(ctx, p):
+            ctx.evidence(started_done=p["name"])
+        return outcome
 
     def inverse(self, ctx) -> str:
         """Stop what this step started and disable what it enabled; a service that was already enabled or
@@ -1253,13 +1273,13 @@ class ServiceEnable:
         p = ctx.step.params
         entries = ctx.prior_evidence()
         notes = []
-        if any("starting" in e for e in entries):
+        if any("started_done" in e for e in entries):
             argv = ["systemctl", "stop", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "stop"]
             done = ctx.host.run(argv, timeout=120)
             if done.rc != 0 and self._running(ctx, p):
                 raise StepFailure(f"stopping {p['name']} failed: " + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300])
             notes.append(f"stopped {p['name']}")
-        if p["flavour"] == "systemd" and any("enabling" in e for e in entries):
+        if p["flavour"] == "systemd" and any("enabled_done" in e for e in entries):
             done = ctx.host.run(["systemctl", "disable", p["name"]], timeout=60)
             if done.rc != 0 and self._enabled(ctx, p):
                 raise StepFailure(f"disabling {p['name']} failed: " + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300])

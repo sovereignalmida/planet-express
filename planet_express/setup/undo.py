@@ -56,8 +56,10 @@ def _undo(plan, plan_id, host, journal, handlers, evidence_ids, evidence_dir) ->
     pending = []
     for step in reversed(plan.steps):
         record = records.get(step.id)
-        if record is None or record.undone or (record.status == "ok" and record.satisfied):
-            continue                       # never ran, already dealt with, or setup found it already in place
+        if record is None or record.undone or (record.status == "ok" and record.satisfied and not record.evidence):
+            # never ran, already dealt with, or setup found it in place and never changed anything. A step that
+            # wrote something on an earlier attempt and was then found satisfied on a retry still has evidence.
+            continue
         pending.append(step)
     for index, step in enumerate(pending):
         handler = handlers[step.kind]

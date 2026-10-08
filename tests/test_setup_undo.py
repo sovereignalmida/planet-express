@@ -325,4 +325,77 @@ def test_a_crash_at_any_operation_of_the_whole_pipeline_resumes_and_still_undoes
         assert tree(host) == expected, (crash_at, after)
         undone = run_undo(plan, host, tmp_path, root)
         assert undone.status == "done", (crash_at, after, undone.step, undone.reason)
-        assert tree(host) == before, (crash_at, after)
+        leftover = {k for k in tree(host) if k not in before}
+        # The only thing allowed to remain is a directory whose creation was never proven to be setup's.
+        assert leftover <= {"/etc/pe"}, (crash_at, after, leftover)
+        assert {k: v for k, v in tree(host).items() if k not in leftover} == before, (crash_at, after)
+
+
+def test_a_venv_directory_that_already_existed_is_never_deleted_by_undo(tmp_path):
+    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    host = host_with_checkout()
+    host.add_dir(VENV)                                  # exists, empty, not ours
+    host.add_file(f"{VENV}/operators-notes", b"mine")
+    healthy_checks(host)
+    state = {"made": False}
+    host.command_results[("python3", "-m", "venv", VENV)] = venv_cmd
+    host.on(lambda a: a[:2] == [PY, "-c"], lambda h, a: RunResult(0 if state["made"] else 1, ""))
+    host.on(lambda a: a[:3] == [PY, "-m", "pip"], lambda h, a: (state.update(made=True), RunResult(0, "pip"))[1])
+    plan = env_plan()
+    assert run_apply(plan, host, tmp_path).status == "done"
+    assert run_undo(plan, host, tmp_path).status == "done"
+    assert f"{VENV}/operators-notes" in host.nodes
+
+
+def test_things_added_inside_a_created_venv_stop_the_undo(tmp_path):
+    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    host = host_with_checkout()
+    healthy_checks(host)
+    state = {"made": False}
+    host.command_results[("python3", "-m", "venv", VENV)] = venv_cmd
+    host.on(lambda a: a[:2] == [PY, "-c"], lambda h, a: RunResult(0 if state["made"] else 1, ""))
+    host.on(lambda a: a[:3] == [PY, "-m", "pip"], lambda h, a: (state.update(made=True), RunResult(0, "pip"))[1])
+    plan = env_plan()
+    run_apply(plan, host, tmp_path)
+    host.add_file(f"{VENV}/my-data", b"precious")
+    result = run_undo(plan, host, tmp_path)
+    assert result.status == "stopped" and "my-data" in result.reason and f"{VENV}/my-data" in host.nodes
+
+
+def test_a_write_that_failed_later_is_still_undone_after_a_satisfied_retry(tmp_path):
+    host = sudoers_with_late_failure()
+    from test_setup_handlers_privilege import sudoers_plan, SUDOERS
+    plan = sudoers_plan()
+    assert run_apply(plan, host, tmp_path).status == "stopped"       # committed, then `visudo -c` failed
+    assert SUDOERS in host.nodes
+    host.visudo_ok["ok"] = True
+    assert run_apply(plan, host, tmp_path).status == "done"          # retry: satisfied, nothing written
+    assert run_undo(plan, host, tmp_path).status == "done"
+    assert SUDOERS not in host.nodes
+
+
+def sudoers_with_late_failure():
+    from test_setup_handlers_privilege import sudoers_host
+    host = sudoers_host()
+    host.visudo_ok = {"ok": False}
+
+    def visudo(h, argv):
+        if "-f" in argv:
+            return RunResult(0, "")
+        return RunResult(0 if h.visudo_ok["ok"] else 1, "", "" if h.visudo_ok["ok"] else "whole-system check failed")
+    host.on(lambda a: a[:2] == ["visudo", "-c"], visudo)
+    return host
+
+
+def test_a_service_started_by_someone_else_after_a_failed_start_is_not_stopped(tmp_path):
+    host, state = systemd_host(), {"enabled": True, "active": False}
+    host.add_file(UNIT, b"[Unit]\n")
+    systemctl(host, state)
+    host.on(lambda a: a[:3] == ["systemctl", "start", "casa-dashboard"], RunResult(1, "", "Job failed"))
+    from test_setup_handlers_services import enable_plan
+    plan = enable_plan(start=True)
+    assert run_apply(plan, host, tmp_path).status == "stopped"
+    state["active"] = True                                            # the operator starts it by hand
+    host.commands.clear()
+    assert run_undo(plan, host, tmp_path).status == "done"
+    assert not [c for c in host.commands if c[1] in ("stop", "disable")] and state["active"]
