@@ -8,162 +8,119 @@
 <body>
 <x-dc>
 <helmet>
-  <title>Planet Express — Other hosts</title>
+  <title>Planet Express — v3 Hosts</title>
   <link rel="stylesheet" href="../design-system/styles.css">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <style>a{color:var(--pe-accent-ink);text-decoration:none}a:hover{color:var(--pe-accent-hi)}</style>
 </helmet>
-<div class="pe-app" data-screen-label="Other hosts">
-  <div class="pe-wrap">
-    <header class="pe-masthead">
-      <img src="../assets/logo.png" alt="Planet Express">
-      <div>
-        <div class="pe-kicker">SYSADMIN CONSOLE · casamediaserver</div>
-        <h1>PLANET EXPRESS</h1>
-      </div>
-      <div class="pe-spacer" style="flex:1"></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-        <span class="pe-label">PREVIEW STATE</span>
-        <sc-for list="{{ scenarios }}" as="s" hint-placeholder-count="4"><button type="button" class="{{ s.cls }}" onClick="{{ s.go }}">{{ s.label }}</button></sc-for>
-      </div>
-    </header>
+<div class="scanline" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+<header class="topbar">
+  <img class="header-logo" src="../assets/logo.png" alt="Planet Express">
+  <div class="header-brand"><span class="wordmark">PLANET EXPRESS</span><span class="tagline">casalan.com · ship computer</span></div>
+  <nav class="tabs">
+    <button class="tab" type="button">Overview</button>
+    <button class="tab" type="button">Backups</button>
+    <button class="tab" type="button">Network</button>
+    <button class="tab" type="button">Actions</button>
+    <button class="tab" type="button">History</button>
+    <button class="tab" type="button">Chat</button>
+    <button class="tab" type="button">Config</button>
+    <button class="tab" type="button">Crew</button>
+    <a class="tab active" href="#">Hosts</a>
+  </nav>
+  <div class="topbar-spacer"></div>
+  <div class="header-status"><span class="led-dot"></span><span>pipeline idle · scanned 4 min ago</span></div>
+  <span class="scan-group"><button class="refresh-btn scan-btn" type="button">SCAN ✈</button></span>
+</header>
 
-    <nav class="pe-tabs">
-      <button class="pe-tab" type="button">OVERVIEW</button>
-      <button class="pe-tab is-active" type="button">HOSTS</button>
-      <button class="pe-tab" type="button">BACKUPS</button>
-      <button class="pe-tab" type="button">NETWORK</button>
-      <button class="pe-tab" type="button">ACTIONS</button>
-    </nav>
+<div class="body-grid">
+  <main class="main-col">
+    <div class="tab-panel active" data-screen-label="v3 Hosts">
 
-    <div class="pe-tabbody">
-      <div class="{{ verdict.cls }}">
-        <div class="pe-verdict-orb">{{ verdict.glyph }}</div>
-        <div class="pe-verdict-text">
-          <h2>{{ verdict.title }}</h2>
-          <p>{{ verdict.detail }}</p>
+      <section class="panel">
+        <div class="panel-head-row"><h3>OTHER HOSTS · BESZEL</h3><span class="status-chip ok">READ-ONLY</span><span class="panel-head-summary">preview state</span>
+          <sc-for list="{{ scenarios }}" as="s" hint-placeholder-count="4"><button type="button" class="{{ s.cls }}" onClick="{{ s.go }}">{{ s.label }}</button></sc-for>
         </div>
-        <div class="pe-verdict-tally">
-          <sc-for list="{{ verdict.chips }}" as="c" hint-placeholder-count="3"><span class="{{ c.cls }}">{{ c.text }}</span></sc-for>
+        <div class="{{ verdict.cls }}">
+          <div class="alarm-orb">{{ verdict.glyph }}</div>
+          <div class="alarm-text"><p class="alarm-title">{{ verdict.title }}</p><p class="alarm-sub">{{ verdict.detail }}</p></div>
+          <div class="alarm-chips"><sc-for list="{{ verdict.chips }}" as="c" hint-placeholder-count="3"><span class="{{ c.cls }}">{{ c.text }}</span></sc-for></div>
         </div>
-      </div>
+      </section>
 
-      <section class="pe-panel">
-        <div class="pe-panel-head">
-          <h3>OTHER HOSTS · BESZEL</h3>
-          <span class="pe-chip info">READ-ONLY</span>
-          <div class="pe-spacer"></div>
-          <span class="pe-panel-note">source: beszel hub API · observe only</span>
-        </div>
-
-        <div class="pe-grid" style="--pe-track:370px">
+      <section class="panel">
+        <div class="panel-head-row"><h3>FLEET</h3><span class="panel-head-note">source: beszel hub API · observe only</span></div>
+        <div class="cryo-grid" style="grid-template-columns:repeat(auto-fill,minmax(370px,1fr))">
           <sc-for list="{{ hosts }}" as="h" hint-placeholder-count="3">
             <div style="display:flex;flex-direction:column;gap:7px;min-width:0">
-              <sc-if value="{{ h.hasNote }}" hint-placeholder-val="{{ false }}"><span class="pe-label" style="color:var(--pe-accent-ink)">{{ h.note }}</span></sc-if>
+              <sc-if value="{{ h.hasNote }}" hint-placeholder-val="{{ false }}"><span class="cryo-cadence">{{ h.note }}</span></sc-if>
 
               <sc-if value="{{ h.isLive }}" hint-placeholder-val="{{ true }}">
-                <div class="{{ h.cardCls }}" style="flex:1">
-                  <div class="pe-card-head">
-                    <span class="{{ h.ledCls }}"></span>
-                    <span class="pe-card-title sm">{{ h.name }}</span>
-                    <div class="pe-spacer"></div>
-                    <span class="{{ h.badgeCls }}">{{ h.badge }}</span>
-                  </div>
-                  <div class="pe-hero" style="margin-bottom:2px">
-                    <span class="{{ h.heroCls }}">{{ h.hero }}</span>
-                    <span class="pe-hero-label">{{ h.heroLabel }}</span>
-                  </div>
-                  <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;margin-bottom:12px">
-                    <span class="pe-card-sub">{{ h.sub }}</span>
-                    <sc-if value="{{ h.hasLink }}" hint-placeholder-val="{{ true }}"><a href="{{ h.link }}" style="font:10px var(--pe-font-mono);letter-spacing:.08em">OPEN ↗</a></sc-if>
-                  </div>
+                <div class="{{ h.podCls }}" style="flex:1">
+                  <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">{{ h.name }}</span><span class="cryo-badge">{{ h.badge }}</span></div>
+                  <div class="cryo-hero"><span class="cryo-hero-num">{{ h.hero }}</span><span class="cryo-hero-label">{{ h.heroLabel }}</span></div>
+                  <div class="cryo-window-caption" style="display:flex;justify-content:space-between;gap:10px"><span>{{ h.sub }}</span><sc-if value="{{ h.hasLink }}" hint-placeholder-val="{{ true }}"><a href="{{ h.link }}" style="color:var(--cp-teal-text);text-decoration:none">OPEN ↗</a></sc-if></div>
 
-                  <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:14px">
+                  <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px">
                     <sc-for list="{{ h.meters }}" as="m" hint-placeholder-count="3">
                       <div>
-                        <div class="pe-readout-row" style="margin-bottom:5px">
-                          <span class="pe-label">{{ m.label }}</span>
-                          <span class="{{ m.valCls }}">{{ m.text }}</span>
-                        </div>
-                        <div class="pe-bar"><div class="{{ m.fillCls }}" style="{{ m.style }}"></div></div>
+                        <div class="mem-label-row"><span class="system-stat-label">{{ m.label }}</span><span class="cell-mono cell-dim">{{ m.text }}</span></div>
+                        <span class="disk-bar-track" style="display:block"><span class="{{ m.fillCls }}" style="{{ m.style }}"></span></span>
                       </div>
                     </sc-for>
                   </div>
 
-                  <div class="pe-readout">
+                  <div class="cryo-stats">
                     <sc-for list="{{ h.facts }}" as="f" hint-placeholder-count="6">
-                      <div class="pe-readout-row"><span class="pe-label">{{ f.label }}</span><span class="{{ f.cls }}" title="{{ f.val }}">{{ f.val }}</span></div>
+                      <div class="cryo-stat-row"><span>{{ f.label }}</span><span class="{{ f.cls }}" title="{{ f.val }}">{{ f.val }}</span></div>
                     </sc-for>
                   </div>
-                  <sc-if value="{{ h.hasTemps }}" hint-placeholder-val="{{ false }}"><div class="pe-footnote">{{ h.temps }}</div></sc-if>
+                  <sc-if value="{{ h.hasTemps }}" hint-placeholder-val="{{ false }}"><div class="cryo-footnote">{{ h.temps }}</div></sc-if>
 
-                  <div class="pe-readout" style="margin-top:14px">
-                    <div class="pe-readout-row">
-                      <span class="pe-label">{{ h.ctLabel }}</span>
-                      <span class="{{ h.ctCountCls }}">{{ h.ctCount }}</span>
-                    </div>
-                    <sc-if value="{{ h.zeroCt }}" hint-placeholder-val="{{ false }}">
-                      <div class="pe-stack-note">No containers on this host. It runs none; that is normal here, not a failed read.</div>
-                    </sc-if>
+                  <div class="cryo-stats">
+                    <div class="cryo-stat-row"><span>{{ h.ctLabel }}</span><span class="{{ h.ctCls }}">{{ h.ctCount }}</span></div>
+                    <sc-if value="{{ h.zeroCt }}" hint-placeholder-val="{{ false }}"><div class="cryo-footnote" style="margin-top:0">No containers on this host. It runs none; that is normal here, not a failed read.</div></sc-if>
                     <sc-if value="{{ h.hasCt }}" hint-placeholder-val="{{ true }}">
-                      <div class="pe-service-chips">
-                        <sc-for list="{{ h.chips }}" as="c" hint-placeholder-count="5">
-                          <span class="{{ c.cls }}" title="{{ c.title }}"><span class="{{ c.dot }}" style="width:8px;height:8px"></span>{{ c.name }}<sc-if value="{{ c.upd }}" hint-placeholder-val="{{ false }}"><strong style="color:var(--pe-ink-label)">UPDATE</strong></sc-if></span>
-                        </sc-for>
-                      </div>
+                      <div class="chip-board"><sc-for list="{{ h.chips }}" as="c" hint-placeholder-count="5"><span class="deploy-chip" title="{{ c.title }}"><span class="svc">{{ c.name }}</span><span class="t">{{ c.mark }}</span></span></sc-for></div>
                     </sc-if>
-                    <sc-if value="{{ h.hasMore }}" hint-placeholder-val="{{ false }}">
-                      <div class="pe-rollup" style="padding:8px 12px"><span class="pe-rollup-count" style="font-size:15px">+{{ h.more }}</span><span style="color:var(--pe-ink-label);font-size:12px">more containers · expand</span></div>
-                    </sc-if>
+                    <sc-if value="{{ h.hasMore }}" hint-placeholder-val="{{ false }}"><div class="cryo-footnote" style="margin-top:0">+{{ h.more }} more containers · expand</div></sc-if>
                   </div>
-                  <sc-if value="{{ h.isStale }}" hint-placeholder-val="{{ false }}"><div class="pe-footnote warn">Last known values. Nothing on this card is live until the host reports again.</div></sc-if>
+                  <sc-if value="{{ h.isStale }}" hint-placeholder-val="{{ false }}"><div class="cryo-footnote">Last known values. Nothing on this card is live until the host reports again.</div></sc-if>
                 </div>
               </sc-if>
 
               <sc-if value="{{ h.isUnknown }}" hint-placeholder-val="{{ false }}">
-                <div class="pe-card none" style="opacity:1;flex:1">
-                  <div class="pe-card-head">
-                    <span class="pe-led idle"></span>
-                    <span class="pe-card-title sm" style="color:var(--pe-ink-body)">{{ h.name }}</span>
-                    <div class="pe-spacer"></div>
-                    <span class="{{ h.badgeCls }}">{{ h.badge }}</span>
+                <div class="cryo-pod nodata" style="opacity:1;flex:1">
+                  <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">{{ h.name }}</span><span class="cryo-badge">{{ h.badge }}</span></div>
+                  <div class="{{ h.tone }}" style="margin-bottom:0">
+                    <div class="alarm-orb">{{ h.glyph }}</div>
+                    <div class="alarm-text"><p class="alarm-title" style="font-size:14px">{{ h.reasonTitle }}</p><p class="alarm-sub">{{ h.reason }}</p></div>
                   </div>
-                  <div class="pe-sensor-dark" style="margin-bottom:14px">
-                    <div class="glyph">{{ h.glyph }}</div>
-                    <p style="color:var(--pe-ink-body)"><strong style="color:var(--pe-ink-2)">{{ h.reasonTitle }}</strong><br>{{ h.reason }}</p>
+                  <div class="cryo-stats">
+                    <div class="cryo-stat-row"><span>CPU · MEM · DISK</span><span>unreadable</span></div>
+                    <div class="cryo-stat-row"><span>LAST GOOD READING</span><span>{{ h.lastGood }}</span></div>
+                    <div class="cryo-stat-row"><span>CONTAINERS</span><span>unreadable</span></div>
                   </div>
-                  <div class="pe-readout" style="border-top:none;padding-top:0">
-                    <div class="pe-readout-row"><span class="pe-label">CPU · MEM · DISK</span><span class="pe-value none">unreadable</span></div>
-                    <div class="pe-readout-row"><span class="pe-label">LAST GOOD READING</span><span class="pe-value dim">{{ h.lastGood }}</span></div>
-                    <div class="pe-readout-row"><span class="pe-label">CONTAINERS</span><span class="pe-value none">unreadable</span></div>
-                  </div>
-                  <div class="pe-footnote">{{ h.check }}</div>
-                  <sc-if value="{{ h.hasLink }}" hint-placeholder-val="{{ true }}"><div style="margin-top:12px"><a href="{{ h.link }}" style="font:10px var(--pe-font-mono);letter-spacing:.08em">OPEN HOST UI ↗</a></div></sc-if>
+                  <div class="cryo-footnote">{{ h.check }}</div>
+                  <sc-if value="{{ h.hasLink }}" hint-placeholder-val="{{ true }}"><div class="cryo-footnote"><a href="{{ h.link }}" style="color:var(--cp-teal-text);text-decoration:none">OPEN HOST UI ↗</a></div></sc-if>
                 </div>
               </sc-if>
 
               <sc-if value="{{ h.isUnconf }}" hint-placeholder-val="{{ false }}">
-                <div class="pe-card none" style="opacity:1">
-                  <div class="pe-card-head">
-                    <span class="pe-led idle"></span>
-                    <span class="pe-card-title sm" style="font-family:var(--pe-font-mono);font-weight:500;font-size:13px;color:var(--pe-ink-body)" title="{{ h.name }}">“{{ h.name }}”</span>
-                    <div class="pe-spacer"></div>
-                    <span class="pe-badge">NOT CONFIGURED</span>
-                  </div>
-                  <div class="pe-stack-note">Known to the collector, not yet set up here. No link and no readings until it is listed in this dashboard’s config.</div>
-                  <div class="pe-dashed-footer" style="margin-top:14px;padding-top:12px"><span class="pe-led idle"></span>name supplied by the remote host · shown as text only</div>
+                <div class="cryo-pod nodata" style="opacity:1">
+                  <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name" style="font-family:'JetBrains Mono',monospace;font-weight:500;font-size:13px" title="{{ h.name }}">“{{ h.name }}”</span><span class="cryo-badge">NOT CONFIGURED</span></div>
+                  <p class="muted-body">Known to the collector, not yet set up here. No link and no readings until it is listed in this dashboard’s config.</p>
+                  <div class="cryo-footnote">name supplied by the remote host · shown as text only</div>
                 </div>
               </sc-if>
             </div>
           </sc-for>
         </div>
-
-        <div class="pe-dashed-footer"><span class="pe-led idle"></span>casamediaserver is not listed here. Its containers and controls are on Overview.</div>
+        <div class="cryo-footnote" style="margin-top:14px">casamediaserver is not listed here. Its containers and controls are on Overview.</div>
       </section>
     </div>
-  </div>
+  </main>
 </div>
+<footer><p>Planet Express — authenticated LAN dashboard · v3 cockpit · hosts tab (design proposal)</p></footer>
 </x-dc>
 <script type="text/x-dc" data-dc-script>
 class Component extends DCLogic {
@@ -171,7 +128,7 @@ class Component extends DCLogic {
   renderVals() {
     const sc = this.state.sc;
     const NR = undefined;
-    const lvl = p => p >= 95 ? 'crit' : p >= 90 ? 'high' : p >= 80 ? 'warn' : 'ok';
+    const lvl = p => p >= 90 ? 'high' : p >= 80 ? 'mid' : 'low';
     const ct = (n, status, o = {}) => ({ n, status, health: o.health || 'healthy', upd: !!o.upd });
     const fmt = v => v === NR ? 'not reported' : v;
     const unraid = { name: 'CASA UNRAID', link: 'http://unraid.casa.lan', os: NR, arch: 'x86_64', kernel: '6.12.24-Unraid', cpuModel: NR, cores: 2, threads: 2, memTotal: '7.6 GiB', cpu: 23, mem: 61, memUsed: '4.6', disk: 71, diskUsed: '1.3', diskTotal: '1.8 TiB', swap: '0 B / 0 B', load: '0.42 · 0.38 · 0.35', fan: '2140 rpm',
@@ -185,11 +142,11 @@ class Component extends DCLogic {
     const live = (b, fresh, age, note) => ({ kind: 'live', b, fresh, age, note });
     const unk = (b, reason, note) => ({ kind: 'unknown', b, reason, note });
     const R = {
-      unreachable: { badge: 'NO CONTACT', bc: 'pe-badge crit', glyph: '⌁', title: 'Collector could not be reached', text: 'The beszel hub did not answer: connection refused or timed out. Every configured host reads as unknown until it does.', check: 'Check: hub URL in config, hub container running, network between this host and the hub.', last: 'never read this session' },
-      denied: { badge: 'NOT PERMITTED', bc: 'pe-badge warn', glyph: '⛨', title: 'Collector answered, but this account cannot see this system', text: 'The hub returned success with an empty list. That looks like “no hosts”, and is not. The account has no access to this system.', check: 'Check: share this system with the dashboard’s beszel user in the hub.', last: 'never' },
-      clock: { badge: 'CLOCK UNUSABLE', bc: 'pe-badge warn', glyph: '◷', title: 'Reading carries an unusable timestamp', text: 'The host reported, but its clock is far from ours. Its age cannot be trusted, so no value is shown as live.', check: 'Check: time sync (NTP) on the remote host.', last: 'timestamp rejected' }
+      unreachable: { badge: 'NO CONTACT', tone: 'crit', glyph: '⌁', title: 'Collector could not be reached', text: 'The beszel hub did not answer: connection refused or timed out. Every configured host reads as unknown until it does.', check: 'Check: hub URL in config, hub container running, network between this host and the hub.', last: 'never read this session' },
+      denied: { badge: 'NOT PERMITTED', tone: 'medium', glyph: '⛨', title: 'Collector answered, but this account cannot see this system', text: 'The hub returned success with an empty list. That looks like “no hosts”, and is not. The account has no access to this system.', check: 'Check: share this system with the dashboard’s beszel user in the hub.', last: 'never' },
+      clock: { badge: 'CLOCK UNUSABLE', tone: 'medium', glyph: '◷', title: 'Reading carries an unusable timestamp', text: 'The host reported, but its clock is far from ours. Its age cannot be trusted, so no value is shown as live.', check: 'Check: time sync (NTP) on the remote host.', last: 'timestamp rejected' }
     };
-    const hostile = 'rack-a \u003cscript\u003ealert(1)\u003c/script\u003e lab-pi';
+    const hostile = 'rack-a <scr' + 'ipt>alert(1)</scr' + 'ipt> lab-pi';
     const SC = {
       fleet: [live(unraid, 'current'), live(mini, 'current'), live(solar, 'current')],
       gallery: [
@@ -209,38 +166,32 @@ class Component extends DCLogic {
       const b = d.b, hasLink = !!b.link;
       if (d.kind === 'unknown') {
         const r = R[d.reason];
-        return { ...base, isLive: false, isUnknown: true, isUnconf: false, name: b.name, badge: r.badge, badgeCls: r.bc, glyph: r.glyph, reasonTitle: r.title, reason: r.text, check: r.check, lastGood: r.last, hasLink, link: b.link };
+        return { ...base, isLive: false, isUnknown: true, isUnconf: false, name: b.name, badge: r.badge, tone: 'alarm-banner ' + r.tone, glyph: r.glyph, reasonTitle: r.title, reason: r.text, check: r.check, lastGood: r.last, hasLink, link: b.link };
       }
       const stale = d.fresh === 'stale';
       const worst = Math.max(b.cpu, b.mem, b.disk);
-      const level = stale ? 'warn' : lvl(worst);
-      const mk = (label, pct, text) => {
-        const missing = pct === NR;
-        const l = stale ? '' : lvl(pct);
-        return { label, text: missing ? 'not reported' : text, valCls: missing ? 'pe-value none' : stale ? 'pe-value dim' : 'pe-value ' + (l === 'ok' ? 'ok' : l === 'high' ? 'warn' : l), fillCls: 'pe-bar-fill ' + l, style: 'width:' + (missing ? 0 : pct) + '%' };
-      };
+      const pod = stale ? 'stale' : worst >= 95 ? 'failed' : 'fresh';
+      const mk = (label, pct, text) => ({ label, text: stale ? text + ' · last known' : text, fillCls: 'disk-bar-fill ' + lvl(pct), style: 'display:block;width:' + pct + '%' + (stale ? ';opacity:.35' : '') });
       const meters = [mk('CPU', b.cpu, b.cpu + '%'), mk('MEMORY', b.mem, b.mem + '% · ' + b.memUsed + ' / ' + b.memTotal), mk('DISK', b.disk, b.disk + '% · ' + b.diskUsed + ' / ' + b.diskTotal)];
-      const f = (label, val, dim) => ({ label, val: fmt(val), cls: val === NR ? 'pe-value none' : dim ? 'pe-value dim' : 'pe-value' });
+      const f = (label, val) => ({ label, val: fmt(val), cls: val === NR ? 'cell-dim' : '' });
       const maxT = b.temps ? Math.max(...b.temps.map(t => t[1])) : null;
       const facts = [
-        f('LOAD 1 · 5 · 15', b.load, stale), f('SWAP', b.swap, stale),
-        ...(b.temps ? [f('TEMP MAX', maxT.toFixed(1) + ' °C · ' + b.temps.length + ' sensors', stale)] : []),
-        ...(b.fan ? [f('FAN', b.fan, stale)] : []),
+        f('LOAD 1 · 5 · 15', b.load),
+        ...(b.temps ? [f('TEMP MAX', maxT.toFixed(1) + ' °C · ' + b.temps.length + ' sensors')] : []),
         f('OS', b.os), f('ARCH · KERNEL', b.arch + ' · ' + b.kernel), f('CPU', b.cpuModel), f('CORES · THREADS', b.cores + ' · ' + b.threads)
       ];
       const n = b.cts.length;
-      const chips = b.cts.slice(0, 6).map(c => ({ name: c.n, title: c.n + ' · ' + c.status + ' · ' + c.health, upd: c.upd, cls: c.health === 'unhealthy' ? 'pe-chip-svc crit' : stale ? 'pe-chip-svc idle' : 'pe-chip-svc', dot: c.health === 'unhealthy' ? 'pe-dot-svc crit' : stale ? 'pe-dot-svc idle' : 'pe-dot-svc' }));
+      const chips = b.cts.slice(0, 6).map(c => ({ name: c.n, mark: c.health === 'unhealthy' ? '✕' : c.upd ? 'UPD' : '✓', title: c.n + ' · ' + c.status + ' · ' + c.health + (c.upd ? ' · update available' : '') }));
       const unh = b.cts.filter(c => c.health === 'unhealthy').length;
       return {
-        ...base, isLive: true, isUnknown: false, isUnconf: false, name: b.name, isStale: stale, cardCls: 'pe-card ' + level,
-        ledCls: 'pe-led ' + level,
-        badge: stale ? 'STALE · ' + d.age : 'CURRENT', badgeCls: 'pe-badge ' + (stale ? 'warn' : 'ok'),
-        heroCls: 'pe-hero-num ' + (stale ? 'warn' : b.cpu >= 80 ? lvl(b.cpu) : ''), hero: stale ? d.age + ' ago' : b.cpu + '%', heroLabel: stale ? 'SINCE LAST READING' : 'CPU',
+        ...base, isLive: true, isUnknown: false, isUnconf: false, name: b.name, isStale: stale, podCls: 'cryo-pod ' + pod,
+        badge: stale ? 'STALE · ' + d.age : 'CURRENT',
+        hero: stale ? d.age + ' ago' : b.cpu + '%', heroLabel: stale ? 'SINCE LAST READING' : 'CPU',
         sub: b.cores + 'C / ' + b.threads + 'T · ' + b.arch + ' · ' + (b.os || 'OS not reported'),
         hasLink, link: b.link, meters, facts,
         hasTemps: !!b.temps, temps: b.temps ? b.temps.map(t => t[0] + ' ' + t[1]).join(' · ') : '',
         ctLabel: stale ? 'CONTAINERS · LAST KNOWN' : 'CONTAINERS', ctCount: n === 0 ? '0' : n + (unh ? ' · ' + unh + ' unhealthy' : ''),
-        ctCountCls: 'pe-value ' + (n === 0 ? 'dim' : unh ? 'crit' : stale ? 'dim' : ''),
+        ctCls: n === 0 ? 'cell-dim' : '',
         zeroCt: n === 0, hasCt: n > 0, chips, hasMore: n > 6, more: n - 6
       };
     });
@@ -248,21 +199,21 @@ class Component extends DCLogic {
     const c = { live: 0, stale: 0, unk: 0, unconf: 0 };
     defs.forEach(d => { if (d.kind === 'unknown') c.unk++; else if (d.kind === 'unconf') c.unconf++; else if (d.fresh === 'stale') c.stale++; else c.live++; });
     const configured = c.live + c.stale + c.unk;
-    let level = 'ok', glyph = '✓', title, detail;
-    if (c.unk === configured) { level = 'unknown'; glyph = '?'; title = 'NOTHING CAN BE READ'; detail = 'Collector unreachable: all ' + configured + ' configured hosts are unknown, not zero and not healthy. Cards below show what would be there once it answers.'; }
-    else if (c.unk || c.stale) { level = 'warn'; glyph = '!'; title = 'SOME HOSTS ARE NOT READING'; detail = c.live + ' reading now' + (c.stale ? ', ' + c.stale + ' stale' : '') + (c.unk ? ', ' + c.unk + ' unknown' : '') + '. Stale and unknown values are never drawn as live.'; }
-    else { title = c.live + ' OTHER HOSTS READING'; detail = 'Every other host on the LAN reported recently. This screen is read-only.'; }
-    if (sc === 'gallery') { level = 'warn'; glyph = '!'; title = 'ALL FIVE STATES, SIDE BY SIDE'; detail = 'Preview: one host per state, plus a hostile name and an 85-container host. Real data never mixes this many failures.'; }
+    let tone = 'none', glyph = '✓', title, detail;
+    if (c.unk === configured) { tone = 'low'; glyph = '?'; title = 'NOTHING CAN BE READ'; detail = 'Collector unreachable: all ' + configured + ' configured hosts are unknown, not zero and not healthy.'; }
+    else if (c.unk || c.stale) { tone = 'medium'; glyph = '!'; title = 'SOME HOSTS ARE NOT READING'; detail = c.live + ' reading now' + (c.stale ? ', ' + c.stale + ' stale' : '') + (c.unk ? ', ' + c.unk + ' unknown' : '') + '. Stale and unknown values are never drawn as live.'; }
+    else { title = c.live + ' OTHER HOSTS READING'; detail = 'Every other host on the LAN reported recently. This tab is read-only.'; }
+    if (sc === 'gallery') { tone = 'medium'; glyph = '!'; title = 'ALL FIVE STATES, SIDE BY SIDE'; detail = 'Preview only: one host per state, a hostile name, and an 85-container host.'; }
     const chips = [];
-    if (c.live) chips.push({ cls: 'pe-chip ok', text: c.live + ' CURRENT' });
-    if (c.stale) chips.push({ cls: 'pe-chip warn', text: c.stale + ' STALE' });
-    if (c.unk) chips.push({ cls: 'pe-chip ' + (c.unk === configured ? 'crit' : 'warn'), text: c.unk + ' UNKNOWN' });
-    if (c.unconf) chips.push({ cls: 'pe-chip info', text: c.unconf + ' NOT CONFIGURED' });
+    if (c.live) chips.push({ cls: 'alarm-chip low', text: c.live + ' CURRENT' });
+    if (c.stale) chips.push({ cls: 'alarm-chip med', text: c.stale + ' STALE' });
+    if (c.unk) chips.push({ cls: 'alarm-chip ' + (c.unk === configured ? 'crit' : 'med'), text: c.unk + ' UNKNOWN' });
+    if (c.unconf) chips.push({ cls: 'alarm-chip low', text: c.unconf + ' NOT CONFIGURED' });
 
     const names = [['gallery', 'ALL STATES'], ['fleet', 'REAL FLEET'], ['mixed', 'MIXED'], ['down', 'COLLECTOR DOWN']];
     return {
-      scenarios: names.map(([k, label]) => ({ label, cls: 'pe-btn sm' + (sc === k ? ' accent' : ''), go: () => this.setState({ sc: k }) })),
-      verdict: { cls: 'pe-verdict ' + level, glyph, title, detail, chips }, hosts
+      scenarios: names.map(([k, label]) => ({ label, cls: 'refresh-btn' + (sc === k ? ' active' : ''), go: () => this.setState({ sc: k }) })),
+      verdict: { cls: 'alarm-banner ' + tone, glyph, title, detail, chips }, hosts
     };
   }
 }
