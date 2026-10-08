@@ -1,0 +1,4 @@
+# What the setup wizard's server needs on top of the runtime requirements (it runs before PE's own virtualenv
+# exists, from setup.sh's throwaway one). Versions are floors here; setup.sh installs pinned, hashed copies.
+cryptography>=43.0
+segno>=1.6

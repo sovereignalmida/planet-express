@@ -2,6 +2,7 @@
 python -m planet_express.setup plan   --answers FILE [--discovery FILE]
 python -m planet_express.setup apply  --answers FILE --plan-id ID [--dry-run] [--journal-dir DIR]
 python -m planet_express.setup undo   --plan-id ID [--journal-dir DIR | --answers FILE]
+python -m planet_express.setup serve  [--port N] [--bind ADDR ...]
 
 `discover` prints the discovery report as JSON. `plan` prints the reviewable plan for those answers, with
 secrets masked. `apply` runs the plan whose id you reviewed; `--dry-run` only runs each step's read-only
@@ -120,6 +121,15 @@ def _undo_command(args) -> int:
     return 0 if result.status == "done" else 1
 
 
+def _serve_command(args) -> int:
+    import socket
+
+    from planet_express.setup.server import Sessions, serve
+    addresses = args.bind or (discover()["network"]["lan_addresses"] + ["127.0.0.1"])
+    return serve(addresses=list(dict.fromkeys(addresses)), port=args.port,
+                 names=[socket.gethostname(), *(args.name or [])], sessions=Sessions())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m planet_express.setup")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -139,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
     undoing.add_argument("--plan-id", required=True, help="the plan_id that was applied")
     undoing.add_argument("--journal-dir", help="the journal root the apply used")
     undoing.add_argument("--answers", help="the answers file, to find this host's default journal root")
+    serving = sub.add_parser("serve", help="the browser wizard (HTTPS, private addresses only)")
+    serving.add_argument("--port", type=int, default=8443)
+    serving.add_argument("--bind", action="append", help="an address to listen on (repeatable); default: this host's LAN addresses")
+    serving.add_argument("--name", action="append", help="an extra host name the page may be reached by")
     args = parser.parse_args(argv)
 
     if args.command == "discover":
@@ -149,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         return _apply_command(args)
     if args.command == "undo":
         return _undo_command(args)
+    if args.command == "serve":
+        return _serve_command(args)
     # plan needs pydantic and PyYAML; discover deliberately does not, because on a new host it runs
     # before any virtualenv exists.
     from planet_express.setup.answers import SetupAnswers
