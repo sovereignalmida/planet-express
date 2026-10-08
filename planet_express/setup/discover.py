@@ -92,7 +92,7 @@ def _storage(env, host: dict, repo_root: str) -> dict:
     root_fstype = dict(mounts).get("/", "unknown")
     persistent_root = root_fstype not in VOLATILE_FSTYPES and root_fstype != "unknown"
     persistent_mounts = [
-        {"name": Path(mount).name, "mount": mount, "fstype": fstype, "free_gib": env.free_gib(mount)}
+        {"name": Path(mount).name, "mount": mount, "fstype": fstype, "free": env.free_gib(mount)}
         for mount, fstype in mounts
         if fstype in PERSISTENT_FSTYPES and mount.startswith("/mnt/")
     ]
@@ -101,11 +101,11 @@ def _storage(env, host: dict, repo_root: str) -> dict:
     if host["init_system"] == "mos":
         # Nothing outside a pool survives a reboot, so the only places PE can live are on one.
         candidates = [f"{p['mount']}/pe" for p in pools
-                      if p["free_gib"] is not None and p["free_gib"] >= MIN_INSTALL_GIB]
+                      if p["free"] is not None and p["free"] >= MIN_INSTALL_GIB]
     else:
         candidates = [repo_root]
-    return {"root_fstype": root_fstype, "persistent": persistent_root, "mounts": persistent_mounts,
-            "pools": pools, "candidate_install_paths": candidates}
+    return {"root_fstype": root_fstype, "persistent": persistent_root, "pools": pools,
+            "candidate_install_paths": candidates, "_mounts": persistent_mounts}
 
 
 def _stack_roots(env, hint: str | None) -> list[dict]:
@@ -125,15 +125,64 @@ def _stack_roots(env, hint: str | None) -> list[dict]:
     return sorted(roots, key=lambda r: (-r["count"], r["path"]))
 
 
-def _stacks(env, roots: list[dict]) -> list[dict]:
+def _compose_services(text: str | None) -> list[str]:
+    """Service names from a compose file's top-level `services:` block, by indentation. stdlib only
+    (discover runs before PyYAML exists), so it is a reader for the ordinary shape, not a YAML parser:
+    anything it cannot read yields an empty list rather than a wrong one."""
+    names, in_services, child_indent = [], False, None
+    for raw in (text or "").splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if indent == 0:
+            in_services = raw.rstrip() == "services:"
+            child_indent = None
+            continue
+        if in_services:
+            child_indent = indent if child_indent is None else child_indent
+            match = re.match(r"^([A-Za-z0-9_.-]+):\s*(#.*)?$", raw.strip())
+            if indent == child_indent and match:
+                names.append(match.group(1))
+    return names
+
+
+def _config_forbidden_stacks(text: str | None) -> list[str]:
+    """`forbidden_stacks` from an existing config.yaml, inline (`[a, b]`) or as a block list."""
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines):
+        if not line.startswith("forbidden_stacks:"):
+            continue
+        rest = line.partition(":")[2].strip()
+        if rest.startswith("["):
+            return [x.strip().strip("'\"") for x in rest.strip("[]").split(",") if x.strip()]
+        found = []
+        for follow in lines[i + 1:]:
+            # yaml.safe_dump writes a block list flush left (`- ai`), hand-written ones are indented.
+            match = re.match(r"^\s*-\s+(.+?)\s*$", follow)
+            if not match:
+                break
+            found.append(match.group(1).strip("'\""))
+        return found
+    return []
+
+
+def _stacks(env, roots: list[dict], containers: list[dict], forbidden: list[str]) -> list[dict]:
     if not roots or roots[0]["count"] == 0:
         return []
     root = roots[0]["path"]
+    running = {}
+    for container in containers:
+        if container["project"]:
+            running[container["project"]] = running.get(container["project"], 0) + 1
     out = []
     for compose in env.glob(f"{root}/*/docker-compose.yml"):
         path = str(Path(compose).parent)
         name = Path(path).name
         out.append({"name": name, "path": path, "root": root,
+                    "services": _compose_services(env.read(compose)),
+                    # Compose names a project after its directory, lower-cased, unless told otherwise.
+                    "running": running.get(name.lower(), 0) > 0,
+                    "forbidden_suggested": name in forbidden,
                     "ingress_suggested": name in INGRESS_STACK_NAMES})
     return out
 
@@ -208,6 +257,7 @@ KNOWN_SYSTEM_PATHS = (
     "/etc/systemd/system/casa-planetexpress.service", "/etc/systemd/system/casa-dashboard.service",
     "/etc/systemd/system/casa-stacks.service",
     "/etc/init.d/casa-planetexpress", "/etc/init.d/casa-dashboard",
+    "/boot/optional/scripts/post-start.sh", "/boot/optional/scripts/shutdown.sh",
 )
 INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env")
 
@@ -226,14 +276,22 @@ def _existing_pe(env, storage: dict) -> dict:
     if config_path:
         probes.append(config_path)
     present = {path: env.exists(path) for path in dict.fromkeys(probes)}
+    # What each present file held when we looked. `plan` carries it into the step so `apply` can refuse to
+    # replace a file that changed after the operator reviewed the plan (compare-and-swap).
+    hashes = {path: digest for path in present if present[path] and (digest := env.sha256(path))}
+    config_path = config_path or ("/etc/planetexpress/config.yaml"
+                                  if env.exists("/etc/planetexpress/config.yaml") else None)
     markers = {
         "config": env.exists(config_path or "/etc/planetexpress/config.yaml"),
         "env_file": env.exists("/etc/planetexpress.env"),
         "systemd_unit": unit is not None,
         "init_script": env.exists("/etc/init.d/casa-planetexpress"),
     }
-    return {"installed": any(markers.values()), **markers,
-            "install_dir": install_dir, "config_path": config_path, "present": present}
+    changelog = env.read(f"{install_dir}/CHANGELOG.md") if install_dir else None
+    version = re.search(r"^## \[(\d+\.\d+\.\d+[^\]]*)\]", changelog or "", re.MULTILINE)
+    return {"installed": any(markers.values()), **markers, "version": version.group(1) if version else None,
+            "install_dir": install_dir, "config_path": config_path, "present": present, "sha256": hashes,
+            "forbidden_stacks": _config_forbidden_stacks(env.read(config_path) if config_path else None)}
 
 
 def _check(id_: str, label: str, status: str, detail: str, fix: str = "", overridable: bool = False) -> dict:
@@ -346,19 +404,22 @@ def discover(env=None, *, repo_root: str | None = None, stacks_root: str | None 
     host = _host(env)
     docker = _docker(env)
     roots = _stack_roots(env, stacks_root)
+    containers = _containers(env, docker)
+    storage = _storage(env, host, repo_root)
     facts = {
         "schema": SCHEMA,
         "host": host,
         "docker": docker,
-        "storage": _storage(env, host, repo_root),
+        "storage": storage,
+        "mounts": storage.pop("_mounts"),
         "stacks_roots": roots,
-        "stacks": _stacks(env, roots),
-        "containers_running": _containers(env, docker),
+        "containers_running": containers,
         "ports_in_use": _listening_ports(env),
         "network": _network(env),
         "privileges": _privileges(env),
     }
     facts["existing_pe"] = _existing_pe(env, facts["storage"])
+    facts["stacks"] = _stacks(env, roots, containers, facts["existing_pe"]["forbidden_stacks"])
     facts["checks"] = _checks(facts)
     counts = {s: sum(1 for c in facts["checks"] if c["status"] == s) for s in ("ok", "warn", "blocked")}
     facts["summary"] = {**counts, "can_continue": not any(

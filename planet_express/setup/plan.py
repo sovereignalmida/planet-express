@@ -23,7 +23,16 @@ MASK = "••••"
 _PLACEHOLDER = re.compile(r"\{\{secret:([A-Za-z0-9_]+)\}\}")
 # Paths whose contents are system-wide, not part of the install: raise the risk and need root.
 _SYSTEM_PREFIXES = ("/etc/", "/boot/", "/usr/", "/var/", "/run/")
-_MOS_PE_HOME_LINE = "PE_HOME=/mnt/data/pe"
+# Every whole-file version of the MOS hook scripts this project shipped before they became merged blocks
+# (git history of scripts/mos-boot/). A file that matches one exactly is entirely ours.
+LEGACY_HOOK_SHA256 = {
+    "post-start.sh": ["099dfc4f54c720ffa9645d8cef1c1b5e32fb1fc7983ab68f566c0333adb68ac6",
+                      "269a61cc194d8d53f84def4ff34ef63f321ff5f3a50f6768e9514adb6956226f",
+                      "f34ee3a804e07da1263bd62f56c3f101c4d34af4e478cb87265fdc3a4de35784"],
+    "shutdown.sh": ["5c78195bb2631081438c96e079fa49bbd5578a047528af823fb634eb740380e7"],
+}
+_MOS_PE_HOME = re.compile(r"^(\s*)PE_HOME=\S+", re.MULTILINE)
+_MOS_CHECKOUT = re.compile(r"^(\s*)CHECKOUT=\S+", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -87,16 +96,35 @@ class _Builder:
         self.not_touched: list[str] = []
         self.cfg = None
         self.p: dict = {}
+        self.snapshot_id: str | None = None
 
     def present(self, path: str) -> bool:
         return bool(self.d["existing_pe"].get("present", {}).get(path))
+
+    def expectation(self, path: str, wanted: str) -> dict:
+        """What `apply` must find at `path` for this step to proceed: the compare-and-swap input.
+
+        A file that exists and whose hash we hold is expected to still have it; one that is absent is
+        expected to stay absent. If it exists but could not be hashed we cannot prove it is unchanged, so a
+        replace is downgraded to keep rather than risk overwriting something unseen."""
+        if not self.present(path):
+            return {"if_exists": wanted, "expect_absent": True}
+        digest = self.d["existing_pe"].get("sha256", {}).get(path)
+        if digest:
+            return {"if_exists": wanted, "expected_sha256": digest}
+        if wanted == "replace":
+            self.warnings.append(f"{path} exists but could not be read to compare, so it is kept, not replaced.")
+        return {"if_exists": "keep"}
 
     # -- steps -------------------------------------------------------------------------------
     def add(self, kind: str, title: str, target: str, params: dict, preview: dict, *,
             depends_on: tuple[str, ...] = (), risk: str | None = None, needs_root: bool | None = None,
             reversible: bool | None = None) -> str:
         meta = CATALOGUE[kind]
-        validated = meta.model(**params)            # per-kind params model: unknown or unsafe values fail here
+        validated = meta.model(**params)
+        if self.snapshot_id and kind != "state.snapshot":
+            # Nothing changes before the safety net exists.
+            depends_on = (self.snapshot_id,) + tuple(d for d in depends_on if d != self.snapshot_id)            # per-kind params model: unknown or unsafe values fail here
         step_id = f"s{len(self.steps) + 1:02d}"
         self.steps.append(Step(
             id=step_id, kind=kind, title=title, target=target,
@@ -109,14 +137,15 @@ class _Builder:
                   if_exists="keep", has_secrets=False, depends_on=()) -> str:
         system = path.startswith(_SYSTEM_PREFIXES) or self.init == "mos"
         shown = _mask(content)
-        if self.present(path) and if_exists == "keep":
+        if self.present(path) and self.expectation(path, if_exists)["if_exists"] == "keep":
             title += " (already exists: kept)"
+        expect = self.expectation(path, if_exists)
         return self.add(
             "file.write", title, path,
             {"path": path, "content": content, "mode": mode, "owner": owner, "group": group,
-             "if_exists": if_exists, "has_secrets": has_secrets},
+             "has_secrets": has_secrets, **expect},
             {"type": "file", "path": path, "mode": mode, "owner": f"{owner}:{group}",
-             "if_exists": if_exists, "already_present": self.present(path), "content": shown},
+             "if_exists": expect["if_exists"], "already_present": self.present(path), "content": shown},
             depends_on=tuple(depends_on), risk="R2" if system else "R1", needs_root=system)
 
     def secret(self, name: str, value: str) -> str:
@@ -245,6 +274,14 @@ def _build(b: _Builder) -> None:
     run_group = a.run_group or a.run_as
     mos = b.init == "mos"
 
+    # An install that already has state gets a snapshot first, as deploy.sh does before it changes anything.
+    if b.d["existing_pe"]["installed"] and b.present(p["config"]):
+        b.snapshot_id = b.add(
+            "state.snapshot", "Snapshot the current state first", a.install_dir,
+            {"install_dir": a.install_dir, "run_user": a.run_as},
+            b.text("Takes a snapshot of the current config and state so this install can be rolled back. "
+                   "It reads what is there and writes only the snapshot."))
+
     # state and logs belong to the service user; on MOS that is root, and the rest live on the pool.
     owner = {"owner": a.run_as, "group": run_group}
     # Parents first: on MOS the pool's home directory holds everything else.
@@ -285,15 +322,20 @@ def _build(b: _Builder) -> None:
                                  depends_on=dir_ids[:3 if mos else 2])
 
     sudoers_id = None
-    if not mos and a.tier == "full" and a.sudo_units:
+    if not mos and a.tier == "full" and a.sudo_units and b.present(p["config"]):
+        b.warnings.append("The kept config decides which units Planet Express may control, so no sudoers grant is "
+                          "written from your answers: it could disagree with that config. Generate one from the "
+                          "config's own sudo_allowlist (scripts/setup_wizard.py).")
+    if not mos and a.tier == "full" and a.sudo_units and not b.present(p["config"]):
         from scripts.setup_wizard import generate_sudoers_snippet
         snippet = generate_sudoers_snippet(a.run_as, b.cfg.sudo_allowlist, [], "systemd")
         sudoers_id = b.add(
             "sudoers.install", "Grant scoped sudo for unit control", "/etc/sudoers.d/planetexpress",
             {"path": "/etc/sudoers.d/planetexpress", "content": snippet, "run_user": a.run_as,
-             "if_exists": "keep"},
+             **b.expectation("/etc/sudoers.d/planetexpress", "keep")},
             {"type": "file", "path": "/etc/sudoers.d/planetexpress", "mode": "0440", "owner": "root:root",
-             "if_exists": "replace", "content": snippet}, depends_on=(config_id,))
+             "if_exists": "keep", "already_present": b.present("/etc/sudoers.d/planetexpress"), "content": snippet},
+            depends_on=(config_id,))
 
     access_id = b.add(
         "access.provision", "Give the dashboard read-only access", "planetexpress-web",
@@ -335,15 +377,25 @@ def _build(b: _Builder) -> None:
             install_ids.append(b.add(
                 "service.install", f"Install the {name} init script", f"/etc/init.d/{name}",
                 {"flavour": "sysvinit", "name": name, "path": f"/etc/init.d/{name}", "content": b.read(script),
-                 "if_exists": "replace", "defaults_path": f"/etc/default/{name}", "defaults_content": defaults},
+                 **b.expectation(f"/etc/init.d/{name}", "replace"),
+                 "defaults_path": f"/etc/default/{name}", "defaults_content": defaults},
                 {"type": "file", "path": f"/etc/init.d/{name}", "mode": "0755", "owner": "root:root",
-                 "if_exists": "replace", "content": b.read(script)},
+                 "if_exists": b.expectation(f"/etc/init.d/{name}", "replace")["if_exists"],
+                 "already_present": b.present(f"/etc/init.d/{name}"), "content": b.read(script)},
                 depends_on=(persisted,) + ((dash_id,) if dash_id else ())))
         hooks = {"post-start.sh": _mos_post_start(b, p), "shutdown.sh": b.read("scripts/mos-boot/shutdown.sh")}
+        hook_dir = "/boot/optional/scripts"
+        known = b.d["existing_pe"].get("sha256", {})
+        expected = {n: known[f"{hook_dir}/{n}"] for n in hooks if f"{hook_dir}/{n}" in known}
         hook_id = b.add(
-            "boot_hook.install", "Restore Planet Express at every MOS boot", "/boot/optional/scripts",
-            {"dest_dir": "/boot/optional/scripts", "hooks": hooks},
-            {"type": "files", "files": [{"path": f"/boot/optional/scripts/{n}", "content": c} for n, c in hooks.items()]},
+            "boot_hook.install", "Restore Planet Express at every MOS boot", hook_dir,
+            {"dest_dir": hook_dir, "hooks": hooks, "expected_sha256": expected, "legacy_sha256": LEGACY_HOOK_SHA256},
+            {"type": "files", "files": [
+                {"path": f"{hook_dir}/{n}",
+                 "merge": ("this is an older copy of ours, so the whole file is replaced"
+                           if known.get(f"{hook_dir}/{n}") in LEGACY_HOOK_SHA256[n]
+                           else "marked block (the rest of the file is kept)"),
+                 "already_present": b.present(f"{hook_dir}/{n}"), "content": c} for n, c in hooks.items()]},
             depends_on=tuple(install_ids))
         install_ids.append(hook_id)
         enable = [("casa-planetexpress", a.start_services and a.telegram is not None),
@@ -364,9 +416,10 @@ def _build(b: _Builder) -> None:
             install_ids.append(b.add(
                 "service.install", f"Install the {name} unit", f"/etc/systemd/system/{name}.service",
                 {"flavour": "systemd", "name": name, "path": f"/etc/systemd/system/{name}.service",
-                 "content": content, "if_exists": "keep"},
+                 "content": content, **b.expectation(f"/etc/systemd/system/{name}.service", "keep")},
                 {"type": "file", "path": f"/etc/systemd/system/{name}.service", "mode": "0644",
-                 "owner": "root:root", "if_exists": "replace", "content": content},
+                 "owner": "root:root", "if_exists": "keep",
+                 "already_present": b.present(f"/etc/systemd/system/{name}.service"), "content": content},
                 depends_on=(config_id,) + ((dash_id,) if dash_id else (access_id,)) + ((secrets_id,) if secrets_id else ())))
         enable = [(n, a.start_services and a.telegram is not None and n != "casa-stacks") for n, _ in units]
         flavour = "systemd"
@@ -395,10 +448,12 @@ def _mos_defaults(name: str, p: dict, a: SetupAnswers) -> str:
 
 def _mos_post_start(b: _Builder, p: dict) -> str:
     script = b.read("scripts/mos-boot/post-start.sh")
-    if _MOS_PE_HOME_LINE not in script:
-        b.blocked.append("scripts/mos-boot/post-start.sh no longer has the PE_HOME line this plan rewrites.")
+    if not _MOS_PE_HOME.search(script) or not _MOS_CHECKOUT.search(script):
+        b.blocked.append("scripts/mos-boot/post-start.sh no longer has the PE_HOME/CHECKOUT lines this plan rewrites.")
         return script
-    return script.replace(_MOS_PE_HOME_LINE, f"PE_HOME={p['home']}", 1)
+    # The hook reinstalls from the checkout at every boot, so it has to name the real one, not assume a layout.
+    script = _MOS_PE_HOME.sub(lambda m: f"{m.group(1)}PE_HOME={p['home']}", script, count=1)
+    return _MOS_CHECKOUT.sub(lambda m: f"{m.group(1)}CHECKOUT={Path(b.a.install_dir).name}", script, count=1)
 
 
 def _will_not_touch(b: _Builder, p: dict) -> None:

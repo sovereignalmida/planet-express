@@ -31,6 +31,10 @@ class FakeEnv:
     def exists(self, path):
         return path in self.files or path in self.dirs
 
+    def sha256(self, path):
+        import hashlib
+        return hashlib.sha256(self.files[path].encode()).hexdigest() if path in self.files else None
+
     def is_dir(self, path):
         return path in self.dirs
 
@@ -80,7 +84,7 @@ def test_systemd_host_reports_plugin_compose_and_a_persistent_root():
                                 "compose_flavour": "plugin", "root_dir": "/var/lib/docker"}
     assert report["storage"]["persistent"] and report["storage"]["candidate_install_paths"] == ["/opt/pe"]
     assert report["storage"]["pools"] == []           # a pool is a MOS concept
-    assert [m["mount"] for m in report["storage"]["mounts"]] == ["/mnt/media"]
+    assert [m["mount"] for m in report["mounts"]] == ["/mnt/media"]
     assert report["summary"] == {"ok": 8, "warn": 0, "blocked": 0, "can_continue": True}
 
 
@@ -218,7 +222,7 @@ def test_a_real_public_address_on_a_real_interface_raises_the_exposure_warning()
 
 def test_mount_points_with_escaped_spaces_are_unescaped():
     mounts = "/dev/sda1 / ext4 rw 0 0\n/dev/sdb1 /mnt/my\\040disk ext4 rw 0 0\n"
-    assert discover(ubuntu(files={"/proc/mounts": mounts}))["storage"]["mounts"][0]["mount"] == "/mnt/my disk"
+    assert discover(ubuntu(files={"/proc/mounts": mounts}))["mounts"][0]["mount"] == "/mnt/my disk"
 
 
 def test_the_report_is_plain_json():
@@ -241,3 +245,70 @@ def test_present_says_which_install_files_already_exist_including_beside_a_mos_p
     assert present["/etc/init.d/casa-planetexpress"] is True
     assert present["/mnt/data/pe/planetexpress.env"] is False
     assert present["/etc/systemd/system/casa-stacks.service"] is False
+
+
+COMPOSE = """\
+# media stack
+name: media
+services:
+  radarr:
+    image: lscr.io/linuxserver/radarr
+    environment:
+      - TZ=UTC
+  sonarr: # tv
+    image: x
+  "quoted": {}
+volumes:
+  data:
+networks:
+  default:
+"""
+
+
+def test_stack_rows_carry_services_running_and_forbidden_suggested_from_the_contract():
+    env = ubuntu(files={"/home/me/stacks/media/docker-compose.yml": COMPOSE,
+                        "/home/me/stacks/ai/docker-compose.yml": "services:\n  ollama:\n    image: x\n",
+                        "/home/me/stacks/network/docker-compose.yml": "services:\n  traefik:\n    image: x\n"},
+                 dirs={"/home/me/stacks"},
+                 runs={("docker", "ps", "--format", '{{.Names}}\t{{.Label "com.docker.compose.project"}}'):
+                       (0, "radarr-1\tmedia\nsonarr-1\tmedia\n")})
+    by_name = {s["name"]: s for s in discover(env)["stacks"]}
+    assert by_name["media"]["services"] == ["radarr", "sonarr"]       # not volumes, networks or environment
+    assert by_name["media"]["running"] is True and by_name["ai"]["running"] is False
+    assert by_name["network"]["ingress_suggested"] is True
+    assert all(isinstance(s["forbidden_suggested"], bool) for s in by_name.values())
+
+
+def test_stacks_an_existing_config_forbids_are_suggested_for_ignoring():
+    cfg = "stacks_root: /home/me/stacks\nforbidden_stacks:\n- ai\n- 'scratch'\npaused_containers: []\n"
+    env = ubuntu(files={"/home/me/stacks/ai/docker-compose.yml": "services:\n  a:\n    image: x\n",
+                        "/home/me/stacks/media/docker-compose.yml": "services:\n  b:\n    image: x\n",
+                        "/etc/planetexpress/config.yaml": cfg}, dirs={"/home/me/stacks"})
+    report = discover(env)
+    assert report["existing_pe"]["forbidden_stacks"] == ["ai", "scratch"]
+    flags = {s["name"]: s["forbidden_suggested"] for s in report["stacks"]}
+    assert flags == {"ai": True, "media": False}
+
+
+def test_an_inline_forbidden_stacks_list_is_read_too():
+    env = ubuntu(files={"/etc/planetexpress/config.yaml": "forbidden_stacks: [ai, 'x y']\n"})
+    assert discover(env)["existing_pe"]["forbidden_stacks"] == ["ai", "x y"]
+
+
+def test_a_config_only_install_still_reports_where_its_config_is():
+    existing = discover(ubuntu(files={"/etc/planetexpress/config.yaml": ""}))["existing_pe"]
+    assert existing["config"] is True and existing["config_path"] == "/etc/planetexpress/config.yaml"
+    assert discover(ubuntu())["existing_pe"]["config_path"] is None
+
+
+def test_the_installed_version_is_read_from_the_checkouts_changelog():
+    unit = "[Service]\nWorkingDirectory=/home/me/pe\n"
+    env = ubuntu(files={"/etc/systemd/system/casa-planetexpress.service": unit,
+                        "/home/me/pe/CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n\n## [2.6.0] - 2026-10-03\n"})
+    assert discover(env)["existing_pe"]["version"] == "2.6.0"
+    assert discover(ubuntu())["existing_pe"]["version"] is None
+
+
+def test_pool_capacity_is_reported_as_free():
+    pool, = discover(mos())["storage"]["pools"]
+    assert pool == {"name": "data", "mount": "/mnt/data", "fstype": "ext4", "free": 36.8}
