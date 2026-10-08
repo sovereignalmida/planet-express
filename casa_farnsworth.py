@@ -44,7 +44,6 @@ import casa_stackctl as stackctl
 import casa_zoidberg as zoidberg
 import config
 from notifier import Notifier, TelegramNotifier
-from planet_express.core.store import INDEFINITE_EXPIRY
 from planet_express.application import compose_plans, planner
 from planet_express.application.chat_service import (
     MAX_ANSWER_CHARS,
@@ -58,7 +57,7 @@ from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
-from planet_express.core.store import SchemaTooNewError, Store
+from planet_express.core.store import INDEFINITE_EXPIRY, SchemaTooNewError, Store
 from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
@@ -1068,6 +1067,21 @@ def _has_active_rollback_candidates(commands: CommandService) -> bool:
         return True
 
 
+# One alert per distinct block, repeated at most this often. A held window can last days; the same
+# message every scan would get the bot muted, which is the failure this alert exists to end.
+BLOCKED_PRUNE_REALERT_SECONDS = 24 * 3600
+_blocked_prune_alerted: dict = {"text": None, "at": 0.0}
+
+
+def _should_alert_blocked_prune(message: str) -> bool:
+    now = time.time()
+    last = _blocked_prune_alerted
+    if last["text"] == message and now - last["at"] < BLOCKED_PRUNE_REALERT_SECONDS:
+        return False
+    last["text"], last["at"] = message, now
+    return True
+
+
 def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> str | None:
     """Why a prune the disk needs is not happening, and the way out -- or None when the block is
     only a canary inside its ordinary grace period, which closes by itself in minutes and is not
@@ -1080,7 +1094,9 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> str | 
                 f"Root disk is at {disk_alert['used_pct']}% and the rollback-window table could not "
                 f"be read, so no image is pruned. Check the Planet Express core database; the "
                 f"dashboard cannot list or settle windows while it is unreadable.")
-    if windows and all(row["expires_at"] < INDEFINITE_EXPIRY for row in windows):
+    if all(row["expires_at"] < INDEFINITE_EXPIRY for row in windows):
+        # Only canaries inside their ordinary grace period -- or none at all, because the window
+        # that blocked the gate closed between its read and this one. Neither is news.
         return None
     lines = [
         "🧹 *Safe prune is blocked*",
@@ -1123,7 +1139,7 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         # Silent for eleven days on casaserver (2026-09-27 to 10-08): a held window blocks every
         # prune on the host and nothing said so. Disk pressure is real here, so say why.
         message = _blocked_prune_message(disk_alert, commands)
-        if message is not None:
+        if message is not None and _should_alert_blocked_prune(message):
             notifier.notify(message)
         return
 

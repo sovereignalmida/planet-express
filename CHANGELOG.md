@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A held rollback window can be settled from the dashboard.** A failed canary inverse pins its
+  rollback window open until a human closes it, but nothing let a human do that: on casaserver it
+  blocked every safe prune from 2026-09-27 to 2026-10-08 while `/` sat at 84%. The OPEN ROLLBACK
+  CANDIDATES panel now has a SETTLE button (held windows only, elevated session, CSRF-checked,
+  audited as `canary.window_settled`) backed by a `canary.settle` RPC.
+- **A prune blocked by a held window says so.** Telegram names the window and the way out (at most
+  once a day per distinct block); an unreadable window table gets its own alert.
+- **`prune.safe` also clears unused build cache** (`docker builder prune -a -f`).
+
 ## [2.6.0] - 2026-10-03
 
 ### Added

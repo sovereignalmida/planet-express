@@ -39,6 +39,11 @@ class Unreadable:
         raise AssertionError("a prune must not run while the window cannot be read")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_alert_throttle(monkeypatch):
+    monkeypatch.setattr(fw, "_blocked_prune_alerted", {"text": None, "at": 0.0})
+
+
 @pytest.fixture
 def state():
     s = fw.PipelineState()
@@ -102,6 +107,19 @@ def test_a_held_window_blocks_the_prune_loudly_and_names_the_way_out(ready, stat
     assert "Safe prune is blocked" in message and "91%" in message
     assert "media/sonarr" in message and execution_id in message and "held" in message
     assert "SETTLE" in message
+
+
+def test_the_same_held_window_is_announced_once_a_day_not_every_scan(ready, state, tmp_path):
+    from planet_express.core.store import INDEFINITE_EXPIRY
+    store = _store(tmp_path)
+    _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
+    commands, notifier = Commands(store), FakeNotifier()
+    for _ in range(3):
+        fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert len(notifier.notifications) == 1
+    fw._blocked_prune_alerted["at"] -= fw.BLOCKED_PRUNE_REALERT_SECONDS + 1
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert len(notifier.notifications) == 2
 
 
 def test_an_ordinary_grace_window_blocks_quietly(ready, state, tmp_path):
