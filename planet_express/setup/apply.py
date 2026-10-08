@@ -175,8 +175,8 @@ def _run(plan, public, host, root, handlers, evidence_ids, evidence_dir, trusted
 
     for step in plan.steps:
         record = journal.steps().get(step.id)
-        if record is not None and record.status == "ok":
-            continue                                           # finished in an earlier run
+        if record is not None and record.status == "ok" and not record.undone:
+            continue                                           # finished in an earlier run (an undone step runs again)
         handler = handlers[step.kind]
         ctx = Context(host, journal, step, plan.secrets, evidence_dir, evidence_ids)
 

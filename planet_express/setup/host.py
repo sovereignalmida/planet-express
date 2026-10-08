@@ -18,6 +18,7 @@ This module never imports `config`: setup runs before any config exists.
 """
 from __future__ import annotations
 
+import errno
 import os
 import stat as stat_module
 import subprocess
@@ -330,6 +331,42 @@ class RealHost:
             except OSError as exc:
                 raise HostError(f"cannot remove {path}: {exc.strerror}") from exc
             os.fsync(fd)
+
+    def remove_tree(self, path: str, identity: dict) -> None:
+        """Delete a directory tree that this tool created: `identity` (device and inode) must still be the
+        directory's, nothing is followed through a symlink, and the walk never leaves that filesystem. Missing
+        is fine (already gone)."""
+        parent, name = _split(path)
+        with self._parent_fd(parent, mutating=True) as fd:
+            try:
+                st = os.lstat(name, dir_fd=fd)
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise HostError(f"cannot inspect {path}: {exc.strerror}") from exc
+            if not stat_module.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != (identity.get("dev"), identity.get("ino")):
+                raise HostError(f"{path} is not the directory this tool created; leaving it alone")
+            try:
+                self._empty(fd, name, st.st_dev)
+                os.rmdir(name, dir_fd=fd)
+                os.fsync(fd)
+            except OSError as exc:
+                raise HostError(f"cannot remove {path}: {exc.strerror}") from exc
+
+    def _empty(self, parent_fd: int, name: str, device: int) -> None:
+        handle = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+        try:
+            for entry in os.listdir(handle):
+                st = os.lstat(entry, dir_fd=handle)
+                if stat_module.S_ISDIR(st.st_mode):
+                    if st.st_dev != device:
+                        raise OSError(errno.EXDEV, "crosses a filesystem boundary")
+                    self._empty(handle, entry, device)
+                    os.rmdir(entry, dir_fd=handle)
+                else:
+                    os.unlink(entry, dir_fd=handle)
+        finally:
+            os.close(handle)
 
     def chmod_dir(self, path: str, mode: int) -> Stat:
         """Set the permission bits of an existing directory, opened without following a symlink."""

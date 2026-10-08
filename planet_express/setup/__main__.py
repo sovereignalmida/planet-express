@@ -1,10 +1,12 @@
 """python -m planet_express.setup discover [--stacks-root PATH]
 python -m planet_express.setup plan   --answers FILE [--discovery FILE]
 python -m planet_express.setup apply  --answers FILE --plan-id ID [--dry-run] [--journal-dir DIR]
+python -m planet_express.setup undo   --plan-id ID [--journal-dir DIR | --answers FILE]
 
 `discover` prints the discovery report as JSON. `plan` prints the reviewable plan for those answers, with
 secrets masked. `apply` runs the plan whose id you reviewed; `--dry-run` only runs each step's read-only
-check and changes nothing. Run `plan` and `apply` as the same user: root sees files (sudoers) that others
+check and changes nothing. `undo` reverts what that apply did, from its journal, and stops at the first thing that
+has changed since. Run `plan` and `apply` as the same user: root sees files (sudoers) that others
 cannot, so their plan ids differ.
 """
 from __future__ import annotations
@@ -78,6 +80,46 @@ def _apply_command(args) -> int:
     return 0 if result.status in ("done", "dry_run") else 1
 
 
+def _undo_command(args) -> int:
+    from planet_express.setup.host import RealHost
+    from planet_express.setup.plan import Plan, Step
+    from planet_express.setup.undo import undo
+
+    if os.geteuid() != 0:
+        print("undo changes system files and has to run as root.", file=sys.stderr)
+        return 2
+    journal_dir = args.journal_dir
+    if not journal_dir:
+        if not args.answers:
+            print("say where the journal is: --journal-dir DIR, or --answers FILE to use the default for this host.",
+                  file=sys.stderr)
+            return 2
+        from planet_express.setup.answers import SetupAnswers
+        with open(args.answers, encoding="utf-8") as handle:
+            install_dir = SetupAnswers.model_validate(json.load(handle)).install_dir
+        journal_dir = default_journal_root(discover(), install_dir)
+    saved = Path(journal_dir) / args.plan_id / "plan.json"
+    try:
+        public = json.loads(saved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"cannot read the saved plan {saved}: {exc}", file=sys.stderr)
+        return 2
+    steps = tuple(Step(s["id"], s["kind"], s["title"], s["target"], s["risk"], s["reversible"], s["needs_root"],
+                       tuple(s["depends_on"]), s["params"], s["preview"]) for s in public["steps"])
+    saved_plan = Plan(public["story"], steps, tuple(public["warnings"]), tuple(public["will_not_touch"]),
+                      tuple(public["blocked"]))
+    if saved_plan.to_public()["plan_id"] != args.plan_id:
+        print("the saved plan does not match its id; it was changed. Not undoing from it.", file=sys.stderr)
+        return 2
+    uids = _trusted_uids(saved_plan)
+    result = undo(saved_plan, host=RealHost(uids), journal_root=journal_dir, trusted_uids=uids)
+    json.dump({"status": result.status, "plan_id": result.plan_id, "step": result.step, "reason": result.reason,
+               "undone": result.undone, "not_undone": result.not_undone, "remaining": result.remaining},
+              sys.stdout, indent=2, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0 if result.status == "done" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m planet_express.setup")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -93,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     applied.add_argument("--dry-run", action="store_true", help="run each step's read-only check; change nothing")
     applied.add_argument("--journal-dir", help="where to keep the journal; defaults per host")
     applied.add_argument("--repo-root", help="the checkout holding the templates and scripts; defaults to this one")
+    undoing = sub.add_parser("undo", help="revert what a past apply did, from its journal")
+    undoing.add_argument("--plan-id", required=True, help="the plan_id that was applied")
+    undoing.add_argument("--journal-dir", help="the journal root the apply used")
+    undoing.add_argument("--answers", help="the answers file, to find this host's default journal root")
     args = parser.parse_args(argv)
 
     if args.command == "discover":
@@ -101,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "apply":
         return _apply_command(args)
+    if args.command == "undo":
+        return _undo_command(args)
     # plan needs pydantic and PyYAML; discover deliberately does not, because on a new host it runs
     # before any virtualenv exists.
     from planet_express.setup.answers import SetupAnswers

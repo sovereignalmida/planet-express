@@ -214,6 +214,19 @@ class FakeHost:
         self._mutate()
         del self.nodes[key]
 
+    def remove_tree(self, path, identity):
+        parent, name = _split(path)
+        real = self._parent(parent, mutating=True).rstrip("/")
+        key = f"{real}/{name}"
+        node = self.nodes.get(key)
+        if node is None:
+            return
+        if node.kind != "dir" or (self.DEV, node.ino) != (identity.get("dev"), identity.get("ino")):
+            raise HostError(f"{path} is not the directory this tool created; leaving it alone")
+        self._mutate()
+        for other in [n for n in self.nodes if n == key or n.startswith(key + "/")]:
+            del self.nodes[other]
+
     def chmod_dir(self, path, mode):
         parent, name = _split(path)
         real = self._parent(parent, mutating=True).rstrip("/")
@@ -245,7 +258,7 @@ class FaultyHost:
     """Wraps a host and raises `Crash` when the Nth mutating operation is about to happen (`before`) or
     has just happened (`after`), so a test can stop the world between any two operations."""
 
-    MUTATING = ("mkdir", "stage_file", "commit_staged", "discard_staged", "copy_private", "unlink", "rmdir", "chmod_dir", "run")
+    MUTATING = ("mkdir", "stage_file", "commit_staged", "discard_staged", "copy_private", "unlink", "rmdir", "chmod_dir", "remove_tree", "run")
 
     def __init__(self, inner, *, crash_at: int | None = None, after: bool = False):
         self._inner, self._crash_at, self._after, self.ops = inner, crash_at, after, 0

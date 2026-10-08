@@ -230,3 +230,24 @@ def test_chmod_dir_changes_a_directory_and_refuses_a_file_or_a_symlink(env):
         env.host.chmod_dir(path, 0o700)
     with pytest.raises(HostError):
         env.host.chmod_dir(f"{env.root}/missing", 0o700)
+
+
+def test_remove_tree_deletes_only_the_directory_it_was_told_about(env):
+    env.dir("venv")
+    env.dir("venv/lib")
+    env.file("venv/lib/x")
+    env.file("venv/y")
+    identity = env.host.lstat(f"{env.root}/venv").identity
+    with pytest.raises(HostError):
+        env.host.remove_tree(f"{env.root}/venv", {"dev": identity["dev"], "ino": identity["ino"] + 1})   # not the one we made
+    assert env.host.lstat(f"{env.root}/venv/lib/x") is not None
+    env.host.remove_tree(f"{env.root}/venv", identity)
+    assert env.host.lstat(f"{env.root}/venv") is None
+    env.host.remove_tree(f"{env.root}/venv", identity)                  # already gone: fine
+
+
+def test_remove_tree_refuses_a_file(env):
+    path = env.file("plain")
+    with pytest.raises(HostError):
+        env.host.remove_tree(path, env.host.lstat(path).identity)
+    assert env.host.lstat(path) is not None

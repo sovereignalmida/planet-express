@@ -51,6 +51,14 @@ class StepFailure(Exception):
         self.reason, self.effect = reason, effect
 
 
+class Irreversible(Exception):
+    """Undo has nothing to revert for this step, or cannot. Named in the undo report; it does not stop the undo."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass
 class Context:
     host: object
@@ -155,6 +163,7 @@ class DirEnsure:
             ctx.log(f"tightened {p['path']} from {before.perms:04o} to {after.perms:04o}")
             return
         for component in missing:
+            ctx.evidence(creating_directory=component)       # before it exists: a crash can leave it, never unrecorded
             try:
                 made = ctx.host.mkdir(component, int(p["mode"], 8), uid, gid)
             except HostError as exc:
@@ -169,6 +178,51 @@ class DirEnsure:
         return "not_applied" if ctx.step.params.get("tighten") and self._excess(ctx) else "applied"
 
     reconcile = verify
+
+    def inverse(self, ctx) -> str:
+        """Remove the directories this step made (newest first) if they are empty and still the same inode; put a
+        tightened directory back to its old mode if nobody has changed it since."""
+        notes = []
+        entries = ctx.prior_evidence()
+        recorded = {e["created_directory"] for e in entries if "created_directory" in e}
+        for entry in reversed(entries):
+            if "creating_directory" in entry and entry["creating_directory"] not in recorded:
+                # Journaled intent without the identity that follows it: the process died in between. The
+                # directory exists only if the mkdir landed, and then it is empty and exactly as planned.
+                path, planned = entry["creating_directory"], ctx.step.params
+                found = ctx.host.lstat(path)
+                ids = _owner(ctx)
+                if (found is not None and found.kind == "dir" and not isinstance(ids, Refuse)
+                        and (found.uid, found.gid) == ids and found.perms == int(planned["mode"], 8)
+                        and not ctx.host.listdir(path)):
+                    ctx.host.rmdir(path)
+                    notes.append(f"removed {path}")
+            elif "tightened_directory" in entry:
+                path = entry["tightened_directory"]
+                found = ctx.host.lstat(path)
+                if found is None or found.kind != "dir" or (found.dev, found.ino) != (entry["dev"], entry["ino"]):
+                    raise StepFailure(f"{path} is not the directory setup tightened; it is left as it is")
+                if found.perms == entry["previous_mode"]:
+                    notes.append(f"{path} is already back to {found.perms:04o}")
+                    continue
+                tightened = entry["previous_mode"] & int(ctx.step.params["mode"], 8)
+                if found.perms != tightened:
+                    raise StepFailure(f"{path} was changed to {found.perms:04o} after setup tightened it; left as it is")
+                ctx.host.chmod_dir(path, entry["previous_mode"])
+                notes.append(f"restored {path} to {entry['previous_mode']:04o}")
+            elif "created_directory" in entry:
+                path = entry["created_directory"]
+                found = ctx.host.lstat(path)
+                if found is None:
+                    notes.append(f"{path} is already gone")
+                    continue
+                if found.kind != "dir" or (found.dev, found.ino) != (entry["dev"], entry["ino"]):
+                    raise StepFailure(f"{path} is not the directory setup created; it is left as it is")
+                if ctx.host.listdir(path):
+                    raise StepFailure(f"{path} is not empty, so it is left in place")
+                ctx.host.rmdir(path)
+                notes.append(f"removed {path}")
+        return "; ".join(notes) or "no directory had been created"
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -261,7 +315,9 @@ class _AtomicFile:
         if reason:
             raise StepFailure(reason)
         record = {"path": path, "created_file": current is None, "previous_sha256": previous,
-                  "written_sha256": wanted, "backup": None}
+                  "written_sha256": wanted, "backup": None,
+                  "previous_mode": current.perms if current else None,
+                  "previous_owner": [current.uid, current.gid] if current else None}
         if current is not None:
             backup = p.get("backup_name") or f"{ctx.step.id}.bak"
             backup_path = f"{ctx.evidence_dir}/{backup}"
@@ -340,6 +396,78 @@ class _AtomicFile:
         return outcome
 
 
+    # -- undo --------------------------------------------------------------------------------------------------
+    def after_inverse(self, ctx) -> None:
+        """Anything the system needs to be told once files are back (a reload); raise StepFailure if it fails."""
+
+    def inverse(self, ctx) -> str:
+        """Put back every file this step wrote, newest first. A file is only touched if it is still the one this
+        step made (device and inode, then content); anything else means someone changed it since, and undo
+        refuses rather than overwrite their work."""
+        entries = ctx.prior_evidence()
+        for entry in entries:                                    # a previous undo may have died holding a temp file
+            if entry.get("phase") == "undo_intent" and is_temp_name(entry["temp"]):
+                left = ctx.host.lstat(f"{entry['parent']}/{entry['temp']}")
+                if left is not None and left.kind == "file":
+                    ctx.host.discard_staged(entry["parent"], entry["temp"])
+        intents = [e for e in entries if e.get("phase") == "intent"]
+        if not intents:
+            return "nothing had been written"
+        staged = {e["temp"]: e["staged"] for e in entries if e.get("phase") == "staged"}
+        by_path: dict[str, list[dict]] = {}
+        for intent in intents:
+            by_path.setdefault(intent["path"], []).append(intent)
+        notes = [self._undo_path(ctx, path, candidates, staged) for path, candidates in reversed(by_path.items())]
+        self.after_inverse(ctx)
+        return "; ".join(notes)
+
+    def _undo_path(self, ctx, path: str, candidates: list[dict], staged: dict) -> str:
+        current = ctx.host.lstat(path)
+        if current is None:
+            if any(c["created_file"] for c in candidates):
+                return f"{path} is already gone"
+            raise StepFailure(f"{path} was replaced by setup and is missing now; the original is in {candidates[0]['backup']}")
+        if current.kind != "file":
+            raise StepFailure(f"{path} is a {current.kind} now, not the file setup wrote; leaving it alone")
+        try:
+            now = sha256(ctx.host.read_bytes(path))
+        except HostError as exc:
+            raise StepFailure(str(exc)) from exc
+        ours = next((c for c in candidates if staged.get(c["temp"]) == current.identity), None)
+        if ours is None:
+            if any(c["previous_sha256"] == now for c in candidates if c["previous_sha256"]):
+                return f"{path} is already back to what it was"
+            raise StepFailure(f"{path} is not the file setup wrote; it was changed or replaced since, so it is left as it is")
+        if now != ours["written_sha256"]:
+            raise StepFailure(f"{path} was edited after setup wrote it; it is left as it is")
+        parent = _parent(path)
+        if ours["created_file"]:
+            ctx.host.unlink(path)
+            return f"removed {path}"
+        backup = ours.get("backup")
+        if not backup or ours.get("previous_mode") is None or not ours.get("previous_owner"):
+            raise StepFailure(f"the journal has no complete record of what {path} was; restore it by hand from {backup}")
+        try:
+            original = ctx.host.read_bytes(backup)
+        except HostError as exc:
+            raise StepFailure(f"the backup of {path} cannot be read: {exc}") from exc
+        if sha256(original) != ours["previous_sha256"]:
+            raise StepFailure(f"the backup {backup} does not hold what {path} was; it is not restored over")
+        temp = new_temp_name()
+        ctx.evidence(phase="undo_intent", parent=parent, temp=temp)
+        uid, gid = ours["previous_owner"]
+        try:
+            ctx.host.stage_file(parent, original, ours["previous_mode"], uid, gid, name=temp)
+            ctx.host.commit_staged(parent, temp, path.rsplit("/", 1)[1])
+        except HostError as exc:
+            try:
+                ctx.host.discard_staged(parent, temp)
+            except HostError:
+                pass
+            raise StepFailure(str(exc)) from exc
+        return f"restored {path}"
+
+
 class FileWrite(_AtomicFile):
     def norm(self, ctx) -> dict:
         return ctx.step.params
@@ -377,6 +505,10 @@ class SudoersInstall(_AtomicFile):
         if outcome == "applied" and ctx.host.run(["visudo", "-c"], timeout=30).rc != 0:
             return "unknown"          # the file is ours, but the system's sudoers no longer parses
         return outcome
+
+    def after_inverse(self, ctx) -> None:
+        if ctx.host.run(["visudo", "-c"], timeout=30).rc != 0:
+            raise StepFailure("the sudoers grant was put back, but the system's sudoers does not parse; check it with visudo")
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -629,6 +761,10 @@ class AccessProvision:
 
     reconcile = verify
 
+    def inverse(self, ctx) -> str:
+        raise Irreversible("the dashboard account, the group memberships and the read grants are left in place; "
+                           "on their own they give nobody access to anything private")
+
 
 # ----------------------------------------------------------------------------------------------------------
 class VerifySmoke:
@@ -661,6 +797,9 @@ class VerifySmoke:
         return "not_applied"          # a read-only check: success means nothing changed
 
     reconcile = verify
+
+    def inverse(self, ctx) -> str:
+        raise Irreversible("it only reads")
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -706,6 +845,9 @@ class StateSnapshot:
 
     # After a crash with no record of a snapshot, taking another is harmless: names are timestamped.
     reconcile = verify
+
+    def inverse(self, ctx) -> str:
+        raise Irreversible("the snapshot is the safety net, so it is kept")
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -808,6 +950,20 @@ class PythonEnv:
 
     reconcile = verify
 
+    def inverse(self, ctx) -> str:
+        made = [e for e in ctx.prior_evidence() if "created_venv" in e]
+        if not made:
+            raise Irreversible("setup did not create this environment, so it leaves it (and what was installed into it) alone")
+        entry = made[-1]
+        found = ctx.host.lstat(entry["created_venv"])
+        if found is None:
+            return f"{entry['created_venv']} is already gone"
+        try:
+            ctx.host.remove_tree(entry["created_venv"], {"dev": entry["dev"], "ino": entry["ino"]})
+        except HostError as exc:
+            raise StepFailure(str(exc)) from exc
+        return f"removed the virtualenv {entry['created_venv']}"
+
 
 # ----------------------------------------------------------------------------------------------------------
 class ServiceInstall(_AtomicFile):
@@ -905,6 +1061,10 @@ class ServiceInstall(_AtomicFile):
             if result.rc != 0:
                 raise StepFailure("the unit was written but systemd would not reload: "
                                   + " | ".join((result.err or result.out).strip().splitlines()[-2:])[:300], "unknown")
+
+    def after_inverse(self, ctx) -> None:
+        if ctx.step.params["flavour"] == "systemd" and ctx.host.run(["systemctl", "daemon-reload"], timeout=60).rc != 0:
+            raise StepFailure("the unit file was removed, but systemd would not reload; run `systemctl daemon-reload`")
 
     def verify(self, ctx) -> Effect:
         outcome = super().verify(ctx)
@@ -1017,6 +1177,10 @@ class BootHookInstall:
             if isinstance(outcome, Proceed):
                 hook.act(ctx)
 
+    def inverse(self, ctx) -> str:
+        # Every hook file is a path in this step's evidence, so one pass puts them all back (or refuses).
+        return self._files(ctx)[0].inverse(ctx)
+
     def verify(self, ctx) -> Effect:
         results = {f.verify(ctx) for f in self._files(ctx)}
         if results == {"applied"}:
@@ -1064,11 +1228,13 @@ class ServiceEnable:
     def act(self, ctx):
         p = ctx.step.params
         if not self._enabled(ctx, p):
+            ctx.evidence(enabling=p["name"])
             done = ctx.host.run(["systemctl", "enable", p["name"]], timeout=60)
             if done.rc != 0:
                 raise StepFailure(f"enabling {p['name']} failed: "
                                   + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
         if p["start"] and not self._running(ctx, p):
+            ctx.evidence(starting=p["name"])
             argv = ["systemctl", "start", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "start"]
             done = ctx.host.run(argv, timeout=120)
             if done.rc != 0:
@@ -1080,6 +1246,27 @@ class ServiceEnable:
         return "applied" if self._enabled(ctx, p) and (not p["start"] or self._running(ctx, p)) else "not_applied"
 
     reconcile = verify
+
+    def inverse(self, ctx) -> str:
+        """Stop what this step started and disable what it enabled; a service that was already enabled or
+        running before setup is left exactly so."""
+        p = ctx.step.params
+        entries = ctx.prior_evidence()
+        notes = []
+        if any("starting" in e for e in entries):
+            argv = ["systemctl", "stop", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "stop"]
+            done = ctx.host.run(argv, timeout=120)
+            if done.rc != 0 and self._running(ctx, p):
+                raise StepFailure(f"stopping {p['name']} failed: " + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300])
+            notes.append(f"stopped {p['name']}")
+        if p["flavour"] == "systemd" and any("enabling" in e for e in entries):
+            done = ctx.host.run(["systemctl", "disable", p["name"]], timeout=60)
+            if done.rc != 0 and self._enabled(ctx, p):
+                raise StepFailure(f"disabling {p['name']} failed: " + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300])
+            notes.append(f"disabled {p['name']}")
+        if not notes:
+            raise Irreversible(f"{p['name']} was already set up before setup ran, so it is left as it was")
+        return "; ".join(notes)
 
 
 HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke(),

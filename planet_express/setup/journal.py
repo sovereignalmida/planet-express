@@ -66,6 +66,8 @@ class StepRecord:
     reason: str | None = None
     evidence: list[dict] = field(default_factory=list)
     satisfied: bool = False
+    undone: bool = False             # undo has dealt with it (reverted, or named as not reversible)
+    undo_note: str | None = None
 
 
 _PLAN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -154,12 +156,14 @@ class Journal:
             record = records.setdefault(step, StepRecord())
             kind = event["type"]
             if kind == "step_started":
-                record.status = "started"
+                record.status, record.undone = "started", False
             elif kind == "evidence":
                 record.evidence.append(event.get("data", {}))
             elif kind == "step_ok":
                 record.status, record.effect = "ok", event.get("effect")
                 record.satisfied = bool(event.get("satisfied"))
+            elif kind in ("step_undone", "step_not_undone"):
+                record.undone, record.undo_note = True, event.get("detail") or event.get("reason")
             elif kind == "step_failed":
                 record.status, record.effect, record.reason = "failed", event.get("effect"), event.get("reason")
         return records
