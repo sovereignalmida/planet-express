@@ -61,7 +61,8 @@
     }).then(function (res) {
       if (!res.ok) throw new Error(res.data.error || "host slow, retry");
       window.alert(res.data.message || "Done.");
-      if (typeof refreshDashboard === "function") refreshDashboard();
+      // The windows panel sits outside the live region the refresh swaps, so reload the page.
+      window.location.reload();
     }).catch(function (error) {
       btn.disabled = false;
       window.alert(error.message);

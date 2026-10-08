@@ -1184,6 +1184,21 @@ def test_canary_settle_closes_a_held_window_once_and_records_who(tmp_path):
     assert json.loads(event[0]) == {"operator": "alice", "step_n": 1}
 
 
+def test_canary_settle_refuses_a_finite_window_still_in_its_grace_period(tmp_path):
+    from planet_express.core.store import Store
+    store, execution_id = _held_window(tmp_path)
+    store.close_rollback_candidate(execution_id, 1)
+    store.open_rollback_candidate(execution_id, 2, stack="media", service="sonarr",
+                                  image_reference="nginx:1.27", old_image_id="b" * 64,
+                                  expires_at=time.time() + 900)
+    handlers = build_core_handlers(Mock(), store)
+    [row] = handlers["canary.candidates"]({})
+    assert row["held"] is False
+    out = handlers["canary.settle"]({"execution_id": execution_id, "step_n": 2, "operator": "alice"})
+    assert out["outcome"] == "refused"
+    assert len(handlers["canary.candidates"]({})) == 1   # still protecting its image
+
+
 @pytest.mark.parametrize("bad", [
     {"execution_id": "nope", "step_n": 1, "operator": "alice"},
     {"execution_id": "a" * 12, "step_n": "1", "operator": "alice"},

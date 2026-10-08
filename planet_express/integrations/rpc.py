@@ -670,6 +670,7 @@ def build_core_handlers(
         return [
             {"execution_id": row["execution_id"], "step_n": row["step_n"],
              "stack": row["stack"], "service": row["service"],
+             "held": row["expires_at"] >= INDEFINITE_EXPIRY,
              "old_image_id": row["old_image_id"], "image_reference": row["image_reference"],
              "recorded_at": _iso(row["created_at"]),
              "expires_at": "when a human closes it" if row["expires_at"] >= INDEFINITE_EXPIRY
@@ -693,7 +694,7 @@ def build_core_handlers(
         if store.settle_rollback_candidate(execution_id, step_n, params["operator"]):
             return {"outcome": "settled",
                     "message": "Window closed. Its old image can now be pruned."}
-        return {"outcome": "refused", "message": "That window is not open."}
+        return {"outcome": "refused", "message": "That window is not held open, so it is not settled by hand."}
 
     # ([[id, name, status], ...], answer -- or None for a final failure) from the last read, in
     # one slot so a reader never pairs one read's containers with another's answer.

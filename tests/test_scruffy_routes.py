@@ -1463,7 +1463,7 @@ def test_index_shows_open_canary_windows_from_core(tmp_path, monkeypatch):
     assert login(client, now).status_code == 302
     # FakeRpc treats a list as a queue of responses, so the row list is queued as one response
     rpc.results["canary.candidates"] = [[
-        {"execution_id": "a" * 12, "step_n": 1,
+        {"execution_id": "a" * 12, "step_n": 1, "held": True,
          "stack": "media", "service": "sonarr", "old_image_id": "a" * 64,
          "image_reference": "nginx:1.27", "recorded_at": "2026-09-23T12:00:00+01:00",
          "expires_at": "when a human closes it"},

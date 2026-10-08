@@ -534,9 +534,11 @@
               <span class="cell-mono cell-service">{{ r.service }}</span>
               <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
               <span class="cell-mono cell-when">{{ r.expires_at }}</span>
+              {% if r.held %}
               <button type="button" class="pe-btn" data-settle-window
                       data-execution="{{ r.execution_id }}" data-step="{{ r.step_n }}"
                       data-label="{{ r.stack }}/{{ r.service }}">SETTLE</button>
+              {% else %}<span></span>{% endif %}
             </div>
             {% endfor %}
             <p class="cell-dim" style="margin-top: 12px;">While a window is open, safe-prune is
