@@ -145,6 +145,11 @@ class ServiceInstall(_Expecting):
     # sysvinit only: /etc/default/<name>, which points the script at persistent paths.
     defaults_path: AbsPath | None = None
     defaults_content: str | None = None
+    # What /etc/default/<name> looked like when the plan was made (same compare-and-swap as the script itself).
+    # On MOS it is a copy of the pool's file made at boot, so it is replaced; elsewhere an existing one is kept.
+    defaults_if_exists: Literal["keep", "replace"] = "keep"
+    defaults_expect_absent: bool = False
+    defaults_expected_sha256: Sha256 | None = None
 
 
 class BootHookInstall(_Params):

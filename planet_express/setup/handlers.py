@@ -241,7 +241,7 @@ class _AtomicFile:
         record = {"path": path, "created_file": current is None, "previous_sha256": previous,
                   "written_sha256": wanted, "backup": None}
         if current is not None:
-            backup = f"{ctx.step.id}.bak"
+            backup = p.get("backup_name") or f"{ctx.step.id}.bak"
             backup_path = f"{ctx.evidence_dir}/{backup}"
             if ctx.host.lstat(ctx.evidence_dir) is None:
                 ctx.host.mkdir(ctx.evidence_dir, 0o700, *ctx.evidence_ids)
@@ -724,7 +724,242 @@ class PythonEnv:
     reconcile = verify
 
 
+# ----------------------------------------------------------------------------------------------------------
+class ServiceInstall(_AtomicFile):
+    """A unit file (systemd) or init script (sysvinit), written like any other file. systemd then re-reads
+    its units. On sysvinit the script's /etc/default file is written first so the script never exists without
+    the paths it needs; an existing, different /etc/default file is never overwritten here."""
+
+    def norm(self, ctx) -> dict:
+        p = dict(ctx.step.params)
+        p.update(mode="0755" if p["flavour"] == "sysvinit" else "0644", owner="root", group="root", has_secrets=False)
+        return p
+
+    def desired(self, ctx) -> bytes:
+        return ctx.step.params["content"].encode("utf-8")
+
+    def _defaults(self, ctx) -> dict | None:
+        p = ctx.step.params
+        if not p.get("defaults_path"):
+            return None
+        return {"path": p["defaults_path"], "mode": "0644", "owner": "root", "group": "root", "has_secrets": False,
+                "if_exists": p.get("defaults_if_exists", "keep"), "expect_absent": p.get("defaults_expect_absent", False),
+                "expected_sha256": p.get("defaults_expected_sha256"), "backup_name": f"{ctx.step.id}.defaults.bak"}
+
+    def _defaults_todo(self, ctx):
+        """(needs_write, Refuse or None) for the /etc/default file."""
+        d = self._defaults(ctx)
+        wanted = sha256(ctx.step.params["defaults_content"].encode("utf-8"))
+        current = ctx.host.lstat(d["path"])
+        if current is None:
+            reason = self._cas_violation(d, None, wanted)
+            return (False, Refuse(reason)) if reason else (True, None)
+        if current.kind != "file":
+            return False, Refuse(f"{d['path']} is a {current.kind}, not a regular file")
+        try:
+            have = sha256(ctx.host.read_bytes(d["path"]))
+        except HostError as exc:
+            return False, Refuse(str(exc))
+        if have == wanted or d["if_exists"] == "keep":
+            return False, None
+        reason = self._cas_violation(d, have, wanted)
+        return (False, Refuse(reason)) if reason else (True, None)
+
+    def check(self, ctx):
+        outcome = super().check(ctx)
+        if self._defaults(ctx) is None or isinstance(outcome, Refuse):
+            return outcome
+        needed, refusal = self._defaults_todo(ctx)
+        if refusal:
+            return refusal
+        return Proceed() if needed and isinstance(outcome, Satisfied) else outcome
+
+    def act(self, ctx):
+        p = ctx.step.params
+        d = self._defaults(ctx)
+        if d is not None:
+            data = p["defaults_content"].encode("utf-8")
+            needed, refusal = self._defaults_todo(ctx)
+            if refusal:
+                raise StepFailure(refusal.reason)
+            if needed:
+                self.write(ctx, d, data)
+        present = sha256(ctx.host.read_bytes(p["path"])) if ctx.host.lstat(p["path"]) else None
+        if present != sha256(self.desired(ctx)):          # on a resume the script may already be in place
+            super().act(ctx)
+        if p["flavour"] == "systemd":
+            result = ctx.host.run(["systemctl", "daemon-reload"], timeout=60)
+            if result.rc != 0:
+                raise StepFailure("the unit was written but systemd would not reload: "
+                                  + " | ".join((result.err or result.out).strip().splitlines()[-2:])[:300], "unknown")
+
+    def verify(self, ctx) -> Effect:
+        outcome = super().verify(ctx)
+        d = self._defaults(ctx)
+        if outcome == "applied" and d is not None:
+            current = ctx.host.lstat(d["path"])
+            if current is None:
+                return "not_applied"
+            if d["if_exists"] == "replace" and sha256(ctx.host.read_bytes(d["path"])) != \
+                    sha256(ctx.step.params["defaults_content"].encode("utf-8")):
+                return "not_applied"
+        return outcome
+
+
+# ----------------------------------------------------------------------------------------------------------
+def _block(marker: str, body: str) -> str:
+    return f"# BEGIN {marker} (managed by Planet Express setup; edits inside this block are overwritten)\n" \
+           f"{body.rstrip(chr(10))}\n# END {marker}\n"
+
+
+def merge_block(current: str | None, marker: str, body: str) -> str:
+    """`current` with the marked block present exactly once and everything else untouched. A file that does not
+    exist yet becomes a minimal script. Half a block (a BEGIN without its END) is refused, never guessed at."""
+    block = _block(marker, body)
+    if current is None:
+        return "#!/bin/sh\n" + block
+    begin = re.compile(rf"^# BEGIN {re.escape(marker)}\b.*\n", re.M)
+    end = re.compile(rf"^# END {re.escape(marker)}\s*\n?", re.M)
+    starts, ends = list(begin.finditer(current)), list(end.finditer(current))
+    if not starts and not ends:
+        if current and not current.endswith("\n"):
+            current += "\n"
+        return current + ("\n" if current else "") + block
+    if len(starts) != 1 or len(ends) != 1 or ends[0].start() < starts[0].start():
+        raise StepFailure(f"the {marker} markers in this file are not one BEGIN followed by one END; fix them by hand")
+    return current[: starts[0].start()] + block + current[ends[0].end():]
+
+
+class _HookFile(_AtomicFile):
+    def __init__(self, outer, name):
+        self.outer, self.name = outer, name
+
+    def norm(self, ctx) -> dict:
+        step = ctx.step.params
+        path = f"{step['dest_dir']}/{self.name}"
+        current = ctx.host.lstat(path)
+        return {"path": path, "mode": f"{current.perms:04o}" if current and current.kind == "file" else "0600",
+                "owner": "root", "group": "root", "has_secrets": False, "if_exists": "replace",
+                "expect_absent": self.name in step["expect_absent"],
+                "expected_sha256": step["expected_sha256"].get(self.name),
+                "backup_name": f"{ctx.step.id}.{self.name}.bak"}
+
+    def _current(self, ctx) -> str | None:
+        path = f"{ctx.step.params['dest_dir']}/{self.name}"
+        if ctx.host.lstat(path) is None:
+            return None
+        try:
+            return ctx.host.read_bytes(path).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise StepFailure(f"{path} is not text, so nothing can be merged into it") from exc
+
+    def desired(self, ctx) -> bytes:
+        step = ctx.step.params
+        path = f"{step['dest_dir']}/{self.name}"
+        current = self._current(ctx)
+        if current is not None and ctx.host.lstat(path).kind == "file":
+            if sha256(current.encode("utf-8")) in step["legacy_sha256"].get(self.name, []):
+                current = None                 # one of our own whole-file copies: replaced, not merged into
+        return merge_block(current, step["marker"], step["hooks"][self.name]).encode("utf-8")
+
+    def check(self, ctx):
+        try:
+            return super().check(ctx)
+        except StepFailure as exc:
+            return Refuse(exc.reason)
+
+
+class BootHookInstall:
+    """Merge a marked block into each boot hook file. The operator's own commands survive; a file that is
+    byte-for-byte one of this project's old whole-file copies is replaced. Every file is compare-and-swapped
+    against the hash the plan saw."""
+
+    def _files(self, ctx):
+        return [_HookFile(self, n) for n in ctx.step.params["hooks"]]
+
+    def check(self, ctx):
+        outcomes = [f.check(ctx) for f in self._files(ctx)]
+        for outcome in outcomes:
+            if isinstance(outcome, Refuse):
+                return outcome
+        if all(isinstance(o, Satisfied) for o in outcomes):
+            return Satisfied("the boot hooks already carry the Planet Express block")
+        return Proceed()
+
+    def act(self, ctx):
+        for hook in self._files(ctx):
+            outcome = hook.check(ctx)
+            if isinstance(outcome, Refuse):
+                raise StepFailure(outcome.reason)
+            if isinstance(outcome, Proceed):
+                hook.act(ctx)
+
+    def verify(self, ctx) -> Effect:
+        results = {f.verify(ctx) for f in self._files(ctx)}
+        if results == {"applied"}:
+            return "applied"
+        return "not_applied" if results == {"not_applied"} else "unknown"
+
+    def reconcile(self, ctx) -> Effect:
+        results = {f.reconcile(ctx) for f in self._files(ctx)}
+        if results == {"applied"}:
+            return "applied"
+        return "not_applied" if results == {"not_applied"} else "unknown"
+
+
+# ----------------------------------------------------------------------------------------------------------
+class ServiceEnable:
+    """Make the service start at boot, and start it now if the plan says so. On sysvinit (MOS) boot start is
+    the boot hook's job, so enabling is only starting. State is read from the init system, not from exit codes
+    of the commands that changed it."""
+
+    @staticmethod
+    def _unit(p) -> str:
+        return f"/etc/systemd/system/{p['name']}.service" if p["flavour"] == "systemd" else f"/etc/init.d/{p['name']}"
+
+    def _enabled(self, ctx, p) -> bool:
+        if p["flavour"] != "systemd":
+            return True
+        done = ctx.host.run(["systemctl", "is-enabled", p["name"]], timeout=30)
+        return done.rc == 0 and done.out.strip() in ("enabled", "enabled-runtime")
+
+    def _running(self, ctx, p) -> bool:
+        if p["flavour"] == "systemd":
+            return ctx.host.run(["systemctl", "is-active", p["name"]], timeout=30).out.strip() == "active"
+        return ctx.host.run([f"/etc/init.d/{p['name']}", "status"], timeout=30).rc == 0
+
+    def check(self, ctx):
+        p = ctx.step.params
+        if ctx.host.lstat(self._unit(p)) is None:
+            return Refuse(f"{self._unit(p)} does not exist; the install step has to run first")
+        if self._enabled(ctx, p) and (not p["start"] or self._running(ctx, p)):
+            return Satisfied(f"{p['name']} is already " + ("enabled and running" if p["start"] else "enabled"))
+        return Proceed()
+
+    def act(self, ctx):
+        p = ctx.step.params
+        if not self._enabled(ctx, p):
+            done = ctx.host.run(["systemctl", "enable", p["name"]], timeout=60)
+            if done.rc != 0:
+                raise StepFailure(f"enabling {p['name']} failed: "
+                                  + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
+        if p["start"] and not self._running(ctx, p):
+            argv = ["systemctl", "start", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "start"]
+            done = ctx.host.run(argv, timeout=120)
+            if done.rc != 0:
+                raise StepFailure(f"starting {p['name']} failed: "
+                                  + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
+
+    def verify(self, ctx) -> Effect:
+        p = ctx.step.params
+        return "applied" if self._enabled(ctx, p) and (not p["start"] or self._running(ctx, p)) else "not_applied"
+
+    reconcile = verify
+
+
 HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke(),
             "sudoers.install": SudoersInstall(), "dashboard.init": DashboardInit(),
             "access.provision": AccessProvision(),
-            "state.snapshot": StateSnapshot(), "python.env": PythonEnv()}
+            "state.snapshot": StateSnapshot(), "python.env": PythonEnv(),
+            "service.install": ServiceInstall(), "boot_hook.install": BootHookInstall(),
+            "service.enable": ServiceEnable()}
