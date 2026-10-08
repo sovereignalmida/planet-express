@@ -192,11 +192,34 @@ def test_unit_names_must_be_systemd_units():
     step = {"type": "unit.action", "params": {"action": "restart", "unit": "casa-stacks.service"},
             "binding": {"unit": "casa-stacks.service"}}
     Runbook.model_validate(document(step))
-    for bad in ("casa-stacks", "../x.service", "a;b.service"):
+    for bad in ("casa-stacks", "../x.service", "a;b.service", "casa-stacks.service\n"):
         broken = {"type": "unit.action", "params": {"action": "restart", "unit": bad},
                   "binding": {"unit": bad}}
         with pytest.raises(ValidationError):
             Runbook.model_validate(document(broken))
+
+
+def test_unit_names_on_mos_are_initd_script_names_not_systemd_units(monkeypatch):
+    import casa_bender
+    monkeypatch.setattr(casa_bender, "HOST_CONTROL_PROVIDER", "mos")
+
+    def doc(unit):
+        return document({"type": "unit.action", "params": {"action": "restart", "unit": unit},
+                         "binding": {"unit": unit}})
+
+    Runbook.model_validate(doc("cron"))
+    for bad in ("cron.service", "../x", "a;b", "a b", "", "x" * 65, "a.b", "cron\n"):
+        with pytest.raises(ValidationError):
+            Runbook.model_validate(doc(bad))
+
+
+def test_the_document_cannot_choose_which_unit_name_shape_applies(monkeypatch):
+    """The shape follows the host's provider: a bare script name is invalid on a systemd host."""
+    import casa_bender
+    monkeypatch.setattr(casa_bender, "HOST_CONTROL_PROVIDER", "systemd")
+    with pytest.raises(ValidationError):
+        Runbook.model_validate(document({"type": "unit.action", "params": {"action": "restart", "unit": "cron"},
+                                         "binding": {"unit": "cron"}}))
 
 
 def test_binding_must_name_the_same_target_as_params():

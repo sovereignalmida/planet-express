@@ -149,9 +149,20 @@ def test_mos_refuses_an_install_that_is_not_on_a_pool_because_root_is_ram():
     assert not p.applicable and any("not on one" in r for r in p.blocked)
 
 
-def test_unit_control_is_unavailable_on_mos_because_it_goes_through_sudo():
-    p = plan(mos_report(), mos_answers(tier="full"))
-    assert not p.applicable and any("not available on MOS" in r for r in p.blocked)
+def test_unit_control_on_mos_needs_no_sudoers_but_keeps_the_declared_allowlist():
+    """MOS runs PE as root with no sudo binary and the provider execs `service` directly, so the
+    full tier is allowed and nothing is granted via sudoers -- but the allowlist is still the
+    policy, so it must reach config.yaml."""
+    p = plan(mos_report(), mos_answers(tier="full", sudo_units=[{"unit": "cron", "actions": ["restart"]}]))
+    assert p.applicable, p.blocked
+    assert "sudoers.install" not in kinds(p)
+    config = next(s for s in by_kind(p, "file.write") if s.target.endswith("config.yaml"))
+    assert "cron" in config.params["content"]
+
+
+def test_mos_unit_names_must_be_initd_script_names():
+    p = plan(mos_report(), mos_answers(tier="full", sudo_units=[{"unit": "docker.service", "actions": ["restart"]}]))
+    assert not p.applicable and any("docker.service" in r for r in p.blocked)
 
 
 def test_canary_updates_and_stack_boot_come_only_with_the_stacks_tier():

@@ -275,6 +275,29 @@ def test_unit_action_outside_the_sudo_allowlist_never_runs(svc, monkeypatch):
     assert svc.argv == []
 
 
+@pytest.mark.parametrize("provider,expected", [
+    ("systemd", "sudo systemctl restart casa-stacks.service"),
+    ("mos", "sudo service casa-stacks restart"),
+])
+def test_unit_action_gate_is_asked_in_the_configured_providers_shape(svc, monkeypatch, provider, expected):
+    """On MOS the engine used to ask the gate the systemctl shape, which the MOS gate can never
+    accept -- every approved unit.action was refused before reaching the provider."""
+    monkeypatch.setattr(bender, "HOST_CONTROL_PROVIDER", provider)
+    asked = []
+
+    def refuse(command):
+        asked.append(command)
+        raise bender.SudoScopeError("not declared", command, "restart", "casa-stacks")
+
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", refuse)
+    unit = expected.split()[-1] if provider == "systemd" else "casa-stacks"
+    ex = execution(svc)
+    rb = runbook({"type": "unit.action", "params": {"action": "restart", "unit": unit},
+                  "binding": {"unit": unit}})
+    engine.RunbookEngine(svc).run(ex, rb, origin="planner")
+    assert asked == [expected]
+
+
 def test_prune_runs_the_fixed_list_as_argv(svc, monkeypatch):
     seen = []
     monkeypatch.setattr(bender, "run_argv_bounded",

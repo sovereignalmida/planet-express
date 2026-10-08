@@ -36,11 +36,30 @@ def _no_dotdot(value: str) -> str:
 Name = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$"), AfterValidator(_no_dotdot)]
 ContainerName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")]
 ContainerId = Annotated[str, Field(pattern=r"^[0-9a-f]{12,64}$")]
-UnitName = Annotated[
-    str,
-    Field(pattern=r"^[A-Za-z0-9@_.:-]{1,200}\.(service|timer|mount|socket|target|path)$"),
-    AfterValidator(_no_dotdot),
-]
+_SYSTEMD_UNIT_RE = re.compile(r"^[A-Za-z0-9@_.:-]{1,200}\.(service|timer|mount|socket|target|path)$")
+# MOS init.d script names -- the same charset casa_bender._SUDO_SERVICE_RE accepts, so a name that
+# validates here is one the gate can ever permit (and no '.', '@', ':' to smuggle in).
+_INITD_UNIT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _unit_name_for_provider(value: str) -> str:
+    """A unit name is a systemd unit (`casa-stacks.service`) or, on a MOS host, an init.d script
+    (`cron`). Which one is a property of the host (`HOST_CONTROL_PROVIDER`), the same switch
+    `casa_bender._check_sudo_allowlist()` uses -- never of the document, so a plan cannot pick the
+    laxer shape for itself. Imported lazily: this module is a pure schema and must not load config
+    at import time."""
+    import casa_bender
+
+    if casa_bender.HOST_CONTROL_PROVIDER == "mos":
+        pattern, what = _INITD_UNIT_RE, "an init.d script name (letters, digits, '-' and '_')"
+    else:
+        pattern, what = _SYSTEMD_UNIT_RE, "a systemd unit name with a type suffix"
+    if not pattern.fullmatch(value):
+        raise ValueError(f"must be {what}")
+    return value
+
+
+UnitName = Annotated[str, AfterValidator(_no_dotdot), AfterValidator(_unit_name_for_provider)]
 AbsolutePath = Annotated[str, Field(pattern=r"^/[^\x00]{1,4095}$"), AfterValidator(_no_dotdot)]
 LogMatch = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[\x20-\x7e]+$")]
 
