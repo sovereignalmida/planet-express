@@ -24,6 +24,7 @@ _PLACEHOLDER = re.compile(r"\{\{secret:([A-Za-z0-9_]+)\}\}")
 # Paths whose contents are system-wide, not part of the install: raise the risk and need root.
 _SYSTEM_PREFIXES = ("/etc/", "/boot/", "/usr/", "/var/", "/run/")
 _MOS_PE_HOME_LINE = "PE_HOME=/mnt/data/pe"
+_MOS_CHECKOUT_LINE = "CHECKOUT=planet-express"
 
 
 @dataclass(frozen=True)
@@ -282,7 +283,11 @@ def _build(b: _Builder) -> None:
                                  depends_on=dir_ids[:3 if mos else 2])
 
     sudoers_id = None
-    if not mos and a.tier == "full" and a.sudo_units:
+    if not mos and a.tier == "full" and a.sudo_units and b.present(p["config"]):
+        b.warnings.append("The kept config decides which units Planet Express may control, so no sudoers grant is "
+                          "written from your answers: it could disagree with that config. Generate one from the "
+                          "config's own sudo_allowlist (scripts/setup_wizard.py).")
+    if not mos and a.tier == "full" and a.sudo_units and not b.present(p["config"]):
         from scripts.setup_wizard import generate_sudoers_snippet
         snippet = generate_sudoers_snippet(a.run_as, b.cfg.sudo_allowlist, [], "systemd")
         sudoers_id = b.add(
@@ -290,7 +295,8 @@ def _build(b: _Builder) -> None:
             {"path": "/etc/sudoers.d/planetexpress", "content": snippet, "run_user": a.run_as,
              "if_exists": "keep"},
             {"type": "file", "path": "/etc/sudoers.d/planetexpress", "mode": "0440", "owner": "root:root",
-             "if_exists": "replace", "content": snippet}, depends_on=(config_id,))
+             "if_exists": "keep", "already_present": b.present("/etc/sudoers.d/planetexpress"), "content": snippet},
+            depends_on=(config_id,))
 
     access_id = b.add(
         "access.provision", "Give the dashboard read-only access", "planetexpress-web",
@@ -334,7 +340,7 @@ def _build(b: _Builder) -> None:
                 {"flavour": "sysvinit", "name": name, "path": f"/etc/init.d/{name}", "content": b.read(script),
                  "if_exists": "replace", "defaults_path": f"/etc/default/{name}", "defaults_content": defaults},
                 {"type": "file", "path": f"/etc/init.d/{name}", "mode": "0755", "owner": "root:root",
-                 "if_exists": "replace", "content": b.read(script)},
+                 "if_exists": "replace", "already_present": b.present(f"/etc/init.d/{name}"), "content": b.read(script)},
                 depends_on=(persisted,) + ((dash_id,) if dash_id else ())))
         hooks = {"post-start.sh": _mos_post_start(b, p), "shutdown.sh": b.read("scripts/mos-boot/shutdown.sh")}
         hook_id = b.add(
@@ -363,7 +369,8 @@ def _build(b: _Builder) -> None:
                 {"flavour": "systemd", "name": name, "path": f"/etc/systemd/system/{name}.service",
                  "content": content, "if_exists": "keep"},
                 {"type": "file", "path": f"/etc/systemd/system/{name}.service", "mode": "0644",
-                 "owner": "root:root", "if_exists": "replace", "content": content},
+                 "owner": "root:root", "if_exists": "keep",
+                 "already_present": b.present(f"/etc/systemd/system/{name}.service"), "content": content},
                 depends_on=(config_id,) + ((dash_id,) if dash_id else (access_id,)) + ((secrets_id,) if secrets_id else ())))
         enable = [(n, a.start_services and a.telegram is not None and n != "casa-stacks") for n, _ in units]
         flavour = "systemd"
@@ -392,10 +399,12 @@ def _mos_defaults(name: str, p: dict, a: SetupAnswers) -> str:
 
 def _mos_post_start(b: _Builder, p: dict) -> str:
     script = b.read("scripts/mos-boot/post-start.sh")
-    if _MOS_PE_HOME_LINE not in script:
-        b.blocked.append("scripts/mos-boot/post-start.sh no longer has the PE_HOME line this plan rewrites.")
+    if _MOS_PE_HOME_LINE not in script or _MOS_CHECKOUT_LINE not in script:
+        b.blocked.append("scripts/mos-boot/post-start.sh no longer has the PE_HOME/CHECKOUT lines this plan rewrites.")
         return script
-    return script.replace(_MOS_PE_HOME_LINE, f"PE_HOME={p['home']}", 1)
+    # The hook reinstalls from the checkout at every boot, so it has to name the real one, not assume a layout.
+    script = script.replace(_MOS_PE_HOME_LINE, f"PE_HOME={p['home']}", 1)
+    return script.replace(_MOS_CHECKOUT_LINE, f"CHECKOUT={Path(b.a.install_dir).name}", 1)
 
 
 def _will_not_touch(b: _Builder, p: dict) -> None:

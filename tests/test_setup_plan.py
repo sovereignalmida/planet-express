@@ -315,3 +315,40 @@ def test_mos_creates_the_pool_home_before_anything_inside_it():
     p = plan(mos_report(), mos_answers())
     dirs = [s.target for s in by_kind(p, "dir.ensure")]
     assert dirs[0] == "/mnt/data/pe" and dirs.index("/mnt/data/pe") < dirs.index("/mnt/data/pe/state")
+
+
+# -- Codex review of the plan step ------------------------------------------------------------------
+
+
+def test_the_mos_boot_hook_names_the_real_checkout_directory_not_an_assumed_one():
+    import re
+
+    def assignments(p):
+        hook = by_kind(p, "boot_hook.install")[0].params["hooks"]["post-start.sh"]
+        return dict(re.findall(r"^(PE_HOME|CHECKOUT)=(\S+)", hook, re.MULTILINE))
+
+    assert assignments(plan(mos_report(), mos_answers())) == {"PE_HOME": "/mnt/data/pe", "CHECKOUT": "planet-express"}
+    custom = plan(mos_report(), mos_answers(install_dir="/mnt/data/pe/custom"))
+    assert assignments(custom) == {"PE_HOME": "/mnt/data/pe", "CHECKOUT": "custom"}
+
+
+def test_a_preview_never_disagrees_with_its_steps_if_exists():
+    """The review screen would otherwise claim an overwrite that apply will not perform."""
+    plans = [plan(systemd_report(), answers()), plan(mos_report(), mos_answers()), live_plan(),
+             plan(systemd_report(), answers(tier="full", sudo_units=[{"unit": "plex.service"}]))]
+    checked = 0
+    for p in plans:
+        for step in p.steps:
+            if step.preview.get("type") == "file" and "if_exists" in step.params:
+                assert step.preview["if_exists"] == step.params["if_exists"], step.target
+                checked += 1
+    assert checked >= 10
+
+
+def test_a_kept_config_means_no_sudoers_is_derived_from_the_answers():
+    kept = discover(ubuntu(files={"/etc/planetexpress/config.yaml": ""}), repo_root="/opt/pe")
+    p = plan(kept, answers(tier="full", sudo_units=[{"unit": "plex.service"}]))
+    assert p.applicable and "sudoers.install" not in kinds(p)
+    assert any("kept config decides which units" in w for w in p.warnings)
+    fresh = plan(systemd_report(), answers(tier="full", sudo_units=[{"unit": "plex.service"}]))
+    assert "sudoers.install" in kinds(fresh)
