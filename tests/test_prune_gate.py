@@ -125,7 +125,9 @@ def test_settling_a_held_window_lets_the_prune_run(ready, state, tmp_path):
 def test_an_unreadable_window_still_says_the_prune_is_blocked(ready, state):
     notifier = FakeNotifier()
     fw.maybe_run_safe_prune({}, notifier, state, Unreadable())
-    assert any("Safe prune is blocked" in m for m in notifier.notifications)
+    [message] = notifier.notifications
+    assert "Safe prune is blocked" in message and "could not be read" in message
+    assert "SETTLE" not in message   # there is no window to point at
 
 
 def test_an_expired_window_no_longer_stops_the_prune(ready, state, tmp_path):

@@ -1075,7 +1075,11 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> str | 
     try:
         windows = commands._store.open_rollback_candidates(time.time())
     except Exception:  # noqa: BLE001 -- the block itself is the news; the detail is a bonus
-        windows = []
+        log.exception("Could not read the rollback windows to explain a blocked prune")
+        return (f"🧹 *Safe prune is blocked*\n"
+                f"Root disk is at {disk_alert['used_pct']}% and the rollback-window table could not "
+                f"be read, so no image is pruned. Check the Planet Express core database; the "
+                f"dashboard cannot list or settle windows while it is unreadable.")
     if windows and all(row["expires_at"] < INDEFINITE_EXPIRY for row in windows):
         return None
     lines = [
