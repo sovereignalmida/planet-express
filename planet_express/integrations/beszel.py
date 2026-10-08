@@ -57,6 +57,7 @@ from typing import Protocol, runtime_checkable
 
 from planet_express.core.hosts import (
     CURRENT,
+    NOT_PERMITTED,
     Host,
     HostDetails,
     HostMetrics,
@@ -514,7 +515,7 @@ class BeszelHubProvider:
             # Authenticated, and scoped to nothing. The listRule hides systems the account is
             # not listed on, so this is byte-identical to an empty fleet and nothing like a
             # collector that is down. Saying which is the only thing that separates them.
-            return FleetReading(liveness=unknown(SCOPED_TO_NOTHING))
+            return FleetReading(liveness=unknown(SCOPED_TO_NOTHING, NOT_PERMITTED))
         readings = []
         for row in items:
             host = _host_from(row) if isinstance(row, Mapping) else None
@@ -825,7 +826,7 @@ class FixtureHostProvider:
             log.info("The host fixtures could not be read: %s", e)
             return FleetReading(liveness=unknown("the captured collector data could not be read"))
         if not systems:
-            return FleetReading(liveness=unknown(SCOPED_TO_NOTHING))
+            return FleetReading(liveness=unknown(SCOPED_TO_NOTHING, NOT_PERMITTED))
         readings = []
         for row in systems:
             host = _host_from(row) if isinstance(row, Mapping) else None

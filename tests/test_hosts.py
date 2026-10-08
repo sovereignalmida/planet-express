@@ -352,3 +352,11 @@ def test_the_skew_boundary_is_exact():
 def test_a_caller_supplied_reason_still_wins_for_a_future_reading():
     lv = liveness(1_000_000.0 + 86_400, now=1_000_000.0, reason="collector down")
     assert lv.state == UNKNOWN and lv.reason == "collector down"
+
+
+def test_unusable_timestamps_carry_the_clock_cause_and_ordinary_unknowns_do_not():
+    assert liveness("not a time", now=1000.0).cause == "clock_unusable"
+    assert liveness(1000.0 + 10 * SKEW_TOLERANCE, now=1000.0).cause == "clock_unusable"
+    assert liveness(1000.0, now=1000.0).cause is None
+    assert unknown("collector unreachable").cause is None
+    assert unknown("x", "not_permitted").cause == "not_permitted"

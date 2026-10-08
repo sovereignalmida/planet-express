@@ -687,6 +687,7 @@ def test_authenticated_but_scoped_to_nothing_is_its_own_reason():
     assert reading.liveness.state == UNKNOWN
     reason = reading.liveness.reason
     assert reason == SCOPED_TO_NOTHING
+    assert reading.liveness.cause == "not_permitted"
     # The distinction this exists for. It happened during setup and it is invisible unless the
     # reason says it: the account authenticated, so this is neither an empty fleet nor a dead
     # collector.

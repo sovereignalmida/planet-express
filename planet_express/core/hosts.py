@@ -51,6 +51,13 @@ MARGIN = 3
 
 LivenessState = Literal["current", "stale", "unknown"]
 
+# Why an unknown reading is unknown, for the renderer. The display text is `reason`; nothing may
+# infer a cause by matching that text, because rewording a reason would silently change the badge.
+UnknownCause = Literal["no_contact", "not_permitted", "clock_unusable"]
+NO_CONTACT: UnknownCause = "no_contact"
+NOT_PERMITTED: UnknownCause = "not_permitted"
+CLOCK_UNUSABLE: UnknownCause = "clock_unusable"
+
 CURRENT: LivenessState = "current"
 STALE: LivenessState = "stale"
 UNKNOWN: LivenessState = "unknown"
@@ -154,6 +161,7 @@ class Liveness:
     state: LivenessState
     reason: str | None = None
     age: float | None = None
+    cause: UnknownCause | None = None
 
     @property
     def is_current(self) -> bool:
@@ -196,7 +204,7 @@ def liveness(updated, *, now: float, reason: str | None = None) -> Liveness:
     """
     at = parse_timestamp(updated)
     if at is None:
-        return Liveness(UNKNOWN, reason or "no reading", None)
+        return Liveness(UNKNOWN, reason or "no reading", None, CLOCK_UNUSABLE)
     ahead = at - now
     # Clock skew between hosts is real and small, so a reading stamped slightly ahead of us is
     # the freshest thing we have and its age floors at zero rather than going negative.
@@ -208,16 +216,19 @@ def liveness(updated, *, now: float, reason: str | None = None) -> Liveness:
     # worse because it is silent. Past the tolerance we cannot date the reading at all, so it
     # is unknown, which is the honest answer.
     if ahead > SKEW_TOLERANCE:
-        return Liveness(UNKNOWN, reason or f"reading is stamped {int(ahead)}s in the future", None)
+        return Liveness(UNKNOWN, reason or f"reading is stamped {int(ahead)}s in the future", None,
+                        CLOCK_UNUSABLE)
     age = max(-ahead, 0.0)
     if age > STALE_AFTER:
         return Liveness(STALE, reason or f"reading is {int(age)}s old", age)
     return Liveness(CURRENT, reason, age)
 
 
-def unknown(reason: str) -> Liveness:
-    """Liveness for a host there is no reading for at all. Age stays None, never 0."""
-    return Liveness(UNKNOWN, reason, None)
+def unknown(reason: str, cause: UnknownCause | None = None) -> Liveness:
+    """Liveness for a host there is no reading for at all. Age stays None, never 0.
+
+    `cause` is None for the ordinary "could not reach it" case, which renders as no contact."""
+    return Liveness(UNKNOWN, reason, None, cause)
 
 
 def coverage(local_names: Iterable[str], names: Iterable[str]) -> float | None:

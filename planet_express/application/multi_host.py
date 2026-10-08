@@ -140,10 +140,10 @@ class FleetCache:
             self._view = answer
             self._refreshing = False
 
-    def _failed_view(self, reason: str) -> FleetView:
+    def _failed_view(self, reason: str, cause=None) -> FleetView:
         return FleetView(tuple(
-            HostCard(entry.system_id, entry.name, entry.link, True, unknown(reason),
-                     containers_liveness=unknown(reason))
+            HostCard(entry.system_id, entry.name, entry.link, True, unknown(reason, cause),
+                     containers_liveness=unknown(reason, cause))
             for entry in self._inventory.hosts
         ), None, reason)
 
@@ -153,7 +153,8 @@ class FleetCache:
         if fleet is None:
             return self._failed_view("ran out of time reading the collector")
         if not fleet.liveness.is_current:
-            return self._failed_view(fleet.liveness.reason or "the collector could not be read")
+            return self._failed_view(fleet.liveness.reason or "the collector could not be read",
+                                     fleet.liveness.cause)
 
         container_readings: dict[str, ContainerReading] = {}
         pending: list[tuple[str, threading.Event, dict]] = []

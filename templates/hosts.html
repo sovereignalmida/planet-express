@@ -90,11 +90,9 @@
               {% if is_stale %}<div class="cryo-footnote">Last known values. Nothing on this card is live until the host reports again.</div>{% endif %}
             </div>
           {% else %}
-            {% set reason = (host.liveness.reason or '')|lower %}
-            {# Substring-matched on the liveness reason: a reworded reason falls through to NO CONTACT.
-               Known fragility, see handoffs/V3.1-HOSTS.md; an enum on Liveness would retire it. #}
-            {% if 'authenticated this account' in reason or 'not permitted' in reason or 'listed no systems' in reason %}{% set badge, glyph, title, explanation, check = 'NOT PERMITTED', '⛨', 'The collector account is not permitted to see this host.', 'The hub returned success with an empty list. That does not mean there are no hosts.', 'Check: list this collector account on the host in Beszel.' %}
-            {% elif 'timestamp' in reason or 'future' in reason or 'no reading' in reason %}{% set badge, glyph, title, explanation, check = 'CLOCK UNUSABLE', '◷', 'The host reported, but its timestamp cannot be trusted.', 'Its age cannot be calculated, so no reading is presented as live.', 'Check: correct the host clock and collector timestamp.' %}
+            {% set cause = host.liveness.cause or 'no_contact' %}
+            {% if cause == 'not_permitted' %}{% set badge, glyph, title, explanation, check = 'NOT PERMITTED', '⛨', 'The collector account is not permitted to see this host.', 'The hub returned success with an empty list. That does not mean there are no hosts.', 'Check: list this collector account on the host in Beszel.' %}
+            {% elif cause == 'clock_unusable' %}{% set badge, glyph, title, explanation, check = 'CLOCK UNUSABLE', '◷', 'The host reported, but its timestamp cannot be trusted.', 'Its age cannot be calculated, so no reading is presented as live.', 'Check: correct the host clock and collector timestamp.' %}
             {% else %}{% set badge, glyph, title, explanation, check = 'NO CONTACT', '⌁', 'No readable contact with this host.', 'No usable reading is available for it.', 'Check: the host agent and its reachability.' %}{% endif %}
             <div class="cryo-pod nodata reasoned">
               <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">{{ host.name }}</span><span class="cryo-badge">{{ badge }}</span></div>

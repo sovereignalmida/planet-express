@@ -57,6 +57,16 @@ def inventory(*, pin=None):
                            local_system_id=pin)
 
 
+def test_a_typed_collector_cause_reaches_every_configured_card():
+    class ScopedProvider(Provider):
+        def hosts(self):
+            return FleetReading(unknown("the account sees nothing", "not_permitted"))
+
+    view = FleetCache(inventory(), ScopedProvider(), lambda: LOCAL_NAMES)._collect()
+    card, = view.cards
+    assert card.liveness.cause == "not_permitted" and card.containers_liveness.cause == "not_permitted"
+
+
 def test_derived_local_system_is_excluded_even_if_collector_name_changes():
     view = FleetCache(inventory(), Provider(), lambda: LOCAL_NAMES)._collect()
     assert [card.id for card in view.cards] == [REMOTE]

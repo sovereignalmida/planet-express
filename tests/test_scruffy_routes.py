@@ -202,14 +202,25 @@ def test_hosts_unknown_reason_cards_have_distinct_explanations():
     cards = (
         HostCard("contact", "No contact", None, True, Liveness("unknown", "collector unreachable")),
         HostCard("permission", "No permission", None, True,
-                 Liveness("unknown", "account not permitted; listed no systems")),
+                 Liveness("unknown", "the account sees nothing", cause="not_permitted")),
         HostCard("clock", "Bad clock", None, True,
-                 Liveness("unknown", "timestamp is unusable")),
+                 Liveness("unknown", "reading is unusable", cause="clock_unusable")),
     )
     page = _hosts_page(cards).get_data(as_text=True)
     for text in ("NO CONTACT", "NOT PERMITTED", "CLOCK UNUSABLE", "⌁", "⛨", "◷",
                  "returned success with an empty list", "timestamp cannot be trusted"):
         assert text in page
+
+
+def test_hosts_badge_comes_from_the_cause_not_the_reason_text():
+    """The template used to match substrings of the reason, so rewording a reason silently turned
+    NOT PERMITTED into NO CONTACT. The badge now follows the typed cause only."""
+    cards = (
+        HostCard("a", "Wording says permission", None, True,
+                 Liveness("unknown", "account not permitted; listed no systems; timestamp in the future")),
+    )
+    page = _hosts_page(cards).get_data(as_text=True)
+    assert "NO CONTACT" in page and "NOT PERMITTED" not in page and "CLOCK UNUSABLE" not in page
 
 
 def test_index_renders_real_findings(tmp_path, monkeypatch):
