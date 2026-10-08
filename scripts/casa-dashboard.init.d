@@ -52,7 +52,10 @@ start() {
         env PYTHONUNBUFFERED=1 CASA_DASHBOARD_PORT="$CASA_DASHBOARD_PORT" \
         "$GUNICORN" --workers 2 --threads 4 --bind "0.0.0.0:$CASA_DASHBOARD_PORT" \
         --worker-tmp-dir /dev/shm --no-control-socket --access-logfile - --error-logfile - \
-        --pid "$PIDFILE" "casa_scruffy:create_app()" > "$LOGFILE" 2>&1 < /dev/null &
+        "casa_scruffy:create_app()" > "$LOGFILE" 2>&1 < /dev/null &
+    # Every program in the chain exec()s the next, so $! is gunicorn's master pid. gunicorn's own
+    # --pid can't be used: it writes next to the pidfile after dropping to the web user.
+    echo $! > "$PIDFILE"
     sleep 3
     if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
         log_end_msg 0
