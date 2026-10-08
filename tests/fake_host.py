@@ -27,6 +27,7 @@ class FakeHost:
         self.trusted_uids = frozenset(trusted_uids) | {euid}
         self.users = {"root": (0, 0), **(users or {})}
         self.groups = {"root": 0, **(groups or {})}
+        self.memberships: dict[str, set[int]] = {}
         self.nodes: dict[str, _Node] = {}
         self._ino = 100
         self.commands: list[list[str]] = []
@@ -63,7 +64,7 @@ class FakeHost:
 
     def on(self, match, result):
         """Script every command `match(argv)` accepts: a RunResult, or a function (host, argv) -> RunResult."""
-        self.matchers.append((match, result))
+        self.matchers.insert(0, (match, result))      # the latest registration wins, so a test can override a default
 
     def tree(self) -> dict:
         """A comparable snapshot: path -> (kind, perms, uid, gid, data)."""
@@ -133,6 +134,11 @@ class FakeHost:
 
     def lookup_group(self, name):
         return self.groups.get(name)
+
+    def user_groups(self, name):
+        if name not in self.users:
+            return None
+        return {self.users[name][1]} | self.memberships.get(name, set())
 
     # -- mutations ---------------------------------------------------------------------------------------
     def _mutate(self):

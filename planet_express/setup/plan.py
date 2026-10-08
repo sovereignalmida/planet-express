@@ -296,8 +296,12 @@ def _build(b: _Builder) -> None:
     owner = {"owner": a.run_as, "group": run_group}
     # Parents first: on MOS the pool's home directory holds everything else.
     dirs = ([p["home"]] if mos else []) + [p["state"], p["logs"]] + ([p["data"], p["defaults"]] if mos else [])
-    dir_ids = [b.add("dir.ensure", f"Create {Path(d).name}/", d, {"path": d, **owner},
-                     b.text(f"Creates {d} (owner {a.run_as}) if it does not exist."), risk="R1", needs_root=mos)
+    # data holds core's database and logs hold step output: private. The dashboard reads state, which holds
+    # no secrets (the dashboard is denied the other two by ACL on systemd and by these modes on MOS).
+    modes = {p["data"]: "0700", p["logs"]: "0700"} if mos else {}
+    dir_ids = [b.add("dir.ensure", f"Create {Path(d).name}/", d, {"path": d, "mode": modes.get(d, "0755"), **owner},
+                     b.text(f"Creates {d} (owner {a.run_as}, mode {modes.get(d, '0755')}) if it does not exist."),
+                     risk="R1", needs_root=mos)
                for d in dirs]
     config_dir = str(Path(p["config"]).parent)
     needs_config_dir = (not mos and not b.present(p["config"])
@@ -323,7 +327,9 @@ def _build(b: _Builder) -> None:
 
     config_id = b.file_step(
         "Write config.yaml", p["config"], _config_content(b),
-        mode="0640", owner=a.run_as, group=run_group,
+        # MOS has no ACLs to give the dashboard its own read grant, and config.yaml holds no secrets (those are in
+        # the env files), so it is world-readable there. On systemd it is 0640 plus an ACL for the dashboard.
+        mode="0644" if mos else "0640", owner=a.run_as, group=run_group,
         depends_on=dir_ids[:3 if mos else 2] + (dir_ids[-1:] if needs_config_dir else []))
     secrets_id = None
     env_text = _env_content(b)
@@ -350,11 +356,11 @@ def _build(b: _Builder) -> None:
     access_id = b.add(
         "access.provision", "Give the dashboard read-only access", "planetexpress-web",
         {"method": "groups" if mos else "acl", "install_dir": a.install_dir, "run_user": a.run_as,
-         **({"state_dir": p["state"], "logs_dir": p["logs"], "config_path": p["config"], "venv_dir": p["venv"]}
-            if mos else {})},
+         "config_path": p["config"], **({"venv_dir": p["venv"], "home_dir": p["home"]} if mos else {})},
         b.text("Creates the planetexpress-web user and planetexpress-rpc group, and lets the dashboard read exactly "
                "what it needs: the code, the state it displays and its own config. "
-               + ("Uses group permissions (MOS has no setfacl)." if mos else
+               + ("MOS has no ACLs: the code and environment are made readable, while the database, logs and "
+                  "env files stay private to root." if mos else
                   "Uses read-only ACLs; everything else in the checkout is explicitly denied to it.")),
         depends_on=(env_id, config_id))
 
@@ -373,8 +379,15 @@ def _build(b: _Builder) -> None:
         opening = (f"{p['dash_env']} already exists and is kept, including its session secret." if dash_kept else
                    f"Creates {p['dash_env']} (root-only) with a fresh session secret.")
         what = f"{opening} {added}"
+        dash_expect = (b.expectation(p["dash_env"], "replace") if dash_kept else {"expect_absent": True})
+        if dash_kept and "expected_sha256" not in dash_expect:
+            b.blocked.append(f"{p['dash_env']} exists but could not be read, so setup cannot add an operator to it "
+                             "safely. Run setup as root.")
+            return
         dash_id = b.add("dashboard.init", "Set up the dashboard login", p["dash_env"],
-                        {"env_file": p["dash_env"], **refs}, b.text(what), depends_on=(access_id,))
+                        {"env_file": p["dash_env"], **refs,
+                         **{k: v for k, v in dash_expect.items() if k in ("expect_absent", "expected_sha256")}},
+                        b.text(what), depends_on=(access_id,))
 
     # Services -------------------------------------------------------------------------------
     install_ids, enable = [], []

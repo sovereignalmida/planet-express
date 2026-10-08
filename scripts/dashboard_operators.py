@@ -14,9 +14,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import config
 import web_auth
 from scripts import revoke_devices
+
+
+def _host_control_provider() -> str:
+    """Imported on use, not at import: setup (planet_express.setup) reuses this module's pure functions before
+    any Planet Express config exists, and `config` refuses to load without one."""
+    import config
+    return config.HOST_CONTROL_PROVIDER
+
 
 ENV_FILE = "/etc/planetexpress-dashboard.env"
 # The unit holding the credentials this script writes. `reset` restarts it itself, because a
@@ -232,7 +239,7 @@ def main(argv=None):
             # anything issued during the gap.
             try:
                 # Use the correct restart command for the configured host type
-                if config.HOST_CONTROL_PROVIDER == "mos":
+                if _host_control_provider() == "mos":
                     restart_cmd = ["sudo", "service", RESTART_UNIT, "restart"]
                     restart_hint = f"sudo service {RESTART_UNIT} restart"
                 else:
@@ -255,7 +262,7 @@ def main(argv=None):
                     f"  scripts/revoke_devices.py {name}") from None
             print(f"Restarted {RESTART_UNIT}. Device epoch for {name}: {epoch}.")
         if action != "reset":
-            if config.HOST_CONTROL_PROVIDER == "mos":
+            if _host_control_provider() == "mos":
                 print(f"Restart with: sudo service {RESTART_UNIT} restart")
             else:
                 print(f"Restart with: sudo systemctl restart {RESTART_UNIT}")

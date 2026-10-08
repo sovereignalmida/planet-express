@@ -91,8 +91,8 @@ def _parent(path: str) -> str:
     return _split(path)[0]
 
 
-def _owner(ctx) -> tuple[int, int] | Refuse:
-    p = ctx.step.params
+def _owner(ctx, p: dict | None = None) -> tuple[int, int] | Refuse:
+    p = p if p is not None else ctx.step.params
     user = ctx.host.lookup_user(p["owner"])
     group = ctx.host.lookup_group(p["group"])
     if user is None:
@@ -150,37 +150,62 @@ class DirEnsure:
 
 
 # ----------------------------------------------------------------------------------------------------------
-class FileWrite:
-    """Compare-and-swap, atomic replace, and undo evidence recorded before the rename."""
+class _AtomicFile:
+    """Compare-and-swap, backup, a journaled intent, a staged file and an atomic rename: the one careful way
+    this package puts a file on the host. `file.write`, `sudoers.install` and `dashboard.init` are all this,
+    differing only in where the bytes come from and what is checked before the rename."""
 
-    def _desired(self, ctx) -> bytes:
-        return render(ctx.step.params["content"], ctx.secrets)
+    def norm(self, ctx) -> dict:
+        """path, mode, owner, group, has_secrets, if_exists, expect_absent, expected_sha256."""
+        raise NotImplementedError
 
+    def desired(self, ctx) -> bytes:
+        raise NotImplementedError
+
+    def validate_staged(self, ctx, parent: str, temp: str) -> None:
+        """Called with the staged file in place and before it is renamed; raise StepFailure to abort."""
+
+    # -- the guard ---------------------------------------------------------------------------------------------
+    @staticmethod
+    def _cas_violation(p: dict, current_sha: str | None, wanted: str | None) -> str | None:
+        """Why the file is not what the plan was built against, or None if it is."""
+        path = p["path"]
+        if current_sha is None:
+            if p.get("expected_sha256"):
+                return f"{path} existed when the plan was made but is gone now"
+            return None
+        if wanted is not None and current_sha == wanted:
+            return None
+        if p.get("expect_absent"):
+            return f"{path} exists now, but this step was approved to create it"
+        if current_sha != p.get("expected_sha256"):
+            return f"{path} changed since the plan was made; refusing to overwrite it"
+        return None
+
+    # -- check -------------------------------------------------------------------------------------------------
     def check(self, ctx):
-        p = ctx.step.params
+        p = self.norm(ctx)
         path, parent = p["path"], _parent(p["path"])
-        ids = _owner(ctx)
+        ids = _owner(ctx, p)
         if isinstance(ids, Refuse):
             return ids
-        missing = unresolved_secrets(p["content"], ctx.secrets)
+        missing = self.unresolved(ctx, p)
         if missing:
             return Refuse(f"no value for secret(s): {', '.join(missing)}")
         parent_stat = ctx.host.lstat(parent)
         if parent_stat is None or parent_stat.kind != "dir":
             return Refuse(f"{parent} does not exist; an earlier step has to create it")
-
         current = ctx.host.lstat(path)
-        wanted = sha256(self._desired(ctx))
         if current is None:
-            if p.get("expected_sha256"):
-                return Refuse(f"{path} existed when the plan was made but is gone now")
-            return Proceed()
+            reason = self._cas_violation(p, None, None)
+            return Refuse(reason) if reason else Proceed()
         if current.kind != "file":
             return Refuse(f"{path} is a {current.kind}, not a regular file")
         try:
             existing = sha256(ctx.host.read_bytes(path))
         except HostError as exc:
             return Refuse(str(exc))
+        wanted = sha256(self.desired(ctx))
         if existing == wanted:
             # The bytes are right; the file is only "as planned" if its mode and owner are too. A config the
             # service user is meant to read, left root:root 0600, would otherwise be reported as success.
@@ -192,21 +217,27 @@ class FileWrite:
             return Satisfied(f"{path} already has the planned content")
         if p["if_exists"] == "keep":
             return Satisfied(f"{path} exists and is kept, not overwritten")
-        if p.get("expect_absent"):
-            return Refuse(f"{path} exists now, but this step was approved to create it")
-        if existing != p.get("expected_sha256"):
-            return Refuse(f"{path} changed since the plan was made; refusing to overwrite it")
-        return Proceed()
+        reason = self._cas_violation(p, existing, wanted)
+        return Refuse(reason) if reason else Proceed()
 
+    def unresolved(self, ctx, p) -> list[str]:
+        return []
+
+    # -- act ---------------------------------------------------------------------------------------------------
     def act(self, ctx):
-        p = ctx.step.params
+        self.write(ctx, self.norm(ctx), self.desired(ctx))
+
+    def write(self, ctx, p: dict, data: bytes) -> None:
         path, parent = p["path"], _parent(p["path"])
         name = path.rsplit("/", 1)[1]
-        uid, gid = _owner(ctx)
-        data = self._desired(ctx)
+        uid, gid = _owner(ctx, p)
         wanted = sha256(data)
         current = ctx.host.lstat(path)
         previous = sha256(ctx.host.read_bytes(path)) if current is not None else None
+        # Re-checked immediately before acting, the compose.write rule: not just at `check`.
+        reason = self._cas_violation(p, previous, wanted)
+        if reason:
+            raise StepFailure(reason)
         record = {"path": path, "created_file": current is None, "previous_sha256": previous,
                   "written_sha256": wanted, "backup": None}
         if current is not None:
@@ -232,18 +263,22 @@ class FileWrite:
         # step wrote (device and inode, not content).
         ctx.evidence(phase="staged", parent=parent, temp=temp, staged=staged.identity)
         try:
+            self.validate_staged(ctx, parent, temp)
             ctx.host.commit_staged(parent, temp, name)
-        except HostError as exc:
+        except (HostError, StepFailure) as exc:
             try:
                 ctx.host.discard_staged(parent, temp)
             except HostError:
                 pass
+            if isinstance(exc, StepFailure):
+                raise
             raise StepFailure(str(exc)) from exc
         ctx.evidence(phase="committed", path=path)
         ctx.log(f"wrote {path} (mode {p['mode']}, {p['owner']}:{p['group']}, sha256 {wanted[:12]})")
 
+    # -- verify / reconcile ------------------------------------------------------------------------------------
     def verify(self, ctx) -> Effect:
-        p = ctx.step.params
+        p = self.norm(ctx)
         current = ctx.host.lstat(p["path"])
         if current is None or current.kind != "file":
             return "not_applied"
@@ -251,8 +286,8 @@ class FileWrite:
             now = sha256(ctx.host.read_bytes(p["path"]))
         except HostError:
             return "unknown"
-        if now == sha256(self._desired(ctx)):
-            ids = _owner(ctx)
+        if now == sha256(self.desired(ctx)):
+            ids = _owner(ctx, p)
             ok = (not isinstance(ids, Refuse) and current.perms == int(p["mode"], 8)
                   and (current.uid, current.gid) == ids)
             return "applied" if ok else "unknown"
@@ -280,6 +315,258 @@ class FileWrite:
             ctx.host.discard_staged(parent, temp)
             ctx.log(f"removed the leftover staged file {temp}")
         return outcome
+
+
+class FileWrite(_AtomicFile):
+    def norm(self, ctx) -> dict:
+        return ctx.step.params
+
+    def desired(self, ctx) -> bytes:
+        return render(ctx.step.params["content"], ctx.secrets)
+
+    def unresolved(self, ctx, p) -> list[str]:
+        return unresolved_secrets(p["content"], ctx.secrets)
+
+
+class SudoersInstall(_AtomicFile):
+    """A sudoers.d grant. Validated with `visudo -c -f` on the staged file BEFORE it is renamed into place: a
+    broken file in /etc/sudoers.d can lock every administrator out of sudo, so an invalid one never gets there.
+    The staged name contains a dot, which sudo ignores, so the half-written file is never read as policy."""
+
+    def norm(self, ctx) -> dict:
+        p = dict(ctx.step.params)
+        p.update(mode="0440", owner="root", group="root", has_secrets=False)
+        return p
+
+    def desired(self, ctx) -> bytes:
+        return ctx.step.params["content"].encode("utf-8")
+
+    def validate_staged(self, ctx, parent, temp):
+        result = ctx.host.run(["visudo", "-c", "-f", f"{parent}/{temp}"], timeout=30)
+        if result.rc == 127:
+            raise StepFailure("visudo was not found, so the grant cannot be validated; is sudo installed?")
+        if result.rc != 0:
+            raise StepFailure("visudo rejected the sudoers grant, so it was not installed: "
+                              + " | ".join((result.err or result.out).strip().splitlines()[-2:])[:300])
+
+    def verify(self, ctx) -> Effect:
+        outcome = super().verify(ctx)
+        if outcome == "applied" and ctx.host.run(["visudo", "-c"], timeout=30).rc != 0:
+            return "unknown"          # the file is ours, but the system's sudoers no longer parses
+        return outcome
+
+
+# ----------------------------------------------------------------------------------------------------------
+class DashboardInit(_AtomicFile):
+    """The dashboard's env file: a session secret and the first operator. Reuses `dashboard_operators`' pure
+    functions (so the format cannot drift from the tool operators later use to add people) and `web_auth`'s
+    hashing (so what is written is exactly what the dashboard verifies against). The passphrase is hashed
+    here; only the hash is stored. The TOTP secret has to be stored, which is why this file is root-only."""
+
+    KEY = "PE_DASHBOARD_SECRET_KEY"
+
+    def norm(self, ctx) -> dict:
+        p = ctx.step.params
+        return {"path": p["env_file"], "mode": "0600", "owner": "root", "group": "root", "has_secrets": True,
+                "if_exists": "replace", "expect_absent": p.get("expect_absent", False),
+                "expected_sha256": p.get("expected_sha256"), "content": ""}
+
+    def _modules(self):
+        try:
+            import web_auth
+            from scripts import dashboard_operators
+        except (ImportError, SystemExit) as exc:
+            # SystemExit too: an older checkout's dashboard_operators imports `config`, which exits when no config
+            # exists yet. A stale checkout is a refusal with a reason, never a crash.
+            raise StepFailure(f"the dashboard's own modules could not be imported ({exc}); are the Python "
+                              "dependencies installed, and is this checkout up to date?") from exc
+        return web_auth, dashboard_operators
+
+    def _operator(self, ctx):
+        p = ctx.step.params
+        if not p.get("operator"):
+            return None
+        return p["operator"], ctx.secrets[p["passphrase_ref"]], ctx.secrets[p["totp_ref"]]
+
+    def _merged(self, ctx, text: str, *, key: str) -> str:
+        web_auth, ops = self._modules()
+        values = ops.parse_env(text)
+        if not values.get(self.KEY):
+            values[self.KEY] = key
+        if len(values[self.KEY]) < 32:
+            raise ValueError(f"{self.KEY} must contain at least 32 characters")
+        operator = self._operator(ctx)
+        if operator is not None and operator[0] not in web_auth.load_operators(values):
+            values = ops.apply_operator_change(values, "add", operator[0], passphrase=operator[1], totp_secret=operator[2])
+        return ops.render_env(text, values)
+
+    def check(self, ctx):
+        p = self.norm(ctx)
+        path, parent = p["path"], _parent(p["path"])
+        p_ = ctx.step.params
+        missing = [r for r in (p_.get("passphrase_ref"), p_.get("totp_ref")) if r and r not in ctx.secrets]
+        if missing:
+            return Refuse(f"no value for secret(s): {', '.join(missing)}")
+        parent_stat = ctx.host.lstat(parent)
+        if parent_stat is None or parent_stat.kind != "dir":
+            return Refuse(f"{parent} does not exist; an earlier step has to create it")
+        current = ctx.host.lstat(path)
+        text = ""
+        if current is not None:
+            if current.kind != "file":
+                return Refuse(f"{path} is a {current.kind}, not a regular file")
+            try:
+                raw = ctx.host.read_bytes(path)
+            except HostError as exc:
+                return Refuse(str(exc))
+            reason = self._cas_violation(p, sha256(raw), None)
+            if reason:
+                return Refuse(reason)
+            text = raw.decode("utf-8", "replace")
+        elif p["expected_sha256"]:
+            return Refuse(f"{path} existed when the plan was made but is gone now")
+        try:
+            merged = self._merged(ctx, text, key="x" * 48)
+        except StepFailure as exc:
+            return Refuse(exc.reason)
+        except ValueError as exc:
+            return Refuse(str(exc))
+        # Satisfied only when nothing would change (key present, operator present) AND the file is as planned.
+        if merged == text and current is not None:
+            if current.perms != 0o600 or (current.uid, current.gid) != (0, 0):
+                return Refuse(f"{path} is already as planned but is mode {current.perms:04o} owned by "
+                              f"{current.uid}:{current.gid}; it holds secrets and has to be 0600 root:root")
+            return Satisfied(f"{path} already has the session secret and the operator")
+        return Proceed()
+
+    def act(self, ctx):
+        p = self.norm(ctx)
+        path = p["path"]
+        current = ctx.host.lstat(path)
+        text = ctx.host.read_bytes(path).decode("utf-8", "replace") if current is not None else ""
+        import secrets as _secrets
+        try:
+            merged = self._merged(ctx, text, key=_secrets.token_urlsafe(48))
+        except ValueError as exc:
+            raise StepFailure(str(exc)) from exc
+        self.write(ctx, p, merged.encode("utf-8"))
+        operator = self._operator(ctx)
+        if operator is not None:
+            ctx.log(f"added the dashboard operator '{operator[0]}' (the passphrase is stored only as a hash)")
+
+    def verify(self, ctx) -> Effect:
+        p = self.norm(ctx)
+        current = ctx.host.lstat(p["path"])
+        if current is None or current.kind != "file":
+            return "not_applied"
+        try:
+            web_auth, ops = self._modules()
+            values = ops.parse_env(ctx.host.read_bytes(p["path"]).decode("utf-8", "replace"))
+            operators = web_auth.load_operators(values)
+        except (HostError, ValueError, StepFailure):
+            return "unknown"
+        if len(values.get(self.KEY, "")) < 32:
+            return "not_applied"
+        operator = self._operator(ctx)
+        if operator is not None:
+            found = operators.get(operator[0])
+            if (found is None or not web_auth.verify_passphrase(found.passphrase_hash, operator[1])
+                    or found.totp_secret != operator[2]):
+                return "not_applied"
+        return "applied" if current.perms == 0o600 and (current.uid, current.gid) == (0, 0) else "unknown"
+
+
+# ----------------------------------------------------------------------------------------------------------
+class AccessProvision:
+    """The dashboard's own account, and exactly the read access it needs. The commands are not invented here:
+    systemd hosts get the ones `scripts/web_access.py` plans (pure, already reviewed), run directly because we
+    are root; MOS has no ACLs, so it gets the account plus readable code and a traversable home, while data,
+    logs and the env files stay private by the modes the earlier steps gave them."""
+
+    def _commands(self, ctx) -> list[list[str]]:
+        p = ctx.step.params
+        host = ctx.host
+        user_exists = lambda name: host.lookup_user(name) is not None
+        group_exists = lambda name: host.lookup_group(name) is not None
+
+        def in_group(user, group):
+            groups, gid = host.user_groups(user), host.lookup_group(group)
+            return groups is not None and gid is not None and gid in groups
+
+        if p["method"] == "acl":
+            try:
+                from scripts.web_access import plan_web_access
+            except ImportError as exc:
+                raise StepFailure(f"scripts/web_access.py could not be imported: {exc}") from exc
+
+            def other_can_traverse(path):
+                found = host.lstat(str(path))
+                return found is not None and bool(found.perms & 0o001)
+            try:
+                return plan_web_access(
+                    p["install_dir"], p["run_user"], p["web_user"], p["rpc_group"],
+                    user_exists=user_exists, group_exists=group_exists, in_group=in_group,
+                    other_can_traverse=other_can_traverse, entries=host.listdir(p["install_dir"]),
+                    config_file=p.get("config_path"))
+            except ValueError as exc:
+                raise StepFailure(str(exc)) from exc
+
+        web, rpc = p["web_user"], p["rpc_group"]
+        commands = []
+        if not group_exists(rpc):
+            commands.append(["groupadd", "--system", rpc])
+        if not user_exists(web):
+            commands.append(["useradd", "--system", "--no-create-home", "--home-dir", "/nonexistent",
+                             "--shell", "/usr/sbin/nologin", "--user-group", web])
+        for user in (p["run_user"], web):
+            if not in_group(user, rpc):
+                commands.append(["usermod", "-aG", rpc, user])
+        commands += [["chmod", "-R", "a+rX", p["install_dir"]], ["chmod", "-R", "a+rX", p["venv_dir"]],
+                     ["chmod", "o+x", p["home_dir"]]]
+        return commands
+
+    def check(self, ctx):
+        p = ctx.step.params
+        if ctx.host.lookup_user(p["run_user"]) is None:
+            return Refuse(f"no such user: {p['run_user']}")
+        if p["method"] == "acl" and ctx.host.run(["setfacl", "--version"], timeout=15).rc != 0:
+            return Refuse("setfacl was not found; install the acl package (for example `apt install acl`) and re-run")
+        try:
+            self._commands(ctx)
+        except StepFailure as exc:
+            return Refuse(exc.reason)
+        return Proceed()          # every command is safe to repeat, so there is no "already done" short cut
+
+    def act(self, ctx):
+        for command in self._commands(ctx):
+            ctx.evidence(command=command)
+            result = ctx.host.run(command, timeout=300)
+            if result.rc != 0:
+                tail = " | ".join((result.err or result.out).strip().splitlines()[-2:])[:300]
+                raise StepFailure(f"`{command[0]}` failed (exit {result.rc}): {tail}", "unknown")
+            ctx.log(f"ran {command[0]} {command[1] if len(command) > 1 else ''}".rstrip())
+
+    def verify(self, ctx) -> Effect:
+        p = ctx.step.params
+        web, rpc = p["web_user"], p["rpc_group"]
+        gid = ctx.host.lookup_group(rpc)
+        if ctx.host.lookup_user(web) is None or gid is None:
+            return "not_applied"
+        for user in (p["run_user"], web):
+            groups = ctx.host.user_groups(user)
+            if groups is None or gid not in groups:
+                return "not_applied"
+        if p["method"] == "acl":
+            shown = ctx.host.run(["getfacl", "-p", "--omit-header", p["install_dir"]], timeout=15)
+            if shown.rc != 0 or f"user:{web}:r-x" not in shown.out:
+                return "not_applied"
+        else:
+            top = ctx.host.lstat(p["home_dir"])
+            if top is None or not top.perms & 0o001:
+                return "not_applied"
+        return "applied"
+
+    reconcile = verify
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -438,4 +725,6 @@ class PythonEnv:
 
 
 HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke(),
+            "sudoers.install": SudoersInstall(), "dashboard.init": DashboardInit(),
+            "access.provision": AccessProvision(),
             "state.snapshot": StateSnapshot(), "python.env": PythonEnv()}

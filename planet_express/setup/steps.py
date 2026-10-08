@@ -103,19 +103,37 @@ class AccessProvision(_Params):
     run_user: Name
     web_user: Name = "planetexpress-web"
     rpc_group: Name = "planetexpress-rpc"
-    state_dir: AbsPath | None = None
-    logs_dir: AbsPath | None = None
-    config_path: AbsPath | None = None
-    venv_dir: AbsPath | None = None
+    config_path: AbsPath | None = None      # the dashboard must be able to read it (acl: a named-user grant)
+    venv_dir: AbsPath | None = None         # groups: made readable, it is outside the install directory
+    home_dir: AbsPath | None = None         # groups: made traversable, it holds the install on a pool
+
+    @model_validator(mode="after")
+    def _groups_method_needs_its_paths(self):
+        if self.method == "groups" and not (self.venv_dir and self.home_dir):
+            raise ValueError("the groups method needs venv_dir and home_dir")
+        return self
 
 
 class DashboardInit(_Params):
+    """Create or extend the dashboard's env file: a session secret and, optionally, the first operator. It
+    reads the file, merges, and writes it back, so like any replace it needs the expectation it will be
+    compared against."""
+
     env_file: AbsPath
     operator: Name | None = None
     # Names of secrets held beside the plan, never the values.
     passphrase_ref: Name | None = None
     totp_ref: Name | None = None
+    expect_absent: bool = False
+    expected_sha256: Sha256 | None = None
 
+    @model_validator(mode="after")
+    def _coherent(self):
+        if bool(self.expect_absent) == bool(self.expected_sha256):
+            raise ValueError("a dashboard env file is expected either absent or with a known hash, not both or neither")
+        if bool(self.operator) != bool(self.passphrase_ref and self.totp_ref):
+            raise ValueError("an operator needs both its passphrase and TOTP secret references, and they need an operator")
+        return self
 
 class ServiceInstall(_Expecting):
     # An installed unit may carry local edits (a mount gate on casa-stacks, say), so the default keeps it.

@@ -143,6 +143,11 @@ class RealHost:
         except KeyError:
             return None
 
+    def user_groups(self, name: str) -> set[int] | None:
+        """Every group id the account belongs to (primary included), or None if there is no such user."""
+        ids = self.lookup_user(name)
+        return None if ids is None else set(os.getgrouplist(name, ids[1]))
+
     # -- safe parent handling -----------------------------------------------------------------------
     @contextmanager
     def _parent_fd(self, parent: str, *, mutating: bool):
