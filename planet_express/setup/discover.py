@@ -198,13 +198,34 @@ def _assigned(text: str | None, key: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _existing_pe(env) -> dict:
+# System paths a Planet Express install owns. `present` says which already exist, so a plan can keep
+# them instead of overwriting something an operator may have edited (deploy.sh asks before replacing
+# casa-stacks.service for the same reason). sudoers.d is root-readable only, so a non-root discover
+# cannot see that one.
+KNOWN_SYSTEM_PATHS = (
+    "/etc/planetexpress/config.yaml", "/etc/planetexpress.env", "/etc/planetexpress-dashboard.env",
+    "/etc/sudoers.d/planetexpress",
+    "/etc/systemd/system/casa-planetexpress.service", "/etc/systemd/system/casa-dashboard.service",
+    "/etc/systemd/system/casa-stacks.service",
+    "/etc/init.d/casa-planetexpress", "/etc/init.d/casa-dashboard",
+)
+INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env")
+
+
+def _existing_pe(env, storage: dict) -> dict:
     """Is Planet Express already here, and where? A systemd unit or /etc/default says where the
     install and its config actually are, which is not always the default path."""
     unit = env.read("/etc/systemd/system/casa-planetexpress.service")
     defaults = env.read("/etc/default/casa-planetexpress")
     install_dir = _assigned(unit, "WorkingDirectory") or _assigned(defaults, "DAEMON_DIR")
     config_path = _assigned(unit, "CASA_CONFIG") or _assigned(defaults, "CASA_CONFIG")
+    # Files beside a candidate install location (a MOS pool keeps its config and env files there).
+    homes = {str(Path(c).parent) if c.endswith("/planet-express") else c
+             for c in storage["candidate_install_paths"] + ([install_dir] if install_dir else [])}
+    probes = list(KNOWN_SYSTEM_PATHS) + [f"{h}/{name}" for h in sorted(homes) for name in INSTALL_FILES]
+    if config_path:
+        probes.append(config_path)
+    present = {path: env.exists(path) for path in dict.fromkeys(probes)}
     markers = {
         "config": env.exists(config_path or "/etc/planetexpress/config.yaml"),
         "env_file": env.exists("/etc/planetexpress.env"),
@@ -212,7 +233,7 @@ def _existing_pe(env) -> dict:
         "init_script": env.exists("/etc/init.d/casa-planetexpress"),
     }
     return {"installed": any(markers.values()), **markers,
-            "install_dir": install_dir, "config_path": config_path}
+            "install_dir": install_dir, "config_path": config_path, "present": present}
 
 
 def _check(id_: str, label: str, status: str, detail: str, fix: str = "", overridable: bool = False) -> dict:
@@ -336,8 +357,8 @@ def discover(env=None, *, repo_root: str | None = None, stacks_root: str | None 
         "ports_in_use": _listening_ports(env),
         "network": _network(env),
         "privileges": _privileges(env),
-        "existing_pe": _existing_pe(env),
     }
+    facts["existing_pe"] = _existing_pe(env, facts["storage"])
     facts["checks"] = _checks(facts)
     counts = {s: sum(1 for c in facts["checks"] if c["status"] == s) for s in ("ok", "warn", "blocked")}
     facts["summary"] = {**counts, "can_continue": not any(

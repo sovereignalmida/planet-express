@@ -232,3 +232,12 @@ def test_setup_never_imports_config_because_it_runs_before_config_exists():
     out = subprocess.run([sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True,
                          env={"PATH": "/usr/bin:/bin"})
     assert out.stdout.strip() == "False"
+
+
+def test_present_says_which_install_files_already_exist_including_beside_a_mos_pool():
+    env = mos(files={"/mnt/data/pe/config.yaml": "", "/etc/init.d/casa-planetexpress": ""})
+    present = discover(env, repo_root="/mnt/data/pe/planet-express")["existing_pe"]["present"]
+    assert present["/mnt/data/pe/config.yaml"] is True
+    assert present["/etc/init.d/casa-planetexpress"] is True
+    assert present["/mnt/data/pe/planetexpress.env"] is False
+    assert present["/etc/systemd/system/casa-stacks.service"] is False
