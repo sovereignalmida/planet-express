@@ -16,7 +16,9 @@ layer, so importing is reuse, not the cross-layer duplication `host_control_syst
 docstring explains for its relationship to `dashboard_data.py`.
 """
 
+import os
 import re
+import shutil
 
 import casa_bender as bender
 from planet_express.core.host_control import ServiceActionResult
@@ -54,6 +56,17 @@ def _text_state(output: str) -> str | None:
     if _RUNNING_RE.search(output):
         return "running"
     return None
+
+
+def _service_argv(unit: str, action: str) -> list[str]:
+    """argv for a start/stop/restart, after the allowlist gate has already passed. MOS has no
+    sudo binary and Planet Express runs as root there (no unprivileged service user; the Docker
+    socket is root-owned), so a root process without sudo runs `service` directly. Every other
+    case keeps `sudo -n` -- a non-root process must still go through the declared sudo grant, and
+    a root process that does have sudo behaves exactly as before."""
+    if os.geteuid() == 0 and shutil.which("sudo") is None:
+        return ["service", unit, action]
+    return ["sudo", "-n", "service", unit, action]
 
 
 class MosHostControlProvider:
@@ -95,7 +108,8 @@ class MosHostControlProvider:
         same unconditional-after-read requirement for `restart`. The sudo command is built as
         `sudo service <unit> <action>` -- unit before action -- matching `casa_bender.py`'s
         `_SUDO_SERVICE_RE`; building it the other way round would silently fail every allowlist
-        check regardless of what's declared in config.yaml."""
+        check regardless of what's declared in config.yaml. The allowlist gate is the same whether
+        or not sudo is then used to run it -- see `_service_argv()`."""
         try:
             bender._check_sudo_allowlist(f"sudo service {unit} {action}")
         except bender.SafetyError as exc:
@@ -110,7 +124,7 @@ class MosHostControlProvider:
                 detail=f"could not read the state of {unit}: {before_detail}",
             )
         rc, out, err = bender.run_argv(
-            ["sudo", "-n", "service", unit, action], timeout=SERVICE_CONTROL_TIMEOUT_SECONDS,
+            _service_argv(unit, action), timeout=SERVICE_CONTROL_TIMEOUT_SECONDS,
         )
         if rc != 0:
             return ServiceActionResult(

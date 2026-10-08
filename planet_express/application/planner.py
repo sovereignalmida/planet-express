@@ -254,14 +254,7 @@ class RunbookBuilder:
             try:
                 # Fail here rather than after the operator approves a plan that cannot run:
                 # the same check the engine makes, against the same declared allowlist.
-                # Build the sudo string in the format expected by the configured provider:
-                # systemctl: `sudo systemctl <action> <unit>` (systemd)
-                # service: `sudo service <unit> <action>` (MOS/sysvinit)
-                if config.HOST_CONTROL_PROVIDER == "mos":
-                    sudo_str = f"sudo service {unit} {action}"
-                else:
-                    sudo_str = f"sudo systemctl {action} {unit}"
-                bender._check_sudo_allowlist(sudo_str)
+                bender._check_sudo_allowlist(bender.sudo_unit_command(action, unit))
             except bender.SafetyError as exc:
                 raise PlanRefused(f"unit.action is not in the sudo allowlist: {exc}") from None
             return {"unit": unit}

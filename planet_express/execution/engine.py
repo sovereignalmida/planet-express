@@ -488,7 +488,7 @@ class RunbookEngine:
         action, unit = params["action"], params["unit"]
         # Policy check: allowlist still lives in casa_bender (policy layer stays separate)
         try:
-            bender._check_sudo_allowlist(f"sudo systemctl {action} {unit}")
+            bender._check_sudo_allowlist(bender.sudo_unit_command(action, unit))
         except bender.SafetyError as exc:
             return self._refuse(f"not in the sudo allowlist: {_clip(str(exc))}")
 

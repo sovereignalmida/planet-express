@@ -173,15 +173,18 @@ def _check_preconditions(b: _Builder) -> None:
         if not any(a.install_dir == m or a.install_dir.startswith(m + "/") for m in pools):
             b.blocked.append("MOS keeps / in RAM, so Planet Express must be installed on a pool. "
                              f"{a.install_dir} is not on one ({', '.join(pools) or 'none mounted'}).")
-        if a.tier == "full":
-            b.blocked.append("Unit control (the R3 tier) is not available on MOS yet: its service commands go "
-                             "through sudo, which MOS does not have. Choose a lower tier.")
+        bad = [u.unit for u in a.sudo_units if not re.fullmatch(r"[A-Za-z0-9_-]+", u.unit)] \
+            if a.tier == "full" else []
+        if bad:
+            b.blocked.append("MOS unit names are init.d script names (letters, digits, '-' and '_'), so "
+                             f"these cannot be allowed: {', '.join(bad)}.")
     if b.init == "unknown":
         b.blocked.append("This host's init system is not recognised; only systemd and MOS are supported.")
 
-    if a.tier == "full" and b.init == "systemd" and not a.sudo_units:
-        b.warnings.append("Tier 'full' allows unit control, but no units were listed, so no sudo grant is written "
-                          "and unit control stays unusable until you add some.")
+    if a.tier == "full" and not a.sudo_units:
+        b.warnings.append("Tier 'full' allows unit control, but no units were listed, so nothing is allowed "
+                          "(no sudo grant on systemd, an empty allowlist on MOS) and unit control stays "
+                          "unusable until you add some.")
     if a.story == "adopt" and a.tier != "observe":
         b.warnings.append(f"Adopting an existing homelab at the '{a.tier}' tier lets Planet Express change running "
                           "stacks (each change still needs your approval). 'observe' changes nothing.")
@@ -213,7 +216,7 @@ def _config_content(b: _Builder) -> str:
     a = b.a
     forbidden = FORBIDDEN_RISKS_BY_TIER[a.tier]
     allowlist = SudoAllowlist(units=[SudoUnitGrant(unit=u.unit, actions=u.actions) for u in a.sudo_units]
-                              if a.tier == "full" and b.init == "systemd" else [])
+                              if a.tier == "full" else [])
     cfg = PlanetExpressConfig(
         stacks_root=a.stacks_root, forbidden_stacks=list(a.ignored_stacks),
         host_control_provider="mos" if b.init == "mos" else "systemd",

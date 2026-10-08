@@ -293,6 +293,87 @@ def test_sudo_command_built_with_unit_before_action(monkeypatch, provider):
     assert seen_mutating["argv"] == ["sudo", "-n", "service", "docker", "restart"]
 
 
+# --- root without sudo (MOS): same gate, direct `service` argv -------------------------------
+
+
+def _mutating_recorder(seen, state="docker is running."):
+    def fake_run_argv(argv, timeout):
+        if argv == ["service", "docker", "status"]:
+            return (0, state, "")
+        seen.append(argv)
+        return (0, "", "")
+    return fake_run_argv
+
+
+def test_root_without_sudo_runs_service_directly(monkeypatch, provider):
+    monkeypatch.setattr(hcm.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hcm.shutil, "which", lambda name: None)
+    gated = []
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: gated.append(command))
+    seen = []
+    monkeypatch.setattr(bender, "run_argv", _mutating_recorder(seen))
+    result = provider.restart_service("docker")
+    assert gated == ["sudo service docker restart"]  # gate semantics unchanged
+    assert seen == [["service", "docker", "restart"]]
+    assert result.ok is True and result.effect == "applied"
+
+
+def test_non_root_with_sudo_keeps_the_sudo_path(monkeypatch, provider):
+    monkeypatch.setattr(hcm.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hcm.shutil, "which", lambda name: "/usr/bin/sudo")
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    seen = []
+    monkeypatch.setattr(bender, "run_argv", _mutating_recorder(seen))
+    provider.restart_service("docker")
+    assert seen == [["sudo", "-n", "service", "docker", "restart"]]
+
+
+def test_root_with_sudo_keeps_the_sudo_path(monkeypatch, provider):
+    monkeypatch.setattr(hcm.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hcm.shutil, "which", lambda name: "/usr/bin/sudo")
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+    seen = []
+    monkeypatch.setattr(bender, "run_argv", _mutating_recorder(seen))
+    provider.restart_service("docker")
+    assert seen == [["sudo", "-n", "service", "docker", "restart"]]
+
+
+def test_non_root_without_sudo_still_tries_sudo_and_fails_honestly(monkeypatch, provider):
+    """A non-root process must never fall back to running `service` unprivileged-as-if-allowed."""
+    monkeypatch.setattr(hcm.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(hcm.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bender, "_check_sudo_allowlist", lambda command: None)
+
+    def fake_run_argv(argv, timeout):
+        if argv == ["service", "docker", "status"]:
+            return (0, "docker is running.", "")
+        assert argv[:2] == ["sudo", "-n"]
+        return (127, "", "sudo: not found")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    result = provider.stop_service("docker")
+    assert result.ok is False and result.effect == "unknown"
+
+
+def test_root_without_sudo_is_still_refused_outside_the_real_allowlist(monkeypatch, provider):
+    """Uses the real gate (not a stub): config's sudo_allowlist still decides, root or not."""
+    monkeypatch.setattr(hcm.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(hcm.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bender, "HOST_CONTROL_PROVIDER", "mos")
+    from config_schema import SudoAllowlist, SudoUnitGrant
+    monkeypatch.setattr(bender, "SUDO_ALLOWLIST", SudoAllowlist(
+        units=[SudoUnitGrant(unit="docker", actions=["restart"])]))
+
+    def fake_run_argv(argv, timeout):
+        raise AssertionError(f"must not run: {argv!r}")
+
+    monkeypatch.setattr(bender, "run_argv", fake_run_argv)
+    for unit, action in (("cron", "restart"), ("docker", "stop")):
+        result = getattr(provider, f"{action}_service")(unit)
+        assert result.ok is False and result.effect == "not_applied"
+        assert "not in the sudo allowlist" in result.detail
+
+
 # --- get_host_logs ------------------------------------------------------------------------------
 
 

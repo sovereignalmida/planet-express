@@ -129,6 +129,17 @@ def _sudo_action_allowed(unit: str, action: str) -> bool:
     return False
 
 
+def sudo_unit_command(action: str, unit: str) -> str:
+    """The string `_check_sudo_allowlist()` is asked about for a unit start/stop/restart, in the
+    shape the configured provider uses (`sudo systemctl <action> <unit>` or `sudo service <unit>
+    <action>`). Callers gate through this so the shape can never disagree with the gate's own
+    `HOST_CONTROL_PROVIDER` switch. On MOS the gate is still asked in the `sudo` form even though
+    root-without-sudo hosts run `service` directly: the allowlist is the policy, sudo is not."""
+    if HOST_CONTROL_PROVIDER == "mos":
+        return f"sudo service {unit} {action}"
+    return f"sudo systemctl {action} {unit}"
+
+
 def _check_sudo_allowlist(command: str) -> None:
     """Raise SafetyError for any segment that invokes `sudo` anywhere and isn't an
     explicitly declared (unit-or-glob, action) grant in config.yaml's sudo_allowlist
