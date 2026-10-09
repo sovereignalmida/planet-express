@@ -151,7 +151,7 @@ def test_put_and_delete_are_guarded_like_post(app, sessions):
 
 @pytest.mark.parametrize("peer, allowed", [
     ("192.168.1.20", True), ("10.0.0.5", True), ("172.20.1.1", True), ("127.0.0.1", True), ("169.254.1.1", True),
-    ("fd00::1", True), ("fe80::1", True), ("::1", True), ("::ffff:192.168.1.20", True),
+    ("fd00::1", True), ("fec0::5054:ff:fe12:3456", True), ("fe80::1", True), ("::1", True), ("::ffff:192.168.1.20", True),
     ("8.8.8.8", False), ("1.1.1.1", False), ("100.64.0.1", False), ("192.0.2.1", False), ("2001:db8::1", False), ("::ffff:8.8.8.8", False), ("", False), ("junk", False)])
 def test_peer_privacy(peer, allowed):
     assert is_private_peer(peer) is allowed

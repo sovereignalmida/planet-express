@@ -114,7 +114,7 @@ class Sessions:
 
 _PEER_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",      # RFC 1918, loopback, link-local
-    "::1/128", "fc00::/7", "fe80::/10"))                                                    # and their IPv6 equivalents
+    "::1/128", "fc00::/7", "fe80::/10", "fec0::/10"))      # fec0 is deprecated site-local, still handed out by some virtual networks                                                    # and their IPv6 equivalents
 
 
 def is_private_peer(address: str | None) -> bool:
