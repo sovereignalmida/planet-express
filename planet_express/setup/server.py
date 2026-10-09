@@ -25,7 +25,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from flask import Flask, g, jsonify, make_response, redirect, request
+from pathlib import Path
+
+from flask import Flask, abort, g, jsonify, make_response, redirect, render_template, request, url_for
 
 log = logging.getLogger("planet_express.setup.server")
 
@@ -153,9 +155,41 @@ class _Exposure:
             return self._value
 
 
+_REPO = Path(__file__).resolve().parents[2]
+
+# The ten stages of the wizard. `built` is False until the slice that implements it lands.
+STAGES = [
+    ("welcome", "Welcome", "fry", True), ("scan", "Scan", "leela", True), ("location", "Where it lives", "fry", True),
+    ("powers", "What it may do", "fry", True), ("telegram", "Telegram", "fry", False),
+    ("operator", "Operator account", "fry", False), ("llm", "LLM key", "fry", False),
+    ("review", "Review the plan", "farnsworth", True), ("install", "Install", "bender", False),
+    ("done", "Verify and done", "hermes", False)]
+
+TIERS = [
+    {"id": "observe", "title": "WATCH ONLY", "risk": "R0", "risk_class": "ok",
+     "detail": "Looks at containers, disks and logs and tells you. Changes nothing.",
+     "access": "Read access to Docker and your compose files."},
+    {"id": "restart", "title": "RESTART CONTAINERS", "risk": "R1", "risk_class": "ok",
+     "detail": "Can restart a container that has failed, and ask before anything else.",
+     "access": "Docker control."},
+    {"id": "stacks", "title": "MANAGE STACKS", "risk": "R2", "risk_class": "warn",
+     "detail": "Can also update stacks with a canary check and prune safely.",
+     "access": "Docker control and write access to compose files."},
+    {"id": "full", "title": "FULL CREW", "risk": "R3", "risk_class": "warn",
+     "detail": "Everything above plus host services you name, restarted through a narrow sudo grant.",
+     "access": "Docker control, compose files and a sudoers grant for the units you list."}]
+
+
+def _stage_views():
+    return [{"index": i, "name": n, "title": t, "who": w, "built": b,
+             "prev": STAGES[i - 1][0] if i else None,
+             "next": STAGES[i + 1][0] if i + 1 < len(STAGES) and STAGES[i + 1][3] else None}
+            for i, (n, t, w, b) in enumerate(STAGES)]
+
+
 def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callable[[], bool],
-               clock: Callable[[], float] = time.time) -> Flask:
-    app = Flask(__name__)
+               clock: Callable[[], float] = time.time, session=None) -> Flask:
+    app = Flask(__name__, static_folder=str(_REPO / "static"), template_folder=str(_REPO / "templates" / "setup"))
     allowed = {h.lower() for h in allowed_hosts}
     exposed = _Exposure(exposure, clock)
 
@@ -202,6 +236,8 @@ def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callabl
 
     @app.get("/")
     def index():
+        if session is not None:
+            return redirect(url_for("stage", name="welcome"))
         return jsonify({"setup": "Planet Express", "state": "/api/state"})
 
     @app.get("/api/state")
@@ -213,7 +249,45 @@ def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callabl
     def ping():
         return jsonify({"ok": True})
 
+    if session is not None:
+        _wizard_routes(app, sessions, session, exposed)
     return app
+
+
+def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
+    views = _stage_views()
+
+    @app.get("/stage/<name>")
+    def stage(name):
+        current = next((v for v in views if v["name"] == name), None)
+        if current is None:
+            abort(404)
+        if not current["built"]:
+            return redirect(url_for("stage", name="welcome"))
+        if session.discovery is None:
+            session.run_discover()
+        d, a = session.discovery, session.public_answers()
+        left = sessions.seconds_left()
+        blocked_next = current["name"] == "scan" and not d["summary"]["can_continue"]
+        host_addr = _host_name(request.host or "")
+        return render_template("stage.html", stages=views, current=current, d=d, a=a, tiers=TIERS, csrf=g.session.csrf,
+                               exposed=exposed(), seconds_left=left, clock=f"{left // 60:02d}:{left % 60:02d}",
+                               host_addr=host_addr, blocked_next=blocked_next)
+
+    @app.post("/api/discover")
+    def api_discover():
+        return jsonify({"summary": session.run_discover()["summary"]})
+
+    @app.put("/api/answers")
+    def api_answers():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"ok": False, "errors": [{"field": "", "message": "expected a JSON object"}]}), 400
+        return jsonify(session.set_answers(body))
+
+    @app.post("/api/plan")
+    def api_plan():
+        return jsonify(session.build_plan())
 
 
 def _scrub(text: str) -> str:
@@ -242,7 +316,7 @@ def network_exposed() -> bool:
 
 def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessions,
           exposure: Callable[[], bool] = network_exposed, out: Callable[[str], None] = print,
-          stop: threading.Event | None = None) -> int:
+          stop: threading.Event | None = None, session=None) -> int:
     """Run the server on exactly these private addresses (never a wildcard) until the session ends, the hard cap
     passes, `stop` is set or the operator interrupts. Prints the URL and the certificate fingerprint."""
     import os
@@ -267,7 +341,7 @@ def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessio
             with os.fdopen(handle, "wb") as stream:
                 stream.write(data)
         hosts = set(names) | set(addresses) | {"localhost"}
-        app = create_app(sessions=sessions, allowed_hosts=hosts, exposure=exposure)
+        app = create_app(sessions=sessions, allowed_hosts=hosts, exposure=exposure, session=session)
         for address in addresses:
             try:
                 server = make_server(address, port, app, threaded=True, ssl_context=(cert_file, key_file),

@@ -126,8 +126,11 @@ def _serve_command(args) -> int:
 
     from planet_express.setup.server import Sessions, serve
     addresses = args.bind or (discover()["network"]["lan_addresses"] + ["127.0.0.1"])
+    from planet_express.setup.plan import plan
+    from planet_express.setup.session import SetupSession
+    session = SetupSession(discover_fn=discover, plan_fn=plan, repo_root=args.repo_root)
     return serve(addresses=list(dict.fromkeys(addresses)), port=args.port,
-                 names=[socket.gethostname(), *(args.name or [])], sessions=Sessions())
+                 names=[socket.gethostname(), *(args.name or [])], sessions=Sessions(), session=session)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -152,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     serving = sub.add_parser("serve", help="the browser wizard (HTTPS, private addresses only)")
     serving.add_argument("--port", type=int, default=8443)
     serving.add_argument("--bind", action="append", help="an address to listen on (repeatable); default: this host's LAN addresses")
+    serving.add_argument("--repo-root", help="the checkout holding the templates and scripts; defaults to this one")
     serving.add_argument("--name", action="append", help="an extra host name the page may be reached by")
     args = parser.parse_args(argv)
 

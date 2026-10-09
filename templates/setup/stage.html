@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf" content="{{ csrf }}">
+  <title>Planet Express — Setup</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='cockpit.css') }}">
+  <script src="{{ url_for('static', filename='setup.js') }}" defer></script>
+</head>
+<body>
+<div class="pe-app"><div class="pe-wrap">
+  <header class="pe-masthead">
+    <img src="{{ url_for('static', filename='logo.png') }}" alt="">
+    <div><div class="pe-kicker">FIRST-RUN SETUP</div><h1>PLANET EXPRESS</h1></div>
+    <span class="pe-spacer"></span>
+    <span class="pe-chip warn" id="setup-clock" data-seconds="{{ seconds_left }}">SETUP MODE · CLOSES IN {{ clock }}</span>
+    <span class="pe-chip info">LAN ONLY · {{ host_addr }}</span>
+  </header>
+  {% if exposed %}
+  <section class="pe-card crit" role="alert">
+    <h2>SETUP IS REACHABLE FROM OUTSIDE YOUR LAN</h2>
+    <p>This host has a public address. Press Ctrl-C in the terminal that printed the setup link to close setup, then
+       run it again once the host is not directly reachable.</p>
+  </section>
+  {% endif %}
+  <div class="pe-split">
+    <nav class="pe-rail" aria-label="Setup progress">
+      {% for s in stages %}
+      <div class="pe-step">
+        <span class="pe-marker {{ 'done' if s.index < current.index else 'active' if s.index == current.index else '' }}">{{ s.index + 1 }}</span>
+        {% if s.built %}<a href="{{ url_for('stage', name=s.name) }}">{{ s.title }}</a>{% else %}<span class="pe-panel-note">{{ s.title }}</span>{% endif %}
+      </div>
+      {% endfor %}
+    </nav>
+    <main class="pe-panel pe-tabbody" id="stage" data-stage="{{ current.name }}">
+      <div class="pe-attrib">
+        <img src="{{ url_for('static', filename='characters/futurama/avatar/' ~ current.who ~ '.png') }}" alt="{{ current.who|capitalize }}">
+        <div><div class="pe-kicker">{{ current.who|upper }}</div><h2>{{ current.title }}</h2></div>
+      </div>
+
+      {% if current.name == 'welcome' %}
+        <section class="pe-card ok">
+          <div class="pe-kicker">DETECTED</div>
+          <p><strong>{{ d.host.os }}</strong> · {{ d.host.init_system }} · {{ d.host.hostname }}</p>
+          <p>Install location: <code>{{ a.install_dir }}</code></p>
+        </section>
+        <p>Good news, everyone. I will look at this machine first and ask only what it cannot answer.
+           Nothing changes until you have read the plan and approved it.</p>
+        <div class="pe-field"><label>WHAT ARE WE DOING?</label>
+          <button class="pe-btn {{ 'accent' if a.story == 'fresh' else '' }}" data-answer="story" data-value="fresh">NEW INSTALL</button>
+          <button class="pe-btn {{ 'accent' if a.story == 'adopt' else '' }}" data-answer="story" data-value="adopt">ADOPT THIS HOMELAB (OBSERVE ONLY)</button>
+        </div>
+        {% if d.existing_pe.installed %}
+        <section class="pe-card warn">Planet Express {{ d.existing_pe.version or '' }} is already installed at
+          <code>{{ d.existing_pe.install_dir }}</code>. Existing files are kept, and a snapshot is taken first.</section>
+        {% endif %}
+
+      {% elif current.name == 'scan' %}
+        <section class="pe-verdict {{ 'ok' if d.summary.can_continue else 'crit' }}">
+          <div class="pe-verdict-text"><h2>{{ 'READY TO CONTINUE' if d.summary.can_continue else 'SOMETHING BLOCKS SETUP' }}</h2>
+            <p>{{ d.summary.ok }} fine · {{ d.summary.warn }} to note · {{ d.summary.blocked }} blocking</p></div>
+        </section>
+        {% for c in d.checks %}
+        <div class="pe-check {{ 'passed' if c.status == 'ok' else 'failed' if c.status == 'blocked' else '' }}">
+          <strong>{{ c.label }}</strong>
+          <span class="pe-badge {{ 'ok' if c.status == 'ok' else 'crit' if c.status == 'blocked' else 'warn' }}">{{ c.status|upper }}</span>
+          <div>{{ c.detail }}</div>
+          {% if c.fix %}<div class="pe-panel-note">{{ c.fix }}</div>{% endif %}
+        </div>
+        {% endfor %}
+        <p class="pe-panel-note">Planet Express guides these fixes; it does not install Docker or create storage pools for you.</p>
+        <button class="pe-btn" data-action="discover">RE-CHECK ⟳</button>
+
+      {% elif current.name == 'location' %}
+        <div class="pe-field"><label for="install_dir">INSTALL PATH</label>
+          <input class="pe-input" id="install_dir" data-answer="install_dir" value="{{ a.install_dir }}"></div>
+        {% for pool in d.storage.pools %}
+        <button class="pe-btn sm" data-answer="install_dir" data-value="{{ pool.mount }}/planetexpress">{{ pool.name }} · {{ pool.mount }}</button>
+        {% endfor %}
+        <div class="pe-field"><label for="stacks_root">STACKS FOLDER</label>
+          <input class="pe-input" id="stacks_root" data-answer="stacks_root" value="{{ a.stacks_root }}"></div>
+        <div class="pe-field"><label for="run_as">RUN AS</label>
+          <input class="pe-input" id="run_as" data-answer="run_as" value="{{ a.run_as }}"></div>
+        <h3>STACKS</h3>
+        <p class="pe-panel-note">A stack set to IGNORE is never read, started or stopped by Planet Express.</p>
+        {% for s in d.stacks %}
+        <label class="pe-check {{ 'passed' if s.name in a.ignored_stacks else '' }}">
+          <input type="checkbox" data-ignore="{{ s.name }}" {{ 'checked' if s.name in a.ignored_stacks }}>
+          IGNORE <strong>{{ s.name }}</strong> <span class="pe-panel-note">{{ s.services|length }} service(s){{ ' · running' if s.running }}{{ ' · ingress' if s.ingress_suggested }}</span>
+        </label>
+        {% else %}<p class="pe-panel-note">No compose stacks found under <code>{{ a.stacks_root }}</code>.</p>{% endfor %}
+
+      {% elif current.name == 'powers' %}
+        <p>What may Planet Express do on its own? Each step up includes the ones before it.</p>
+        {% for t in tiers %}
+        <button class="pe-check {{ 'passed' if a.tier == t.id else '' }}" data-answer="tier" data-value="{{ t.id }}">
+          <strong>{{ t.title }}</strong> <span class="pe-badge {{ t.risk_class }}">{{ t.risk }}</span>
+          <div>{{ t.detail }}</div><div class="pe-panel-note">{{ t.access }}</div>
+        </button>
+        {% endfor %}
+
+      {% elif current.name == 'review' %}
+        <div id="plan" data-loaded="0"><p class="pe-panel-note">Building the plan…</p></div>
+      {% endif %}
+
+      <div class="pe-actions" id="answer-errors" role="alert"></div>
+      <footer class="pe-panel-head">
+        {% if current.prev %}<a class="pe-btn" href="{{ url_for('stage', name=current.prev) }}">BACK</a>{% endif %}
+        <span class="pe-spacer"></span>
+        {% if current.next %}
+          {% if blocked_next %}<button class="pe-btn" disabled>NEXT</button>
+          {% else %}<a class="pe-btn primary accent" href="{{ url_for('stage', name=current.next) }}">NEXT</a>{% endif %}
+        {% endif %}
+      </footer>
+    </main>
+  </div>
+</div></div>
+</body>
+</html>
