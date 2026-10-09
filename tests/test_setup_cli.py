@@ -81,3 +81,11 @@ def test_on_mos_the_pool_mount_owner_is_trusted_only_when_the_plan_writes_under_
     assert owner in _trusted_uids(Plan("fresh", (inside,), (), (), ()), report)
     assert _trusted_uids(Plan("fresh", (outside,), (), (), ()), report) == {0}
     assert _trusted_uids(Plan("fresh", (inside,), (), (), ()), {**report, "host": {"init_system": "systemd"}}) == {0}
+
+
+def test_serve_accepts_preview_and_it_is_documented():
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-m", "planet_express.setup", "serve", "--help"], capture_output=True, text=True,
+                         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": "."}, cwd=".")
+    assert out.returncode == 0 and "--preview" in out.stdout

@@ -169,7 +169,19 @@ def _serve_command(args) -> int:
     cannot = None if os.geteuid() == 0 else (
         "This setup was not started as root, so it can show you the plan but cannot install it. "
         "Press Ctrl-C and run it again with sudo.")
-    session = SetupSession(discover_fn=discover, plan_fn=plan, repo_root=args.repo_root, apply_fn=apply_fn,
+    discover_fn = discover
+    if args.preview and os.geteuid() != 0:
+        def discover_fn():                                          # noqa: F811 -- a preview shows the pages, it installs nothing
+            report = discover()
+            for check in report["checks"]:
+                if check["id"] == "privileges" and check["status"] == "blocked":
+                    check.update(status="warn", overridable=True,
+                                 detail="Preview: this server is not root, so it can show every screen but cannot install.")
+            report["summary"] = {**report["summary"], "blocked": sum(c["status"] == "blocked" for c in report["checks"]),
+                                 "warn": sum(c["status"] == "warn" for c in report["checks"])}
+            report["summary"]["can_continue"] = report["summary"]["blocked"] == 0
+            return report
+    session = SetupSession(discover_fn=discover_fn, plan_fn=plan, repo_root=args.repo_root, apply_fn=apply_fn,
                            undo_fn=undo_fn, journal_fn=journal_fn, cannot_apply=cannot, dry_run_fn=dry_run_fn)
     holder["session"] = session
     return serve(addresses=list(dict.fromkeys(addresses)), port=args.port,
@@ -199,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
     serving.add_argument("--port", type=int, default=8443)
     serving.add_argument("--bind", action="append", help="an address to listen on (repeatable); default: this host's LAN addresses")
     serving.add_argument("--repo-root", help="the checkout holding the templates and scripts; defaults to this one")
+    serving.add_argument("--preview", action="store_true", help="when not root, let the privileges check pass so every screen can be viewed (nothing can be installed)")
     serving.add_argument("--name", action="append", help="an extra host name the page may be reached by")
     args = parser.parse_args(argv)
 
