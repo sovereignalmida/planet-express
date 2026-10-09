@@ -227,7 +227,8 @@ class FakeHost:
             if "__pycache__" in rel.split("/") or rel.endswith(".pyc"):
                 continue
             node = self.nodes[other]
-            digest.update(f"{rel}\0{node.kind}\0{len(node.data) if node.kind == 'file' else 0}\n".encode())
+            detail = hashlib.sha256(node.data).hexdigest() if node.kind == "file" else (node.target or "") if node.kind == "symlink" else ""
+            digest.update(f"{rel}\0{node.kind if node.kind != 'symlink' else 'link'}\0{detail}\n".encode())
         return digest.hexdigest()
 
     def remove_tree(self, path, identity):

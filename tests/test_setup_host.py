@@ -266,3 +266,16 @@ def test_tree_digest_changes_when_the_tree_does_and_ignores_bytecode(env):
     assert env.host.tree_digest(f"{env.root}/t") != first
     with pytest.raises(HostError):
         env.host.tree_digest(f"{env.root}/missing")
+
+
+def test_tree_digest_notices_a_same_size_edit_and_a_retargeted_link(env):
+    env.dir("t")
+    env.file("t/f", b"aaaa")
+    link = env.symlink("t/l", "/one")
+    first = env.host.tree_digest(f"{env.root}/t")
+    env.host.unlink(link)
+    env.symlink("t/l", "/two")                                         # retargeted
+    second = env.host.tree_digest(f"{env.root}/t")
+    assert second != first
+    env.file("t/f", b"bbbb")                                           # same size, different bytes
+    assert env.host.tree_digest(f"{env.root}/t") != second

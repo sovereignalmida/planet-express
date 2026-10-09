@@ -354,8 +354,13 @@ class RealHost:
                     if seen[0] > limit:
                         raise HostError(f"{path} has too many entries to fingerprint")
                     kind = "dir" if stat_module.S_ISDIR(st.st_mode) else "link" if stat_module.S_ISLNK(st.st_mode) else "file"
-                    size = st.st_size if kind == "file" else 0
-                    digest.update(f"{prefix}{entry}\0{kind}\0{size}\n".encode("utf-8", "surrogateescape"))
+                    if kind == "file":
+                        detail = self._file_hash(entry, handle)
+                    elif kind == "link":
+                        detail = os.readlink(entry, dir_fd=handle)
+                    else:
+                        detail = ""
+                    digest.update(f"{prefix}{entry}\0{kind}\0{detail}\n".encode("utf-8", "surrogateescape"))
                     if kind == "dir":
                         child = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=handle)
                         try:
@@ -369,6 +374,17 @@ class RealHost:
             finally:
                 os.close(top)
         return digest.hexdigest()
+
+    @staticmethod
+    def _file_hash(name: str, dir_fd: int) -> str:
+        handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), dir_fd=dir_fd)
+        try:
+            digest = hashlib.sha256()
+            while chunk := os.read(handle, 1 << 20):
+                digest.update(chunk)
+            return digest.hexdigest()
+        finally:
+            os.close(handle)
 
     def remove_tree(self, path: str, identity: dict) -> None:
         """Delete a directory tree that this tool created: `identity` (device and inode) must still be the
