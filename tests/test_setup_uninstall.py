@@ -278,3 +278,12 @@ def test_an_older_revision_of_our_own_casa_stacks_unit_is_still_recognised():
     files = {**LIVE_FILES, "/etc/systemd/system/casa-stacks.service": old_revision}
     p = plan(discover(ubuntu(files=files), repo_root="/home/pe/apps/pe"), uninstall_answers())
     assert "/etc/systemd/system/casa-stacks.service" in {s.target for s in p.steps}
+
+
+def test_a_unit_that_only_mentions_our_boot_script_is_not_claimed():
+    for text in ("[Unit]\n# runs casa_boot.py someday\n[Service]\nExecStart=/usr/bin/true\n",
+                 "[Service]\nExecStart=/usr/bin/python3 /opt/other/casa_boot.py\n",
+                 "[Service]\nExecStartPre=/usr/bin/python3 /home/pe/apps/pe/casa_boot.py\nExecStart=/usr/bin/true\n"):
+        files = {**LIVE_FILES, "/etc/systemd/system/casa-stacks.service": text}
+        p = plan(discover(ubuntu(files=files), repo_root="/home/pe/apps/pe"), uninstall_answers())
+        assert "/etc/systemd/system/casa-stacks.service" not in {s.target for s in p.steps}, text
