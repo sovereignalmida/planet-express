@@ -587,7 +587,7 @@ def _uninstall(b: _Builder) -> None:
         from scripts.render_template import render
         mine = render(b.read("systemd/casa-stacks.service.template"), INSTALL_DIR=a.install_dir, RUN_USER=a.run_as,
                       RUN_GROUP=a.run_group or a.run_as, CONFIG_FILE=p["config"], DASHBOARD_PORT=str(a.dashboard_port))
-        if hashes.get(stacks_unit) == hashlib.sha256(mine.encode()).hexdigest():
+        if hashes.get(stacks_unit) == hashlib.sha256(mine.encode()).hexdigest() or existing.get("stacks_unit_is_ours"):
             names += ("casa-stacks",)
         else:
             b.not_touched.append("casa-stacks.service is not what Planet Express writes, so it is treated as yours and kept.")

@@ -271,3 +271,10 @@ def test_a_casa_stacks_unit_setup_did_not_write_is_left_alone_and_one_it_did_is_
         assert ("/etc/systemd/system/casa-stacks.service" in targets) is removed
         if not removed:
             assert any("casa-stacks.service" in t and "kept" in t for t in p.will_not_touch)
+
+
+def test_an_older_revision_of_our_own_casa_stacks_unit_is_still_recognised():
+    old_revision = "[Unit]\nDescription=Planet Express stacks\n[Service]\nExecStart=/usr/bin/python3 /home/pe/apps/pe/casa_boot.py\n"
+    files = {**LIVE_FILES, "/etc/systemd/system/casa-stacks.service": old_revision}
+    p = plan(discover(ubuntu(files=files), repo_root="/home/pe/apps/pe"), uninstall_answers())
+    assert "/etc/systemd/system/casa-stacks.service" in {s.target for s in p.steps}

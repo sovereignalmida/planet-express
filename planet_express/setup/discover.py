@@ -293,10 +293,14 @@ def _existing_pe(env, storage: dict) -> dict:
         "systemd_unit": unit is not None,
         "init_script": env.exists("/etc/init.d/casa-planetexpress"),
     }
+    # A casa-stacks unit that runs Planet Express's own boot script is Planet Express's, whatever revision of the
+    # template wrote it; one that does not is the operator's.
+    stacks_unit = env.read("/etc/systemd/system/casa-stacks.service")
     changelog = env.read(f"{install_dir}/CHANGELOG.md") if install_dir else None
     version = re.search(r"^## \[(\d+\.\d+\.\d+[^\]]*)\]", changelog or "", re.MULTILINE)
     return {"installed": any(markers.values()), **markers, "version": version.group(1) if version else None,
             "install_dir": install_dir, "config_path": config_path, "present": present, "sha256": hashes,
+            "stacks_unit_is_ours": bool(stacks_unit and "casa_boot.py" in stacks_unit),
             "forbidden_stacks": _config_forbidden_stacks(env.read(config_path) if config_path else None)}
 
 
