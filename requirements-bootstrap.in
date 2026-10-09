@@ -1,0 +1,8 @@
+# The wizard's own dependencies, installed by setup.sh into a throwaway virtualenv (not PE's runtime venv).
+# Regenerate the hashed lock with:
+#   uv pip compile requirements-bootstrap.in --universal --python-version 3.11 --generate-hashes -o requirements-bootstrap.txt
+pydantic>=2.0
+PyYAML>=6.0
+Flask>=3.0
+cryptography>=43.0
+segno>=1.6
