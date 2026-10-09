@@ -181,10 +181,15 @@ TIERS = [
 
 
 def _stage_views():
-    return [{"index": i, "name": n, "title": t, "who": w, "built": b,
-             "prev": STAGES[i - 1][0] if i else None,
-             "next": STAGES[i + 1][0] if i + 1 < len(STAGES) and STAGES[i + 1][3] else None}
-            for i, (n, t, w, b) in enumerate(STAGES)]
+    built = [i for i, stage in enumerate(STAGES) if stage[3]]
+    views = []
+    for i, (n, t, w, b) in enumerate(STAGES):
+        before = [j for j in built if j < i]
+        after = [j for j in built if j > i]
+        views.append({"index": i, "name": n, "title": t, "who": w, "built": b,
+                      "prev": STAGES[before[-1]][0] if before else None,
+                      "next": STAGES[after[0]][0] if after else None})
+    return views
 
 
 def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callable[[], bool],
@@ -268,15 +273,17 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
             session.run_discover()
         d, a = session.discovery, session.public_answers()
         left = sessions.seconds_left()
-        blocked_next = current["name"] == "scan" and not d["summary"]["can_continue"]
+        is_exposed = exposed()
+        blocked_next = is_exposed or (current["name"] == "scan" and not d["summary"]["can_continue"])
         host_addr = _host_name(request.host or "")
         return render_template("stage.html", stages=views, current=current, d=d, a=a, tiers=TIERS, csrf=g.session.csrf,
-                               exposed=exposed(), seconds_left=left, clock=f"{left // 60:02d}:{left % 60:02d}",
+                               exposed=is_exposed, seconds_left=left, clock=f"{left // 60:02d}:{left % 60:02d}",
                                host_addr=host_addr, blocked_next=blocked_next)
 
     @app.post("/api/discover")
     def api_discover():
-        return jsonify({"summary": session.run_discover()["summary"]})
+        found = session.run_discover()
+        return jsonify({key: found.get(key) for key in ("summary", "checks", "storage", "stacks", "host", "docker")})
 
     @app.put("/api/answers")
     def api_answers():

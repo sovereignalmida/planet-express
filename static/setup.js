@@ -19,12 +19,28 @@
     }
   }
 
+  const pending = new Set();   // saves in flight: navigation waits for them, so a typed value is never lost
   function save(partial, reload) {
-    return send("PUT", "/api/answers", partial).then(r => {
+    const job = send("PUT", "/api/answers", partial).then(r => {
       show(r.body.errors);
       if (r.body.ok && reload) window.location.reload();
+      return r.body.ok;
     });
+    pending.add(job);
+    job.finally(() => pending.delete(job));
+    return job;
   }
+
+  // Leaving a stage: finish saving, and only go on if every save was accepted.
+  document.querySelectorAll("a.pe-btn[href]").forEach(link => link.addEventListener("click", ev => {
+    const active = document.activeElement;
+    if (active && active.tagName === "INPUT" && active.dataset.answer) active.dispatchEvent(new Event("change"));
+    if (!pending.size) return;
+    ev.preventDefault();
+    Promise.all(Array.from(pending)).then(results => {
+      if (results.every(Boolean)) window.location.assign(link.href);
+    });
+  }));
 
   document.querySelectorAll("[data-answer]").forEach(el => {
     const field = el.dataset.answer;

@@ -140,3 +140,27 @@ def test_the_mutating_routes_take_no_path_command_or_step(wizard):
     app, *_ = wizard
     rules = sorted(r.rule for r in app.url_map.iter_rules() if r.methods & {"POST", "PUT", "DELETE", "PATCH"})
     assert rules == ["/api/answers", "/api/discover", "/api/ping", "/api/plan"]
+
+
+def test_next_and_back_skip_stages_that_are_not_built(wizard):
+    app, cookie, *_ = wizard
+    powers = call(app, "GET", "/stage/powers", cookie=cookie).get_data(as_text=True)
+    review = call(app, "GET", "/stage/review", cookie=cookie).get_data(as_text=True)
+    assert 'href="/stage/review"' in powers and 'href="/stage/powers"' in review
+    assert "/stage/telegram" not in powers and "/stage/llm" not in review
+
+
+def test_next_is_withheld_while_setup_is_exposed(report):
+    clock = Clock()
+    sessions = Sessions(clock=clock)
+    session = SetupSession(discover_fn=lambda: copy.deepcopy(report), plan_fn=plan, repo_root=REPO)
+    app = create_app(sessions=sessions, allowed_hosts={"192.168.1.50"}, exposure=lambda: True, clock=clock, session=session)
+    cookie, _ = login(app, sessions)
+    html = call(app, "GET", "/stage/welcome", cookie=cookie).get_data(as_text=True)
+    assert "REACHABLE FROM OUTSIDE" in html and "disabled>NEXT" in html and 'href="/stage/scan"' not in html.split("<footer")[-1]
+
+
+def test_the_recheck_returns_the_refreshed_report(wizard):
+    app, cookie, csrf, *_ = wizard
+    body = post(app, cookie, csrf, "/api/discover").get_json()
+    assert body["summary"] and body["checks"] and "stacks" in body and "storage" in body
