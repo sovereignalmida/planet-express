@@ -151,3 +151,30 @@ HTTP surface, so the review is of the checks above, not of the screens.
   output for them.
 - **Reload:** kill the browser state mid-install, reload, and the view equals the journal.
 - **A real browser pass** (the in-app browser) over each story against the fake host, then on the VMs.
+
+
+## As built: the wizard, and repair and uninstall
+
+All five slices are built (A4a to A4e) and were run end to end on a real Ubuntu 24.04 VM and a real MOS VM: install,
+reboot, undo. Running them found bugs no unit test had: a stock `775` clone directory refused as unsafe, a site-local
+IPv6 address read as "public", FAT renumbering inodes at every mount (which stranded undo after a reboot), MOS recopying
+its init scripts at boot, the MOS pool being owned by uid 500, and no way on the page to acknowledge running as root.
+
+**Repair** is the normal plan, shown from a dry run: only the steps that would change are listed, the rest are
+collapsed as "already in place". Nothing you wrote is overwritten.
+
+**Uninstall** removes the integration and keeps everything a person wrote:
+
+| removed (after a snapshot) | kept |
+|---|---|
+| services stopped and disabled, unit files or init scripts and `/etc/default` copies, the sudo grant, the Planet Express block in the MOS boot hooks (a hook that held only that block is deleted) | config, the secret files, state, logs, the database, the checkout and its virtualenv, the dashboard account and group, snapshots, every container and compose file |
+
+Three new typed steps carry it: `file.remove`, `service.disable`, `boot_hook.remove`. Each is compare-and-swapped against
+the hash the plan saw, keeps a private copy first, journals its intent before acting, and has an inverse, so an uninstall
+can be undone. Decisions the Codex review forced:
+
+- the snapshot step runs a script as the service user, so an uninstall is bound to the install that was **found**, not to
+  what the page says (`install_dir`, and root only on MOS);
+- `casa-stacks.service` may be an operator's own unit, so it is removed only on an exact byte match with what setup would
+  write; otherwise it is kept and the plan tells the person how to stop it by hand. Heuristics for "is this ours" were
+  tried and rejected: each traded one failure for another.
