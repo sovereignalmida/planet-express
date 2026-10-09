@@ -32,12 +32,14 @@ class SetupSession:
     def __init__(self, *, discover_fn: Callable[[], dict], plan_fn: Callable, repo_root: str | None = None,
                  apply_fn: Callable | None = None, undo_fn: Callable | None = None,
                  journal_fn: Callable | None = None, cannot_apply: str | None = None, checks=None,
+                 dry_run_fn: Callable | None = None,
                  clock: Callable[[], float] | None = None):
         """`apply_fn(plan, replan)` and `undo_fn(plan)` run the real thing and return an ApplyResult / UndoResult;
         `journal_fn(plan_id)` opens that plan's journal for reading. `cannot_apply` is why this process may not
         change the host (not root), shown instead of an Install button."""
         self._discover, self._plan, self.repo_root = discover_fn, plan_fn, repo_root
         self._apply_fn, self._undo_fn, self._journal_fn = apply_fn, undo_fn, journal_fn
+        self._dry_run_fn = dry_run_fn             # plan -> [{step, check, detail}] without changing anything (repair's diff)
         self.cannot_apply = cannot_apply if apply_fn is not None else (cannot_apply or "this server was started without an executor")
         self.phase = "idle"                       # idle | applying | done | stopped | refused | undoing | undone | undo_stopped
         self.outcome: dict | None = None          # the last apply or undo result, public fields only
@@ -128,7 +130,14 @@ class SetupSession:
                 fields = sorted({".".join(str(p) for p in e["loc"]) for e in exc.errors(include_input=False)})
                 return {"error": f"the answers are incomplete or invalid: {', '.join(fields)}"}
             self.reviewed = self._plan(self.discovery, answers, repo_root=self.repo_root)
-            return self.reviewed.to_public()
+            public = self.reviewed.to_public()
+            if answers.story == "repair" and self._dry_run_fn is not None and self.reviewed.applicable:
+                try:
+                    public["checks"] = {c["step"]: {"check": c["check"], "detail": c["detail"]}
+                                        for c in self._dry_run_fn(self.reviewed)}
+                except Exception:                                      # noqa: BLE001 -- no diff is better than no plan
+                    pass
+            return public
 
 
     # -- running ---------------------------------------------------------------------------------------------------

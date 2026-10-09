@@ -163,7 +163,14 @@
       if (p.blocked && p.blocked.length) p.blocked.forEach(b => add("div", "pe-card crit", b));
       (p.warnings || []).forEach(w => add("div", "pe-card warn", w));
       add("div", "pe-kicker", "PLAN " + p.plan_id + " · " + p.summary.steps + " STEPS · HIGHEST RISK " + p.summary.highest_risk);
-      (p.steps || []).forEach((s, i) => {
+      const inPlace = (s) => p.checks && p.checks[s.id] && p.checks[s.id].check === "satisfied";
+      if (p.checks) {
+        const n = (p.steps || []).filter(inPlace).length;
+        add("div", "pe-card " + (n === p.steps.length ? "ok" : "warn"),
+            n === p.steps.length ? "Everything is already in place. Nothing would change."
+                                 : n + " of " + p.steps.length + " steps are already in place and are hidden below. These would change:");
+      }
+      (p.steps || []).filter(s => !inPlace(s)).forEach((s, i) => {
         const row = add("details", "pe-check", "");
         const head = add("summary", "", (i + 1) + ". " + s.title + " ");
         add("span", "pe-badge " + (s.risk === "R0" || s.risk === "R1" ? "ok" : "warn"), s.risk, head);
@@ -194,6 +201,12 @@
     let seq = 0;
     const lines = [];
     const mark = {pending: "·", started: "▶", ok: "✓", failed: "✗", undone: "↺"};
+    const story = progress.dataset.story;
+    const heads = story === "uninstall"
+      ? {applying: "REMOVING", done: "REMOVED", stopped: "STOPPED", refused: "NOT STARTED", undoing: "PUTTING IT BACK",
+         undone: "PUT BACK", undo_stopped: "UNDO STOPPED"}
+      : {applying: story === "repair" ? "REPAIRING" : "INSTALLING", done: story === "repair" ? "REPAIRED" : "INSTALLED",
+         stopped: "STOPPED", refused: "NOT STARTED", undoing: "UNDOING", undone: "UNDONE", undo_stopped: "UNDO STOPPED"};
     const draw = (data) => {
       progress.textContent = "";
       const add = (tag, cls, text, parent) => {
@@ -207,8 +220,7 @@
       const failed = data.steps.find(s => s.status === "failed");
       const verdict = add("section", "pe-verdict " + (failed || data.phase === "stopped" ? "crit" : data.phase === "done" ? "ok" : "warn"), "");
       const text = add("div", "pe-verdict-text", "", verdict);
-      add("h2", "", {applying: "INSTALLING", done: "INSTALLED", stopped: "STOPPED", refused: "NOT STARTED", undoing: "UNDOING",
-                     undone: "UNDONE", undo_stopped: "UNDO STOPPED"}[data.phase] || data.phase.toUpperCase(), text);
+      add("h2", "", heads[data.phase] || data.phase.toUpperCase(), text);
       add("p", "", done + " of " + data.steps.length + " steps finished", text);
       if (data.outcome && data.outcome.reason) add("p", "", data.outcome.reason, text);
       data.steps.forEach(s => {
@@ -227,7 +239,7 @@
         add("a", "pe-btn", "BACK TO PLAN", progress).href = "/stage/review";
       }
       if (data.phase === "stopped" || data.phase === "done" || data.phase === "undo_stopped") {
-        const undo = add("button", "pe-btn warn", "UNDO WHAT WAS INSTALLED", progress);
+        const undo = add("button", "pe-btn warn", story === "uninstall" ? "PUT EVERYTHING BACK" : "UNDO WHAT WAS DONE", progress);
         undo.addEventListener("click", () => send("POST", "/api/undo").then(r => {
           if (r.status !== 200) show([{field: "undo", message: r.body.error || "refused"}]);
         }));

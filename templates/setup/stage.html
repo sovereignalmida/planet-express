@@ -54,6 +54,12 @@
         {% if d.existing_pe.installed %}
         <section class="pe-card warn">Planet Express {{ d.existing_pe.version or '' }} is already installed at
           <code>{{ d.existing_pe.install_dir }}</code>. Existing files are kept, and a snapshot is taken first.</section>
+        <div class="pe-field"><label>OR WORK ON THE INSTALL THAT IS HERE</label>
+          <button class="pe-btn {{ 'accent' if a.story == 'repair' else '' }}" data-answer="story" data-value="repair">REPAIR IT</button>
+          <button class="pe-btn {{ 'warn' if a.story == 'uninstall' else '' }}" data-answer="story" data-value="uninstall">UNINSTALL IT</button>
+        </div>
+        {% if a.story == 'repair' %}<p class="pe-panel-note">REPAIR re-checks everything against what is on this host and shows only what would change. Nothing you wrote is overwritten.</p>{% endif %}
+        {% if a.story == 'uninstall' %}<p class="pe-panel-note">UNINSTALL removes the services, units, boot hooks and sudo grant. Your configuration, secrets, state and data stay, and a snapshot is taken first.</p>{% endif %}
         {% endif %}
 
       {% elif current.name == 'scan' %}
@@ -162,16 +168,26 @@
         {% if session.cannot_apply %}
         <section class="pe-card warn">{{ session.cannot_apply }}</section>
         {% else %}
-        <button class="pe-btn primary accent" id="approve" disabled>APPROVE AND INSTALL</button>
+        <button class="pe-btn primary accent" id="approve" disabled>APPROVE AND {{ {'repair': 'REPAIR', 'uninstall': 'UNINSTALL'}.get(a.story, 'INSTALL') }}</button>
         {% endif %}
 
       {% elif current.name == 'install' %}
-        <div id="progress" data-run="install"><p class="pe-panel-note">Reading the journal…</p></div>
+        <div id="progress" data-run="install" data-story="{{ a.story }}"><p class="pe-panel-note">Reading the journal…</p></div>
 
       {% elif current.name == 'done' %}
-        <section class="pe-verdict ok"><div class="pe-verdict-text"><h2>PLANET EXPRESS IS INSTALLED</h2>
+        {% if a.story == 'uninstall' %}
+        <section class="pe-verdict ok"><div class="pe-verdict-text"><h2>PLANET EXPRESS HAS BEEN REMOVED</h2>
+          <p>Hermes has filed the report. Your configuration, secrets, state and data were left where they were.</p></div></section>
+        <div id="progress" data-run="done" data-story="{{ a.story }}"><p class="pe-panel-note">Reading the journal…</p></div>
+        <h3>WHAT NOW</h3>
+        <ol>
+          <li>To bring it back, run <code>./setup.sh</code> again: it will find your config and keep it.</li>
+          <li>To delete what was kept, remove the checkout and the config and env files yourself.</li>
+        </ol>
+        {% else %}
+        <section class="pe-verdict ok"><div class="pe-verdict-text"><h2>{{ 'PLANET EXPRESS IS REPAIRED' if a.story == 'repair' else 'PLANET EXPRESS IS INSTALLED' }}</h2>
           <p>Hermes has filed the report. Everything below was read back from the host, not assumed.</p></div></section>
-        <div id="progress" data-run="done"><p class="pe-panel-note">Reading the journal…</p></div>
+        <div id="progress" data-run="done" data-story="{{ a.story }}"><p class="pe-panel-note">Reading the journal…</p></div>
         <h3>NEXT THREE THINGS</h3>
         <ol>
           <li>Open the dashboard and sign in with the operator account.</li>
@@ -179,6 +195,7 @@
           <li>Send <code>/status</code> to your Telegram bot to confirm it answers.</li>
         </ol>
         <a class="pe-btn primary accent" href="http://{{ host_addr }}:{{ a.dashboard_port }}/" id="open-dashboard">OPEN DASHBOARD</a>
+        {% endif %}
       {% endif %}
 
       <div class="pe-actions" id="answer-errors" role="alert"></div>

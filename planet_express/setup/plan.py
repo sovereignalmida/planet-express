@@ -563,7 +563,7 @@ def _uninstall(b: _Builder) -> None:
                              "Run setup as root so it can read it.")
             return
         b.add("file.remove", title, path, {"path": path, "expected_sha256": digest, "reload_systemd": reload},
-              {"type": "file", "path": path, "removes": True, "sha256": digest[:12]},
+              b.text(f"Removes {path}. A private copy is kept first, so undo can put it back."),
               risk=risk, depends_on=())
 
     names = ("casa-dashboard", "casa-planetexpress") + (("casa-stacks",) if not mos else ())

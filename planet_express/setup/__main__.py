@@ -156,6 +156,12 @@ def _serve_command(args) -> int:
         uids = _trusted_uids(reviewed, holder["session"].discovery)
         return undo(reviewed, host=RealHost(uids), journal_root=journal_root(), trusted_uids=uids)
 
+    def dry_run_fn(reviewed):
+        uids = _trusted_uids(reviewed, holder["session"].discovery)
+        done = apply(reviewed, host=RealHost(uids), journal_root=journal_root(), replan=holder["session"]._replan,
+                     dry_run=True, trusted_uids=uids)
+        return done.checks
+
     def journal_fn(plan_id):
         applied = holder["session"].applied_plan
         return Journal(journal_root(), plan_id, trusted_uids=_trusted_uids(applied, holder["session"].discovery))
@@ -164,7 +170,7 @@ def _serve_command(args) -> int:
         "This setup was not started as root, so it can show you the plan but cannot install it. "
         "Press Ctrl-C and run it again with sudo.")
     session = SetupSession(discover_fn=discover, plan_fn=plan, repo_root=args.repo_root, apply_fn=apply_fn,
-                           undo_fn=undo_fn, journal_fn=journal_fn, cannot_apply=cannot)
+                           undo_fn=undo_fn, journal_fn=journal_fn, cannot_apply=cannot, dry_run_fn=dry_run_fn)
     holder["session"] = session
     return serve(addresses=list(dict.fromkeys(addresses)), port=args.port,
                  names=[socket.gethostname(), *(args.name or [])], sessions=Sessions(), session=session)

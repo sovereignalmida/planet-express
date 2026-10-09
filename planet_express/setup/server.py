@@ -183,15 +183,22 @@ TIERS = [
      "access": "Docker control, compose files and a sudoers grant for the units you list."}]
 
 
-def _stage_views():
-    built = [i for i, stage in enumerate(STAGES) if stage[3]]
+# Repair and uninstall act on what is already there, so the questions about powers and credentials are not asked.
+HIDDEN_STAGES = {"repair": frozenset({"powers", "telegram", "operator", "llm"}),
+                 "uninstall": frozenset({"powers", "telegram", "operator", "llm"})}
+
+
+def _stage_views(story: str = "fresh"):
+    hidden = HIDDEN_STAGES.get(story, frozenset())
+    names = [stage[0] for stage in STAGES if stage[0] not in hidden]
     views = []
-    for i, (n, t, w, b) in enumerate(STAGES):
-        before = [j for j in built if j < i]
-        after = [j for j in built if j > i]
-        views.append({"index": i, "name": n, "title": t, "who": w, "built": b,
-                      "prev": STAGES[before[-1]][0] if before else None,
-                      "next": STAGES[after[0]][0] if after else None})
+    for n, t, w, b in STAGES:
+        if n in hidden:
+            views.append({"index": -1, "name": n, "title": t, "who": w, "built": False, "prev": None, "next": None, "hidden": True})
+            continue
+        i = names.index(n)
+        views.append({"index": i, "name": n, "title": t, "who": w, "built": b, "hidden": False,
+                      "prev": names[i - 1] if i else None, "next": names[i + 1] if i + 1 < len(names) else None})
     return views
 
 
@@ -263,14 +270,14 @@ def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callabl
 
 
 def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
-    views = _stage_views()
 
     @app.get("/stage/<name>")
     def stage(name):
+        views = _stage_views(session.answers.get("story", "fresh"))
         current = next((v for v in views if v["name"] == name), None)
         if current is None:
             abort(404)
-        if not current["built"]:
+        if not current["built"] or current["hidden"]:
             return redirect(url_for("stage", name="welcome"))
         if current["name"] == "install" and session.phase == "idle":
             return redirect(url_for("stage", name="review"))
@@ -284,7 +291,7 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
         blocked_next = is_exposed or (current["name"] == "scan" and not d["summary"]["can_continue"]) \
             or (current["name"] == "operator" and not a["operator_set"])
         host_addr = _host_name(request.host or "")
-        return render_template("stage.html", stages=views, current=current, d=d, a=a, tiers=TIERS, csrf=g.session.csrf,
+        return render_template("stage.html", stages=[v for v in views if not v["hidden"]], current=current, d=d, a=a, tiers=TIERS, csrf=g.session.csrf,
                                exposed=is_exposed, seconds_left=left, clock=f"{left // 60:02d}:{left % 60:02d}",
                                host_addr=host_addr, blocked_next=blocked_next, session=session)
 
