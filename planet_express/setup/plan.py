@@ -582,15 +582,17 @@ def _uninstall(b: _Builder) -> None:
     names = ("casa-dashboard", "casa-planetexpress")
     stacks_unit = "/etc/systemd/system/casa-stacks.service"
     if not mos and b.present(stacks_unit):
-        # casa-stacks may be an operator's own unit that install kept rather than overwrote. It is only ours if it
-        # is exactly what setup would have written.
+        # casa-stacks may be an operator's own unit that install kept rather than overwrote, or one setup wrote from an
+        # older template. Ownership is decided by an exact match only; anything else is kept and the person is told.
         from scripts.render_template import render
         mine = render(b.read("systemd/casa-stacks.service.template"), INSTALL_DIR=a.install_dir, RUN_USER=a.run_as,
                       RUN_GROUP=a.run_group or a.run_as, CONFIG_FILE=p["config"], DASHBOARD_PORT=str(a.dashboard_port))
-        if hashes.get(stacks_unit) == hashlib.sha256(mine.encode()).hexdigest() or existing.get("stacks_unit_is_ours"):
+        if hashes.get(stacks_unit) == hashlib.sha256(mine.encode()).hexdigest():
             names += ("casa-stacks",)
         else:
-            b.not_touched.append("casa-stacks.service is not what Planet Express writes, so it is treated as yours and kept.")
+            b.not_touched.append("casa-stacks.service is not byte-for-byte what Planet Express writes, so it is treated as yours and kept.")
+            b.warnings.append("casa-stacks.service differs from what setup writes, so it was kept. If it is the one Planet Express "
+                              "installed to start your stacks at boot, turn it off yourself: systemctl disable --now casa-stacks")
     if mos:
         hook_dir = "/boot/optional/scripts"
         hooks = {n: hashes[f"{hook_dir}/{n}"] for n in ("post-start.sh", "shutdown.sh")
