@@ -224,6 +224,28 @@ class VerifySmoke(_Params):
         return self
 
 
+class ServiceDisable(_Params):
+    """Stop a service and turn off its start at boot. The inverse of `service.enable`."""
+    flavour: Literal["systemd", "sysvinit"]
+    name: Name
+
+
+class FileRemove(_Params):
+    """Remove one regular file, only if it is still byte-for-byte what the plan saw (compare-and-swap), after
+    keeping a private copy so undo can put it back."""
+    path: AbsPath
+    expected_sha256: Sha256
+    reload_systemd: bool = False        # a unit file: tell systemd afterwards
+
+
+class BootHookRemove(_Params):
+    """Remove Planet Express's marked block from MOS boot hook files. The rest of each file is kept; a file that
+    would be left empty is removed. Each file must still hash to what the plan saw."""
+    dest_dir: AbsPath
+    hooks: dict[Name, Sha256]
+    marker: Name = "planetexpress"
+
+
 class Kind:
     def __init__(self, model: type[_Params], risk: Risk, reversible: bool, needs_root: bool, label: str):
         self.model, self.risk, self.reversible, self.needs_root, self.label = (
@@ -244,4 +266,7 @@ CATALOGUE: dict[str, Kind] = {
     "service.enable": Kind(ServiceEnable, "R2", True, True, "Enable a service"),
     "state.snapshot": Kind(StateSnapshot, "R1", True, False, "Snapshot the current state"),
     "verify.smoke": Kind(VerifySmoke, "R0", True, False, "Check Planet Express can see Docker"),
+    "service.disable": Kind(ServiceDisable, "R2", True, True, "Stop and disable a service"),
+    "file.remove": Kind(FileRemove, "R2", True, True, "Remove a file"),
+    "boot_hook.remove": Kind(BootHookRemove, "R3", True, True, "Remove the MOS boot hooks"),
 }

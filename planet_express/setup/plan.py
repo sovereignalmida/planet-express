@@ -538,6 +538,79 @@ def _will_not_touch(b: _Builder, p: dict) -> None:
             b.not_touched.append(f"The existing service file {step.target} is kept, not overwritten.")
 
 
+def _uninstall(b: _Builder) -> None:
+    """Remove the integration (services, units, init scripts, the sudo grant, the boot-hook block) and keep
+    everything a person wrote or that holds their data: config, secrets, state, the database, the checkout."""
+    a, p, existing = b.a, b.p, b.d["existing_pe"]
+    mos = b.init == "mos"
+    if not existing["installed"]:
+        b.blocked.append("Planet Express is not installed on this host, so there is nothing to uninstall.")
+        return
+    b.snapshot_id = b.add(
+        "state.snapshot", "Snapshot the current state first", a.install_dir,
+        {"install_dir": a.install_dir, "run_user": a.run_as,
+         "env": {"CASA_CONFIG": p["config"], "CASA_DATA_DIR": p["data"]}},
+        b.text("Takes a snapshot of the current config and state before anything is removed. "
+               "It reads what is there and writes only the snapshot."))
+    hashes = existing.get("sha256", {})
+
+    def remove(title: str, path: str, *, reload: bool = False, risk: str | None = None) -> None:
+        if not b.present(path):
+            return
+        digest = hashes.get(path)
+        if not digest:
+            b.blocked.append(f"{path} exists but could not be read, so setup cannot prove what it is removing. "
+                             "Run setup as root so it can read it.")
+            return
+        b.add("file.remove", title, path, {"path": path, "expected_sha256": digest, "reload_systemd": reload},
+              {"type": "file", "path": path, "removes": True, "sha256": digest[:12]},
+              risk=risk, depends_on=())
+
+    names = ("casa-dashboard", "casa-planetexpress") + (("casa-stacks",) if not mos else ())
+    if mos:
+        hook_dir = "/boot/optional/scripts"
+        hooks = {n: hashes[f"{hook_dir}/{n}"] for n in ("post-start.sh", "shutdown.sh")
+                 if b.present(f"{hook_dir}/{n}") and f"{hook_dir}/{n}" in hashes}
+        unreadable = [n for n in ("post-start.sh", "shutdown.sh")
+                      if b.present(f"{hook_dir}/{n}") and f"{hook_dir}/{n}" not in hashes]
+        if unreadable:
+            b.blocked.append(f"{', '.join(unreadable)} exists in {hook_dir} but could not be read. "
+                             "Run setup as root so it can read the boot hooks.")
+        elif hooks:
+            # First, so a reboot cannot bring the services back while the rest is being removed.
+            b.add("boot_hook.remove", "Stop restoring Planet Express at boot", hook_dir,
+                  {"dest_dir": hook_dir, "hooks": hooks},
+                  b.text("Removes the Planet Express block from the MOS boot hooks. Anything else in those files stays."))
+        for name in names:
+            if b.present(f"/etc/init.d/{name}"):
+                b.add("service.disable", f"Stop {name}", name, {"flavour": "sysvinit", "name": name},
+                      b.text(f"Stops {name} if it is running."))
+        for name in names:
+            remove(f"Remove the {name} init script", f"/etc/init.d/{name}")
+            remove(f"Remove /etc/default/{name}", f"/etc/default/{name}")
+    else:
+        for name in names:
+            if b.present(f"/etc/systemd/system/{name}.service"):
+                b.add("service.disable", f"Stop and disable {name}", name, {"flavour": "systemd", "name": name},
+                      b.text(f"Stops {name} and turns off its start at boot."))
+        for name in names:
+            remove(f"Remove the {name} unit", f"/etc/systemd/system/{name}.service", reload=True)
+        remove("Remove the sudo grant", "/etc/sudoers.d/planetexpress", risk="R3")
+    if not any(step.kind != "state.snapshot" for step in b.steps) and not b.blocked:
+        b.warnings.append("No Planet Express services, units or grants were found to remove. Only the "
+                          "files you wrote (config, secrets, state, the checkout) are here, and those are kept.")
+    b.not_touched += [
+        f"Your configuration ({p['config']}) and the secret files are kept, so a later install picks up where you left off.",
+        f"State, logs and the database under {a.install_dir} and {p['home']} are kept.",
+        "The checkout and its Python environment are kept. Delete them yourself if you want them gone.",
+        "The dashboard's account and group are left in place; on their own they grant nothing.",
+        "No container, compose file or Docker setting is touched.",
+        "Snapshots (including the one taken first) are kept.",
+    ]
+    b.warnings.append("After this the services no longer start at boot" + (" and MOS no longer restores them" if mos else "")
+                      + ". Undo, or running setup again, puts them back.")
+
+
 def plan(discovery: dict, answers: SetupAnswers, *, repo_root: str | None = None, read=None) -> Plan:
     """The plan for this host and these answers. `read(relative_path)` supplies repo files (templates,
     init scripts); it defaults to reading them from `repo_root`."""
@@ -545,6 +618,11 @@ def plan(discovery: dict, answers: SetupAnswers, *, repo_root: str | None = None
     read = read or (lambda rel: (Path(repo_root) / rel).read_text())
     b = _Builder(discovery, answers, repo_root, read)
     b.p = _paths(b)
+    if answers.story == "uninstall":
+        _uninstall(b)
+        if b.blocked:
+            return Plan(answers.story, (), tuple(b.warnings), (), tuple(b.blocked))
+        return Plan(answers.story, tuple(b.steps), tuple(b.warnings), tuple(b.not_touched), ())
     _check_preconditions(b)
     if b.blocked:
         return Plan(answers.story, (), tuple(b.warnings), (), tuple(b.blocked))

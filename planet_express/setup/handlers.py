@@ -1333,9 +1333,319 @@ class ServiceEnable:
         return "; ".join(notes)
 
 
+# ----------------------------------------------------------------------------------------------------------
+# Removal (uninstall). Every removal is compare-and-swapped against the hash the plan saw, keeps a private
+# copy first, journals its intent before acting, and can be put back by `inverse` if nothing has moved since.
+def _backup_name(ctx, path: str) -> str:
+    return f"{ctx.step.id}.{path.strip('/').replace('/', '_')}.rm.bak"
+
+
+def _remove_with_backup(ctx, path: str, expected: str) -> None:
+    """Unlink `path` if it is a regular file hashing to `expected`, after copying it into the evidence directory."""
+    current = ctx.host.lstat(path)
+    if current is None:
+        return
+    if current.kind != "file":
+        raise StepFailure(f"{path} is a {current.kind}, not a regular file")
+    try:
+        found = sha256(ctx.host.read_bytes(path))
+    except HostError as exc:
+        raise StepFailure(str(exc)) from exc
+    if found != expected:
+        raise StepFailure(f"{path} changed since the plan was made; it is not removed")
+    backup = f"{ctx.evidence_dir}/{_backup_name(ctx, path)}"
+    if ctx.host.lstat(ctx.evidence_dir) is None:
+        ctx.host.mkdir(ctx.evidence_dir, 0o700, *ctx.evidence_ids)
+    if ctx.host.lstat(backup) is None:
+        ctx.host.copy_private(path, ctx.evidence_dir, backup.rsplit("/", 1)[1], *ctx.evidence_ids)
+    elif sha256(ctx.host.read_bytes(backup)) != expected:
+        raise StepFailure(f"{backup} exists but does not hold the file being removed")
+    ctx.evidence(phase="removing", path=path, previous_sha256=expected, previous_mode=current.perms,
+                 previous_owner=[current.uid, current.gid], backup=backup)
+    ctx.host.unlink(path)
+    ctx.evidence(phase="removed", path=path)
+    ctx.log(f"removed {path} (a private copy is kept for undo)")
+
+
+def _restore_removed(ctx, entry: dict) -> str:
+    path = entry["path"]
+    current = ctx.host.lstat(path)
+    if current is not None:
+        try:
+            if current.kind == "file" and sha256(ctx.host.read_bytes(path)) == entry["previous_sha256"]:
+                return f"{path} is already back"
+        except HostError:
+            pass
+        raise StepFailure(f"something else is at {path} now, so the removed file is not put back over it "
+                          f"(its copy is in {entry['backup']})")
+    try:
+        data = ctx.host.read_bytes(entry["backup"])
+    except HostError as exc:
+        raise StepFailure(f"the copy of {path} cannot be read: {exc}") from exc
+    if sha256(data) != entry["previous_sha256"]:
+        raise StepFailure(f"the copy {entry['backup']} does not hold what {path} was; it is not restored")
+    parent, temp = _parent(path), new_temp_name()
+    ctx.evidence(phase="undo_intent", parent=parent, temp=temp)
+    uid, gid = entry["previous_owner"]
+    try:
+        ctx.host.stage_file(parent, data, entry["previous_mode"], uid, gid, name=temp)
+        ctx.host.commit_staged(parent, temp, path.rsplit("/", 1)[1])
+    except HostError as exc:
+        try:
+            ctx.host.discard_staged(parent, temp)
+        except HostError:
+            pass
+        raise StepFailure(str(exc)) from exc
+    return f"restored {path}"
+
+
+def _undo_removals(ctx) -> list[str]:
+    entries = ctx.prior_evidence()
+    for entry in entries:                                    # a previous undo may have died holding a temp file
+        if entry.get("phase") == "undo_intent" and is_temp_name(entry["temp"]):
+            left = ctx.host.lstat(f"{entry['parent']}/{entry['temp']}")
+            if left is not None and left.kind == "file":
+                ctx.host.discard_staged(entry["parent"], entry["temp"])
+    done = {e["path"] for e in entries if e.get("phase") == "removed"}
+    seen, notes = set(), []
+    for entry in reversed([e for e in entries if e.get("phase") == "removing"]):
+        if entry["path"] in seen:
+            continue
+        seen.add(entry["path"])
+        if entry["path"] in done or ctx.host.lstat(entry["path"]) is None:     # only what really was removed
+            notes.append(_restore_removed(ctx, entry))
+    return notes
+
+
+class FileRemove:
+    def check(self, ctx):
+        p = ctx.step.params
+        current = ctx.host.lstat(p["path"])
+        if current is None:
+            return Satisfied(f"{p['path']} is already gone")
+        if current.kind != "file":
+            return Refuse(f"{p['path']} is a {current.kind}, not a regular file")
+        try:
+            found = sha256(ctx.host.read_bytes(p["path"]))
+        except HostError as exc:
+            return Refuse(str(exc))
+        if found != p["expected_sha256"]:
+            return Refuse(f"{p['path']} changed since the plan was made; it is not removed")
+        return Proceed()
+
+    def act(self, ctx):
+        p = ctx.step.params
+        _remove_with_backup(ctx, p["path"], p["expected_sha256"])
+        if p.get("reload_systemd") and ctx.host.run(["systemctl", "daemon-reload"], timeout=60).rc != 0:
+            raise StepFailure("the file was removed, but systemd would not reload", "unknown")
+
+    def verify(self, ctx) -> Effect:
+        p = ctx.step.params
+        current = ctx.host.lstat(p["path"])
+        if current is None:
+            return "applied"
+        try:
+            return "not_applied" if sha256(ctx.host.read_bytes(p["path"])) == p["expected_sha256"] else "unknown"
+        except HostError:
+            return "unknown"
+
+    reconcile = verify
+
+    def inverse(self, ctx) -> str:
+        notes = _undo_removals(ctx)
+        if ctx.step.params.get("reload_systemd") and ctx.host.run(["systemctl", "daemon-reload"], timeout=60).rc != 0:
+            raise StepFailure("the unit file was put back, but systemd would not reload")
+        return "; ".join(notes) or "nothing had been removed"
+
+
+class ServiceDisable:
+    """Stop a service and turn off its start at boot, remembering what was actually changed."""
+
+    def _enabled(self, ctx, p) -> bool:
+        if p["flavour"] != "systemd":
+            return False
+        done = ctx.host.run(["systemctl", "is-enabled", p["name"]], timeout=30)
+        return done.rc == 0 and done.out.strip() in ("enabled", "enabled-runtime")
+
+    def _running(self, ctx, p) -> bool:
+        if p["flavour"] == "systemd":
+            return ctx.host.run(["systemctl", "is-active", p["name"]], timeout=30).out.strip() == "active"
+        return ctx.host.run([f"/etc/init.d/{p['name']}", "status"], timeout=30).rc == 0
+
+    def check(self, ctx):
+        p = ctx.step.params
+        if not self._enabled(ctx, p) and not self._running(ctx, p):
+            return Satisfied(f"{p['name']} is already stopped and not enabled")
+        return Proceed()
+
+    def act(self, ctx):
+        p = ctx.step.params
+        was_enabled, was_running = self._enabled(ctx, p), self._running(ctx, p)
+        ctx.evidence(was_enabled=was_enabled, was_running=was_running)
+        if was_running:
+            argv = ["systemctl", "stop", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "stop"]
+            done = ctx.host.run(argv, timeout=120)
+            if done.rc != 0 and self._running(ctx, p):
+                raise StepFailure(f"stopping {p['name']} failed: " + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
+            ctx.evidence(stopped_done=p["name"])
+        if was_enabled:
+            done = ctx.host.run(["systemctl", "disable", p["name"]], timeout=60)
+            if done.rc != 0 and self._enabled(ctx, p):
+                raise StepFailure(f"disabling {p['name']} failed: " + " | ".join((done.err or done.out).strip().splitlines()[-2:])[:300], "unknown")
+            ctx.evidence(disabled_done=p["name"])
+
+    def verify(self, ctx) -> Effect:
+        p = ctx.step.params
+        return "not_applied" if self._enabled(ctx, p) or self._running(ctx, p) else "applied"
+
+    def reconcile(self, ctx) -> Effect:
+        outcome = self.verify(ctx)
+        entries = ctx.prior_evidence()
+        flags = {k: v for e in entries for k, v in e.items() if k in ("was_enabled", "was_running")}
+        if outcome == "applied":
+            if flags.get("was_running") and not any("stopped_done" in e for e in entries):
+                ctx.evidence(stopped_done=ctx.step.params["name"])
+            if flags.get("was_enabled") and not any("disabled_done" in e for e in entries):
+                ctx.evidence(disabled_done=ctx.step.params["name"])
+        return outcome
+
+    def inverse(self, ctx) -> str:
+        """Turn back on only what this step turned off."""
+        p = ctx.step.params
+        entries = ctx.prior_evidence()
+        notes = []
+        if any("disabled_done" in e for e in entries):
+            done = ctx.host.run(["systemctl", "enable", p["name"]], timeout=60)
+            if done.rc != 0 and not self._enabled(ctx, p):
+                raise StepFailure(f"enabling {p['name']} again failed")
+            notes.append(f"enabled {p['name']} again")
+        if any("stopped_done" in e for e in entries):
+            argv = ["systemctl", "start", p["name"]] if p["flavour"] == "systemd" else [f"/etc/init.d/{p['name']}", "start"]
+            done = ctx.host.run(argv, timeout=120)
+            if done.rc != 0 and not self._running(ctx, p):
+                raise StepFailure(f"starting {p['name']} again failed")
+            notes.append(f"started {p['name']} again")
+        if not notes:
+            raise Irreversible(f"{p['name']} was already stopped and not enabled, so there is nothing to turn back on")
+        return "; ".join(notes)
+
+
+def strip_block(current: str, marker: str) -> str | None:
+    """`current` without the marked block, or None if it has none. Half a block is refused, never guessed at."""
+    begin = re.compile(rf"^# BEGIN {re.escape(marker)}\b.*\n", re.M)
+    end = re.compile(rf"^# END {re.escape(marker)}\s*\n?", re.M)
+    starts, ends = list(begin.finditer(current)), list(end.finditer(current))
+    if not starts and not ends:
+        return None
+    if len(starts) != 1 or len(ends) != 1 or ends[0].start() < starts[0].start():
+        raise StepFailure(f"the {marker} markers in this file are not one BEGIN followed by one END; fix them by hand")
+    rest = current[: starts[0].start()] + current[ends[0].end():]
+    return rest.rstrip("\n") + "\n" if rest.strip() else ""
+
+
+def _is_empty_script(text: str) -> bool:
+    return text.strip() in ("", "#!/bin/sh", "#!/bin/bash")
+
+
+class _HookStripFile(_AtomicFile):
+    """One hook file with the block taken out, written the careful way (compare-and-swap, backup, rename)."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def norm(self, ctx) -> dict:
+        step = ctx.step.params
+        path = f"{step['dest_dir']}/{self.name}"
+        current = ctx.host.lstat(path)
+        return {"path": path, "mode": f"{current.perms:04o}" if current and current.kind == "file" else "0600",
+                "owner": "root", "group": "root", "has_secrets": False, "if_exists": "replace",
+                "expect_absent": False, "expected_sha256": step["hooks"][self.name],
+                "backup_name": f"{ctx.step.id}.{self.name}.strip.bak"}
+
+    def desired(self, ctx) -> bytes:
+        path = f"{ctx.step.params['dest_dir']}/{self.name}"
+        text = strip_block(ctx.host.read_bytes(path).decode("utf-8"), ctx.step.params["marker"])
+        return (text if text is not None else ctx.host.read_bytes(path).decode("utf-8")).encode("utf-8")
+
+
+class BootHookRemove:
+    """Take Planet Express's block out of each MOS boot hook. A hook that held only that block is removed."""
+
+    def _plan(self, ctx):
+        """[(name, path, action, current_sha)] where action is "gone", "none", "strip" or "delete"."""
+        p, out = ctx.step.params, []
+        for name, expected in p["hooks"].items():
+            path = f"{p['dest_dir']}/{name}"
+            current = ctx.host.lstat(path)
+            if current is None:
+                out.append((name, path, "gone", expected))
+                continue
+            if current.kind != "file":
+                raise StepFailure(f"{path} is a {current.kind}, not a regular file")
+            data = ctx.host.read_bytes(path)
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise StepFailure(f"{path} is not text") from exc
+            stripped = strip_block(text, p["marker"])
+            if stripped is None:
+                out.append((name, path, "none", sha256(data)))
+            elif sha256(data) != expected:
+                raise StepFailure(f"{path} changed since the plan was made; its block is not removed")
+            else:
+                out.append((name, path, "delete" if _is_empty_script(stripped) else "strip", expected))
+        return out
+
+    def check(self, ctx):
+        try:
+            actions = self._plan(ctx)
+        except (StepFailure, HostError) as exc:
+            return Refuse(exc.reason if isinstance(exc, StepFailure) else str(exc))
+        if all(a in ("gone", "none") for _, _, a, _ in actions):
+            return Satisfied("the boot hooks no longer carry the Planet Express block")
+        return Proceed()
+
+    def act(self, ctx):
+        for name, path, action, expected in self._plan(ctx):
+            if action == "delete":
+                _remove_with_backup(ctx, path, expected)
+            elif action == "strip":
+                hook = _HookStripFile(name)
+                outcome = hook.check(ctx)
+                if isinstance(outcome, Refuse):
+                    raise StepFailure(outcome.reason)
+                if isinstance(outcome, Proceed):
+                    hook.act(ctx)
+
+    def verify(self, ctx) -> Effect:
+        p = ctx.step.params
+        try:
+            for name in p["hooks"]:
+                path = f"{p['dest_dir']}/{name}"
+                if ctx.host.lstat(path) is None:
+                    continue
+                if strip_block(ctx.host.read_bytes(path).decode("utf-8"), p["marker"]) is not None:
+                    return "not_applied"
+        except (HostError, StepFailure, UnicodeDecodeError):
+            return "unknown"
+        return "applied"
+
+    def reconcile(self, ctx) -> Effect:
+        outcome = self.verify(ctx)
+        _HookStripFile(next(iter(ctx.step.params["hooks"]))).reconcile(ctx)     # tidy a leftover staged file
+        return outcome
+
+    def inverse(self, ctx) -> str:
+        notes = _undo_removals(ctx)
+        first = _HookStripFile(next(iter(ctx.step.params["hooks"])))
+        notes.append(first.inverse(ctx))
+        return "; ".join(n for n in notes if n)
+
+
 HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke(),
             "sudoers.install": SudoersInstall(), "dashboard.init": DashboardInit(),
             "access.provision": AccessProvision(),
             "state.snapshot": StateSnapshot(), "python.env": PythonEnv(),
             "service.install": ServiceInstall(), "boot_hook.install": BootHookInstall(),
-            "service.enable": ServiceEnable()}
+            "service.enable": ServiceEnable(), "file.remove": FileRemove(), "service.disable": ServiceDisable(),
+            "boot_hook.remove": BootHookRemove()}

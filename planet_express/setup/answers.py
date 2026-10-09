@@ -84,7 +84,7 @@ class SudoUnit(_Strict):
 
 
 class SetupAnswers(_Strict):
-    story: Literal["fresh", "adopt"] = "fresh"
+    story: Literal["fresh", "adopt", "repair", "uninstall"] = "fresh"
     # The account the service runs as. Root is refused except on a host with no sudo, and only when
     # `accept_root_service` is set (invariant 1).
     run_as: Name
