@@ -287,3 +287,20 @@ def test_tree_digest_does_not_block_on_a_fifo(tmp_path):
     (tmp_path / "t").mkdir()
     os.mkfifo(tmp_path / "t" / "pipe")
     assert RealHost({0, os.geteuid()}).tree_digest(str(tmp_path / "t"))    # returns instead of waiting for a writer
+
+
+def test_a_group_writable_directory_is_fine_when_the_group_is_only_trusted_accounts(env):
+    """A stock Ubuntu clone is 775 with a one-person private group."""
+    env.dir("mine", mode=0o775)
+    env.dir("mine/inner")
+    env.host.mkdir(f"{env.root}/mine/inner/d", 0o755, UID, GID)
+    assert env.host.lstat(f"{env.root}/mine/inner/d") is not None
+
+
+def test_a_group_writable_directory_is_refused_when_an_untrusted_account_shares_the_group():
+    from fake_host import FakeHost
+    host = FakeHost(trusted_uids={0, 1000}, users={"svc": (1000, 1000), "stranger": (2000, 2000)}, groups={"shared": 1000})
+    host.memberships["stranger"] = {1000}
+    host.add_dir("/srv/app", mode=0o775, uid=1000, gid=1000)
+    with pytest.raises(HostError, match="writable by group or other"):
+        host.mkdir("/srv/app/d", 0o755, 1000, 1000)

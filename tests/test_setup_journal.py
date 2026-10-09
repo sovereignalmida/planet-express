@@ -84,3 +84,13 @@ def test_a_longer_secret_is_masked_whole_even_when_a_shorter_one_is_its_prefix()
 def test_different_plans_have_separate_journals(tmp_path):
     Journal(tmp_path, "one").append("apply_started")
     assert Journal(tmp_path, "two").events() == []
+
+
+def test_a_step_that_failed_and_then_succeeded_no_longer_carries_the_failure_reason(tmp_path):
+    journal = Journal(tmp_path / "j", "abc")
+    journal.append("step_started", step="s01")
+    journal.append("step_failed", step="s01", effect="not_applied", reason="boom")
+    journal.append("step_started", step="s01")
+    journal.append("step_ok", step="s01", effect="applied")
+    record = journal.steps()["s01"]
+    assert record.status == "ok" and record.reason is None

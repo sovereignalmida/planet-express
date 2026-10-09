@@ -231,8 +231,10 @@ def _network(env) -> dict:
             continue
     usable = [a for a in addresses if not (a.is_loopback or a.is_link_local)]
     return {
-        "lan_addresses": [str(a) for a in usable if a.is_private],
-        "public_addresses": [str(a) for a in usable if a.is_global],
+        # fec0::/10 (site-local, deprecated but still handed out by some virtual networks) is not publicly routable
+        # even though Python calls it "global".
+        "lan_addresses": [str(a) for a in usable if a.is_private or getattr(a, "is_site_local", False)],
+        "public_addresses": [str(a) for a in usable if a.is_global and not getattr(a, "is_site_local", False)],
     }
 
 

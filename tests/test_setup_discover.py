@@ -212,6 +212,15 @@ def test_docker_bridges_outside_rfc1918_are_not_a_public_exposure():
     assert "exposure" not in checks(report)
 
 
+def test_a_site_local_ipv6_address_is_not_public():
+    """Real case: a QEMU guest's fec0:: address, which `ipaddress` calls global but nothing routes."""
+    ip = ("2: ens3    inet 10.0.2.15/24 scope global ens3\n"
+          "2: ens3    inet6 fec0::5054:ff:fe12:3456/64 scope site dynamic ens3\n")
+    report = discover(ubuntu(runs={("ip", "-o", "addr", "show"): (0, ip)}))
+    assert report["network"]["public_addresses"] == [] and "fec0::5054:ff:fe12:3456" in report["network"]["lan_addresses"]
+    assert "exposure" not in checks(report)
+
+
 def test_a_real_public_address_on_a_real_interface_raises_the_exposure_warning():
     ip = ("2: eth0    inet 192.168.1.94/24 scope global eth0\n"
           "3: ppp0    inet 8.8.4.4/32 scope global ppp0\n")

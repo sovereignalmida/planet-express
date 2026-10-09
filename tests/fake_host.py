@@ -96,9 +96,17 @@ class FakeHost:
             if mutating:
                 if node.uid not in self.trusted_uids:
                     raise HostError(f"{directory} is owned by uid {node.uid}, which this plan does not trust")
-                if node.mode & 0o022 and not node.mode & stat_module.S_ISVTX:
+                sticky = node.mode & stat_module.S_ISVTX
+                if node.mode & 0o002 and not sticky or (node.mode & 0o020 and not sticky and not self._group_is_private(node.gid)):
                     raise HostError(f"{directory} is writable by group or other, so a path through it could be redirected")
         return real
+
+    def _group_is_private(self, gid) -> bool:
+        for name, (uid, primary) in self.users.items():
+            in_group = primary == gid or gid in self.memberships.get(name, set())
+            if in_group and uid not in self.trusted_uids:
+                return False
+        return True
 
     def _stat(self, node) -> Stat:
         kind_bits = {"dir": stat_module.S_IFDIR, "file": stat_module.S_IFREG, "symlink": stat_module.S_IFLNK}[node.kind]

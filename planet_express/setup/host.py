@@ -150,6 +150,20 @@ class RealHost:
         ids = self.lookup_user(name)
         return None if ids is None else set(os.getgrouplist(name, ids[1]))
 
+    def _group_is_private(self, gid: int) -> bool:
+        """True if every account in group `gid` (as primary or supplementary group) is one this plan trusts."""
+        import grp
+        import pwd
+        try:
+            members = set(grp.getgrgid(gid).gr_mem)
+            accounts = pwd.getpwall()
+        except (KeyError, OSError):
+            return False
+        trusted_names = {a.pw_name for a in accounts if a.pw_uid in self.trusted_uids}
+        if not members <= trusted_names:
+            return False
+        return all(a.pw_uid in self.trusted_uids for a in accounts if a.pw_gid == gid)
+
     # -- safe parent handling -----------------------------------------------------------------------
     @contextmanager
     def _parent_fd(self, parent: str, *, mutating: bool):
@@ -168,8 +182,12 @@ class RealHost:
             if mutating:
                 if st.st_uid not in self.trusted_uids:
                     raise HostError(f"{directory} is owned by uid {st.st_uid}, which this plan does not trust")
-                writable_by_others = st.st_mode & 0o022
-                if writable_by_others and not (st.st_mode & stat_module.S_ISVTX):
+                sticky = st.st_mode & stat_module.S_ISVTX
+                if st.st_mode & 0o002 and not sticky:
+                    raise HostError(f"{directory} is writable by group or other, so a path through it could be redirected")
+                # Group-write is harmless when the group holds only accounts this plan already trusts: a stock
+                # Ubuntu clone is 775 with a one-person private group, and refusing it would stop every install.
+                if st.st_mode & 0o020 and not sticky and not self._group_is_private(st.st_gid):
                     raise HostError(f"{directory} is writable by group or other, so a path through it could be redirected")
             last = st
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)

@@ -160,7 +160,7 @@ class Journal:
             elif kind == "evidence":
                 record.evidence.append(event.get("data", {}))
             elif kind == "step_ok":
-                record.status, record.effect = "ok", event.get("effect")
+                record.status, record.effect, record.reason = "ok", event.get("effect"), None      # a later success clears an earlier failure
                 record.satisfied = bool(event.get("satisfied"))
             elif kind in ("step_undone", "step_not_undone"):
                 record.undone, record.undo_note = True, event.get("detail") or event.get("reason")
