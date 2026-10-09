@@ -163,8 +163,8 @@ _REPO = Path(__file__).resolve().parents[2]
 # The ten stages of the wizard. `built` is False until the slice that implements it lands.
 STAGES = [
     ("welcome", "Welcome", "fry", True), ("scan", "Scan", "leela", True), ("location", "Where it lives", "fry", True),
-    ("powers", "What it may do", "fry", True), ("telegram", "Telegram", "fry", False),
-    ("operator", "Operator account", "fry", False), ("llm", "LLM key", "fry", False),
+    ("powers", "What it may do", "fry", True), ("telegram", "Telegram", "fry", True),
+    ("operator", "Operator account", "fry", True), ("llm", "LLM key", "fry", True),
     ("review", "Review the plan", "farnsworth", True), ("install", "Install", "bender", True),
     ("done", "Verify and done", "hermes", True)]
 
@@ -239,7 +239,7 @@ def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callabl
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+            "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         return response
 
     @app.get("/")
@@ -281,7 +281,8 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
         d, a = session.discovery, session.public_answers()
         left = sessions.seconds_left()
         is_exposed = exposed()
-        blocked_next = is_exposed or (current["name"] == "scan" and not d["summary"]["can_continue"])
+        blocked_next = is_exposed or (current["name"] == "scan" and not d["summary"]["can_continue"]) \
+            or (current["name"] == "operator" and not a["operator_set"])
         host_addr = _host_name(request.host or "")
         return render_template("stage.html", stages=views, current=current, d=d, a=a, tiers=TIERS, csrf=g.session.csrf,
                                exposed=is_exposed, seconds_left=left, clock=f"{left // 60:02d}:{left % 60:02d}",
@@ -340,6 +341,42 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
         except Conflict as exc:
             return conflict(exc)
         return jsonify({"started": True})
+
+    def json_body():
+        body = request.get_json(silent=True)
+        return body if isinstance(body, dict) else {}
+
+    def text(body, key):
+        value = body.get(key)
+        return value if isinstance(value, str) else ""
+
+    @app.post("/api/telegram/find-chat")
+    def api_telegram_find():
+        return jsonify(session.telegram_find(text(json_body(), "token")))
+
+    @app.post("/api/telegram/test")
+    def api_telegram_test():
+        try:
+            return jsonify(session.telegram_test())
+        except Conflict as exc:
+            return conflict(exc)
+
+    @app.post("/api/llm/check")
+    def api_llm_check():
+        body = json_body()
+        return jsonify(session.llm_check(text(body, "provider"), text(body, "api_key")))
+
+    @app.post("/api/operator/totp")
+    def api_operator_totp():
+        return jsonify(session.totp_begin(text(json_body(), "name")))
+
+    @app.post("/api/operator/verify")
+    def api_operator_verify():
+        body = json_body()
+        try:
+            return jsonify(session.totp_verify(text(body, "name"), text(body, "passphrase"), text(body, "code")))
+        except Conflict as exc:
+            return conflict(exc)
 
     @app.get("/api/events")
     def api_events():

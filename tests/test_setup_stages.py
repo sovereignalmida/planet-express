@@ -45,15 +45,14 @@ def test_the_root_lands_on_the_first_stage_and_each_built_stage_renders(wizard):
         assert page.status_code == 200 and marker in page.get_data(as_text=True), name
 
 
-def test_a_stage_that_is_not_built_yet_goes_back_to_welcome_and_an_unknown_one_is_404(wizard):
+def test_an_unknown_stage_is_404(wizard):
     app, cookie, *_ = wizard
-    assert call(app, "GET", "/stage/telegram", cookie=cookie).headers["Location"].endswith("/stage/welcome")
     assert call(app, "GET", "/stage/nope", cookie=cookie).status_code == 404
 
 
 def test_pages_are_safe_under_a_strict_content_security_policy(wizard):
     app, cookie, *_ = wizard
-    for name in ("welcome", "scan", "location", "powers", "review"):
+    for name in ("welcome", "scan", "location", "powers", "telegram", "operator", "llm", "review"):
         html = call(app, "GET", f"/stage/{name}", cookie=cookie).get_data(as_text=True)
         assert not re.search(r"\sstyle=|\son[a-z]+=|<script(?![^>]*\ssrc=)", html), name
         assert "googleapis" not in html and "http://" not in html
@@ -139,15 +138,14 @@ def test_plan_needs_csrf_like_every_mutation(wizard):
 def test_the_mutating_routes_take_no_path_command_or_step(wizard):
     app, *_ = wizard
     rules = sorted(r.rule for r in app.url_map.iter_rules() if r.methods & {"POST", "PUT", "DELETE", "PATCH"})
-    assert rules == ["/api/answers", "/api/apply", "/api/discover", "/api/ping", "/api/plan", "/api/retry", "/api/undo"]
+    assert rules == ["/api/answers", "/api/apply", "/api/discover", "/api/llm/check", "/api/operator/totp", "/api/operator/verify", "/api/ping", "/api/plan", "/api/retry", "/api/telegram/find-chat", "/api/telegram/test", "/api/undo"]
 
 
-def test_next_and_back_skip_stages_that_are_not_built(wizard):
+def test_next_and_back_follow_the_stage_order(wizard):
     app, cookie, *_ = wizard
     powers = call(app, "GET", "/stage/powers", cookie=cookie).get_data(as_text=True)
     review = call(app, "GET", "/stage/review", cookie=cookie).get_data(as_text=True)
-    assert 'href="/stage/review"' in powers and 'href="/stage/powers"' in review
-    assert "/stage/telegram" not in powers and "/stage/llm" not in review
+    assert 'href="/stage/telegram"' in powers and 'href="/stage/llm"' in review
 
 
 def test_next_is_withheld_while_setup_is_exposed(report):

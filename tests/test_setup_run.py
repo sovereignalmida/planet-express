@@ -157,4 +157,4 @@ def test_install_and_done_pages_follow_the_run(rig):
 def test_the_run_routes_are_the_only_new_mutations_and_take_no_path_or_command(rig):
     app, *_ = rig
     rules = sorted(r.rule for r in app.url_map.iter_rules() if r.methods & {"POST", "PUT", "DELETE", "PATCH"})
-    assert rules == ["/api/answers", "/api/apply", "/api/discover", "/api/ping", "/api/plan", "/api/retry", "/api/undo"]
+    assert rules == ["/api/answers", "/api/apply", "/api/discover", "/api/llm/check", "/api/operator/totp", "/api/operator/verify", "/api/ping", "/api/plan", "/api/retry", "/api/telegram/find-chat", "/api/telegram/test", "/api/undo"]

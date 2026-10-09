@@ -31,7 +31,8 @@ class Conflict(Exception):
 class SetupSession:
     def __init__(self, *, discover_fn: Callable[[], dict], plan_fn: Callable, repo_root: str | None = None,
                  apply_fn: Callable | None = None, undo_fn: Callable | None = None,
-                 journal_fn: Callable | None = None, cannot_apply: str | None = None):
+                 journal_fn: Callable | None = None, cannot_apply: str | None = None, checks=None,
+                 clock: Callable[[], float] | None = None):
         """`apply_fn(plan, replan)` and `undo_fn(plan)` run the real thing and return an ApplyResult / UndoResult;
         `journal_fn(plan_id)` opens that plan's journal for reading. `cannot_apply` is why this process may not
         change the host (not root), shown instead of an Install button."""
@@ -42,6 +43,15 @@ class SetupSession:
         self.outcome: dict | None = None          # the last apply or undo result, public fields only
         self.applied_plan = None                  # the plan object a run used (kept for retry and undo)
         self._thread: threading.Thread | None = None
+        if checks is None:
+            from planet_express.setup import checks as real_checks
+            checks = real_checks
+        self._checks = checks
+        import time
+        self._clock = clock or time.time
+        self._pending_chat: dict | None = None    # a chat found for a token, awaiting the test message
+        self._pending_totp: dict | None = None    # an enrolment secret, awaiting a valid code
+        self._totp_failures = 0
         self._lock = threading.RLock()
         self.discovery: dict | None = None
         self.answers: dict = {}
@@ -205,3 +215,72 @@ class SetupSession:
                                                                     "undo_refused", "undo_done")]
         seq = max([after] + [e["seq"] for e in snapshot])
         return {"phase": phase, "outcome": outcome, "plan_id": public["plan_id"], "steps": steps, "events": events, "seq": seq}
+
+
+    # -- Telegram --------------------------------------------------------------------------------------------------
+    def telegram_find(self, token: str) -> dict:
+        found = self._checks.telegram_find_chat(token)
+        with self._lock:
+            self._pending_chat = {"token": token, "chat_id": found.chat_id} if found.ok else None
+        return {"found": found.ok, "message": found.message, "bot": found.bot,
+                "chat": f"···{found.chat_id[-4:]}" if found.ok and found.chat_id else None}
+
+    def telegram_test(self) -> dict:
+        with self._lock:
+            pending = self._pending_chat
+        if pending is None:
+            raise Conflict("find the chat first")
+        ok, message = self._checks.telegram_send_test(pending["token"], pending["chat_id"])
+        if not ok:
+            return {"verified": False, "message": message}
+        saved = self.set_answers({"telegram": {"token": pending["token"], "chat_id": pending["chat_id"]}})
+        with self._lock:
+            self._pending_chat = None
+        return {"verified": saved["ok"], "message": message if saved["ok"] else "That token or chat id was not accepted.",
+                "errors": [] if saved["ok"] else [e["field"] for e in saved["errors"]]}
+
+    # -- LLM -------------------------------------------------------------------------------------------------------
+    def llm_check(self, provider: str, key: str) -> dict:
+        if provider not in ("openai", "anthropic"):
+            return {"ok": False, "message": "Choose OpenAI or Anthropic."}
+        ok, message = self._checks.check_llm_key(provider, key)
+        if not ok:
+            return {"ok": False, "message": message}
+        saved = self.set_answers({"llm": {"provider": provider, "api_key": key}})
+        return {"ok": saved["ok"], "message": message if saved["ok"] else "That key was not accepted."}
+
+    # -- operator --------------------------------------------------------------------------------------------------
+    MAX_TOTP_ATTEMPTS = 5
+
+    def totp_begin(self, name: str) -> dict:
+        """A new enrolment secret, held here. Its QR and manual code are shown once; it only becomes an answer when
+        a code from the person's authenticator proves they enrolled it."""
+        import web_auth
+        import segno
+        if not web_auth.OPERATOR_PATTERN.fullmatch(name or ""):
+            return {"ok": False, "message": "Use 1-32 lowercase letters, digits, _, . or -."}
+        secret = web_auth.new_totp_secret()
+        uri = web_auth.provisioning_uri(name, secret)
+        with self._lock:
+            self._pending_totp, self._totp_failures = {"name": name, "secret": secret}, 0
+        qr = segno.make(uri, error="m").png_data_uri(scale=5, border=2)
+        return {"ok": True, "qr": qr, "manual": " ".join(secret[i:i + 4] for i in range(0, len(secret), 4))}
+
+    def totp_verify(self, name: str, passphrase: str, code: str) -> dict:
+        import web_auth
+        with self._lock:
+            pending = self._pending_totp
+            if pending is None or pending["name"] != name:
+                raise Conflict("start the authenticator setup first")
+            if self._totp_failures >= self.MAX_TOTP_ATTEMPTS:
+                raise Conflict("too many wrong codes; start the authenticator setup again")
+            if web_auth.verify_totp(pending["secret"], code, self._clock()) is None:
+                self._totp_failures += 1
+                return {"verified": False, "message": "That code was not accepted. Check the time on your phone."}
+        saved = self.set_answers({"operator": {"name": name, "passphrase": passphrase, "totp_secret": pending["secret"]}})
+        if not saved["ok"]:
+            return {"verified": False, "message": "The name or passphrase was not accepted.",
+                    "errors": [e for e in saved["errors"] if e["field"].startswith("operator")]}
+        with self._lock:
+            self._pending_totp = None
+        return {"verified": True, "message": "Verified. This account will sign in with the passphrase and the code."}

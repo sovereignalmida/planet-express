@@ -61,6 +61,78 @@
     send("POST", "/api/discover").then(() => window.location.reload());
   }));
 
+  const say = (id, text, bad) => {
+    const box = document.getElementById(id);
+    if (!box) return;
+    box.textContent = "";
+    const line = document.createElement("div");
+    line.className = bad ? "pe-hint" : "pe-card ok";
+    line.textContent = text;
+    box.appendChild(line);
+  };
+  const on = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+
+  // Telegram
+  on("tg-find", () => {
+    const token = document.getElementById("tg-token").value.trim();
+    send("POST", "/api/telegram/find-chat", {token}).then(r => {
+      const b = r.body;
+      say("tg-result", b.found ? "Found chat " + b.chat + (b.bot ? " with @" + b.bot : "") + ". Now send the test message." : b.message, !b.found);
+      document.getElementById("tg-test").disabled = !b.found;
+      document.getElementById("tg-token").value = "";            // the server holds it now; it is not left in the page
+    });
+  });
+  on("tg-test", () => send("POST", "/api/telegram/test").then(r => {
+    say("tg-result", r.body.message || r.body.error, !r.body.verified);
+    if (r.body.verified) setTimeout(() => window.location.reload(), 1200);
+  }));
+  on("tg-skip", () => save({telegram: null}, false).then(() => window.location.assign("/stage/operator")));
+
+  // Operator account
+  on("op-begin", () => {
+    const name = document.getElementById("op-name").value.trim();
+    const pass = document.getElementById("op-pass").value, again = document.getElementById("op-pass2").value;
+    if (pass.length < 12) return say("op-result", "The passphrase needs at least 12 characters.", true);
+    if (pass !== again) return say("op-result", "The two passphrases do not match.", true);
+    send("POST", "/api/operator/totp", {name}).then(r => {
+      if (!r.body.ok) return say("op-result", r.body.message, true);
+      document.getElementById("op-qr").src = r.body.qr;
+      document.getElementById("op-manual").textContent = r.body.manual;
+      document.getElementById("op-enrol").hidden = false;
+      say("op-result", "Scan the code with your authenticator, then type the 6 digits it shows.", false);
+    });
+  });
+  on("op-verify", () => {
+    const body = {name: document.getElementById("op-name").value.trim(), passphrase: document.getElementById("op-pass").value,
+                  code: document.getElementById("op-code").value.trim()};
+    send("POST", "/api/operator/verify", body).then(r => {
+      say("op-result", r.body.message || r.body.error, !r.body.verified);
+      if (r.body.verified) {
+        document.getElementById("op-pass").value = document.getElementById("op-pass2").value = "";
+        setTimeout(() => window.location.reload(), 1200);
+      } else {
+        const cell = document.getElementById("op-code");
+        cell.value = "";
+        cell.parentElement.classList.add("is-rejected");
+      }
+    });
+  });
+
+  // LLM key
+  let provider = "openai";
+  document.querySelectorAll("[data-provider]").forEach(btn => btn.addEventListener("click", () => {
+    provider = btn.dataset.provider;
+    document.querySelectorAll("[data-provider]").forEach(b => b.classList.toggle("accent", b === btn));
+  }));
+  on("llm-check", () => {
+    const key = document.getElementById("llm-key").value.trim();
+    send("POST", "/api/llm/check", {provider, api_key: key}).then(r => {
+      say("llm-result", r.body.message, !r.body.ok);
+      if (r.body.ok) { document.getElementById("llm-key").value = ""; setTimeout(() => window.location.reload(), 1200); }
+    });
+  });
+  on("llm-skip", () => save({llm: null}, false).then(() => window.location.assign("/stage/review")));
+
   const clock = document.getElementById("setup-clock");
   if (clock) {
     let left = parseInt(clock.dataset.seconds, 10);

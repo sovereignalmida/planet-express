@@ -100,6 +100,55 @@
         </button>
         {% endfor %}
 
+      {% elif current.name == 'telegram' %}
+        <p>This is how Planet Express talks to you: alerts, questions, and approvals. You can skip it and add it later,
+           but then nothing can message you, so the services are enabled and not started.</p>
+        {% if a.telegram_set %}<section class="pe-card ok">Telegram is connected and verified.</section>{% endif %}
+        <ol>
+          <li>In Telegram, talk to <strong>@BotFather</strong>, send <code>/newbot</code>, and copy the token it gives you.</li>
+          <li>Paste it below, then open your new bot in Telegram and send it any message.</li>
+          <li>Press FIND MY CHAT. Then send a test message.</li>
+        </ol>
+        <div class="pe-field"><label for="tg-token">BOT TOKEN</label>
+          <input class="pe-input" id="tg-token" type="password" autocomplete="off" spellcheck="false"></div>
+        <button class="pe-btn accent" id="tg-find">FIND MY CHAT</button>
+        <button class="pe-btn" id="tg-test" disabled>SEND TEST MESSAGE</button>
+        <button class="pe-btn" id="tg-skip">SKIP FOR NOW</button>
+        <div id="tg-result" role="status"></div>
+
+      {% elif current.name == 'operator' %}
+        <p>The account you will sign in to the dashboard with: a passphrase and a code from an authenticator app.
+           If you lose your phone, another operator can enrol you again; there are no recovery codes.</p>
+        {% if a.operator_set %}<section class="pe-card ok">Operator account verified.</section>{% endif %}
+        <div class="pe-field"><label for="op-name">NAME</label>
+          <input class="pe-input" id="op-name" autocomplete="off" value="{{ a.get('operator_name', '') }}"></div>
+        <div class="pe-field"><label for="op-pass">PASSPHRASE (12 OR MORE CHARACTERS)</label>
+          <input class="pe-input" id="op-pass" type="password" autocomplete="new-password"></div>
+        <div class="pe-field"><label for="op-pass2">PASSPHRASE AGAIN</label>
+          <input class="pe-input" id="op-pass2" type="password" autocomplete="new-password"></div>
+        <button class="pe-btn accent" id="op-begin">SET UP AUTHENTICATOR</button>
+        <div id="op-enrol" hidden>
+          <img id="op-qr" alt="Authenticator QR code" width="200" height="200">
+          <p class="pe-panel-note">Or type this code into your authenticator: <code id="op-manual"></code></p>
+          <div class="pe-field"><label for="op-code">6-DIGIT CODE</label>
+            <div class="pe-totp"><input class="pe-input pe-totp-cell" id="op-code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div></div>
+          <button class="pe-btn primary accent" id="op-verify">VERIFY</button>
+        </div>
+        <div id="op-result" role="status"></div>
+
+      {% elif current.name == 'llm' %}
+        <p>An AI model lets Planet Express plan fixes and explain findings. Without a key it still watches and alerts,
+           but it cannot plan or diagnose. Planning uses small, cheap models.</p>
+        {% if a.llm %}<section class="pe-card ok">{{ a.llm.provider|capitalize }} key checked and saved.</section>{% endif %}
+        <div class="pe-field"><label>PROVIDER</label>
+          <button class="pe-btn accent" id="llm-openai" data-provider="openai">OPENAI</button>
+          <button class="pe-btn" id="llm-anthropic" data-provider="anthropic">ANTHROPIC</button></div>
+        <div class="pe-field"><label for="llm-key">API KEY</label>
+          <input class="pe-input" id="llm-key" type="password" autocomplete="off" spellcheck="false"></div>
+        <button class="pe-btn primary accent" id="llm-check">CHECK AND SAVE</button>
+        <button class="pe-btn" id="llm-skip">SKIP: NO AI PLANNING</button>
+        <div id="llm-result" role="status"></div>
+
       {% elif current.name == 'review' %}
         <div id="plan" data-loaded="0"><p class="pe-panel-note">Building the plan…</p></div>
         {% if session.cannot_apply %}
