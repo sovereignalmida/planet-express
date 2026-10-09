@@ -139,7 +139,7 @@ def test_plan_needs_csrf_like_every_mutation(wizard):
 def test_the_mutating_routes_take_no_path_command_or_step(wizard):
     app, *_ = wizard
     rules = sorted(r.rule for r in app.url_map.iter_rules() if r.methods & {"POST", "PUT", "DELETE", "PATCH"})
-    assert rules == ["/api/answers", "/api/discover", "/api/ping", "/api/plan"]
+    assert rules == ["/api/answers", "/api/apply", "/api/discover", "/api/ping", "/api/plan", "/api/retry", "/api/undo"]
 
 
 def test_next_and_back_skip_stages_that_are_not_built(wizard):

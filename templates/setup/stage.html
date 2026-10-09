@@ -102,13 +102,33 @@
 
       {% elif current.name == 'review' %}
         <div id="plan" data-loaded="0"><p class="pe-panel-note">Building the plan…</p></div>
+        {% if session.cannot_apply %}
+        <section class="pe-card warn">{{ session.cannot_apply }}</section>
+        {% else %}
+        <button class="pe-btn primary accent" id="approve" disabled>APPROVE AND INSTALL</button>
+        {% endif %}
+
+      {% elif current.name == 'install' %}
+        <div id="progress" data-run="install"><p class="pe-panel-note">Reading the journal…</p></div>
+
+      {% elif current.name == 'done' %}
+        <section class="pe-verdict ok"><div class="pe-verdict-text"><h2>PLANET EXPRESS IS INSTALLED</h2>
+          <p>Hermes has filed the report. Everything below was read back from the host, not assumed.</p></div></section>
+        <div id="progress" data-run="done"><p class="pe-panel-note">Reading the journal…</p></div>
+        <h3>NEXT THREE THINGS</h3>
+        <ol>
+          <li>Open the dashboard and sign in with the operator account.</li>
+          <li>Add or adopt a stack, and watch it appear on the Overview.</li>
+          <li>Send <code>/status</code> to your Telegram bot to confirm it answers.</li>
+        </ol>
+        <a class="pe-btn primary accent" href="http://{{ host_addr }}:{{ a.dashboard_port }}/" id="open-dashboard">OPEN DASHBOARD</a>
       {% endif %}
 
       <div class="pe-actions" id="answer-errors" role="alert"></div>
       <footer class="pe-panel-head">
         {% if current.prev %}<a class="pe-btn" href="{{ url_for('stage', name=current.prev) }}">BACK</a>{% endif %}
         <span class="pe-spacer"></span>
-        {% if current.next %}
+        {% if current.next and current.name not in ('review', 'install') %}
           {% if blocked_next %}<button class="pe-btn" disabled>NEXT</button>
           {% else %}<a class="pe-btn primary accent" href="{{ url_for('stage', name=current.next) }}">NEXT</a>{% endif %}
         {% endif %}

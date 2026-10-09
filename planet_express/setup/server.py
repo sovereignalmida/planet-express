@@ -29,6 +29,8 @@ from pathlib import Path
 
 from flask import Flask, abort, g, jsonify, make_response, redirect, render_template, request, url_for
 
+from planet_express.setup.session import Conflict
+
 log = logging.getLogger("planet_express.setup.server")
 
 COOKIE = "pe_setup"
@@ -143,9 +145,10 @@ class _Exposure:
         self._at = float("-inf")
         self._value = True                  # until proven otherwise: a failed probe must not read as "safe"
 
-    def __call__(self) -> bool:
+    def __call__(self, fresh: bool = False) -> bool:
+        """`fresh` skips the cache: used before anything that changes the host, where ten seconds is too stale."""
         with self._lock:
-            if self._clock() - self._at >= EXPOSURE_TTL:
+            if fresh or self._clock() - self._at >= EXPOSURE_TTL:
                 try:
                     self._value = bool(self._probe())
                 except Exception:           # noqa: BLE001 -- an unanswerable probe is treated as exposed
@@ -162,8 +165,8 @@ STAGES = [
     ("welcome", "Welcome", "fry", True), ("scan", "Scan", "leela", True), ("location", "Where it lives", "fry", True),
     ("powers", "What it may do", "fry", True), ("telegram", "Telegram", "fry", False),
     ("operator", "Operator account", "fry", False), ("llm", "LLM key", "fry", False),
-    ("review", "Review the plan", "farnsworth", True), ("install", "Install", "bender", False),
-    ("done", "Verify and done", "hermes", False)]
+    ("review", "Review the plan", "farnsworth", True), ("install", "Install", "bender", True),
+    ("done", "Verify and done", "hermes", True)]
 
 TIERS = [
     {"id": "observe", "title": "WATCH ONLY", "risk": "R0", "risk_class": "ok",
@@ -269,6 +272,10 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
             abort(404)
         if not current["built"]:
             return redirect(url_for("stage", name="welcome"))
+        if current["name"] == "install" and session.phase == "idle":
+            return redirect(url_for("stage", name="review"))
+        if current["name"] == "done" and session.phase != "done":
+            return redirect(url_for("stage", name="install" if session.phase != "idle" else "review"))
         if session.discovery is None:
             session.run_discover()
         d, a = session.discovery, session.public_answers()
@@ -278,7 +285,7 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
         host_addr = _host_name(request.host or "")
         return render_template("stage.html", stages=views, current=current, d=d, a=a, tiers=TIERS, csrf=g.session.csrf,
                                exposed=is_exposed, seconds_left=left, clock=f"{left // 60:02d}:{left % 60:02d}",
-                               host_addr=host_addr, blocked_next=blocked_next)
+                               host_addr=host_addr, blocked_next=blocked_next, session=session)
 
     @app.post("/api/discover")
     def api_discover():
@@ -295,6 +302,52 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
     @app.post("/api/plan")
     def api_plan():
         return jsonify(session.build_plan())
+
+    def conflict(exc):
+        return jsonify({"error": str(exc)}), 409
+
+    @app.post("/api/apply")
+    def api_apply():
+        body = request.get_json(silent=True)
+        plan_id = body.get("plan_id") if isinstance(body, dict) else None
+        if not isinstance(plan_id, str):
+            return jsonify({"error": "plan_id is required"}), 400
+        if exposed(fresh=True):
+            log.warning("apply refused: setup is reachable from outside")
+            return jsonify({"error": "setup is reachable from outside your LAN, so nothing will be installed"}), 403
+        try:
+            session.approve(plan_id)
+        except Conflict as exc:
+            return conflict(exc)
+        return jsonify({"started": True})
+
+    @app.post("/api/retry")
+    def api_retry():
+        body = request.get_json(silent=True)
+        step = body.get("step") if isinstance(body, dict) else None
+        if exposed(fresh=True):
+            return jsonify({"error": "setup is reachable from outside your LAN, so nothing will be installed"}), 403
+        try:
+            session.retry(step if isinstance(step, str) else None)
+        except Conflict as exc:
+            return conflict(exc)
+        return jsonify({"started": True})
+
+    @app.post("/api/undo")
+    def api_undo():
+        try:
+            session.undo()
+        except Conflict as exc:
+            return conflict(exc)
+        return jsonify({"started": True})
+
+    @app.get("/api/events")
+    def api_events():
+        try:
+            after = max(0, int(request.args.get("after", "0")))
+        except ValueError:
+            after = 0
+        return jsonify(session.progress(after))
 
 
 def _scrub(text: str) -> str:

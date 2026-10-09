@@ -99,6 +99,82 @@
       });
       add("h3", "", "WILL NOT TOUCH");
       (p.will_not_touch || []).forEach(t => add("div", "pe-panel-note", "• " + t));
+      const approve = document.getElementById("approve");
+      if (approve && p.applicable) {
+        approve.disabled = false;
+        approve.addEventListener("click", () => {
+          approve.disabled = true;
+          send("POST", "/api/apply", {plan_id: p.plan_id}).then(res => {
+            if (res.status === 200) window.location.assign("/stage/install");
+            else { show([{field: "install", message: res.body.error || "refused"}]); approve.disabled = false; }
+          });
+        });
+      }
     });
+  }
+
+  const progress = document.getElementById("progress");
+  if (progress) {
+    let seq = 0;
+    const lines = [];
+    const mark = {pending: "·", started: "▶", ok: "✓", failed: "✗", undone: "↺"};
+    const draw = (data) => {
+      progress.textContent = "";
+      const add = (tag, cls, text, parent) => {
+        const el = document.createElement(tag);
+        if (cls) el.className = cls;
+        el.textContent = text;
+        (parent || progress).appendChild(el);
+        return el;
+      };
+      const done = data.steps.filter(s => s.status === "ok").length;
+      const failed = data.steps.find(s => s.status === "failed");
+      const verdict = add("section", "pe-verdict " + (failed || data.phase === "stopped" ? "crit" : data.phase === "done" ? "ok" : "warn"), "");
+      const text = add("div", "pe-verdict-text", "", verdict);
+      add("h2", "", {applying: "INSTALLING", done: "INSTALLED", stopped: "STOPPED", refused: "NOT STARTED", undoing: "UNDOING",
+                     undone: "UNDONE", undo_stopped: "UNDO STOPPED"}[data.phase] || data.phase.toUpperCase(), text);
+      add("p", "", done + " of " + data.steps.length + " steps finished", text);
+      if (data.outcome && data.outcome.reason) add("p", "", data.outcome.reason, text);
+      data.steps.forEach(s => {
+        const row = add("div", "pe-check " + (s.status === "ok" ? "passed" : s.status === "failed" ? "failed" : s.status === "started" ? "running" : ""), "");
+        add("strong", "", (mark[s.status] || "·") + " " + s.title, row);
+        add("span", "pe-panel-note", " " + s.target + (s.satisfied ? " · already in place" : ""), row);
+        if (s.status === "failed" && s.reason) add("div", "pe-output crit", s.reason, row);
+        if (s.undo_note) add("div", "pe-panel-note", s.undo_note, row);
+      });
+      if (data.phase === "stopped" || data.phase === "refused") {
+        add("div", "pe-hint", "NOTHING FURTHER WILL RUN. Fix the cause, then retry the step, or go back to the plan.");
+        const retry = add("button", "pe-btn accent", "RETRY STEP", progress);
+        retry.addEventListener("click", () => send("POST", "/api/retry", {step: (data.outcome || {}).step}).then(r => {
+          if (r.status !== 200) show([{field: "retry", message: r.body.error || "refused"}]);
+        }));
+        add("a", "pe-btn", "BACK TO PLAN", progress).href = "/stage/review";
+      }
+      if (data.phase === "stopped" || data.phase === "done" || data.phase === "undo_stopped") {
+        const undo = add("button", "pe-btn warn", "UNDO WHAT WAS INSTALLED", progress);
+        undo.addEventListener("click", () => send("POST", "/api/undo").then(r => {
+          if (r.status !== 200) show([{field: "undo", message: r.body.error || "refused"}]);
+        }));
+      }
+      if (data.outcome && data.outcome.not_undone && data.outcome.not_undone.length) {
+        add("h3", "", "LEFT IN PLACE");
+        data.outcome.not_undone.forEach(n => add("div", "pe-panel-note", "• " + n.reason));
+      }
+      const log = add("div", "pe-logwell", "");
+      lines.slice(-200).forEach(l => add("div", "pe-logline", l, log));
+    };
+    const tick = () => send("GET", "/api/events?after=" + seq).then(r => {
+      const data = r.body;
+      seq = data.seq;
+      (data.events || []).forEach(e => {
+        if (e.type === "log") lines.push(e.line);
+        else if (e.type === "step_failed") lines.push("✗ " + e.step + ": " + e.reason);
+        else if (e.type === "step_ok") lines.push("✓ " + e.step);
+      });
+      draw(data);
+      if (progress.dataset.run === "install" && data.phase === "done") { window.location.assign("/stage/done"); return; }
+      setTimeout(tick, ["applying", "undoing"].includes(data.phase) ? 1000 : 3000);
+    }).catch(() => setTimeout(tick, 3000));
+    tick();
   }
 })();

@@ -124,11 +124,38 @@ def _undo_command(args) -> int:
 def _serve_command(args) -> int:
     import socket
 
-    from planet_express.setup.server import Sessions, serve
-    addresses = args.bind or (discover()["network"]["lan_addresses"] + ["127.0.0.1"])
+    from planet_express.setup.apply import apply
+    from planet_express.setup.host import RealHost
+    from planet_express.setup.journal import Journal
     from planet_express.setup.plan import plan
+    from planet_express.setup.server import Sessions, serve
     from planet_express.setup.session import SetupSession
-    session = SetupSession(discover_fn=discover, plan_fn=plan, repo_root=args.repo_root)
+    from planet_express.setup.undo import undo
+
+    addresses = args.bind or (discover()["network"]["lan_addresses"] + ["127.0.0.1"])
+    holder: dict = {}
+
+    def journal_root() -> str:
+        return default_journal_root(discover(), holder["session"].answers["install_dir"])
+
+    def apply_fn(reviewed, replan):
+        uids = _trusted_uids(reviewed)
+        return apply(reviewed, host=RealHost(uids), journal_root=journal_root(), replan=replan, trusted_uids=uids)
+
+    def undo_fn(reviewed):
+        uids = _trusted_uids(reviewed)
+        return undo(reviewed, host=RealHost(uids), journal_root=journal_root(), trusted_uids=uids)
+
+    def journal_fn(plan_id):
+        applied = holder["session"].applied_plan
+        return Journal(journal_root(), plan_id, trusted_uids=_trusted_uids(applied))
+
+    cannot = None if os.geteuid() == 0 else (
+        "This setup was not started as root, so it can show you the plan but cannot install it. "
+        "Press Ctrl-C and run it again with sudo.")
+    session = SetupSession(discover_fn=discover, plan_fn=plan, repo_root=args.repo_root, apply_fn=apply_fn,
+                           undo_fn=undo_fn, journal_fn=journal_fn, cannot_apply=cannot)
+    holder["session"] = session
     return serve(addresses=list(dict.fromkeys(addresses)), port=args.port,
                  names=[socket.gethostname(), *(args.name or [])], sessions=Sessions(), session=session)
 
