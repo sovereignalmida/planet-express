@@ -212,6 +212,7 @@ class SetupSession:
         try:
             journal = self._journal_fn(public["plan_id"])
             records = journal.steps()
+            snapshot = journal.events(after)                # read once: events and seq must come from the same view
         except Exception as exc:                                       # noqa: BLE001 -- the poll must stay JSON
             return {"phase": phase, "outcome": outcome, "plan_id": public["plan_id"], "events": [], "seq": after,
                     "steps": [{"id": s["id"], "title": s["title"], "target": s["target"], "risk": s["risk"],
@@ -225,13 +226,11 @@ class SetupSession:
                           "status": ("undone" if record and record.undone else record.status) if record else "pending",
                           "effect": record.effect if record else None, "reason": record.reason if record else None,
                           "satisfied": bool(record and record.satisfied), "undo_note": record.undo_note if record else None})
-        snapshot = journal.events(after)                    # read once: events and seq must come from the same view
-        events = [e for e in snapshot if e["type"] in ("log", "step_started", "step_ok", "step_failed",
-                                                                    "stopped", "done", "step_undone", "step_not_undone",
-                                                                    "undo_refused", "undo_done")]
+        shown = ("log", "step_started", "step_ok", "step_failed", "stopped", "done", "step_undone", "step_not_undone",
+                 "undo_refused", "undo_done")
+        events = [e for e in snapshot if e["type"] in shown]
         seq = max([after] + [e["seq"] for e in snapshot])
         return {"phase": phase, "outcome": outcome, "plan_id": public["plan_id"], "steps": steps, "events": events, "seq": seq}
-
 
     # -- Telegram --------------------------------------------------------------------------------------------------
     def telegram_find(self, token: str) -> dict:

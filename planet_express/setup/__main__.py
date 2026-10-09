@@ -81,10 +81,10 @@ def _apply_command(args) -> int:
         return 2
 
     result = apply(
-        reviewed, host=RealHost(_trusted_uids(reviewed)),
+        reviewed, host=RealHost(_trusted_uids(reviewed, report)),
         journal_root=args.journal_dir or default_journal_root(report, answers.install_dir),
         replan=lambda: plan(discover(), answers, repo_root=args.repo_root), dry_run=args.dry_run,
-        trusted_uids=_trusted_uids(reviewed))
+        trusted_uids=_trusted_uids(reviewed, report))
     json.dump({"status": result.status, "plan_id": result.plan_id, "step": result.step, "reason": result.reason,
                "checks": result.checks}, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
