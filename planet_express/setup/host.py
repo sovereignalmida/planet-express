@@ -150,6 +150,26 @@ class RealHost:
         ids = self.lookup_user(name)
         return None if ids is None else set(os.getgrouplist(name, ids[1]))
 
+    _UNSTABLE_INODES = frozenset({"vfat", "msdos", "exfat", "ntfs", "ntfs3", "fuseblk", "cifs", "smb3"})
+
+    def stable_inodes(self, path: str) -> bool:
+        """False on filesystems that invent inode numbers at mount time (FAT, NTFS, SMB): a file's inode there
+        proves nothing after a reboot, so identity checks must fall back to content and metadata."""
+        real = os.path.realpath(path)
+        best, fstype = "", ""
+        try:
+            lines = open("/proc/self/mounts", encoding="utf-8", errors="replace").read().splitlines()
+        except OSError:
+            return True
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 3:
+                continue
+            mount = fields[1].replace("\\040", " ")
+            if (real == mount or real.startswith(mount.rstrip("/") + "/")) and len(mount) >= len(best):
+                best, fstype = mount, fields[2]
+        return fstype not in self._UNSTABLE_INODES
+
     def _group_is_private(self, gid: int) -> bool:
         """True if every account in group `gid` (as primary or supplementary group) is one this plan trusts."""
         import grp

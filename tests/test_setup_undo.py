@@ -420,3 +420,48 @@ def test_content_added_deep_inside_a_created_venv_also_stops_the_undo(tmp_path):
     result = run_undo(plan, host, tmp_path)
     assert result.status == "stopped" and "changed since setup built it" in result.reason
     assert f"{VENV}/bin/custom-tool" in host.nodes
+
+
+def test_on_a_filesystem_with_unstable_inodes_undo_trusts_the_bytes_and_still_refuses_an_edit(tmp_path):
+    """MOS's /boot is FAT: inode numbers change at every mount, so a reboot must not strand the undo."""
+    from test_setup_handlers_services import hook_plan
+    mine = "#!/bin/sh\nmodprobe nct6775\n"
+    host = hook_host(**{"post-start.sh": mine})
+    host.unstable_prefixes.append(HOOKS)
+    plan = hook_plan(expect_absent=[], expected_sha256={"post-start.sh": sha(mine)})
+    run_apply(plan, host, tmp_path)
+    host.nodes[f"{HOOKS}/post-start.sh"].ino += 5000                     # "rebooted": same file, new inode number
+    assert run_undo(plan, host, tmp_path).status == "done"
+    assert host.nodes[f"{HOOKS}/post-start.sh"].data.decode() == mine
+    # an edit is still refused, inode or not
+    host2 = hook_host(**{"post-start.sh": mine})
+    host2.unstable_prefixes.append(HOOKS)
+    run_apply(plan, host2, tmp_path, "k")
+    host2.nodes[f"{HOOKS}/post-start.sh"].data += b"echo mine\n"
+    host2.nodes[f"{HOOKS}/post-start.sh"].ino += 5000
+    assert run_undo(plan, host2, tmp_path, "k").status == "stopped"
+
+
+def test_on_a_normal_filesystem_a_changed_inode_is_still_refused(tmp_path):
+    from test_setup_handlers_services import hook_plan
+    mine = "#!/bin/sh\nmodprobe nct6775\n"
+    host = hook_host(**{"post-start.sh": mine})
+    plan = hook_plan(expect_absent=[], expected_sha256={"post-start.sh": sha(mine)})
+    run_apply(plan, host, tmp_path)
+    host.nodes[f"{HOOKS}/post-start.sh"].ino += 5000
+    assert run_undo(plan, host, tmp_path).status == "stopped"
+
+
+def test_a_mos_init_script_recopied_at_boot_is_still_undone_but_an_edited_one_is_not(tmp_path):
+    host = init_host(defaults=b"stale\n")
+    plan = init_plan(defaults_if_exists="replace", defaults_expected_sha256=sha("stale\n"))
+    run_apply(plan, host, tmp_path)
+    node = host.nodes[INIT]
+    node.ino += 777                                                     # the boot hook copied it again
+    node.mode = 0o751
+    assert run_undo(plan, host, tmp_path).status == "done" and host.nodes[INIT].data == b"old\n"
+    host2 = init_host(defaults=b"stale\n")
+    run_apply(plan, host2, tmp_path, "k")
+    host2.nodes[INIT].ino += 777
+    host2.nodes[INIT].data += b"# mine\n"
+    assert run_undo(plan, host2, tmp_path, "k").status == "stopped"

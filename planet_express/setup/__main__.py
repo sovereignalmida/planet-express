@@ -28,9 +28,10 @@ def default_journal_root(report: dict, install_dir: str) -> str:
     return "/var/lib/planetexpress-setup"
 
 
-def _trusted_uids(plan) -> set[int]:
+def _trusted_uids(plan, report: dict | None = None) -> set[int]:
     """Root, plus every account the plan makes an owner. Only these may own a directory on the way to a file
-    setup writes."""
+    setup writes. On MOS the pool's mount point belongs to MOS's own administrator account (uid 500 on a stock
+    install), which is who set the pool up; the pool is trusted as that account's, never anyone else's."""
     import pwd
     uids = {0}
     for step in plan.steps:
@@ -40,6 +41,15 @@ def _trusted_uids(plan) -> set[int]:
                 try:
                     uids.add(pwd.getpwnam(name).pw_uid)
                 except KeyError:
+                    pass
+    if report is not None and report["host"]["init_system"] == "mos":
+        targets = [step.target for step in plan.steps if step.target.startswith("/")]
+        for pool in report["storage"].get("pools", []):
+            mount = pool["mount"]
+            if any(t == mount or t.startswith(mount.rstrip("/") + "/") for t in targets):
+                try:
+                    uids.add(os.stat(mount).st_uid)
+                except OSError:
                     pass
     return uids
 
@@ -112,7 +122,7 @@ def _undo_command(args) -> int:
     if saved_plan.to_public()["plan_id"] != args.plan_id:
         print("the saved plan does not match its id; it was changed. Not undoing from it.", file=sys.stderr)
         return 2
-    uids = _trusted_uids(saved_plan)
+    uids = _trusted_uids(saved_plan, discover())
     result = undo(saved_plan, host=RealHost(uids), journal_root=journal_dir, trusted_uids=uids)
     json.dump({"status": result.status, "plan_id": result.plan_id, "step": result.step, "reason": result.reason,
                "undone": result.undone, "not_undone": result.not_undone, "remaining": result.remaining},
@@ -139,16 +149,16 @@ def _serve_command(args) -> int:
         return default_journal_root(discover(), holder["session"].answers["install_dir"])
 
     def apply_fn(reviewed, replan):
-        uids = _trusted_uids(reviewed)
+        uids = _trusted_uids(reviewed, holder["session"].discovery)
         return apply(reviewed, host=RealHost(uids), journal_root=journal_root(), replan=replan, trusted_uids=uids)
 
     def undo_fn(reviewed):
-        uids = _trusted_uids(reviewed)
+        uids = _trusted_uids(reviewed, holder["session"].discovery)
         return undo(reviewed, host=RealHost(uids), journal_root=journal_root(), trusted_uids=uids)
 
     def journal_fn(plan_id):
         applied = holder["session"].applied_plan
-        return Journal(journal_root(), plan_id, trusted_uids=_trusted_uids(applied))
+        return Journal(journal_root(), plan_id, trusted_uids=_trusted_uids(applied, holder["session"].discovery))
 
     cannot = None if os.geteuid() == 0 else (
         "This setup was not started as root, so it can show you the plan but cannot install it. "

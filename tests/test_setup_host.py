@@ -304,3 +304,9 @@ def test_a_group_writable_directory_is_refused_when_an_untrusted_account_shares_
     host.add_dir("/srv/app", mode=0o775, uid=1000, gid=1000)
     with pytest.raises(HostError, match="writable by group or other"):
         host.mkdir("/srv/app/d", 0o755, 1000, 1000)
+
+
+def test_stable_inodes_is_true_for_an_ordinary_directory(tmp_path):
+    import os
+    from planet_express.setup.host import RealHost
+    assert RealHost({0, os.geteuid()}).stable_inodes(str(tmp_path)) is True

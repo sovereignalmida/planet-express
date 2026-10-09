@@ -66,3 +66,18 @@ def test_dry_run_prints_what_each_check_says_and_changes_nothing(wired, capsys, 
 def test_the_journal_lives_on_the_pool_on_mos_and_in_var_lib_elsewhere():
     assert cli.default_journal_root({"host": {"init_system": "mos"}}, "/mnt/data/pe/planet-express") == "/mnt/data/pe/setup"
     assert cli.default_journal_root({"host": {"init_system": "systemd"}}, "/opt/pe") == "/var/lib/planetexpress-setup"
+
+
+def test_on_mos_the_pool_mount_owner_is_trusted_only_when_the_plan_writes_under_it(tmp_path):
+    import os
+    from planet_express.setup.__main__ import _trusted_uids
+    from planet_express.setup.plan import Plan, Step
+    pool = tmp_path / "data"
+    pool.mkdir()
+    inside = Step("s01", "dir.ensure", "x", str(pool / "pe"), "R1", True, True, (), {"path": str(pool / "pe")}, {})
+    outside = Step("s01", "dir.ensure", "x", "/etc/pe", "R1", True, True, (), {"path": "/etc/pe"}, {})
+    report = {"host": {"init_system": "mos"}, "storage": {"pools": [{"mount": str(pool)}]}}
+    owner = os.stat(pool).st_uid
+    assert owner in _trusted_uids(Plan("fresh", (inside,), (), (), ()), report)
+    assert _trusted_uids(Plan("fresh", (outside,), (), (), ()), report) == {0}
+    assert _trusted_uids(Plan("fresh", (inside,), (), (), ()), {**report, "host": {"init_system": "systemd"}}) == {0}

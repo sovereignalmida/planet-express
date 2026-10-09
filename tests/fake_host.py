@@ -38,6 +38,7 @@ class FakeHost:
         self.umasks: list = []
         self.cwds: list = []
         self.mutations = 0
+        self.unstable_prefixes: list[str] = []        # paths on a filesystem with unstable inode numbers (FAT)
         self.nodes["/"] = _Node("dir", 0o755, 0, 0, self._next())
 
     def _next(self) -> int:
@@ -100,6 +101,9 @@ class FakeHost:
                 if node.mode & 0o002 and not sticky or (node.mode & 0o020 and not sticky and not self._group_is_private(node.gid)):
                     raise HostError(f"{directory} is writable by group or other, so a path through it could be redirected")
         return real
+
+    def stable_inodes(self, path) -> bool:
+        return not any(path == p or path.startswith(p.rstrip("/") + "/") for p in self.unstable_prefixes)
 
     def _group_is_private(self, gid) -> bool:
         for name, (uid, primary) in self.users.items():

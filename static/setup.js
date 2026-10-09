@@ -45,11 +45,15 @@
   document.querySelectorAll("[data-answer]").forEach(el => {
     const field = el.dataset.answer;
     if (el.tagName === "INPUT") {
-      el.addEventListener("change", () => save({[field]: el.value}, false));
+      // Changing who it runs as can add or remove the root acknowledgement, so that page is redrawn.
+      el.addEventListener("change", () => save({[field]: el.value}, field === "run_as"));
     } else {
       el.addEventListener("click", () => save({[field]: el.dataset.value}, true));
     }
   });
+
+  const root = document.getElementById("accept-root");
+  if (root) root.addEventListener("change", () => save({accept_root_service: root.checked}, true));
 
   document.querySelectorAll("[data-ignore]").forEach(box => box.addEventListener("change", () => {
     const names = Array.from(document.querySelectorAll("[data-ignore]")).filter(b => b.checked).map(b => b.dataset.ignore);

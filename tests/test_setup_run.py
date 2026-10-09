@@ -158,3 +158,22 @@ def test_the_run_routes_are_the_only_new_mutations_and_take_no_path_or_command(r
     app, *_ = rig
     rules = sorted(r.rule for r in app.url_map.iter_rules() if r.methods & {"POST", "PUT", "DELETE", "PATCH"})
     assert rules == ["/api/answers", "/api/apply", "/api/discover", "/api/llm/check", "/api/operator/totp", "/api/operator/verify", "/api/ping", "/api/plan", "/api/retry", "/api/telegram/find-chat", "/api/telegram/test", "/api/undo"]
+
+
+def test_a_journal_that_cannot_be_read_still_answers_the_poll_with_json(tmp_path):
+    clock = Clock()
+    sessions = Sessions(clock=clock)
+
+    def broken(plan_id):
+        raise OSError("disk gone")
+    session = SetupSession(discover_fn=lambda: copy.deepcopy(systemd_report()), plan_fn=lambda *a, **k: standard_plan(),
+                           repo_root=REPO, apply_fn=lambda p, r: real_apply(p, host=fresh_host(), journal_root=tmp_path / "j", replan=r,
+                                                                          evidence_dir="/journal/evidence"),
+                           undo_fn=None, journal_fn=broken)
+    app = create_app(sessions=sessions, allowed_hosts={"192.168.1.50"}, exposure=lambda: False, clock=clock, session=session)
+    cookie, csrf = login(app, sessions)
+    plan_id = post(app, cookie, csrf, "/api/plan").get_json()["plan_id"]
+    post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
+    session.wait()
+    reply = call(app, "GET", "/api/events", cookie=cookie)
+    assert reply.status_code == 200 and "journal cannot be read" in reply.get_json()["journal_error"]

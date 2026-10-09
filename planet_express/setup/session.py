@@ -71,7 +71,8 @@ class SetupSession:
         roots = found.get("stacks_roots") or []
         install = existing.get("install_dir") or self.repo_root or str(Path(__file__).resolve().parents[2])
         run_as = os.environ.get("SUDO_USER") or ("root" if os.geteuid() == 0 else None) or os.environ.get("USER") or "root"
-        stacks = roots[0]["path"] if roots else f"{install}/stacks"
+        pools = (found.get("storage") or {}).get("pools") or []
+        stacks = roots[0]["path"] if roots else (f"{pools[0]['mount'].rstrip('/')}/stacks" if pools else f"{install}/stacks")
         return {"story": "adopt" if existing.get("installed") or roots else "fresh", "run_as": run_as,
                 "install_dir": install, "stacks_root": stacks, "tier": "observe"}
 
@@ -208,8 +209,15 @@ class SetupSession:
         if plan is None or self._journal_fn is None:
             return {"phase": phase, "outcome": outcome, "steps": [], "events": [], "seq": after}
         public = plan.to_public()
-        journal = self._journal_fn(public["plan_id"])
-        records = journal.steps()
+        try:
+            journal = self._journal_fn(public["plan_id"])
+            records = journal.steps()
+        except Exception as exc:                                       # noqa: BLE001 -- the poll must stay JSON
+            return {"phase": phase, "outcome": outcome, "plan_id": public["plan_id"], "events": [], "seq": after,
+                    "steps": [{"id": s["id"], "title": s["title"], "target": s["target"], "risk": s["risk"],
+                               "status": "pending", "effect": None, "reason": None, "satisfied": False, "undo_note": None}
+                              for s in public["steps"]],
+                    "journal_error": f"the journal cannot be read: {type(exc).__name__}"}
         steps = []
         for step in public["steps"]:
             record = records.get(step["id"])

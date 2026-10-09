@@ -172,3 +172,14 @@ def test_the_recheck_returns_the_refreshed_report(wizard):
     app, cookie, csrf, *_ = wizard
     body = post(app, cookie, csrf, "/api/discover").get_json()
     assert body["summary"] and body["checks"] and "stacks" in body and "storage" in body
+
+
+def test_running_as_root_needs_an_explicit_acknowledgement_on_the_page(wizard):
+    app, cookie, csrf, session, _ = wizard
+    put(app, cookie, csrf, {"run_as": "root"})
+    html = call(app, "GET", "/stage/location", cookie=cookie).get_data(as_text=True)
+    assert 'id="accept-root"' in html and "RUN AS ROOT" in html and "checked" not in html.split('id="accept-root"')[1].split(">")[0]
+    assert put(app, cookie, csrf, {"accept_root_service": True}).get_json()["ok"]
+    assert "checked" in call(app, "GET", "/stage/location", cookie=cookie).get_data(as_text=True).split('id="accept-root"')[1].split(">")[0]
+    put(app, cookie, csrf, {"run_as": "pe"})
+    assert 'id="accept-root"' not in call(app, "GET", "/stage/location", cookie=cookie).get_data(as_text=True)

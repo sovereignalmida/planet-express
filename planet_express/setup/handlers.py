@@ -417,6 +417,12 @@ class _AtomicFile:
         self.after_inverse(ctx)
         return "; ".join(notes)
 
+    def _identity_unreliable(self, ctx, path: str) -> bool:
+        return not ctx.host.stable_inodes(path)
+
+    def _wears_its_stat(self, ctx, path, candidate, current) -> bool:
+        return staged_stat_matches(ctx, path, candidate, current)
+
     def _undo_path(self, ctx, path: str, candidates: list[dict], staged: dict, committed: set) -> str:
         current = ctx.host.lstat(path)
         if current is None:
@@ -430,6 +436,12 @@ class _AtomicFile:
         except HostError as exc:
             raise StepFailure(str(exc)) from exc
         ours = next((c for c in candidates if staged.get(c["temp"]) == current.identity), None)
+        if ours is None and path in committed and self._identity_unreliable(ctx, path):
+            # FAT renumbers inodes at every mount, and a MOS init script is copied afresh at every boot, so after a
+            # reboot identity proves nothing. Fall back to what can still be checked: the bytes setup wrote and
+            # the mode and owner it gave them.
+            ours = next((c for c in candidates if c["written_sha256"] == now
+                         and self._wears_its_stat(ctx, path, c, current)), None)
         if ours is None:
             if any(c["previous_sha256"] == now for c in candidates if c["previous_sha256"]):
                 return f"{path} is already back to what it was"
@@ -464,6 +476,16 @@ class _AtomicFile:
                 pass
             raise StepFailure(str(exc)) from exc
         return f"restored {path}"
+
+
+def staged_stat_matches(ctx, path, candidate, current) -> bool:
+    """On a filesystem without stable inodes: is this file still wearing the mode and owner setup gave it?
+    A step with no fixed mode or owner (a boot hook keeps its file's own) is judged by its bytes alone."""
+    p = ctx.step.params
+    if "mode" not in p or "owner" not in p:
+        return True
+    ids = _owner(ctx)
+    return current.perms == int(p["mode"], 8) and not isinstance(ids, Refuse) and (current.uid, current.gid) == ids
 
 
 class FileWrite(_AtomicFile):
@@ -1078,6 +1100,13 @@ class ServiceInstall(_AtomicFile):
             if result.rc != 0:
                 raise StepFailure("the unit was written but systemd would not reload: "
                                   + " | ".join((result.err or result.out).strip().splitlines()[-2:])[:300], "unknown")
+
+    def _identity_unreliable(self, ctx, path: str) -> bool:
+        # MOS copies its init scripts out of the persistent install at every boot: same bytes, a new file each time.
+        return ctx.step.params["flavour"] == "sysvinit" or super()._identity_unreliable(ctx, path)
+
+    def _wears_its_stat(self, ctx, path, candidate, current) -> bool:
+        return ctx.step.params["flavour"] == "sysvinit" or super()._wears_its_stat(ctx, path, candidate, current)
 
     def after_inverse(self, ctx) -> None:
         if ctx.step.params["flavour"] == "systemd" and ctx.host.run(["systemctl", "daemon-reload"], timeout=60).rc != 0:

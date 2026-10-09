@@ -82,6 +82,14 @@
           <input class="pe-input" id="stacks_root" data-answer="stacks_root" value="{{ a.stacks_root }}"></div>
         <div class="pe-field"><label for="run_as">RUN AS</label>
           <input class="pe-input" id="run_as" data-answer="run_as" value="{{ a.run_as }}"></div>
+        {% if a.run_as == 'root' %}
+        <label class="pe-check {{ 'passed' if a.accept_root_service else '' }}">
+          <input type="checkbox" id="accept-root" {{ 'checked' if a.accept_root_service }}>
+          <strong>RUN AS ROOT</strong>
+          <div>Planet Express will run as root on this host. That is how MOS works (it has no sudo, and Docker's socket
+               belongs to root), but it means a bug in Planet Express acts with root's power. I understand that.</div>
+        </label>
+        {% endif %}
         <h3>STACKS</h3>
         <p class="pe-panel-note">A stack set to IGNORE is never read, started or stopped by Planet Express.</p>
         {% for s in d.stacks %}
