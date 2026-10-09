@@ -246,3 +246,28 @@ def test_an_uninstall_plan_applies_and_undoes_on_a_host_that_looks_like_the_live
     before = tree(host)
     assert run_apply(p, host, tmp_path).status == "done" and UNIT not in host.nodes and state["enabled"] is False
     assert run_undo(p, host, tmp_path).status == "done" and tree(host) == before and state["enabled"] is True
+
+
+def test_uninstall_is_bound_to_the_install_that_was_found_not_to_what_the_page_says():
+    report = discover(ubuntu(files=LIVE_FILES), repo_root="/home/pe/apps/pe")
+    other = plan(report, uninstall_answers(install_dir="/tmp/attacker-controlled"))
+    assert not other.applicable and "not /tmp/attacker-controlled" in other.blocked[0]
+    as_root = plan(report, uninstall_answers(run_as="root"))
+    assert not as_root.applicable and "does not run as root" in as_root.blocked[0]
+    assert plan(report, uninstall_answers()).applicable
+
+
+def test_a_casa_stacks_unit_setup_did_not_write_is_left_alone_and_one_it_did_is_removed():
+    from scripts.render_template import render
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    values = dict(INSTALL_DIR="/home/pe/apps/pe", RUN_USER="pe", RUN_GROUP="pe", CONFIG_FILE="/home/pe/apps/pe/config.yaml",
+                  DASHBOARD_PORT="8420")
+    ours = render((root / "systemd/casa-stacks.service.template").read_text(), **values)
+    for content, removed in ((ours, True), ("[Unit]\nDescription=my own stacks unit\n", False)):
+        files = {**LIVE_FILES, "/etc/systemd/system/casa-stacks.service": content}
+        p = plan(discover(ubuntu(files=files), repo_root="/home/pe/apps/pe"), uninstall_answers(), repo_root=str(root))
+        targets = {s.target for s in p.steps}
+        assert ("/etc/systemd/system/casa-stacks.service" in targets) is removed
+        if not removed:
+            assert any("casa-stacks.service" in t and "kept" in t for t in p.will_not_touch)

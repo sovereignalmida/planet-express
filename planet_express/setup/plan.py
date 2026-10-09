@@ -546,6 +546,19 @@ def _uninstall(b: _Builder) -> None:
     if not existing["installed"]:
         b.blocked.append("Planet Express is not installed on this host, so there is nothing to uninstall.")
         return
+    # The snapshot runs a script from the install directory as the service user, so both are bound to the install
+    # that was found, never to whatever the page says, and root is only the service user where it has to be.
+    found_dir = existing.get("install_dir")
+    if found_dir and a.install_dir != found_dir:
+        b.blocked.append(f"Planet Express is installed at {found_dir}, not {a.install_dir}. Uninstall works on the install "
+                         "that is actually here; set the install path back.")
+        return
+    if mos and a.run_as != "root":
+        b.blocked.append("On MOS the service runs as root, so the uninstall runs as root too.")
+        return
+    if not mos and a.run_as == "root":
+        b.blocked.append("The service does not run as root on this host; choose the account it runs as.")
+        return
     b.snapshot_id = b.add(
         "state.snapshot", "Snapshot the current state first", a.install_dir,
         {"install_dir": a.install_dir, "run_user": a.run_as,
@@ -566,7 +579,18 @@ def _uninstall(b: _Builder) -> None:
               b.text(f"Removes {path}. A private copy is kept first, so undo can put it back."),
               risk=risk, depends_on=())
 
-    names = ("casa-dashboard", "casa-planetexpress") + (("casa-stacks",) if not mos else ())
+    names = ("casa-dashboard", "casa-planetexpress")
+    stacks_unit = "/etc/systemd/system/casa-stacks.service"
+    if not mos and b.present(stacks_unit):
+        # casa-stacks may be an operator's own unit that install kept rather than overwrote. It is only ours if it
+        # is exactly what setup would have written.
+        from scripts.render_template import render
+        mine = render(b.read("systemd/casa-stacks.service.template"), INSTALL_DIR=a.install_dir, RUN_USER=a.run_as,
+                      RUN_GROUP=a.run_group or a.run_as, CONFIG_FILE=p["config"], DASHBOARD_PORT=str(a.dashboard_port))
+        if hashes.get(stacks_unit) == hashlib.sha256(mine.encode()).hexdigest():
+            names += ("casa-stacks",)
+        else:
+            b.not_touched.append("casa-stacks.service is not what Planet Express writes, so it is treated as yours and kept.")
     if mos:
         hook_dir = "/boot/optional/scripts"
         hooks = {n: hashes[f"{hook_dir}/{n}"] for n in ("post-start.sh", "shutdown.sh")
