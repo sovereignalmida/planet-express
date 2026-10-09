@@ -353,11 +353,14 @@ class RealHost:
                     seen[0] += 1
                     if seen[0] > limit:
                         raise HostError(f"{path} has too many entries to fingerprint")
-                    kind = "dir" if stat_module.S_ISDIR(st.st_mode) else "link" if stat_module.S_ISLNK(st.st_mode) else "file"
+                    kind = ("dir" if stat_module.S_ISDIR(st.st_mode) else "link" if stat_module.S_ISLNK(st.st_mode)
+                            else "file" if stat_module.S_ISREG(st.st_mode) else "special")
                     if kind == "file":
                         detail = self._file_hash(entry, handle)
                     elif kind == "link":
                         detail = os.readlink(entry, dir_fd=handle)
+                    elif kind == "special":
+                        detail = f"{stat_module.S_IFMT(st.st_mode):o}"          # a FIFO or socket is never opened
                     else:
                         detail = ""
                     digest.update(f"{prefix}{entry}\0{kind}\0{detail}\n".encode("utf-8", "surrogateescape"))

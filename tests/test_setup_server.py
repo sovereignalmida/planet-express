@@ -249,3 +249,45 @@ def _free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return probe.getsockname()[1]
+
+
+def test_the_start_up_token_never_reaches_the_log(caplog):
+    import logging
+    lines, stop, sessions, port = [], threading.Event(), Sessions(), _free_port()
+    thread = threading.Thread(target=serve, kwargs=dict(addresses=["127.0.0.1"], port=port, names=["t"], sessions=sessions,
+                                                        exposure=lambda: False, out=lines.append, stop=stop))
+    with caplog.at_level(logging.DEBUG):
+        thread.start()
+        try:
+            for _ in range(100):
+                if any("https://" in line for line in lines):
+                    break
+                time.sleep(0.05)
+            token = next(part for line in lines for part in line.split() if part.startswith("https://")).split("?t=")[1]
+            context = ssl.create_default_context()
+            context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+            connection = http.client.HTTPSConnection("127.0.0.1", port, context=context, timeout=5)
+            connection.request("GET", f"/?t={token}", headers={"Host": f"127.0.0.1:{port}"})
+            assert connection.getresponse().status == 303
+        finally:
+            stop.set()
+            thread.join(timeout=10)
+    assert token not in caplog.text
+
+
+def test_a_failed_second_bind_returns_instead_of_hanging():
+    import socket
+    busy = socket.socket()
+    busy.bind(("127.0.0.2", 0))
+    busy.listen()
+    port = busy.getsockname()[1]
+    out = []
+    try:
+        done = []
+        thread = threading.Thread(target=lambda: done.append(serve(addresses=["127.0.0.1", "127.0.0.2"], port=port, names=["t"],
+                                                                   sessions=Sessions(), exposure=lambda: False, out=out.append)))
+        thread.start()
+        thread.join(timeout=15)
+        assert not thread.is_alive() and done == [2] and "cannot listen" in out[0]
+    finally:
+        busy.close()

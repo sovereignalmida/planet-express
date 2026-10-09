@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import ipaddress
 import logging
+import re
 import secrets
 import threading
 import time
@@ -215,6 +216,23 @@ def create_app(*, sessions: Sessions, allowed_hosts: set[str], exposure: Callabl
     return app
 
 
+def _scrub(text: str) -> str:
+    """Drop query strings from anything about to be logged: the start-up token travels in one."""
+    return re.sub(r"\?\S*", "?…", text)
+
+
+def _quiet_handler():
+    from werkzeug.serving import WSGIRequestHandler
+
+    class Handler(WSGIRequestHandler):
+        def log_request(self, code="-", size="-"):
+            log.info("%s %s %s", self.command, self.path.split("?")[0], code)
+
+        def log_message(self, format, *args):                                       # noqa: A002
+            log.warning(_scrub(format % args))
+    return Handler
+
+
 def network_exposed() -> bool:
     """True if this host has a globally routable address on a real interface: setup is meant for the LAN only."""
     from planet_express.setup.discover import _network
@@ -251,10 +269,14 @@ def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessio
         hosts = set(names) | set(addresses) | {"localhost"}
         app = create_app(sessions=sessions, allowed_hosts=hosts, exposure=exposure)
         for address in addresses:
-            servers.append(make_server(address, port, app, threaded=True, ssl_context=(cert_file, key_file)))
-        threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in servers]
-        for thread in threads:
-            thread.start()
+            try:
+                server = make_server(address, port, app, threaded=True, ssl_context=(cert_file, key_file),
+                                     request_handler=_quiet_handler())
+            except (OSError, SystemExit) as exc:        # werkzeug calls sys.exit when the address is in use
+                out(f"cannot listen on {address}:{port}" + (f": {exc.strerror}" if isinstance(exc, OSError) and exc.strerror else ""))
+                return 2
+            servers.append(server)
+            threading.Thread(target=server.serve_forever, daemon=True).start()     # started now: shutdown() needs a loop
         token = sessions.issue_token()
         out("Planet Express setup is running. Open ONE of these in a browser on your LAN:")
         for address in addresses:

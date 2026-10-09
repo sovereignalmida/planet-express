@@ -279,3 +279,11 @@ def test_tree_digest_notices_a_same_size_edit_and_a_retargeted_link(env):
     assert second != first
     env.file("t/f", b"bbbb")                                           # same size, different bytes
     assert env.host.tree_digest(f"{env.root}/t") != second
+
+
+def test_tree_digest_does_not_block_on_a_fifo(tmp_path):
+    import os
+    from planet_express.setup.host import RealHost
+    (tmp_path / "t").mkdir()
+    os.mkfifo(tmp_path / "t" / "pipe")
+    assert RealHost({0, os.geteuid()}).tree_digest(str(tmp_path / "t"))    # returns instead of waiting for a writer
