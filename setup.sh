@@ -35,8 +35,16 @@ if ! "$PYTHON" -m venv "$WORK/venv" >/dev/null 2>&1; then
     # MOS ships Python without ensurepip: make the venv without pip and fetch pip into it.
     rm -rf "$WORK/venv"
     "$PYTHON" -m venv --without-pip "$WORK/venv" || die "could not create a virtual environment (is python3-venv installed?)."
-    "$WORK/venv/bin/python" -c 'import urllib.request, sys; urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", sys.argv[1])' \
-        "$WORK/get-pip.py" || die "could not download pip. Does this host have internet access?"
+    # Pinned to an immutable commit and checked against its SHA-256 before it is run as root.
+    "$WORK/venv/bin/python" - "$WORK/get-pip.py" <<'PY' || die "could not fetch a verified pip installer. Does this host have internet access?"
+import hashlib, sys, urllib.request
+URL = "https://raw.githubusercontent.com/pypa/get-pip/af54dfe793b24685f8dc4ebba0630d9f2d77653c/public/get-pip.py"
+SHA256 = "fb24e693bab954209a063d90953621412ccad4a500905a726286e038f508ddf6"
+data = urllib.request.urlopen(URL, timeout=60).read()
+if hashlib.sha256(data).hexdigest() != SHA256:
+    sys.exit("the pip installer does not match its pinned digest")
+open(sys.argv[1], "wb").write(data)
+PY
     "$WORK/venv/bin/python" "$WORK/get-pip.py" --quiet --disable-pip-version-check >/dev/null \
         || die "could not install pip into the setup environment."
 fi

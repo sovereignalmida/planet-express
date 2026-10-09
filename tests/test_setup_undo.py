@@ -465,3 +465,13 @@ def test_a_mos_init_script_recopied_at_boot_is_still_undone_but_an_edited_one_is
     host2.nodes[INIT].ino += 777
     host2.nodes[INIT].data += b"# mine\n"
     assert run_undo(plan, host2, tmp_path, "k").status == "stopped"
+
+
+def test_on_an_unstable_filesystem_a_unit_whose_mode_changed_after_setup_is_not_undone(tmp_path):
+    host, plan = systemd_host(), unit_plan()
+    host.unstable_prefixes.append("/etc/systemd")
+    run_apply(plan, host, tmp_path)
+    host.nodes[UNIT].ino += 99
+    host.nodes[UNIT].mode = 0o666                                       # loosened after setup
+    result = run_undo(plan, host, tmp_path)
+    assert result.status == "stopped" and UNIT in host.nodes

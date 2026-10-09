@@ -262,3 +262,28 @@ def test_the_real_check_script_accepts_a_good_environment_and_rejects_a_missing_
     assert run(["pydantic>=2.0", "pyyaml>=6.0", "# comment-free", "pytest>=1.0"]) == 0
     assert run(["definitely-not-installed-pkg>=1"]) == 3
     assert run(["pydantic>=999.0"]) == 4
+
+
+def test_the_pip_installer_is_pinned_to_a_commit_and_a_digest_in_both_places():
+    import re
+    from pathlib import Path
+    from planet_express.setup.handlers import GET_PIP_SHA256
+    assert re.search(r"/pypa/get-pip/[0-9a-f]{40}/", GET_PIP_URL) and "bootstrap.pypa.io" not in GET_PIP_URL
+    script = (Path(__file__).resolve().parents[1] / "setup.sh").read_text()
+    assert GET_PIP_URL in script and GET_PIP_SHA256 in script and "bootstrap.pypa.io" not in script
+
+
+def test_the_fetch_script_refuses_a_download_that_does_not_match_its_digest(tmp_path):
+    import hashlib
+    import subprocess
+    import sys
+    from planet_express.setup.handlers import _FETCH
+    source = tmp_path / "pip.py"
+    source.write_bytes(b"print('hello')\n")
+    good = hashlib.sha256(source.read_bytes()).hexdigest()
+    target = tmp_path / "out.py"
+    ok = subprocess.run([sys.executable, "-c", _FETCH, source.as_uri(), str(target), good], capture_output=True)
+    assert ok.returncode == 0 and target.read_bytes() == source.read_bytes()
+    target.unlink()
+    bad = subprocess.run([sys.executable, "-c", _FETCH, source.as_uri(), str(target), "0" * 64], capture_output=True)
+    assert bad.returncode != 0 and not target.exists()

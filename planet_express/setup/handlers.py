@@ -421,7 +421,7 @@ class _AtomicFile:
         return not ctx.host.stable_inodes(path)
 
     def _wears_its_stat(self, ctx, path, candidate, current) -> bool:
-        return staged_stat_matches(ctx, path, candidate, current)
+        return staged_stat_matches(ctx, path, candidate, current, self.norm(ctx))
 
     def _undo_path(self, ctx, path: str, candidates: list[dict], staged: dict, committed: set) -> str:
         current = ctx.host.lstat(path)
@@ -478,13 +478,13 @@ class _AtomicFile:
         return f"restored {path}"
 
 
-def staged_stat_matches(ctx, path, candidate, current) -> bool:
-    """On a filesystem without stable inodes: is this file still wearing the mode and owner setup gave it?
-    A step with no fixed mode or owner (a boot hook keeps its file's own) is judged by its bytes alone."""
-    p = ctx.step.params
+def staged_stat_matches(ctx, path, candidate, current, p: dict) -> bool:
+    """On a filesystem without stable inodes: is this file still wearing the mode and owner setup gave it? `p` is
+    the step's normalised parameters (a unit or sudoers grant only gets its mode and owner there). A step with no
+    fixed mode or owner (a boot hook keeps its file's own) is judged by its bytes alone."""
     if "mode" not in p or "owner" not in p:
         return True
-    ids = _owner(ctx)
+    ids = _owner(ctx, p)
     return current.perms == int(p["mode"], 8) and not isinstance(ids, Refuse) and (current.uid, current.gid) == ids
 
 
@@ -871,7 +871,8 @@ class StateSnapshot:
 
 
 # ----------------------------------------------------------------------------------------------------------
-GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"       # unpinned, as deploy.sh's own bootstrap is
+GET_PIP_URL = "https://raw.githubusercontent.com/pypa/get-pip/af54dfe793b24685f8dc4ebba0630d9f2d77653c/public/get-pip.py"          # an immutable commit, not the moving bootstrap.pypa.io copy
+GET_PIP_SHA256 = "fb24e693bab954209a063d90953621412ccad4a500905a726286e038f508ddf6"
 # Run by the venv's own python: version floor, then each requirement installed and at least the named version.
 _CHECK_ENV = (
     "import sys, json, re\n"
@@ -886,7 +887,10 @@ _CHECK_ENV = (
     "    if m.group(2) == '>=' and num(have) < num(m.group(3)): sys.exit(4)\n"
     "    if m.group(2) == '==' and num(have) != num(m.group(3)): sys.exit(4)\n"
 )
-_FETCH = "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])"
+_FETCH = ("import hashlib, sys, urllib.request\n"
+          "data = urllib.request.urlopen(sys.argv[1], timeout=60).read()\n"
+          "if hashlib.sha256(data).hexdigest() != sys.argv[3]: sys.exit('the pip installer does not match its pinned digest')\n"
+          "open(sys.argv[2], 'wb').write(data)\n")
 
 
 class PythonEnv:
@@ -949,7 +953,7 @@ class PythonEnv:
             ctx.log(f"created the virtualenv {p['venv_dir']}")
         if p["bootstrap_pip"] and ctx.host.run([python, "-m", "pip", "--version"], as_user=user, timeout=30).rc != 0:
             script = f"{p['venv_dir']}/get-pip.py"
-            got = ctx.host.run(["python3", "-c", _FETCH, GET_PIP_URL, script], as_user=user, cwd=cwd, timeout=120)
+            got = ctx.host.run(["python3", "-c", _FETCH, GET_PIP_URL, script, GET_PIP_SHA256], as_user=user, cwd=cwd, timeout=120)
             if got.rc != 0:
                 raise StepFailure(f"fetching pip failed (does this host have internet access?): {self._tail(got)}", "unknown")
             installed = ctx.host.run([python, script, "--quiet", "--disable-pip-version-check"],
