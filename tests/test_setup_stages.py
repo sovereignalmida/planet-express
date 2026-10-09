@@ -101,18 +101,28 @@ def test_answers_need_csrf_and_a_json_object(wizard):
 
 def test_secrets_are_kept_but_never_come_back_out(wizard):
     app, cookie, csrf, session, _ = wizard
-    reply = put(app, cookie, csrf, {"telegram": {"token": TOKEN, "chat_id": "555000111"},
-                                    "llm": {"provider": "openai", "api_key": KEY},
-                                    "operator": {"name": "chris", "passphrase": PASS, "totp_secret": TOTP}})
+    session.set_answers({"telegram": {"token": TOKEN, "chat_id": "555000111"},
+                         "llm": {"provider": "openai", "api_key": KEY},
+                         "operator": {"name": "chris", "passphrase": PASS, "totp_secret": TOTP}}, proven=True)
+    reply = put(app, cookie, csrf, {"tier": "restart"})
     text = reply.get_data(as_text=True)
     assert reply.get_json()["ok"] and all(s not in text for s in (TOKEN, KEY, PASS, TOTP))
     assert reply.get_json()["answers"]["telegram_set"] is True and reply.get_json()["answers"]["llm"]["key_set"] is True
-    # and a validation failure must not echo what was typed either
-    bad = put(app, cookie, csrf, {"operator": {"name": "Chris!", "passphrase": "hunter2hunter", "totp_secret": TOTP}})
-    assert not bad.get_json()["ok"] and "hunter2hunter" not in bad.get_data(as_text=True)
-    for name in ("welcome", "scan", "location", "powers", "review"):
+    assert reply.get_json()["answers"]["operator_name"] == "chris"
+    for name in ("welcome", "scan", "location", "powers", "telegram", "operator", "llm", "review"):
         html = call(app, "GET", f"/stage/{name}", cookie=cookie).get_data(as_text=True)
         assert all(s not in html for s in (TOKEN, KEY, PASS, TOTP)), name
+
+
+def test_the_generic_answers_call_cannot_set_a_credential_only_clear_one(wizard):
+    app, cookie, csrf, session, _ = wizard
+    for body in ({"operator": {"name": "evil", "passphrase": PASS, "totp_secret": TOTP}},
+                 {"telegram": {"token": TOKEN, "chat_id": "1"}}, {"llm": {"provider": "openai", "api_key": KEY}}):
+        reply = put(app, cookie, csrf, body).get_json()
+        assert not reply["ok"] and "own check" in reply["errors"][0]["message"]
+    assert not {"operator", "telegram", "llm"} & set(session.answers)
+    session.set_answers({"llm": {"provider": "openai", "api_key": KEY}}, proven=True)
+    assert put(app, cookie, csrf, {"llm": None}).get_json()["ok"] and "llm" not in session.answers
 
 
 # -- plan ------------------------------------------------------------------------------------------------------

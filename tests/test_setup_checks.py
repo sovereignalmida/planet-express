@@ -225,3 +225,15 @@ def test_the_csp_allows_the_qr_image_and_nothing_else_remote(rig):
     app, cookie, *_ = rig
     csp = call(app, "GET", "/stage/operator", cookie=cookie).headers["Content-Security-Policy"]
     assert "img-src 'self' data:" in csp and "default-src 'self'" in csp
+
+
+def test_a_success_that_is_not_json_is_a_failed_check_not_a_crash():
+    class Html(Reply):
+        def read(self):
+            return b"<html>Sign in to the hotel wifi</html>"
+    bad = lambda request, timeout=10: Html(200, {})
+    assert not checks.check_llm_key("openai", KEY, opener=bad)[0]
+    assert not checks.telegram_find_chat(BOT, opener=bad).ok
+    assert not checks.telegram_send_test(BOT, "1", opener=bad)[0]
+    listy = lambda request, timeout=10: Reply(200, ["not", "an", "object"])
+    assert not checks.check_llm_key("openai", KEY, opener=listy)[0]

@@ -38,7 +38,11 @@ def _fetch(request: urllib.request.Request, *, opener=urllib.request.urlopen, ti
     """(status, parsed JSON or {}), never raising for an HTTP error status."""
     try:
         with opener(request, timeout=timeout) as response:
-            return response.status, json.loads(response.read() or b"{}")
+            try:
+                body = json.loads(response.read() or b"{}")
+            except ValueError:
+                return 502, {}                       # a success that is not JSON (a captive portal, a proxy page)
+            return (response.status, body) if isinstance(body, dict) else (502, {})
     except urllib.error.HTTPError as exc:
         try:
             return exc.code, json.loads(exc.read() or b"{}")

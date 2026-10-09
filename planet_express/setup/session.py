@@ -76,9 +76,16 @@ class SetupSession:
                 "install_dir": install, "stacks_root": stacks, "tier": "observe"}
 
     # -- answers -----------------------------------------------------------------------------------------------
-    def set_answers(self, partial: dict) -> dict:
-        """Merge `partial` if the result is valid. Returns {"ok", "errors", "answers"}; never echoes a secret."""
+    def set_answers(self, partial: dict, *, proven: bool = False) -> dict:
+        """Merge `partial` if the result is valid. Returns {"ok", "errors", "answers"}; never echoes a secret.
+
+        A credential (Telegram, LLM key, operator) is only accepted with `proven=True`, which only the code paths
+        that checked it pass; the browser's generic call can clear one (null) but never set one."""
         unknown = sorted(set(partial) - SETTABLE)
+        unproven = [k for k in SECRET_KEYS if partial.get(k) is not None and not proven]
+        if unproven:
+            return {"ok": False, "errors": [{"field": k, "message": "is set by its own check on this page"} for k in unproven],
+                    "answers": self.public_answers()}
         if unknown:
             return {"ok": False, "errors": [{"field": k, "message": "not a setting"} for k in unknown],
                     "answers": self.public_answers()}
@@ -105,6 +112,7 @@ class SetupSession:
         view["llm"] = {"provider": self.answers["llm"].get("provider"), "key_set": bool(self.answers["llm"].get("api_key"))} \
             if "llm" in self.answers else None
         view["operator_set"] = "operator" in self.answers
+        view["operator_name"] = self.answers["operator"]["name"] if "operator" in self.answers else ""
         return view
 
     # -- plan --------------------------------------------------------------------------------------------------
@@ -233,7 +241,7 @@ class SetupSession:
         ok, message = self._checks.telegram_send_test(pending["token"], pending["chat_id"])
         if not ok:
             return {"verified": False, "message": message}
-        saved = self.set_answers({"telegram": {"token": pending["token"], "chat_id": pending["chat_id"]}})
+        saved = self.set_answers({"telegram": {"token": pending["token"], "chat_id": pending["chat_id"]}}, proven=True)
         with self._lock:
             self._pending_chat = None
         return {"verified": saved["ok"], "message": message if saved["ok"] else "That token or chat id was not accepted.",
@@ -246,7 +254,7 @@ class SetupSession:
         ok, message = self._checks.check_llm_key(provider, key)
         if not ok:
             return {"ok": False, "message": message}
-        saved = self.set_answers({"llm": {"provider": provider, "api_key": key}})
+        saved = self.set_answers({"llm": {"provider": provider, "api_key": key}}, proven=True)
         return {"ok": saved["ok"], "message": message if saved["ok"] else "That key was not accepted."}
 
     # -- operator --------------------------------------------------------------------------------------------------
@@ -277,7 +285,8 @@ class SetupSession:
             if web_auth.verify_totp(pending["secret"], code, self._clock()) is None:
                 self._totp_failures += 1
                 return {"verified": False, "message": "That code was not accepted. Check the time on your phone."}
-        saved = self.set_answers({"operator": {"name": name, "passphrase": passphrase, "totp_secret": pending["secret"]}})
+        saved = self.set_answers({"operator": {"name": name, "passphrase": passphrase, "totp_secret": pending["secret"]}},
+                                 proven=True)
         if not saved["ok"]:
             return {"verified": False, "message": "The name or passphrase was not accepted.",
                     "errors": [e for e in saved["errors"] if e["field"].startswith("operator")]}
