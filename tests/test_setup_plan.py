@@ -7,12 +7,12 @@ from pathlib import Path
 import pytest
 import yaml
 from pydantic import ValidationError
+from test_setup_discover import mos, ubuntu
 
 from planet_express.setup.answers import FORBIDDEN_RISKS_BY_TIER, SetupAnswers
 from planet_express.setup.discover import discover
 from planet_express.setup.plan import MASK, plan
 from planet_express.setup.steps import CATALOGUE
-from test_setup_discover import mos, ubuntu
 
 REPO = str(Path(__file__).resolve().parent.parent)
 TOKEN = "123456:TOKEN-VALUE-abc"
@@ -398,7 +398,7 @@ def test_a_file_that_exists_but_cannot_be_hashed_is_kept_not_replaced_with_a_war
 
 
 def test_replacing_without_an_expectation_cannot_be_represented():
-    from planet_express.setup.steps import FileWrite, ServiceInstall, SudoersInstall
+    from planet_express.setup.steps import FileWrite, SudoersInstall
     with pytest.raises(ValidationError, match="expectation"):
         FileWrite(path="/etc/x", content="", if_exists="replace")
     with pytest.raises(ValidationError, match="expectation"):
@@ -454,7 +454,9 @@ def test_a_hook_file_that_is_exactly_an_old_copy_of_ours_is_recognised_and_anyth
 
 def test_the_legacy_hashes_are_the_real_shipped_versions():
     """Guard against a typo in the list: the last whole-file post-start.sh and shutdown.sh are in it."""
-    import hashlib, subprocess
+    import hashlib
+    import subprocess
+
     from planet_express.setup.plan import LEGACY_HOOK_SHA256
     for name, commit in (("post-start.sh", "19eb14d"), ("shutdown.sh", "f4e4f17")):
         shown = subprocess.run(["git", "show", f"{commit}:scripts/mos-boot/{name}"], cwd=REPO,
@@ -491,10 +493,10 @@ def test_every_path_a_plan_makes_a_claim_about_was_actually_probed_by_discover()
         assert p.applicable
         probed = set(report["existing_pe"]["present"])
         for step in p.steps:
-            if step.kind in ("file.write", "service.install", "sudoers.install"):
-                if step.params.get("expect_absent") or step.params.get("expected_sha256"):
-                    assert step.target in probed, step.target
-                    checked += 1
+            guarded = step.params.get("expect_absent") or step.params.get("expected_sha256")
+            if step.kind in ("file.write", "service.install", "sudoers.install") and guarded:
+                assert step.target in probed, step.target
+                checked += 1
     assert checked >= 12
 
 

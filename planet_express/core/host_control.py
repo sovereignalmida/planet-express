@@ -87,7 +87,9 @@ def get_host_control_provider(provider_type: str) -> HostControlProvider:
         ValueError: if provider_type is not recognized
     """
     if provider_type == "systemd":
-        from planet_express.execution.host_control_systemd import SystemdHostControlProvider
+        from planet_express.execution.host_control_systemd import (
+            SystemdHostControlProvider,
+        )
         return SystemdHostControlProvider()
     elif provider_type == "mos":
         from planet_express.execution.host_control_mos import MosHostControlProvider

@@ -6,6 +6,9 @@ import time
 import urllib.error
 
 import pytest
+from test_setup_plan import KEY, PASS, TOKEN, systemd_report
+from test_setup_server import Clock, call, login, post
+from test_setup_stages import REPO, put
 
 import web_auth
 from planet_express.setup import checks
@@ -13,12 +16,9 @@ from planet_express.setup.checks import Found
 from planet_express.setup.plan import plan
 from planet_express.setup.server import Sessions, create_app
 from planet_express.setup.session import SetupSession
-from test_setup_plan import KEY, PASS, TOKEN, TOTP, systemd_report
-from test_setup_server import Clock, call, login, post
-from test_setup_stages import REPO, put
 
 # Assembled at runtime so secret scanners do not mistake this obviously fake test value for a real bot token.
-BOT = "-".join(["123456789:fake", "token", "value", "for", "tests", "0001"])
+BOT = "-".join(["123456789:fake", "token", "value", "for", "tests", "0001"])  # noqa: FLY002 -- joined at runtime on purpose
 
 
 class Reply:
@@ -171,7 +171,7 @@ def code_for(session, clock):
 
 
 def test_the_operator_must_prove_the_authenticator_works_before_the_account_is_kept(rig):
-    app, cookie, csrf, session, fake, clock = rig
+    app, cookie, csrf, session, _fake, clock = rig
     begin = post(app, cookie, csrf, "/api/operator/totp", json={"name": "chris"}).get_json()
     assert begin["ok"] and begin["qr"].startswith("data:image/png;base64,") and len(begin["manual"].replace(" ", "")) == 32
     assert "operator" not in session.answers
@@ -183,7 +183,7 @@ def test_the_operator_must_prove_the_authenticator_works_before_the_account_is_k
 
 
 def test_a_weak_passphrase_is_refused_without_echoing_it(rig):
-    app, cookie, csrf, session, fake, clock = rig
+    app, cookie, csrf, session, _fake, clock = rig
     post(app, cookie, csrf, "/api/operator/totp", json={"name": "chris"})
     reply = post(app, cookie, csrf, "/api/operator/verify", json={"name": "chris", "passphrase": "short", "code": code_for(session, clock)})
     assert reply.get_json()["verified"] is False and "short" not in reply.get_data(as_text=True)
@@ -191,7 +191,7 @@ def test_a_weak_passphrase_is_refused_without_echoing_it(rig):
 
 
 def test_too_many_wrong_codes_force_a_new_enrolment(rig):
-    app, cookie, csrf, session, *_ = rig
+    app, cookie, csrf, _session, *_ = rig
     post(app, cookie, csrf, "/api/operator/totp", json={"name": "chris"})
     for _ in range(5):
         post(app, cookie, csrf, "/api/operator/verify", json={"name": "chris", "passphrase": PASS, "code": "000000"})
@@ -201,7 +201,7 @@ def test_too_many_wrong_codes_force_a_new_enrolment(rig):
 
 
 def test_verifying_without_enrolling_first_or_under_another_name_is_refused(rig):
-    app, cookie, csrf, session, *_ = rig
+    app, cookie, csrf, _session, *_ = rig
     assert post(app, cookie, csrf, "/api/operator/verify", json={"name": "chris", "passphrase": PASS, "code": "123456"}).status_code == 409
     post(app, cookie, csrf, "/api/operator/totp", json={"name": "chris"})
     assert post(app, cookie, csrf, "/api/operator/verify", json={"name": "mallory", "passphrase": PASS, "code": "123456"}).status_code == 409
@@ -213,7 +213,7 @@ def test_a_bad_operator_name_gets_no_secret(rig):
 
 
 def test_the_stages_render_and_next_waits_for_a_verified_operator(rig):
-    app, cookie, csrf, session, fake, clock = rig
+    app, cookie, csrf, session, _fake, clock = rig
     for name, marker in (("telegram", "FIND MY CHAT"), ("operator", "SET UP AUTHENTICATOR"), ("llm", "CHECK AND SAVE")):
         assert marker in call(app, "GET", f"/stage/{name}", cookie=cookie).get_data(as_text=True)
     assert "disabled>NEXT" in call(app, "GET", "/stage/operator", cookie=cookie).get_data(as_text=True)

@@ -1,13 +1,12 @@
 """sudoers.install, dashboard.init and access.provision: the handlers that grant or protect access (A2b)."""
-import json
 from functools import partial
 
 import pytest
+from test_setup_apply import fresh_host, make_plan, sha, step
 
 from planet_express.setup.apply import apply as _apply
 from planet_express.setup.host import RunResult
 from planet_express.setup.journal import Journal
-from test_setup_apply import SECRET, fresh_host, make_plan, sha, step
 
 apply = partial(_apply, evidence_dir="/journal/evidence")
 SUDOERS = "/etc/sudoers.d/planetexpress"
@@ -104,8 +103,9 @@ def test_an_existing_grant_is_kept_and_a_changed_one_is_not_overwritten(tmp_path
 
 # -- dashboard.init ------------------------------------------------------------------------------------------------
 
-import web_auth
 from fake_host import Crash, FaultyHost
+
+import web_auth
 from scripts import dashboard_operators as ops
 
 ENV = "/etc/pe/dashboard.env"
@@ -321,11 +321,10 @@ def test_on_systemd_the_commands_are_the_reviewed_web_access_plan_run_directly_n
     host, plan = access_host(), access_plan()
     result = apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
     assert result.status == "done", result.reason
-    ran = [c for c in host.commands if c[0] not in ("setfacl", "getfacl") or c[1:2] != ["--version"]]
     assert ["groupadd", "--system", "planetexpress-rpc"] in host.commands
     assert any(c[0] == "useradd" and c[-1] == "planetexpress-web" and "--user-group" in c for c in host.commands)
     assert any(c[:3] == ["usermod", "-aG", "planetexpress-rpc"] for c in host.commands)
-    assert any(c[0] == "setfacl" and f"u:planetexpress-web:rX" in " ".join(c) for c in host.commands)
+    assert any(c[0] == "setfacl" and "u:planetexpress-web:rX" in " ".join(c) for c in host.commands)
     assert not any("sudo" in c for c in host.commands)
     # Everything in the checkout that is not on the dashboard's allowlist is explicitly denied to it.
     assert ["setfacl", "-m", "u:planetexpress-web:---", f"{INSTALL}/.env.local"] in host.commands
@@ -337,7 +336,6 @@ def test_every_command_is_journaled_before_it_runs(tmp_path):
     apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan)
     evidence = Journal(tmp_path / "j", plan.to_public()["plan_id"]).steps()["s01"].evidence
     journaled = [e["command"] for e in evidence if "command" in e]
-    ran = [c for c in host.commands if c[:1] != ["setfacl"] or c[1:2] != ["--version"]]
     assert journaled and all(c in host.commands for c in journaled) and len(journaled) >= 8
 
 
@@ -414,8 +412,7 @@ def test_a_crash_between_two_grants_is_not_mistaken_for_a_finished_step(tmp_path
 def test_an_acl_entry_that_is_missing_makes_the_step_not_applied(tmp_path):
     host, plan = access_host(), access_plan()
     assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
-    from planet_express.setup.handlers import HANDLERS
-    from planet_express.setup.handlers import Context
+    from planet_express.setup.handlers import HANDLERS, Context
     from planet_express.setup.journal import Journal
     host.acl.pop(f"{INSTALL}/data")                                   # one deny never landed
     ctx = Context(host, Journal(tmp_path / "j", plan.to_public()["plan_id"]), plan.steps[0], {}, "")
@@ -424,13 +421,14 @@ def test_an_acl_entry_that_is_missing_makes_the_step_not_applied(tmp_path):
 
 def test_setup_handlers_never_import_config():
     """Setup runs before any config exists; importing `config` there exits when no config file is present."""
-    import subprocess, sys
+    import subprocess
+    import sys
     code = ("import sys; import planet_express.setup.handlers as h; "
             "from planet_express.setup.handlers import HANDLERS; "
             "from scripts import dashboard_operators; "
             "assert 'config' not in sys.modules, 'config was imported'")
     env = {"PATH": "/usr/bin:/bin", "PYTHONPATH": "."}
-    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=False)
     assert r.returncode == 0, r.stderr
 
 

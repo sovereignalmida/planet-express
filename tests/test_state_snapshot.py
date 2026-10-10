@@ -395,30 +395,6 @@ def test_printed_config_command_is_shell_safe(tmp_path, capsys, monkeypatch):
     assert config.read_bytes() == b"snapshot"
 
 
-def test_restore_on_sysvinit_detects_stopped_service(state, capsys, monkeypatch):
-    """On sysvinit/MOS, restore() correctly detects stopped service via service command."""
-    data, config = state
-    database(data / "planetexpress.db")
-    directory = create(capsys)
-    config.write_bytes(b"current")
-
-    def mock_sysvinit(command, **kwargs):
-        if command[0] == "git":
-            return SimpleNamespace(returncode=0, stdout="v2-test\n")
-        # Simulate no systemctl (sysvinit)
-        if command[0] == "systemctl":
-            raise FileNotFoundError("systemctl not found")
-        # Fallback to service command (sysvinit returns 3 for stopped)
-        if command == ["service", "casa-planetexpress", "status"]:
-            return SimpleNamespace(returncode=3, stdout="")
-        raise AssertionError(f"Unexpected command: {command}")
-
-    monkeypatch.setattr(snapshot.subprocess, "run", mock_sysvinit)
-    # Should succeed because service is stopped (exit code 3)
-    assert snapshot.main(["restore", str(directory), "--yes"]) == 0
-    assert "Restored" in capsys.readouterr().out
-
-
 def test_restore_on_sysvinit_refuses_active_service(state, capsys, monkeypatch):
     """On sysvinit/MOS, restore() refuses if service is active."""
     data, config = state

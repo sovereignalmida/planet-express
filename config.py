@@ -141,7 +141,9 @@ def get_stack_orchestrator():
     on MOS (see compose_argv)."""
     global _STACK_ORCHESTRATOR
     if _STACK_ORCHESTRATOR is None:
-        from planet_express.execution.systemd_stack_orchestrator import SystemdStackOrchestrator
+        from planet_express.execution.systemd_stack_orchestrator import (
+            SystemdStackOrchestrator,
+        )
         _STACK_ORCHESTRATOR = SystemdStackOrchestrator(STACKS_ROOT)
     return _STACK_ORCHESTRATOR
 

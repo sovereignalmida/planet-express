@@ -5,12 +5,12 @@ import re
 from pathlib import Path
 
 import pytest
+from test_setup_plan import KEY, PASS, TOKEN, TOTP, systemd_report
+from test_setup_server import HOST, Clock, call, login, post
 
 from planet_express.setup.plan import plan
 from planet_express.setup.server import Sessions, create_app
 from planet_express.setup.session import SetupSession
-from test_setup_plan import KEY, PASS, TOKEN, TOTP, systemd_report
-from test_setup_server import HOST, Clock, call, login, post
 
 REPO = str(Path(__file__).resolve().parents[1])
 
@@ -37,7 +37,7 @@ def put(app, cookie, csrf, body, path="/api/answers"):
 
 
 def test_the_root_lands_on_the_first_stage_and_each_built_stage_renders(wizard):
-    app, cookie, csrf, *_ = wizard
+    app, cookie, _csrf, *_ = wizard
     assert call(app, "GET", "/", cookie=cookie).headers["Location"].endswith("/stage/welcome")
     for name, marker in (("welcome", "DETECTED"), ("scan", "RE-CHECK"), ("location", "INSTALL PATH"),
                          ("powers", "WATCH ONLY"), ("review", "Building the plan")):
@@ -68,7 +68,7 @@ def test_static_files_need_the_session_and_then_serve(wizard):
 
 
 def test_a_blocking_scan_disables_next(wizard):
-    app, cookie, csrf, session, holder = wizard
+    app, cookie, _csrf, session, holder = wizard
     holder["report"]["summary"] = {**holder["report"]["summary"], "can_continue": False, "blocked": 1}
     holder["report"]["checks"][0] = {**holder["report"]["checks"][0], "status": "blocked", "fix": "Install Docker yourself"}
     session.run_discover()
@@ -175,7 +175,7 @@ def test_the_recheck_returns_the_refreshed_report(wizard):
 
 
 def test_running_as_root_needs_an_explicit_acknowledgement_on_the_page(wizard):
-    app, cookie, csrf, session, _ = wizard
+    app, cookie, csrf, _session, _ = wizard
     put(app, cookie, csrf, {"run_as": "root"})
     html = call(app, "GET", "/stage/location", cookie=cookie).get_data(as_text=True)
     assert 'id="accept-root"' in html and "RUN AS ROOT" in html and "checked" not in html.split('id="accept-root"')[1].split(">")[0]

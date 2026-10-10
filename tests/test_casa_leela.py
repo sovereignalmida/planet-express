@@ -18,9 +18,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
-import config
-
 import casa_leela
+import config
 
 
 def _make_cert(dir_: Path, name: str, cn: str, sans: list[str], days: int = 1) -> Path:

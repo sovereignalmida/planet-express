@@ -10,3 +10,8 @@ combine-as-imports = true
 # idiom (tells type checkers/import linters this name is intentionally re-exported from
 # config.py, not an accidental unused import) -- not a useless alias.
 "config.py" = ["PLC0414"]
+
+# The two stack orchestrators are provider boundaries: every call into Docker, compose or the MOS API is wrapped so a
+# failure becomes a typed result the engine can reason about, never an unhandled crash in the scan loop.
+"planet_express/execution/mos_stack_orchestrator.py" = ["BLE001"]
+"planet_express/execution/systemd_stack_orchestrator.py" = ["BLE001"]

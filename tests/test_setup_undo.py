@@ -2,15 +2,32 @@
 from functools import partial
 
 import pytest
-
 from fake_host import Crash, FaultyHost
+from test_setup_apply import (
+    SECRET,
+    fresh_host,
+    make_plan,
+    replace_plan,
+    sha,
+    standard_plan,
+    step,
+)
+from test_setup_handlers_services import (
+    BODY,
+    HOOKS,
+    INIT,
+    UNIT,
+    hook_host,
+    init_host,
+    init_plan,
+    systemctl,
+    systemd_host,
+    unit_plan,
+)
+
 from planet_express.setup.apply import apply as _apply
 from planet_express.setup.host import RunResult
-from planet_express.setup.journal import Journal
 from planet_express.setup.undo import undo as _undo
-from test_setup_apply import SECRET, fresh_host, make_plan, replace_plan, sha, standard_plan, step
-from test_setup_handlers_services import (BODY, HOOKS, INIT, UNIT, hook_host, init_host, init_plan, systemd_host, systemctl,
-                                          unit_plan)
 
 apply = partial(_apply, evidence_dir="/journal/evidence")
 undo = partial(_undo, evidence_dir="/journal/evidence")
@@ -228,7 +245,14 @@ def test_accounts_and_the_snapshot_are_named_as_not_undone_not_hidden(tmp_path):
 
 
 def test_a_virtualenv_setup_created_is_removed_and_one_it_did_not_create_is_not(tmp_path):
-    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    from test_setup_handlers_env import (
+        PY,
+        VENV,
+        env_plan,
+        healthy_checks,
+        host_with_checkout,
+        venv_cmd,
+    )
     host = host_with_checkout()
     healthy_checks(host)
     host.command_results[("python3", "-m", "venv", VENV)] = venv_cmd
@@ -262,7 +286,6 @@ def test_a_tightened_directory_gets_its_old_mode_back_unless_it_was_changed_sinc
 
 # -- the whole pipeline ----------------------------------------------------------------------------------------
 def pipeline():
-    from planet_express.setup.plan import Step
     mine = "#!/bin/sh\nmodprobe nct6775\n"
     host = systemd_host()
     host.add_dir("/etc/sudoers.d", mode=0o750)
@@ -315,7 +338,7 @@ def test_a_crash_at_any_operation_of_the_whole_pipeline_resumes_and_still_undoes
                  evidence_dir="/journal/evidence").status == "done"
     expected = tree(clean_host)
     for crash_at in range(1, counter.ops + 1):
-        _, host, state = pipeline()
+        _, host, _state = pipeline()
         root = f"p{crash_at}"
         with pytest.raises(Crash):
             apply(plan, host=FaultyHost(host, crash_at=crash_at, after=after), journal_root=tmp_path / root,
@@ -332,7 +355,14 @@ def test_a_crash_at_any_operation_of_the_whole_pipeline_resumes_and_still_undoes
 
 
 def test_a_venv_directory_that_already_existed_is_never_deleted_by_undo(tmp_path):
-    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    from test_setup_handlers_env import (
+        PY,
+        VENV,
+        env_plan,
+        healthy_checks,
+        host_with_checkout,
+        venv_cmd,
+    )
     host = host_with_checkout()
     host.add_dir(VENV)                                  # exists, empty, not ours
     host.add_file(f"{VENV}/operators-notes", b"mine")
@@ -348,7 +378,14 @@ def test_a_venv_directory_that_already_existed_is_never_deleted_by_undo(tmp_path
 
 
 def test_things_added_inside_a_created_venv_stop_the_undo(tmp_path):
-    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    from test_setup_handlers_env import (
+        PY,
+        VENV,
+        env_plan,
+        healthy_checks,
+        host_with_checkout,
+        venv_cmd,
+    )
     host = host_with_checkout()
     healthy_checks(host)
     state = {"made": False}
@@ -364,7 +401,7 @@ def test_things_added_inside_a_created_venv_stop_the_undo(tmp_path):
 
 def test_a_write_that_failed_later_is_still_undone_after_a_satisfied_retry(tmp_path):
     host = sudoers_with_late_failure()
-    from test_setup_handlers_privilege import sudoers_plan, SUDOERS
+    from test_setup_handlers_privilege import SUDOERS, sudoers_plan
     plan = sudoers_plan()
     assert run_apply(plan, host, tmp_path).status == "stopped"       # committed, then `visudo -c` failed
     assert SUDOERS in host.nodes
@@ -402,7 +439,14 @@ def test_a_service_started_by_someone_else_after_a_failed_start_is_not_stopped(t
 
 
 def test_content_added_deep_inside_a_created_venv_also_stops_the_undo(tmp_path):
-    from test_setup_handlers_env import PY, VENV, env_plan, healthy_checks, host_with_checkout, venv_cmd
+    from test_setup_handlers_env import (
+        PY,
+        VENV,
+        env_plan,
+        healthy_checks,
+        host_with_checkout,
+        venv_cmd,
+    )
     host = host_with_checkout()
     healthy_checks(host)
     state = {"made": False}

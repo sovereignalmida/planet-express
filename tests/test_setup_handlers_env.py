@@ -1,14 +1,13 @@
 """state.snapshot and python.env on a fake host with scripted commands (A2a)."""
 import json
+from functools import partial
 
 import pytest
-
-from functools import partial
+from test_setup_apply import fresh_host, make_plan, step
 
 from planet_express.setup.apply import apply as _apply
 from planet_express.setup.handlers import GET_PIP_URL
 from planet_express.setup.host import RunResult
-from test_setup_apply import fresh_host, make_plan, step
 
 apply = partial(_apply, evidence_dir="/journal/evidence")
 INSTALL, VENV = "/opt/pe", "/opt/pe/venv"
@@ -127,7 +126,6 @@ def test_an_environment_that_already_imports_its_dependencies_is_left_completely
     host.add_file(PY, b"", mode=0o755)
     healthy_checks(host)
     plan = env_plan()
-    before = host.mutations
     assert apply(plan, host=host, journal_root=tmp_path / "j", replan=lambda: plan).status == "done"
     assert not any("install" in c for c in host.commands) and not any("venv" in c for c in host.commands)
     from planet_express.setup.journal import Journal
@@ -254,11 +252,11 @@ def test_a_snapshot_path_that_climbs_out_of_the_snapshots_directory_is_rejected(
 
 
 def test_the_real_check_script_accepts_a_good_environment_and_rejects_a_missing_or_too_new_requirement():
-    import json
     import subprocess
     import sys
+
     from planet_express.setup.handlers import _CHECK_ENV
-    run = lambda reqs: subprocess.run([sys.executable, "-c", _CHECK_ENV, json.dumps(reqs)], capture_output=True).returncode
+    run = lambda reqs: subprocess.run([sys.executable, "-c", _CHECK_ENV, json.dumps(reqs)], capture_output=True, check=False).returncode
     assert run(["pydantic>=2.0", "pyyaml>=6.0", "# comment-free", "pytest>=1.0"]) == 0
     assert run(["definitely-not-installed-pkg>=1"]) == 3
     assert run(["pydantic>=999.0"]) == 4
@@ -267,6 +265,7 @@ def test_the_real_check_script_accepts_a_good_environment_and_rejects_a_missing_
 def test_the_pip_installer_is_pinned_to_a_commit_and_a_digest_in_both_places():
     import re
     from pathlib import Path
+
     from planet_express.setup.handlers import GET_PIP_SHA256
     assert re.search(r"/pypa/get-pip/[0-9a-f]{40}/", GET_PIP_URL) and "bootstrap.pypa.io" not in GET_PIP_URL
     script = (Path(__file__).resolve().parents[1] / "setup.sh").read_text()
@@ -277,13 +276,14 @@ def test_the_fetch_script_refuses_a_download_that_does_not_match_its_digest(tmp_
     import hashlib
     import subprocess
     import sys
+
     from planet_express.setup.handlers import _FETCH
     source = tmp_path / "pip.py"
     source.write_bytes(b"print('hello')\n")
     good = hashlib.sha256(source.read_bytes()).hexdigest()
     target = tmp_path / "out.py"
-    ok = subprocess.run([sys.executable, "-c", _FETCH, source.as_uri(), str(target), good], capture_output=True)
+    ok = subprocess.run([sys.executable, "-c", _FETCH, source.as_uri(), str(target), good], capture_output=True, check=False)
     assert ok.returncode == 0 and target.read_bytes() == source.read_bytes()
     target.unlink()
-    bad = subprocess.run([sys.executable, "-c", _FETCH, source.as_uri(), str(target), "0" * 64], capture_output=True)
+    bad = subprocess.run([sys.executable, "-c", _FETCH, source.as_uri(), str(target), "0" * 64], capture_output=True, check=False)
     assert bad.returncode != 0 and not target.exists()

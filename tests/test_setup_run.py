@@ -1,21 +1,17 @@
 """Applying, progress, retry and undo from the browser's side (A4c), against the fake host."""
 import copy
-from pathlib import Path
 
 import pytest
+from test_setup_apply import SECRET, fresh_host, standard_plan
+from test_setup_plan import KEY, systemd_report
+from test_setup_server import Clock, call, login, post
+from test_setup_stages import REPO, put
 
-from fake_host import FakeHost
-from planet_express.setup import apply as apply_module
 from planet_express.setup.apply import apply as real_apply
 from planet_express.setup.journal import Journal
-from planet_express.setup.plan import plan
 from planet_express.setup.server import Sessions, create_app
 from planet_express.setup.session import SetupSession
 from planet_express.setup.undo import undo as real_undo
-from test_setup_plan import KEY, systemd_report
-from test_setup_server import HOST, Clock, call, login, post
-from test_setup_stages import REPO, put
-from test_setup_apply import SECRET, fresh_host, make_plan, standard_plan
 
 
 @pytest.fixture
@@ -65,7 +61,7 @@ def test_a_stale_or_invented_plan_id_is_refused_and_nothing_runs(rig):
 
 
 def test_changing_an_answer_after_review_means_the_plan_must_be_reviewed_again(rig):
-    app, cookie, csrf, session, host, *_ = rig
+    app, cookie, csrf, _session, _host, *_ = rig
     plan_id = review(app, cookie, csrf)
     put(app, cookie, csrf, {"tier": "restart"})
     refused = post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
@@ -73,16 +69,15 @@ def test_changing_an_answer_after_review_means_the_plan_must_be_reviewed_again(r
 
 
 def test_nothing_is_applied_while_setup_is_exposed(rig):
-    app, cookie, csrf, session, host, plans, exposed = rig
+    app, cookie, csrf, _session, host, _plans, exposed = rig
     plan_id = review(app, cookie, csrf)
     exposed["v"] = True
-    from test_setup_server import call as c
     assert post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id}).status_code == 403
     assert host.mutations == 0
 
 
 def test_two_applies_are_one_run_and_a_second_is_a_conflict(rig):
-    app, cookie, csrf, session, host, *_ = rig
+    app, cookie, csrf, session, _host, *_ = rig
     plan_id = review(app, cookie, csrf)
     assert post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id}).status_code == 200
     session.wait()
@@ -91,7 +86,7 @@ def test_two_applies_are_one_run_and_a_second_is_a_conflict(rig):
 
 
 def test_a_failure_stops_shows_the_reason_and_retry_finishes_the_job(rig):
-    app, cookie, csrf, session, host, plans, _ = rig
+    app, cookie, csrf, session, host, _plans, _ = rig
     host.add_file("/etc/pe/config.yaml.blocker", b"")
     host.nodes["/etc"].mode = 0o777                                    # untrusted parent: the first write refuses
     plan_id = review(app, cookie, csrf)
@@ -121,7 +116,7 @@ def test_undo_reverts_and_the_progress_says_what_was_left(rig):
 
 
 def test_no_secret_reaches_any_progress_response(rig):
-    app, cookie, csrf, session, host, *_ = rig
+    app, cookie, csrf, session, _host, *_ = rig
     plan_id = review(app, cookie, csrf)
     post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
     session.wait()
@@ -143,7 +138,7 @@ def test_a_server_not_run_as_root_shows_the_plan_but_will_not_install(tmp_path):
 
 
 def test_install_and_done_pages_follow_the_run(rig):
-    app, cookie, csrf, session, host, *_ = rig
+    app, cookie, csrf, session, _host, *_ = rig
     assert call(app, "GET", "/stage/install", cookie=cookie).headers["Location"].endswith("/stage/review")
     assert call(app, "GET", "/stage/done", cookie=cookie).headers["Location"].endswith("/stage/review")
     plan_id = review(app, cookie, csrf)

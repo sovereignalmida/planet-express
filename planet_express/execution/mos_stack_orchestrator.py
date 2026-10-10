@@ -4,12 +4,12 @@ Implements StackOrchestrationProvider for MOS/sysvinit systems.
 Provides feature parity with SystemdStackOrchestrator but uses MOS API instead of CLI.
 """
 
-from dataclasses import dataclass
-from typing import Protocol
-import httpx
 import logging
-import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
+
+import httpx
 
 log = logging.getLogger("planetexpress.mos_orchestrator")
 
@@ -71,7 +71,7 @@ class StackOrchestrationProvider(Protocol):
 class MosStackOrchestrator:
     """Docker Compose management via MOS REST API."""
 
-    def __init__(self, api_base_url: str = "http://localhost:998/api/v1", auth_token: str = None, stacks_root: Path = None):
+    def __init__(self, api_base_url: str = "http://localhost:998/api/v1", auth_token: str | None = None, stacks_root: Path | None = None):
         """Initialize MOS orchestrator.
 
         Args:
@@ -98,7 +98,7 @@ class MosStackOrchestrator:
             headers["Authorization"] = f"Bearer {self.auth_token}"
         return headers
 
-    def _call_api(self, method: str, endpoint: str, json_data: dict = None) -> httpx.Response:
+    def _call_api(self, method: str, endpoint: str, json_data: dict | None = None) -> httpx.Response:
         """Call MOS API endpoint.
 
         Args:
@@ -185,8 +185,8 @@ class MosStackOrchestrator:
         before = "not-found"
         try:
             before = self.get_stack_status(name)
-        except Exception:
-            pass
+        except Exception:                     
+            log.debug("could not read %s's status before acting", name, exc_info=True)
 
         try:
             # Parse YAML to validate it
@@ -201,7 +201,7 @@ class MosStackOrchestrator:
                 before=before,
                 after="error",
                 effect="error",
-                error=f"Invalid YAML: {str(e)}"
+                error=f"Invalid YAML: {e!s}"
             )
 
         try:
@@ -209,10 +209,10 @@ class MosStackOrchestrator:
             payload = {
                 "name": name,
                 "yaml": compose_yaml,
-                "description": f"Stack created by Planet Express"
+                "description": "Stack created by Planet Express"
             }
 
-            response = self._call_api("POST", "/docker/mos/compose/stacks", payload)
+            self._call_api("POST", "/docker/mos/compose/stacks", payload)
 
             # After creation, start the stack
             self.start_stack(name)

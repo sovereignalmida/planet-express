@@ -33,7 +33,6 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import casa_bender as bender
 import config

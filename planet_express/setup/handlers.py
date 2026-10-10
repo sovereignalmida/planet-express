@@ -20,7 +20,7 @@ import json
 import posixpath
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from planet_express.setup.host import HostError, _split, is_temp_name, new_temp_name
 
@@ -736,7 +736,7 @@ class AccessProvision:
                 raise StepFailure(f"`{command[0]}` failed (exit {result.rc}): {tail}", "unknown")
             ctx.log(f"ran {command[0]} {command[1] if len(command) > 1 else ''}".rstrip())
 
-    _ACL_FORMS = {"---": {"---"}, "x": {"--x"}, "rx": {"r-x"}, "rX": {"r-x", "r--"}, "r": {"r--"}}
+    _ACL_FORMS: ClassVar[dict] = {"---": {"---"}, "x": {"--x"}, "rx": {"r-x"}, "rX": {"r-x", "r--"}, "r": {"r--"}}
 
     def verify(self, ctx) -> Effect:
         """Every grant the plan makes, read back: a crash between two commands must not look finished."""
@@ -1129,10 +1129,10 @@ class ServiceInstall(_AtomicFile):
             current = ctx.host.lstat(d["path"])
             if current is None:
                 return "not_applied"
-            if current.perms != 0o644 or (current.uid, current.gid) != (0, 0):
-                if d["if_exists"] == "replace" or sha256(ctx.host.read_bytes(d["path"])) == \
-                        sha256(ctx.step.params["defaults_content"].encode("utf-8")):
-                    return "unknown"
+            wrong_metadata = current.perms != 0o644 or (current.uid, current.gid) != (0, 0)
+            if wrong_metadata and (d["if_exists"] == "replace" or sha256(ctx.host.read_bytes(d["path"])) ==
+                                   sha256(ctx.step.params["defaults_content"].encode("utf-8"))):
+                return "unknown"
             if d["if_exists"] == "replace" and sha256(ctx.host.read_bytes(d["path"])) != \
                     sha256(ctx.step.params["defaults_content"].encode("utf-8")):
                 return "not_applied"
@@ -1151,8 +1151,8 @@ def merge_block(current: str | None, marker: str, body: str) -> str:
     block = _block(marker, body)
     if current is None:
         return "#!/bin/sh\n" + block
-    begin = re.compile(rf"^# BEGIN {re.escape(marker)}\b.*\n", re.M)
-    end = re.compile(rf"^# END {re.escape(marker)}\s*\n?", re.M)
+    begin = re.compile(rf"^# BEGIN {re.escape(marker)}\b.*\n", re.MULTILINE)
+    end = re.compile(rf"^# END {re.escape(marker)}\s*\n?", re.MULTILINE)
     starts, ends = list(begin.finditer(current)), list(end.finditer(current))
     if not starts and not ends:
         if current and not current.endswith("\n"):
@@ -1190,9 +1190,10 @@ class _HookFile(_AtomicFile):
         step = ctx.step.params
         path = f"{step['dest_dir']}/{self.name}"
         current = self._current(ctx)
-        if current is not None and ctx.host.lstat(path).kind == "file":
-            if sha256(current.encode("utf-8")) in step["legacy_sha256"].get(self.name, []):
-                current = None                 # one of our own whole-file copies: replaced, not merged into
+        is_ours = (current is not None and ctx.host.lstat(path).kind == "file"
+                   and sha256(current.encode("utf-8")) in step["legacy_sha256"].get(self.name, []))
+        if is_ours:
+            current = None                     # one of our own whole-file copies: replaced, not merged into
         return merge_block(current, step["marker"], step["hooks"][self.name]).encode("utf-8")
 
     def check(self, ctx):
@@ -1532,8 +1533,8 @@ class ServiceDisable:
 
 def strip_block(current: str, marker: str) -> str | None:
     """`current` without the marked block, or None if it has none. Half a block is refused, never guessed at."""
-    begin = re.compile(rf"^# BEGIN {re.escape(marker)}\b.*\n", re.M)
-    end = re.compile(rf"^# END {re.escape(marker)}\s*\n?", re.M)
+    begin = re.compile(rf"^# BEGIN {re.escape(marker)}\b.*\n", re.MULTILINE)
+    end = re.compile(rf"^# END {re.escape(marker)}\s*\n?", re.MULTILINE)
     starts, ends = list(begin.finditer(current)), list(end.finditer(current))
     if not starts and not ends:
         return None

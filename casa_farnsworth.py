@@ -1090,7 +1090,7 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[
     news. An unreadable table is news: the block is real and nobody can see why."""
     try:
         windows = commands._store.open_rollback_candidates(time.time())
-    except Exception:  # noqa: BLE001 -- the block itself is the news; the detail is a bonus
+    except Exception:
         log.exception("Could not read the rollback windows to explain a blocked prune")
         return "unreadable", (
             f"🧹 *Safe prune is blocked*\n"
@@ -1103,8 +1103,8 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[
         return None
     lines = [
         "🧹 *Safe prune is blocked*",
-        f"Root disk is at {disk_alert['used_pct']}% but an update rollback window is open, "
-        f"and no image is pruned while one is.",
+        (f"Root disk is at {disk_alert['used_pct']}% but an update rollback window is open, "
+         f"and no image is pruned while one is."),
     ]
     for row in windows[:5]:
         held = row["expires_at"] >= INDEFINITE_EXPIRY

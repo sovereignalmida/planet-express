@@ -3,12 +3,12 @@ import json
 import os
 
 import pytest
+from test_setup_discover import ubuntu
 
 from planet_express.setup import __main__ as cli
-from planet_express.setup.plan import plan
 from planet_express.setup.answers import SetupAnswers
-from test_setup_discover import ubuntu
 from planet_express.setup.discover import discover
+from planet_express.setup.plan import plan
 
 ANSWERS = {"run_as": "pe", "install_dir": "/opt/pe", "stacks_root": "/home/pe/stacks"}
 
@@ -70,6 +70,7 @@ def test_the_journal_lives_on_the_pool_on_mos_and_in_var_lib_elsewhere():
 
 def test_on_mos_the_pool_mount_owner_is_trusted_only_when_the_plan_writes_under_it(tmp_path):
     import os
+
     from planet_express.setup.__main__ import _trusted_uids
     from planet_express.setup.plan import Plan, Step
     pool = tmp_path / "data"
@@ -87,5 +88,5 @@ def test_serve_accepts_preview_and_it_is_documented():
     import subprocess
     import sys
     out = subprocess.run([sys.executable, "-m", "planet_express.setup", "serve", "--help"], capture_output=True, text=True,
-                         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": "."}, cwd=".")
+                         env={"PATH": "/usr/bin:/bin", "PYTHONPATH": "."}, cwd=".", check=False)
     assert out.returncode == 0 and "--preview" in out.stdout

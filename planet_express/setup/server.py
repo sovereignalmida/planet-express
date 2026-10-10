@@ -24,10 +24,19 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-
 from pathlib import Path
 
-from flask import Flask, abort, g, jsonify, make_response, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    abort,
+    g,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from planet_express.setup.session import Conflict
 
@@ -151,7 +160,7 @@ class _Exposure:
             if fresh or self._clock() - self._at >= EXPOSURE_TTL:
                 try:
                     self._value = bool(self._probe())
-                except Exception:           # noqa: BLE001 -- an unanswerable probe is treated as exposed
+                except Exception:
                     log.exception("exposure probe failed; treating setup as exposed")
                     self._value = True
                 self._at = self._clock()
@@ -406,7 +415,7 @@ def _quiet_handler():
         def log_request(self, code="-", size="-"):
             log.info("%s %s %s", self.command, self.path.split("?")[0], code)
 
-        def log_message(self, format, *args):                                       # noqa: A002
+        def log_message(self, format, *args):
             log.warning(_scrub(format % args))
     return Handler
 
@@ -426,6 +435,7 @@ def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessio
     import os
     import shutil
     import tempfile
+
     from werkzeug.serving import make_server
 
     from planet_express.setup.tls import make_certificate

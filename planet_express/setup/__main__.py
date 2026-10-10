@@ -171,7 +171,7 @@ def _serve_command(args) -> int:
         "Press Ctrl-C and run it again with sudo.")
     discover_fn = discover
     if args.preview and os.geteuid() != 0:
-        def discover_fn():                                          # noqa: F811 -- a preview shows the pages, it installs nothing
+        def discover_fn():
             report = discover()
             for check in report["checks"]:
                 if check["id"] == "privileges" and check["status"] == "blocked":

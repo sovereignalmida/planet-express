@@ -7,7 +7,14 @@ from __future__ import annotations
 
 import stat as stat_module
 
-from planet_express.setup.host import TEMP_PREFIX, HostError, RunResult, Stat, _split, is_temp_name
+from planet_express.setup.host import (
+    TEMP_PREFIX,
+    HostError,
+    RunResult,
+    Stat,
+    _split,
+    is_temp_name,
+)
 
 
 class Crash(BaseException):

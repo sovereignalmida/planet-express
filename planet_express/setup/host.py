@@ -158,7 +158,8 @@ class RealHost:
         real = os.path.realpath(path)
         best, fstype = "", ""
         try:
-            lines = open("/proc/self/mounts", encoding="utf-8", errors="replace").read().splitlines()
+            with open("/proc/self/mounts", encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
         except OSError:
             return True
         for line in lines:

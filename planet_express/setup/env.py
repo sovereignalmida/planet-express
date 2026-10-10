@@ -11,7 +11,6 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-
 MAX_HASHED_BYTES = 1024 * 1024
 
 

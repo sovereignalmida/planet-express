@@ -25,7 +25,14 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from planet_express.setup.handlers import HANDLERS, Context, Proceed, Refuse, Satisfied, StepFailure
+from planet_express.setup.handlers import (
+    HANDLERS,
+    Context,
+    Proceed,
+    Refuse,
+    Satisfied,
+    StepFailure,
+)
 from planet_express.setup.host import HostError, RealHost
 from planet_express.setup.journal import Journal, make_redactor
 

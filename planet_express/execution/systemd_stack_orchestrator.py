@@ -4,12 +4,11 @@ Implements StackOrchestrationProvider for systemd systems (Ubuntu, etc).
 Uses docker compose CLI for stack management.
 """
 
-from dataclasses import dataclass
-from typing import Protocol
-import subprocess
 import logging
+import subprocess
+from dataclasses import dataclass
 from pathlib import Path
-import tempfile
+
 import yaml
 
 log = logging.getLogger("planetexpress.systemd_orchestrator")
@@ -36,7 +35,7 @@ class StackActionResult:
 class SystemdStackOrchestrator:
     """Docker Compose management via CLI for systemd systems."""
 
-    def __init__(self, stacks_root: Path = None):
+    def __init__(self, stacks_root: Path | None = None):
         """Initialize Systemd orchestrator.
 
         Args:
@@ -178,7 +177,7 @@ class SystemdStackOrchestrator:
                 before=before,
                 after="error",
                 effect="error",
-                error=f"Invalid YAML: {str(e)}"
+                error=f"Invalid YAML: {e!s}"
             )
 
         try:

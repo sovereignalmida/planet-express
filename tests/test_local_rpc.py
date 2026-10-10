@@ -1185,7 +1185,6 @@ def test_canary_settle_closes_a_held_window_once_and_records_who(tmp_path):
 
 
 def test_canary_settle_refuses_a_finite_window_still_in_its_grace_period(tmp_path):
-    from planet_express.core.store import Store
     store, execution_id = _held_window(tmp_path)
     store.close_rollback_candidate(execution_id, 1)
     store.open_rollback_candidate(execution_id, 2, stack="media", service="sonarr",

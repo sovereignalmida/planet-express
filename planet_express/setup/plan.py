@@ -157,7 +157,7 @@ class _Builder:
 
     def secret(self, name: str, value: str) -> str:
         self.secrets[name] = value
-        return "{{secret:%s}}" % name
+        return f"{{{{secret:{name}}}}}"
 
     def text(self, summary: str) -> dict:
         return {"type": "text", "text": summary}
@@ -248,7 +248,12 @@ def _check_preconditions(b: _Builder) -> None:
 
 
 def _config_content(b: _Builder) -> str:
-    from config_schema import AutonomyConfig, PlanetExpressConfig, SudoAllowlist, SudoUnitGrant
+    from config_schema import (
+        AutonomyConfig,
+        PlanetExpressConfig,
+        SudoAllowlist,
+        SudoUnitGrant,
+    )
     a = b.a
     forbidden = FORBIDDEN_RISKS_BY_TIER[a.tier]
     allowlist = SudoAllowlist(units=[SudoUnitGrant(unit=u.unit, actions=u.actions) for u in a.sudo_units]
@@ -340,7 +345,6 @@ def _build(b: _Builder) -> None:
         secrets_id = b.file_step("Write the secrets file", p["env"], env_text, mode="0600", has_secrets=True,
                                  depends_on=dir_ids[:3 if mos else 2])
 
-    sudoers_id = None
     if not mos and a.tier == "full" and a.sudo_units and b.present(p["config"]):
         b.warnings.append("The kept config decides which units Planet Express may control, so no sudoers grant is "
                           "written from your answers: it could disagree with that config. Generate one from the "
@@ -348,7 +352,7 @@ def _build(b: _Builder) -> None:
     if not mos and a.tier == "full" and a.sudo_units and not b.present(p["config"]):
         from scripts.setup_wizard import generate_sudoers_snippet
         snippet = generate_sudoers_snippet(a.run_as, b.cfg.sudo_allowlist, [], "systemd")
-        sudoers_id = b.add(
+        b.add(
             "sudoers.install", "Grant scoped sudo for unit control", "/etc/sudoers.d/planetexpress",
             {"path": "/etc/sudoers.d/planetexpress", "content": snippet, "run_user": a.run_as,
              **b.expectation("/etc/sudoers.d/planetexpress", "keep")},
@@ -458,7 +462,7 @@ def _build(b: _Builder) -> None:
         enable = [(n, a.start_services and a.telegram is not None and n != "casa-stacks") for n, _ in units]
         flavour = "systemd"
 
-    enable_ids = [b.add("service.enable", f"Enable {n}" + (" and start it" if start else ""), n,
+    [b.add("service.enable", f"Enable {n}" + (" and start it" if start else ""), n,
                         {"flavour": flavour, "name": n, "start": start},
                         b.text(f"Enables {n} at boot" + (" and starts it now." if start else "; it is not started now.")),
                         depends_on=tuple(install_ids)) for n, start in enable]

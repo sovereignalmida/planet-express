@@ -7,7 +7,13 @@ import time
 
 import pytest
 
-from planet_express.setup.server import COOKIE, Sessions, create_app, is_private_peer, serve
+from planet_express.setup.server import (
+    COOKIE,
+    Sessions,
+    create_app,
+    is_private_peer,
+    serve,
+)
 from planet_express.setup.tls import make_certificate
 
 HOST = "192.168.1.50:8443"
@@ -144,7 +150,7 @@ def test_a_good_post_works(app, sessions):
 
 
 def test_put_and_delete_are_guarded_like_post(app, sessions):
-    cookie, csrf = login(app, sessions)
+    cookie, _csrf = login(app, sessions)
     for method in ("PUT", "DELETE", "PATCH"):
         assert call(app, method, "/api/ping", cookie=cookie).status_code == 403
 
@@ -200,8 +206,8 @@ def test_serve_speaks_tls_with_the_fingerprint_it_prints_and_refuses_public_bind
     sessions = Sessions()
     stop = threading.Event()
     port = _free_port()
-    thread = threading.Thread(target=serve, kwargs=dict(addresses=["127.0.0.1"], port=port, names=["testhost"],
-                                                        sessions=sessions, exposure=lambda: False, out=lines.append, stop=stop))
+    thread = threading.Thread(target=serve, kwargs={"addresses": ["127.0.0.1"], "port": port, "names": ["testhost"],
+                                                        "sessions": sessions, "exposure": lambda: False, "out": lines.append, "stop": stop})
     thread.start()
     try:
         for _ in range(100):
@@ -254,8 +260,8 @@ def _free_port():
 def test_the_start_up_token_never_reaches_the_log(caplog):
     import logging
     lines, stop, sessions, port = [], threading.Event(), Sessions(), _free_port()
-    thread = threading.Thread(target=serve, kwargs=dict(addresses=["127.0.0.1"], port=port, names=["t"], sessions=sessions,
-                                                        exposure=lambda: False, out=lines.append, stop=stop))
+    thread = threading.Thread(target=serve, kwargs={"addresses": ["127.0.0.1"], "port": port, "names": ["t"], "sessions": sessions,
+                                                        "exposure": lambda: False, "out": lines.append, "stop": stop})
     with caplog.at_level(logging.DEBUG):
         thread.start()
         try:

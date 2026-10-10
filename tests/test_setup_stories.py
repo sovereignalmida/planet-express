@@ -2,15 +2,15 @@
 import copy
 
 import pytest
+from test_setup_discover import ubuntu
+from test_setup_plan import LIVE_FILES
+from test_setup_server import Clock, call, login, post
+from test_setup_stages import REPO, put
 
 from planet_express.setup.discover import discover
 from planet_express.setup.plan import plan
 from planet_express.setup.server import Sessions, create_app
 from planet_express.setup.session import SetupSession
-from test_setup_discover import ubuntu
-from test_setup_plan import LIVE_FILES
-from test_setup_server import Clock, call, login, post
-from test_setup_stages import REPO, put
 
 
 def rig(files, dry_run=None):
@@ -38,7 +38,7 @@ def test_repair_and_uninstall_are_offered_only_when_something_is_installed():
 
 @pytest.mark.parametrize("story", ["repair", "uninstall"])
 def test_these_stories_skip_the_questions_about_powers_and_credentials(story):
-    app, cookie, csrf, session = rig(LIVE_FILES)
+    app, cookie, csrf, _session = rig(LIVE_FILES)
     assert put(app, cookie, csrf, {"story": story}).get_json()["ok"]
     for hidden in ("powers", "telegram", "operator", "llm"):
         assert page(app, cookie, hidden).headers["Location"].endswith("/stage/welcome")
@@ -48,7 +48,7 @@ def test_these_stories_skip_the_questions_about_powers_and_credentials(story):
 
 
 def test_the_uninstall_plan_comes_back_through_the_browser_api_and_removes_only_integration():
-    app, cookie, csrf, session = rig(LIVE_FILES)
+    app, cookie, csrf, _session = rig(LIVE_FILES)
     put(app, cookie, csrf, {"story": "uninstall"})
     body = post(app, cookie, csrf, "/api/plan").get_json()
     assert body["story"] == "uninstall" and body["applicable"]
@@ -73,7 +73,7 @@ def test_repair_shows_what_would_change_by_asking_the_host_without_changing_it()
     def dry_run(reviewed):
         seen.append(reviewed)
         return [{"step": s.id, "check": "satisfied" if i % 2 else "would run", "detail": ""} for i, s in enumerate(reviewed.steps)]
-    app, cookie, csrf, session = rig(LIVE_FILES, dry_run=dry_run)
+    app, cookie, csrf, _session = rig(LIVE_FILES, dry_run=dry_run)
     put(app, cookie, csrf, {"story": "repair"})
     body = post(app, cookie, csrf, "/api/plan").get_json()
     assert seen and set(body["checks"]) == {s["id"] for s in body["steps"]}
@@ -86,7 +86,7 @@ def test_repair_shows_what_would_change_by_asking_the_host_without_changing_it()
 def test_a_dry_run_that_fails_still_gives_the_plan():
     def boom(reviewed):
         raise OSError("no")
-    app, cookie, csrf, session = rig(LIVE_FILES, dry_run=boom)
+    app, cookie, csrf, _session = rig(LIVE_FILES, dry_run=boom)
     put(app, cookie, csrf, {"story": "repair"})
     body = post(app, cookie, csrf, "/api/plan").get_json()
     assert body["steps"] and "checks" not in body

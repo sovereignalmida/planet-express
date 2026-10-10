@@ -1,21 +1,18 @@
 """The executor and the first three handlers, on a fake host: ordering, drift, compare-and-swap, resume,
 and a crash injected at every mutating operation."""
-import copy
 import hashlib
 import json
 import os
+from functools import partial
 from pathlib import Path
 
 import pytest
-
 from fake_host import Crash, FakeHost, FaultyHost
-from functools import partial
 
-from planet_express.setup.apply import Busy, _Lock
-from planet_express.setup.apply import apply as _apply
+from planet_express.setup.apply import _Lock, apply as _apply
+from planet_express.setup.handlers import HANDLERS
 from planet_express.setup.host import RunResult
 from planet_express.setup.journal import Journal
-from planet_express.setup.handlers import HANDLERS
 from planet_express.setup.plan import Plan, Step
 
 # A build that can only apply directories, to test what happens with a kind it cannot.
@@ -97,7 +94,7 @@ def test_running_the_same_plan_again_does_nothing(tmp_path):
 def test_a_fresh_journal_on_an_already_converged_host_finds_every_step_satisfied(tmp_path):
     plan, host = standard_plan(), fresh_host()
     apply(plan, host=host, journal_root=tmp_path / "first", replan=lambda: plan)
-    before, mutations = host.tree(), host.mutations
+    before = host.tree()
     result = apply(plan, host=host, journal_root=tmp_path / "second", replan=lambda: plan)
     assert result.status == "done" and host.tree() == before
     ok = [e for e in Journal(tmp_path / "second", plan.to_public()["plan_id"]).events() if e["type"] == "step_ok"]
@@ -539,7 +536,7 @@ def test_the_journal_and_lock_are_private_when_everything_is_in_order(tmp_path):
 
 
 def identical_file_plan(**over):
-    params = dict(path="/etc/pe.conf", content="same\n", mode="0640", owner="svc", group="svc", expect_absent=True)
+    params = {"path": "/etc/pe.conf", "content": "same\n", "mode": "0640", "owner": "svc", "group": "svc", "expect_absent": True}
     params.update(over)
     return make_plan([step(1, "file.write", "/etc/pe.conf", **params)])
 

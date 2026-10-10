@@ -2,12 +2,12 @@
 from functools import partial
 
 import pytest
-
 from fake_host import Crash, FaultyHost
+from test_setup_apply import fresh_host, make_plan, sha, step
+
 from planet_express.setup.apply import apply as _apply
 from planet_express.setup.handlers import merge_block
 from planet_express.setup.host import RunResult
-from test_setup_apply import fresh_host, make_plan, sha, step
 
 apply = partial(_apply, evidence_dir="/journal/evidence")
 UNIT = "/etc/systemd/system/casa-dashboard.service"
@@ -21,7 +21,7 @@ def run(plan, host, tmp_path, name="j"):
 
 
 def unit_plan(content="[Unit]\n", **over):
-    params = dict(flavour="systemd", name="casa-dashboard", path=UNIT, content=content, expect_absent=True)
+    params = {"flavour": "systemd", "name": "casa-dashboard", "path": UNIT, "content": content, "expect_absent": True}
     params.update(over)
     return make_plan([step(1, "service.install", UNIT, **params)])
 
@@ -68,9 +68,9 @@ def test_a_failed_reload_is_a_stop_not_a_success(tmp_path):
 
 
 def init_plan(**over):
-    params = dict(flavour="sysvinit", name="casa-dashboard", path=INIT, content="#!/bin/sh\n", if_exists="replace",
-                  expected_sha256=sha("old\n"), defaults_path="/etc/default/casa-dashboard",
-                  defaults_content="PYTHON=/mnt/data/pe/venv/bin/python\n")
+    params = {"flavour": "sysvinit", "name": "casa-dashboard", "path": INIT, "content": "#!/bin/sh\n", "if_exists": "replace",
+                  "expected_sha256": sha("old\n"), "defaults_path": "/etc/default/casa-dashboard",
+                  "defaults_content": "PYTHON=/mnt/data/pe/venv/bin/python\n"}
     params.update(over)
     return make_plan([step(1, "service.install", INIT, **params)])
 
@@ -123,7 +123,7 @@ def test_an_init_script_changed_since_review_is_not_replaced(tmp_path):
 
 # -- boot_hook.install -------------------------------------------------------------------------------------
 def hook_plan(**over):
-    params = dict(dest_dir=HOOKS, hooks={"post-start.sh": BODY}, expect_absent=["post-start.sh"])
+    params = {"dest_dir": HOOKS, "hooks": {"post-start.sh": BODY}, "expect_absent": ["post-start.sh"]}
     params.update(over)
     return make_plan([step(1, "boot_hook.install", HOOKS, **params)])
 

@@ -96,8 +96,8 @@ class SetupSession:
             if self.discovery is None:
                 self.run_discover()                               # the defaults for required answers come from it
             candidate = {**self.answers, **{k: v for k, v in partial.items() if v is not None}}
-            for key in partial:                                   # an explicit null clears an optional answer
-                if partial[key] is None:
+            for key, value in partial.items():                    # an explicit null clears an optional answer
+                if value is None:
                     candidate.pop(key, None)
             try:
                 SetupAnswers.model_validate(candidate)
@@ -135,7 +135,7 @@ class SetupSession:
                 try:
                     public["checks"] = {c["step"]: {"check": c["check"], "detail": c["detail"]}
                                         for c in self._dry_run_fn(self.reviewed)}
-                except Exception:                                      # noqa: BLE001 -- no diff is better than no plan
+                except Exception:                                      # noqa: BLE001, S110 -- no diff is better than no plan
                     pass
             return public
 
@@ -279,8 +279,9 @@ class SetupSession:
     def totp_begin(self, name: str) -> dict:
         """A new enrolment secret, held here. Its QR and manual code are shown once; it only becomes an answer when
         a code from the person's authenticator proves they enrolled it."""
-        import web_auth
         import segno
+
+        import web_auth
         if not web_auth.OPERATOR_PATTERN.fullmatch(name or ""):
             return {"ok": False, "message": "Use 1-32 lowercase letters, digits, _, . or -."}
         secret = web_auth.new_totp_secret()

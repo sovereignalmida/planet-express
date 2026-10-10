@@ -3,8 +3,8 @@
 import pytest
 
 from planet_express.core.host_control import get_host_control_provider
-from planet_express.execution.host_control_systemd import SystemdHostControlProvider
 from planet_express.execution.host_control_mos import MosHostControlProvider
+from planet_express.execution.host_control_systemd import SystemdHostControlProvider
 
 
 class TestHostControlProviderFactory:

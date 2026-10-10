@@ -1,10 +1,9 @@
 """One contract, two hosts: RealHost (on a temp directory) and FakeHost must behave identically."""
 import os
-import stat
 
 import pytest
-
 from fake_host import Crash, FakeHost, FaultyHost
+
 from planet_express.setup.host import TEMP_PREFIX, HostError, RealHost
 
 UID, GID = os.getuid(), os.getgid()
@@ -283,6 +282,7 @@ def test_tree_digest_notices_a_same_size_edit_and_a_retargeted_link(env):
 
 def test_tree_digest_does_not_block_on_a_fifo(tmp_path):
     import os
+
     from planet_express.setup.host import RealHost
     (tmp_path / "t").mkdir()
     os.mkfifo(tmp_path / "t" / "pipe")
@@ -308,5 +308,6 @@ def test_a_group_writable_directory_is_refused_when_an_untrusted_account_shares_
 
 def test_stable_inodes_is_true_for_an_ordinary_directory(tmp_path):
     import os
+
     from planet_express.setup.host import RealHost
     assert RealHost({0, os.geteuid()}).stable_inodes(str(tmp_path)) is True
