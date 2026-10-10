@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **A browser setup wizard** (`sudo ./setup.sh`). It scans the host, builds a reviewable plan, and applies
+  only what you approve, through the same typed-step discipline as the engine: every step validates its
+  parameters, compare-and-swaps the files it touches against what the plan saw, journals before it acts,
+  and is verified by reading the host back. Ten screens (welcome, scan, location, power tier, Telegram,
+  operator account with a verified authenticator, LLM key, review, install, done). Served over HTTPS on
+  private addresses only, with a one-time link, strict request checks, and a refusal to install while the
+  host is reachable from outside. Works on Ubuntu (systemd) and MOS.
+- **Undo, repair and uninstall.** Undo reverts an install from its journal and only touches what it can
+  prove it made. Repair shows only what would change. Uninstall removes the services, units, MOS boot-hook
+  block and sudo grant (`file.remove`, `service.disable`, `boot_hook.remove`) and keeps configuration,
+  secrets, state and data. Each removal keeps a private copy and can itself be undone.
+- `python -m planet_express.setup {discover,plan,apply,undo,serve}`, the same machinery without the browser.
+  `serve --preview` shows every screen without root and installs nothing.
+
+### Fixed
+- `scripts/web_access.py` looks for the config in the install directory (where a clone-in-place install
+  keeps it) and fails with a clear message when there is none, instead of a traceback.
+
+### Added (hotfix, already on v3-production)
 - **A held rollback window can be settled from the dashboard.** A failed canary inverse pins its
   rollback window open until a human closes it, but nothing let a human do that: on casaserver it
   blocked every safe prune from 2026-09-27 to 2026-10-08 while `/` sat at 84%. The OPEN ROLLBACK

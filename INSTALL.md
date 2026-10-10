@@ -29,11 +29,45 @@ the wizard runs.
 3. Visit `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in a browser — the JSON
    response includes `"chat":{"id": ...}`. That number is your chat id.
 
-(The setup wizard does not do this lookup for you automatically — polling Telegram mid-install
-is a real network dependency for what's ultimately a one-time lookup, so it stays a manual
-step here rather than another way the installer can fail.)
+(The browser wizard does this lookup for you with its *Find my chat* button. The scripted
+`deploy.sh` path does not, so use the manual steps above there.)
 
-## Install
+## Install with the wizard (recommended)
+
+```bash
+git clone https://github.com/sovereignalmida/planet-express.git
+cd planet-express
+sudo ./setup.sh
+```
+
+Open the HTTPS link it prints in a browser on your LAN (one-time link, 15 minutes; the certificate is
+self-signed, so accept the warning once, and compare the fingerprint the terminal printed if you want to
+be careful). The wizard works the same on Ubuntu (systemd) and on MOS. On MOS, clone onto a pool (for
+example `/mnt/data/pe/planet-express`), because MOS keeps `/` in RAM.
+
+What it does for you, in order: **scan** (it tells you what is missing and how to fix it; it does not
+install Docker or create storage pools), **where it lives**, **what it may do**, **Telegram** (paste the
+bot token, send your bot any message, press *Find my chat*, then *Send test message*), an **operator
+account** for the dashboard (scan the QR code with an authenticator app and type a code to prove it works;
+there are no recovery codes, another operator can re-enrol you), an optional **LLM key** (checked against
+the provider), and a **review** of the exact plan. Approving it installs; every step is read back from the
+host to confirm, and it stops at the first thing that is not right.
+
+- **Undo** puts back what the install changed. It only touches what it can prove it made, and refuses
+  the moment anything has changed since (a file you edited, a directory that now has your files in it).
+  Accounts and the pre-install snapshot are left in place and named.
+- **Repair** re-checks an existing install against the host and lists only what would change.
+- **Uninstall** removes the services, units, MOS boot hooks and sudo grant after taking a snapshot, and
+  keeps your configuration, secrets, state, data and the checkout. It can be undone too.
+- **Preview.** `sudo ./setup.sh` is the real thing. To only look at the screens, run
+  `python -m planet_express.setup serve --preview` as a normal user from a checkout that has
+  `requirements-bootstrap.txt` installed. It shows everything and installs nothing.
+
+The wizard needs internet access once, to build its own small virtualenv from hash-pinned packages.
+
+## Install with the scripted path
+
+The older installer, still supported:
 
 ```bash
 git clone https://github.com/sovereignalmida/planet-express.git

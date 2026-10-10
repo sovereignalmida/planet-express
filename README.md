@@ -4,11 +4,19 @@ A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stack
 failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
 rollback, and talks to you over Telegram.
 
-**Status: v2.1.0.** This project started as a bespoke agent running on one person's home server,
-hardcoded to that host. It's now generalized into something anyone with their own Compose-based
-homelab can install — see [CHANGELOG.md](CHANGELOG.md) for the full spec history, starting with
-v1.0.0's first tagged release. It is dogfooded on the author's own fleet from day one of that
-rework, not developed in isolation and thrown over the wall.
+**Status: the v3 line.** It started as a bespoke agent running on one person's home server and has
+been generalized into something anyone with a Docker Compose homelab can install. It is dogfooded on
+the author's own fleet, not developed in isolation. See [CHANGELOG.md](CHANGELOG.md) for the history.
+
+**What v3 added:**
+
+- **A browser setup wizard** (`sudo ./setup.sh`) that scans the host, shows you a plan, and installs
+  only what you approve. It can also repair an install and uninstall one, and everything it does can
+  be undone. See [Quick start](#quick-start).
+- **More than one kind of host.** Planet Express now runs on Ubuntu (systemd) and on **MOS** (sysvinit,
+  RAM root, no sudo), behind provider interfaces for host control and stack orchestration.
+- **An Other hosts screen** that shows the rest of your fleet, observed through the Beszel hub you
+  already run.
 
 **What 2.0 changed:** an LLM used to write shell commands, which a pattern-matching safety check
 tried to vet before running them through a shell. It no longer does. Every change to the host is
@@ -16,6 +24,40 @@ now a **typed step** chosen from a fixed catalogue: its parameters are validated
 target is resolved when the plan is proposed and re-checked immediately before it acts, it runs as
 an argv list with no shell anywhere, and whether it worked is decided by reading the host — not by
 an exit code. A model picks *which* step to run; it never writes what runs.
+
+## Quick start
+
+You need a Linux host with Docker and Docker Compose, and Python 3.11 or newer. Then:
+
+```bash
+git clone https://github.com/sovereignalmida/planet-express.git
+cd planet-express
+sudo ./setup.sh
+```
+
+`setup.sh` builds a throwaway virtualenv from hash-pinned requirements, starts the wizard, and prints
+an HTTPS link for a browser on your LAN. The certificate is made on the spot, so your browser will warn
+once; the terminal prints its fingerprint so you can check it. The link works once, expires in 15
+minutes, and the wizard only listens on private addresses. It refuses to install while the host has a
+publicly routable address.
+
+The wizard has ten screens: it **scans** the host, asks **where it lives**, **what it may do** (four
+power tiers, from watch-only to full), your **Telegram** bot, an **operator account** (passphrase plus
+an authenticator app, proved with a real code), and an optional **LLM key**. Then you **review the
+plan**. It lists every file, unit and grant, which steps need root, which can be undone, and a "will not
+touch" list. Nothing on the host changes until you approve that exact plan. A secret you type is checked
+(a test message really arrives, the key really works) before it is kept, and is never shown again.
+
+If something goes wrong, the wizard stops at the first failed step and says exactly why. You can retry
+that step, change the answers, or **undo** what was done. It also offers **repair** (re-check an existing
+install and show only what would change) and **uninstall** (remove the services, units, boot hooks and
+sudo grant, keeping your configuration, secrets, state and data). See [INSTALL.md](INSTALL.md) for the
+details, including the older scripted path (`bash deploy.sh`).
+
+| Host | Status |
+|---|---|
+| Ubuntu / systemd | supported; runs as an unprivileged user with an optional, scoped sudo grant |
+| MOS (sysvinit, RAM root) | supported; installs on a pool, runs as root (you acknowledge this in the wizard) and is restored at boot by the MOS boot hooks |
 
 ## What it does
 
@@ -105,19 +147,26 @@ rather than leaving a button that quietly does nothing.
 
 ## What's tested, what isn't
 
-CI (`.github/workflows/ci.yml`) runs `ruff check .` and the full pytest suite on every push/PR,
-Python 3.11 and 3.12. That test suite is **pure-logic only**: state-schema round-trips, policy and
-allowlist rules, engine behaviour against a faked host, notifier/dashboard/template rendering — no
-real Docker daemon, sudo, or systemd involved anywhere in it.
+CI (`.github/workflows/ci.yml`) runs `ruff check .` and the full pytest suite on every push and PR
+(about 3,200 tests). That suite is **pure-logic**: state schemas, policy and allowlist rules, the engine
+against a faked host, dashboard and template rendering, and the setup wizard against an in-memory fake
+host that can be made to crash at every single mutating operation. No real Docker daemon, sudo or systemd
+is involved anywhere in it.
 
 What CI does **not** cover, because it can't be tested in good faith without a real host: actual
-container start/stop/restart behaviour, the sudo-scoped commands, compose writes, canary updates
-against a real registry, systemd unit installation, and the Telegram bot's live message flow.
-Those are rehearsed on a **throwaway KVM guest shaped like the real host** (`tests/homelab/`)
-before anything is deployed — fixture stacks that are healthy, unhealthy, crash-looping and
-slow-starting, plus a local registry serving a good and a deliberately broken image tag. Each
-landing has a rehearsal script there. Several of the bugs in the changelog were found that way and
-nowhere else, which is the point: a green CI badge is not a claim about the host.
+container start/stop/restart behaviour, the sudo-scoped commands, compose writes, canary updates against
+a real registry, systemd and MOS service installation, and the Telegram bot's live message flow. Those are
+rehearsed on throwaway virtual machines before anything is deployed:
+
+- the **setup wizard** has been run end to end (install, repair, uninstall, undo, reboot) on a fresh
+  Ubuntu 24.04 VM and a fresh MOS VM, which found bugs no unit test could (FAT renumbering inodes at every
+  mount, MOS re-copying its init scripts at boot, a pool owned by an unexpected account);
+- the rest is rehearsed on a **throwaway KVM guest shaped like the real host** (`tests/homelab/`): fixture
+  stacks that are healthy, unhealthy, crash-looping and slow-starting, plus a local registry serving a good
+  and a deliberately broken image tag.
+
+Several of the bugs in the changelog were found that way and nowhere else, which is the point: a green CI
+badge is not a claim about the host.
 
 ### Manual pre-release checklist
 
@@ -151,12 +200,14 @@ for, not just a joke.
 
 ## Project status
 
-This repo was built out in small, independent specs rather than one big rewrite — see
-`CLAUDE.md` for the standing engineering process (including an independent second-review gate that
-every slice goes through) and [CHANGELOG.md](CHANGELOG.md) for the full history. The 2.0 rework
-landed as five slices, each one deployed to a real host and soaked before the next began. `git clone` + `bash deploy.sh` is a real install
-path — see [INSTALL.md](INSTALL.md) for the full walkthrough, including how to get a Telegram bot
-token and what the optional sudo grant is for.
+This repo was built out in small, independent specs rather than one big rewrite. See `CLAUDE.md` for the
+standing engineering process, including an independent second-review gate that every slice goes through,
+and [CHANGELOG.md](CHANGELOG.md) for the full history.
+
+Branches: `main` is the older v2.x line; `v3-production` is the stable v3 line (what runs on the author's
+own host); `v3-next` is where new work lands first and is promoted once it has been reviewed and soaked.
+`sudo ./setup.sh` is the way to install; `git clone` plus `bash deploy.sh` is the older scripted path and
+still works. See [INSTALL.md](INSTALL.md) for the walkthrough, including how to get a Telegram bot token.
 
 ## License
 
