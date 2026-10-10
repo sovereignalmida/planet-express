@@ -437,7 +437,7 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False,
     if tg and not dry_run and results:
         try:
             tg.send(summarize_pass(results, kept_manual(stacks)))
-        except Exception:                       # noqa: BLE001 -- a failed digest must never fail the pass
+        except Exception:
             log.exception("could not send the weekly update digest")
     return results
 
