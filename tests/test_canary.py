@@ -611,7 +611,7 @@ def test_a_pass_that_checked_nothing_still_sends_its_digest(monkeypatch):
     class Tg:
         def send(self, text, **kw):
             sent.append(text)
-    monkeypatch.setattr(zoidberg, "eligible_stacks", lambda: [])
+    monkeypatch.setattr(zoidberg, "eligible_stacks", list)
     monkeypatch.setattr(zoidberg, "kept_manual", lambda stacks: ["network/traefik"])
     assert zoidberg.run_update_pass(tg=Tg(), commands=object()) == []
     assert sent and "0 services checked" in sent[0] and "network/traefik" in sent[0]
