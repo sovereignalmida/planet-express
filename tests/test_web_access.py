@@ -159,3 +159,21 @@ def test_main_executes_sudo_argv(monkeypatch, capsys):
     assert planner.call_args.args[1] == "chris"
     assert "entries" in planner.call_args.kwargs
     assert "/a path" in capsys.readouterr().out
+
+
+def test_the_config_is_found_in_the_environment_then_the_install_dir_then_etc(tmp_path):
+    install = tmp_path / "pe"
+    install.mkdir()
+    (install / "config.yaml").write_text("x: 1\n")
+    other = tmp_path / "other.yaml"
+    other.write_text("y: 1\n")
+    assert web_access.resolve_config_file({"CASA_CONFIG": str(other)}, install) == other.resolve()
+    assert web_access.resolve_config_file({}, install) == (install / "config.yaml").resolve()
+
+
+def test_a_missing_config_is_a_clear_message_not_a_traceback(tmp_path):
+    with pytest.raises(SystemExit) as raised:
+        web_access.resolve_config_file({}, tmp_path, exists=lambda path: False)
+    assert "No Planet Express config found" in str(raised.value) and "CASA_CONFIG" in str(raised.value)
+    with pytest.raises(SystemExit):
+        web_access.resolve_config_file({"CASA_CONFIG": str(tmp_path / "nope.yaml")}, tmp_path)

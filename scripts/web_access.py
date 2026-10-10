@@ -132,6 +132,20 @@ def _in_group(user, group):
         return False
 
 
+def resolve_config_file(environ, install_dir: Path, exists=os.path.exists) -> Path:
+    """Where the config is: $CASA_CONFIG if set, else the one in the install directory (how a clone-in-place install
+    keeps it), else the conventional /etc/planetexpress/config.yaml. Raises SystemExit saying so if there is none,
+    so a wrong guess is a clear message and not a traceback from deep inside the plan."""
+    explicit = environ.get("CASA_CONFIG")
+    candidates = [Path(explicit)] if explicit else [install_dir / "config.yaml", Path("/etc/planetexpress/config.yaml")]
+    for candidate in candidates:
+        if exists(candidate):
+            return candidate.resolve()
+    tried = ", ".join(str(c) for c in candidates)
+    raise SystemExit(f"No Planet Express config found (looked for: {tried}). Set CASA_CONFIG to its path and re-run, e.g. "
+                     f"CASA_CONFIG=/path/to/config.yaml venv/bin/python scripts/web_access.py")
+
+
 def main() -> None:
     if os.getuid() == 0 or os.geteuid() == 0:
         raise SystemExit("Don't run this as root (or via sudo); run as the unprivileged install user.")
@@ -142,7 +156,7 @@ def main() -> None:
     run_user = pwd.getpwuid(os.getuid()).pw_name
     commands = plan_web_access(
         install_dir, run_user, entries=[entry.name for entry in install_dir.iterdir()],
-        config_file=Path(os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml")).resolve(),
+        config_file=resolve_config_file(os.environ, install_dir),
         user_exists=_user_exists, group_exists=_group_exists, in_group=_in_group,
         other_can_traverse=lambda path: bool(path.stat().st_mode & stat.S_IXOTH),
     )
