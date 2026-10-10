@@ -350,6 +350,65 @@ def canary_update_service(
 
 
 # ── Full pass ────────────────────────────────────────────────────────────────────
+def _hint(status: str, reason: str) -> str:
+    """What a person can do about a service the pass could not update, in a few words."""
+    text = reason or ""
+    if status == "skipped" and "not a canary-eligible image reference" in text:
+        if "@sha256" in text:
+            return "pinned by digest, so it never moves; unpin it if you want it updated"
+        return "no tag in the compose file (Docker treats that as :latest); add a tag so it can be updated"
+    if "build-only" in text:
+        return "built locally, so there is nothing to pull; rebuild it yourself"
+    if status == "pull_failed":
+        return "the pull failed; check the registry and your network"
+    if status in ("rollback_failed", "interrupted"):
+        return "needs your attention now"
+    return text[:100]
+
+
+def kept_manual(stacks: list[Path]) -> list[str]:
+    """Services that are left to a person on purpose: the network guard (traefik, adguard) and anything the
+    config excludes. Listed in the digest so a quiet week is not mistaken for a forgotten service."""
+    manual: list[str] = []
+    for stack_dir in stacks:
+        exit_code, out, _ = _run(f"{_compose()} -f {stack_dir}/docker-compose.yml config --services")
+        if exit_code != 0:
+            continue
+        for name in (line.strip() for line in out.splitlines() if line.strip()):
+            guarded = any(tok in name.lower() for tok in NETWORK_GUARD_SERVICE_SUBSTRINGS)
+            if guarded or (stack_dir.name, name) in EXCLUDE_SERVICES:
+                manual.append(f"{stack_dir.name}/{name}")
+    return manual
+
+
+def summarize_pass(results: list[dict], manual: list[str] | None = None, limit: int = 3500) -> str:
+    """The weekly digest, in Telegram HTML: what was updated, how many were already current, what needs a
+    person and why, and what is kept manual by design. A pass that does its job quietly looks, from outside,
+    exactly like one that did nothing; this is what says which it was."""
+    def label(r):
+        return f"{r['stack']}/{r['service']}"
+    esc = TelegramClient.s
+    updated = [r for r in results if r["status"] == "updated"]
+    current = [r for r in results if r["status"] == "no_change"]
+    rolled = [r for r in results if r["status"] in ("rolled_back", "rollback_failed", "interrupted")]
+    needs = [r for r in results if r["status"] not in ("updated", "no_change", "rolled_back", "rollback_failed", "interrupted")]
+    lines = [f"🛰 <b>Weekly update pass</b>: {len(results)} services checked"]
+    lines.append(f"✅ <b>Updated ({len(updated)}):</b> " + (", ".join(esc(label(r)) for r in updated[:12])
+                 + (f" and {len(updated) - 12} more" if len(updated) > 12 else "") if updated else "nothing was newer"))
+    lines.append(f"✔️ <b>Already on the latest:</b> {len(current)}")
+    if rolled:
+        lines.append(f"↩️ <b>Rolled back ({len(rolled)}):</b> " + ", ".join(esc(label(r)) for r in rolled))
+    if needs:
+        lines.append(f"🙋 <b>Could not be updated automatically ({len(needs)}):</b>")
+        lines += [f"• {esc(label(r))}: {esc(_hint(r['status'], r.get('reason', '')))}" for r in needs[:15]]
+        if len(needs) > 15:
+            lines.append(f"…and {len(needs) - 15} more (see the log)")
+    if manual:
+        lines.append("🔒 <b>Kept manual on purpose:</b> " + ", ".join(esc(m) for m in manual[:12]))
+    text = "\n".join(lines)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False,
                     commands=None) -> list[dict]:
     results = []
@@ -375,6 +434,11 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False,
         f"Zoidberg update pass complete — {len(updated)} updated cleanly, "
         f"{len(rolled_back)} needed rollback, {len(results)} services checked total"
     )
+    if tg and not dry_run and results:
+        try:
+            tg.send(summarize_pass(results, kept_manual(stacks)))
+        except Exception:                       # noqa: BLE001 -- a failed digest must never fail the pass
+            log.exception("could not send the weekly update digest")
     return results
 
 

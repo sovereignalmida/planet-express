@@ -527,3 +527,68 @@ def test_going_forward_an_unreadable_container_stops_the_tag(svc, monkeypatch):
     # inverse still puts it back. That is the one tag allowed here.
     assert f"docker tag {NEW} {GLUETUN}" not in joined(svc)
     assert f"docker tag {OLD} {GLUETUN}" in joined(svc)
+
+
+# -- the weekly digest -------------------------------------------------------------------------------------------
+def test_the_digest_says_what_was_updated_what_was_current_and_what_needs_a_person():
+    import casa_zoidberg as zoidberg
+    results = [
+        {"stack": "media", "service": "radarr", "status": "updated", "reason": "x"},
+        {"stack": "media", "service": "sonarr", "status": "updated", "reason": "x"},
+        {"stack": "services", "service": "planka", "status": "no_change"},
+        {"stack": "services", "service": "miniflux", "status": "no_change"},
+        {"stack": "media", "service": "unpackerr", "status": "skipped",
+         "reason": "golift/unpackerr is not a canary-eligible image reference"},
+        {"stack": "media", "service": "redis", "status": "skipped",
+         "reason": "docker.io/redis:6.2-alpine@sha256:abc is not a canary-eligible image reference"},
+        {"stack": "services", "service": "porta", "status": "skipped", "reason": "no image reference (build-only service)"},
+        {"stack": "vikunja", "service": "sync", "status": "pull_failed", "reason": "denied"},
+        {"stack": "media", "service": "bad", "status": "rolled_back", "reason": "unhealthy"},
+    ]
+    text = zoidberg.summarize_pass(results, manual=["network/traefik", "network/adguard"])
+    assert "9 services checked" in text and "Updated (2):</b> media/radarr, media/sonarr" in text
+    assert "Already on the latest:</b> 2" in text and "Rolled back (1)" in text and "media/bad" in text
+    assert "Could not be updated automatically (4)" in text
+    assert "media/unpackerr: no tag in the compose file" in text and "pinned by digest" in text
+    assert "built locally" in text and "the pull failed" in text
+    assert "Kept manual on purpose:</b> network/traefik, network/adguard" in text
+
+
+def test_a_quiet_pass_still_says_so_and_a_huge_one_stays_under_the_telegram_limit():
+    import casa_zoidberg as zoidberg
+    quiet = zoidberg.summarize_pass([{"stack": "a", "service": "b", "status": "no_change"}])
+    assert "nothing was newer" in quiet and "Could not be updated" not in quiet
+    many = [{"stack": "s", "service": f"svc{i}", "status": "skipped",
+             "reason": "x is not a canary-eligible image reference"} for i in range(400)]
+    assert len(zoidberg.summarize_pass(many)) <= 3500
+
+
+def test_service_names_are_escaped_for_telegram_html():
+    import casa_zoidberg as zoidberg
+    text = zoidberg.summarize_pass([{"stack": "a<b", "service": "c&d", "status": "updated", "reason": ""}])
+    assert "a&lt;b/c&amp;d" in text
+
+
+def test_the_pass_sends_the_digest_and_a_failing_send_never_fails_the_pass(monkeypatch):
+    import casa_zoidberg as zoidberg
+    sent = []
+
+    class Tg:
+        def send(self, text, **kw):
+            sent.append(text)
+            raise OSError("telegram down")
+    # a pass with results sends a digest, and survives the send failing
+    monkeypatch.setattr(zoidberg, "stack_services", lambda stack_dir: ["svc"])
+    monkeypatch.setattr(zoidberg, "eligible_stacks", lambda: [Path("/stacks/media")])
+    monkeypatch.setattr(zoidberg, "canary_update_service", lambda *a, **k: {"stack": "media", "service": "svc", "status": "no_change"})
+    monkeypatch.setattr(zoidberg.time, "sleep", lambda s: None)
+    monkeypatch.setattr(zoidberg, "kept_manual", lambda stacks: [])
+    results = zoidberg.run_update_pass(tg=Tg(), commands=object())
+    assert results[0]["status"] == "no_change" and sent and "Weekly update pass" in sent[0]
+
+
+def test_hermes_no_longer_turns_image_age_into_findings():
+    import casa_hermes
+    assert "Image age is NOT a finding" in casa_hermes.SYSTEM_PROMPT
+    slim = casa_hermes._slim_snapshot({"image_candidates": [{"repo": "redis", "tag": "latest", "stale_days": 42}]})
+    assert "image_candidates" not in slim

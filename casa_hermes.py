@@ -67,7 +67,9 @@ SEVERITY RULES (apply all that match):
   nebula and dnclient were both decommissioned — remote access is now Tailscale on OPNsense,
   outside this host)
 - Journal errors same message repeated > 3 times in the window: MEDIUM
-- Stale :latest image (stale_days >= 30): LOW — batch into update_candidates
+- Image age is NOT a finding. An old :latest image only means the publisher has not released a newer
+  build; Zoidberg compares against the registry every week and updates what has changed. Never create a
+  finding, and never fill update_candidates, from how old an image is.
 - Cert/acme errors (e.g. permission denied reading acme.json): this host has no active ACME
   resolver configured in Traefik — acme.json is known-dead legacy data, nothing reads or writes
   it. Do not raise this above LOW severity; note it as informational/cosmetic, not something
@@ -142,7 +144,6 @@ def _slim_snapshot(snapshot: dict) -> dict:
         },
         "backups": snapshot.get("backups", {}),
         "services": snapshot.get("services", {}),
-        "image_candidates": snapshot.get("image_candidates", []),
         "certs": snapshot.get("certs", []),
     }
 
