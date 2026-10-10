@@ -1434,8 +1434,8 @@ def _send_status_report(notifier: Notifier, snapshot: dict, mode: str) -> None:
         if not candidates:
             notifier.notify("🔵 No old `:latest` images found.")
         else:
-            lines = [f"🔵 *{len(candidates)} image(s) built over 30 days ago* (age only: an old image can just mean the "
-                     f"publisher has released nothing newer. The weekly pass checks the registry, and /patchnow runs it now.)"]
+            lines = [(f"🔵 *{len(candidates)} image(s) built over 30 days ago* (age only: an old image can just mean the "
+                      f"publisher has released nothing newer. The weekly pass checks the registry, and /patchnow runs it now.)")]
             for img in candidates:
                 lines.append(
                     f"  `{img['repo']}:{img['tag']}` — {img.get('stale_days', '?')}d old"
