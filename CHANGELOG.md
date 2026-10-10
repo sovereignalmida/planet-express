@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-10-10
+
+Planet Express now runs on more than one kind of host and installs from a browser. An upgrade from 2.6.x
+needs no config change and no new dependency: pull, run `scripts/web_access.py` (with `CASA_CONFIG` set to
+your config if it is not in `/etc/planetexpress`), and restart the two services.
+
 ### Added
+- **MOS support.** Planet Express runs on MOS (sysvinit, RAM root, no sudo) as well as Ubuntu/systemd,
+  behind `HostControlProvider` and `StackOrchestrationProvider` (the service-control and stack-orchestration
+  seams extracted in 2.x are now the real thing, with a MOS implementation of each). On MOS it installs on a
+  pool, runs as root (acknowledged explicitly), uses the standalone `docker-compose` binary, and is restored at
+  every boot by a merged block in `/boot/optional/scripts` that never replaces your own commands. A soak
+  monitor and boot-time resume are included.
+- **A Hosts screen inside the dashboard shell**, with a typed cause for every "unknown" reading, and one
+  head-and-shoulders portrait per crew member used everywhere.
 - **A browser setup wizard** (`sudo ./setup.sh`). It scans the host, builds a reviewable plan, and applies
   only what you approve, through the same typed-step discipline as the engine: every step validates its
   parameters, compare-and-swaps the files it touches against what the plan saw, journals before it acts,
@@ -21,12 +35,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   secrets, state and data. Each removal keeps a private copy and can itself be undone.
 - `python -m planet_express.setup {discover,plan,apply,undo,serve}`, the same machinery without the browser.
   `serve --preview` shows every screen without root and installs nothing.
-
-### Fixed
-- `scripts/web_access.py` looks for the config in the install directory (where a clone-in-place install
-  keeps it) and fails with a clear message when there is none, instead of a traceback.
-
-### Added (hotfix, already on v3-production)
 - **A held rollback window can be settled from the dashboard.** A failed canary inverse pins its
   rollback window open until a human closes it, but nothing let a human do that: on casaserver it
   blocked every safe prune from 2026-09-27 to 2026-10-08 while `/` sat at 84%. The OPEN ROLLBACK
@@ -35,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A prune blocked by a held window says so.** Telegram names the window and the way out (at most
   once a day per distinct block); an unreadable window table gets its own alert.
 - **`prune.safe` also clears unused build cache** (`docker builder prune -a -f`).
+
+### Fixed
+- `scripts/web_access.py` looks for the config in the install directory (where a clone-in-place install
+  keeps it) and fails with a clear message when there is none, instead of a traceback.
+- `/etc/init.d` discovery fails open when the directory is missing; the init script loads its environment
+  without mangling a `$` in a password hash; the dashboard's master pid is recorded by the script itself so it
+  survives dropping privileges.
 
 ## [2.6.0] - 2026-10-03
 
