@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-10-10
+
+Maintenance release: no behaviour change, no config change, no new dependency.
+
+### Fixed
+- `ruff check .` passes. It reported 162 errors on the v3 line and 41 on `main`, so CI's lint step had been
+  failing. Import order and unused code were cleaned up, the blind excepts in the two stack orchestrators are
+  declared in `pyproject.toml` as the provider boundaries they are, and the remaining style findings were fixed.
+- A test in `tests/test_state_snapshot.py` was defined twice under the same name, so the duplicate was never
+  run; the identical copy is removed.
+
 ## [3.0.0] - 2026-10-10
 
 Planet Express now runs on more than one kind of host and installs from a browser. An upgrade from 2.6.x
