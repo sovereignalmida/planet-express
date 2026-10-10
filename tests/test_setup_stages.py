@@ -183,3 +183,10 @@ def test_running_as_root_needs_an_explicit_acknowledgement_on_the_page(wizard):
     assert "checked" in call(app, "GET", "/stage/location", cookie=cookie).get_data(as_text=True).split('id="accept-root"')[1].split(">")[0]
     put(app, cookie, csrf, {"run_as": "pe"})
     assert 'id="accept-root"' not in call(app, "GET", "/stage/location", cookie=cookie).get_data(as_text=True)
+
+
+def test_the_power_tiers_are_keyboard_reachable_rows_not_unstyled_buttons(wizard):
+    """A bare <button> inherits a dark text colour and is unreadable on the cockpit theme (found in a screenshot)."""
+    app, cookie, *_ = wizard
+    html = call(app, "GET", "/stage/powers", cookie=cookie).get_data(as_text=True)
+    assert html.count('role="button" tabindex="0"') == 4 and "<button class=\"pe-check" not in html

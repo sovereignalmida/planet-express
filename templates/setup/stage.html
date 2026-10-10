@@ -108,10 +108,11 @@
       {% elif current.name == 'powers' %}
         <p>What may Planet Express do on its own? Each step up includes the ones before it.</p>
         {% for t in tiers %}
-        <button class="pe-check {{ 'passed' if a.tier == t.id else '' }}" data-answer="tier" data-value="{{ t.id }}">
+        <div class="pe-check {{ 'passed' if a.tier == t.id else '' }}" role="button" tabindex="0" aria-pressed="{{ 'true' if a.tier == t.id else 'false' }}"
+             data-answer="tier" data-value="{{ t.id }}">
           <strong>{{ t.title }}</strong> <span class="pe-badge {{ t.risk_class }}">{{ t.risk }}</span>
           <div>{{ t.detail }}</div><div class="pe-panel-note">{{ t.access }}</div>
-        </button>
+        </div>
         {% endfor %}
 
       {% elif current.name == 'telegram' %}

@@ -49,6 +49,11 @@
       el.addEventListener("change", () => save({[field]: el.value}, field === "run_as"));
     } else {
       el.addEventListener("click", () => save({[field]: el.dataset.value}, true));
+      if (el.getAttribute("role") === "button") {              // a row that acts as a button works from the keyboard too
+        el.addEventListener("keydown", ev => {
+          if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); el.click(); }
+        });
+      }
     }
   });
 
@@ -171,14 +176,15 @@
                                  : n + " of " + p.steps.length + " steps are already in place and are hidden below. These would change:");
       }
       (p.steps || []).filter(s => !inPlace(s)).forEach((s, i) => {
-        const row = add("details", "pe-check", "");
-        const head = add("summary", "", (i + 1) + ". " + s.title + " ");
+        const row = add("details", "", "");                    // a plain block: the header is the flex row, the detail stacks under it
+        const head = add("summary", "pe-check", (i + 1) + ". " + s.title + " ", row);
         add("span", "pe-badge " + (s.risk === "R0" || s.risk === "R1" ? "ok" : "warn"), s.risk, head);
         add("span", "pe-chip " + (s.reversible ? "ok" : "warn"), s.reversible ? "REVERSIBLE" : "NOT REVERSIBLE", head);
         add("div", "pe-panel-note", s.target, row);
         if (s.needs_root) add("div", "pe-panel-note", "NEEDS ROOT", row);
         const text = (s.preview && (s.preview.content || s.preview.text)) || "";
-        if (text) add("pre", "pe-output", text, row);
+        // File contents keep their line breaks; a one-sentence description wraps like text.
+        if (text) add(s.preview.content ? "pre" : "div", s.preview.content ? "pe-output" : "pe-panel-note", text, row);
       });
       add("h3", "", "WILL NOT TOUCH");
       (p.will_not_touch || []).forEach(t => add("div", "pe-panel-note", "• " + t));
@@ -200,6 +206,7 @@
   if (progress) {
     let seq = 0;
     const lines = [];
+    let logOpen = progress.dataset.run === "install";            // open while installing, folded once it is done
     const mark = {pending: "·", started: "▶", ok: "✓", failed: "✗", undone: "↺"};
     const story = progress.dataset.story;
     const heads = story === "uninstall"
@@ -248,8 +255,18 @@
         add("h3", "", "LEFT IN PLACE");
         data.outcome.not_undone.forEach(n => add("div", "pe-panel-note", "• " + n.reason));
       }
-      const log = add("div", "pe-logwell", "");
-      lines.slice(-200).forEach(l => add("div", "pe-logline", l, log));
+      // Repeated lines ("ran setfacl -m" a dozen times) are folded into one with a count.
+      const folded = [];
+      lines.slice(-400).forEach(l => {
+        const last = folded[folded.length - 1];
+        if (last && last[0] === l) last[1] += 1; else folded.push([l, 1]);
+      });
+      const box = add("details", "", "");
+      box.open = logOpen;
+      box.addEventListener("toggle", () => { logOpen = box.open; });
+      add("summary", "pe-panel-note", "LOG · " + folded.length + " ENTRIES", box);
+      const log = add("div", "pe-logwell", "", box);
+      folded.forEach(([l, n]) => add("div", "pe-logline", n > 1 ? l + "  ×" + n : l, log));
     };
     const tick = () => send("GET", "/api/events?after=" + seq).then(r => {
       const data = r.body;

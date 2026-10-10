@@ -54,6 +54,23 @@ install and show only what would change) and **uninstall** (remove the services,
 sudo grant, keeping your configuration, secrets, state and data). See [INSTALL.md](INSTALL.md) for the
 details, including the older scripted path (`bash deploy.sh`).
 
+### The wizard
+
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/wizard/02-scan.png"><img src="docs/screenshots/wizard/02-scan.png" alt="Scan screen"></a><br><sub><b>Scan</b>: Leela checks Docker, storage, ports and any existing install, and says what to fix. It guides; it does not install Docker for you.</sub></td>
+<td width="50%"><a href="docs/screenshots/wizard/04-powers.png"><img src="docs/screenshots/wizard/04-powers.png" alt="Powers screen"></a><br><sub><b>What it may do</b>: four tiers, from watch-only to the full crew, each with the access it needs.</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/wizard/06-operator.png"><img src="docs/screenshots/wizard/06-operator.png" alt="Operator account"></a><br><sub><b>Operator account</b>: a passphrase plus an authenticator app, proved with a real code before it is kept.</sub></td>
+<td width="50%"><a href="docs/screenshots/wizard/08b-review-expanded.png"><img src="docs/screenshots/wizard/08b-review-expanded.png" alt="Review the plan"></a><br><sub><b>Review the plan</b>: every file and unit, its risk, whether it can be undone, and what will not be touched. Nothing happens until you approve it.</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/wizard/09-install.png"><img src="docs/screenshots/wizard/09-install.png" alt="Installing"></a><br><sub><b>Install</b>: Bender runs the approved steps one at a time, and each is read back from the host before the next begins.</sub></td>
+<td width="50%"><a href="docs/screenshots/wizard/10-done.png"><img src="docs/screenshots/wizard/10-done.png" alt="Done"></a><br><sub><b>Done</b>: everything is verified, with an undo button and the next three things to do.</sub></td>
+</tr>
+</table>
+
 | Host | Status |
 |---|---|
 | Ubuntu / systemd | supported; runs as an unprivileged user with an optional, scoped sudo grant |
