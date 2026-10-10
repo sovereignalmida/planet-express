@@ -390,12 +390,17 @@ def summarize_pass(results: list[dict], manual: list[str] | None = None, limit: 
     esc = TelegramClient.s
     updated = [r for r in results if r["status"] == "updated"]
     current = [r for r in results if r["status"] == "no_change"]
-    rolled = [r for r in results if r["status"] in ("rolled_back", "rollback_failed", "interrupted")]
+    rolled = [r for r in results if r["status"] == "rolled_back"]
+    urgent = [r for r in results if r["status"] in ("rollback_failed", "interrupted")]
     needs = [r for r in results if r["status"] not in ("updated", "no_change", "rolled_back", "rollback_failed", "interrupted")]
     lines = [f"🛰 <b>Weekly update pass</b>: {len(results)} services checked"]
     lines.append(f"✅ <b>Updated ({len(updated)}):</b> " + (", ".join(esc(label(r)) for r in updated[:12])
                  + (f" and {len(updated) - 12} more" if len(updated) > 12 else "") if updated else "nothing was newer"))
     lines.append(f"✔️ <b>Already on the latest:</b> {len(current)}")
+    if urgent:
+        lines.append(f"🚨 <b>Needs your attention now ({len(urgent)}):</b>")
+        lines += [f"• {esc(label(r))}: {esc('the rollback failed' if r['status'] == 'rollback_failed' else 'the update did not finish and its outcome is unknown')}"
+                  for r in urgent]
     if rolled:
         lines.append(f"↩️ <b>Rolled back ({len(rolled)}):</b> " + ", ".join(esc(label(r)) for r in rolled))
     if needs:
@@ -434,7 +439,7 @@ def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False,
         f"Zoidberg update pass complete — {len(updated)} updated cleanly, "
         f"{len(rolled_back)} needed rollback, {len(results)} services checked total"
     )
-    if tg and not dry_run and results:
+    if tg and not dry_run:
         try:
             tg.send(summarize_pass(results, kept_manual(stacks)))
         except Exception:

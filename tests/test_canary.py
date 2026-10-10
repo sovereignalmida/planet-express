@@ -592,3 +592,26 @@ def test_hermes_no_longer_turns_image_age_into_findings():
     assert "Image age is NOT a finding" in casa_hermes.SYSTEM_PROMPT
     slim = casa_hermes._slim_snapshot({"image_candidates": [{"repo": "redis", "tag": "latest", "stale_days": 42}]})
     assert "image_candidates" not in slim
+
+
+def test_a_failed_rollback_is_urgent_never_reported_as_rolled_back():
+    import casa_zoidberg as zoidberg
+    text = zoidberg.summarize_pass([
+        {"stack": "a", "service": "x", "status": "rollback_failed", "reason": "boom"},
+        {"stack": "a", "service": "y", "status": "interrupted", "reason": "?"},
+        {"stack": "a", "service": "z", "status": "rolled_back", "reason": "unhealthy"}])
+    assert "Needs your attention now (2)" in text and "a/x: the rollback failed" in text and "a/y: the update did not finish" in text
+    assert "Rolled back (1):</b> a/z" in text
+
+
+def test_a_pass_that_checked_nothing_still_sends_its_digest(monkeypatch):
+    import casa_zoidberg as zoidberg
+    sent = []
+
+    class Tg:
+        def send(self, text, **kw):
+            sent.append(text)
+    monkeypatch.setattr(zoidberg, "eligible_stacks", lambda: [])
+    monkeypatch.setattr(zoidberg, "kept_manual", lambda stacks: ["network/traefik"])
+    assert zoidberg.run_update_pass(tg=Tg(), commands=object()) == []
+    assert sent and "0 services checked" in sent[0] and "network/traefik" in sent[0]
