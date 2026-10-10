@@ -44,9 +44,51 @@
   // a refresh (or a real reload) should keep a dismissed plan hidden, but a *different*
   // plan ID (new pending plan) should always show up regardless of a past dismissal.
 
+  // Close a held canary rollback window. Confirmed first: it releases the update's old image to
+  // the next prune, which is the only thing that could restore the service.
+  function settleWindow(btn) {
+    var label = btn.dataset.label;
+    if (!window.confirm("Close the rollback window for " + label + "? Its old image becomes " +
+        "prunable, so confirm the service is healthy first.")) return;
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    var url = "/api/canary/" + encodeURIComponent(btn.dataset.execution) + "/" +
+              encodeURIComponent(btn.dataset.step) + "/settle";
+    function post() {
+      return fetch(url, {
+        method: "POST", cache: "no-store",
+        body: new URLSearchParams({ csrf_token: meta ? meta.content : "" })
+      }).then(function (r) {
+        return r.json().then(function (data) { return { r: r, data: data }; });
+      });
+    }
+    btn.disabled = true;
+    post().then(function (res) {
+      if (res.r.status === 401) { window.location.assign("/login?next=" + encodeURIComponent("/")); return null; }
+      if (res.data.reason === "elevation_required" && window.peElevate) {
+        return window.peElevate(res.data.error || "This needs your passphrase again.")
+          .then(function (ok) { return ok ? post() : null; });
+      }
+      return res;
+    }).then(function (res) {
+      if (!res) { btn.disabled = false; return; }
+      if (!res.r.ok) throw new Error(res.data.error || "host slow, retry");
+      window.alert(res.data.message || "Done.");
+      // The windows panel sits outside the live region the refresh swaps, so reload the page.
+      window.location.reload();
+    }).catch(function (error) {
+      btn.disabled = false;
+      window.alert(error.message);
+    });
+  }
+
   // Everything in here binds to DOM nodes -- must re-run after every refresh swap
   // (fresh nodes from the fetched HTML have no listeners of their own yet).
   function bindInteractions() {
+    document.querySelectorAll("[data-settle-window]").forEach(function (btn) {
+      // Assigned, not added: the windows panel sits outside the swapped region, so this runs
+      // again on the same buttons after every refresh and a listener would stack (Codex).
+      btn.onclick = function () { settleWindow(btn); };
+    });
     var scanBtn = document.getElementById("scan-btn");
     if (scanBtn && !scanBtn.disabled) {
       scanBtn.addEventListener("click", function () { startScan(scanBtn); });
@@ -582,6 +624,11 @@
         var freshHull = fresh.getElementById("hull-diagnostics-panel");
         var currentHull = document.getElementById("hull-diagnostics-panel");
         if (freshHull && currentHull) currentHull.innerHTML = freshHull.innerHTML;
+        // A window can appear or become held after page load; this panel is the only way out of
+        // a held one, so it follows the refresh (bindInteractions rebinds its buttons).
+        var freshWindows = fresh.getElementById("rollback-candidates-panel");
+        var currentWindows = document.getElementById("rollback-candidates-panel");
+        if (freshWindows && currentWindows) currentWindows.innerHTML = freshWindows.innerHTML;
         applyHashTab();
         bindInteractions();
         return true;

@@ -668,13 +668,34 @@ def build_core_handlers(
         directory, so these rows can only reach it through here (Codex, T42)."""
         _params(params, {})
         return [
-            {"stack": row["stack"], "service": row["service"],
+            {"execution_id": row["execution_id"], "step_n": row["step_n"],
+             "stack": row["stack"], "service": row["service"],
+             "held": row["expires_at"] >= INDEFINITE_EXPIRY,
              "old_image_id": row["old_image_id"], "image_reference": row["image_reference"],
              "recorded_at": _iso(row["created_at"]),
              "expires_at": "when a human closes it" if row["expires_at"] >= INDEFINITE_EXPIRY
                            else _iso(row["expires_at"])}
             for row in store.open_rollback_candidates(time.time())
         ]
+
+    def canary_settle(params):
+        """An operator closes an open rollback window, releasing its image to the prune. The only
+        way out of a held window (a failed inverse pins one open until a human settles it)."""
+        if not isinstance(params, dict) or set(params) != {"execution_id", "step_n", "operator"}:
+            raise RpcError("Invalid params", "bad_request")
+        execution_id, step_n = params["execution_id"], params["step_n"]
+        if not isinstance(execution_id, str) or re.fullmatch(r"[0-9a-f]{12}", execution_id) is None:
+            raise RpcError("Invalid execution id", "bad_request")
+        if type(step_n) is not int or not 0 <= step_n <= 10_000:
+            raise RpcError("Invalid step", "bad_request")
+        auth_params({"operator": params["operator"]})
+        if params["operator"] == "?":
+            raise RpcError("Invalid operator", "bad_request")
+        if store.settle_rollback_candidate(execution_id, step_n, params["operator"]):
+            return {"outcome": "settled",
+                    "message": "Window closed. Its old image can now be pruned."}
+        return {"outcome": "refused",
+                "message": "That window is not held open, so it is not settled by hand."}
 
     # ([[id, name, status], ...], answer -- or None for a final failure) from the last read, in
     # one slot so a reader never pairs one read's containers with another's answer.
@@ -894,7 +915,7 @@ def build_core_handlers(
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked,
-            "canary.candidates": canary_candidates,
+            "canary.candidates": canary_candidates, "canary.settle": canary_settle,
             "containers.routers": container_routers, "config.enforced": config_enforced,
             "query.widget_target": widget_target}
 

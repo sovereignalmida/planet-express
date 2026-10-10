@@ -39,6 +39,11 @@ class Unreadable:
         raise AssertionError("a prune must not run while the window cannot be read")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_alert_throttle(monkeypatch):
+    monkeypatch.setattr(fw, "_blocked_prune_alerted", {"text": None, "at": 0.0})
+
+
 @pytest.fixture
 def state():
     s = fw.PipelineState()
@@ -87,6 +92,69 @@ def test_an_open_rollback_window_stops_the_prune(ready, state, tmp_path):
     commands = Commands(store)
     fw.maybe_run_safe_prune({}, FakeNotifier(), state, commands)
     assert commands.runs == []
+
+
+def test_a_held_window_blocks_the_prune_loudly_and_names_the_way_out(ready, state, tmp_path):
+    # 2026-09-27 to 10-08, casaserver: a held window blocked every prune for eleven days and the
+    # only trace was an info line while the disk sat at 84%.
+    from planet_express.core.store import INDEFINITE_EXPIRY
+    store = _store(tmp_path)
+    execution_id = _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
+    commands, notifier = Commands(store), FakeNotifier()
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert commands.runs == []
+    [message] = notifier.notifications
+    assert "Safe prune is blocked" in message and "91%" in message
+    assert "media/sonarr" in message and execution_id in message and "held" in message
+    assert "SETTLE" in message
+
+
+_PCT = {"v": 91}
+
+
+def test_the_same_held_window_is_announced_once_a_day_not_every_scan(ready, state, tmp_path,
+                                                                     monkeypatch):
+    monkeypatch.setattr(fw, "_root_disk_alert",
+                        lambda snap: {"used_pct": _PCT["v"], "alert": "high"})
+    from planet_express.core.store import INDEFINITE_EXPIRY
+    store = _store(tmp_path)
+    _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
+    commands, notifier = Commands(store), FakeNotifier()
+    for _ in range(3):
+        fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert len(notifier.notifications) == 1
+    monkeypatch.setitem(_PCT, "v", 95)   # disk drifts; still the same block, still one alert
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert len(notifier.notifications) == 1
+    fw._blocked_prune_alerted["at"] -= fw.BLOCKED_PRUNE_REALERT_SECONDS + 1
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert len(notifier.notifications) == 2
+
+
+def test_an_ordinary_grace_window_blocks_quietly(ready, state, tmp_path):
+    store = _store(tmp_path)
+    _open_candidate(store, expires_at=time_far_future())   # finite: closes by itself
+    commands, notifier = Commands(store), FakeNotifier()
+    fw.maybe_run_safe_prune({}, notifier, state, commands)
+    assert commands.runs == [] and notifier.notifications == []
+
+
+def test_settling_a_held_window_lets_the_prune_run(ready, state, tmp_path):
+    from planet_express.core.store import INDEFINITE_EXPIRY
+    store = _store(tmp_path)
+    execution_id = _open_candidate(store, expires_at=INDEFINITE_EXPIRY)
+    assert store.settle_rollback_candidate(execution_id, 1, "alice")
+    commands = Commands(store)
+    fw.maybe_run_safe_prune({}, FakeNotifier(), state, commands)
+    assert commands.runs == [("system", "prune:safe")]
+
+
+def test_an_unreadable_window_still_says_the_prune_is_blocked(ready, state):
+    notifier = FakeNotifier()
+    fw.maybe_run_safe_prune({}, notifier, state, Unreadable())
+    [message] = notifier.notifications
+    assert "Safe prune is blocked" in message and "could not be read" in message
+    assert "SETTLE" not in message   # there is no window to point at
 
 
 def test_an_expired_window_no_longer_stops_the_prune(ready, state, tmp_path):

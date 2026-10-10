@@ -306,7 +306,8 @@ def test_prune_runs_the_fixed_list_as_argv(svc, monkeypatch):
     result = engine.RunbookEngine(svc).run(ex, runbook({"type": "prune.safe", "params": {}, "binding": {}}),
                                            origin="system")
     assert result.status == "passed"
-    assert seen == [["docker", "image", "prune", "-a", "-f"], ["docker", "network", "prune", "-f"]]
+    assert seen == [["docker", "image", "prune", "-a", "-f"], ["docker", "network", "prune", "-f"],
+                    ["docker", "builder", "prune", "-a", "-f"]]
 
 
 def test_stack_up_outputs_container_identities(svc):

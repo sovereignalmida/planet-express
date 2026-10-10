@@ -57,7 +57,7 @@ from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
-from planet_express.core.store import SchemaTooNewError, Store
+from planet_express.core.store import INDEFINITE_EXPIRY, SchemaTooNewError, Store
 from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
@@ -1067,12 +1067,62 @@ def _has_active_rollback_candidates(commands: CommandService) -> bool:
         return True
 
 
+# One alert per distinct block, repeated at most this often. A held window can last days; the same
+# message every scan would get the bot muted, which is the failure this alert exists to end.
+BLOCKED_PRUNE_REALERT_SECONDS = 24 * 3600
+_blocked_prune_alerted: dict = {"text": None, "at": 0.0}
+
+
+def _should_alert_blocked_prune(key: str) -> bool:
+    now = time.time()
+    last = _blocked_prune_alerted
+    if last["text"] == key and now - last["at"] < BLOCKED_PRUNE_REALERT_SECONDS:
+        return False
+    last["text"], last["at"] = key, now
+    return True
+
+
+def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[str, str] | None:
+    """(throttle key, text), or None. The key names the block -- which windows, or an unreadable
+    table -- and not the disk percentage in the text, which drifts and must not defeat the
+    throttle. Why a prune the disk needs is not happening, and the way out -- or None when the block is
+    only a canary inside its ordinary grace period, which closes by itself in minutes and is not
+    news. An unreadable table is news: the block is real and nobody can see why."""
+    try:
+        windows = commands._store.open_rollback_candidates(time.time())
+    except Exception:  # noqa: BLE001 -- the block itself is the news; the detail is a bonus
+        log.exception("Could not read the rollback windows to explain a blocked prune")
+        return "unreadable", (
+            f"🧹 *Safe prune is blocked*\n"
+            f"Root disk is at {disk_alert['used_pct']}% and the rollback-window table could not "
+            f"be read, so no image is pruned. Check the Planet Express core database; the "
+            f"dashboard cannot list or settle windows while it is unreadable.")
+    if all(row["expires_at"] < INDEFINITE_EXPIRY for row in windows):
+        # Only canaries inside their ordinary grace period -- or none at all, because the window
+        # that blocked the gate closed between its read and this one. Neither is news.
+        return None
+    lines = [
+        "🧹 *Safe prune is blocked*",
+        f"Root disk is at {disk_alert['used_pct']}% but an update rollback window is open, "
+        f"and no image is pruned while one is.",
+    ]
+    for row in windows[:5]:
+        held = row["expires_at"] >= INDEFINITE_EXPIRY
+        lines.append(f"• {TelegramClient.s(row['stack'])}/{TelegramClient.s(row['service'])} "
+                     f"({row['execution_id']}{', held until a human settles it' if held else ''})")
+    lines.append("A held window never expires: check the service is healthy, then SETTLE it "
+                 "on the dashboard (it asks for your passphrase again).")
+    key = ",".join(sorted(f"{row['execution_id']}:{row['step_n']}" for row in windows))
+    return key, "\n".join(lines)
+
+
 def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState",
                          commands: CommandService | None = None) -> None:
     """Prune Docker images/networks when root disk pressure is real AND every container
     is in a known-safe state. Skips entirely (logs why, no Telegram noise) if disk is
     fine, if anything is unhealthy/crash-looping/unrecognized, if a whole stack is
-    missing containers, or if an update rollback window is open."""
+    missing containers, or if an update rollback window is open. A *held* window is the
+    exception to "no Telegram noise": it never expires, so it says so."""
     disk_alert = _root_disk_alert(snapshot)
     if not disk_alert:
         return
@@ -1089,7 +1139,12 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         log.info("Safe-prune skipped: typed execution is unavailable (command service not started)")
         return
     if _has_active_rollback_candidates(commands):
-        log.info("Safe-prune skipped: an update rollback window is still open")
+        log.warning("Safe-prune skipped: an update rollback window is still open")
+        # Silent for eleven days on casaserver (2026-09-27 to 10-08): a held window blocks every
+        # prune on the host and nothing said so. Disk pressure is real here, so say why.
+        blocked = _blocked_prune_message(disk_alert, commands)
+        if blocked is not None and _should_alert_blocked_prune(blocked[0]):
+            notifier.notify(blocked[1])
         return
 
     owner = "safe-prune"

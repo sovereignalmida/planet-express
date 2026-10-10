@@ -197,6 +197,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
                 or request.path.startswith("/api/executions/")
                 or request.path.startswith("/api/incidents")
                 or request.path.startswith("/api/scan")
+                or request.path.startswith("/api/canary/")
                 or request.path.startswith("/api/elevate")
                 or request.path.startswith("/api/stacks/")
                 or request.path.startswith("/api/config"))
@@ -330,6 +331,10 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             status, message = {"bad_request": (400, "Invalid execution request"),
                                "not_found": (404, "Execution not found")}.get(
                                    error.code, (503, "Execution unavailable; try again shortly"))
+            return jsonify(error=message), status
+        if request.path.startswith("/api/canary/"):
+            status, message = {"bad_request": (400, "Invalid rollback window request")}.get(
+                error.code, (503, "Core unavailable; try again shortly"))
             return jsonify(error=message), status
         if request.path.startswith("/api/incidents"):
             status, message = {"bad_request": (400, "Invalid incident request"),
@@ -838,6 +843,22 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     @app.post("/api/executions/<execution_id>/rollback")
     def execution_rollback(execution_id):
         return jsonify(core("execution.rollback", _execution_control(execution_id)))
+
+    @app.post("/api/canary/<execution_id>/<int:step_n>/settle")
+    def canary_settle(execution_id, step_n):
+        if re.fullmatch(r"[0-9a-f]{12}", execution_id) is None:
+            raise RpcError("Invalid execution ID", "bad_request")
+        # Releasing a held window lets the next prune remove the only image that can restore the
+        # service, so a session that was merely signed in -- a walked-up trusted browser -- may not
+        # do it without the passphrase again (Codex; T47).
+        denied = require_elevation()
+        if denied is not None:
+            return denied
+        settled = core("canary.settle", {
+            "execution_id": execution_id, "step_n": step_n, "operator": g.operator})
+        if settled.get("outcome") == "settled":
+            elevation_acted()
+        return jsonify(settled)
 
     def _execution_control(execution_id):
         if re.fullmatch(r"[0-9a-f]{12}", execution_id) is None:

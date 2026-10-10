@@ -312,7 +312,7 @@ def test_core_handlers():
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
                              "incident.list", "incident.get", "incident.propose",
-                             "canary.candidates", "scan.start", "containers.routers",
+                             "canary.candidates", "canary.settle", "scan.start", "containers.routers",
                              "config.enforced", "query.widget_target"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
@@ -1148,6 +1148,68 @@ def test_canary_candidates_reports_open_windows_for_the_dashboard(tmp_path):
     assert rows[0]["expires_at"] == "when a human closes it"   # a failed inverse, held open
     with pytest.raises(RpcError):
         handlers["canary.candidates"]({"unexpected": 1})
+
+
+def _held_window(tmp_path):
+    from planet_express.core.store import INDEFINITE_EXPIRY, Store
+
+    store = Store(tmp_path / "db.sqlite")
+    store.init()
+    approval, _ = store.propose(action="docker.restart_service", target_key="media/sonarr",
+                                target={"stack": "media", "service": "sonarr", "container": "c"},
+                                risk="R1", requested_via="telegram", requested_by="t")
+    execution = store.approve_and_create_execution(approval["id"], decided_by="t", arrived_at=1)
+    store.create_steps(execution["id"], [{"type": "update.canary",
+                                          "params": {"stack": "media", "service": "sonarr"},
+                                          "binding": {}}])
+    store.open_rollback_candidate(execution["id"], 1, stack="media", service="sonarr",
+                                  image_reference="nginx:1.27", old_image_id="a" * 64,
+                                  expires_at=INDEFINITE_EXPIRY)
+    return store, execution["id"]
+
+
+def test_canary_settle_closes_a_held_window_once_and_records_who(tmp_path):
+    store, execution_id = _held_window(tmp_path)
+    handlers = build_core_handlers(Mock(), store)
+    [row] = handlers["canary.candidates"]({})
+    assert (row["execution_id"], row["step_n"]) == (execution_id, 1)
+
+    params = {"execution_id": execution_id, "step_n": 1, "operator": "alice"}
+    assert handlers["canary.settle"](params)["outcome"] == "settled"
+    assert handlers["canary.candidates"]({}) == []
+    assert handlers["canary.settle"](params)["outcome"] == "refused"   # already closed
+    with store._connect() as conn:
+        [event] = conn.execute(
+            "SELECT payload FROM events WHERE kind='canary.window_settled'").fetchall()
+    assert json.loads(event[0]) == {"operator": "alice", "step_n": 1}
+
+
+def test_canary_settle_refuses_a_finite_window_still_in_its_grace_period(tmp_path):
+    from planet_express.core.store import Store
+    store, execution_id = _held_window(tmp_path)
+    store.close_rollback_candidate(execution_id, 1)
+    store.open_rollback_candidate(execution_id, 2, stack="media", service="sonarr",
+                                  image_reference="nginx:1.27", old_image_id="b" * 64,
+                                  expires_at=time.time() + 900)
+    handlers = build_core_handlers(Mock(), store)
+    [row] = handlers["canary.candidates"]({})
+    assert row["held"] is False
+    out = handlers["canary.settle"]({"execution_id": execution_id, "step_n": 2, "operator": "alice"})
+    assert out["outcome"] == "refused"
+    assert len(handlers["canary.candidates"]({})) == 1   # still protecting its image
+
+
+@pytest.mark.parametrize("bad", [
+    {"execution_id": "nope", "step_n": 1, "operator": "alice"},
+    {"execution_id": "a" * 12, "step_n": "1", "operator": "alice"},
+    {"execution_id": "a" * 12, "step_n": True, "operator": "alice"},
+    {"execution_id": "a" * 12, "step_n": 1, "operator": "?"},
+    {"execution_id": "a" * 12, "step_n": 1},
+])
+def test_canary_settle_rejects_malformed_params(tmp_path, bad):
+    store, _ = _held_window(tmp_path)
+    with pytest.raises(RpcError):
+        build_core_handlers(Mock(), store)["canary.settle"](bad)
 
 
 # ── the summary of a stored approval ────────────────────────────────────────────
