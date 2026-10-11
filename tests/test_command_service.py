@@ -1468,3 +1468,60 @@ def test_a_started_action_says_whether_it_spent_elevation(env, monkeypatch):
         elevated=True,
     )
     assert privileged.used_elevation is True
+
+
+# -- re-scan after a fix --------------------------------------------------------------------------------------------------
+def _watch_rescans(env):
+    asked = []
+    env.state.set_rescan_starter(lambda: asked.append("scan"))
+    return asked
+
+
+def test_a_restart_that_passed_asks_for_one_re_scan_after_the_lock_is_released(env):
+    asked = _watch_rescans(env)
+    approval_id = env.propose().approval_id
+    env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    assert asked == ["scan"] and env.state.mutation_owner is None
+
+
+def test_a_failed_restart_does_not_ask_for_a_re_scan(env):
+    asked = _watch_rescans(env)
+    env.verify_result = (False, "healthcheck failing")
+    approval_id = env.propose().approval_id
+    env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    assert asked == []                          # nothing new to learn; the failure already triggers its own investigation
+
+
+def test_a_rollback_that_passed_asks_for_a_re_scan(env):
+    from planet_express.execution import runbook as runbooks
+    asked = _watch_rescans(env)
+    plan = runbooks.Runbook.model_validate({"title": "Stop healthy/web", "artifacts": {}, "steps": [
+        {"type": "service.stop", "params": {"stack": "healthy", "service": "web"},
+         "binding": env.service._binder.service(TARGET, timeout=4)}]})
+    row, _ = env.store.propose_runbook(
+        action=RESTART, target_key="healthy/web", target=TARGET.as_dict(), risk="R1",
+        requested_via="telegram", requested_by="t", plan_json=runbooks.canonical_json(plan),
+        plan_sha256=runbooks.plan_sha256(plan), origin="telegram")
+    parent = env.store.approve_and_create_execution(row["id"], decided_by="x", arrived_at=env.clock())
+    env.store.create_steps(parent["id"], plan.steps)
+    env.store.set_step_pre_state(parent["id"], 1, {"running": True})
+    env.store.mark_step_dispatched(parent["id"], 1)
+    env.store.finish_step(parent["id"], 1, status="passed", effect="applied", reason="stopped")
+    env.store.set_execution_status(parent["id"], "passed", reason="stopped")
+    env.service.rollback(parent["id"], operator="chris")
+    assert asked == ["scan"]
+
+
+def test_a_state_without_the_re_scan_method_is_simply_not_asked(env):
+    class Plain:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == "request_rescan":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+    env.service._state = Plain(env.service._state)
+    approval_id = env.propose().approval_id
+    result = env.service.decide(approval_id, approve=True, decided_by="x", decision=_tap(approval_id))
+    assert env.store.get_execution(result.execution_id)["status"] == "passed"

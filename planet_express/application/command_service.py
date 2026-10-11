@@ -1045,6 +1045,8 @@ class CommandService:
                     else "🔴 <b>Rollback did not finish</b>")
             self._in_background(lambda: self._notify_quietly(
                 f"{done}: {_s(self._row_summary(approval))}. {_s(result.reason)}"))
+            if result.status == "passed":
+                self._ask_for_rescan("a rollback passed")
         except Exception as exc:
             log.exception(f"Rollback {child_id} crashed")
             try:
@@ -1158,6 +1160,17 @@ class CommandService:
             return "every stack"
         return target.get("stack") or cls._row_summary(row)
 
+    def _ask_for_rescan(self, reason: str) -> None:
+        """After a fix, ask the pipeline to look again (it fires once everything is quiet, after this lock is gone).
+        Duck-typed like the rest of the state: an older or fake state with no such method simply does not rescan."""
+        request = getattr(self._state, "request_rescan", None)
+        if request is not None:
+            try:
+                request(reason)
+            except Exception:
+                log.exception("Could not request a re-scan")
+
+    @staticmethod
     @staticmethod
     def _verified_plan(row: dict | None) -> runbooks.Runbook | None:
         if not row or not row.get("plan_json") or not row.get("plan_sha256"):
@@ -1183,6 +1196,8 @@ class CommandService:
             )
             result = runner.run(execution_id, plan, origin=row.get("origin") or row["requested_via"])
             self._finish(row, execution_id, result.status, result.reason)
+            if result.status == "passed" and runbooks.risk(plan) != "R0":
+                self._ask_for_rescan("an approved action passed")
         except Exception as e:
             log.exception(f"Typed action {execution_id} crashed")
             try:

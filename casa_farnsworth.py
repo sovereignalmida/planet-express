@@ -795,13 +795,51 @@ class PipelineState:
         # Host-mutation lock, deliberately separate from _state: a scan and a mutation are
         # different things, and one must be able to refuse the other without either owning _state.
         self._mutation_owner: str | None = None
+        # "Look again once things are quiet": set by anything that fixed something, fired when the pipeline is idle
+        # and no mutation holds the lock. A single flag, so a pass that fixes 26 services asks for ONE scan.
+        self._rescan_wanted = False
+        self._rescan_starter: Callable[[], None] | None = None
 
     @property
     def state(self) -> str:
         with self._lock:
             return self._state
 
+    def set_rescan_starter(self, starter: Callable[[], None] | None) -> None:
+        with self._lock:
+            self._rescan_starter = starter
+
+    def request_rescan(self, reason: str) -> None:
+        """Ask for a fresh scan after something was fixed. Never starts one under the lock and never while a
+        mutation or a scan is in progress: the wish is kept and fires when the pipeline is idle (see
+        _fire_rescan_if_idle). Safe to call from a thread that still holds the mutation lock."""
+        with self._lock:
+            self._rescan_wanted = True
+        log.info(f"Re-scan requested ({reason})")
+        self._fire_rescan_if_idle()
+
+    def _fire_rescan_if_idle(self) -> None:
+        """Start the wished-for scan if, and only if, nothing else is going on. Called after every release of the
+        mutation lock and every return to IDLE, always OUTSIDE the lock: the scan must start after the mutation's
+        lock is gone, or it would refuse the next approved action."""
+        with self._lock:
+            if (not self._rescan_wanted or self._rescan_starter is None or self._state != self.IDLE
+                    or self._mutation_owner is not None or self.maintenance() is not None):
+                return
+            self._rescan_wanted = False
+            starter = self._rescan_starter
+        try:
+            starter()
+        except Exception:
+            log.exception("Could not start the re-scan")
+
     def transition(self, new_state: str, plan_id: str | None = None, msg_id: int | None = None):
+        went_idle = new_state == self.IDLE
+        self._transition(new_state, plan_id, msg_id)
+        if went_idle:
+            self._fire_rescan_if_idle()
+
+    def _transition(self, new_state: str, plan_id: str | None = None, msg_id: int | None = None):
         with self._lock:
             log.info(f"State: {self._state} → {new_state}")
             self._state = new_state
@@ -898,6 +936,7 @@ class PipelineState:
                     self._persist()
         if release:
             log.info(f"Mutation lock released by {owner}")
+            self._fire_rescan_if_idle()
         else:
             log.warning(f"end_mutation({owner!r}) ignored: lock held by {held_by!r}")
 
@@ -1117,27 +1156,29 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[
 
 
 def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineState",
-                         commands: CommandService | None = None) -> None:
-    """Prune Docker images/networks when root disk pressure is real AND every container
+                         commands: CommandService | None = None) -> bool:
+    """Returns True only if a prune ran and passed, so the caller can re-measure the disk before anyone reports it.
+
+    Prune Docker images/networks when root disk pressure is real AND every container
     is in a known-safe state. Skips entirely (logs why, no Telegram noise) if disk is
     fine, if anything is unhealthy/crash-looping/unrecognized, if a whole stack is
     missing containers, or if an update rollback window is open. A *held* window is the
     exception to "no Telegram noise": it never expires, so it says so."""
     disk_alert = _root_disk_alert(snapshot)
     if not disk_alert:
-        return
+        return False
     if _has_incomplete_stacks(snapshot):
         log.warning(
             "Safe-prune skipped: at least one stack has urgently failing services or can't be read — "
             "this is more urgent than the disk pressure that would have triggered pruning"
         )
-        return
+        return False
     if not _safe_to_prune(snapshot):
         log.info("Safe-prune skipped: at least one container isn't in a known-safe state")
-        return
+        return False
     if commands is None:
         log.info("Safe-prune skipped: typed execution is unavailable (command service not started)")
-        return
+        return False
     if _has_active_rollback_candidates(commands):
         log.warning("Safe-prune skipped: an update rollback window is still open")
         # Silent for eleven days on casaserver (2026-09-27 to 10-08): a held window blocks every
@@ -1145,14 +1186,14 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         blocked = _blocked_prune_message(disk_alert, commands)
         if blocked is not None and _should_alert_blocked_prune(blocked[0]):
             notifier.notify(blocked[1])
-        return
+        return False
 
     owner = "safe-prune"
     # during_scan: safe-prune is called from inside run_pipeline while the scan it belongs
     # to is RUNNING; it is the one mutation allowed then.
     if not state.try_begin_mutation(owner, during_scan=True):
         log.info(f"Safe-prune skipped: host busy ({state.busy_reason})")
-        return
+        return False
     try:
         log.info(
             f"Root disk at {disk_alert['used_pct']}% and all containers healthy — running safe prune"
@@ -1167,7 +1208,7 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         state.end_mutation(owner)
     if result.outcome == "refused":
         log.warning(f"Safe-prune refused: {result.reason}")
-        return
+        return False
     if result.outcome != "passed":
         # A prune command exited non-zero, or the engine refused the run: say so rather than
         # reporting a cleanup that did not happen (Codex, T42).
@@ -1177,7 +1218,7 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
             f"Root disk is at {disk_alert['used_pct']}% ({disk_alert.get('alert', '')}).\n"
             f"{TelegramClient.s(result.reason)}"
         )
-        return
+        return False
     notifier.notify(
         f"🧹 *Safe prune ran automatically*\n"
         f"Root disk was at {disk_alert['used_pct']}% ({disk_alert.get('alert', '')}). "
@@ -1185,6 +1226,7 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         f"removed images/networks not attached to anything.\n"
         f"{TelegramClient.s(result.reason)}"
     )
+    return True
 
 
 # ── Pipeline runner ───────────────────────────────────────────────────────────
@@ -1241,6 +1283,35 @@ def admit_pipeline_run(state: PipelineState, *, scheduled: bool = False) -> Admi
     return Admission(True)
 
 
+def _read_saved_findings() -> dict:
+    """The findings the last scan saved, or {} (a re-scan compares against these before they are overwritten)."""
+    try:
+        return json.loads(config.STATE_FINDINGS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _finding_keys(findings: dict) -> set[tuple]:
+    """What makes two findings 'the same problem' across scans. Ids (f1, f2...) are renumbered every scan, so they
+    cannot be compared; the thing and how bad it is can."""
+    return {(f.get("category"), f.get("resource"), f.get("severity")) for f in (findings.get("findings") or [])}
+
+
+def make_rescan_starter(notifier: Notifier, state: PipelineState, store: Store | None,
+                        commands: CommandService | None, *, settle_seconds: float = 15.0,
+                        sleep: Callable[[float], None] = time.sleep) -> Callable[[], None]:
+    """What the pipeline calls (outside every lock) when a fix finished and everything is quiet: a short pause so
+    the fixed service has settled, then a quiet full scan on its own thread."""
+
+    def run() -> None:
+        sleep(settle_seconds)
+        run_pipeline(notifier, state, "full", incident_store=store, commands=commands, quiet=True)
+
+    def start() -> None:
+        threading.Thread(target=run, daemon=True, name="rescan").start()
+    return start
+
+
 def run_pipeline(
     notifier: Notifier,
     state: PipelineState,
@@ -1250,27 +1321,43 @@ def run_pipeline(
     incident_store: Store | None = None,
     commands: CommandService | None = None,
     admitted: bool = False,
+    quiet: bool = False,
 ) -> None:
     """
     Full pipeline: Leela → Hermes → Farnsworth → Telegram notification.
     mode: 'full' | 'status' | 'updates'
 
     admitted=True means the caller already holds the run slot from admit_pipeline_run().
+    quiet=True is the re-scan after a fix: no progress messages, and it speaks only if something is NEW (or to say
+    that findings cleared). Findings that were already reported and planned are not reported or planned again.
     """
     if not admitted:
         admission = admit_pipeline_run(state, scheduled=scheduled)
         if not admission.ok:
-            notifier.notify(admission.message)
+            if quiet:
+                state.request_rescan("deferred: the pipeline was busy")   # keep the wish; nothing to tell anyone
+            else:
+                notifier.notify(admission.message)
             return
     try:
         # ── Step 1: Leela scans ──────────────────────────────────────────────
-        notifier.notify("👁️ *Leela scanning...*")
+        if not quiet:
+            notifier.notify("👁️ *Leela scanning...*")
         if mode == "status":
             snapshot = leela.run_status()
         elif mode == "updates":
             snapshot = leela.run_updates()
         else:
             snapshot = leela.run_full()
+        if mode == "full":
+            # Safe-prune runs BEFORE the snapshot is published. It used to run after, so the dashboard, the incident
+            # reconciliation and Hermes all reported the disk as it was before the prune: an alert went out ten
+            # seconds after the problem was already fixed. After a prune that passed, the disk is measured again.
+            try:
+                if maybe_run_safe_prune(snapshot, notifier, state, commands):
+                    snapshot["disk"] = leela.check_disk()
+            except Exception:
+                log.exception("Safe-prune check failed (non-fatal)")
         config.ensure_dirs()
         monitor = MonitorSnapshot(**snapshot)
         monitor_data = monitor.model_dump(mode="json")
@@ -1291,12 +1378,6 @@ def run_pipeline(
                     "⚠️ Incident history was not updated for this scan; the monitoring report will continue."
                 )
 
-        if mode == "full":
-            try:
-                maybe_run_safe_prune(snapshot, notifier, state, commands)
-            except Exception:
-                log.exception("Safe-prune check failed (non-fatal)")
-
         if mode in ("status", "updates"):
             # Short-circuit — just report, no planning needed
             _send_status_report(notifier, snapshot, mode)
@@ -1304,9 +1385,23 @@ def run_pipeline(
             return
 
         # ── Step 2: Hermes analyzes ──────────────────────────────────────────
-        notifier.notify("📋 *Hermes filing the report...*")
+        if not quiet:
+            notifier.notify("📋 *Hermes filing the report...*")
+        before = _finding_keys(_read_saved_findings()) if quiet else set()
         findings = hermes.analyze(snapshot)
         hermes.save_findings(findings)
+
+        if quiet:
+            # A re-scan after a fix says nothing unless something changed: new findings are reported and planned
+            # exactly like a normal scan's; findings that went away are acknowledged in one line; the rest is
+            # already known and already has its card, so it is not announced again.
+            now = _finding_keys(findings)
+            if not (now - before):
+                if before - now:
+                    notifier.notify(f"✅ Re-checked after the fix: {len(before - now)} finding(s) cleared, "
+                                    f"{len(now)} remaining.")
+                state.transition(PipelineState.IDLE)
+                return
 
         date_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
         report_msg = TelegramClient.fmt_report(date_str, findings.get("findings", []))
@@ -2463,7 +2558,9 @@ def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineStat
         if commands is None:
             notifier.notify("⚠️ Typed execution is unavailable; the canary pass did not start.")
             return
-        zoidberg.run_update_pass(tg=tg, commands=commands)
+        results = zoidberg.run_update_pass(tg=tg, commands=commands)
+        if any(r.get("status") in ("updated", "rolled_back") for r in (results or [])):
+            state.request_rescan("the update pass changed something")
     except Exception as e:
         log.exception("Zoidberg update pass crashed")
         notifier.notify(f"🛑 *Zoidberg update pass crashed:* `{str(e)[:200]}`")
@@ -2519,7 +2616,9 @@ def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, 
             log.warning("Scheduled update pass skipped: typed execution is unavailable")
             return "skipped"
         log.info("Scheduled canary update pass starting")
-        zoidberg.run_update_pass(tg=tg, commands=commands)
+        results = zoidberg.run_update_pass(tg=tg, commands=commands)
+        if any(r.get("status") in ("updated", "rolled_back") for r in (results or [])):
+            state.request_rescan("the update pass changed something")     # one scan for the whole pass
         return "ran"
     except Exception:
         log.exception("Scheduled update pass error")
@@ -2848,6 +2947,10 @@ def run_bot() -> None:
     interrupted = commands.reconcile_on_startup()
     if interrupted:
         log.warning(f"Marked {len(interrupted)} unfinished typed action(s) interrupted at startup")
+
+    # After a fix (an approved action, a rollback, an update pass), look again once everything is quiet, so the
+    # dashboard, the open incidents and the alerts stop showing a problem that has been fixed.
+    state.set_rescan_starter(make_rescan_starter(notifier, state, store, commands))
 
     rpc_server = _start_dashboard_rpc(
         commands, store, notifier, chat, config_service,

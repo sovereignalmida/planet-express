@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A safe prune no longer reports the disk as it was before the prune.** The scan used to publish its snapshot,
+  then prune, then hand Hermes the same stale snapshot, so an alert went out ten seconds after the problem was
+  fixed (2026-10-11: "root disk at 81%" at 09:49:37, pruned by 09:49:58, reported as HIGH at 09:50:08). The prune now
+  runs before the snapshot is published, and after a prune that passed the disk is measured again, so the dashboard,
+  the incident reconciliation and Hermes all see the real number.
+- **A successful fix is followed by a re-scan.** After an approved action, a rollback or an update pass that changed
+  something, nothing looked again, so the dashboard, the findings and any open incident kept showing the fixed
+  problem until the next 6-hourly scan or a manual SCAN. The pipeline now asks for one scan, which starts only once
+  everything is quiet (after the mutation lock is released, so it cannot refuse the next approved action), merges
+  any number of requests into one (an update pass of 26 services gives one scan), and fires after a short pause so
+  the fixed service has settled. It is quiet: no progress messages, silent when nothing is new, one line when
+  findings cleared, and a normal report and plans only for findings that are new. Failed fixes do not trigger it.
+
 ## [3.1.1] - 2026-10-11
 
 ### Added
