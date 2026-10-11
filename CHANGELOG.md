@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-10-11
+
+Upgrading from 3.0.x needs no dependency change. **Before the first weekly pass after you upgrade**, add any untagged
+database engine to `exclude_services` (see `config.example.yaml`): an image with no tag is now updated like any other
+`:latest` image.
+
 ### Added
 - **A weekly digest of what the update pass did.** The pass was silent on success, so 15 clean updates looked
   like nothing happening. Every pass now sends a Telegram digest: what was updated, how many were already on the
