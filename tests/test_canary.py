@@ -616,3 +616,45 @@ def test_a_pass_that_checked_nothing_still_sends_its_digest(monkeypatch):
     monkeypatch.setattr(zoidberg, "kept_manual", lambda stacks: ["network/traefik"])
     assert zoidberg.run_update_pass(tg=Tg(), commands=object()) == []
     assert sent and "0 services checked" in sent[0] and "network/traefik" in sent[0]
+
+
+# -- untagged references (`image: redis`) -----------------------------------------------------------------------------
+UNTAGGED = ["redis", "golift/unpackerr", "ghcr.io/linuxserver/qbittorrent", "localhost:5000/app", "bbilly1/tubearchivist"]
+
+
+@pytest.mark.parametrize("reference", UNTAGGED + ["nginx:1.27-alpine", "redis@sha256:" + "a" * 64, "bad..ref", "", "has space"])
+def test_the_eligibility_check_and_the_output_schema_agree_on_every_reference(reference):
+    """If they ever disagree, a deploy that succeeded is recorded as a crash (Codex, T42 and again for untagged)."""
+    from pydantic import TypeAdapter, ValidationError
+    adapter = TypeAdapter(runbooks.ImageReference)
+    try:
+        adapter.validate_python(reference)
+        storable = True
+    except ValidationError:
+        storable = False
+    from planet_express.execution import actions
+    assert actions.is_canary_reference(reference) is storable
+
+
+@pytest.mark.parametrize("reference", UNTAGGED)
+def test_an_untagged_image_is_updated_end_to_end_like_any_other_latest(tmp_path, reference):
+    svc = CanarySvc(tmp_path, reference=reference)
+    _ex, result, step = run(svc)
+    assert result.status == "passed" and (step["status"], step["effect"]) == ("passed", "applied")
+    assert step["output"] == {"image_reference": reference, "old_image_id": OLD, "new_image_id": NEW}
+    assert f"docker tag {NEW} {reference}" in joined(svc) and svc.running == NEW
+
+
+def test_an_untagged_image_that_has_not_changed_passes_without_recreating_anything(tmp_path):
+    svc = CanarySvc(tmp_path, reference="redis")
+    svc.pulled = OLD
+    _ex, result, step = run(svc)
+    assert result.status == "passed" and step["effect"] == "not_applied"
+    assert not any("up -d" in line for line in joined(svc))
+
+
+def test_an_untagged_update_that_fails_its_watch_is_rolled_back_to_the_old_image(tmp_path):
+    svc = CanarySvc(tmp_path, reference="redis")
+    svc.watch_result = (False, "restarting (3 restarts)")
+    _ex, result, step = run(svc)
+    assert result.status != "passed" and svc.running == OLD

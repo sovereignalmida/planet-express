@@ -212,10 +212,16 @@ Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 # be longer. The two must agree, or a deploy that succeeded would fail output validation and be
 # recorded as a crash (Codex, T42).
 IMAGE_REFERENCE_MAX = 512
+# The ONE definition of a reference a canary may move, used by the eligibility check (`actions.is_canary_reference`)
+# and by this output schema alike. A reference with no tag at all (`redis`, `golift/unpackerr`) is `:latest` to
+# Docker, so it is mutable too; a registry port (`host:5000/app`) is not a tag. No lookaheads: pydantic's regex
+# engine does not support them.
+_TAGGED_REFERENCE = r"[a-zA-Z0-9][a-zA-Z0-9_.:/-]*:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}"
+_UNTAGGED_REFERENCE = r"[a-zA-Z0-9][a-zA-Z0-9_.-]*(?::[0-9]+)?(?:/[a-zA-Z0-9_.-]+)*"
+IMAGE_REFERENCE_PATTERN = rf"^(?:{_TAGGED_REFERENCE}|{_UNTAGGED_REFERENCE})$"
 ImageReference = Annotated[
     str,
-    Field(min_length=3, max_length=IMAGE_REFERENCE_MAX,
-          pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$"),
+    Field(min_length=3, max_length=IMAGE_REFERENCE_MAX, pattern=IMAGE_REFERENCE_PATTERN),
     AfterValidator(_no_dotdot),
 ]
 

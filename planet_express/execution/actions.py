@@ -25,7 +25,10 @@ from pathlib import Path
 import casa_bender as bender
 import config
 from planet_express.core.redact import redact
-from planet_express.execution.runbook import IMAGE_REFERENCE_MAX
+from planet_express.execution.runbook import (
+    IMAGE_REFERENCE_MAX,
+    IMAGE_REFERENCE_PATTERN,
+)
 
 log = logging.getLogger("planetexpress.actions")
 
@@ -609,24 +612,15 @@ def container_image_id_argv(container: str) -> list[str]:
 # A canary update needs a canonical **mutable** reference: `name:tag`, optionally registry- and
 # namespace-qualified. `repo@sha256:…` pins a digest (there is no tag to move) and a build-only
 # service has no reference at all — both are ineligible (design §4.5).
-CANARY_REFERENCE_RE = re.compile(
-    r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$")
-
-
-# An image written with no tag at all (`image: redis`) is `:latest` to Docker, so it is a mutable reference too.
-# What is still refused: a digest pin (`@sha256:`), which has nothing to move, and anything malformed.
-UNTAGGED_REFERENCE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:/-]*$")
+CANARY_REFERENCE_RE = re.compile(IMAGE_REFERENCE_PATTERN)
 
 
 def is_canary_reference(reference: str | None) -> bool:
-    """Eligible **and** storable: the same bound the step's output model applies, so a reference
-    this accepts can never fail validation after a successful deploy (Codex, T42)."""
-    if not reference or not 3 <= len(reference) <= IMAGE_REFERENCE_MAX or ".." in reference:
-        return False
-    if CANARY_REFERENCE_RE.fullmatch(reference):
-        return True
-    # No tag: the last path component carries no ':' (a registry port such as `host:5000/app` is earlier).
-    return "@" not in reference and ":" not in reference.rsplit("/", 1)[-1] and bool(UNTAGGED_REFERENCE_RE.fullmatch(reference))
+    """Eligible **and** storable: the very pattern the step's output model applies, so a reference this accepts can
+    never fail validation after a successful deploy (Codex, T42). An untagged reference is `:latest` to Docker and
+    is accepted; a digest pin is not."""
+    return (bool(reference) and 3 <= len(reference) <= IMAGE_REFERENCE_MAX
+            and ".." not in reference and bool(CANARY_REFERENCE_RE.fullmatch(reference)))
 
 
 def compose_pull_argv(stack: str, service: str) -> list[str]:
