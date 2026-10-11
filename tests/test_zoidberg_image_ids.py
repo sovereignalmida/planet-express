@@ -36,6 +36,8 @@ def _fake_docker(running_id: str, local_id: str, calls: list):
         joined = " ".join(cmd)
         if "images -q" in joined:
             out = running_id
+        elif "config --format json" in joined:
+            out = '{"services": {"web": {"image": "nginx:1.27-alpine"}}}'
         elif "config --images" in joined:
             out = "nginx:1.27-alpine"
         elif " pull " in f" {joined} ":

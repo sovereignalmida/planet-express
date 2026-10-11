@@ -549,7 +549,8 @@ def test_the_digest_says_what_was_updated_what_was_current_and_what_needs_a_pers
     assert "9 services checked" in text and "Updated (2):</b> media/radarr, media/sonarr" in text
     assert "Already on the latest:</b> 2" in text and "Rolled back (1)" in text and "media/bad" in text
     assert "Could not be updated automatically (4)" in text
-    assert "media/unpackerr: no tag in the compose file" in text and "pinned by digest" in text
+    assert "media/unpackerr: its image reference is not one PE can update" in text and "pinned by digest" in text
+    assert "/update stack service" in text
     assert "built locally" in text and "the pull failed" in text
     assert "Kept manual on purpose:</b> network/traefik, network/adguard" in text
 

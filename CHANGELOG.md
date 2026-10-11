@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A weekly digest of what the update pass did.** The pass was silent on success, so 15 clean updates looked
+  like nothing happening. Every pass now sends a Telegram digest: what was updated, how many were already on the
+  latest, what was rolled back (a failed rollback is reported as urgent, never as resolved), what could not be
+  updated and why, and what is kept manual on purpose (the network guard and `exclude_services`).
+- **`/update <stack> <service>`** updates one service now: the same canary as the weekly pass (pull, recreate,
+  watch, roll back by itself if it does not come up healthy), behind an approval card. Traefik and AdGuard are
+  refused with an explanation: they carry the network and are updated by hand.
+
+### Changed
+- **An image written with no tag is treated as `:latest`** and updated by the weekly pass, as Docker itself reads
+  it. Digest pins (`@sha256:`) are still never moved. Exclude any untagged database engine in
+  `exclude_services` (see `config.example.yaml`).
+- **Image age is no longer a finding.** "Stale :latest for 60 days" only meant the publisher had released nothing
+  newer, and the report ranked it HIGH. Hermes no longer receives it; the weekly pass compares against the registry.
+
+### Fixed
+- Zoidberg's eligibility check read the first line of `compose config --images <service>`, which also lists the
+  images of everything the service depends on, in no fixed order. It made `tubearchivist` look like `redis`. It now
+  reads the service's own image from compose's JSON.
+
 ## [3.0.1] - 2026-10-10
 
 Maintenance release: no behaviour change, no config change, no new dependency.

@@ -1606,6 +1606,19 @@ def handle_message(
                 daemon=True,
             ).start()
 
+    elif cmd == "/update":
+        parts = text.split()
+        if commands is None:
+            notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
+        elif len(parts) != 3:
+            notifier.notify("Usage: `/update <stack> <service>`")
+        else:
+            threading.Thread(
+                target=_run_update_request,
+                args=(commands, notifier, parts[1], parts[2], _telegram_operator(msg)),
+                daemon=True,
+            ).start()
+
     elif cmd == "/install":
         parts = text.split()
         url = parts[1] if len(parts) > 1 else None
@@ -1732,6 +1745,7 @@ def handle_message(
             "/up `<stack>`|`all` — One stack runs immediately (R1); `all` needs approval (R2)\n"
             "/down `<stack>`|`all` — Needs approval (R2; ingress/all is R3)\n"
             "/restart `<stack>` `<service>` — Propose a verified restart (needs approval)\n"
+            "/update `<stack>` `<service>` — Pull and update one service now, with a canary and automatic rollback (needs approval)\n"
             "/abort `<execution_id>` — Stop a running action before its next step\n"
             "/install `<url>` `<domain>` — Fry resolves a project URL and proposes a new LAN-only "
             "stack: one approval writes the compose file and brings it up\n"
@@ -1795,6 +1809,45 @@ def _run_restart_request(
             f"ℹ️ A restart of {where} is already awaiting approval "
             f"(request <code>{TelegramClient.s(result.approval_id)}</code>)."
         )
+
+
+def _run_update_request(
+    commands: CommandService, notifier: Notifier, stack: str, service: str, requested_by: str
+) -> None:
+    """`/update <stack> <service>`: the weekly canary (pull, recreate, watch, roll back on failure) for ONE service,
+    run now, behind an approval card like any other change."""
+    where = f"<code>{TelegramClient.s(stack)}/{TelegramClient.s(service)}</code>"
+    # The raw words from the message are validated before anything is built from them: a stack name that is not a
+    # plain name never becomes a path or part of a command line.
+    why_not = None
+    try:
+        actions.resolve_target(stack, service, for_mutation=True)
+        stack_dir = actions.compose_file(stack).parent
+    except actions.TargetError as exc:
+        why_not = str(exc)
+    runbook = None
+    if why_not is None:
+        runbook, why_not = zoidberg.build_canary_runbook(stack_dir, service, commands)
+    if runbook is None:
+        if "network-guarded" in (why_not or ""):
+            notifier.notify(
+                f"🚫 {where} carries your network (DNS or ingress), so it is never updated from a one-line command: "
+                f"a bad update would take the network, and this bot's route to you, down with it. Update it by hand, "
+                f"with a look at the logs afterwards.")
+        else:
+            notifier.notify(f"🚫 Update of {where} refused: {TelegramClient.s(zoidberg._hint('skipped', why_not or ''))}"
+                            f" ({TelegramClient.s(why_not or '')})")
+        return
+    result = commands.propose_plan(runbook, requested_by=requested_by, origin="telegram")
+    if not result.ok:
+        notifier.notify(f"🚫 Update of {where} refused: {TelegramClient.s(result.reason)}")
+    elif result.created:
+        notifier.notify(f"Approval card sent for updating {where} (request "
+                        f"<code>{TelegramClient.s(result.approval_id)}</code>). Approve it and PE pulls, recreates, "
+                        f"watches it, and rolls back by itself if it does not come up healthy.")
+    else:
+        notifier.notify(f"ℹ️ An update of {where} is already awaiting approval "
+                        f"(request <code>{TelegramClient.s(result.approval_id)}</code>).")
 
 
 def _telegram_operator(msg: dict) -> str:

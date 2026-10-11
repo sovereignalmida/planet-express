@@ -30,11 +30,18 @@ mounts: {}
 # (stack, service) pairs to exclude from Zoidberg's canary auto-update pass —
 # typically your own actively-developed images that shouldn't be silently
 # auto-pulled and restarted.
+#
+# An image with no tag at all (`image: redis`) is `:latest` to Docker, and Zoidberg updates it like any other
+# `:latest` image. Exclude the ones a rollback cannot protect: a database ENGINE whose on-disk format changes
+# when it upgrades (Elasticsearch, a Postgres major version, ...) can start fine on the new image and then be
+# unreadable by the old one, so rolling back to the old image does not bring it back.
 exclude_services: []
 # Example:
 # exclude_services:
 #   - stack: services
 #     service: my-custom-app
+#   - stack: media          # Elasticsearch rewrites its data on upgrade; update it by hand, with a snapshot
+#     service: archivist-es
 
 # Sudo actions Bender is allowed to run, enforced in code (casa_bender.py's
 # _safety_check()) independent of whatever a plan's LLM-generated commands claim to

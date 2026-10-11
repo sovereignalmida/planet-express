@@ -121,14 +121,14 @@ def service_image_id(stack_dir: Path, service: str) -> str | None:
 
 
 def service_image_ref(stack_dir: Path, service: str) -> str | None:
-    """The image reference (e.g. 'amir20/dozzle:latest') this service resolves to per
-    its compose config — not what's running, what the compose file/env vars say."""
-    exit_code, out, _err = _run(
-        f"{_compose()} -f {stack_dir}/docker-compose.yml config --images {service}"
-    )
+    """The image reference (e.g. 'amir20/dozzle:latest') this service resolves to per its compose config,
+    read for exactly this service. Not `config --images`: that prints the images of everything the service
+    depends on too, in no fixed order, so line one was often a neighbour's (it made `tubearchivist` look
+    like `redis` and refused it as ineligible)."""
+    exit_code, out, _err = _run(f"{_compose()} -f {stack_dir}/docker-compose.yml config --format json {service}")
     if exit_code != 0 or not out.strip():
         return None
-    return out.strip().splitlines()[0]
+    return actions.compose_configured_image(out, service)
 
 
 def local_image_id(image_ref: str) -> str | None:
@@ -239,35 +239,44 @@ def _classify(step: dict | None, result) -> tuple[str, str]:
     return "skipped", step["reason"]
 
 
-def _typed_canary(stack_dir: Path, service: str, tg: TelegramClient | None, commands) -> dict:
-    """One service, one `update.canary` runbook, run on the engine under D34."""
+def build_canary_runbook(stack_dir: Path, service: str, commands) -> tuple[runbooks.Runbook | None, str | None]:
+    """The one-step `update.canary` runbook for this service, or (None, why not). Shared by the weekly pass and by
+    /update, so both refuse the same things for the same reasons."""
     stack_name = stack_dir.name
-    base = {"stack": stack_name, "service": service}
-    # Eligibility first: a digest-pinned or build-only service has no tag to move, so it is refused
-    # here — recorded, with no execution created for something that could never run (Codex, T42).
-    reference = service_image_ref(stack_dir, service)
-    if not actions.is_canary_reference(reference):
-        reason = (f"{reference} is not a canary-eligible image reference" if reference
-                  else "no image reference (build-only service)")
-        log.info(f"{stack_name}/{service}: {reason}")
-        commands.record_event("canary.ineligible", stack=stack_name, service=service,
-                              reason=reason, requested_via="zoidberg")
-        return base | {"status": "skipped", "reason": reason}
+    # The target is resolved first: it validates the names (this is also reached from a Telegram command, and the
+    # names go into a compose command line below) and refuses forbidden and network-guarded services.
     try:
         target = actions.resolve_target(stack_name, service, for_mutation=True)
+    except actions.TargetError as exc:
+        return None, str(exc)
+    # Eligibility next: a digest-pinned or build-only service has no tag to move, so it is refused
+    # here, with no execution created for something that could never run (Codex, T42).
+    reference = service_image_ref(stack_dir, service)
+    if not actions.is_canary_reference(reference):
+        return None, (f"{reference} is not a canary-eligible image reference" if reference
+                      else "no image reference (build-only service)")
+    try:
         binding = commands.binder.service(target, timeout=actions.DOCKER_TIMEOUT_SECONDS)
     except actions.TargetError as exc:
-        log.warning(f"{stack_name}/{service}: not updatable — {exc}")
-        commands.record_event("canary.ineligible", stack=stack_name, service=service,
-                              reason=str(exc), requested_via="zoidberg")
-        return base | {"status": "skipped", "reason": str(exc)}
-
-    runbook = runbooks.Runbook.model_validate({
+        return None, str(exc)
+    return runbooks.Runbook.model_validate({
         "title": f"Canary update {stack_name}/{service}",
         "steps": [{"type": "update.canary", "params": {"stack": stack_name, "service": service},
                    "binding": binding}],
         "artifacts": {},
-    })
+    }), None
+
+
+def _typed_canary(stack_dir: Path, service: str, tg: TelegramClient | None, commands) -> dict:
+    """One service, one `update.canary` runbook, run on the engine under D34."""
+    stack_name = stack_dir.name
+    base = {"stack": stack_name, "service": service}
+    runbook, why_not = build_canary_runbook(stack_dir, service, commands)
+    if runbook is None:
+        log.info(f"{stack_name}/{service}: {why_not}")
+        commands.record_event("canary.ineligible", stack=stack_name, service=service,
+                              reason=why_not, requested_via="zoidberg")
+        return base | {"status": "skipped", "reason": why_not}
     result = commands.run_automatic(runbook, origin="zoidberg",
                                     target_key=f"{stack_name}/{service}")
     step = (result.steps or [None])[0]
@@ -356,7 +365,7 @@ def _hint(status: str, reason: str) -> str:
     if status == "skipped" and "not a canary-eligible image reference" in text:
         if "@sha256" in text:
             return "pinned by digest, so it never moves; unpin it if you want it updated"
-        return "no tag in the compose file (Docker treats that as :latest); add a tag so it can be updated"
+        return "its image reference is not one PE can update (check the image line in the compose file)"
     if "build-only" in text:
         return "built locally, so there is nothing to pull; rebuild it yourself"
     if status == "pull_failed":
@@ -408,6 +417,8 @@ def summarize_pass(results: list[dict], manual: list[str] | None = None, limit: 
         lines += [f"• {esc(label(r))}: {esc(_hint(r['status'], r.get('reason', '')))}" for r in needs[:15]]
         if len(needs) > 15:
             lines.append(f"…and {len(needs) - 15} more (see the log)")
+    if updated or needs or rolled:
+        lines.append("Update one service now with <code>/update stack service</code>.")
     if manual:
         lines.append("🔒 <b>Kept manual on purpose:</b> " + ", ".join(esc(m) for m in manual[:12]))
     text = "\n".join(lines)
