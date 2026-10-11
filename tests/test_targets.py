@@ -380,3 +380,24 @@ def test_compose_services_cache_entries_expire(stacks, monkeypatch):
     resolve()
     assert len([c for c in fake.calls if c[-2:] == ['config', '--services']]) == 2
     actions.clear_compose_services_cache()
+
+
+# -- the guard's one exception: an approved update of AdGuard -----------------------------------------------------------
+def test_adguard_may_be_resolved_for_an_approved_update_but_traefik_never_may(stacks, monkeypatch):
+    fake = _install(monkeypatch, FakeDocker(services="adguard-home\n"))
+    assert actions.resolve_target("healthy", "adguard-home", allow_guarded_update=True).service == "adguard-home"
+    with pytest.raises(actions.TargetError, match="network-guarded"):
+        actions.resolve_target("healthy", "traefik", allow_guarded_update=True)
+    with pytest.raises(actions.TargetError, match="network-guarded"):
+        actions.resolve_target("traefik", "proxy", allow_guarded_update=True)
+    with pytest.raises(actions.TargetError, match="network-guarded"):
+        actions.resolve_target("healthy", "adguard-home")             # without the flag nothing changed
+    assert fake.calls
+
+
+@pytest.mark.parametrize("stack, service, guarded, updatable", [
+    ("network", "adguardhome", True, True), ("healthy", "adguard-home", True, True), ("network", "traefik", True, False),
+    ("traefik", "proxy", True, False), ("network", "adguard-traefik-bridge", True, False), ("media", "radarr", False, False)])
+def test_which_guarded_services_may_be_updated(stack, service, guarded, updatable):
+    assert actions.is_network_guarded(stack, service) is guarded
+    assert actions.guarded_update_allowed(stack, service) is updatable

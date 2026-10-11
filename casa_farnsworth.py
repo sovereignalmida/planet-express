@@ -1821,24 +1821,30 @@ def _run_update_request(
     # plain name never becomes a path or part of a command line.
     why_not = None
     try:
-        actions.resolve_target(stack, service, for_mutation=True)
+        actions.resolve_target(stack, service, for_mutation=True, allow_guarded_update=True)
         stack_dir = actions.compose_file(stack).parent
     except actions.TargetError as exc:
         why_not = str(exc)
     runbook = None
     if why_not is None:
-        runbook, why_not = zoidberg.build_canary_runbook(stack_dir, service, commands)
+        runbook, why_not = zoidberg.build_canary_runbook(stack_dir, service, commands, allow_guarded=True)
     if runbook is None:
         if "network-guarded" in (why_not or ""):
             notifier.notify(
-                f"🚫 {where} carries your network (DNS or ingress), so it is never updated from a one-line command: "
-                f"a bad update would take the network, and this bot's route to you, down with it. Update it by hand, "
-                f"with a look at the logs afterwards.")
+                f"🚫 {where} carries your network (ingress), and its image is pinned to a version tag, so there is "
+                f"nothing for a canary to move: change the tag in the compose file and recreate it by hand, then "
+                f"check that your routes still answer.")
         else:
             notifier.notify(f"🚫 Update of {where} refused: {TelegramClient.s(zoidberg._hint('skipped', why_not or ''))}"
                             f" ({TelegramClient.s(why_not or '')})")
         return
-    result = commands.propose_plan(runbook, requested_by=requested_by, origin="telegram")
+    preface = None
+    if actions.is_network_guarded(stack, service):
+        preface = (f"⚠️ <b>{where} carries your network.</b> If you approve, PE pulls the new image first (while DNS "
+                   f"still works), then recreates it. For those few seconds this instance does not answer; another "
+                   f"instance still does if you run one. If it does not come up healthy, PE restores the previous "
+                   f"image from the local copy, which needs no network.")
+    result = commands.propose_plan(runbook, requested_by=requested_by, origin="telegram", preface=preface)
     if not result.ok:
         notifier.notify(f"🚫 Update of {where} refused: {TelegramClient.s(result.reason)}")
     elif result.created:

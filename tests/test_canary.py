@@ -658,3 +658,77 @@ def test_an_untagged_update_that_fails_its_watch_is_rolled_back_to_the_old_image
     svc.watch_result = (False, "restarting (3 restarts)")
     _ex, result, _step = run(svc)
     assert result.status != "passed" and svc.running == OLD
+
+
+# -- AdGuard: a person's approved update, never the weekly pass ---------------------------------------------------------
+def adguard_plan(svc):
+    step = canary_step(svc)
+    step["params"] = {"stack": "network", "service": "adguardhome"}
+    step["binding"] = dict(step["binding"], compose_path=step["binding"]["compose_path"].replace("/media/", "/network/"),
+                           service="adguardhome")
+    return runbooks.Runbook.model_validate({"title": "Canary update network/adguardhome", "steps": [step], "artifacts": {}})
+
+
+def test_the_weekly_origin_can_never_run_a_runbook_for_a_guarded_service(svc):
+    from planet_express.execution import policy
+    decision = policy.decide_runbook(adguard_plan(svc), "zoidberg")
+    assert not decision.allowed and "never automatic" in decision.reason
+    assert policy.decide_runbook(adguard_plan(svc), "system").automatic is False
+
+
+def test_an_approved_plan_for_adguard_is_allowed_through_the_normal_approval_path(svc):
+    from planet_express.execution import policy
+    decision = policy.decide_runbook(adguard_plan(svc), "telegram")
+    assert decision.allowed and decision.needs_approval and not decision.automatic
+
+
+def test_a_restart_of_adguard_is_still_refused_by_the_engine(tmp_path):
+    from planet_express.execution import actions
+    svc = CanarySvc(tmp_path)
+
+    def resolve(stack, service, **kwargs):
+        if actions.is_network_guarded(stack, service) and not (kwargs.get("allow_guarded_update") and actions.guarded_update_allowed(stack, service)):
+            raise actions.TargetError(f"{stack}/{service} is network-guarded (Traefik/AdGuard); use a reviewed plan")
+        return svc._resolve_real(stack, service, **kwargs)
+    svc._resolve_real = svc._resolve
+    svc._resolve = resolve
+    step = {"type": "service.restart", "params": {"stack": "network", "service": "adguardhome"},
+            "binding": dict(canary_step(svc)["binding"], compose_path=canary_step(svc)["binding"]["compose_path"].replace("/media/", "/network/"),
+                            service="adguardhome")}
+    ex = execution(svc)
+    plan = runbooks.Runbook.model_validate({"title": "Restart adguard", "steps": [step], "artifacts": {}})
+    result = engine.RunbookEngine(svc).run(ex, plan, origin="telegram")
+    assert result.status != "passed" and any("network-guarded" in str(s) for s in [result.reason, svc._store.list_steps(ex)[0].get("reason")])
+
+
+def _guarding_svc(tmp_path):
+    from planet_express.execution import actions
+    svc = CanarySvc(tmp_path)
+    plain = svc._resolve
+
+    def resolve(stack, service, **kwargs):
+        if actions.is_network_guarded(stack, service) and not (
+                kwargs.get("allow_guarded_update") and actions.guarded_update_allowed(stack, service)):
+            raise actions.TargetError(f"{stack}/{service} is network-guarded (Traefik/AdGuard); use a reviewed plan")
+        return plain(stack, service)
+    svc._resolve = resolve
+    svc.compose_config = {"adguardhome": svc.reference}          # compose configures this service's image
+    return svc
+
+
+def test_an_approved_adguard_update_runs_the_whole_canary_and_can_be_rolled_back(tmp_path):
+    svc = _guarding_svc(tmp_path)
+    ex = execution(svc)
+    result = engine.RunbookEngine(svc).run(ex, adguard_plan(svc), origin="telegram")
+    step = svc._store.list_steps(ex)[0]
+    assert result.status == "passed" and (step["status"], step["effect"]) == ("passed", "applied")
+    assert any("up -d --pull never" in line for line in joined(svc)) and svc.running == NEW
+
+
+def test_a_failing_adguard_update_is_rolled_back_from_the_local_image(tmp_path):
+    svc = _guarding_svc(tmp_path)
+    svc.watch_result = (False, "restarting (3 restarts)")
+    ex = execution(svc)
+    result = engine.RunbookEngine(svc).run(ex, adguard_plan(svc), origin="telegram")
+    assert result.status != "passed" and svc.running == OLD
+    assert not any(" pull " in f" {line} " for line in joined(svc)[joined(svc).index(next(l for l in joined(svc) if "up -d --pull never" in l)):])

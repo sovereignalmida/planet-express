@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.1] - 2026-10-11
+
+### Added
+- **`/update` works for AdGuard.** The network guard exists so a bad update cannot take DNS and ingress (and this
+  bot's route to you) down with no one watching. It is unchanged, with one exception: a person's approved,
+  one-service canary update of AdGuard. The pull happens first, while DNS still works; the rollback is a local image
+  id and needs no network. The approval card says plainly that this instance stops answering for a few seconds. The
+  weekly pass and every automatic origin still refuse guarded services outright (now enforced in the runbook policy
+  as well as in the pass's own service list). Restart, stop and every other action on AdGuard stay refused.
+  Traefik stays refused: it is pinned to a version tag, so there is nothing for a canary to move; change the tag in
+  its compose file by hand.
+
 ## [3.1.0] - 2026-10-11
 
 Upgrading from 3.0.x needs no dependency change. **Before the first weekly pass after you upgrade**, add any untagged

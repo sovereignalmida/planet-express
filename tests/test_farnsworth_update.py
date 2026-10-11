@@ -106,7 +106,7 @@ def test_update_runs_off_the_poll_thread_with_the_sender(monkeypatch):
 
 def test_update_proposes_the_same_one_step_canary_the_weekly_pass_runs_and_asks_for_approval(monkeypatch, known_stack):
     runbook = object()
-    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda stack_dir, service, commands: (runbook, None))
+    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda stack_dir, service, commands, **_: (runbook, None))
     commands, n = FakeCommands(), FakeNotifier()
     fw._run_update_request(commands, n, "media", "redis", "1001")
     assert commands.plans == [(runbook, "1001", "telegram")]          # a human origin: it needs approval like any other change
@@ -114,7 +114,7 @@ def test_update_proposes_the_same_one_step_canary_the_weekly_pass_runs_and_asks_
 
 
 def test_update_reports_an_existing_proposal_and_a_policy_refusal(monkeypatch, known_stack):
-    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda *a: (object(), None))
+    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda *a, **k: (object(), None))
     n = FakeNotifier()
     fw._run_update_request(FakeCommands(ProposeResult(True, "abc", False, "already")), n, "media", "redis", "x")
     assert any("already awaiting approval" in m for m in n.notifications)
@@ -124,15 +124,42 @@ def test_update_reports_an_existing_proposal_and_a_policy_refusal(monkeypatch, k
 
 
 def test_a_service_that_cannot_be_canaried_is_refused_with_what_to_do(monkeypatch, known_stack):
-    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda *a: (None, "x@sha256:abc is not a canary-eligible image reference"))
+    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda *a, **k: (None, "x@sha256:abc is not a canary-eligible image reference"))
     commands, n = FakeCommands(), FakeNotifier()
     fw._run_update_request(commands, n, "media", "pinned", "x")
     assert commands.plans == [] and any("pinned by digest" in m for m in n.notifications)
 
 
-def test_adguard_and_traefik_are_never_updated_from_a_one_line_command(monkeypatch, known_stack):
+def test_traefik_is_never_updated_from_a_one_line_command(monkeypatch, known_stack):
     monkeypatch.setattr(zoidberg, "build_canary_runbook",
-                        lambda *a: (None, "network/adguard is network-guarded (Traefik/AdGuard); use a reviewed plan"))
+                        lambda *a, **k: (None, "network/traefik is network-guarded (Traefik/AdGuard); use a reviewed plan"))
     commands, n = FakeCommands(), FakeNotifier()
-    fw._run_update_request(commands, n, "network", "adguard", "x")
+    fw._run_update_request(commands, n, "network", "traefik", "x")
     assert commands.plans == [] and any("carries your network" in m and "by hand" in m for m in n.notifications)
+
+
+def test_adguard_gets_an_approval_card_with_a_plain_warning_about_dns(monkeypatch, known_stack):
+    seen = {}
+    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda *a, **k: (seen.update(kwargs=k) or object(), None))
+
+    class Commands(FakeCommands):
+        def propose_plan(self, runbook, *, requested_by=None, origin="planner", preface=None, **_):
+            seen["preface"] = preface
+            return super().propose_plan(runbook, requested_by=requested_by, origin=origin)
+    commands, n = Commands(), FakeNotifier()
+    fw._run_update_request(commands, n, "network", "adguardhome", "1001")
+    assert seen["kwargs"] == {"allow_guarded": True}
+    assert "carries your network" in seen["preface"] and "does not answer" in seen["preface"] and "local copy" in seen["preface"]
+    assert commands.plans and commands.plans[0][2] == "telegram"
+
+
+def test_an_ordinary_service_gets_no_network_warning(monkeypatch, known_stack):
+    seen = {}
+    monkeypatch.setattr(zoidberg, "build_canary_runbook", lambda *a, **k: (object(), None))
+
+    class Commands(FakeCommands):
+        def propose_plan(self, runbook, *, preface=None, **kw):
+            seen["preface"] = preface
+            return super().propose_plan(runbook, **kw)
+    fw._run_update_request(Commands(), FakeNotifier(), "media", "radarr", "1001")
+    assert seen["preface"] is None

@@ -239,14 +239,16 @@ def _classify(step: dict | None, result) -> tuple[str, str]:
     return "skipped", step["reason"]
 
 
-def build_canary_runbook(stack_dir: Path, service: str, commands) -> tuple[runbooks.Runbook | None, str | None]:
+def build_canary_runbook(stack_dir: Path, service: str, commands, *,
+                         allow_guarded: bool = False) -> tuple[runbooks.Runbook | None, str | None]:
     """The one-step `update.canary` runbook for this service, or (None, why not). Shared by the weekly pass and by
-    /update, so both refuse the same things for the same reasons."""
+    /update, so both refuse the same things for the same reasons. `allow_guarded` is for /update only: it lets a
+    person's approved plan cover AdGuard; the weekly pass never sets it."""
     stack_name = stack_dir.name
     # The target is resolved first: it validates the names (this is also reached from a Telegram command, and the
     # names go into a compose command line below) and refuses forbidden and network-guarded services.
     try:
-        target = actions.resolve_target(stack_name, service, for_mutation=True)
+        target = actions.resolve_target(stack_name, service, for_mutation=True, allow_guarded_update=allow_guarded)
     except actions.TargetError as exc:
         return None, str(exc)
     # Eligibility next: a digest-pinned or build-only service has no tag to move, so it is refused
@@ -420,7 +422,8 @@ def summarize_pass(results: list[dict], manual: list[str] | None = None, limit: 
     if updated or needs or rolled:
         lines.append("Update one service now with <code>/update stack service</code>.")
     if manual:
-        lines.append("🔒 <b>Kept manual on purpose:</b> " + ", ".join(esc(m) for m in manual[:12]))
+        lines.append("🔒 <b>Kept manual on purpose:</b> " + ", ".join(esc(m) for m in manual[:12])
+                     + " (AdGuard: <code>/update stack service</code>; Traefik is pinned, so change its tag by hand)")
     text = "\n".join(lines)
     return text if len(text) <= limit else text[: limit - 1] + "…"
 

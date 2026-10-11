@@ -162,6 +162,19 @@ def container_compose_labels(container: str) -> tuple[str, str]:
 #   names valid? ─► stack forbidden? ─► network-guarded? ─► compose file exists?
 #       ─► service in `config --services`? ─► exactly one container? ─► paused? ─► Target
 NETWORK_GUARDED_SUBSTRINGS = ("traefik", "adguard")  # same rule as Zoidberg and Bender's network guard
+# A person may approve a one-service canary update for these guarded services (the update pulls first, while the
+# network still works, and its rollback is a local image id). Never automatic, and never for Traefik: a pinned tag
+# is not something a canary can move. Everything else about the guard is unchanged.
+GUARDED_UPDATABLE_SUBSTRINGS = ("adguard",)
+
+
+def is_network_guarded(stack: str, service: str) -> bool:
+    return any(tok in f"{stack}/{service}".lower() for tok in NETWORK_GUARDED_SUBSTRINGS)
+
+
+def guarded_update_allowed(stack: str, service: str) -> bool:
+    name = f"{stack}/{service}".lower()
+    return "traefik" not in name and any(tok in name for tok in GUARDED_UPDATABLE_SUBSTRINGS)
 _NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _CONTAINER_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}")
 
@@ -265,6 +278,7 @@ def clear_compose_services_cache() -> None:
 
 def resolve_target(
     stack: str, service: str, *, for_mutation: bool = True, timeout=DOCKER_TIMEOUT_SECONDS,
+    allow_guarded_update: bool = False,
     clock: Callable[[], float] = time.monotonic,
 ) -> Target:
     """`timeout` is one budget for all of resolution's docker calls, not a per-call limit:
@@ -275,7 +289,8 @@ def resolve_target(
             raise TargetError(f"invalid {label} name {value!r}")
     if stack in config.FORBIDDEN_STACKS:
         raise TargetError(f"stack {stack!r} is forbidden")
-    if for_mutation and any(tok in f"{stack}/{service}".lower() for tok in NETWORK_GUARDED_SUBSTRINGS):
+    if (for_mutation and is_network_guarded(stack, service)
+            and not (allow_guarded_update and guarded_update_allowed(stack, service))):
         raise TargetError(f"{stack}/{service} is network-guarded (Traefik/AdGuard); use a reviewed plan")
 
     compose = compose_file(stack)

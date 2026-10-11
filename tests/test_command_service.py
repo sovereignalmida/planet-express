@@ -63,7 +63,7 @@ class Env:
             clock=self.clock, binder=FakeBinder(),
         )
 
-    def _resolve(self, stack, service, for_mutation=True, timeout=actions.DOCKER_TIMEOUT_SECONDS):
+    def _resolve(self, stack, service, for_mutation=True, timeout=actions.DOCKER_TIMEOUT_SECONDS, **_):
         self.resolve_calls.append((stack, service, for_mutation))
         if self.resolve_error:
             raise actions.TargetError(self.resolve_error)
@@ -1221,7 +1221,7 @@ def test_propose_plan_refuses_a_forbidden_risk_and_records_it(env, monkeypatch):
 
 def test_an_approved_planner_runbook_runs_every_step_through_the_engine(env):
     # resolve each service to its own container, as the real resolver does
-    env.service._resolve = lambda stack, service, for_mutation=True, timeout=None: actions.Target(
+    env.service._resolve = lambda stack, service, for_mutation=True, timeout=None, **_: actions.Target(
         stack, service, f"fixture-{service}")
     plan = _plan(env, "web", "api")
     proposal = env.service.propose_plan(plan, requested_by="Farnsworth")

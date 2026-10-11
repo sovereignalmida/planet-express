@@ -147,6 +147,11 @@ def decide_runbook(
     ) or (
         origin == "zoidberg" and all(step.type == "update.canary" for step in runbook.steps)
     )
+    if automatic and any(actions.is_network_guarded(str(step.params.get("stack", "")), str(step.params.get("service", "")))
+                         for step in runbook.steps):
+        # The weekly pass and safe-prune never touch the network guard, whatever a runbook says; a guarded update
+        # exists only as a person's approved plan.
+        return RunbookDecision(False, False, False, computed_risk, "network-guarded services are never automatic", pairs)
     if automatic:
         return RunbookDecision(
             True, False, True, computed_risk, f"{computed_risk}: approved automatic exception", pairs,

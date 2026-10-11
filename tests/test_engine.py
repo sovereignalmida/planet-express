@@ -46,7 +46,7 @@ class Svc:
             self.running[f"media-{argv[-1]}-1"] = True
         return self.argv_result
 
-    def _resolve(self, stack, service, for_mutation=True, timeout=None):
+    def _resolve(self, stack, service, for_mutation=True, timeout=None, **_):
         return actions.Target(stack, service, f"{stack}-{service}-1")
 
     def _read_health(self, container):

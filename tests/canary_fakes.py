@@ -116,7 +116,7 @@ class CanarySvc:
             return 0, "", ""
         raise AssertionError(f"unexpected argv: {argv!r}")
 
-    def _resolve(self, stack, service, for_mutation=True, timeout=None):
+    def _resolve(self, stack, service, for_mutation=True, timeout=None, **_):
         return actions.Target(stack, service, CONTAINER)
 
     def _watch(self, container, seconds, **kwargs):

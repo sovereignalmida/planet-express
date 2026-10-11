@@ -272,8 +272,10 @@ class RunbookEngine:
         binding = step.binding
         stack = step.params.get("stack") or binding["compose_path"].rstrip("/").split("/")[-2]
         service = step.params.get("service") or binding["service"]
+        # An approved update.canary may move AdGuard (the guard's one exception, see actions); no other step may.
+        extra = {"allow_guarded_update": True} if step.type == "update.canary" else {}
         try:
-            target = self.svc._resolve(stack, service, for_mutation=True)
+            target = self.svc._resolve(stack, service, for_mutation=True, **extra)
         except actions.TargetError as exc:
             return None, self._refuse(f"target no longer valid: {exc}")
         if target.container != binding["container"]:
