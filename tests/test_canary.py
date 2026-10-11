@@ -656,5 +656,5 @@ def test_an_untagged_image_that_has_not_changed_passes_without_recreating_anythi
 def test_an_untagged_update_that_fails_its_watch_is_rolled_back_to_the_old_image(tmp_path):
     svc = CanarySvc(tmp_path, reference="redis")
     svc.watch_result = (False, "restarting (3 restarts)")
-    _ex, result, step = run(svc)
+    _ex, result, _step = run(svc)
     assert result.status != "passed" and svc.running == OLD
