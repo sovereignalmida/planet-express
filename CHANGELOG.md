@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.2] - 2026-10-12
+
+No config change and no new dependency. Pull and restart.
+
 ### Fixed
 - **A safe prune no longer reports the disk as it was before the prune.** The scan used to publish its snapshot,
   then prune, then hand Hermes the same stale snapshot, so an alert went out ten seconds after the problem was
@@ -20,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any number of requests into one (an update pass of 26 services gives one scan), and fires after a short pause so
   the fixed service has settled. It is quiet: no progress messages, silent when nothing is new, one line when
   findings cleared, and a normal report and plans only for findings that are new. Failed fixes do not trigger it.
+- `/update` no longer repeats a refusal reason in its reply.
 
 ## [3.1.1] - 2026-10-11
 
