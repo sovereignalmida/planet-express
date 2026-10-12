@@ -232,3 +232,66 @@ def test_an_update_pass_that_changed_something_asks_for_one_scan_and_a_quiet_pas
         monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda results=results, **kw: results)
         assert fw._run_scheduled_update_pass(None, state, commands=object()) == "ran"
         assert len(started) == expected
+
+
+# -- requests during the settle pause join the pending scan ------------------------------------------------------------------
+def test_requests_during_the_settle_pause_join_the_pending_scan_instead_of_starting_more():
+    state, started = state_with_starter()
+    state.request_rescan("first fix")
+    assert started == [1]                                    # handed to a worker that is still waiting to settle
+    state.request_rescan("second fix, a moment later")
+    state.request_rescan("third")
+    assert started == [1]                                    # joined, not multiplied
+    state.rescan_claimed()                                    # the worker reached the front door: the scan is looking now
+    state.request_rescan("a fix after that scan began")       # it may have looked before this one: a genuinely new wish
+    assert started == [1, 1]
+
+
+def test_a_worker_that_died_before_claiming_cannot_stop_re_scans_for_good(monkeypatch):
+    state, started = state_with_starter()
+    state.request_rescan("fixed")
+    assert started == [1]
+    later = fw.time.monotonic() + state.RESCAN_PENDING_TTL_SECONDS + 1
+    monkeypatch.setattr(fw.time, "monotonic", lambda: later)
+    state.request_rescan("fixed again")
+    assert started == [1, 1]
+
+
+def test_a_failed_start_releases_the_pending_marker():
+    state = fw.PipelineState()
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("no threads")
+    state.set_rescan_starter(flaky)
+    state.request_rescan("fixed")
+    state.request_rescan("fixed again")
+    assert calls == [1, 1]
+
+
+def test_the_worker_claims_the_slot_whether_or_not_it_was_admitted(monkeypatch):
+    state, started = state_with_starter()
+    state.request_rescan("fixed")
+    assert state._rescan_pending()
+    assert state.try_begin_mutation("act:1")                 # the pipeline is busy when the worker arrives
+    stub_pipeline(monkeypatch, {"findings": []})
+    fw.run_pipeline(FakeNotifier(), state, quiet=True)
+    assert not state._rescan_pending()                        # claimed even though it could not run
+    state.end_mutation("act:1")
+    assert started == [1, 1]                                  # and its wish was kept, so it runs when the mutation ends
+
+
+def test_a_quiet_scan_reports_and_plans_only_the_new_findings(monkeypatch):
+    save_previous(finding("CASA_X"), finding("CASA_Z", "HIGH"))
+    stub_pipeline(monkeypatch, {"findings": [finding("CASA_X"), finding("CASA_Z", "HIGH"), finding("CASA_NEW", "HIGH")]})
+    got = {}
+    monkeypatch.setattr(fw, "_propose_typed_plans", lambda notifier, findings, *a: got.update(findings=findings))
+    n = FakeNotifier()
+    fw.run_pipeline(n, fw.PipelineState(), quiet=True)
+    report = " ".join(n.notifications)
+    assert "CASA_NEW" in report and "CASA_X" not in report and "CASA_Z" not in report
+    assert [f["resource"] for f in got["findings"]["findings"]] == ["CASA_NEW"]
+    import json
+    assert len(json.loads(fw.config.STATE_FINDINGS.read_text())["findings"]) == 3          # the saved set is complete

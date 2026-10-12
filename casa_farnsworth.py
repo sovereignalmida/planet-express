@@ -799,6 +799,10 @@ class PipelineState:
         # and no mutation holds the lock. A single flag, so a pass that fixes 26 services asks for ONE scan.
         self._rescan_wanted = False
         self._rescan_starter: Callable[[], None] | None = None
+        # A re-scan that has been handed to its worker but has not claimed the run slot yet (it waits a few seconds for
+        # the fixed service to settle). Requests arriving in that window join it instead of starting another. Expires,
+        # so a worker that died before claiming can never stop re-scans for good.
+        self._rescan_pending_since: float | None = None
 
     @property
     def state(self) -> str:
@@ -814,9 +818,24 @@ class PipelineState:
         mutation or a scan is in progress: the wish is kept and fires when the pipeline is idle (see
         _fire_rescan_if_idle). Safe to call from a thread that still holds the mutation lock."""
         with self._lock:
+            if self._rescan_pending():
+                log.info(f"Re-scan requested ({reason}): joins the one about to start")
+                return
             self._rescan_wanted = True
         log.info(f"Re-scan requested ({reason})")
         self._fire_rescan_if_idle()
+
+    RESCAN_PENDING_TTL_SECONDS = 120.0
+
+    def _rescan_pending(self) -> bool:
+        return (self._rescan_pending_since is not None
+                and time.monotonic() - self._rescan_pending_since < self.RESCAN_PENDING_TTL_SECONDS)
+
+    def rescan_claimed(self) -> None:
+        """The delayed re-scan has reached the pipeline's front door (admitted or not): from here a new request is a
+        genuinely new wish, because the scan may already have looked before the newest fix."""
+        with self._lock:
+            self._rescan_pending_since = None
 
     def _fire_rescan_if_idle(self) -> None:
         """Start the wished-for scan if, and only if, nothing else is going on. Called after every release of the
@@ -827,11 +846,13 @@ class PipelineState:
                     or self._mutation_owner is not None or self.maintenance() is not None):
                 return
             self._rescan_wanted = False
+            self._rescan_pending_since = time.monotonic()
             starter = self._rescan_starter
         try:
             starter()
-        except Exception:
+        except Exception:                               # a failed re-scan must never break a release
             log.exception("Could not start the re-scan")
+            self.rescan_claimed()
 
     def transition(self, new_state: str, plan_id: str | None = None, msg_id: int | None = None):
         went_idle = new_state == self.IDLE
@@ -1291,10 +1312,14 @@ def _read_saved_findings() -> dict:
         return {}
 
 
-def _finding_keys(findings: dict) -> set[tuple]:
+def _finding_key(finding: dict) -> tuple:
     """What makes two findings 'the same problem' across scans. Ids (f1, f2...) are renumbered every scan, so they
     cannot be compared; the thing and how bad it is can."""
-    return {(f.get("category"), f.get("resource"), f.get("severity")) for f in (findings.get("findings") or [])}
+    return (finding.get("category"), finding.get("resource"), finding.get("severity"))
+
+
+def _finding_keys(findings: dict) -> set[tuple]:
+    return {_finding_key(f) for f in (findings.get("findings") or [])}
 
 
 def make_rescan_starter(notifier: Notifier, state: PipelineState, store: Store | None,
@@ -1333,6 +1358,8 @@ def run_pipeline(
     """
     if not admitted:
         admission = admit_pipeline_run(state, scheduled=scheduled)
+        if quiet:
+            state.rescan_claimed()          # at the front door, admitted or not (see PipelineState.rescan_claimed)
         if not admission.ok:
             if quiet:
                 state.request_rescan("deferred: the pipeline was busy")   # keep the wish; nothing to tell anyone
@@ -1402,6 +1429,11 @@ def run_pipeline(
                                     f"{len(now)} remaining.")
                 state.transition(PipelineState.IDLE)
                 return
+            # Something is new. Report and plan ONLY the new findings: the rest were reported (and planned) by the
+            # scan that found them, and announcing or planning them again would stack a second card on a problem
+            # that already has one. The saved findings file keeps the full set.
+            findings = {**findings, "findings": [f for f in findings.get("findings", [])
+                                                  if _finding_key(f) in now - before]}
 
         date_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
         report_msg = TelegramClient.fmt_report(date_str, findings.get("findings", []))
