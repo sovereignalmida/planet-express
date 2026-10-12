@@ -1962,8 +1962,9 @@ def _run_update_request(
                 f"nothing for a canary to move: change the tag in the compose file and recreate it by hand, then "
                 f"check that your routes still answer.")
         else:
-            notifier.notify(f"🚫 Update of {where} refused: {TelegramClient.s(zoidberg._hint('skipped', why_not or ''))}"
-                            f" ({TelegramClient.s(why_not or '')})")
+            hint = zoidberg._hint("skipped", why_not or "")
+            detail = "" if hint == (why_not or "")[:100] else f" ({TelegramClient.s(why_not or '')})"   # never say it twice
+            notifier.notify(f"🚫 Update of {where} refused: {TelegramClient.s(hint)}{detail}")
         return
     preface = None
     if actions.is_network_guarded(stack, service):

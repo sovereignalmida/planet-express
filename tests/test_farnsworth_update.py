@@ -163,3 +163,17 @@ def test_an_ordinary_service_gets_no_network_warning(monkeypatch, known_stack):
             return super().propose_plan(runbook, **kw)
     fw._run_update_request(Commands(), FakeNotifier(), "media", "radarr", "1001")
     assert seen["preface"] is None
+
+
+def test_a_refusal_reason_is_not_repeated_in_the_message(monkeypatch, known_stack):
+    monkeypatch.setattr(zoidberg, "build_canary_runbook",
+                        lambda *a, **k: (None, "CASA_ADGUARD is paused by the operator (paused_containers)"))
+    n = FakeNotifier()
+    fw._run_update_request(FakeCommands(), n, "network", "adguardhome", "x")
+    text = " ".join(n.notifications)
+    assert text.count("paused by the operator") == 1
+    n = FakeNotifier()
+    monkeypatch.setattr(zoidberg, "build_canary_runbook",
+                        lambda *a, **k: (None, "x@sha256:abc is not a canary-eligible image reference"))
+    fw._run_update_request(FakeCommands(), n, "media", "pinned", "x")
+    assert "pinned by digest" in " ".join(n.notifications) and "not a canary-eligible" in " ".join(n.notifications)
