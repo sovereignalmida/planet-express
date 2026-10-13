@@ -31,3 +31,6 @@ logs/*.log
 
 # Typed-action database (core-only runtime state, landing 1b)
 /data/
+
+# Private operator material (server-agent export, incident detail): never commit; the repo has a public remote
+/docs/private/
