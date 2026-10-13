@@ -8,6 +8,7 @@ raises SystemExit if it's missing. config.py imports these same classes, so ever
 existing `from config import PlanetExpressConfig` (etc.) call site is unaffected.
 """
 
+import posixpath
 import re
 from pathlib import Path
 from typing import Literal
@@ -280,11 +281,80 @@ class MultiHostConfig(BaseModel):
         return self
 
 
+_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+_SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", re.IGNORECASE)
+_UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+
+
+class MissionRuntimeConfig(BaseModel):
+    """The agent command a mission session runs. argv only: there is no shell string."""
+    model_config = ConfigDict(extra="forbid")
+
+    argv: list[str] = []
+    # Names copied from Core's environment into the session. Everything else is dropped; a name that
+    # looks like a credential is refused outright (sessions get no secret values).
+    env_allow: list[str] = []
+
+    @field_validator("argv")
+    @classmethod
+    def _argv(cls, argv: list[str]) -> list[str]:
+        if argv and (not argv[0].startswith("/") or any(not a or "\0" in a for a in argv)):
+            raise ValueError("runtime.argv must start with an absolute program path and have no empty or NUL items")
+        return argv
+
+    @field_validator("env_allow")
+    @classmethod
+    def _env_allow(cls, names: list[str]) -> list[str]:
+        for name in names:
+            if not _ENV_NAME.fullmatch(name) or name.startswith("PE_") or _SECRETISH.search(name):
+                raise ValueError(f"runtime.env_allow: {name!r} is not an allowed environment name")
+        return names
+
+
+class MissionBudgetsConfig(BaseModel):
+    """Default per-mission ceilings. A grant may only lower them."""
+    model_config = ConfigDict(extra="forbid")
+
+    wall_seconds: int = Field(default=1800, gt=0)
+    tool_calls: int = Field(default=200, gt=0)
+    output_bytes: int = Field(default=4 * 1024 * 1024, gt=0)
+    retries: int = Field(default=2, ge=0)
+
+
 class MissionsConfig(BaseModel):
     """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    # The dedicated unix account sessions run as; never root and never the Core user (setup creates it).
+    worker_user: str = "pe-worker"
+    # A delegated cgroup v2 subtree; one child cgroup per session.
+    cgroup_root: str = "/sys/fs/cgroup/planetexpress-missions"
+    worker_socket: str = "/run/planetexpress/worker.sock"
+    runtime: MissionRuntimeConfig = MissionRuntimeConfig()
+    budgets: MissionBudgetsConfig = MissionBudgetsConfig()
+
+    @field_validator("worker_user")
+    @classmethod
+    def _worker_user(cls, name: str) -> str:
+        if not _UNIX_NAME.fullmatch(name) or name == "root":
+            raise ValueError("missions.worker_user must be a non-root unix account name")
+        return name
+
+    @field_validator("worker_socket")
+    @classmethod
+    def _worker_socket(cls, path: str) -> str:
+        if not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path:
+            raise ValueError("missions.worker_socket must be a normalised absolute path")
+        return path
+
+    @field_validator("cgroup_root")
+    @classmethod
+    def _cgroup_root(cls, path: str) -> str:
+        if (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
+                or path.rstrip("/") == "/sys/fs/cgroup"):
+            raise ValueError("missions.cgroup_root must be a normalised absolute path below the cgroup mount")
+        return path
 
 
 class PlanetExpressConfig(BaseModel):

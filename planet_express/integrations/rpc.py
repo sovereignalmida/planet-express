@@ -44,6 +44,14 @@ class RpcError(Exception):
 
 
 @dataclass(frozen=True)
+class PeerCred:
+    """SO_PEERCRED of the connecting process, captured at accept time."""
+    pid: int
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
 class _PostReply:
     result: Any
     callback: Callable[[], None]
@@ -89,18 +97,30 @@ def _decode(data):
 
 class RpcServer:
     def __init__(
-        self, socket_path, handlers: dict[str, Callable[[dict], Any]],
-        allowed_uids: set[int], group, read_timeout=5.0, workers=4,
+        self, socket_path, handlers: dict[str, Callable[..., Any]],
+        allowed_uids: set[int] | None, group, read_timeout=5.0, workers=4,
         # Decisions only. Docker reads use general workers so slow reads cannot exhaust
         # the capacity that keeps approvals answerable (Codex review, T9).
         reserved_methods=frozenset({"approval.decide"}),
         reserved_read_timeout=0.5,
+        # Optional per-call authenticator (the worker socket, slice 3). Called as
+        # authenticator(PeerCred, request) and returns a session object or None. When set, every
+        # request is authenticated before its method is even looked up, handlers are called as
+        # handler(params, session), and uid admission is the authenticator's job (allowed_uids may
+        # then be None). Without it nothing changes: handler(params) behind a uid allowlist.
+        authenticator: Callable[[PeerCred, dict], Any] | None = None,
+        # The operator socket re-groups its directory too; the worker socket must not.
+        chown_parent: bool = True,
     ):
         if workers < 1 or read_timeout <= 0:
             raise ValueError("workers and read_timeout must be positive")
+        if allowed_uids is None and authenticator is None:
+            raise ValueError("allowed_uids may only be None when an authenticator is given")
+        self.authenticator = authenticator
+        self.chown_parent = chown_parent
         self.socket_path = Path(socket_path)
         self.handlers = dict(handlers)
-        self.allowed_uids = set(allowed_uids)
+        self.allowed_uids = None if allowed_uids is None else set(allowed_uids)
         self.group = group
         self.read_timeout = read_timeout
         self.reserved_methods = frozenset(reserved_methods)
@@ -160,7 +180,8 @@ class RpcServer:
             self._identity = (info.st_dev, info.st_ino)
             if gid is not None:
                 os.chown(self.socket_path, -1, gid)
-                os.chown(self.socket_path.parent, -1, gid)
+                if self.chown_parent:
+                    os.chown(self.socket_path.parent, -1, gid)
             os.chmod(self.socket_path, 0o660)
             conn.listen(16)
             conn.settimeout(0.1)
@@ -190,8 +211,8 @@ class RpcServer:
             except OSError:
                 break
             try:
-                _, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                if uid not in self.allowed_uids:
+                pid, uid, gid = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if self.allowed_uids is not None and uid not in self.allowed_uids:
                     log.warning("Rejected RPC peer uid %s", uid)
                     conn.close()
                     continue
@@ -208,7 +229,7 @@ class RpcServer:
                 with self._lock:
                     self._connections.add(conn)
                 try:
-                    self._pool.submit(self._serve, conn, slot, reserved)
+                    self._pool.submit(self._serve, conn, slot, reserved, PeerCred(pid, uid, gid))
                 except Exception:
                     with self._lock:
                         self._connections.discard(conn)
@@ -218,7 +239,7 @@ class RpcServer:
                 conn.close()
                 log.warning("RPC connection dispatch failed")
 
-    def _serve(self, conn, slot, reserved):
+    def _serve(self, conn, slot, reserved, peer=None):
         request_id = None
         post_reply = None
         try:
@@ -239,13 +260,26 @@ class RpcServer:
                 response = _error(request_id, "bad_request", "Invalid JSON request or request shape")
             else:
                 method = request["method"]
-                if reserved and method not in self.reserved_methods:
+                session = None
+                if self.authenticator is not None:
+                    try:
+                        session = self.authenticator(peer, request)
+                    except Exception:  # noqa: BLE001 -- any authenticator failure is a refusal
+                        session = None
+                if self.authenticator is not None and session is None:
+                    # One answer for every failure, before the method is looked at, so a refused
+                    # peer learns nothing about identity checks or the method table.
+                    response = _error(request_id, "unauthorized", "Refused")
+                elif reserved and method not in self.reserved_methods:
                     response = _error(request_id, "busy", "RPC workers are busy")
                 elif method not in self.handlers:
                     response = _error(request_id, "unknown_method", "Unknown method")
                 else:
                     try:
-                        result = self.handlers[method](request["params"])
+                        if self.authenticator is not None:
+                            result = self.handlers[method](request["params"], session)
+                        else:
+                            result = self.handlers[method](request["params"])
                         if isinstance(result, _PostReply):
                             post_reply = result.callback
                             result = result.result
@@ -290,7 +324,7 @@ class RpcServer:
         self._pool.shutdown(wait=True)
 
 
-def call(socket_path, method, params=None, *, timeout=5.0, request_id=None) -> dict:
+def call(socket_path, method, params=None, *, timeout=5.0, request_id=None, session_token=None) -> dict:
     """Make one framed request; transport failures raise RpcError."""
     request_id = uuid.uuid4().hex if request_id is None else request_id
     try:
@@ -298,7 +332,10 @@ def call(socket_path, method, params=None, *, timeout=5.0, request_id=None) -> d
             deadline = time.monotonic() + timeout
             conn.settimeout(timeout)
             conn.connect(str(socket_path))
-            _send(conn, {"request_id": request_id, "method": method, "params": {} if params is None else params})
+            request = {"request_id": request_id, "method": method, "params": {} if params is None else params}
+            if session_token is not None:
+                request["session_token"] = session_token
+            _send(conn, request)
             response = _decode(_receive(conn, deadline))
             if not isinstance(response, dict):
                 raise TypeError("response must be an object")
