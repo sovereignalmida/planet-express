@@ -259,6 +259,32 @@ subtle edits, so the grant must not scope such a service unless the operator acc
 Proxy rules are a reviewed capability, and the discovery/Unraid consumer uses a separate read-only
 proxy (brief §14.1 item 9).
 
+### 6.2 Change missions: how new resources get created
+The worker never creates volumes, networks or images; Core does, from an approved plan.
+
+`plan_json` (strict model, RFC 8785 hash, slice 1): `{v, summary, files: [{path, op, diff_sha256,
+unified_diff}], images: [{ref, digest, registry}], volumes: [{name, driver: "local", opts: {}}],
+networks: [{name, internal, subnet?}], binds: [{host_path, container_path, ro}], services:
+[{resource_id}], dns: [{name, target}], routes: [{host, service}], backups: [{path}], tiles:
+[...], checks: [check ids], rollback: [...], protected_touches: [...]}`.
+
+Flow: investigate → draft plan → `awaiting_decision` → approval row phase `plan` bound to
+`plan_hash`, plus one `critical:<n>` approval per `protected_touches` entry (ingress/DNS/route,
+backup config, credentials, storage) → **Core applies** the resource-creating parts in order
+(registry-allowlisted pulls by digest, volume and network create with validated local driver and
+no bind options, brokered `dns.rewrite`, brokered route/backup writes) as recorded events → the
+approved plan's `services[*].resource_id` and created resource ids are **added to the session's
+effective scope** (the grant hash is unchanged; the effective scope is `grant.scope ∪ plan
+resources`, recorded) → the worker writes the files in the plan's `files` list (hash-checked
+against `diff_sha256`) and runs compose for those services through the proxy → verify. The proxy
+adds `network create/remove` to its served list only for names listed in the approved plan.
+Builds stay refused: a service needing a local image build requires the escalated `docker: raw`
+mission (§4), or a prebuilt digest-pinned image.
+Rollback of a Change mission removes what Core created (reverse order) and restores the
+checkpoint's files; created data volumes are kept unless the operator says otherwise.
+Test (slice 7/9): add-then-remove a synthetic service end to end on the test homelab, reversible,
+with the plan hash enforced (a changed file after approval is refused).
+
 - Remote worker: identity is **the per-session forwarded sockets**, not `SO_PEERCRED` (a forwarded
   socket's peer is the local ssh process). For each remote session Core creates unique worker-socket
   and proxy-socket paths, owned by the forwarder's uid, bound to the session row (`kind=
