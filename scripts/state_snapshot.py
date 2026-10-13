@@ -56,6 +56,19 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+SNAPSHOT_MARKER_NAME = "pe-snapshot.marker"
+
+
+def write_snapshot_marker(db_path, now):
+    """Tell the core's schema-upgrade guard a snapshot was just taken: the epoch second, written
+    atomically beside the database. Mirrors core.store.write_snapshot_marker (see the note there)."""
+    marker = Path(db_path).parent / SNAPSHOT_MARKER_NAME
+    temporary = marker.with_name(marker.name + ".tmp")
+    temporary.write_text(str(int(now.timestamp())))
+    temporary.chmod(0o600)
+    os.replace(temporary, marker)
+
+
 def create(label=None):
     suffix = re.sub(r"[^A-Za-z0-9_-]+", "-", label).strip("-") if label else ""
     data, sources = paths()
@@ -101,6 +114,10 @@ def create(label=None):
         except (OSError, subprocess.SubprocessError):
             pass
         (destination / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        if manifest["sha256"]["planetexpress.db"] is not None:
+            # Last, so a failed snapshot leaves no marker. This is core/store.py's write_snapshot_marker()
+            # format, duplicated because this script imports nothing from the repository.
+            write_snapshot_marker(sources["planetexpress.db"], datetime.now(timezone.utc))
     except BaseException:
         shutil.rmtree(destination)
         raise

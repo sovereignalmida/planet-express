@@ -32,11 +32,19 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-from planet_express.memory.schema import DDL as _MEMORY_DDL
+from planet_express.memory import schema as _memory_schema
 from planet_express.missions.schema import DDL_V6 as _MISSIONS_DDL_V6
 
-# Schema v6 = missions (slice 1) + Ship's Memory (slice 2), created together.
-DDL_V6 = _MISSIONS_DDL_V6.rstrip().rstrip(";") + ";\n" + _MEMORY_DDL
+
+def ddl_v6() -> str:
+    """Schema v6 = missions (slice 1) always, plus Ship's Memory (slice 2) when SQLite has FTS5.
+
+    Memory is optional: a Python whose sqlite3 lacks FTS5 must still open the store for everything
+    else, so its tables are left out there rather than failing core's startup. Evaluated at call time."""
+    ddl = _MISSIONS_DDL_V6.rstrip().rstrip(";") + ";\n"
+    if _memory_schema.fts5_available():
+        ddl += _memory_schema.DDL
+    return ddl
 
 SCHEMA_VERSION = 6
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
@@ -308,7 +316,10 @@ class SnapshotRequiredError(RuntimeError):
     """A schema upgrade was refused because no recent snapshot marker exists."""
 
 
-# The v5 -> v6 upgrade runs only when `deploy`/`setup` has just snapshotted the state (contract §2).
+# The v5 -> v6 upgrade runs only when a snapshot was just taken (contract §2). `scripts/state_snapshot.py
+# create`, which deploy.sh runs before every deploy, writes this marker itself on success. That script is
+# stdlib-only by design (it runs from older checkouts during rollback), so it carries its own copy of the
+# marker format: an epoch second in `pe-snapshot.marker` beside the database. Keep the two in step.
 SNAPSHOT_MARKER_NAME = "pe-snapshot.marker"
 SNAPSHOT_MAX_AGE_S = 600
 
@@ -319,8 +330,8 @@ def snapshot_marker_path(db_path: Path) -> Path:
 
 
 def write_snapshot_marker(db_path: Path, now: float | None = None) -> Path:
-    """Record that a snapshot of the state was just taken. `deploy` and `setup` call this immediately
-    after `scripts/state_snapshot.py` succeeds. The marker holds the epoch second it was written and is
+    """Record that a snapshot of the state was just taken. `scripts/state_snapshot.py create` does the
+    same thing on its own copy of this format; this function is for tests and in-process callers. The marker holds the epoch second it was written and is
     honoured for SNAPSHOT_MAX_AGE_S; it is replaced atomically."""
     marker = snapshot_marker_path(db_path)
     marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -410,7 +421,7 @@ class Store:
                     self._migrate_5_to_6(conn)
                 if entry_version >= 5:
                     # Preserve the old idempotent repair behaviour for a v5/v6 database.
-                    conn.executescript(f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{DDL_V6};\nCOMMIT;")
+                    conn.executescript(f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{ddl_v6()};\nCOMMIT;")
             conn.execute("PRAGMA journal_mode = WAL")
         return cutover
 
@@ -436,7 +447,7 @@ class Store:
     def _create_fresh(conn: sqlite3.Connection) -> None:
         try:
             conn.executescript(
-                f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{DDL_V6};\n"
+                f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{ddl_v6()};\n"
                 f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
             )
         except BaseException:
@@ -467,7 +478,7 @@ class Store:
             if conn.execute("PRAGMA user_version").fetchone()[0] >= 6:
                 conn.execute("ROLLBACK")
                 return
-            _execute_ddl(conn, DDL_V6)
+            _execute_ddl(conn, ddl_v6())
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             conn.execute("COMMIT")
         except BaseException:
