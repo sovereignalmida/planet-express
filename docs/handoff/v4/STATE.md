@@ -6,9 +6,9 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 ## Slice status
 | # | Slice | Status |
 |---|---|---|
-| 0 | Contracts, threat model | spec rev 0.3 (`v4-slice-0-contracts.md`); two Codex G1 rounds folded in (§19, §20); MOS cgroup freeze/kill verified; needs operator sign-off |
-| 1 | Mission store | not started |
-| 2 | Ship's Memory | not started |
+| 0 | Contracts, threat model | DONE rev 0.4 (final G1 dispositioned); was: spec rev 0.3 (`v4-slice-0-contracts.md`); two Codex G1 rounds folded in (§19, §20); MOS cgroup freeze/kill verified; needs operator sign-off |
+| 1 | Mission store | brief written; worker dispatched |
+| 2 | Ship's Memory | brief written; worker dispatched |
 | 3 | Supervisor, adapter, worker | not started |
 | 4 | Surfaces | not started |
 | 5 | Checkpoint | not started |
