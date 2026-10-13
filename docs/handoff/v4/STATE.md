@@ -6,7 +6,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 ## Slice status
 | # | Slice | Status |
 |---|---|---|
-| 0 | Contracts, threat model | spec rev 0.2 written (`v4-slice-0-contracts.md`); G1 Codex done and folded in; needs G1 re-check of §19 + operator sign-off |
+| 0 | Contracts, threat model | spec rev 0.3 (`v4-slice-0-contracts.md`); two Codex G1 rounds folded in (§19, §20); MOS cgroup freeze/kill verified; needs operator sign-off |
 | 1 | Mission store | not started |
 | 2 | Ship's Memory | not started |
 | 3 | Supervisor, adapter, worker | not started |
@@ -18,8 +18,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | 9 | First Repair, release | not started |
 
 ## Next action
-Re-run G1 (`codex exec`, read-only) on `docs/designs/v4-slice-0-contracts.md` §19 changes only; fix or
-decline findings; operator signs off slice 0; then slices 1 and 2 in parallel worktrees (briefs:
+Operator signs off slice 0 (`docs/designs/v4-slice-0-contracts.md` rev 0.3); then slices 1 and 2 in parallel worktrees (briefs:
 `docs/handoff/v4/S1-brief.md`, `S2-brief.md`, not yet written).
 
 ## Decisions since the brief

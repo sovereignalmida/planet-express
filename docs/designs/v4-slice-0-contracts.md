@@ -1,6 +1,7 @@
 # v4 Slice 0 — Contracts and threat model
 
-Status: DRAFT rev 0.2 (2026-10-13). G1 (Codex) findings folded in; see §19. Awaiting a G1 re-check of §19 before slices start. Parent: `v4-mission-control.md` (v4.1) and
+Status: DRAFT rev 0.3 (2026-10-13). Two G1 (Codex) rounds folded in; see §19 and §20. MOS cgroup
+capability verified on the test VM (§20). Awaiting operator sign-off. Parent: `v4-mission-control.md` (v4.1) and
 `v4-plan.md`. This slice produces no product code. Its output is the set of contracts below, which
 slices 1-9 build against, plus the threat model they must defend. Where this document and the
 brief disagree, fix the disagreement here before any slice starts.
@@ -64,7 +65,7 @@ CREATE TABLE mission_events (             -- append-only; redacted before insert
   body_json TEXT NOT NULL, redaction_applied INT NOT NULL DEFAULT 1);
 CREATE TABLE mission_leases (
   resource TEXT PRIMARY KEY,               -- canonical id, see §2.3
-  mission_id TEXT NOT NULL REFERENCES missions(id), fence INTEGER NOT NULL,   -- monotonic per resource
+  mission_id TEXT NOT NULL REFERENCES missions(id), fence INTEGER NOT NULL,   -- = resource_fences.fence at acquire
   acquired_at INT NOT NULL, expires_at INT NOT NULL, last_heartbeat INT NOT NULL);
 CREATE TABLE standing_grants (
   id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, tier TEXT NOT NULL,
@@ -79,7 +80,11 @@ CREATE TABLE mission_approvals (           -- the ONLY proof of approval; create
 CREATE TABLE mission_sessions (            -- one live session per mission
   id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id),
   token_hash TEXT NOT NULL, issued_at INT NOT NULL, expires_at INT NOT NULL, revoked_at INT,
-  cgroup_path TEXT, leader_pid INT, fence_json TEXT NOT NULL);   -- resource -> fence
+  kind TEXT NOT NULL,                      -- local_cgroup | local_uid | remote_tunnel
+  cgroup_path TEXT, leader_pid INT, session_uid INT UNIQUE,     -- uid from the reserved pool
+  fence_json TEXT NOT NULL);               -- resource -> fence
+CREATE UNIQUE INDEX one_live_session ON mission_sessions(mission_id) WHERE revoked_at IS NULL;
+CREATE TABLE resource_fences (resource TEXT PRIMARY KEY, fence INTEGER NOT NULL);  -- permanent, never deleted
 CREATE TABLE mission_artifacts (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), name TEXT,
   sha256 TEXT NOT NULL, bytes INT NOT NULL, path TEXT NOT NULL);   -- files under artifact dir
 ```
@@ -87,9 +92,16 @@ CREATE TABLE mission_artifacts (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL RE
 Rules: strict models (`extra=forbid`, bounded strings/lists, enums as `Literal`) live in
 `planet_express/missions/models.py` (slice 1; G1-reviewed there). Canonical JSON for every hash is
 RFC 8785 (JCS); duplicate keys, NaN/Infinity and non-UTF-8 are rejected before hashing.
-Approval is proven only by a `mission_approvals` row whose `bound_hash` equals the mission's current
-`grant_hash` (or `plan_hash`); `missions` carries no approval pointer. Events are never updated or deleted by mission code (retention job only, §2.2).
-`fence` is read-modify-write under `BEGIN IMMEDIATE`. A mission row's `grant_json` is immutable
+Approval is proven only by a `mission_approvals` row with `decision='approve'`, the required `phase`,
+`elevated=1` where the phase demands it (`broad_sudo`, `no_backup`, `critical:*`), and `bound_hash`
+equal to the mission's *current* `grant_hash` (or `plan_hash`). **Every** issuance of a Repair-or-higher
+session and every transition into `executing` re-checks this inside the transaction, unless a valid
+unexpired, unrevoked standing grant covers the grant (then `standing_grant_id` is set and `broad_sudo`
+/`no_backup` are refused). A changed grant gets a new hash, so old rows stop matching; `missions` carries no approval pointer. Events are never updated or deleted by mission code (retention job only, §2.2).
+`fence` is taken by incrementing `resource_fences.fence` (upserted, never deleted) inside the same
+`BEGIN IMMEDIATE` that inserts the lease, so a freed-then-reacquired resource never reuses a fence.
+Starting a session is one transaction: mission status CAS, approval validation (below), lease
+acquisition, session insert (the partial unique index makes a second live session fail). A mission row's `grant_json` is immutable
 once `approval_id` is set; a change creates a new grant hash and requires re-approval.
 
 ### 2.1 Resume and cancel
@@ -98,7 +110,10 @@ once `approval_id` is set; a change creates a new grant hash and requires re-app
   Core reads host state, and the mission lands in `cancelled` or `needs_operator`.
 - A live session runs in a **delegated cgroup** (v2, `pids`/`freezer`); pause = freeze the cgroup,
   cancel/kill = freeze, `cgroup.kill`, confirm empty. Where cgroups are unavailable (to be proven on
-  MOS, §18d) the fallback is a per-session Unix identity plus `kill -9 -1` as that uid; a host
+  MOS, §18d) the fallback is a per-session Unix identity (`kind=local_uid`) taken from a reserved uid range that
+  setup creates, allocated and reaped transactionally via `mission_sessions.session_uid` (unique),
+  verified through `SO_PEERCRED`, with exclusivity checked before start; kill is `kill -9 -1` from a
+  setuid helper running as that uid only; a host
   that can do neither is proposal-only for Repair.
 - **A lease is never reclaimed on TTL alone.** Expiry marks it `suspect`; Core revokes the session
   token and capability endpoints, kills and confirms the cgroup/uid empty, classifies host state,
@@ -138,7 +153,11 @@ Terminal: completed, failed, rolled_back, cancelled. Change and Critical mission
 `needs_operator` = Core cannot proceed without a human. Illegal transitions raise and are logged.
 Observe/Propose missions never enter `executing`.
 
-`rollback_pending` (executing/paused_tripwire/failed-verification → rollback_pending → rolled_back
+`blocked` exits: `blocked → queued` when the lease or window clears, `→ awaiting_decision` after
+`blocked_max_s`, `→ cancelled`. `verifying` ends in `completed` (all checks pass), or in
+`needs_operator` on any failed check, or in `rollback_pending` when the grant says
+`on_verify_fail: rollback` (default `needs_operator`; rollback needs a checkpoint and an approved
+tier). `rollback_pending` (from executing, paused_tripwire, verifying or recovery_required → rollback_pending → rolled_back
 | needs_operator) is an explicit non-terminal state while a restore runs. Resumption after a
 runtime outage or crash is **operator-mediated** (brief §14.8); the only automatic restarts are
 Observe/Propose sessions (no mutation possible), within the retry budget.
@@ -160,6 +179,7 @@ Observe/Propose sessions (no mutation possible), within the retry budget.
  "credentials": ["tool:arr-api"],                   // brokered tools, never raw keys
  "budgets": {"wall_s": 3600, "tool_calls": 200, "output_bytes": 5000000, "retries": 2},
  "effects": {"max_unexpected_in_scope": 3, "per_resource": {"service:media/*": {"changes": 5}}},
+ "on_verify_fail": "needs_operator|rollback",
  "docker": "proxy|raw",                           // raw only with sudo.mode = broad
  "verification": {"checks": ["<check ids from §10>"], "agreed_at": 0},
  "backup": {"covered": true, "recent_s": 86400, "acknowledged_no_backup": false}
@@ -208,15 +228,44 @@ Observe/Propose sessions (no mutation possible), within the retry budget.
 - Test: the worker uid calling `approval.decide`, `execution.*`, `config.*`, `canary.*`, `auth.*`
   gets "unknown method" on its socket and a refused connection on `rpc.sock`.
 ### 6.1 Scope-enforcing Docker API proxy
-The default Repair worker's `DOCKER_HOST` is a Unix socket served by a Core-owned proxy that
-inspects each Docker API request and refuses: `privileged`, `cap_add` beyond a list, `pid/ipc/
-network_mode: host`, `devices`, bind mounts of the Docker socket or of paths outside the grant's
-`paths`/`mounts`, creating or modifying objects whose resource id is outside the grant, daemon and
-swarm endpoints, `exec` into out-of-scope containers, and image builds with host contexts. It
-applies equally to Compose (which only uses that API). Each accepted write is recorded before it is
-forwarded. The dashboard/discovery consumer and Unraid use a separate read-only allowlisting proxy
-(§14.1 item 9). Proxy rules are a reviewed capability.
-- Remote worker: the same socket forwarded by SSH (`ssh -L`/`-R` with `StreamLocalBindUnlink`),
+Deny-by-default and schema-aware: only listed API versions and endpoints are served, and for each
+write endpoint only listed request fields are accepted; anything else is refused and logged.
+
+Served for the default Repair worker: container list/inspect/logs/stats, container create/start/
+stop/restart/kill/rename/update/remove, exec create/start/inspect, container archive (get/put),
+image list/inspect, network and volume list/inspect, network connect/disconnect (scoped), events.
+Refused outright: swarm, plugins, secrets/configs, system/daemon, volume **create/prune** and any
+volume driver or `driver_opts`, image build, image import/load, `prune` endpoints, and
+`remote=`/URL parameters anywhere.
+
+Container-create/update field rules (refused unless explicitly satisfied): no `Privileged`;
+`CapAdd` limited to a short list; `PidMode/IpcMode/NetworkMode/UsernsMode/CgroupnsMode/UTSMode`
+not `host`; no `Devices`, `Sysctls`, `Tmpfs`, `SecurityOpt` (other than a fixed allowlist),
+`GroupAdd` to a protected gid, `VolumesFrom` to an out-of-scope container; every `Mounts/Binds`
+entry must be (a) an existing grant-scoped named volume with a validated local driver and no bind
+options, or (b) a bind whose host path is inside the grant's `paths`/`mounts`, and never the Docker
+socket; named volumes are **never created** by the worker (a volume the mission needs is created by
+Core from the approved plan); image pulls happen only through Core from the operator's registry
+allowlist when a plan names the image. Container name/labels/networks must resolve (§2.3) inside the
+grant scope. Each accepted write is recorded as an event before it is forwarded.
+
+Responses: `inspect` output has environment values and secret-looking labels redacted by the
+proxy. `exec` and `archive` into an in-scope container are allowed (diagnosis needs them); the
+credentials *that service itself holds* are therefore in scope by definition. What stays out of
+reach is credentials for other systems (brokered tools) and every protected resource.
+Accepted residual: a worker can change data on a protected-data volume that an in-scope container
+already mounts read-write via exec; tripwires (size/entry-count/mtime) catch bulk change, not
+subtle edits, so the grant must not scope such a service unless the operator accepts that.
+Proxy rules are a reviewed capability, and the discovery/Unraid consumer uses a separate read-only
+proxy (brief §14.1 item 9).
+
+- Remote worker: identity is **the per-session forwarded sockets**, not `SO_PEERCRED` (a forwarded
+  socket's peer is the local ssh process). For each remote session Core creates unique worker-socket
+  and proxy-socket paths, owned by the forwarder's uid, bound to the session row (`kind=
+  remote_tunnel`) plus the token; the remote process holds no other credential and no route to this
+  host, so containment is the host boundary. Kill = revoke the token, close both sockets, drain
+  in-flight proxy requests, then classify host state; that is "provably dead" for a remote session.
+  The same socket forwarded by SSH (`ssh -L`/`-R` with `StreamLocalBindUnlink`),
   dedicated key restricted with `restrict,permitlisten=...,command=` options. No TCP listener.
 
 ## 7. Checkpoint contract
@@ -228,6 +277,10 @@ Captured: in-scope Compose files **and `.env` files**, as full copies under
 at rest on the same host and trust level as the originals) with a manifest of sha256+mode+owner; container
 inspect JSON (image id, mounts, networks, labels, restart policy, health); mount state; listening
 ports; in-scope unit file hashes. Not captured: data volumes (that is the backup's job; §4 floor).
+**Secrets at rest:** the checkpoint root is a 0700 Core-owned directory on the data pool (MOS: under
+`/mnt/data`), excluded from off-host backup by path, purged at `closed_at + retention`, and a file
+the Core cannot already read is **refused** at scope validation (a mission cannot be granted what
+Core cannot restore). Encryption with a separately held restore key is a documented later hardening.
 **Post-change manifest** is captured by Core when the session ends or `verifying` starts (and at each
 tripwire pause). Restore: write back files (compare-and-swap: current hash must equal the post-change
 manifest hash, else refuse, state `needs_operator`, and report the drift), then ask the provider to recreate affected services. Restore is a recorded
@@ -254,9 +307,9 @@ reviewed capability (listed in `CLAUDE.md`'s v4 surface).
 ## 9. Tripwires
 
 - Monitor thread in Core scans every `tripwire_interval_s` (default 15) with a hard scan deadline of
-  10 s and a per-signal timeout of 3 s. Two consecutive failed or late scans **fail closed**: pause.
-  The pause SLA (the release-proof number) is `interval + deadline` = 25 s from the change to the
-  recorded `paused_tripwire` event. Defaults for diffs: data-volume shrink >10% size or >5% entries;
+  10 s and a per-signal timeout of 3 s. A failed or late scan **fails closed immediately**: pause.
+  The pause SLA (the release-proof number) is `interval + deadline + freeze + durable write`, budgeted
+  as 30 s worst case from the change to the recorded `paused_tripwire` event, and tested as such. Defaults for diffs: data-volume shrink >10% size or >5% entries;
   `effects.max_unexpected_in_scope` as granted. Baselines are the checkpoint's immutable manifest.
   Matching: a signal's resource id is tested against the grant `scope` and `protected.resources` by
   the §2.3 containment rules (protected wins). Monitor while any mission is
@@ -306,6 +359,12 @@ start(mission) → lease acquire → checkpoint (repair+) → spawn session as w
   events show accepted mutations; if state == checkpoint → `needs_operator` offering resume (or
   automatic restart for Observe/Propose only); if state matches the end expectation → verifying;
   else `recovery_required` → `needs_operator` or `rollback_pending`.
+
+## 11.1 External-session import
+An imported session was not started under the worker's identity, cgroup, proxy or token, so it is
+**evidence-only**: its record becomes events and artifacts on a mission. It may inform a mission but
+never moves it to `executing` or `completed`, and a Repair mission still requires verification. A
+session that must act is relaunched through the Supervisor.
 
 ## 12. Hook layer
 
@@ -405,3 +464,23 @@ All findings accepted; rev 0.2 changes in brackets.
   change budget and matching [§4 `effects`, §9]; check params and scope predicate [§10]; memory DDL
   [§13, slice 2]; scan deadline and thresholds [§9].
 - Snapshot-then-migrate claim [§2 upgrade guard]. `mission` origin rejected by `RUNBOOK_ORIGINS` [§5].
+
+## 20. G1 round 2 (Codex) and MOS verification
+
+Round 2 accepted in full [rev 0.3]: named-volume bind bypass and the wider Docker API surface
+[§6.1 rewritten: deny-by-default, field rules, no volume create, no build/import, pulls only via
+Core]; Repair entering `executing` without an affirmative approval [approval rule]; fence reuse after
+release [`resource_fences`]; remote-worker identity [§6 remote]; uid-fallback representability
+[`session_uid`, range, helper]; double live session [partial unique index, single transaction]; `.env`
+secrets at rest [§7]; SLA arithmetic [§9; brief proof 3 aligned]; `blocked`/verify-fail dead ends
+[§3, `on_verify_fail`]; external-session containment [§11.1]. One finding is **accepted as residual**:
+exec/archive into an in-scope container exposes that service's own credentials, and subtle edits to
+mounted protected data evade size-based tripwires (§6.1, stated, not hidden).
+
+MOS capability check (test VM, kernel 6.18, 2026-10-13): unified cgroup v2 is mounted; a child
+cgroup can be created, populated, **frozen** (`cgroup.freeze`) and **killed** (`cgroup.kill`) and
+confirmed empty (`cgroup.events populated 0`); `useradd`, `setpriv`, `unshare` and `runuser` exist.
+So the cgroup path is available on MOS. Not yet proven: delegation of a cgroup subtree to the
+non-root Core user (the cgroup tree is RAM-backed, so a boot-time init script must create and chown
+it), and the setup-created `pe-worker` account surviving reboot (users are recreated each boot).
+Both are slice 3 and slice 6 setup work with MOS tests.
