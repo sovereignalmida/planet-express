@@ -19,7 +19,6 @@ import os
 import pwd
 import threading
 from collections.abc import Callable
-from pathlib import Path
 
 from planet_express.core.store import Store
 from planet_express.missions.adapters.command import CommandRuntime
@@ -100,9 +99,11 @@ def build_mission_runner(
     store: Store, cfg, *, containment: SessionContainment | None = None,
     getpwnam: Callable[[str], pwd.struct_passwd] = pwd.getpwnam,
     getgrgid: Callable[[int], grp.struct_group] = grp.getgrgid,
-    interval_s: float = POLL_INTERVAL_S,
+    interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
 ) -> MissionRunner | None:
-    """None when missions are off or no agent command is configured (nothing could run)."""
+    """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
+    switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
+    the config object's own flag."""
     if not cfg.enabled:
         return None
     if not cfg.runtime.argv:
@@ -119,8 +120,7 @@ def build_mission_runner(
         containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
         worker_uid=account.pw_uid, worker_gid=account.pw_gid)
     supervisor = Supervisor(
-        store, containment, lambda mission: runtime, enabled=lambda: cfg.enabled,
-        workspace_dir=Path(store.path).parent / "mission-workspaces")
+        store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled))
     server = build_worker_server(cfg.worker_socket, supervisor, WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)),
                                  group=getgrgid(account.pw_gid).gr_name)
     return MissionRunner(supervisor, server, interval_s)

@@ -3028,10 +3028,12 @@ def run_bot() -> None:
     )
 
     # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).
-    mission_runner = start_mission_runner(store, config.MISSIONS)
+    mission_runner = start_mission_runner(store, config.MISSIONS, enabled=lambda: config.MISSIONS_ENABLED)
+    shutdown = threading.Event()
     if mission_runner is not None:
-        # systemd stops the service with SIGTERM: run the same path as Ctrl-C so sessions are killed and revoked.
-        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+        # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff
+        # sleep) notices it between updates, and the `finally` below always stops the runner.
+        signal.signal(signal.SIGTERM, lambda *_: shutdown.set())
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")
@@ -3055,28 +3057,32 @@ def run_bot() -> None:
 
     # Main Telegram poll loop
     log.info("Farnsworth entering Telegram poll loop...")
-    while True:
+    try:
+        while not shutdown.is_set():
+            try:
+                updates = tg.poll_updates(timeout=30)
+                for update in updates:
+                    try:
+                        if "message" in update:
+                            handle_message(update, tg, notifier, state, commands, store, missions)
+                        elif "callback_query" in update:
+                            handle_callback(update, tg, notifier, state, commands)
+                    except Exception:
+                        log.exception("Update handler error")
+            except KeyboardInterrupt:
+                shutdown.set()
+            except Exception:
+                log.exception("Poll loop error")
+                shutdown.wait(5)  # brief backoff on unexpected errors; ends early on SIGTERM
+    finally:
         try:
-            updates = tg.poll_updates(timeout=30)
-            for update in updates:
-                try:
-                    if "message" in update:
-                        handle_message(update, tg, notifier, state, commands, store, missions)
-                    elif "callback_query" in update:
-                        handle_callback(update, tg, notifier, state, commands)
-                except Exception:
-                    log.exception("Update handler error")
-        except KeyboardInterrupt:
             if rpc_server is not None:
                 rpc_server.stop()
+        finally:
             if mission_runner is not None:
                 mission_runner.stop()
-            log.info("Farnsworth shutting down. Goodbye!")
-            notifier.notify("🛑 <b>Planet Express going offline.</b>")
-            break
-        except Exception:
-            log.exception("Poll loop error")
-            time.sleep(5)  # brief backoff on unexpected errors
+    log.info("Farnsworth shutting down. Goodbye!")
+    notifier.notify("🛑 <b>Planet Express going offline.</b>")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

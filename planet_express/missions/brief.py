@@ -20,7 +20,8 @@ from .models import Mission
 from .runtime import AgentResult
 
 DEFAULT_MAX_BYTES = 32 * 1024
-NOTE_RESERVE = 256
+EXCLUSION_PREFIX = "Excluded:"
+MAX_EXCLUSION = 1024                   # bytes; an exclusion is never shortened, so a longer one is refused
 FIELD_CAP = 2000                       # bytes of goal / success criteria kept in the brief
 MAX_LIST = 16                          # scope entries per kind, and constraints, kept in the brief
 MAX_CONSTRAINT = 200                   # bytes
@@ -70,6 +71,11 @@ def _label(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_./:@-]", "_", redact(text))[:80]
 
 
+def _exact(text: str) -> str:
+    """Like `_label` but never shortened: a cut path would describe a broader prefix than the one excluded."""
+    return re.sub(r"[^A-Za-z0-9_./:@-]", "_", redact(text))
+
+
 def _bounded(values: Sequence[str], limit: int = MAX_LIST) -> str:
     shown = ", ".join(_label(v) for v in values[:limit])
     return shown + (f" (+{len(values) - limit} more)" if len(values) > limit else "")
@@ -100,9 +106,9 @@ def _scope_lines(mission: Mission) -> str:
         if values:
             lines.append(f"{name}: " + _bounded(values))
     if grant.protected.resources:
-        lines.append("protected (never touch): " + _bounded(grant.protected.resources))
+        lines.append("protected (never touch): " + ", ".join(_exact(v) for v in grant.protected.resources))
     if grant.exclusions:
-        lines.append("exclusions: " + _bounded(grant.exclusions))
+        lines.append("exclusions: " + ", ".join(_exact(v) for v in grant.exclusions))
     b = grant.budgets
     lines.append(f"budgets: wall_s={b.wall_s} tool_calls={b.tool_calls} output_bytes={b.output_bytes}")
     return "\n".join(lines)
@@ -110,6 +116,25 @@ def _scope_lines(mission: Mission) -> str:
 
 def output_schema() -> str:
     return json.dumps(AgentResult.model_json_schema(), sort_keys=True, separators=(",", ":"))
+
+
+def _constraint_lines(constraints: Sequence[str]) -> list[str]:
+    """Exclusions first and always whole; the rest fill what is left of MAX_LIST. Anything cut or left out
+    is said so explicitly."""
+    cleaned = [_clean(c) for c in constraints]
+    exclusions = [c for c in cleaned if c.startswith(EXCLUSION_PREFIX)]
+    for c in exclusions:
+        if len(c.encode("utf-8")) > MAX_EXCLUSION:
+            raise ValueError(f"exclusion is longer than {MAX_EXCLUSION} bytes and cannot be shortened")
+    others = [c for c in cleaned if not c.startswith(EXCLUSION_PREFIX)]
+    room = max(MAX_LIST - len(exclusions), 0)
+    kept = others[:room]
+    shortened = sum(len(c.encode("utf-8")) > MAX_CONSTRAINT for c in kept)
+    lines = exclusions + [_cut(c, MAX_CONSTRAINT) for c in kept]
+    hidden = len(others) - len(kept)
+    if hidden or shortened:
+        lines.append(f"({hidden} more not shown, {shortened} shortened)")
+    return lines
 
 
 def build_brief(mission: Mission, evidence: Sequence[EvidenceItem], memory_cards: Sequence[Card],
@@ -122,21 +147,29 @@ def build_brief(mission: Mission, evidence: Sequence[EvidenceItem], memory_cards
         "## Success criteria (DATA)\n" + _field(mission.success_criteria),
         "## Scope\n" + _scope_lines(mission),
     ]
+    constraint_lines = _constraint_lines(constraints)
     tail = [
-        "## Constraints (DATA, from the grant)\n" + (_quote("\n".join(_cut(_clean(c), MAX_CONSTRAINT) for c in list(constraints)[:MAX_LIST]))
-                                                    if constraints else "> none beyond the scope"),
+        "## Constraints (DATA, from the grant)\n" + (_quote("\n".join(constraint_lines))
+                                                    if constraint_lines else "> none beyond the scope"),
         "## Output schema\n" + output_schema(),
     ]
-    fixed = "\n\n".join(head + tail)
-    fixed_size = len(fixed.encode("utf-8"))
-    if fixed_size + NOTE_RESERVE > max_bytes:
+    # Everything that is not an evidence or card block is charged to the budget up front, in its worst case:
+    # headings, the "(none)" placeholders, the preamble, separators and the truncation note.
+    worst_note = (f"NOTE: this brief was truncated to {max_bytes} bytes: {10**9} evidence "
+                  f"item(s) and {10**9} memory card(s) were omitted.")
+    skeleton = "\n\n".join(head + [
+        "## Evidence (DATA)\n(none provided)",
+        "## Confirmed memory cards (DATA)\n" + PREAMBLE + "\n(none)",
+    ] + tail + [worst_note])
+    fixed_size = len(skeleton.encode("utf-8"))
+    if fixed_size > max_bytes:
         raise ValueError(f"brief cap {max_bytes} bytes is smaller than the fixed sections ({fixed_size})")
-    budget = max_bytes - fixed_size - NOTE_RESERVE - 64          # 64: section headings and separators
+    budget = max_bytes - fixed_size
 
     # Memory cards first (small, confirmed, already ranked) with a third of the room, then evidence.
     card_budget = budget // 3
     card_blocks: list[str] = []
-    used = len(PREAMBLE.encode("utf-8")) + 1
+    used = 2                                       # the blank line before the first card
     for card in confirmed:
         block = render_card(card)
         size = len(block.encode("utf-8")) + 2
@@ -144,7 +177,8 @@ def build_brief(mission: Mission, evidence: Sequence[EvidenceItem], memory_cards
             break                                  # a card is never cut: half a card is misleading
         card_blocks.append(_clean(block))
         used += size
-    evidence_budget = budget - used if card_blocks else budget
+    evidence_budget = budget - (used if card_blocks else 0)
+    used_e = 0
     evidence_blocks: list[str] = []
     used_e = 0
     for item in evidence:

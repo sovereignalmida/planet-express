@@ -21,15 +21,11 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from planet_express.missions.containment import ContainedSession
+from planet_express.missions.containment import ContainedSession, ContainmentError
 
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 _PR_SET_NO_NEW_PRIVS = 38
 _CAP_CHOWN, _CAP_SETGID, _CAP_SETUID = 0, 6, 7
-
-
-class ContainmentError(RuntimeError):
-    """A containment operation could not be completed; the session is NOT known to be dead."""
 
 
 @dataclass(frozen=True)
@@ -197,10 +193,23 @@ class CgroupContainment:
             raise ValueError("unsafe cgroup name")
         return path
 
-    def _reap(self, session_id):
+    def _reap(self, session_id, path):
         leader = self._leaders.get(session_id)
-        if leader is not None and leader.poll() is not None:
-            del self._leaders[session_id]
+        if leader is not None:
+            if leader.poll() is not None:
+                del self._leaders[session_id]
+            return
+        # A session this instance did not launch (Core restarted or re-exec'd; the children stayed): its dead
+        # leader is our zombie child and keeps the cgroup populated until somebody waits for it.
+        try:
+            members = [int(x) for x in self._read(os.path.join(path, "cgroup.procs")).split() if x.isdigit()]
+        except OSError:
+            return
+        for pid in members:
+            try:
+                os.waitpid(pid, os.WNOHANG)       # reaps only a child of ours that has already exited
+            except (ChildProcessError, OSError):
+                pass
 
     # --- SessionContainment ----------------------------------------------------------------
 
@@ -273,12 +282,18 @@ class CgroupContainment:
 
     def kill(self, cs) -> None:
         path = self._dir(cs)
+        if not os.path.isdir(path):
+            return          # gone (reboot, or removed behind our back): the kernel only removes an empty cgroup
         try:
             self.freeze(cs)  # stop members forking while the kill is delivered
         except (OSError, ContainmentError):
             pass  # no freezer, or it is slow: cgroup.kill alone still reaches every member
         try:
             self._write(os.path.join(path, "cgroup.kill"), "1")
+        except FileNotFoundError:
+            if self.is_empty(cs):
+                return
+            raise ContainmentError("cgroup.kill failed: no such file") from None
         except OSError as exc:
             raise ContainmentError(f"cgroup.kill failed: {exc.strerror}") from exc
         deadline = self._clock() + self.kill_timeout_s
@@ -291,7 +306,7 @@ class CgroupContainment:
 
     def is_empty(self, cs) -> bool:
         path = self._dir(cs)
-        self._reap(cs.session_id)  # a zombie leader still counts as a member until reaped
+        self._reap(cs.session_id, path)  # a zombie leader still counts as a member until reaped
         try:
             events = self._read(os.path.join(path, "cgroup.events"))
         except FileNotFoundError:

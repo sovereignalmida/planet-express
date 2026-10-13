@@ -3,7 +3,18 @@
 import pytest
 from pydantic import ValidationError
 
+import config_schema
 from config_schema import MissionsConfig
+
+CGROUP2 = "25 1 0:22 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n30 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+
+
+@pytest.fixture(autouse=True)
+def mountinfo(tmp_path, monkeypatch):
+    path = tmp_path / "mountinfo"
+    path.write_text(CGROUP2)
+    monkeypatch.setattr(config_schema, "MOUNTINFO_PATH", str(path))
+    return path
 
 
 def test_defaults_are_off_and_safe():
@@ -44,3 +55,32 @@ def test_configured_values_round_trip():
 def test_invalid_values_are_refused(kw):
     with pytest.raises(ValidationError):
         MissionsConfig(**kw)
+
+
+@pytest.mark.parametrize("root", ["/", "/sys", "/sys/fs", "/sys/fs/cgroup"])
+def test_roots_that_are_not_strictly_below_the_mount_are_refused(root):
+    with pytest.raises(ValidationError):
+        MissionsConfig(cgroup_root=root)
+
+
+def test_enabled_root_must_be_below_a_cgroup2_mount(mountinfo):
+    MissionsConfig(enabled=True, cgroup_root="/sys/fs/cgroup/pe")
+    with pytest.raises(ValidationError, match="cgroup v2"):
+        MissionsConfig(enabled=True, cgroup_root="/var/lib/pe")
+    mountinfo.write_text("30 1 8:1 / / rw - ext4 /dev/sda1 rw\n")
+    with pytest.raises(ValidationError, match="cgroup v2"):
+        MissionsConfig(enabled=True)
+    MissionsConfig(enabled=False, cgroup_root="/var/lib/pe")        # not checked while missions are off
+
+
+def test_enabled_root_equal_to_the_mount_point_is_refused(mountinfo):
+    mountinfo.write_text("25 1 0:22 / /srv/cg rw - cgroup2 cgroup2 rw\n")
+    with pytest.raises(ValidationError, match="subdirectory"):
+        MissionsConfig(enabled=True, cgroup_root="/srv/cg")
+    MissionsConfig(enabled=True, cgroup_root="/srv/cg/pe")
+
+
+def test_unreadable_mount_table_fails_clearly_when_enabled(mountinfo, tmp_path):
+    config_schema.MOUNTINFO_PATH = str(tmp_path / "missing")
+    with pytest.raises(ValidationError, match="mount table"):
+        MissionsConfig(enabled=True)

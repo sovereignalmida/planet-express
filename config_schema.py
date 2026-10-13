@@ -283,6 +283,7 @@ class MultiHostConfig(BaseModel):
 
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", re.IGNORECASE)
+MOUNTINFO_PATH = "/proc/self/mountinfo"      # tests point this at a fake mount table
 _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 
 
@@ -352,9 +353,27 @@ class MissionsConfig(BaseModel):
     @classmethod
     def _cgroup_root(cls, path: str) -> str:
         if (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
-                or path.rstrip("/") == "/sys/fs/cgroup"):
+                or path.rstrip("/") in ("", "/sys", "/sys/fs", "/sys/fs/cgroup")):
             raise ValueError("missions.cgroup_root must be a normalised absolute path below the cgroup mount")
         return path
+
+    @model_validator(mode="after")
+    def _cgroup_root_below_a_cgroup2_mount(self) -> "MissionsConfig":
+        """When missions are on, the root must be strictly below a cgroup v2 mount point (a delegated subtree)."""
+        if not self.enabled:
+            return self
+        from planet_express.missions.containment_cgroup import cgroup2_mountpoint
+        try:
+            with open(MOUNTINFO_PATH, encoding="utf-8", errors="replace") as handle:
+                mount = cgroup2_mountpoint(self.cgroup_root, handle.read())
+        except OSError as exc:
+            raise ValueError(f"missions.cgroup_root cannot be verified: cannot read the mount table ({exc.strerror})") from None
+        if mount is None:
+            raise ValueError(f"missions.cgroup_root {self.cgroup_root} is not on a cgroup v2 mount; "
+                             "mission sessions need a delegated cgroup2 subtree")
+        if posixpath.normpath(self.cgroup_root) == posixpath.normpath(mount):
+            raise ValueError("missions.cgroup_root must be a subdirectory below the cgroup2 mount point, not the mount itself")
+        return self
 
 
 class PlanetExpressConfig(BaseModel):
