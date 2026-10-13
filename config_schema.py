@@ -280,6 +280,13 @@ class MultiHostConfig(BaseModel):
         return self
 
 
+class MissionsConfig(BaseModel):
+    """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+
+
 class PlanetExpressConfig(BaseModel):
     # extra="forbid": a misspelled key (e.g. "forbidden_stack") must be a hard error, not
     # silently ignored — pydantic's default would otherwise drop it and fall back to the
@@ -340,6 +347,7 @@ class PlanetExpressConfig(BaseModel):
     # MOS sudo gate can be built at all -- Phase 3 deliberately deferred host-type
     # dispatch when only one provider existed; this is that deferred decision.
     host_control_provider: Literal["systemd", "mos"] = "systemd"
+    missions: MissionsConfig = MissionsConfig()
 
     @field_validator("backup_jobs")
     @classmethod
