@@ -9,7 +9,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | 0 | Contracts, threat model | DONE rev 0.4 (final G1 dispositioned); was: spec rev 0.3 (`v4-slice-0-contracts.md`); two Codex G1 rounds folded in (§19, §20); MOS cgroup freeze/kill verified; needs operator sign-off |
 | 1 | Mission store | MERGED to v4-next (9870e21 + merge); Codex G3 done by worker (3 fixed); Claude /code-review round 1 done: 5 fixes merged |
 | 2 | Ship's Memory | MERGED to v4-next (d744c2a + merge); Codex G3 x2 done (2 fixed); v6 DDL combined with slice 1 in core/store.py |
-| 3 | Supervisor, adapter, worker | 3b done (worker branch a03426f, unmerged, awaiting 3a); 3a running |
+| 3 | Supervisor, adapter, worker | 3a+3b+3c MERGED; 3c review round 2 (9 fixes) in progress; 3d launcher spec (§22) OPERATOR-APPROVED, brief S3d-brief.md ready, starts after 3c r2 |
 | 4 | Surfaces | MERGED (round 1 + round 2 fixes, 10 Claude findings). Codex G3 on round 2 PENDING (usage limit until 21:05 WEST 2026-10-13): run `codex review --base 44c38e5` on the slice-4 diff |
 | 5 | Checkpoint | not started |
 | 6 | Tripwires and grants | not started |

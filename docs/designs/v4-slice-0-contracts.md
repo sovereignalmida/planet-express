@@ -109,8 +109,7 @@ once any approving `mission_approvals` row exists for its hash; a change creates
   accepted mutation. Cancel sets `cancel_requested`; Supervisor kills the session's process group,
   Core reads host state, and the mission lands in `cancelled` or `needs_operator`.
 - A live session runs in a **delegated cgroup** (v2, `pids`/`freezer`); pause = freeze the cgroup,
-  cancel/kill = freeze, `cgroup.kill`, confirm empty. Where cgroups are unavailable (to be proven on
-  MOS, §18d) the fallback is a per-session Unix identity (`kind=local_uid`) taken from a reserved uid range that
+  cancel/kill = freeze, `cgroup.kill`, confirm empty. Where cgroups are unavailable the host is proposal-only (decision 2026-10-13; the per-uid kill fallback described here is withdrawn; the unique uid per session in §22.1 remains for isolation, not as containment). Original text: a per-session Unix identity (`kind=local_uid`) taken from a reserved uid range that
   setup creates, allocated and reaped transactionally via `mission_sessions.session_uid` (unique),
   verified through `SO_PEERCRED`, with exclusivity checked before start; kill is `kill -9 -1` from a
   setuid helper running as that uid only; a host
@@ -541,7 +540,7 @@ into §6.2 (they affect only Phase 3); the proxy binding, execution predicate an
 model are normative now (§3, §6.1, §10). The `approval_id` wording follow-up is fixed in §2.
 Remaining work is owned by slices, not by slice 0.
 
-## 22. Session identity and launcher (slice 3d; rev 2 after G1 review, needs one more look before code)
+## 22. Session identity and launcher (slice 3d; rev 2 after G1 review; OPERATOR-APPROVED 2026-10-13: unique uid per session, DirectLauncher on MOS, proposal-only when the preflight fails)
 
 Findings that shaped this section (Codex G1, 2026-10-13): Core is unprivileged on Ubuntu so it cannot
 spawn as another uid or move that process into a cgroup; MOS has **no sudo** and PE runs as root there
@@ -599,8 +598,8 @@ binding; the helper's own install path, GID, and delegated file ownership were u
   session). MOS: the same tree created by a boot script (RAM-backed cgroupfs) owned as above.
 - Preflight performs real operations on a throwaway cgroup: create, move, freeze **and confirm
   `cgroup.events frozen 1`**, kill, confirm `populated 0`, rmdir, and checks `cgroup.kill` exists
-  (kernel >= 5.14). `freeze()` must poll `frozen 1` before reporting paused. Failing hosts use the uid
-  fallback (`kill -9 -1` as the session uid) or are proposal-only.
+  (kernel >= 5.14). `freeze()` must poll `frozen 1` before reporting paused. A host that fails any preflight step is **proposal-only** for
+  missions: there is no weaker fallback containment (decided 2026-10-13).
 
 ### 22.5 Setup, repair, undo (named steps, each with probe, repair and undo)
 `session-uid-range`, `launcher-helper` (file, config, ancestors check), `launcher-sudoers` (Ubuntu only;
