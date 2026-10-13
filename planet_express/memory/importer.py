@@ -238,7 +238,10 @@ def _items(path: Path, report: ImportReport):
             yield str(file), _Bad(f"cannot read file: {exc.__class__.__name__}")
             continue
         if file.suffix.lower() == ".jsonl":
-            for number, line in enumerate(text.splitlines(), 1):
+            # Split on \n only: str.splitlines() also breaks on U+2028/U+2029/U+0085, which are legal
+            # inside a JSON string and must not cut a record in two.
+            for number, line in enumerate(text.split("\n"), 1):
+                line = line.removesuffix("\r")
                 if not line.strip():
                     continue
                 location = f"{file}:{number}"
@@ -293,6 +296,9 @@ def import_path(conn: sqlite3.Connection, path, *, actor: str = "importer:cli", 
         report.rejected.append(Rejected(str(path), "no such file or directory"))
         return report
     seen: dict[str, str] = {}
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")  # take the write lock before any status is read
     conn.execute("SAVEPOINT memory_import")
     try:
         for location, parsed in _items(path, report):
@@ -313,16 +319,24 @@ def import_path(conn: sqlite3.Connection, path, *, actor: str = "importer:cli", 
                 _import_one(conn, card, detail, actor, now, report)
             except _Bad as exc:
                 report.rejected.append(Rejected(location, str(exc)))
+            except store.CardExistsError:
+                # e.g. an earlier conflict candidate the operator has since confirmed or deprecated:
+                # that decision stands, and the rest of the batch carries on.
+                report.skipped += 1
             except store.SecretShapedContent as exc:
                 report.rejected.append(Rejected(location, str(exc)))
     except BaseException:
         conn.execute("ROLLBACK TO memory_import")
         conn.execute("RELEASE memory_import")
+        if own:
+            conn.execute("ROLLBACK")
         raise
     if dry_run:
         conn.execute("ROLLBACK TO memory_import")
     conn.execute("RELEASE memory_import")
-    if not dry_run:
+    if own:
+        conn.execute("ROLLBACK" if dry_run else "COMMIT")
+    elif not dry_run:
         conn.commit()
     return report
 
@@ -356,7 +370,7 @@ def render_jsonl(card: Card) -> str:
         data["steps"] = [s.model_dump() for s in card.steps]
     if card.review_after:
         data["review_after"] = card.review_after.isoformat()
-    return json.dumps(data, ensure_ascii=False)
+    return json.dumps(data, ensure_ascii=True)
 
 
 def _open_db(db: Path, dry_run: bool) -> sqlite3.Connection:
@@ -392,6 +406,10 @@ def main(argv: list[str] | None = None) -> int:
     except (schema.FTSUnavailable, ValueError, sqlite3.Error) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    if store.redact_is_shape_only():
+        print("warning: no Planet Express config found, so site-specific secrets are unknown; cards were "
+              "screened by shape only (key names, bearer tokens, private keys, common token formats)",
+              file=sys.stderr)
     for item in report.rejected:
         print(f"rejected {item}", file=sys.stderr)
     print(report.summary())

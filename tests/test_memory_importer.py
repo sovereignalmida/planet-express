@@ -292,6 +292,7 @@ def test_cli_works_without_any_pe_config(tmp_path):
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=False, env=env)
     assert proc.returncode == 0, proc.stderr
     assert json.dumps(proc.stdout)  # printed a summary
+    assert "site-specific" in proc.stderr  # screening ran shape-only, and the operator is told
 
 
 def test_render_markdown_is_loadable_yaml_front_matter():
@@ -328,3 +329,48 @@ def test_conflict_candidate_that_would_exceed_the_bound_is_rejected_not_stored(c
     assert len(report.rejected) == 1 and "conflicts_with" in report.rejected[0].message
     assert report.conflicts == 0
     assert [c.id for c in store.list_cards(conn)] == ["a"]  # still readable, nothing invalid written
+
+
+def test_reimport_over_a_resolved_conflict_candidate_does_not_abort_the_batch(conn, tmp_path):
+    confirmed(conn, "a", statement="Approved.")
+    write(tmp_path, "a.md", MD.format(id="a", type="fact", source="inferred", body="Different."))
+    assert run(conn, tmp_path).conflicts == 1
+    cid = next(c.id for c in store.list_cards(conn) if c.id != "a")
+    store.confirm(conn, cid, OPERATOR, now=NOW)  # the operator accepted the conflict candidate
+    write(tmp_path, "good.md", MD.format(id="good", type="fact", source="inferred", body="Fresh."))
+    report = run(conn, tmp_path)
+    assert report.rejected == [] and report.skipped == 1 and report.created == 1
+    assert store.get_card(conn, "good") is not None
+
+
+def test_cli_does_not_traceback_on_a_resolved_conflict_candidate(tmp_path):
+    from planet_express.memory import schema
+    notes, db = tmp_path / "notes", tmp_path / "m.db"
+    write(notes, "a.md", MD.format(id="a", type="fact", source="inferred", body="Different."))
+    setup = sqlite3.connect(db)
+    schema.init_schema(setup)
+    store.upsert_candidate(setup, make_card("a", statement="Approved.", source="inferred"), OPERATOR, now=NOW)
+    store.confirm(setup, "a", OPERATOR, now=NOW)
+    setup.commit()
+    assert importer.main([str(notes), "--db", str(db)]) == 0   # creates the conflict candidate
+    cid = next(c.id for c in store.list_cards(setup) if c.id != "a")
+    store.confirm(setup, cid, OPERATOR, now=NOW)
+    setup.commit()
+    assert importer.main([str(notes), "--db", str(db)]) == 0
+    setup.close()
+
+
+def test_jsonl_with_unicode_line_separators_is_one_record(conn, tmp_path):
+    card = make_card("sep", statement="one\u2028two\u2029three\x85four")
+    line = importer.render_jsonl(card)
+    assert line.isascii() and "\n" not in line
+    write(tmp_path, "c.jsonl", line + "\r\n")
+    assert run(conn, tmp_path).rejected == []
+    assert store.get_card(conn, "sep").statement == card.statement
+
+
+def test_raw_unicode_separators_inside_a_json_string_do_not_split_the_record(conn, tmp_path):
+    raw = '{"id": "raw", "type": "fact", "source": "inferred", "statement": "a\u2028b\u0085c"}'
+    write(tmp_path, "c.jsonl", raw + "\n")
+    report = run(conn, tmp_path)
+    assert report.rejected == [] and store.get_card(conn, "raw").statement == "a\u2028b\u0085c"
