@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from planet_express.integrations.rpc import PeerCred, RpcError, RpcServer
 from planet_express.missions.runtime import AgentResult
+from planet_express.missions.sessions import resolve_session
 
 WORKER_METHODS = (
     "mission.get_context",
@@ -55,17 +56,17 @@ def _proc_cgroup(pid: int, mount: str = CGROUP_MOUNT) -> str | None:
         return None
 
 
-def _default_resolver(*args, **kwargs):
-    from planet_express.missions.sessions import resolve_session  # S3a
-    return resolve_session(*args, **kwargs)
-
-
 class WorkerAuthenticator:
-    """Callable for `RpcServer(authenticator=...)`: returns the session row or None."""
+    """Callable for `RpcServer(authenticator=...)`: returns the session row or None.
 
-    def __init__(self, resolve: Callable[..., Any] | None = None, *,
+    `store` is Core's `Store`; the session lookup is S3a's `resolve_session(store, token_hash, peer_cgroup=,
+    peer_uid=)`. `resolve` replaces that lookup (tests only)."""
+
+    def __init__(self, store, *, resolve: Callable[..., Any] | None = None,
                  read_cgroup: Callable[[int], str | None] | None = None, mount: str = CGROUP_MOUNT):
-        self._resolve = resolve or _default_resolver
+        if store is None and resolve is None:
+            raise ValueError("a store (or a resolver) is required")
+        self._resolve = resolve or (lambda token_hash, **kw: resolve_session(store, token_hash, **kw))
         self._read_cgroup = read_cgroup or (lambda pid: _proc_cgroup(pid, mount))
 
     def __call__(self, peer: PeerCred, request: dict):

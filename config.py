@@ -100,6 +100,7 @@ AUTONOMY = _cfg.autonomy
 BACKUP_JOBS = _cfg.backup_jobs
 MULTI_HOST = _cfg.multi_host
 MISSIONS_ENABLED = _cfg.missions.enabled
+MISSIONS = _cfg.missions
 
 
 def active_stack_dirs() -> list[Path]:

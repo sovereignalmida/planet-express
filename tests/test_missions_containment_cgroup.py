@@ -7,11 +7,14 @@ import sys
 import time
 from pathlib import Path
 
+import missions_helpers
 import pytest
 
-import s3b_stubs  # noqa: F401  (installs S3a stand-ins when S3a is not merged yet)
 from planet_express.missions.containment import ContainedSession
-from planet_express.missions.containment_cgroup import CgroupContainment, ContainmentError
+from planet_express.missions.containment_cgroup import (
+    CgroupContainment,
+    ContainmentError,
+)
 
 
 class FakeFsContainment(CgroupContainment):
@@ -33,6 +36,11 @@ class Recording(CgroupContainment):
     def _write(self, path, value):
         self.writes.append((Path(path).name, value))
         super()._write(path, value)
+        if Path(path).name == "cgroup.freeze":      # the kernel reflects the request in cgroup.events
+            events = Path(path).with_name("cgroup.events")
+            if events.exists():
+                text = events.read_text().splitlines()
+                events.write_text("\n".join([l for l in text if not l.startswith("frozen")] + [f"frozen {value}"]) + "\n")
 
     def _read(self, path):
         if Path(path).name == "cgroup.events":
@@ -273,3 +281,146 @@ def test_real_cgroup_kill_catches_a_double_forking_escaper(tmp_path):
         c.cleanup(cs)
     finally:
         subprocess.run(["rmdir", str(base)], check=False)
+
+
+# ── S3c: the launcher strategy ──────────────────────────────────────────────
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="the unprivileged failure path needs a non-root caller")
+def test_default_launcher_without_privilege_fails_with_a_clear_message(root, tmp_path):
+    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, sleep=lambda s: None, require_cgroup2=False)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    with pytest.raises(ContainmentError) as exc:
+        c.spawn(cs, [sys.executable, "-c", "pass"], {}, str(tmp_path))
+    assert "launcher" in str(exc.value) and "CAP_SETUID" in str(exc.value)
+    assert cs.session_id not in c._out and cs.session_id not in c._leaders       # nothing half-started
+    assert c.pids(cs) == []
+
+
+def test_a_custom_launcher_receives_a_complete_request_and_its_leader_is_tracked(root, tmp_path):
+    seen = []
+
+    class Fake:
+        def launch(self, request):
+            seen.append(request)
+            return subprocess.Popen([sys.executable, "-c", "print('hi')"], stdout=request.output_fd,
+                                    stderr=request.output_fd, cwd=request.cwd)
+
+    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, sleep=lambda s: None, launcher=Fake(), require_cgroup2=False)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    r, w = os.pipe()
+    try:
+        pid = c.spawn(cs, ["/bin/agent", "--x"], {"A": "b"}, str(tmp_path), (r,))
+    finally:
+        os.close(r)
+        os.close(w)
+    req = seen[0]
+    assert (req.argv, req.env, req.cwd, req.pass_fds) == (["/bin/agent", "--x"], {"A": "b"}, str(tmp_path), (r,))
+    assert req.procs_path == str(Path(cs.cgroup_path) / "cgroup.procs")
+    assert (req.uid, req.gid) == (4242, 4242)
+    assert pid == c._leaders["s1"].pid
+    deadline = time.time() + 10
+    data = b""
+    while b"hi" not in data and time.time() < deadline:
+        try:
+            data += os.read(c.output_fd(cs), 100)
+        except BlockingIOError:
+            time.sleep(0.02)
+    assert b"hi" in data
+    c.release_output(cs)
+
+
+def test_a_failing_launcher_leaks_no_pipe(root, tmp_path):
+    class Boom:
+        def launch(self, request):
+            raise RuntimeError("no")
+
+    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, launcher=Boom(), require_cgroup2=False)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    before = len(os.listdir("/proc/self/fd"))
+    with pytest.raises(ContainmentError):
+        c.spawn(cs, ["/bin/x"], {}, str(tmp_path))
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+# ── addendum: identity, cgroup2, frozen polling ─────────────────────────────
+
+def test_worker_uid_equal_to_the_core_user_is_refused(root):
+    with pytest.raises(ValueError):
+        CgroupContainment(root, worker_uid=os.geteuid(), worker_gid=4242, require_cgroup2=False)
+
+
+def test_spawn_rechecks_the_worker_identity(root, tmp_path):
+    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, require_cgroup2=False,
+                          launcher=type("L", (), {"launch": lambda self, r: pytest.fail("launched")})())
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    c.worker_uid = os.geteuid()
+    with pytest.raises(ContainmentError):
+        c.spawn(cs, ["/bin/x"], {}, str(tmp_path))
+
+
+def test_cgroup_root_must_be_on_a_cgroup2_mount(root, tmp_path):
+    from planet_express.missions.containment_cgroup import cgroup2_mount_of
+    info = ("25 1 0:22 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
+            "30 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+            "31 25 0:40 / /sys/fs/cgroup/odd rw - tmpfs tmpfs rw\n")
+    assert cgroup2_mount_of("/sys/fs/cgroup/pe-missions", info)
+    assert not cgroup2_mount_of("/sys/fs/cgroup/odd/x", info)
+    assert not cgroup2_mount_of("/var/lib/pe", info)
+    assert not cgroup2_mount_of("/sys/fs/cgroupx/y", info)
+    mounts = tmp_path / "mountinfo"
+    mounts.write_text("30 1 8:1 / / rw - ext4 /dev/sda1 rw\n")
+    with pytest.raises(ContainmentError) as exc:
+        CgroupContainment(root, worker_uid=4242, worker_gid=4242, mountinfo_path=str(mounts))
+    assert "cgroup v2" in str(exc.value)
+    mounts.write_text(f"30 1 0:22 / {root.parent} rw - cgroup2 cgroup2 rw\n")
+    CgroupContainment(root, worker_uid=4242, worker_gid=4242, mountinfo_path=str(mounts))
+
+
+def test_freeze_waits_for_frozen_1_and_thaw_for_frozen_0(root):
+    now = [0.0]
+    c = make(root, Recording, sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0])
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    events = Path(cs.cgroup_path) / "cgroup.events"
+    reads = []
+    orig = c._read
+
+    def slow(path):
+        text = orig(path)
+        if Path(path).name == "cgroup.events":
+            reads.append(1)
+            if len(reads) < 3:                      # the kernel has not finished freezing yet
+                return "populated 1\nfrozen 0\n"
+        return text
+    c._read = slow
+    c.freeze(cs)
+    assert len(reads) >= 3 and "frozen 1" in events.read_text()
+    c._read = orig
+    c.thaw(cs)
+    assert "frozen 0" in events.read_text()
+
+
+def test_freeze_times_out_loudly_and_kill_still_proceeds(root):
+    now = [0.0]
+
+    class Stuck(Recording):
+        def _write(self, path, value):
+            self.writes.append((Path(path).name, value))
+            CgroupContainment._write(self, path, value)     # never reflected in cgroup.events
+
+    def sleep(s):
+        now[0] += s
+
+    c = make(root, Stuck, sleep=sleep, clock=lambda: now[0], freeze_timeout_s=1.0)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    with pytest.raises(ContainmentError):
+        c.freeze(cs)
+    c.writes.clear()
+    c.empty_after_polls = 0
+    c.kill(cs)
+    assert ("cgroup.kill", "1") in c.writes
