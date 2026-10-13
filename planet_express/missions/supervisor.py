@@ -118,11 +118,34 @@ def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
         return []
 
 
-def _serialised(fn):
+def _per_mission(fn):
+    """Serialise on the mission named by the first argument. Missions never wait for each other, so a slow
+    kill (up to the containment's kill timeout) on one mission cannot stall another's polling or worker calls."""
     @functools.wraps(fn)
-    def wrapper(self, *args, **kwargs):
-        with self._lock:
-            return fn(self, *args, **kwargs)
+    def wrapper(self, mission_id, *args, **kwargs):
+        with self._lock_for(mission_id):
+            return fn(self, mission_id, *args, **kwargs)
+    return wrapper
+
+
+WORKER_LOCK_WAIT_S = 2.0
+
+
+def _per_session(fn):
+    """Worker-socket entry points. A worker whose mission is mid-kill, or whose mission lock is busy for longer
+    than a moment, is refused at once instead of tying up one of the socket's few handler threads."""
+    @functools.wraps(fn)
+    def wrapper(self, session, *args, **kwargs):
+        run = self._runs.get(session.mission_id)
+        if run is None or run.phase != "running":
+            raise RpcError("Refused", "unauthorized")
+        lock = self._lock_for(session.mission_id)
+        if not lock.acquire(timeout=WORKER_LOCK_WAIT_S):
+            raise RpcError("Busy", "busy")
+        try:
+            return fn(self, session, *args, **kwargs)
+        finally:
+            lock.release()
     return wrapper
 
 
@@ -150,7 +173,12 @@ class Supervisor:
         self.max_brief_bytes = max_brief_bytes
         self.lease_ttl_s = lease_ttl_s
         self._runs: dict[str, _Run] = {}
-        self._lock = threading.RLock()        # start/poll/cancel/recover never interleave in-process
+        self._locks: dict[str, threading.RLock] = {}      # one per mission: its start/poll/cancel never interleave
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, mission_id: str) -> threading.RLock:
+        with self._locks_guard:
+            return self._locks.setdefault(mission_id, threading.RLock())
 
     # ── guards ──────────────────────────────────────────────────────────────
     @property
@@ -171,7 +199,7 @@ class Supervisor:
             return conn.execute("SELECT COUNT(*) FROM mission_sessions WHERE mission_id=?", (mission_id,)).fetchone()[0]
 
     # ── start ───────────────────────────────────────────────────────────────
-    @_serialised
+    @_per_mission
     def start(self, mission_id: str) -> None:
         self._require_enabled()
         mission = self.ms.get_mission(mission_id)
@@ -253,11 +281,10 @@ class Supervisor:
         return out
 
     # ── driving a session ───────────────────────────────────────────────────
-    @_serialised
     def poll_all(self) -> dict[str, str]:
         return {mid: self.poll(mid) for mid in list(self._runs)}
 
-    @_serialised
+    @_per_mission
     def poll(self, mission_id: str) -> str:
         """Advance one step. Returns the mission's status afterwards."""
         run = self._runs.get(mission_id)
@@ -356,7 +383,6 @@ class Supervisor:
         self._note(mission_id, {"memory_candidates": {"stored": stored, "dropped": dropped}})
 
     # ── ending a session ────────────────────────────────────────────────────
-    @_serialised
     def cancel(self, mission_id: str, by: str) -> None:
         if not (by.startswith("operator:") or by in ("system", "core")):
             raise ValueError("cancel must name an operator or a core actor")
@@ -370,11 +396,14 @@ class Supervisor:
             conn.execute("UPDATE missions SET cancel_requested_at=?, cancel_requested_by=?, updated_at=? "
                          "WHERE id=?", (now, by, now, mission_id))
             insert_event(conn, mission_id, "decision", by, {"cancel_requested": True}, now)
-        run = self._runs.get(mission_id)
-        if run is not None:
-            self._kill_and_advance(run, "cancel")
-        elif not self._adopt(self.ms.get_mission(mission_id), "cancel"):
-            self._settle_without_session(mission_id, "cancel")
+        # The request above is recorded without the mission lock (so it is never delayed by a slow kill); the
+        # kill itself runs under it.
+        with self._lock_for(mission_id):
+            run = self._runs.get(mission_id)
+            if run is not None:
+                self._kill_and_advance(run, "cancel")
+            elif not self._adopt(self.ms.get_mission(mission_id), "cancel"):
+                self._settle_without_session(mission_id, "cancel")
 
     def _kill_and_advance(self, run: _Run, reason: str) -> None:
         self._begin_kill(run, reason)
@@ -436,6 +465,11 @@ class Supervisor:
                     return self._launch(mission)
                 except Exception as exc:
                     self._note(mission.id, {"restart_failed": type(exc).__name__})
+                    if mission.id in self._runs:
+                        # The new session was registered and its kill could not be completed: it may still be
+                        # running. It stays tracked in `killing`, the poll loop retries until `is_empty()`, and
+                        # nothing below may request a transition meanwhile.
+                        return
             else:
                 self._note(mission.id, {"retries_exhausted": reason})
         self._settle_without_session(mission.id, reason, run.result)
@@ -456,7 +490,6 @@ class Supervisor:
             self._note(mission_id, {"transition_refused": target, "why": str(exc)[:200]})
 
     # ── the daemon's loop and shutdown ──────────────────────────────────────
-    @_serialised
     def tick(self) -> None:
         """One turn of the daemon's poll thread: start queued Observe/Propose missions, then advance every
         running session. One misbehaving mission never stops the others."""
@@ -493,24 +526,23 @@ class Supervisor:
             self._start_failures.pop(mission_id, None)
             self._settle_without_session(mission_id, "start_failed")
 
-    @_serialised
     def shutdown(self) -> None:
         """Daemon stop: revoke every token and kill every session. Missions are NOT moved on: they stay
         `investigating`, and `recover()` at the next start restarts them within the retry budget. A session
         that cannot be proven empty stays tracked (and its cgroup stays), never silently dropped."""
         for run in list(self._runs.values()):
             try:
-                self._begin_kill(run, "shutdown")
-                if run.cs is None or self.containment.is_empty(run.cs):
-                    self._revoke(run)
-                    if run.cs is not None:
-                        self.containment.cleanup(run.cs)
-                    self._runs.pop(run.mission_id, None)
+                with self._lock_for(run.mission_id):
+                    self._begin_kill(run, "shutdown")
+                    if run.cs is None or self.containment.is_empty(run.cs):
+                        self._revoke(run)
+                        if run.cs is not None:
+                            self.containment.cleanup(run.cs)
+                        self._runs.pop(run.mission_id, None)
             except Exception:
                 log.exception("could not stop mission %s cleanly", run.mission_id)
 
     # ── restart recovery ────────────────────────────────────────────────────
-    @_serialised
     def recover(self) -> list[str]:
         """Reconcile after a Supervisor restart. For each in-flight Observe/Propose mission: kill whatever
         its last session left in containment, wait for empty, then restart within the retry budget or hand
@@ -523,8 +555,15 @@ class Supervisor:
             if mission.tier not in ("observe", "propose"):
                 continue
             reason = "cancel" if mission.cancel_requested_at is not None else "recover"
-            if self._adopt(mission, reason, only_if_live=mission.status != "investigating"):
-                acted.append(mission.id)
+            try:
+                with self._lock_for(mission.id):
+                    if self._adopt(mission, reason, only_if_live=mission.status != "investigating"):
+                        acted.append(mission.id)
+            except Exception as exc:  # one mission whose session cannot be proven dead must not block the others
+                # `_adopt` registered the run before killing, so it stays tracked in `killing`: the poll loop keeps
+                # retrying, and the mission is not moved on until containment says the session is empty.
+                log.warning("recovering mission %s failed: %s", mission.id, type(exc).__name__)
+                self._note(mission.id, {"recover_failed": type(exc).__name__})
         return acted
 
     def _adopt(self, mission: Mission, reason: str, *, only_if_live: bool = False) -> bool:
@@ -562,7 +601,7 @@ class Supervisor:
             raise RpcError("Refused", "unauthorized")
         return run
 
-    @_serialised
+    @_per_session
     def get_context(self, session: SessionRow) -> dict:
         run = self._live_run(session)
         mission = self.ms.get_mission(run.mission_id)
@@ -570,7 +609,7 @@ class Supervisor:
                 "success_criteria": mission.success_criteria, "tier": mission.tier,
                 "scope": mission.grant().scope.model_dump(mode="json"), "brief": run.brief}
 
-    @_serialised
+    @_per_session
     def post_event(self, session: SessionRow, kind: str, data: dict) -> dict:
         run = self._live_run(session)
         if kind not in RUNTIME_EVENT_KINDS:
@@ -585,7 +624,7 @@ class Supervisor:
         run.output_bytes += size
         return {"ok": True}
 
-    @_serialised
+    @_per_session
     def heartbeat(self, session: SessionRow) -> dict:
         run = self._live_run(session)
         try:
@@ -594,7 +633,7 @@ class Supervisor:
             raise RpcError("Refused", "unauthorized") from None
         return {"ok": True}
 
-    @_serialised
+    @_per_session
     def submit_result(self, session: SessionRow, result: AgentResult) -> dict:
         run = self._live_run(session)
         if run.submitted is not None:
@@ -603,14 +642,17 @@ class Supervisor:
         self._note(run.mission_id, {"result_submitted": True})
         return {"accepted": True}
 
+    @_per_session
+    def _search_scope(self, session: SessionRow) -> Mission:
+        return self.ms.get_mission(self._live_run(session).mission_id)
+
     def memory_search(self, session: SessionRow, query: str, limit: int) -> dict:
-        with self._lock:
-            run = self._live_run(session)
-            mission = self.ms.get_mission(run.mission_id)
+        mission = self._search_scope(session)
         grant = mission.grant()
         tags = [f"stack:{x}" for x in grant.scope.stacks] + [f"service:{x}" for x in grant.scope.services]
         with self.store._connect() as conn:
             found = retrieve(conn, tags, query, limit=min(limit, MAX_MEMORY_HITS))       # confirmed cards only
+        self._search_scope(session)       # revalidate: a session revoked or killed meanwhile gets nothing back
         return {"cards": [{"id": c.id, "type": c.type, "status": c.status, "title": c.title, "text": render_card(c)}
                           for c in found.cards],
                 "truncated": found.truncated}

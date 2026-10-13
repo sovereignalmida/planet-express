@@ -205,6 +205,14 @@ def test_worker_socket_serves_only_the_live_session_of_the_right_cgroup(tmp_path
 
 # ── wiring from configuration ───────────────────────────────────────────────
 
+@pytest.fixture(autouse=True)
+def cgroup2_mount(tmp_path, monkeypatch):
+    import config_schema
+    path = tmp_path / "mountinfo"
+    path.write_text("25 1 0:22 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")
+    monkeypatch.setattr(config_schema, "MOUNTINFO_PATH", str(path))
+
+
 def cfg(**over):
     body = {"enabled": True, "runtime": {"argv": ["/usr/bin/agent", "--json"]}}
     body.update(over)
@@ -260,3 +268,14 @@ def test_the_core_user_cannot_be_the_worker(tmp_path):
     store, _ = make_store(tmp_path)
     with pytest.raises(ValueError):
         build_mission_runner(store, cfg(), getpwnam=account(os.geteuid(), 900), containment=FakeContainment())
+
+
+def test_the_supervisor_reads_the_live_enabled_switch(tmp_path):
+    store, _ = make_store(tmp_path)
+    flag = {"on": True}
+    runner = build_mission_runner(store, cfg(), getpwnam=account(), getgrgid=group, containment=FakeContainment(),
+                                  enabled=lambda: flag["on"])
+    assert runner.supervisor.enabled
+    flag["on"] = False
+    assert not runner.supervisor.enabled
+    assert runner.supervisor.workspace_dir == tmp_path / "state" / "mission-workspaces"

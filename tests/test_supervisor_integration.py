@@ -263,3 +263,105 @@ def test_token_fd_env_name_is_pe_session_token_fd(tmp_path):
     assert "PE_SESSION_TOKEN_FD" in env and "PE_TOKEN_FD" not in env
     assert rig.runtimes[0].token not in json.dumps(env)
     assert env["PE_MISSION_ID"] == rig.mid
+
+
+# ── round 2 ─────────────────────────────────────────────────────────────────
+
+def second_mission(rig):
+    from planet_express.missions.models import Grant
+    other = rig.ms.create_mission(title="t2", origin="operator", grant=Grant.model_validate(
+        {"tier": "observe", "scope": {"stacks": ["media"], "hosts": ["local"]}}), goal="other goal",
+        success_criteria="s", runtime="fake")
+    advance_to(rig.ms, other.id, "queued")
+    return other
+
+
+def test_a_slow_kill_on_one_mission_does_not_block_another_missions_worker_calls(tmp_path):
+    import threading
+    import time
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 20}, {"script": [update()] * 20}])
+    other = second_mission(rig)
+    rig.sup.start(rig.mid)
+    rig.sup.start(other.id)
+    row_b = session_of(rig, 1)
+    row_a = session_of(rig, 0)
+    sid_a = rig.runtimes[0].context.session.session_id
+    gate, entered = threading.Event(), threading.Event()
+    real_kill = rig.cont.kill
+
+    def slow_kill(cs):
+        if cs.session_id == sid_a:
+            entered.set()
+            gate.wait(10)
+        real_kill(cs)
+    rig.cont.kill = slow_kill
+    worker = threading.Thread(target=rig.sup.cancel, args=(rig.mid, "operator:me"))
+    worker.start()
+    try:
+        assert entered.wait(5)
+        t0 = time.time()
+        assert rig.sup.heartbeat(row_b)["ok"] is True
+        assert rig.sup.post_event(row_b, "note", {"a": 1})["ok"] is True
+        assert time.time() - t0 < 2
+        t0 = time.time()
+        with pytest.raises(RpcError):                        # A's own worker is refused at once, not queued
+            rig.sup.heartbeat(row_a)
+        assert time.time() - t0 < 2
+    finally:
+        gate.set()
+        worker.join(10)
+    assert rig.ms.get_mission(rig.mid).status == "cancelled"
+
+
+def test_a_failed_relaunch_never_falls_through_to_a_transition_while_a_session_may_run(tmp_path):
+    from planet_express.missions.containment import ContainmentError
+    rig = Rig(tmp_path, budgets={"retries": 2}, behaviours=[{"script": [update()]}, {"fail_start": OSError("boom")}])
+    rig.sup.start(rig.mid)
+    first = rig.runtimes[0].context.session.session_id
+    real_kill = rig.cont.kill
+    broken = {"on": True}
+
+    def kill(cs):
+        if cs.session_id != first and broken["on"]:
+            raise ContainmentError("cannot kill")
+        real_kill(cs)
+    rig.cont.kill = kill
+    rig.cont.crash(first)
+    rig.sup.poll(rig.mid)                                     # the relaunch's own kill fails, and is swallowed
+    assert rig.status() == "investigating", "no transition while the new session is not provably empty"
+    assert rig.mid in rig.sup._runs and rig.sup._runs[rig.mid].phase == "killing"
+    assert not any("needs_operator" in s for s in rig.state_path())
+    second = rig.session_ids()[-1]
+    rig.cont.leak_child(second)                               # the new session really has a live member
+    with pytest.raises(ContainmentError):
+        rig.sup.poll(rig.mid)                                 # retried, still not empty
+    assert rig.status() == "investigating"
+    broken["on"] = False
+    rig.sup.poll(rig.mid)
+    assert rig.status() == "investigating", "the leaked member keeps it from being provably empty"
+    rig.cont.reap_leaks(second)
+    rig.sup.poll(rig.mid)                                     # now provably empty: the mission settles
+    assert rig.status() == "needs_operator"
+    assert rig.mid not in rig.sup._runs
+
+
+def test_recover_isolates_a_containment_error_to_its_mission(tmp_path):
+    from planet_express.missions.containment import ContainmentError
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 5}, {"script": [update()] * 5}])
+    other = second_mission(rig)
+    rig.sup.start(rig.mid)
+    rig.sup.start(other.id)
+    sid_a = rig.runtimes[0].context.session.session_id
+    real_kill = rig.cont.kill
+
+    def kill(cs):
+        if cs.session_id == sid_a:
+            raise ContainmentError("cgroup still populated")
+        real_kill(cs)
+    rig.cont.kill = kill
+    sup2 = rig.new_supervisor()
+    acted = sup2.recover()                                    # must not raise
+    assert other.id in acted
+    assert any("recover_failed" in e.body_json for e in rig.ms.events(rig.mid))
+    assert rig.status() == "investigating"                    # not released while not provably empty
+    assert rig.mid in sup2._runs                              # still tracked: the poll loop keeps retrying

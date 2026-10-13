@@ -1,5 +1,6 @@
 import hashlib
 
+import pytest
 from memory_support import confirmed, make_card, make_conn, propose
 from missions_helpers import make_store, new_mission
 from supervisor_fakes import Rig, update
@@ -119,8 +120,20 @@ def test_a_huge_valid_grant_still_fits_the_default_cap(tmp_path):
                                   "exclusions": ["x" * 500 for _ in range(256)]})
     m = MissionStore(store).create_mission(title="t", origin="operator", grant=grant, goal="g\n" * 4000,
                                            success_criteria="s\n" * 4000, runtime="fake")
+    # Exclusions are never shortened, so a grant whose exclusions cannot fit the cap is refused (fail closed).
+    with pytest.raises(ValueError, match="brief cap"):
+        build_brief(m, [], [], ["c" * 500] * 100)
+
+
+def test_a_large_but_fitting_grant_still_fits_the_default_cap(tmp_path):
+    from planet_express.missions.models import Grant
+    store, _ = make_store(tmp_path)
+    grant = Grant.model_validate({"tier": "observe", "scope": {"stacks": [f"s{i}" for i in range(256)]},
+                                  "exclusions": ["x" * 200 for _ in range(20)]})
+    m = MissionStore(store).create_mission(title="t", origin="operator", grant=grant, goal="g\n" * 4000,
+                                           success_criteria="s\n" * 4000, runtime="fake")
     brief = build_brief(m, [], [], ["c" * 500] * 100)
-    assert brief.size <= 32 * 1024 and "more)" in brief.text
+    assert brief.size <= 32 * 1024 and "more)" in brief.text and "more not shown" in brief.text
 
 
 def test_a_runtime_that_raises_after_its_process_vanished_is_a_crash_and_retried(tmp_path):
@@ -141,5 +154,69 @@ def test_multibyte_constraints_and_fields_still_fit(tmp_path):
     grant = Grant.model_validate({"tier": "observe", "exclusions": ["\u00e9" * 250] * 256})
     m = MissionStore(store).create_mission(title="t", origin="operator", grant=grant, goal="\u00e9\n" * 4000,
                                            success_criteria="\u00e9\n" * 4000, runtime="fake")
-    brief = build_brief(m, [], [], ["\u00e9" * 250] * 40)
-    assert brief.size <= 32 * 1024
+    with pytest.raises(ValueError, match="brief cap|exclusion"):
+        build_brief(m, [], [], ["\u00e9" * 250] * 40)
+    grant = Grant.model_validate({"tier": "observe", "exclusions": ["\u00e9" * 100] * 20})
+    m = MissionStore(store).create_mission(title="t2", origin="operator", grant=grant, goal="\u00e9\n" * 4000,
+                                           success_criteria="\u00e9\n" * 4000, runtime="fake")
+    assert build_brief(m, [], [], ["\u00e9" * 250] * 40).size <= 32 * 1024
+
+
+# ── round 2: the cap never raises; exclusions are never cut ──────────────────
+
+def _min_cap(m, **kw):
+    """Smallest cap the brief accepts for these inputs (binary search on the fixed-section check)."""
+    lo, hi = 1, 200_000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        try:
+            build_brief(m, [], [], max_bytes=mid, **kw)
+            hi = mid
+        except ValueError as exc:
+            assert str(exc).startswith("brief cap"), exc
+            lo = mid + 1
+    return lo
+
+
+def test_cap_never_raises_exceeded_for_any_size(tmp_path):
+    m = mission(tmp_path)
+    conn = make_conn()
+    cards = [confirmed(conn, f"card-{i}", statement="x" * (50 * i + 10)) for i in range(4)]
+    floor = _min_cap(m)
+    evidence = [EvidenceItem(f"logs:{i}", ("line %d\n" % i) * (30 * i + 1)) for i in range(6)]
+    for cap in range(floor, floor + 2500, 7):
+        for ev, cs in ((evidence, cards), (evidence, []), ([], cards), ([], [])):
+            brief = build_brief(m, ev, cs, max_bytes=cap)            # must not raise "exceeded its cap"
+            assert brief.size <= cap
+
+
+def test_exclusions_come_first_and_are_never_shortened(tmp_path):
+    m = mission(tmp_path)
+    long_path = "Excluded: /srv/data/" + "a" * 150 + "/private"
+    others = [f"Budget line {i}" for i in range(30)]
+    brief = build_brief(m, [], [], others + [long_path])
+    assert long_path in brief.text
+    constraints = brief.text.split("## Constraints", 1)[1].split("## Output schema")[0]
+    assert constraints.index(long_path) < constraints.index("Budget line 0")
+    assert "more not shown" in constraints
+
+
+def test_every_exclusion_survives_even_beyond_sixteen(tmp_path):
+    m = mission(tmp_path)
+    ex = [f"Excluded: /srv/p{i}" for i in range(25)]
+    brief = build_brief(m, [], [], ex)
+    assert all(e in brief.text for e in ex)
+
+
+def test_an_exclusion_that_cannot_fit_is_rejected(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="exclusion"):
+        build_brief(mission(tmp_path), [], [], ["Excluded: /" + "z" * 5000])
+
+
+def test_scope_lines_do_not_shorten_exclusions(tmp_path):
+    from planet_express.missions.models import Grant
+    store, _ = make_store(tmp_path)
+    path = "/srv/" + "q" * 120 + "/secret"
+    m = new_mission(MissionStore(store), Grant.model_validate({"tier": "observe", "exclusions": [path]}))
+    assert path in build_brief(m, [], []).text

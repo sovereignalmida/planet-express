@@ -7,7 +7,6 @@ import sys
 import time
 from pathlib import Path
 
-import missions_helpers
 import pytest
 
 from planet_express.missions.containment import ContainedSession
@@ -424,3 +423,62 @@ def test_freeze_times_out_loudly_and_kill_still_proceeds(root):
     c.empty_after_polls = 0
     c.kill(cs)
     assert ("cgroup.kill", "1") in c.writes
+
+
+# ── round 2: missing cgroup, adopted zombies ────────────────────────────────
+
+def test_kill_of_a_cgroup_that_no_longer_exists_is_already_dead(root):
+    import shutil
+    c = make(root)
+    cs = c.create("s1")
+    shutil.rmtree(cs.cgroup_path)               # e.g. after a reboot
+    assert c.is_empty(cs)
+    c.kill(cs)                                  # must not raise
+    c.cleanup(cs)
+
+
+def test_kill_when_cgroup_kill_file_vanishes_mid_way_is_dead_if_empty(root):
+    import shutil
+
+    class Vanish(Recording):
+        def _write(self, path, value):
+            if Path(path).name == "cgroup.kill":
+                shutil.rmtree(Path(path).parent)
+                raise FileNotFoundError(path)
+            super()._write(path, value)
+
+    c = make(root, Vanish)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    c.kill(cs)
+
+
+def test_is_empty_reaps_a_dead_child_this_instance_did_not_launch(root):
+    c = make(root)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    deadline = time.time() + 5
+    while time.time() < deadline:                 # wait until it is a zombie
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except OSError:
+            break
+        if state == "Z":
+            break
+        time.sleep(0.01)
+    (Path(cs.cgroup_path) / "cgroup.procs").write_text(f"{pid}\n")
+    assert c._leaders == {}                       # a restarted Core has no Popen for it
+    c.is_empty(cs)
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)               # already reaped by is_empty
+
+
+def test_reaping_tolerates_pids_that_are_not_our_children(root):
+    c = make(root)
+    cs = c.create("s1")
+    seed_cgroup(cs)
+    (Path(cs.cgroup_path) / "cgroup.procs").write_text("1\n999999\n")
+    assert c.is_empty(cs) is False
