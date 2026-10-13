@@ -1,6 +1,6 @@
 # v4 Slice 0 — Contracts and threat model
 
-Status: DRAFT rev 0.3 (2026-10-13). Two G1 (Codex) rounds folded in; see §19 and §20. MOS cgroup
+Status: rev 0.4 (2026-10-13), G1 FINAL CHECK done and dispositioned (§21). Two G1 (Codex) rounds folded in; see §19 and §20. MOS cgroup
 capability verified on the test VM (§20). Awaiting operator sign-off. Parent: `v4-mission-control.md` (v4.1) and
 `v4-plan.md`. This slice produces no product code. Its output is the set of contracts below, which
 slices 1-9 build against, plus the threat model they must defend. Where this document and the
@@ -102,7 +102,7 @@ unexpired, unrevoked standing grant covers the grant (then `standing_grant_id` i
 `BEGIN IMMEDIATE` that inserts the lease, so a freed-then-reacquired resource never reuses a fence.
 Starting a session is one transaction: mission status CAS, approval validation (below), lease
 acquisition, session insert (the partial unique index makes a second live session fail). A mission row's `grant_json` is immutable
-once `approval_id` is set; a change creates a new grant hash and requires re-approval.
+once any approving `mission_approvals` row exists for its hash; a change creates a new grant hash and requires re-approval.
 
 ### 2.1 Resume and cancel
 - Resume reads `status`, the last event `seq`, the checkpoint and the lease; it never re-sends an
@@ -147,9 +147,12 @@ draft ──► queued ──► investigating ──► awaiting_decision ─�
                        chosen by Core's host-state classification, not by the runtime
 ```
 
-Terminal: completed, failed, rolled_back, cancelled. Change and Critical missions cannot enter
-`executing` until a `mission_approvals` row for phase `plan` (or `critical:<n>`) bound to the current
-`plan_hash` exists. `blocked` = waiting on a lease or window;
+Terminal: completed, failed, rolled_back, cancelled. **One execution predicate**, evaluated atomically at session issuance and at every transition into
+`executing`: (a) the current-grant approval or a valid standing grant (§2 rule), AND (b) for Change/
+Critical, an approving `plan` row bound to the current `plan_hash`, AND (c) one approving
+`critical:<index>` row bound to the plan hash for **every** `protected_touches` entry in the plan,
+AND (d) elevated `broad_sudo`/`no_backup` rows where the grant demands them. No `critical:*` row
+substitutes for `plan` or for the grant approval. `blocked` = waiting on a lease or window;
 `needs_operator` = Core cannot proceed without a human. Illegal transitions raise and are logged.
 Observe/Propose missions never enter `executing`.
 
@@ -228,6 +231,14 @@ Observe/Propose sessions (no mutation possible), within the retry budget.
 - Test: the worker uid calling `approval.decide`, `execution.*`, `config.*`, `canary.*`, `auth.*`
   gets "unknown method" on its socket and a refused connection on `rpc.sock`.
 ### 6.1 Scope-enforcing Docker API proxy
+**Session binding.** The proxy serves each session on its **own Unix socket** (path unique per
+session, created by Core at issuance, 0660 to the worker group, removed at revoke) and also requires
+the session token on every connection (an `X-PE-Session` header injected by a Core-owned shim, or a
+connection preface). Before forwarding any write the proxy loads the session row and checks: not
+revoked, cgroup/uid binding, grant hash still approved, and the target's resource id against the
+session's **effective scope** (§6.2) and current fences. A same-uid process in another session cannot
+use this session's socket because the socket path is only inherited by that session.
+
 Deny-by-default and schema-aware: only listed API versions and endpoints are served, and for each
 write endpoint only listed request fields are accepted; anything else is refused and logged.
 
@@ -259,31 +270,33 @@ subtle edits, so the grant must not scope such a service unless the operator acc
 Proxy rules are a reviewed capability, and the discovery/Unraid consumer uses a separate read-only
 proxy (brief §14.1 item 9).
 
-### 6.2 Change missions: how new resources get created
-The worker never creates volumes, networks or images; Core does, from an approved plan.
+### 6.2 Change missions: how new resources get created (design intent; normative in slice 10)
+Change missions are Phase 3, owned by **slice 10** (plan in `v4-plan.md`), whose own G1 makes this
+section normative. Phase 2 (Repair) uses none of it. The intent, fixed now so Repair does not
+foreclose it, with the G1-final constraints already adopted:
 
-`plan_json` (strict model, RFC 8785 hash, slice 1): `{v, summary, files: [{path, op, diff_sha256,
-unified_diff}], images: [{ref, digest, registry}], volumes: [{name, driver: "local", opts: {}}],
-networks: [{name, internal, subnet?}], binds: [{host_path, container_path, ro}], services:
-[{resource_id}], dns: [{name, target}], routes: [{host, service}], backups: [{path}], tiles:
-[...], checks: [check ids], rollback: [...], protected_touches: [...]}`.
-
-Flow: investigate → draft plan → `awaiting_decision` → approval row phase `plan` bound to
-`plan_hash`, plus one `critical:<n>` approval per `protected_touches` entry (ingress/DNS/route,
-backup config, credentials, storage) → **Core applies** the resource-creating parts in order
-(registry-allowlisted pulls by digest, volume and network create with validated local driver and
-no bind options, brokered `dns.rewrite`, brokered route/backup writes) as recorded events → the
-approved plan's `services[*].resource_id` and created resource ids are **added to the session's
-effective scope** (the grant hash is unchanged; the effective scope is `grant.scope ∪ plan
-resources`, recorded) → the worker writes the files in the plan's `files` list (hash-checked
-against `diff_sha256`) and runs compose for those services through the proxy → verify. The proxy
-adds `network create/remove` to its served list only for names listed in the approved plan.
-Builds stay refused: a service needing a local image build requires the escalated `docker: raw`
-mission (§4), or a prebuilt digest-pinned image.
-Rollback of a Change mission removes what Core created (reverse order) and restores the
-checkpoint's files; created data volumes are kept unless the operator says otherwise.
-Test (slice 7/9): add-then-remove a synthetic service end to end on the test homelab, reversible,
-with the plan hash enforced (a changed file after approval is refused).
+- The worker never creates volumes, networks or images. **Core is the sole creator and remover**: it
+  pulls images by digest from the registry allowlist, creates volumes and networks (validated local
+  driver, no bind options), applies brokered DNS/route/backup writes, requires each name to be
+  **absent or already owned by this mission** (a pre-existing same-name object aborts the plan), and
+  records actual ids and ownership in a Core-created-resource journal (events plus a table in slice 10).
+  The proxy never serves network or volume create/remove to a worker.
+- The plan is a strict, hashed model (slice 10): file operations, images each bound to an approved
+  digest and to the service that uses it, volumes, networks, binds, services, dns, routes, backups,
+  tiles, `verification_plan`, rollback, `protected_touches`. Files are changed by **Core applying the
+  approved patch** (source sha256 precondition and resulting sha256 recorded) or by a Core-scoped
+  writer that enforces the same preconditions; the native worker does not write Change files
+  directly, so "a changed file after approval is refused" is testable.
+- Created resources get canonical ids under §2.3 (`…/volume:<n>`, `…/network:<n>`, `…/route:<host>`,
+  `…/dns:<name>`). The **effective scope** = `grant.scope ∪ plan resource ids`, persisted on the
+  session row as `effective_scope_json` with its sha256, extended only by Core at the moment it
+  applies the plan, and used by the proxy, leases and tripwires. The grant hash does not change.
+- Execution predicate is the §3 one. Rollback removes Core-created resources in reverse order and
+  restores the checkpoint; data volumes are kept unless the operator says otherwise.
+- Builds stay refused; a service needing a local build needs a digest-pinned prebuilt image or an
+  escalated `docker: raw` mission.
+Acceptance (slice 10): add then remove a synthetic service on the test homelab, reversible, plan
+hash enforced, pre-existing-name collision aborts, a worker edit to a Change file is refused.
 
 - Remote worker: identity is **the per-session forwarded sockets**, not `SO_PEERCRED` (a forwarded
   socket's peer is the local ssh process). For each remote session Core creates unique worker-socket
@@ -353,6 +366,13 @@ reviewed capability (listed in `CLAUDE.md`'s v4 surface).
   they are the control against mistakes, injected instructions and runaway scope.
 
 ## 10. Verification catalogue (typed, Core-executed)
+
+A mission's `verification_plan_json` is one canonical model
+`{catalogue_v, checks: [{id, check, params}]}` (strict, RFC 8785). The grant's
+`verification.checks` and a Change plan's `checks` are **hash-referenced** to this plan: the grant
+stores `verification.plan_sha256`, so the exact checks and parameters (route, probe argv, project
+target) are fixed by the approved hash and replayable by the release-proof tests. It cannot change
+after approval.
 
 | Check | Params | Passes when |
 |---|---|---|
@@ -510,3 +530,13 @@ So the cgroup path is available on MOS. Not yet proven: delegation of a cgroup s
 non-root Core user (the cgroup tree is RAM-backed, so a boot-time init script must create and chown
 it), and the setup-created `pe-worker` account surviving reboot (users are recreated each boot).
 Both are slice 3 and slice 6 setup work with MOS tests.
+
+## 21. G1 final check (Codex, 2026-10-13) and disposition
+
+Seven blockers, all accepted, one follow-up. Resolved in rev 0.4: effective scope without a model,
+network create conflict, diff hash not binding the result, local proxy session binding, approval
+predicate conflict, verification-plan parameters, and Change having no owning slice. The first three
+and the owning-slice item are handled by moving Change to **slice 10** with the constraints written
+into §6.2 (they affect only Phase 3); the proxy binding, execution predicate and verification-plan
+model are normative now (§3, §6.1, §10). The `approval_id` wording follow-up is fixed in §2.
+Remaining work is owned by slices, not by slice 0.

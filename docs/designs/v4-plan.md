@@ -35,8 +35,9 @@ the production host and v4 work happens on a new branch with no deploy without a
 | 7 | Approval, standing grants, privileged worker tier, hooks, ask-flow | 3, 4, 6 | — |
 | 8 | Verification catalogue, pre-agreed checks, crash classification and recovery | 1, 3, 5 | 6, 7 |
 | 9 | First Repair mission end to end, Ubuntu then MOS, release proof, setup/undo/uninstall/docs | 7, 8 | — |
+| 10 | Change missions (Phase 3): plan model, Core-applied resources, effective scope, add/remove a service | 9 | — |
 
-Phase 1 is slices 0–4 (plus the Observe/Propose path through 3). Phase 2 is 5–9.
+Phase 1 is slices 0–4 (plus the Observe/Propose path through 3). Phase 2 is 5–9; Phase 3 is slice 10.
 
 ## Slice detail and acceptance tests
 
@@ -129,6 +130,12 @@ Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); th
 - Release proof items 1–10 from the brief, each with a named test or rehearsal record.
 - Setup, repair, undo, uninstall, upgrade, downgrade documentation; INSTALL.md and CHANGELOG.
 - Final full-branch `codex review --base v3-next` and `/code-review` before any deploy conversation.
+
+### Slice 10 — Change missions (Phase 3)
+Owns slice-0 spec §6.2 (made normative by its own G1): plan model and hash, Core-created-resource
+journal, Core-applied file patches with source/result sha256 preconditions, effective-scope
+persistence, protected-touch approvals, add/remove a synthetic service (reversible), collision abort,
+refusal of direct worker edits to Change files.
 
 ## Coordination
 
