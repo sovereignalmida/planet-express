@@ -17,31 +17,34 @@ Run one of:
 Read every finding it reports and either fix it or tell the user explicitly why it's being left
 as-is — don't silently drop findings. Both reviews stay in the loop; they catch different things.
 
-This gate is most load-bearing on execution safety. **There is no shell.** Since Planet Express 2.0
-(slice 5b-5), every change to the host is a typed step in an approved runbook: its parameters are
-validated by a per-type model, its target is bound at proposal time and re-checked immediately
-before it acts, it runs as argv through `run_argv()` with a minimal environment, and its outcome is
-decided by reading host state rather than by an exit code. `_run_command()`, `shell=True` and
-`_safety_check()`'s pattern list are gone, along with the LLM-written shell plans they existed to
-contain. An LLM now chooses *which* typed step to run; it never writes what runs.
+This gate is most load-bearing on execution safety. **The safety model is changing for v4**
+(`docs/designs/v4-mission-control.md` §6, approved direction). v3's rule that every host change is a
+typed step, with no shell anywhere, is retired for *missions*: a supervised agent session may use
+its native tools. Safety moves from "what may the agent type" to consequence control. Until a v4
+slice lands, the v3 text below still describes the running code:
 
-What that leaves worth a second reviewer's attention:
+- v3 (current code): every change is a typed step in an approved runbook, validated per type,
+  target bound at proposal and re-checked before acting, run as argv through `run_argv()`, outcome
+  decided by reading host state. `_run_command()`, `shell=True` and `_safety_check()` are gone.
+  Typed runbooks remain the fast path for known repairs in v4, not the boundary.
 
-- **The step catalogue** (`planet_express/execution/runbook.py`). Adding a step type adds a
-  capability. Its params model, risk class, verifier and inverse are the entire contract.
-- **The sudo scope**, still code-enforced: `_check_sudo_allowlist()` fails closed on any `sudo`
-  that is not a declared `sudo systemctl start|stop|restart <unit>` grant.
-- **Policy and limits** (`planet_express/execution/policy.py`): which risk classes need approval,
-  which origins may run something unattended (only `zoidberg`/`update.canary` and
-  `system`/`prune.safe`), and the T24 attempt limits.
-- **`compose.write`** (`planet_express/execution/compose_files.py`): the one step that writes a
-  file. Its compare-and-swap, its symlink refusals, and the device+inode evidence its inverse uses
-  before deleting anything.
-- **The host-mutation lock** in `casa_farnsworth.py`'s `PipelineState`, which still serialises
-  every mutation against every scan.
+What a second reviewer should attend to, v3 and v4 together:
 
-A change to any of those is exactly the class of bug an independent second reviewer exists to
-catch, and none of them fails safe by accident — they fail safe because someone checked.
+- **v3 surface that stays:** the step catalogue (`planet_express/execution/runbook.py`), the sudo
+  scope (`_check_sudo_allowlist()`), policy and limits (`planet_express/execution/policy.py`),
+  `compose.write` (`planet_express/execution/compose_files.py`) and the unattended-origin list
+  (only `zoidberg`/`update.canary` and `system`/`prune.safe`).
+- **v4 surface (when built):** the checkpoint/restore service; the tripwire monitor and protected
+  domains; the grant schema, its hash binding and the grant-to-credential/environment builder;
+  standing grants (their scope, expiry, and that they never cover Change/Critical); the worker
+  identity, privilege tiers and the per-principal RPC method allowlist (the worker must never reach
+  approval/decision methods); per-resource leases and fencing; the session supervisor's crash
+  classification; redaction before persistence; memory quarantine (candidates are never injected
+  into a session until operator-confirmed).
+- **Independent verification:** a mission completes only when PE's own pre-agreed checks pass,
+  never on an agent's assertion.
+
+None of these fails safe by accident. They fail safe because someone checked.
 
 ## Project shape
 
