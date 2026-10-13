@@ -1,0 +1,32 @@
+{% extends "missions_base.html" %}
+{% block title %}Missions{% endblock %}
+{% block content %}
+{% set order = ["draft", "queued", "investigating", "awaiting_decision", "blocked", "needs_operator", "executing", "verifying", "paused_tripwire", "recovery_required", "rollback_pending", "completed", "failed", "rolled_back", "cancelled"] %}
+<section class="panel" aria-label="Missions">
+  <div class="panel-head-row">
+    <h3>MISSIONS</h3>
+    <span class="panel-head-note">{{ data.total }} total · Observe and Propose only; nothing here changes the host</span>
+  </div>
+  {% if not data.missions %}
+  <p class="muted-body">No missions yet. Press INVESTIGATE on an incident to open one.</p>
+  {% endif %}
+  <div class="mc-board">
+  {% for st in order %}
+    {% set items = data.missions | selectattr('status', 'equalto', st) | list %}
+    {% if items %}
+    <section class="mc-col" aria-label="{{ st }}">
+      <h4 class="mc-col-head"><span>{{ st | replace('_', ' ') | upper }}</span><span class="status-chip{{ ' ok' if st == 'completed' }}">{{ items | length }}</span></h4>
+      {% for m in items %}
+      <a class="mc-card" href="{{ url_for('mission_page', mission_id=m.id) }}">
+        <span class="mc-card-id">{{ m.id }}</span>
+        <span class="mc-card-title">{{ m.title }}</span>
+        <span class="mc-card-meta">{{ m.tier }} · {{ m.origin }}{% if m.cancel_requested %} · cancel requested{% endif %}</span>
+      </a>
+      {% endfor %}
+    </section>
+    {% endif %}
+  {% endfor %}
+  </div>
+  {% if data.total > data.missions | length %}<p class="muted-body">Showing the {{ data.missions | length }} most recently updated.</p>{% endif %}
+</section>
+{% endblock %}

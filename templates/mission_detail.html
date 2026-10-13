@@ -1,0 +1,53 @@
+{% extends "missions_base.html" %}
+{% block title %}Mission{% endblock %}
+{% block content %}
+{% set closed = m.status in ["completed", "failed", "rolled_back", "cancelled"] %}
+<section class="panel" aria-label="Mission">
+  <div class="panel-head-row">
+    <a class="pe-link-out" href="{{ url_for('missions_page') }}">‹ MISSIONS</a>
+    <h3>{{ m.id }} · {{ m.title }}</h3>
+    <span class="status-chip{{ ' ok' if m.status == 'completed' }}">{{ m.status | replace('_', ' ') | upper }}</span>
+  </div>
+  <dl class="mc-facts">
+    <dt>TIER</dt><dd>{{ m.tier }}</dd>
+    <dt>ORIGIN</dt><dd>{{ m.origin }}{% if m.incident_id %} · incident {{ m.incident_id }}{% endif %}</dd>
+    <dt>RUNTIME</dt><dd>{{ m.runtime }}</dd>
+    <dt>GOAL</dt><dd class="mc-pre">{{ m.goal }}</dd>
+    <dt>SUCCESS</dt><dd class="mc-pre">{{ m.success_criteria }}</dd>
+    {% if m.session %}<dt>SESSION</dt><dd>{{ m.session.kind }} · {{ m.session.id }}</dd>{% endif %}
+    {% if m.cancel_requested %}<dt>CANCEL</dt><dd>requested by {{ m.cancel_requested_by }}</dd>{% endif %}
+  </dl>
+  {% if not closed %}
+  <form method="post" action="{{ url_for('mission_cancel', mission_id=m.id) }}" class="mc-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="pe-btn warn" type="submit"{{ ' disabled' if m.cancel_requested }}>{{ 'CANCEL REQUESTED' if m.cancel_requested else 'CANCEL MISSION' }}</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel" aria-label="Result">
+  <div class="panel-head-row"><h3>RESULT</h3></div>
+  {% if m.result.outcome or m.result.flags or m.result.verification %}
+  <dl class="mc-facts">
+    {% if m.result.outcome %}<dt>OUTCOME</dt><dd class="mc-pre">{{ m.result.outcome }}</dd>{% endif %}
+    {% if m.result.flags %}<dt>FLAGS</dt><dd>{{ m.result.flags }}</dd>{% endif %}
+    {% if m.result.verification %}<dt>VERIFICATION</dt><dd class="mc-pre">{{ m.result.verification | tojson(indent=1) }}</dd>{% endif %}
+  </dl>
+  {% else %}<p class="muted-body">No result yet.</p>{% endif %}
+</section>
+
+<section class="panel" aria-label="Artifacts">
+  <div class="panel-head-row"><h3>ARTIFACTS</h3><span class="panel-head-note">{{ m.artifacts | length }}</span></div>
+  {% for a in m.artifacts %}
+  <div class="mc-event"><span class="mc-event-seq">#{{ a.seq }}</span><span class="mc-event-actor">{{ a.actor }}</span><span class="mc-pre">{{ a.body | tojson }}</span></div>
+  {% else %}<p class="muted-body">No artifacts.</p>{% endfor %}
+</section>
+
+<section class="panel" aria-label="Event stream">
+  <div class="panel-head-row"><h3>EVENT STREAM</h3><span class="panel-head-note">append-only · redacted</span></div>
+  {% for e in events.events %}
+  <div class="mc-event"><span class="mc-event-seq">#{{ e.seq }}</span><span class="status-chip">{{ e.kind }}</span><span class="mc-event-actor">{{ e.actor }}</span><span class="mc-pre">{{ e.body | tojson }}</span></div>
+  {% else %}<p class="muted-body">No events.</p>{% endfor %}
+  {% if events.has_more %}<p><a class="pe-link-out" href="{{ url_for('mission_page', mission_id=m.id, after=events.next_after_seq) }}">NEXT EVENTS ›</a></p>{% endif %}
+</section>
+{% endblock %}

@@ -155,3 +155,8 @@ multi_host:
 #       name: CASA SOLAR ASSISTANT
 #       link: http://192.168.1.154
 #   local_system_id: n7n7ppta55karj9      # only if derivation cannot decide
+
+# v4 mission control (off by default). With it on, the dashboard gains Missions and Memory pages and
+# Telegram gains /missions, /mission <id> and /cancel_mission <id>. Observe and Propose only.
+# missions:
+#   enabled: true

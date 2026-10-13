@@ -321,7 +321,7 @@ def _params(params, strings, booleans=()):
 
 def build_core_handlers(
     commands: CommandService, store: Store, notifier=None, chat=None, config_service=None,
-    *, start_scan=None,
+    *, start_scan=None, missions=None,
 ) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
@@ -924,4 +924,7 @@ def build_core_handlers(
     if config_service is not None:
         handlers.update({"config.get": config_get, "config.validate": config_validate,
                          "config.apply": config_apply})
+    if missions is not None:
+        # Operator mission/memory methods (v4 S4). They answer "disabled" while missions.enabled is false.
+        handlers.update(missions.handlers())
     return handlers

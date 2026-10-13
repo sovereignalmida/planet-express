@@ -1,0 +1,52 @@
+{% extends "missions_base.html" %}
+{% block title %}Memory{% endblock %}
+{% macro card(c, actions) %}
+<article class="mc-mem" id="card-{{ c.id }}">
+  <header class="mc-mem-head">
+    <span class="mc-card-id">{{ c.id }}</span>
+    <span class="status-chip">{{ c.type }}</span>
+    <span class="status-chip">{{ c.source }}</span>
+  </header>
+  <h4 class="mc-card-title">{{ c.title }}</h4>
+  <p class="muted-body mc-pre">{{ c.statement }}</p>
+  {% if c.steps %}<ol class="mc-steps">{% for s in c.steps %}<li>{{ s.text }} <span class="cell-dim">check: {{ s.check }}</span></li>{% endfor %}</ol>{% endif %}
+  {% if c.scope %}<p class="mc-card-meta">{{ c.scope | join(', ') }}</p>{% endif %}
+  {% if c.conflicts_with %}<p class="mc-card-meta">conflicts with {{ c.conflicts_with | join(', ') }}</p>{% endif %}
+  {% if actions %}
+  <div class="mc-actions">
+    {% if 'confirm' in actions %}
+    <form method="post" action="{{ url_for('memory_confirm', card_id=c.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="pe-btn accent" type="submit">CONFIRM</button>
+    </form>{% endif %}
+    {% if 'deprecate' in actions %}
+    <form method="post" action="{{ url_for('memory_deprecate', card_id=c.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input class="mc-reason" type="text" name="reason" maxlength="500" placeholder="reason (optional)" aria-label="Reason">
+      <button class="pe-btn warn" type="submit">DEPRECATE</button>
+    </form>{% endif %}
+  </div>
+  {% endif %}
+</article>
+{% endmacro %}
+{% block content %}
+{% if unavailable %}
+<section class="panel" aria-label="Unavailable">
+  <div class="panel-head-row"><h3>SHIP'S MEMORY</h3><span class="status-chip">UNAVAILABLE</span></div>
+  <p class="muted-body">Ship's Memory is unavailable on this host: its SQLite build has no FTS5, so the memory tables were not created.</p>
+</section>
+{% else %}
+<section class="panel" aria-label="Candidates">
+  <div class="panel-head-row"><h3>CANDIDATES</h3><span class="panel-head-note">{{ candidates.total }} awaiting review · a candidate is never shown to a worker until confirmed</span></div>
+  {% for c in candidates.cards %}{{ card(c, ['confirm', 'deprecate']) }}{% else %}<p class="muted-body">Nothing waiting for review.</p>{% endfor %}
+</section>
+<section class="panel" aria-label="Review due">
+  <div class="panel-head-row"><h3>REVIEW DUE</h3><span class="panel-head-note">{{ due.total }} confirmed cards past their review date</span></div>
+  {% for c in due.cards %}{{ card(c, ['deprecate']) }}{% else %}<p class="muted-body">Nothing is due for review.</p>{% endfor %}
+</section>
+<section class="panel" aria-label="Confirmed">
+  <div class="panel-head-row"><h3>CONFIRMED</h3><span class="panel-head-note">{{ confirmed.total }} cards</span></div>
+  {% for c in confirmed.cards %}{{ card(c, ['deprecate']) }}{% else %}<p class="muted-body">No confirmed cards yet.</p>{% endfor %}
+</section>
+{% endif %}
+{% endblock %}
