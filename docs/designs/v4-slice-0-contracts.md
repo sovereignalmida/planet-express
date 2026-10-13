@@ -614,3 +614,11 @@ On Ubuntu, Core is also in the `docker` group today, so a compromised Core is al
 the helper adds no authority Core lacks. This is an assumption about the current deployment, stated per
 host in the threat model; if the docker-group assumption is removed the helper's checks are the boundary
 and must be reviewed on their own. The release proof checks the observable prerequisites.
+
+### 22.7 No `preexec_fn` in a multithreaded Core (from the slice 3 review)
+`Popen(preexec_fn=...)` from the threaded Core daemon can deadlock between fork and exec, and the hang
+would hold `Supervisor` state. Both launchers therefore spawn through the **same exec helper**: Core
+starts `pe-launch` as a plain subprocess (via `sudo -n` on Ubuntu, directly when Core is root on MOS)
+and all cgroup join, uid/gid drop, `no_new_privs`, fd closing and `execve` happen inside that
+single-threaded helper. Core never runs Python between fork and exec. `DirectLauncher` is the same
+helper without `sudo`, so there is one launch implementation to review and test.
