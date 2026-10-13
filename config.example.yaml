@@ -158,5 +158,7 @@ multi_host:
 
 # v4 mission control (off by default). With it on, the dashboard gains Missions and Memory pages and
 # Telegram gains /missions, /mission <id> and /cancel_mission <id>. Observe and Propose only.
+# Core reads missions.enabled once, at startup: after changing it, restart core (the dashboard follows
+# config reloads on its own, so it can show the pages before core will answer them).
 # missions:
 #   enabled: true

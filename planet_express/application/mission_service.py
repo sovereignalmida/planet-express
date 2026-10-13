@@ -21,17 +21,18 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, get_args
 
 from pydantic import ValidationError
 
 from planet_express.core.redact import redact
 from planet_express.core.store import Store
+from planet_express.execution.actions import TargetTimeout
 from planet_express.memory import retrieval as memory_retrieval
 from planet_express.memory import store as memory_store
 from planet_express.memory.models import SLUG_RE, Card
 from planet_express.missions.events import insert_event, redact_value
-from planet_express.missions.models import Grant, GrantScope, Mission, MissionEvent
+from planet_express.missions.models import Grant, GrantScope, Mission, MissionEvent, Status
 from planet_express.missions.state import (
     TERMINAL,
     IllegalTransition,
@@ -44,6 +45,7 @@ from planet_express.missions.store import MissionStore
 log = logging.getLogger("planetexpress.missions.service")
 
 MAX_PAGE = 100
+MAX_LIST = 500               # mission.list only: the board needs every open mission, not just a page of them
 MAX_EVENT_PAGE = 200
 MAX_OFFSET = 100_000
 MAX_SEARCH = 20
@@ -57,15 +59,18 @@ DEFAULT_RUNTIME = "command"
 CREATABLE_TIERS = ("observe", "propose")
 CREATABLE_ORIGINS = ("operator", "incident")
 
-_MISSION_ID = re.compile(r"M-[0-9]{1,9}")
-_INCIDENT_ID = re.compile(r"[0-9a-f]{12}")
+# Defined once; the dashboard imports these rather than keeping copies.
+MISSION_ID_RE = re.compile(r"M-[0-9]{1,9}")
+INCIDENT_ID_RE = re.compile(r"[0-9a-f]{12}")
 _OPERATOR = re.compile(r"[a-z0-9_.-]{1,32}")
-_STATUSES = frozenset({
-    "draft", "queued", "investigating", "awaiting_decision", "executing", "verifying", "completed", "failed",
-    "rolled_back", "cancelled", "blocked", "needs_operator", "recovery_required", "paused_tripwire",
-    "rollback_pending",
-})
-_TERMINAL_SQL = ",".join(f"'{s}'" for s in sorted(TERMINAL))
+_PREFERRED_ORDER = (
+    "draft", "queued", "investigating", "awaiting_decision", "blocked", "needs_operator", "executing", "verifying",
+    "paused_tripwire", "recovery_required", "rollback_pending", "completed", "failed", "rolled_back", "cancelled")
+# Board order: the preferred order, then any status the model gains later, so a new status shows up on its own.
+STATUS_ORDER = _PREFERRED_ORDER + tuple(x for x in get_args(Status) if x not in _PREFERRED_ORDER)
+_STATUSES = frozenset(STATUS_ORDER)
+TERMINAL_STATUSES = frozenset(TERMINAL)
+_TERMINAL_SQL = ",".join(f"'{x}'" for x in sorted(TERMINAL_STATUSES))
 
 
 class MissionError(Exception):
@@ -192,6 +197,12 @@ def _tags(value):
     return value
 
 
+def _bool(value):
+    if type(value) is not bool:
+        raise ValueError("expected true or false")
+    return value
+
+
 def _dict(value):
     if not isinstance(value, dict):
         raise ValueError("expected an object")
@@ -199,7 +210,7 @@ def _dict(value):
 
 
 _OPERATOR_CHECK = _pattern(_OPERATOR, "a plain operator name")
-_MISSION_CHECK = _pattern(_MISSION_ID, "a mission id such as M-12")
+_MISSION_CHECK = _pattern(MISSION_ID_RE, "a mission id such as M-12")
 _PAGE = {"limit": _int(1, MAX_PAGE), "offset": _int(0, MAX_OFFSET)}
 
 
@@ -233,16 +244,28 @@ class MissionService:
             raise MissionError("Mission not found", "not_found") from None
 
     # ── missions ────────────────────────────────────────────────────────────
-    def list_missions(self, *, status: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+    def list_missions(self, *, status: str | None = None, scope: str | None = None, limit: int = 50,
+                      offset: int = 0) -> dict:
+        """`scope` is "active" (every non-terminal mission) or "closed" (terminal ones), newest first. The
+        board asks for all active ones so an old awaiting-decision mission never drops off behind recent
+        closed ones."""
         self._require_enabled()
-        where, args = ("WHERE status=?", (status,)) if status else ("", ())
+        if status and scope:
+            raise MissionError("Give a status or a scope, not both")
+        if status:
+            where, args = "WHERE status=?", (status,)
+        elif scope:
+            op = "NOT IN" if scope == "active" else "IN"
+            where, args = f"WHERE status {op} ({_TERMINAL_SQL})", ()
+        else:
+            where, args = "", ()
         with self.store._connect() as conn:
             total = conn.execute(f"SELECT COUNT(*) FROM missions {where}", args).fetchone()[0]
             rows = conn.execute(
                 f"SELECT * FROM missions {where} ORDER BY updated_at DESC, CAST(SUBSTR(id, 3) AS INTEGER) DESC "
                 "LIMIT ? OFFSET ?", (*args, limit, offset)).fetchall()
-        return {"missions": [_mission_summary(Mission(**dict(r))) for r in rows], "total": total,
-                "limit": limit, "offset": offset}
+        missions, cut = _fit([_mission_summary(Mission(**dict(r))) for r in rows])
+        return {"missions": missions, "total": total, "limit": limit, "offset": offset, "truncated": cut}
 
     def get_mission(self, mission_id: str) -> dict:
         self._require_enabled()
@@ -273,16 +296,56 @@ class MissionService:
         })
         return out
 
-    def mission_events(self, mission_id: str, *, after_seq: int = 0, limit: int = 100) -> dict:
+    def mission_events(self, mission_id: str, *, after_seq: int = 0, limit: int = 100, tail: bool = False) -> dict:
+        """Events oldest-first from `after_seq`, or with `tail` the latest `limit` events (still oldest-first)."""
         self._require_enabled()
         self._mission(mission_id)
+        if tail and after_seq:
+            raise MissionError("tail and after_seq cannot be combined")
         with self.store._connect() as conn:
+            if tail:
+                rows = conn.execute("SELECT * FROM mission_events WHERE mission_id=? ORDER BY seq DESC LIMIT ?",
+                                    (mission_id, limit + 1)).fetchall()
+                rows = rows[::-1]
+                earlier, rows = len(rows) > limit, rows[-limit:]
+                outs, cut = _fit([_event_out(MissionEvent(**dict(r))) for r in reversed(rows)])
+                outs.reverse()          # keep the newest if the budget forces a cut
+                return {"events": outs, "has_more": earlier or cut, "tail": True,
+                        "next_after_seq": outs[-1]["seq"] if outs else 0,
+                        "first_seq": outs[0]["seq"] if outs else None}
             rows = conn.execute("SELECT * FROM mission_events WHERE mission_id=? AND seq>? ORDER BY seq LIMIT ?",
                                 (mission_id, after_seq, limit + 1)).fetchall()
         events, cut = _fit([_event_out(MissionEvent(**dict(r))) for r in rows[:limit]])
         more = cut or len(rows) > limit
-        return {"events": events, "has_more": more,
-                "next_after_seq": events[-1]["seq"] if events else after_seq}
+        return {"events": events, "has_more": more, "tail": False,
+                "next_after_seq": events[-1]["seq"] if events else after_seq,
+                "first_seq": events[0]["seq"] if events else None}
+
+    def _create_queued(self, *, operator: str, title: str, goal: str, tier: str, origin: str,
+                       incident_id: str | None, success_criteria: str, scope: dict | None,
+                       evidence: dict | None = None) -> dict:
+        """Create the mission, queue it and (optionally) record incident evidence in ONE transaction, so no
+        failure can leave a half-made mission behind."""
+        try:
+            grant = Grant(tier=tier, scope=GrantScope.model_validate(scope or {}))
+        except ValidationError:
+            raise MissionError("Invalid scope") from None
+        actor = _actor(operator)
+        try:
+            with self.store._write() as conn:
+                mission_id = self.missions.create_in_txn(
+                    conn, title=redact(title), origin=origin, grant=grant, goal=redact(goal),
+                    success_criteria=redact(success_criteria), runtime=self._runtime,
+                    incident_id=incident_id, actor=actor)
+                now = int(self.store._clock())
+                transition_in_txn(conn, mission_id, "queued", actor, now)
+                if evidence is not None:
+                    insert_event(conn, mission_id, "note", actor, {"incident_evidence": evidence}, now)
+        except ValidationError:
+            raise MissionError("Mission text is too long") from None
+        except sqlite3.IntegrityError:
+            raise MissionError("Incident not found", "not_found") from None   # missions.incident_id is a foreign key
+        return _mission_summary(self.missions.get_mission(mission_id))
 
     def create_mission(self, *, operator: str, title: str, goal: str, tier: str = "propose",
                        origin: str | None = None, incident_id: str | None = None,
@@ -294,26 +357,14 @@ class MissionService:
         origin = origin or ("incident" if incident_id else "operator")
         if (origin == "incident") != (incident_id is not None):
             raise MissionError("An incident mission needs an incident_id, and only an incident mission has one")
-        try:
-            grant = Grant(tier=tier, scope=GrantScope.model_validate(scope or {}))
-        except ValidationError:
-            raise MissionError("Invalid scope") from None
-        actor = _actor(operator)
-        try:
-            m = self.missions.create_mission(
-                title=redact(title), origin=origin, grant=grant, goal=redact(goal),
-                success_criteria=redact(success_criteria or "A diagnosis with evidence; nothing is changed."),
-                runtime=self._runtime, incident_id=incident_id, actor=actor)
-        except ValidationError:
-            raise MissionError("Mission text is too long") from None
-        except sqlite3.IntegrityError:
-            raise MissionError("Incident not found", "not_found") from None   # missions.incident_id is a foreign key
-        transition(self.store, m.id, "queued", actor)
-        return _mission_summary(self.missions.get_mission(m.id))
+        return self._create_queued(
+            operator=operator, title=title, goal=goal, tier=tier, origin=origin, incident_id=incident_id,
+            success_criteria=success_criteria or "A diagnosis with evidence; nothing is changed.", scope=scope)
 
     def cancel_mission(self, mission_id: str, *, operator: str) -> dict:
-        """Set `cancel_requested`. The supervisor owns stopping a live session and confirming it dead; a
-        mission that never started (draft or queued) has nothing to stop and is cancelled at once."""
+        """With a live session, set `cancel_requested`: the supervisor owns stopping it and confirming it
+        dead. With none (never started, or its session already revoked after being proven dead) there is
+        nothing to stop, so the mission is cancelled through the state machine at once."""
         self._require_enabled()
         actor = _actor(operator)
         now = int(self.store._clock())
@@ -324,27 +375,33 @@ class MissionService:
                 raise MissionError("Mission not found", "not_found")
             if row["status"] in TERMINAL:
                 raise MissionError(f"Mission is already {row['status']}", "conflict")
-            if row["cancel_requested_at"] is None:
-                conn.execute("UPDATE missions SET cancel_requested_at=?, cancel_requested_by=?, updated_at=? "
-                             "WHERE id=?", (now, actor, now, mission_id))
-                insert_event(conn, mission_id, "decision", actor, {"cancel_requested": True}, now)
-            if row["status"] in ("draft", "queued"):
+            live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL",
+                                (mission_id,)).fetchone()
+            if live is None:
                 try:
                     transition_in_txn(conn, mission_id, "cancelled", actor, now)
                 except IllegalTransition as exc:
                     raise MissionError(str(exc), "conflict") from None
+            elif row["cancel_requested_at"] is None:
+                conn.execute("UPDATE missions SET cancel_requested_at=?, cancel_requested_by=?, updated_at=? "
+                             "WHERE id=?", (now, actor, now, mission_id))
+                insert_event(conn, mission_id, "decision", actor, {"cancel_requested": True}, now)
         return _mission_summary(self._mission(mission_id))
 
     def investigate_incident(self, incident_id: str, *, operator: str) -> dict:
-        """Create (or return the open) Propose mission seeded with an incident's evidence."""
+        """Create (or return the open) Propose mission for an incident. The goal is a fixed sentence: the
+        incident's own text (event payloads, container output) is attacker-influenced, so it is kept only as
+        DATA in the mission's `incident_evidence` event."""
         self._require_enabled()
         if self._incident_context is None:
             raise MissionError("Incident evidence is unavailable", "unavailable")
         try:
             incident = self._incident_context(incident_id)
-        except Exception:  # noqa: BLE001 -- the incident source is another subsystem; never leak its error
-            log.warning("Could not read incident %s for a mission", incident_id, exc_info=True)
+        except TargetTimeout:
             raise MissionError("host slow, retry", "timeout") from None
+        except Exception:  # noqa: BLE001 -- another subsystem's failure; log it, never leak it
+            log.exception("Could not read incident %s for a mission", incident_id)
+            raise MissionError("Could not read the incident", "internal") from None
         if not isinstance(incident, dict):
             raise MissionError("Incident not found", "not_found")
         with self._incident_lock:
@@ -354,17 +411,12 @@ class MissionService:
                     "ORDER BY CAST(SUBSTR(id, 3) AS INTEGER) DESC LIMIT 1", (incident_id,)).fetchone()
             if row is not None:
                 return {"created": False, "mission": _mission_summary(self.missions.get_mission(row["id"]))}
-            evidence = self._evidence(incident)
-            summary = str(incident.get("summary") or incident.get("kind") or incident_id)
-            lines = [f"Investigate incident {incident_id}: {summary}"]
-            lines += [f"{k}: {evidence[k]}" for k in ("kind", "resource", "severity", "status", "condition")
-                      if k in evidence]
-            lines += [f"- {e}" for e in evidence.get("events", [])]
-            made = self.create_mission(
-                operator=operator, title=f"Investigate: {summary}"[:256], goal="\n".join(lines)[:8000],
-                tier="propose", incident_id=incident_id,
-                success_criteria="Root cause with evidence and a proposed remediation. Nothing is changed.")
-            self.missions.append_event(made["id"], "note", _actor(operator), {"incident_evidence": evidence})
+            made = self._create_queued(
+                operator=operator, title=f"Investigate incident {incident_id}",
+                goal=f"Investigate incident {incident_id} and propose a diagnosis", tier="propose",
+                origin="incident", incident_id=incident_id,
+                success_criteria="Root cause with evidence and a proposed remediation. Nothing is changed.",
+                scope=None, evidence=self._evidence(incident))
             return {"created": True, "mission": made}
 
     @staticmethod
@@ -434,6 +486,9 @@ class MissionService:
     def memory_confirm(self, card_id: str, *, operator: str) -> dict:
         return self._card_change(memory_store.confirm, card_id, _actor(operator))
 
+    def memory_reverify(self, card_id: str, *, operator: str) -> dict:
+        return self._card_change(memory_store.reverify, card_id, _actor(operator))
+
     def memory_deprecate(self, card_id: str, *, operator: str, reason: str = "") -> dict:
         return self._card_change(memory_store.deprecate, card_id, _actor(operator), redact(reason))
 
@@ -458,20 +513,21 @@ class MissionService:
         status_checks = {"status": _choice(*sorted(_STATUSES))}
 
         def list_(p):
-            return self.list_missions(**_params(p, {}, {**status_checks, **_PAGE}))
+            return self.list_missions(**_params(p, {}, {**status_checks, "scope": _choice("active", "closed"),
+                                                        "limit": _int(1, MAX_LIST), "offset": _PAGE["offset"]}))
 
         def get(p):
             return self.get_mission(_params(p, mid)["mission_id"])
 
         def events(p):
             return self.mission_events(**_params(p, mid, {"after_seq": _int(0, 2**62),
-                                                          "limit": _int(1, MAX_EVENT_PAGE)}))
+                                                          "limit": _int(1, MAX_EVENT_PAGE), "tail": _bool}))
 
         def create(p):
             return self.create_mission(**_params(
                 p, {**op, "title": _str(256), "goal": _str(8192)},
                 {"tier": _choice(*CREATABLE_TIERS, "repair", "change", "critical"),
-                 "origin": _choice(*CREATABLE_ORIGINS), "incident_id": _pattern(_INCIDENT_ID, "an incident id"),
+                 "origin": _choice(*CREATABLE_ORIGINS), "incident_id": _pattern(INCIDENT_ID_RE, "an incident id"),
                  "success_criteria": _str(8192), "scope": _dict}))
 
         def cancel(p):
@@ -479,7 +535,7 @@ class MissionService:
             return self.cancel_mission(v["mission_id"], operator=v["operator"])
 
         def from_incident(p):
-            v = _params(p, {"incident_id": _pattern(_INCIDENT_ID, "an incident id"), **op})
+            v = _params(p, {"incident_id": _pattern(INCIDENT_ID_RE, "an incident id"), **op})
             return self.investigate_incident(v["incident_id"], operator=v["operator"])
 
         def candidates(p):
@@ -495,6 +551,10 @@ class MissionService:
             v = _params(p, {**card, **op})
             return self.memory_confirm(v["card_id"], operator=v["operator"])
 
+        def reverify(p):
+            v = _params(p, {**card, **op})
+            return self.memory_reverify(v["card_id"], operator=v["operator"])
+
         def deprecate(p):
             v = _params(p, {**card, **op}, {"reason": _str(500, blank=True)})
             return self.memory_deprecate(v["card_id"], operator=v["operator"], reason=v.get("reason", ""))
@@ -506,7 +566,7 @@ class MissionService:
         table = {"mission.list": list_, "mission.get": get, "mission.events": events, "mission.create": create,
                  "mission.cancel": cancel, "mission.from_incident": from_incident,
                  "memory.candidates": candidates, "memory.cards": cards, "memory.review_due": review_due,
-                 "memory.confirm": confirm, "memory.deprecate": deprecate, "memory.search": search}
+                 "memory.confirm": confirm, "memory.reverify": reverify, "memory.deprecate": deprecate, "memory.search": search}
         return {name: wrap(fn) for name, fn in table.items()}
 
     # ── Telegram ────────────────────────────────────────────────────────────
@@ -522,7 +582,7 @@ class MissionService:
                 if args:
                     return "Usage: /missions"
                 return self._telegram_list()
-            if len(args) != 1 or _MISSION_ID.fullmatch(args[0]) is None:
+            if len(args) != 1 or MISSION_ID_RE.fullmatch(args[0]) is None:
                 return f"Usage: {cmd} M-<number>"
             if cmd == "/mission":
                 return self._telegram_detail(args[0])

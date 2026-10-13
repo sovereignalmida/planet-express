@@ -1862,10 +1862,11 @@ def handle_message(
     elif missions is not None and missions.enabled() and cmd in missions.TELEGRAM_COMMANDS:
         # v4 S4: the logic lives in MissionService; this is only the dispatch. Reached only for the
         # configured chat (checked at the top) and only while missions.enabled is true.
-        notifier.notify(TelegramClient.s(missions.telegram(text, _mission_operator(msg))))
+        threading.Thread(target=_run_mission_command, args=(missions, notifier, text, _mission_operator(msg)),
+                         daemon=True, name="mission-command").start()
 
     elif cmd == "/help":
-        notifier.notify(
+        help_text = (
             "*Planet Express — Available Commands*\n"
             "/check — Full scan + plan (no execution)\n"
             "/status — Quick health snapshot\n"
@@ -1885,6 +1886,13 @@ def handle_message(
             "stack: one approval writes the compose file and brings it up\n"
             "/grant — Show current sudo allowlist scope + how to widen it"
         )
+        if missions is not None and missions.enabled():
+            help_text += (
+                "\n/missions — Active missions\n"
+                "/mission `<id>` — One mission's summary\n"
+                "/cancel_mission `<id>` — Cancel (or request cancel of) a mission"
+            )
+        notifier.notify(help_text)
 
 
 def _busy_text(state: PipelineState) -> str:
@@ -2001,6 +2009,15 @@ def _mission_operator(msg: dict) -> str:
     """The operator name mission actions are attributed to (recorded as `operator:tg.<telegram id>`)."""
     sender_id = (msg.get("from") or {}).get("id")
     return f"tg.{sender_id}" if isinstance(sender_id, int) and sender_id > 0 else "telegram"
+
+
+def _run_mission_command(missions: MissionService, notifier: Notifier, text: str, operator: str) -> None:
+    try:
+        reply = missions.telegram(text, operator)
+    except Exception:  # noqa: BLE001 -- a daemon thread must answer, not die silently
+        log.exception("Mission command failed")
+        reply = "Something went wrong with that mission command."
+    notifier.notify(TelegramClient.s(reply))
 
 
 def _run_execution_control(

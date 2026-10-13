@@ -44,9 +44,7 @@ class Core:
     def __init__(self):
         self.calls = []
         self.results = {
-            "mission.list": {"missions": [mission("M-2", "Why is <script>x</script> slow"),
-                                          mission("M-1", "Old one", status="completed")],
-                             "total": 2, "limit": 100, "offset": 0},
+            "mission.list": self.list_pool,
             "mission.get": detail(mission("M-2", "Why slow")),
             "mission.events": {"events": [{"seq": 1, "at": 1, "kind": "state", "actor": "operator:alice",
                                            "body": {"from": None, "to": "draft"}}],
@@ -62,6 +60,15 @@ class Core:
             "canary.candidates": [], "proposal.list_pending": [],
         }
         self.errors = {}
+        self.pool = [mission("M-2", "Why is <script>x</script> slow"),
+                     mission("M-1", "Old one", status="completed")]
+
+    def list_pool(self, params):
+        """mission.list as core answers it: scope active/closed, newest first, bounded by limit."""
+        closed = {"completed", "failed", "rolled_back", "cancelled"}
+        rows = [m for m in self.pool if (m["status"] in closed) == (params.get("scope") == "closed")]
+        return {"missions": rows[:params["limit"]], "total": len(rows), "limit": params["limit"], "offset": 0,
+                "truncated": False}
 
     def __call__(self, method, params):
         self.calls.append((method, params))
@@ -70,7 +77,8 @@ class Core:
         if method.startswith("auth."):
             return {"ok": True, "result": {"locked": False, "remaining_attempts": 2, "locked_until": None,
                                            "accepted": True, "epoch": 0, "sent": True}}
-        return {"ok": True, "result": self.results[method]}
+        result = self.results[method]
+        return {"ok": True, "result": result(params) if callable(result) else result}
 
     def methods(self):
         return [m for m, _ in self.calls if not m.startswith("auth.")]
@@ -130,7 +138,8 @@ def test_board_renders_groups_and_escapes(web):
     client, core, _ = web
     r = client.get("/missions")
     page = r.get_data(as_text=True)
-    assert r.status_code == 200 and core.methods() == ["mission.list"]
+    assert r.status_code == 200 and core.methods() == ["mission.list", "mission.list"]
+    assert [p["scope"] for m, p in core.calls if m == "mission.list"] == ["active", "closed"]
     assert "Why is &lt;script&gt;x&lt;/script&gt; slow" in page and "<script>x</script>" not in page
     assert "INVESTIGATING" in page.upper() and "COMPLETED" in page.upper()
     assert 'href="/missions/M-2"' in page
@@ -139,7 +148,7 @@ def test_board_renders_groups_and_escapes(web):
 
 def test_board_empty_state(web):
     client, core, _ = web
-    core.results["mission.list"] = {"missions": [], "total": 0, "limit": 100, "offset": 0}
+    core.pool = []
     assert "No missions yet" in client.get("/missions").get_data(as_text=True)
 
 
@@ -151,6 +160,7 @@ def test_detail_shows_events_artifacts_result_and_cancel(web):
     assert "report.md" in page and "operator:alice" in page and "done" in page
     assert 'action="/missions/M-2/cancel"' in page and 'name="csrf_token"' in page
     assert "after=1" in page            # the stream is paged
+    assert "view=latest" in page        # and the newest events are one click away
 
 
 def test_detail_of_a_closed_mission_has_no_cancel(web):
@@ -298,7 +308,7 @@ def test_investigate_validates_the_id_and_maps_errors(web):
     t = token(client)
     assert client.post("/api/incidents/short/investigate", data={"csrf_token": t}).status_code == 400
     assert "mission.from_incident" not in core.methods()
-    for code, status in (("disabled", 404), ("not_found", 404), ("bad_request", 400), ("internal", 503)):
+    for code, status in (("disabled", 404), ("not_found", 404), ("bad_request", 400), ("timeout", 503)):
         core.errors["mission.from_incident"] = code
         r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": t})
         assert r.status_code == status and set(r.get_json()) == {"error"}
@@ -307,3 +317,86 @@ def test_investigate_validates_the_id_and_maps_errors(web):
 def test_incidents_js_offers_investigate():
     js = (Path(__file__).resolve().parent.parent / "static" / "incidents.js").read_text()
     assert "/investigate" in js and "INVESTIGATE" in js
+
+
+# ── round 2 ───────────────────────────────────────────────────────────────────
+def test_board_shows_old_open_missions_beside_many_closed_ones(web):
+    client, core, _ = web
+    core.pool = [mission("M-900", "Ancient but actionable", status="awaiting_decision")] + [
+        mission(f"M-{i}", f"done {i}", status="completed") for i in range(1, 300)]
+    page = client.get("/missions").get_data(as_text=True)
+    assert "Ancient but actionable" in page
+    active = [p for m, p in core.calls if m == "mission.list" and p["scope"] == "active"][0]
+    closed = [p for m, p in core.calls if m == "mission.list" and p["scope"] == "closed"][0]
+    assert active["limit"] == 500 and closed["limit"] <= 100
+    assert "most recently closed" in page            # the truncation note is about the closed part only
+
+
+def test_no_truncation_note_when_everything_fits(web):
+    client, _, _ = web
+    assert "most recently closed" not in client.get("/missions").get_data(as_text=True)
+
+
+def test_a_status_the_page_has_never_heard_of_still_gets_a_column(web):
+    client, core, _ = web
+    core.pool = [mission("M-5", "Brand new state", status="brand_new_status")]
+    page = client.get("/missions").get_data(as_text=True)
+    assert "Brand new state" in page and "BRAND NEW STATUS" in page
+
+
+def test_board_columns_follow_the_model_statuses():
+    from typing import get_args
+    from planet_express.application import mission_service
+    from planet_express.missions.models import Status
+    assert set(mission_service.STATUS_ORDER) == set(get_args(Status))
+    assert casa_scruffy.MISSION_ID_RE is mission_service.MISSION_ID_RE
+    assert casa_scruffy.TERMINAL_STATUSES is mission_service.TERMINAL_STATUSES
+
+
+def test_detail_latest_view_uses_tail(web):
+    client, core, _ = web
+    page = client.get("/missions/M-2?view=latest").get_data(as_text=True)
+    assert ("mission.events", {"mission_id": "M-2", "tail": True, "limit": 100}) in core.calls
+    assert "FROM THE START" in page and "LATEST ›" not in page
+    assert client.get("/missions/M-2?view=bogus").status_code == 400
+    assert client.get("/missions/M-2?view=latest&after=3").status_code == 400
+
+
+def test_review_due_cards_offer_reverify(web):
+    client, core, _ = web
+    page = client.get("/memory").get_data(as_text=True)
+    due = page.split('aria-label="Review due"')[1].split('aria-label="Confirmed"')[0]
+    assert 'action="/memory/due-one/reverify"' in due and "RE-VERIFY" in due
+    assert "/reverify" not in page.split('aria-label="Confirmed"')[1]
+    assert "/reverify" not in page.split('aria-label="Review due"')[0]
+
+
+def test_reverify_post_uses_session_operator_and_csrf(web):
+    client, core, _ = web
+    assert client.post("/memory/due-one/reverify").status_code == 400
+    core.results["memory.reverify"] = card("due-one", "confirmed")
+    r = client.post("/memory/due-one/reverify", data={"csrf_token": token(client), "operator": "bob"})
+    assert r.status_code == 302 and "notice=reverified" in r.headers["Location"]
+    assert ("memory.reverify", {"card_id": "due-one", "operator": "alice"}) in core.calls
+    assert "re-verified" in client.get(r.headers["Location"]).get_data(as_text=True).lower()
+    core.errors["memory.reverify"] = "conflict"
+    r = client.post("/memory/due-one/reverify", data={"csrf_token": token(client)})
+    assert r.headers["Location"].endswith("notice=conflict")
+    assert client.post("/memory/Bad Id/reverify", data={"csrf_token": token(client)}).status_code in (400, 404)
+
+
+def test_disabled_notice_says_core_needs_a_restart(web):
+    client, core, _ = web
+    core.errors["mission.list"] = "disabled"
+    page = client.get("/missions").get_data(as_text=True)
+    assert "restart" in page.lower() and "core" in page.lower()
+
+
+def test_investigate_internal_failure_is_not_a_retry_prompt(web):
+    client, core, _ = web
+    core.errors["mission.from_incident"] = "internal"
+    r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": token(client)})
+    assert r.status_code == 500 and "retry" not in r.get_json()["error"].lower()
+    core.errors["mission.from_incident"] = "timeout"
+    r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": token(client)})
+    assert r.status_code == 503

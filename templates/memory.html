@@ -19,6 +19,11 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="pe-btn accent" type="submit">CONFIRM</button>
     </form>{% endif %}
+    {% if 'reverify' in actions %}
+    <form method="post" action="{{ url_for('memory_reverify', card_id=c.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="pe-btn accent" type="submit">RE-VERIFY</button>
+    </form>{% endif %}
     {% if 'deprecate' in actions %}
     <form method="post" action="{{ url_for('memory_deprecate', card_id=c.id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -42,7 +47,7 @@
 </section>
 <section class="panel" aria-label="Review due">
   <div class="panel-head-row"><h3>REVIEW DUE</h3><span class="panel-head-note">{{ due.total }} confirmed cards past their review date</span></div>
-  {% for c in due.cards %}{{ card(c, ['deprecate']) }}{% else %}<p class="muted-body">Nothing is due for review.</p>{% endfor %}
+  {% for c in due.cards %}{{ card(c, ['reverify', 'deprecate']) }}{% else %}<p class="muted-body">Nothing is due for review.</p>{% endfor %}
 </section>
 <section class="panel" aria-label="Confirmed">
   <div class="panel-head-row"><h3>CONFIRMED</h3><span class="panel-head-note">{{ confirmed.total }} cards</span></div>
