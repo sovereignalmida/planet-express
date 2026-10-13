@@ -541,49 +541,76 @@ into §6.2 (they affect only Phase 3); the proxy binding, execution predicate an
 model are normative now (§3, §6.1, §10). The `approval_id` wording follow-up is fixed in §2.
 Remaining work is owned by slices, not by slice 0.
 
-## 22. Privileged session launcher (slice 3d; DRAFT, needs G1 before code)
+## 22. Session identity and launcher (slice 3d; rev 2 after G1 review, needs one more look before code)
 
-Problem found while integrating slice 3: Core runs as an unprivileged user. Spawning a process as the
-worker uid and putting it in a cgroup needs privilege (a non-root writer cannot move another uid's
-process into a cgroup; `setuid` needs `CAP_SETUID`). The previous S3b `CgroupContainment` assumed Core
-had those. This section replaces that assumption.
+Findings that shaped this section (Codex G1, 2026-10-13): Core is unprivileged on Ubuntu so it cannot
+spawn as another uid or move that process into a cgroup; MOS has **no sudo** and PE runs as root there
+(`setup/plan.py`); a shared worker uid lets two sessions ptrace each other and defeat the per-cgroup RPC
+binding; the helper's own install path, GID, and delegated file ownership were unspecified.
 
-**Helper.** `pe-launch`, one small root-owned program (`root:<core-group>` mode 0750, installed by setup,
-on MOS on the data pool with the boot hook restoring its sudoers rule). Core runs it as
-`sudo -n /path/pe-launch` with **no arguments**: the sudoers rule is `<core-user> ALL=(root) NOPASSWD:
-/path/pe-launch ""` (the empty-string argument form forbids any argv). All input is a single JSON spec on
-**stdin**: `{session_id, cgroup_root, worker_uid, worker_gid, cwd, argv, env, token}`. Nothing secret is
-ever in argv or the environment of the helper.
+### 22.1 Identity: one unique uid per live session (all hosts)
+- Setup reserves a **uid range** (e.g. 61000-61999) and creates, per uid, a private group with the same
+  gid and **no supplementary groups**. No `pe-worker` shared account. `mission_sessions.session_uid` is set
+  for every session kind and is unique (already indexed); allocation is transactional in `start_session`.
+- A session's workspace is owned by its uid, mode 0700; uid, gid and workspace are released at reap. A
+  reaped uid is not reused until its cgroup is gone and no process runs as it (`kill -9 -1` as that uid via
+  the launcher, then verify none remain).
+- The RPC binding (§6) is cgroup AND uid AND token; a cross-session ptrace/`/proc/<pid>/fd` attempt must
+  fail by uid separation (test it). `kernel.yama.ptrace_scope` is not relied on.
+- `worker_uid` must never equal the Core uid or 0 (reject in config validation and at spawn); the gid must
+  equal the uid's private gid exactly; any other pair is refused.
 
-**Helper behaviour (all checks fail closed, then exit non-zero before exec):**
-1. Validate: `session_id` matches `^[A-Za-z0-9_-]{1,64}$`; `cgroup_root` equals the configured delegated
-   root (read from a root-owned config the helper loads itself, not from the spec); `worker_uid` is in the
-   configured worker uid range, is not 0 and is not the Core uid; `cwd` is under the configured workspace
-   root, owned by the worker, and not a symlink; `argv[0]` is absolute; `argv`/`env` bounded and free of NUL.
-2. Create `<cgroup_root>/<session_id>` (fails if it exists), then chown **the directory and its
-   `cgroup.procs`, `cgroup.freeze`, `cgroup.kill`, `cgroup.events`** to the Core uid (standard cgroup v2
-   delegation) so Core can freeze, kill and read emptiness without privilege, while the worker cannot.
-3. Create a pipe, write the token into it, keep the read end for the child as fd 3; every other inherited
-   fd above 2 is closed.
-4. Join the cgroup (write own pid to `cgroup.procs`), `setgroups([])`, `setgid`, `setuid` to the worker,
-   verify the ids took effect, set `no_new_privs`, `setsid`, reset resource limits, `chdir(cwd)`, `execve`
-   with exactly the spec env. Child stdout/stderr are the helper's, so Core reads output through the sudo
-   process's pipe. The exec'd pid is not tracked; Core tracks the cgroup, which is the contract (§2.1).
-5. It never runs the worker as root and never changes anything outside its cgroup directory.
+### 22.2 Two launcher strategies, chosen by host capability, never silently downgraded
+- `DirectLauncher`: Core already has the privilege (**MOS: Core runs as root**; also a Core granted
+  `CAP_SETUID/SETGID/CHOWN/DAC_OVERRIDE` by a systemd unit if the operator chooses). It performs the §22.3
+  steps in-process. MOS needs no sudoers artifact and no helper.
+- `SudoLauncher` (Ubuntu with unprivileged Core): `sudo -n /usr/libexec/planetexpress/pe-launch` with the
+  sudoers rule `<core-user> ALL=(root) NOPASSWD: /usr/libexec/planetexpress/pe-launch ""` (the empty
+  string argument forbids any argv; verified by a test that `sudo -n pe-launch --x` is refused). Input is
+  one JSON spec on stdin: `{session_id, worker_uid, cwd, argv, env, token}`; **the gid, cgroup root,
+  uid range and workspace root come from a root-owned config the helper loads itself, never the spec.**
+- Preflight (setup, repair, and before each Repair start) picks the strategy and fails closed with the
+  exact missing prerequisite; a host that can do neither is proposal-only.
+- Install hardening (both): the helper and its config live at fixed root-owned paths whose every ancestor
+  directory is root-owned, not group/world writable, and not a symlink (`/usr/libexec/planetexpress/`,
+  `/etc/planetexpress/launch.conf` 0600 root); the helper opens paths with `O_NOFOLLOW`/`openat2
+  RESOLVE_NO_SYMLINKS`, checks the cgroup root with `statfs` for `CGROUP2_SUPER_MAGIC`, and installation
+  tests cover writable and symlinked ancestors. It is never installed under a Core-writable path.
 
-**Core side.** `CgroupContainment` gains a `LauncherStrategy` (S3c adds the seam): `SudoLauncher` runs
-the helper as above; `DirectLauncher` (tests/CI, or a Core that already has the capabilities) does the
-same steps in-process. `kill`/`freeze`/`is_empty` always act on the Core-owned cgroup files directly.
-Cleanup is `rmdir` of the session cgroup, so `cgroup_root` is a directory delegated to the Core uid at
-boot (Ubuntu: a systemd unit `Delegate=` or setup-created dir; MOS: a boot script because the cgroup
-tree is RAM-backed). Setup/repair/undo create, verify and remove: helper file, sudoers fragment
-(`visudo -c`), worker account and uid range, delegated cgroup root, boot hook (MOS).
+### 22.3 Launch steps (in the helper or in-process)
+1. Validate session id (`^[A-Za-z0-9_-]{1,64}$`), uid in range and not Core/0, cwd under the workspace root,
+   owned by that uid, not a symlink, `argv[0]` absolute, bounds on argv/env/token, no NUL.
+2. **The launcher owns cgroup creation** (`create()` and spawn become one `launch(session_id, spec) ->
+   ContainedSession`, returning only after success; on any failure it removes what it made). It makes
+   `<cgroup_root>/<session_id>` (must not exist) and sets ownership: directory and `cgroup.procs`,
+   `cgroup.freeze`, `cgroup.kill` owned by the Core uid mode 0644/0755 (so Core can freeze/kill/read
+   emptiness unprivileged); `cgroup.events` world-readable. The worker uid owns nothing in it.
+3. Pipe with the token to the child as fd 3; close every other fd above 2.
+4. Join the cgroup, `setgroups([])`, `setgid(gid)`, `setuid(uid)`, verify, `no_new_privs`, `setsid`, reset
+   rlimits, `chdir`, `execve` with exactly the spec env. The exec'd pid is not tracked; the cgroup is.
+5. Tests prove: Core's write to `cgroup.freeze`/`cgroup.kill` succeeds and the worker's gets EACCES; the
+   token is absent from `/proc/<pid>/cmdline` and `environ`; no stray fds; double-fork escapers stay in the
+   cgroup; spec fields cannot select another gid, root, or path.
 
-**Threats and tests.** A worker or other local user must not run the helper (mode and sudoers rule);
-a Core compromise gains nothing it lacks today (Core is docker-group = root-equivalent) but the helper
-must still never execute as root, accept paths outside the configured roots, or accept a uid outside
-range; tests cover: bad session id, existing cgroup, uid 0, Core uid, out-of-range uid, symlinked cwd,
-relative argv[0], oversize spec, token absent from `/proc/<pid>/cmdline` and `environ`, fd leakage,
-cgroup membership before exec, Core can freeze/kill/see empty, worker cannot write cgroup files, and
-double-fork escapers stay inside. Root-only tests run on Ubuntu and on the MOS VM via the rehearsal
-script. This section needs a G1 (Codex) review and the operator's sign-off before slice 3d starts.
+### 22.4 cgroup layout and capability gates
+- Ubuntu/systemd: `casa-planetexpress.service` has `Delegate=yes`; at start Core moves itself into a
+  `<delegated>/core` leaf, then session cgroups are siblings under `<delegated>/sessions` (an empty
+  parent, so domain controllers such as `pids` can be enabled in `subtree_control` and `pids.max` set per
+  session). MOS: the same tree created by a boot script (RAM-backed cgroupfs) owned as above.
+- Preflight performs real operations on a throwaway cgroup: create, move, freeze **and confirm
+  `cgroup.events frozen 1`**, kill, confirm `populated 0`, rmdir, and checks `cgroup.kill` exists
+  (kernel >= 5.14). `freeze()` must poll `frozen 1` before reporting paused. Failing hosts use the uid
+  fallback (`kill -9 -1` as the session uid) or are proposal-only.
+
+### 22.5 Setup, repair, undo (named steps, each with probe, repair and undo)
+`session-uid-range`, `launcher-helper` (file, config, ancestors check), `launcher-sudoers` (Ubuntu only;
+fragment `/etc/sudoers.d/planetexpress-launch`, `visudo -c`, and a probe that `sudo -n pe-launch` works and
+`pe-launch --x` is refused; must not be skipped when the legacy sudoers file is preserved),
+`cgroup-tree` (systemd unit settings or MOS boot script), `workspace-root`. MOS: all state on the data pool,
+recreated by the boot hook.
+
+### 22.6 Stated assumption (not a conclusion)
+On Ubuntu, Core is also in the `docker` group today, so a compromised Core is already root-equivalent and
+the helper adds no authority Core lacks. This is an assumption about the current deployment, stated per
+host in the threat model; if the docker-group assumption is removed the helper's checks are the boundary
+and must be reviewed on their own. The release proof checks the observable prerequisites.
