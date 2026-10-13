@@ -7,10 +7,10 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | # | Slice | Status |
 |---|---|---|
 | 0 | Contracts, threat model | DONE rev 0.4 (final G1 dispositioned); was: spec rev 0.3 (`v4-slice-0-contracts.md`); two Codex G1 rounds folded in (§19, §20); MOS cgroup freeze/kill verified; needs operator sign-off |
-| 1 | Mission store | MERGED to v4-next (9870e21 + merge); Codex G3 done by worker (3 fixed); Claude /code-review pending |
+| 1 | Mission store | MERGED to v4-next (9870e21 + merge); Codex G3 done by worker (3 fixed); Claude /code-review round 1 done: 5 fixes merged |
 | 2 | Ship's Memory | MERGED to v4-next (d744c2a + merge); Codex G3 x2 done (2 fixed); v6 DDL combined with slice 1 in core/store.py |
-| 3 | Supervisor, adapter, worker | not started |
-| 4 | Surfaces | not started |
+| 3 | Supervisor, adapter, worker | next |
+| 4 | Surfaces | next (parallel with 3) |
 | 5 | Checkpoint | not started |
 | 6 | Tripwires and grants | not started |
 | 7 | Approval, standing grants, privilege | not started |
@@ -35,3 +35,8 @@ Primary orchestrator: Claude Code, account A. Budget notes: (none yet).
 ## Resume commands
 - Tests: `pytest tests -x -q` (targeted first).
 - Review: `codex review --base v4-next` / `--uncommitted`; Claude: `/code-review`.
+
+## Deferred findings (owned by a later slice)
+- Slice 7: standing-grant `window_json` is stored but not evaluated; grant `protected`/`exclusions` not cross-checked against standing scope or plan (spec §5.2 needs a window format).
+- Slice 3: supervisor must confirm session dead BEFORE requesting a terminal transition (terminal transition now frees leases/session in one txn).
+- Existing v3 code review findings (not v4): quiet re-scan dropped when refused in a maintenance window; MOS `docker-compose config --format json` may fail on Compose v1; severity wobble re-planning. Unverified.
