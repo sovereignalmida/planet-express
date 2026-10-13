@@ -1,7 +1,7 @@
 # Planet Express v4 — Execution plan
 
 Plans against `v4-mission-control.md` (v4.1). Nothing here deploys: `v3-production` stays live on
-192.168.1.94 and v4 work happens on a new branch with no deploy without an explicit go.
+the production host and v4 work happens on a new branch with no deploy without an explicit go.
 
 ## Working agreements
 

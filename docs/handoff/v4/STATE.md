@@ -28,7 +28,7 @@ slices 1 and 2 in parallel worktrees. Operator must decide brief §14.1 items 9-
 ## Open
 - Pushed `v4-next` to origin (public repo: keep infra detail out of tracked files; private inputs go in gitignored `docs/private/`).
 - Operator-side findings from the export, separate from v4: legacy sudoers wildcard line, open Docker TCP socket, broken VPN port-forward cycle, leftover timers, AdGuard in paused_containers, two credentials to rotate.
-- MOS test VM (192.168.122.159) was unreachable on 2026-10-13; needed before slice 6.
+- MOS test VM was unreachable on 2026-10-13; needed before slice 6.
 
 ## Usage / account
 Primary orchestrator: Claude Code, account A. Budget notes: (none yet).

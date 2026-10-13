@@ -480,16 +480,17 @@ Resolved; these are inputs to Phase 0, not open questions.
 
 ### 14.1 Open items raised by the server export (decide in Phase 0)
 
-9. **Unauthenticated Docker TCP socket** on the primary host. The §6.8 preflight makes this a
-   blocker for any Repair worker. Options: close it; bind it to loopback; replace it with an
-   allowlisting socket proxy. Existing consumers (dashboard discovery, multi-host) need the
-   proxy path.
-10. **Backup floor definition.** "Verified recent backup" must be defined per scope: backup
-    coverage (what is covered), recency, and whether a restore has ever been tested. Today the
-    backup tool covers local application data and the Docker data root; NAS-share coverage is
-    unconfirmed and no restore has been tested. A floor that requires a tested restore would
-    refuse everything, so the first definition is *covered and recent*, with restore-tested shown
-    on the card and the restore-validation mission (decision 6c) as the way to earn it.
+9. **Unauthenticated Docker TCP socket** (decided 2026-10-13): replace it with an **allowlisting
+   socket proxy** that exposes only the read/discovery endpoints dashboard discovery and
+   multi-host need; the raw daemon listens on the Unix socket only. The §6.8 preflight fails
+   closed on any other TCP exposure.
+10. **Backup floor definition** (decided 2026-10-13): the backup tool covers only the primary
+    host's local application data and Docker data root. **It does not back up the NAS.** So the
+    floor is scope-specific: a scope whose data is covered and recent passes; a scope whose data
+    lives on the NAS has no coverage, so a Repair touching it is refused unless the operator
+    records the "no backup" acknowledgement (decision 5). The first definition is *covered and
+    recent*; restore-tested is shown on the card and is earned by the restore-validation mission.
+    NAS backup is an operator project outside v4, but missions surface it as a standing finding.
 11. **MOS parity.** Checkpoint and unit-state reads use systemd properties and fail on MOS. The
     checkpoint service must be provider-aware; until then MOS is proposal-only (decision 7's
     fallback applies).
