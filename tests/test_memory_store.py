@@ -226,3 +226,96 @@ def test_credential_placeholders_are_not_secrets(conn):
         conn, make_card("c1", statement="Needs <credential: cloudflare-dns-token> from the vault."),
         OPERATOR, now=NOW)
     assert store.get_card(conn, "c1") is not None
+
+
+def test_fallback_redact_import_leaves_os_environ_unchanged_and_flags_itself(monkeypatch):
+    import os
+    import sys
+    from pathlib import Path
+    if Path("/etc/planetexpress/config.yaml").exists():
+        pytest.skip("host has a real config; the fallback path is not taken")
+    monkeypatch.delenv("CASA_CONFIG", raising=False)
+    monkeypatch.delitem(sys.modules, "planet_express.core.redact", raising=False)
+    import planet_express.core as core_pkg
+    monkeypatch.setattr(core_pkg, "redact", core_pkg.redact)  # importing rebinds the package attribute; undo it
+    monkeypatch.delitem(sys.modules, "config", raising=False)
+    monkeypatch.setattr(store, "_redact_fn", None)
+    monkeypatch.setattr(store, "_redact_fallback", False)
+    assert store._redact("hello") == "hello"
+    assert "CASA_CONFIG" not in os.environ
+    assert store.redact_is_shape_only() is True
+    assert store._redact("DB_PASSWORD=abc12345") != "DB_PASSWORD=abc12345"
+
+
+def test_wrong_explicit_casa_config_is_an_error_and_is_left_alone(monkeypatch, tmp_path):
+    import os
+    import sys
+    monkeypatch.setenv("CASA_CONFIG", str(tmp_path / "missing.yaml"))
+    monkeypatch.delitem(sys.modules, "planet_express.core.redact", raising=False)
+    import planet_express.core as core_pkg
+    monkeypatch.setattr(core_pkg, "redact", core_pkg.redact)  # importing rebinds the package attribute; undo it
+    monkeypatch.delitem(sys.modules, "config", raising=False)
+    monkeypatch.setattr(store, "_redact_fn", None)
+    with pytest.raises((Exception, SystemExit)):
+        store._redact("x")
+    assert os.environ["CASA_CONFIG"] == str(tmp_path / "missing.yaml")
+
+
+def test_upsert_holds_the_write_lock_before_reading_status(tmp_path):
+    """A confirm racing in between the status read and the write must not be overwritten."""
+    import sqlite3
+
+    from planet_express.memory import schema
+    db = tmp_path / "m.db"
+    first = sqlite3.connect(db, timeout=0)
+    second = sqlite3.connect(db, timeout=0)
+    schema.init_schema(first)
+    store.upsert_candidate(first, make_card("c1", statement="Original.", source="inferred"), OPERATOR, now=NOW)
+    first.commit()
+    outcome = {}
+    real_row = store._row
+
+    def racing_row(conn, card_id):
+        row = real_row(conn, card_id)
+        if conn is first and "done" not in outcome:
+            outcome["done"] = True
+            try:
+                store.confirm(second, card_id, OPERATOR, now=NOW)
+                second.commit()
+                outcome["confirmed"] = True
+            except sqlite3.OperationalError:
+                outcome["blocked"] = True
+        return row
+
+    store._row = racing_row
+    try:
+        try:
+            store.upsert_candidate(first, make_card("c1", statement="Overwrite.", source="inferred"), OPERATOR, now=NOW)
+        except store.CardExistsError:
+            pass
+    finally:
+        store._row = real_row
+    first.commit()
+    card = store.get_card(first, "c1")
+    assert not (card.status == "confirmed" and card.statement == "Overwrite.")
+    assert outcome.get("blocked") or card.statement == "Original."
+
+
+def test_insert_race_surfaces_as_card_exists_not_integrity_error():
+    conn = make_conn()
+    real_row = store._row
+
+    def stale_row(c, card_id):
+        row = real_row(c, card_id)
+        if row is None:  # another writer slips the card in after we looked
+            c.execute("INSERT INTO memory_cards (id, title, type, scope_json, tags, statement, steps_json,"
+                      " evidence_json, source, status, created_at) VALUES ('c1','t','fact','[]','','s','[]','[]',"
+                      "'inferred','confirmed','2026-01-01T00:00:00+00:00')")
+        return row
+
+    store._row = stale_row
+    try:
+        with pytest.raises(store.CardExistsError):
+            store.upsert_candidate(conn, make_card("c1", source="inferred"), OPERATOR, now=NOW)
+    finally:
+        store._row = real_row

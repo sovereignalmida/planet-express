@@ -65,13 +65,21 @@ class SecretShapedContent(MemoryStoreError):
 
 
 _redact_fn = None
+_redact_fallback = False
+
+
+def redact_is_shape_only() -> bool:
+    """True when core.redact had to be loaded without a PE config: configured (site-specific) secrets
+    are then unknown and screening is by shape only."""
+    return _redact_fallback
 
 
 def _redact(text: str) -> str:
     """core.redact is imported lazily: it needs a PE config file at import time, and a user with only
-    Markdown notes has none. Without one we fall back to the repository's example config, which only
-    means no site-specific credentials are known; the shape-based detectors are unaffected."""
-    global _redact_fn
+    Markdown notes has none. Without one we import it against the repository's example config, which
+    only means no site-specific credentials are known; the shape-based detectors are unaffected.
+    CASA_CONFIG is set only for that one import and put back exactly as it was."""
+    global _redact_fn, _redact_fallback
     if _redact_fn is None:
         import os
         from pathlib import Path
@@ -82,7 +90,11 @@ def _redact(text: str) -> str:
             if "CASA_CONFIG" in os.environ or not example.exists():
                 raise
             os.environ["CASA_CONFIG"] = str(example)
-            from planet_express.core.redact import redact
+            try:
+                from planet_express.core.redact import redact
+            finally:
+                del os.environ["CASA_CONFIG"]
+            _redact_fallback = True
         _redact_fn = redact
     return _redact_fn(text)
 
@@ -124,14 +136,24 @@ def _iso(value: datetime | None) -> str | None:
 
 @contextmanager
 def _atomic(conn: sqlite3.Connection):
+    """One atomic unit. Outside a transaction it takes the write lock up front (BEGIN IMMEDIATE), so a
+    status read inside the block cannot go stale before the write; inside one it nests as a SAVEPOINT
+    and the caller owns commit and locking."""
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN IMMEDIATE")
     conn.execute("SAVEPOINT memory_op")
     try:
         yield
     except BaseException:
         conn.execute("ROLLBACK TO memory_op")
         conn.execute("RELEASE memory_op")
+        if own:
+            conn.execute("ROLLBACK")
         raise
     conn.execute("RELEASE memory_op")
+    if own:
+        conn.execute("COMMIT")
 
 
 def _cursor(conn: sqlite3.Connection) -> sqlite3.Cursor:
@@ -227,37 +249,45 @@ def upsert_candidate(conn: sqlite3.Connection, card: Card, actor: str, *, now: d
     card = card.model_copy(update={"status": "candidate"})
     check_no_secrets(card)
     check_text_no_secrets(card.id, "history detail", detail)  # detail is stored forever
-    row = _row(conn, card.id)
-    if row is not None and row["status"] != "candidate":
-        raise CardExistsError(card.id, row["status"])
     values = (
         card.title, card.type, json.dumps(card.scope), " ".join(card.scope), card.statement,
         json.dumps([s.model_dump() for s in card.steps]), json.dumps(card.evidence), card.source,
         _iso(card.last_verified_at), card.review_after.isoformat() if card.review_after else None,
         card.content_hash())
-    with _atomic(conn):
-        if row is None:
-            conn.execute(
-                "INSERT INTO memory_cards (title, type, scope_json, tags, statement, steps_json, evidence_json,"
-                " source, last_verified_at, review_after, content_hash, id, status, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?)",
-                (*values, card.id, _iso(card.created_at)))
-            outcome, from_status = "created", None
-        else:
-            if row["content_hash"] == card.content_hash():
-                return "unchanged"
-            conn.execute(
-                "UPDATE memory_cards SET title=?, type=?, scope_json=?, tags=?, statement=?, steps_json=?,"
-                " evidence_json=?, source=?, last_verified_at=?, review_after=?, content_hash=? WHERE id = ?",
-                (*values, card.id))
-            outcome, from_status = "updated", "candidate"
-        conn.execute("DELETE FROM memory_edges WHERE src = ? AND kind = 'supersedes'", (card.id,))
-        for dst in card.supersedes:
-            _add_edge(conn, card.id, dst, "supersedes", now)
-        for other in card.conflicts_with:
-            _add_edge(conn, card.id, other, "conflicts_with", now)
-        _history(conn, card.id, actor, "create" if outcome == "created" else "update", now,
-                 from_status, "candidate", detail)
+    try:
+        with _atomic(conn):
+            row = _row(conn, card.id)  # read under the write lock; the UPDATE is guarded as well
+            if row is not None and row["status"] != "candidate":
+                raise CardExistsError(card.id, row["status"])
+            if row is None:
+                conn.execute(
+                    "INSERT INTO memory_cards (title, type, scope_json, tags, statement, steps_json,"
+                    " evidence_json, source, last_verified_at, review_after, content_hash, id, status, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?)",
+                    (*values, card.id, _iso(card.created_at)))
+                outcome, from_status = "created", None
+            else:
+                if row["content_hash"] == card.content_hash():
+                    return "unchanged"
+                changed = conn.execute(
+                    "UPDATE memory_cards SET title=?, type=?, scope_json=?, tags=?, statement=?, steps_json=?,"
+                    " evidence_json=?, source=?, last_verified_at=?, review_after=?, content_hash=?"
+                    " WHERE id = ? AND status = 'candidate'", (*values, card.id)).rowcount
+                if changed != 1:
+                    raise CardExistsError(card.id, "no longer a candidate")
+                outcome, from_status = "updated", "candidate"
+            conn.execute("DELETE FROM memory_edges WHERE src = ? AND kind = 'supersedes'", (card.id,))
+            for dst in card.supersedes:
+                _add_edge(conn, card.id, dst, "supersedes", now)
+            for other in card.conflicts_with:
+                _add_edge(conn, card.id, other, "conflicts_with", now)
+            _history(conn, card.id, actor, "create" if outcome == "created" else "update", now,
+                     from_status, "candidate", detail)
+    except sqlite3.IntegrityError as exc:
+        # Someone else created the id between our read and our insert (only possible inside a
+        # caller-owned transaction): the same answer as finding it already there.
+        current = _row(conn, card.id)
+        raise CardExistsError(card.id, current["status"] if current else "existing") from exc
     return outcome
 
 

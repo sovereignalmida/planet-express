@@ -43,8 +43,13 @@ def _fts_query(query: str) -> str | None:
     return " OR ".join(f'"{t}"' for t in terms) or None
 
 
+# Every form a reader or a model may treat as a line break (str.splitlines() set), so no form can start
+# an unquoted visual line inside a card.
+_LINE_BREAKS = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+
+
 def _quote(text: str) -> list[str]:
-    return [f"> {line}" if line else ">" for line in text.split("\n")]
+    return [f"> {line}" if line else ">" for line in _LINE_BREAKS.split(text)]
 
 
 def render_card(card: Card) -> str:
