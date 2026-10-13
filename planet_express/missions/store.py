@@ -47,27 +47,38 @@ class MissionStore:
     def create_mission(self, *, title: str, origin: Origin, grant: Grant, goal: str, success_criteria: str,
                        runtime: str, priority: int = 50, incident_id: str | None = None,
                        standing_grant_id: str | None = None, actor: str = "core") -> Mission:
+        with self.store._write() as conn:
+            mission_id = self.create_in_txn(
+                conn, title=title, origin=origin, grant=grant, goal=goal, success_criteria=success_criteria,
+                runtime=runtime, priority=priority, incident_id=incident_id,
+                standing_grant_id=standing_grant_id, actor=actor)
+        return self.get_mission(mission_id)
+
+    def create_in_txn(self, conn, *, title: str, origin: Origin, grant: Grant, goal: str, success_criteria: str,
+                      runtime: str, priority: int = 50, incident_id: str | None = None,
+                      standing_grant_id: str | None = None, actor: str = "core") -> str:
+        """Insert a draft mission inside the caller's write transaction and return its id, so a caller can
+        make creation and what follows (queueing, an evidence note) one atomic unit."""
         now = self._now()
         grant_json = grant.canonical()
-        with self.store._write() as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(CAST(SUBSTR(id, 3) AS INTEGER)), 0) + 1 FROM missions"
-            ).fetchone()
-            mission_id = f"M-{row[0]}"
-            # Validate with the strict model BEFORE the insert, so no unreadable row can be committed.
-            Mission(id=mission_id, title=title, origin=origin, incident_id=incident_id, priority=priority,
-                    status="draft", tier=grant.tier, goal=goal, success_criteria=success_criteria,
-                    grant_json=grant_json, grant_hash=sha256_hex(grant.model_dump(mode="json")),
-                    standing_grant_id=standing_grant_id, runtime=runtime, created_at=now, updated_at=now)
-            conn.execute(
-                "INSERT INTO missions (id, title, origin, incident_id, priority, status, tier, goal, "
-                "success_criteria, grant_json, grant_hash, standing_grant_id, runtime, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (mission_id, title, origin, incident_id, priority, grant.tier, goal, success_criteria,
-                 grant_json, sha256_hex(grant.model_dump(mode="json")), standing_grant_id, runtime, now, now),
-            )
-            insert_event(conn, mission_id, "state", actor, {"from": None, "to": "draft"}, now)
-        return self.get_mission(mission_id)
+        row = conn.execute(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(id, 3) AS INTEGER)), 0) + 1 FROM missions"
+        ).fetchone()
+        mission_id = f"M-{row[0]}"
+        # Validate with the strict model BEFORE the insert, so no unreadable row can be committed.
+        Mission(id=mission_id, title=title, origin=origin, incident_id=incident_id, priority=priority,
+                status="draft", tier=grant.tier, goal=goal, success_criteria=success_criteria,
+                grant_json=grant_json, grant_hash=sha256_hex(grant.model_dump(mode="json")),
+                standing_grant_id=standing_grant_id, runtime=runtime, created_at=now, updated_at=now)
+        conn.execute(
+            "INSERT INTO missions (id, title, origin, incident_id, priority, status, tier, goal, "
+            "success_criteria, grant_json, grant_hash, standing_grant_id, runtime, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mission_id, title, origin, incident_id, priority, grant.tier, goal, success_criteria,
+             grant_json, sha256_hex(grant.model_dump(mode="json")), standing_grant_id, runtime, now, now),
+        )
+        insert_event(conn, mission_id, "state", actor, {"from": None, "to": "draft"}, now)
+        return mission_id
 
     def get_mission(self, mission_id: str) -> Mission:
         with self.store._connect() as conn:

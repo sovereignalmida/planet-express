@@ -1,7 +1,6 @@
 {% extends "missions_base.html" %}
 {% block title %}Mission{% endblock %}
 {% block content %}
-{% set closed = m.status in ["completed", "failed", "rolled_back", "cancelled"] %}
 <section class="panel" aria-label="Mission">
   <div class="panel-head-row">
     <a class="pe-link-out" href="{{ url_for('missions_page') }}">‹ MISSIONS</a>
@@ -48,6 +47,14 @@
   {% for e in events.events %}
   <div class="mc-event"><span class="mc-event-seq">#{{ e.seq }}</span><span class="status-chip">{{ e.kind }}</span><span class="mc-event-actor">{{ e.actor }}</span><span class="mc-pre">{{ e.body | tojson }}</span></div>
   {% else %}<p class="muted-body">No events.</p>{% endfor %}
-  {% if events.has_more %}<p><a class="pe-link-out" href="{{ url_for('mission_page', mission_id=m.id, after=events.next_after_seq) }}">NEXT EVENTS ›</a></p>{% endif %}
+  <p class="mc-pager">
+  {% if view == 'latest' %}
+    <a class="pe-link-out" href="{{ url_for('mission_page', mission_id=m.id) }}">‹ FROM THE START</a>
+    {% if events.has_more %}<span class="panel-head-note">earlier events are not shown</span>{% endif %}
+  {% else %}
+    {% if events.has_more %}<a class="pe-link-out" href="{{ url_for('mission_page', mission_id=m.id, after=events.next_after_seq) }}">NEXT EVENTS ›</a>{% endif %}
+    <a class="pe-link-out" href="{{ url_for('mission_page', mission_id=m.id, view='latest') }}">LATEST ›</a>
+  {% endif %}
+  </p>
 </section>
 {% endblock %}

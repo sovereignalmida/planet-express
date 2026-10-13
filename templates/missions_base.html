@@ -25,7 +25,7 @@
       {% if disabled %}
       <section class="panel" aria-label="Disabled">
         <div class="panel-head-row"><h3>MISSIONS</h3><span class="status-chip">OFF</span></div>
-        <p class="muted-body">Missions are disabled on this host. Set <code>missions.enabled: true</code> in config.yaml to turn them on.</p>
+        <p class="muted-body">Missions are disabled on this host. Set <code>missions.enabled: true</code> in config.yaml to turn them on, then restart core: core reads <code>missions.enabled</code> only at startup, so the dashboard can show these pages before core agrees.</p>
       </section>
       {% else %}{% block content %}{% endblock %}{% endif %}
     </div>

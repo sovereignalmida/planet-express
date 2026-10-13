@@ -34,6 +34,12 @@ import config
 import dashboard_data
 import web_auth
 from config_io import validate_config_text
+from planet_express.application.mission_service import (
+    INCIDENT_ID_RE,
+    MISSION_ID_RE,
+    STATUS_ORDER,
+    TERMINAL_STATUSES,
+)
 from planet_express.application.multi_host import FleetCache, provider_for
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
@@ -342,7 +348,9 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
         if request.path.startswith("/api/incidents"):
             status, message = {"bad_request": (400, "Invalid incident request"),
                                "not_found": (404, "Incident not found"),
-                               "disabled": (404, "Missions are disabled")}.get(
+                               "disabled": (404, "Missions are disabled"),
+                               **({"internal": (500, "Could not open the investigation")}
+                                  if request.path.endswith("/investigate") else {})}.get(
                                    error.code, (503, "Incidents unavailable; try again shortly"))
             return jsonify(error=message), status
         if request.path.startswith("/api/scan"):
@@ -832,7 +840,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
 
     @app.post("/api/incidents/<incident_id>/investigate")
     def incident_investigate(incident_id):
-        if re.fullmatch(r"[0-9a-f]{12}", incident_id) is None:
+        if INCIDENT_ID_RE.fullmatch(incident_id) is None:
             raise RpcError("Invalid incident ID", "bad_request")
         return jsonify(core("mission.from_incident", {
             "incident_id": incident_id, "operator": g.operator,
@@ -895,8 +903,10 @@ _MISSION_NOTICES = {
     "not_found": "That mission no longer exists.",
     "disabled": "Missions are disabled on this host.",
 }
+CLOSED_ON_BOARD = 50
 _MEMORY_NOTICES = {
     "confirmed": "Card confirmed.",
+    "reverified": "Card re-verified.",
     "deprecated": "Card deprecated.",
     "conflict": "That card is no longer in the state this action needs. Reload and check it.",
     "forbidden": "That card cannot be changed by this action.",
@@ -931,34 +941,45 @@ def register_mission_pages(app, core) -> None:
     @app.get("/missions")
     def missions_page():
         try:
-            data = core("mission.list", {"limit": 100})
+            # Every open mission (so an old one awaiting a decision never drops off the board), plus only the
+            # most recent closed ones.
+            active = core("mission.list", {"scope": "active", "limit": 500})
+            closed = core("mission.list", {"scope": "closed", "limit": CLOSED_ON_BOARD})
         except RpcError as error:
             if error.code != "disabled":
                 raise
             return shell("missions.html", page="missions", disabled=True, notice=None, data=None)
-        return shell("missions.html", page="missions", disabled=False, data=data,
-                     notice=notice_for(_MISSION_NOTICES))
+        rows = active["missions"] + closed["missions"]
+        seen = {m["status"] for m in rows}
+        order = list(STATUS_ORDER) + sorted(seen - set(STATUS_ORDER))   # a status added later still gets a column
+        return shell("missions.html", page="missions", disabled=False, missions=rows, order=order,
+                     active=active, closed=closed, notice=notice_for(_MISSION_NOTICES))
 
     @app.get("/missions/<mission_id>")
     def mission_page(mission_id):
-        if re.fullmatch(r"M-[0-9]{1,9}", mission_id) is None:
+        if MISSION_ID_RE.fullmatch(mission_id) is None:
             abort(404)
+        view = request.args.get("view", "start")
         after = request.args.get("after", "0")
-        if re.fullmatch(r"[0-9]{1,15}", after) is None:
+        if (view not in ("start", "latest") or re.fullmatch(r"[0-9]{1,15}", after) is None
+                or (view == "latest" and "after" in request.args)):
             abort(400)
+        query = ({"mission_id": mission_id, "tail": True, "limit": 100} if view == "latest"
+                 else {"mission_id": mission_id, "after_seq": int(after), "limit": 100})
         try:
             mission = core("mission.get", {"mission_id": mission_id})
-            events = core("mission.events", {"mission_id": mission_id, "after_seq": int(after), "limit": 100})
+            events = core("mission.events", query)
         except RpcError as error:
             if error.code == "disabled":
                 return shell("mission_detail.html", page="missions", disabled=True, notice=None)
             refuse(error)
         return shell("mission_detail.html", page="missions", disabled=False, m=mission, events=events,
+                     view=view, closed=mission["status"] in TERMINAL_STATUSES,
                      notice=notice_for(_MISSION_NOTICES))
 
     @app.post("/missions/<mission_id>/cancel")
     def mission_cancel(mission_id):
-        if re.fullmatch(r"M-[0-9]{1,9}", mission_id) is None:
+        if MISSION_ID_RE.fullmatch(mission_id) is None:
             abort(404)
         try:
             result = core("mission.cancel", {"mission_id": mission_id, "operator": g.operator})
@@ -1000,6 +1021,10 @@ def register_mission_pages(app, core) -> None:
     @app.post("/memory/<card_id>/confirm")
     def memory_confirm(card_id):
         return card_change(card_id, "memory.confirm", {}, "confirmed")
+
+    @app.post("/memory/<card_id>/reverify")
+    def memory_reverify(card_id):
+        return card_change(card_id, "memory.reverify", {}, "reverified")
 
     @app.post("/memory/<card_id>/deprecate")
     def memory_deprecate(card_id):

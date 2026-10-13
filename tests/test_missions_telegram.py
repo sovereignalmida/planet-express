@@ -25,6 +25,24 @@ def svc(tmp_path):
     return MissionService(store, enabled=lambda: True)
 
 
+class InlineThread:
+    """Runs the target at start(); records that it was started as a daemon, never called directly."""
+    started: list = []
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None, name=None):
+        self.target, self.args, self.kwargs, self.daemon = target, args, kwargs or {}, daemon
+
+    def start(self):
+        InlineThread.started.append(self)
+        self.target(*self.args, **self.kwargs)
+
+
+@pytest.fixture(autouse=True)
+def inline_threads(monkeypatch):
+    InlineThread.started = []
+    monkeypatch.setattr(fw.threading, "Thread", InlineThread)
+
+
 def send(text, svc, *, chat=42, sender=None):
     n = FakeNotifier()
     msg = {"text": text, "chat": {"id": chat}, "from": sender or {"id": 7, "username": "alice"}}
@@ -59,13 +77,14 @@ def test_cancel_mission_queued_is_cancelled_and_attributed(svc):
     (reply,) = send(f"/cancel_mission {mid}", svc)
     assert "cancelled" in reply
     m = MissionStore(svc.store).get_mission(mid)
-    assert m.status == "cancelled" and m.cancel_requested_by == "operator:tg.7"
+    assert m.status == "cancelled"
+    assert [e for e in MissionStore(svc.store).events(mid) if e.actor == "operator:tg.7" and "cancelled" in e.body_json]
 
 
 def test_cancel_mission_in_flight_only_requests(svc):
-    from planet_express.missions.state import transition
     mid = make(svc)
-    transition(svc.store, mid, "investigating", "core")
+    MissionStore(svc.store).start_session(mid, kind="local_uid", token_hash="a" * 64, session_ttl_s=60,
+                                          lease_ttl_s=60, session_uid=4000)
     (reply,) = send(f"/cancel_mission {mid}", svc)
     assert "cancel requested" in reply
     assert MissionStore(svc.store).get_mission(mid).status == "investigating"
@@ -110,3 +129,47 @@ def test_no_service_changes_nothing():
 def test_secrets_in_titles_are_masked(svc):
     mid = svc.create_mission(operator="alice", title="x password=hunter2hunter2", goal="g")["id"]
     assert "hunter2hunter2" not in send(f"/mission {mid}", svc)[0] + send("/missions", svc)[0]
+
+
+def test_commands_run_on_a_daemon_thread_never_the_polling_thread(svc, monkeypatch):
+    ran = []
+    monkeypatch.setattr(MissionService, "telegram", lambda self, text, op: ran.append(text) or "ok")
+
+    class Deferred(InlineThread):
+        def start(self):
+            InlineThread.started.append(self)        # recorded, deliberately not run
+
+    monkeypatch.setattr(fw.threading, "Thread", Deferred)
+    n = FakeNotifier()
+    msg = {"text": "/missions", "chat": {"id": 42}, "from": {"id": 7}}
+    fw.handle_message({"message": msg}, FakeTg(), n, fw.PipelineState(), None, None, missions=svc)
+    assert ran == [] and n.notifications == []             # nothing happened on the calling thread
+    assert len(InlineThread.started) == 1 and InlineThread.started[0].daemon is True
+    InlineThread.started[0].target(*InlineThread.started[0].args)
+    assert ran == ["/missions"] and n.notifications == ["ok"]
+
+
+def test_a_failing_command_does_not_kill_the_thread_silently(svc, monkeypatch):
+    def boom(self, text, op):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(MissionService, "telegram", boom)
+    (reply,) = send("/missions", svc)
+    assert "went wrong" in reply and "db locked" not in reply
+
+
+def _help(missions):
+    n = FakeNotifier()
+    fw.handle_message({"message": {"text": "/help", "chat": {"id": 42}}}, FakeTg(), n, fw.PipelineState(),
+                      None, None, missions=missions)
+    return n.notifications[0]
+
+
+def test_help_lists_mission_commands_only_when_enabled(svc, tmp_path):
+    store, _ = make_store(tmp_path)
+    off = MissionService(store, enabled=lambda: False)
+    baseline = _help(None)
+    assert _help(off) == baseline and "/missions" not in baseline
+    on = _help(svc)
+    assert on.startswith(baseline)
+    for cmd in ("/missions", "/mission ", "/cancel_mission"):
+        assert cmd in on
