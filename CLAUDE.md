@@ -34,6 +34,11 @@ What a second reviewer should attend to, v3 and v4 together:
   scope (`_check_sudo_allowlist()`), policy and limits (`planet_express/execution/policy.py`),
   `compose.write` (`planet_express/execution/compose_files.py`) and the unattended-origin list
   (only `zoidberg`/`update.canary` and `system`/`prune.safe`).
+- **Host-mutation lock and network-guard exceptions (v3, still load-bearing):** the `PipelineState`
+  lock in `casa_farnsworth.py` (it serialises every mutation against every scan, and now fires the
+  quiet re-scan from `end_mutation`/`transition`), and the AdGuard exception to the network guard
+  (`allow_guarded_update`, `resolve_target`, and the automatic-run exclusion in `policy.py`). Any
+  change to either gets the second review.
 - **v4 surface (when built):** the checkpoint/restore service; the tripwire monitor and protected
   domains; the grant schema, its hash binding and the grant-to-credential/environment builder;
   standing grants (their scope, expiry, and that they never cover Change/Critical); the worker
