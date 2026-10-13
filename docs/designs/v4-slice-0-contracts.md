@@ -37,7 +37,7 @@ So a lease is released or reclaimed only after the session is **provably dead** 
 
 New tables, one forward migration v5→v6. `Store.init()` migrates directly today (snapshots are a deploy/setup
 step), so slice 1 adds an upgrade guard: the daemon refuses to run the v5→v6 migration unless a
-snapshot marker younger than 10 minutes exists, written by `deploy`/`setup` after the snapshot. All times
+snapshot marker younger than 2 hours exists (written by `scripts/state_snapshot.py create`; a longer window because deploy snapshots before an interactive wizard). All times
 UTC epoch seconds; all JSON columns validated by Pydantic models on read and write.
 
 ```sql

@@ -5,6 +5,7 @@ from missions_helpers import Clock, make_store, v5_database
 
 from planet_express.core.store import (
     SCHEMA_VERSION,
+    SNAPSHOT_MAX_AGE_S,
     SchemaTooNewError,
     SnapshotRequiredError,
     Store,
@@ -67,7 +68,7 @@ def test_upgrade_refused_with_stale_or_future_or_garbage_marker(tmp_path):
     v5_database(db)
     clock = Clock()
     store = Store(db, clock=clock)
-    write_snapshot_marker(db, now=clock.t - 601)
+    write_snapshot_marker(db, now=clock.t - (SNAPSHOT_MAX_AGE_S + 1))
     with pytest.raises(SnapshotRequiredError):
         store.init()
     write_snapshot_marker(db, now=clock.t + 3600)
@@ -76,7 +77,7 @@ def test_upgrade_refused_with_stale_or_future_or_garbage_marker(tmp_path):
     snapshot_marker_path(db).write_text("not a number")
     with pytest.raises(SnapshotRequiredError):
         store.init()
-    write_snapshot_marker(db, now=clock.t - 599)
+    write_snapshot_marker(db, now=clock.t - (SNAPSHOT_MAX_AGE_S - 1))
     store.init()
     assert version(db) == 6
 

@@ -321,7 +321,7 @@ class SnapshotRequiredError(RuntimeError):
 # stdlib-only by design (it runs from older checkouts during rollback), so it carries its own copy of the
 # marker format: an epoch second in `pe-snapshot.marker` beside the database. Keep the two in step.
 SNAPSHOT_MARKER_NAME = "pe-snapshot.marker"
-SNAPSHOT_MAX_AGE_S = 600
+SNAPSHOT_MAX_AGE_S = 2 * 3600  # deploy snapshots before an interactive wizard; a slow deploy must not expire it
 
 
 def snapshot_marker_path(db_path: Path) -> Path:
