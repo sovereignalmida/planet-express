@@ -7,8 +7,8 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | # | Slice | Status |
 |---|---|---|
 | 0 | Contracts, threat model | DONE rev 0.4 (final G1 dispositioned); was: spec rev 0.3 (`v4-slice-0-contracts.md`); two Codex G1 rounds folded in (§19, §20); MOS cgroup freeze/kill verified; needs operator sign-off |
-| 1 | Mission store | brief written; worker dispatched |
-| 2 | Ship's Memory | brief written; worker dispatched |
+| 1 | Mission store | MERGED to v4-next (9870e21 + merge); Codex G3 done by worker (3 fixed); Claude /code-review pending |
+| 2 | Ship's Memory | MERGED to v4-next (d744c2a + merge); Codex G3 x2 done (2 fixed); v6 DDL combined with slice 1 in core/store.py |
 | 3 | Supervisor, adapter, worker | not started |
 | 4 | Surfaces | not started |
 | 5 | Checkpoint | not started |

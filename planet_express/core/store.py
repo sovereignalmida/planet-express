@@ -32,7 +32,11 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-from planet_express.missions.schema import DDL_V6
+from planet_express.memory.schema import DDL as _MEMORY_DDL
+from planet_express.missions.schema import DDL_V6 as _MISSIONS_DDL_V6
+
+# Schema v6 = missions (slice 1) + Ship's Memory (slice 2), created together.
+DDL_V6 = _MISSIONS_DDL_V6.rstrip().rstrip(";") + ";\n" + _MEMORY_DDL
 
 SCHEMA_VERSION = 6
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
@@ -266,9 +270,17 @@ def _execute_ddl(conn: sqlite3.Connection, script: str) -> None:
     sqlite3.executescript() commits an already-open transaction, so the migration
     must issue each statement itself to remain one atomic BEGIN IMMEDIATE.
     """
-    for statement in script.split(";"):
-        if statement.strip():
-            conn.execute(statement)
+    # Accumulate lines until sqlite says the statement is complete: a bare split on ";" would cut a
+    # CREATE TRIGGER body (which contains semicolons) in half.
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            if buffer.strip().rstrip(";").strip():
+                conn.execute(buffer)
+            buffer = ""
+    if buffer.strip().rstrip(";").strip():
+        conn.execute(buffer)
 
 
 # Year 2100: a rollback window that must not lapse on its own (a failed automatic inverse). The

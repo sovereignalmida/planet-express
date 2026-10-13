@@ -95,7 +95,10 @@ def test_zoidberg_dry_run_is_allowed_while_core_is_active(monkeypatch):
     assert calls == [{"tg": None, "dry_run": True, "commands": None}]  # a dry run touches nothing
 
 
-def test_zoidberg_force_runs_a_real_pass_while_core_is_active(monkeypatch):
+def test_zoidberg_force_runs_a_real_pass_while_core_is_active(monkeypatch, tmp_path):
+    # Never the developer's real data/planetexpress.db: opening it would migrate it (and the v6
+    # upgrade guard rightly refuses without a snapshot marker).
+    monkeypatch.setattr(zoidberg.config, "ACTIONS_DB", tmp_path / "planetexpress.db")
     monkeypatch.setattr(zoidberg.bender, "core_service_active", lambda: True)
     calls = []
     monkeypatch.setattr(zoidberg, "run_update_pass", lambda **kw: calls.append(kw) or [])
