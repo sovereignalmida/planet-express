@@ -52,6 +52,7 @@ from planet_express.application.chat_service import (
 )
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
+from planet_express.application.mission_service import MissionService
 from planet_express.application.multi_host import pin_error, provider_for
 from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
@@ -1578,6 +1579,7 @@ def handle_message(
     state: PipelineState,
     commands: CommandService | None = None,
     incident_store: Store | None = None,
+    missions: MissionService | None = None,
 ) -> None:
     msg = update.get("message", {})
     text = msg.get("text", "").strip()
@@ -1857,6 +1859,11 @@ def handle_message(
 
         notifier.notify("\n".join(lines))
 
+    elif missions is not None and missions.enabled() and cmd in missions.TELEGRAM_COMMANDS:
+        # v4 S4: the logic lives in MissionService; this is only the dispatch. Reached only for the
+        # configured chat (checked at the top) and only while missions.enabled is true.
+        notifier.notify(TelegramClient.s(missions.telegram(text, _mission_operator(msg))))
+
     elif cmd == "/help":
         notifier.notify(
             "*Planet Express — Available Commands*\n"
@@ -1988,6 +1995,12 @@ def _telegram_operator(msg: dict) -> str:
     sender = msg.get("from") or {}
     return (f"@{sender['username']} ({sender.get('id')})" if sender.get("username")
             else str(sender.get("id", "telegram")))
+
+
+def _mission_operator(msg: dict) -> str:
+    """The operator name mission actions are attributed to (recorded as `operator:tg.<telegram id>`)."""
+    sender_id = (msg.get("from") or {}).get("id")
+    return f"tg.{sender_id}" if isinstance(sender_id, int) and sender_id > 0 else "telegram"
 
 
 def _run_execution_control(
@@ -2757,7 +2770,7 @@ def make_scan_starter(notifier: Notifier, state: PipelineState, store: Store | N
 # ── Main bot loop ─────────────────────────────────────────────────────────────
 def _start_dashboard_rpc(
     commands: CommandService, store: Store, notifier: Notifier, chat=None, config_service=None,
-    start_scan=None,
+    start_scan=None, missions: MissionService | None = None,
 ) -> RpcServer | None:
     """Optional dashboard transport: installation failures never prevent polling."""
     try:
@@ -2772,7 +2785,7 @@ def _start_dashboard_rpc(
         server = RpcServer(
             config.RPC_SOCKET,
             build_core_handlers(commands, store, notifier, chat, config_service,
-                                start_scan=start_scan),
+                                start_scan=start_scan, missions=missions),
             allowed_uids,
             config.RPC_GROUP,
         )
@@ -2985,9 +2998,14 @@ def run_bot() -> None:
     # dashboard, the open incidents and the alerts stop showing a problem that has been fixed.
     state.set_rescan_starter(make_rescan_starter(notifier, state, store, commands))
 
+    missions = MissionService(
+        store, enabled=lambda: config.MISSIONS_ENABLED,
+        incident_context=lambda incident_id: commands.get_incident_context(
+            incident_id, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS),
+    )
     rpc_server = _start_dashboard_rpc(
         commands, store, notifier, chat, config_service,
-        start_scan=make_scan_starter(notifier, state, store, commands),
+        start_scan=make_scan_starter(notifier, state, store, commands), missions=missions,
     )
 
     log.info("Good news, everyone! Professor Farnsworth is online.")
@@ -3018,7 +3036,7 @@ def run_bot() -> None:
             for update in updates:
                 try:
                     if "message" in update:
-                        handle_message(update, tg, notifier, state, commands, store)
+                        handle_message(update, tg, notifier, state, commands, store, missions)
                     elif "callback_query" in update:
                         handle_callback(update, tg, notifier, state, commands)
                 except Exception:

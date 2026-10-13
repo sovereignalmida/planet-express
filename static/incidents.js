@@ -64,6 +64,29 @@
     }
   }
 
+  // v4 S4: hand the incident's evidence to a Propose mission (diagnosis only, nothing is changed).
+  async function investigate(item, button) {
+    if (state.submitting.has(item.id)) return;
+    state.submitting.add(item.id);
+    button.disabled = true;
+    message.textContent = "Opening an investigation…";
+    try {
+      const result = await request(root.dataset.api + "/" + encodeURIComponent(item.id) + "/investigate", {
+        method: "POST", body: new URLSearchParams({ csrf_token: csrf() }),
+      });
+      const id = result.mission && result.mission.id;
+      state.notice = (result.created ? "Investigation started as mission " : "Already investigating in mission ") +
+        id + ". Follow it under Missions.";
+      message.textContent = state.notice;
+    } catch (error) {
+      state.notice = error.message;
+      message.textContent = state.notice;
+    } finally {
+      state.submitting.delete(item.id);
+      if (button.isConnected) button.disabled = false;
+    }
+  }
+
   function shortDate(value) {
     if (typeof value !== "number") return "unknown";
     const d = new Date(value * 1000);
@@ -112,6 +135,13 @@
       // Without this the click bubbles to the row and collapses the detail the operator is
       // reading, right as the proposal lands.
       button.addEventListener("click", event => { event.stopPropagation(); propose(item, button); });
+      detail.append(button);
+    }
+
+    if (root.dataset.missions === "1" && item.status !== "resolved") {
+      const button = node("button", "pe-btn", "INVESTIGATE");
+      button.type = "button";
+      button.addEventListener("click", event => { event.stopPropagation(); investigate(item, button); });
       detail.append(button);
     }
 

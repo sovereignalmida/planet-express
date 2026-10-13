@@ -126,6 +126,9 @@ def register_template_helpers(app) -> None:
             return url
 
     app.jinja_env.globals["asset"] = asset
+    # The Missions/Memory nav links and the incident Investigate button follow the flag. Core is
+    # authoritative (it answers "disabled" to every mission method); this only decides what to offer.
+    app.jinja_env.globals["missions_enabled"] = lambda: bool(config.MISSIONS_ENABLED)
     app.add_template_filter(extract_host)
     app.add_template_filter(_extra_host_count, "extra_host_count")
 
@@ -338,7 +341,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             return jsonify(error=message), status
         if request.path.startswith("/api/incidents"):
             status, message = {"bad_request": (400, "Invalid incident request"),
-                               "not_found": (404, "Incident not found")}.get(
+                               "not_found": (404, "Incident not found"),
+                               "disabled": (404, "Missions are disabled")}.get(
                                    error.code, (503, "Incidents unavailable; try again shortly"))
             return jsonify(error=message), status
         if request.path.startswith("/api/scan"):
@@ -826,6 +830,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             "incident_id": incident_id, "operator": g.operator,
         }))
 
+    @app.post("/api/incidents/<incident_id>/investigate")
+    def incident_investigate(incident_id):
+        if re.fullmatch(r"[0-9a-f]{12}", incident_id) is None:
+            raise RpcError("Invalid incident ID", "bad_request")
+        return jsonify(core("mission.from_incident", {
+            "incident_id": incident_id, "operator": g.operator,
+        }))
+
     @app.post("/api/scan")
     def scan_start():
         """Run the same full pipeline Telegram's /check runs.
@@ -869,10 +881,132 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     def execution_page(execution_id):
         return render_template("execution.html", execution_id=execution_id)
 
+    register_mission_pages(app, core)
     app.add_url_rule("/", "index", partial(index, core))
     app.add_url_rule("/hosts", "hosts", partial(hosts, fleet_cache))
     app.add_url_rule("/api/widget", view_func=widget)
     return app
+
+
+_MISSION_NOTICES = {
+    "cancel_requested": "Cancel requested. The supervisor will stop the session and confirm it is gone.",
+    "cancelled": "Mission cancelled.",
+    "conflict": "That mission is already closed.",
+    "not_found": "That mission no longer exists.",
+    "disabled": "Missions are disabled on this host.",
+}
+_MEMORY_NOTICES = {
+    "confirmed": "Card confirmed.",
+    "deprecated": "Card deprecated.",
+    "conflict": "That card is no longer in the state this action needs. Reload and check it.",
+    "forbidden": "That card cannot be changed by this action.",
+    "not_found": "That card no longer exists.",
+    "disabled": "Missions are disabled on this host.",
+    "unavailable": "Ship's Memory is unavailable on this host.",
+}
+
+
+def register_mission_pages(app, core) -> None:
+    """The Missions and Memory pages (v4 S4). Server-rendered; every mutation is a form POST that the
+    before-request hook has already CSRF-checked and authenticated, and the acting operator is always the
+    signed-in session's (`g.operator`), never a form field. Core answers "disabled" while missions are off."""
+    from planet_express.memory.models import SLUG_RE
+
+    def shell(template, **context):
+        ctx = {"health": dashboard_data.summarize_health(),
+               "pipeline_status": dashboard_data.summarize_pipeline_status()}
+        return render_template(template, ctx=ctx, **context)
+
+    def notice_for(table):
+        return table.get(request.args.get("notice", ""))
+
+    def refuse(error):
+        """Map a core refusal to a page-level answer; anything else is core being unavailable."""
+        if error.code == "bad_request":
+            abort(400)
+        if error.code == "not_found":
+            abort(404)
+        raise error
+
+    @app.get("/missions")
+    def missions_page():
+        try:
+            data = core("mission.list", {"limit": 100})
+        except RpcError as error:
+            if error.code != "disabled":
+                raise
+            return shell("missions.html", page="missions", disabled=True, notice=None, data=None)
+        return shell("missions.html", page="missions", disabled=False, data=data,
+                     notice=notice_for(_MISSION_NOTICES))
+
+    @app.get("/missions/<mission_id>")
+    def mission_page(mission_id):
+        if re.fullmatch(r"M-[0-9]{1,9}", mission_id) is None:
+            abort(404)
+        after = request.args.get("after", "0")
+        if re.fullmatch(r"[0-9]{1,15}", after) is None:
+            abort(400)
+        try:
+            mission = core("mission.get", {"mission_id": mission_id})
+            events = core("mission.events", {"mission_id": mission_id, "after_seq": int(after), "limit": 100})
+        except RpcError as error:
+            if error.code == "disabled":
+                return shell("mission_detail.html", page="missions", disabled=True, notice=None)
+            refuse(error)
+        return shell("mission_detail.html", page="missions", disabled=False, m=mission, events=events,
+                     notice=notice_for(_MISSION_NOTICES))
+
+    @app.post("/missions/<mission_id>/cancel")
+    def mission_cancel(mission_id):
+        if re.fullmatch(r"M-[0-9]{1,9}", mission_id) is None:
+            abort(404)
+        try:
+            result = core("mission.cancel", {"mission_id": mission_id, "operator": g.operator})
+            notice = "cancelled" if result.get("status") == "cancelled" else "cancel_requested"
+        except RpcError as error:
+            if error.code not in ("conflict", "not_found", "disabled"):
+                refuse(error)
+            notice = error.code
+        return redirect(url_for("mission_page", mission_id=mission_id, notice=notice))
+
+    @app.get("/memory")
+    def memory_page():
+        try:
+            candidates = core("memory.candidates", {"limit": 100})
+            confirmed = core("memory.cards", {"status": "confirmed", "limit": 100})
+            due = core("memory.review_due", {"limit": 100})
+        except RpcError as error:
+            if error.code == "disabled":
+                return shell("memory.html", page="memory", disabled=True, notice=None)
+            if error.code == "unavailable":
+                return shell("memory.html", page="memory", disabled=False, unavailable=True,
+                             notice=notice_for(_MEMORY_NOTICES))
+            raise
+        return shell("memory.html", page="memory", disabled=False, unavailable=False, candidates=candidates,
+                     confirmed=confirmed, due=due, notice=notice_for(_MEMORY_NOTICES))
+
+    def card_change(card_id, method, extra, done):
+        if SLUG_RE.fullmatch(card_id) is None:
+            abort(404)
+        try:
+            core(method, {"card_id": card_id, "operator": g.operator, **extra})
+            notice = done
+        except RpcError as error:
+            if error.code not in ("conflict", "forbidden", "not_found", "disabled", "unavailable"):
+                refuse(error)
+            notice = error.code
+        return redirect(url_for("memory_page", notice=notice))
+
+    @app.post("/memory/<card_id>/confirm")
+    def memory_confirm(card_id):
+        return card_change(card_id, "memory.confirm", {}, "confirmed")
+
+    @app.post("/memory/<card_id>/deprecate")
+    def memory_deprecate(card_id):
+        reason = request.form.get("reason", "").strip()
+        if len(reason) > 500:
+            abort(400)
+        return card_change(card_id, "memory.deprecate", {"reason": reason} if reason else {}, "deprecated")
 
 
 def safe_next(value):

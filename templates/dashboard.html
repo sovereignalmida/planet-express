@@ -550,7 +550,7 @@
       </div>
 
       <div class="actions-col">
-        <div class="incident-dock" id="incident-panel" data-api="/api/incidents">
+        <div class="incident-dock" id="incident-panel" data-api="/api/incidents" data-missions="{{ '1' if missions_enabled() else '0' }}">
           <section class="panel">
             <div class="panel-head-row">
               <h2>INCIDENT CONSOLE</h2>
