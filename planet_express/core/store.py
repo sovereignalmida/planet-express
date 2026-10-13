@@ -22,6 +22,7 @@ client-supplied timestamp is never trusted.
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import sqlite3
@@ -31,7 +32,9 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-SCHEMA_VERSION = 5
+from planet_express.missions.schema import DDL_V6
+
+SCHEMA_VERSION = 6
 EVENT_RETENTION_SECONDS = 90 * 24 * 3600
 AUTH_MAX_FAILURES = 3
 AUTH_LOCK_SECONDS = 900
@@ -289,6 +292,33 @@ class PendingPlanConflict(RuntimeError):
         self.approval_id = approval_id
 
 
+class SnapshotRequiredError(RuntimeError):
+    """A schema upgrade was refused because no recent snapshot marker exists."""
+
+
+# The v5 -> v6 upgrade runs only when `deploy`/`setup` has just snapshotted the state (contract §2).
+SNAPSHOT_MARKER_NAME = "pe-snapshot.marker"
+SNAPSHOT_MAX_AGE_S = 600
+
+
+def snapshot_marker_path(db_path: Path) -> Path:
+    """The marker lives beside the database, in the state directory."""
+    return Path(db_path).parent / SNAPSHOT_MARKER_NAME
+
+
+def write_snapshot_marker(db_path: Path, now: float | None = None) -> Path:
+    """Record that a snapshot of the state was just taken. `deploy` and `setup` call this immediately
+    after `scripts/state_snapshot.py` succeeds. The marker holds the epoch second it was written and is
+    honoured for SNAPSHOT_MAX_AGE_S; it is replaced atomically."""
+    marker = snapshot_marker_path(db_path)
+    marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(str(int(time.time() if now is None else now)))
+    tmp.chmod(0o600)
+    os.replace(tmp, marker)
+    return marker
+
+
 class SchemaTooNewError(RuntimeError):
     """The database requires a newer core or restoration of an older snapshot."""
 
@@ -349,20 +379,26 @@ class Store:
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchone()[0]
             if not tables:
-                self._create_fresh_v5(conn)
+                self._create_fresh(conn)
                 cutover = {"expired_approvals": [], "interrupted_executions": []}
             else:
+                if version < SCHEMA_VERSION:
+                    # Refuse before touching anything: a partial upgrade with no snapshot to go back to
+                    # is the failure the guard exists to prevent (contract §2).
+                    self._require_snapshot_marker()
+                entry_version = version
                 if version < 4:
                     self._create_v4_baseline(conn)
                     version = conn.execute("PRAGMA user_version").fetchone()[0]
                 cutover = self._migrate_4_to_5(conn) if version == 4 else {
                     "expired_approvals": [], "interrupted_executions": [],
                 }
-                if cutover.pop("already", False):
-                    version = SCHEMA_VERSION
-                if version == 5:
-                    # Preserve the old idempotent repair behaviour for a v5 database.
-                    conn.executescript(f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\nCOMMIT;")
+                cutover.pop("already", None)
+                if conn.execute("PRAGMA user_version").fetchone()[0] == 5:
+                    self._migrate_5_to_6(conn)
+                if entry_version >= 5:
+                    # Preserve the old idempotent repair behaviour for a v5/v6 database.
+                    conn.executescript(f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{DDL_V6};\nCOMMIT;")
             conn.execute("PRAGMA journal_mode = WAL")
         return cutover
 
@@ -385,12 +421,43 @@ class Store:
             raise
 
     @staticmethod
-    def _create_fresh_v5(conn: sqlite3.Connection) -> None:
+    def _create_fresh(conn: sqlite3.Connection) -> None:
         try:
             conn.executescript(
-                f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n"
+                f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{DDL_V6};\n"
                 f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
             )
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+
+    def _require_snapshot_marker(self) -> None:
+        marker = snapshot_marker_path(self.path)
+        try:
+            written = int(marker.read_text().strip())
+        except (OSError, ValueError):
+            written = None
+        age = None if written is None else self._clock() - written
+        # A marker from the future is as untrustworthy as a stale one (clock skew allowance: 60s).
+        if age is None or age < -60 or age > SNAPSHOT_MAX_AGE_S:
+            raise SnapshotRequiredError(
+                f"{self.path}: refusing to upgrade the schema without a snapshot marker younger than "
+                f"{SNAPSHOT_MAX_AGE_S // 60} minutes at {marker}; take a snapshot "
+                "(scripts/state_snapshot.py) and write the marker with write_snapshot_marker()."
+            )
+
+    def _migrate_5_to_6(self, conn: sqlite3.Connection) -> None:
+        """Transactional v5 -> v6: add the mission tables. Re-reads the version under the write lock so a
+        concurrent initializer that already migrated makes this a no-op."""
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("PRAGMA user_version").fetchone()[0] >= 6:
+                conn.execute("ROLLBACK")
+                return
+            _execute_ddl(conn, DDL_V6)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -404,7 +471,7 @@ class Store:
             conn.execute("BEGIN IMMEDIATE")
             # Re-read under the write lock: another process may have migrated between our first
             # read and acquiring it; it must then take the idempotent v5 path (Codex review, T38).
-            if conn.execute("PRAGMA user_version").fetchone()[0] >= SCHEMA_VERSION:
+            if conn.execute("PRAGMA user_version").fetchone()[0] >= 5:
                 conn.execute("ROLLBACK")
                 return {"expired_approvals": [], "interrupted_executions": [], "already": True}
             interrupted_rows = conn.execute(
@@ -462,7 +529,7 @@ class Store:
             violations = conn.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise sqlite3.IntegrityError(f"foreign key check failed: {len(violations)} row(s)")
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.execute("PRAGMA user_version = 5")
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:

@@ -59,9 +59,12 @@ def test_schema_three_upgrade_adds_incident_proposals_without_losing_rows(tmp_pa
         conn.execute("INSERT INTO events (ts, kind, payload) VALUES (1, 'before-upgrade', '{}')")
         conn.execute("DROP TABLE incident_proposals")
         conn.execute("PRAGMA user_version = 3")
+    from planet_express.core.store import write_snapshot_marker
+
+    write_snapshot_marker(path)
     Store(path).init()
     with sqlite3.connect(path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='incident_proposals'"
         ).fetchone()

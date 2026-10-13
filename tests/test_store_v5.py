@@ -14,6 +14,7 @@ from planet_express.core.store import (
     PendingPlanConflict,
     SchemaTooNewError,
     Store,
+    write_snapshot_marker,
 )
 
 V4_DDL = """
@@ -93,7 +94,7 @@ def test_fresh_database_gets_full_v5_schema(tmp_path):
     store = Store(tmp_path / "data" / "state.db")
     assert store.init() == {"expired_approvals": [], "interrupted_executions": []}
     with sqlite3.connect(store.path) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
         tables = {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'"
         )}
@@ -106,12 +107,13 @@ def test_fresh_database_gets_full_v5_schema(tmp_path):
 def test_v4_migration_preserves_rows_and_returns_cutover(tmp_path):
     path = tmp_path / "state.db"
     make_v4(path)
+    write_snapshot_marker(path, now=50)
     cutover = Store(path, clock=lambda: 50).init()
     assert [row["id"] for row in cutover["expired_approvals"]] == ["pending"]
     assert [row["id"] for row in cutover["interrupted_executions"]] == ["exec-running"]
     with sqlite3.connect(path) as conn:
         conn.row_factory = sqlite3.Row
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
         assert conn.execute("SELECT status FROM approvals WHERE id='pending'").fetchone()[0] == "expired"
         running = conn.execute("SELECT * FROM executions WHERE id='exec-running'").fetchone()
         assert running["status"] == "interrupted"
@@ -132,6 +134,7 @@ def test_forced_migration_failure_rolls_back_byte_for_byte(tmp_path, monkeypatch
 
     path = tmp_path / "state.db"
     make_v4(path)
+    write_snapshot_marker(path)
     before = path.read_bytes()
 
     def fail(_conn, _script):
@@ -151,7 +154,7 @@ def test_forced_migration_failure_rolls_back_byte_for_byte(tmp_path, monkeypatch
 def test_v6_refused_and_v5_reinit_is_noop(tmp_path):
     path = tmp_path / "state.db"
     with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version=6")
+        conn.execute("PRAGMA user_version=7")
     before = path.read_bytes()
     with pytest.raises(SchemaTooNewError):
         Store(path).init()
@@ -355,6 +358,7 @@ def test_concurrent_initializer_that_loses_the_race_takes_the_v5_path(tmp_path, 
     # re-read under the write lock and not re-run the migration.
     path = tmp_path / "state.db"
     make_v4(path)
+    write_snapshot_marker(path)
     loser = Store(path)
     real_migrate = Store._migrate_4_to_5
 
@@ -379,6 +383,7 @@ def test_pre_v4_loser_never_stamps_a_migrated_database_back_to_v4(tmp_path, monk
     path = tmp_path / "state.db"
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE legacy_marker (x INTEGER)")  # a non-empty pre-v4 database
+    write_snapshot_marker(path)
     loser = Store(path)
     real_baseline = Store._create_v4_baseline
     fired = []
