@@ -159,7 +159,8 @@ class MissionStore:
                       lease_ttl_s: int, resources: Sequence[str] | None = None,
                       declared: Mapping[str, Sequence[str]] | None = None, cgroup_path: str | None = None,
                       leader_pid: int | None = None, session_uid: int | None = None,
-                      actor: str = "core") -> str:
+                      actor: str = "core", session_id: str | None = None,
+                      expected_grant_hash: str | None = None) -> str:
         """Status CAS, approval predicate, lease acquire and session insert in ONE BEGIN IMMEDIATE.
 
         Observe and propose missions move queued -> investigating and take no leases (they cannot mutate).
@@ -168,12 +169,14 @@ class MissionStore:
         if not re.fullmatch(r"[0-9a-f]{64}", token_hash):
             raise ValueError("token_hash must be a sha256 hex digest")
         now = self._now()
-        session_id = f"S-{secrets.token_hex(8)}"
+        session_id = session_id or f"S-{secrets.token_hex(8)}"
         with self.store._write() as conn:
-            row = conn.execute("SELECT status, tier, grant_json FROM missions WHERE id=?",
+            row = conn.execute("SELECT status, tier, grant_json, grant_hash FROM missions WHERE id=?",
                                (mission_id,)).fetchone()
             if row is None:
                 raise MissionNotFound(mission_id)
+            if expected_grant_hash is not None and row["grant_hash"] != expected_grant_hash:
+                raise SessionConflict(f"{mission_id}: the grant changed since the caller read it")
             if conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL",
                             (mission_id,)).fetchone():
                 raise SessionConflict(f"{mission_id} already has a live session")
