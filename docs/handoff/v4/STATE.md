@@ -6,7 +6,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 ## Slice status
 | # | Slice | Status |
 |---|---|---|
-| 0 | Contracts, threat model | not started (waiting on server-Claude export) |
+| 0 | Contracts, threat model | export received; brief amended (§6.8, §14.1); spec not yet written |
 | 1 | Mission store | not started |
 | 2 | Ship's Memory | not started |
 | 3 | Supervisor, adapter, worker | not started |
@@ -18,15 +18,16 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | 9 | First Repair, release | not started |
 
 ## Next action
-Fold the server-Claude export (gap list, tool inventory, incident register, health checks) into a
-Slice 0 spec; run G1 (Codex) on it; then start slices 1 and 2 in parallel worktrees.
+Write the Slice 0 spec from the brief plus the private export (`docs/private/`, gitignored; copy from
+the server `~/apps/V4-SERVER-AGENT-EXPORT.md` via scp, never commit); run G1 (Codex) on it; then
+slices 1 and 2 in parallel worktrees. Operator must decide brief §14.1 items 9-11 in Phase 0.
 
 ## Decisions since the brief
 - 2026-10-13: brief §14 decisions 1-8 recorded.
 
 ## Open
-- Server-Claude export in progress (operator).
-- Push of `v4-next` to origin: not yet authorised.
+- Pushed `v4-next` to origin (public repo: keep infra detail out of tracked files; private inputs go in gitignored `docs/private/`).
+- Operator-side findings from the export, separate from v4: legacy sudoers wildcard line, open Docker TCP socket, broken VPN port-forward cycle, leftover timers, AdGuard in paused_containers, two credentials to rotate.
 - MOS test VM (192.168.122.159) was unreachable on 2026-10-13; needed before slice 6.
 
 ## Usage / account

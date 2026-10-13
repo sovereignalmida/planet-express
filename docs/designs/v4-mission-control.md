@@ -146,8 +146,17 @@ outside the backup window, without asking."* Rules:
 ### 5.3 Protected domains (default: always escalate)
 
 Network/ingress/DNS, firewall, credentials and identities, persistent data volumes and storage,
-backup configuration, package management, host reboot. The operator may refine the list; it
-cannot be emptied silently. A tripwire (§6.2) watches each.
+backup configuration, package management, host reboot, **publishing** (pushing to any remote,
+exposing a service publicly), **destructive version-control operations in a live working tree**
+(`reset --hard`, `checkout --`, `stash`, trial `revert`, force-push), sudoers and the Docker daemon
+configuration, and any cross-host system the operator names (NAS exports, edge proxy, router, DNS
+provider). The operator may refine the list; it cannot be emptied silently. A tripwire (§6.2)
+watches each.
+
+Protected domains are defined per site as **concrete resources** (containers, networks, paths,
+units, hosts, remotes) in configuration, not as stack names: a stack can contain both a protected
+ingress container and an ordinary helper that a Repair legitimately recreates. Setup proposes the
+list from discovery and the operator confirms it.
 
 ## 6. Safety model: control by consequence
 
@@ -177,17 +186,31 @@ The session environment is built from the grant. Credentials for protected domai
 router, backup repository, identity provider) are not provided to a session that is not granted
 them. This is the one control that holds even against a capable root-level agent.
 
+**Brokered integrations.** Application API keys (media-manager, DNS-rewrite, reverse-proxy,
+photo-library APIs and similar) are exposed to the session as PE-brokered tools that hold the key
+server-side, not as environment variables or readable files. A session that needs to fix a
+phantom queue entry or a DNS rewrite calls the tool; it never holds the key. This is also how
+"secret files are never sent" (§14.4) stays true when the work needs those APIs.
+
 ### 6.4 Tool hooks: a speed bump, not the boundary
 
 The reference adapter installs the runtime's pre-/post-tool hooks to record every call and to ask
 the operator when the agent crosses into a protected domain or an irreversible-looking command
 (`docker volume rm`, `prune -a`, recursive deletes, database drops). Hooks give audit and UX.
-Safety does not depend on them stopping a determined agent.
+Safety does not depend on them stopping a determined agent. The hook layer must also supply the
+guards an interactive runtime's permission classifier would otherwise provide, because a headless
+worker may run under different settings: refuse reading raw secret stores and `.env` contents,
+refuse destructive version-control operations in live trees, and refuse publishing. Whatever PE
+expects refused, PE enforces itself.
 
 ### 6.5 Independent verification and crash honesty
 
-- A verification plan is agreed **before** mutation (typed, core-executed checks: HTTP probe,
-  container health, mount readable, file stat, bounded query). The mission completes only when PE
+- A verification plan is agreed **before** mutation (typed, core-executed checks: HTTP probe
+  through the real route, container health, in-container probe (an `exec` that exercises the
+  dependency, not a `stat` healthcheck), mount readable inside the consumer, file stat, bounded
+  query, a log-absence check over a window, and **compose-project completeness**: every service
+  the project defines exists after a recreate). Green-but-broken health status has recurred often
+  enough that no Docker health state alone may satisfy a check. The mission completes only when PE
   runs those checks plus a fresh Leela scan and they pass. An agent assertion is never sufficient.
 - After any crash PE reads host state to classify the mission; it never replays an unknown
   mutation. Intent is journaled before the session is started and at each checkpoint/phase change.
@@ -209,7 +232,22 @@ crash-settlement logic; target-binding discipline for typed steps; unattended or
 automation stay limited to `zoidberg`/`update.canary` and `system`/`prune.safe`. Mission unattended
 start is governed solely by standing grants (§5.2).
 
-### 6.8 Accepted residual risk
+### 6.8 Preconditions: no side door around the worker boundary
+
+A worker boundary is meaningless if the host has another path to root. Setup preflight checks, and
+a mission refuses to start a Repair-tier worker unless these hold:
+
+- The worker's Unix identity is **not** the PE core's identity and not any identity that is in the
+  `docker` group beyond what its tier grants.
+- The Docker daemon has **no unauthenticated TCP listener** reachable by the worker (a TCP
+  `0.0.0.0` socket is root for anyone who can connect, including a worker with no docker group).
+  The operator may keep a socket proxy with an allowlist instead; the preflight names the exact
+  exposure it found.
+- Sudoers contains only rules managed by PE's generator; unmanaged broader rules (for example a
+  literal wildcard that sudoers matches across spaces) are reported and, with approval, removed by
+  `repair`.
+
+### 6.9 Accepted residual risk
 
 An agent with root can in principle defeat any in-host tripwire. That is already true of the
 operator's own session today. v4 makes damage detectable and recoverable and keeps protected
@@ -293,6 +331,10 @@ holds incident history, procedures, tool use and environment notes. These seed f
 evaluation cases, gap analysis and test memory during the v4 build. The export is specified in
 `v4-server-memory-export.md`. None of it ships, and no release contract depends on its presence.
 
+**The canonical store.** Ship's Memory is the single canonical store. The operator's existing
+skill file, memory notes and exports are inputs to it, imported one way, and are not kept in sync.
+Where they disagree, the card records the conflict for the operator.
+
 **Product (any site).** A generic **import format** (Markdown-with-front-matter / JSONL cards,
 documented and versioned) lets any operator load existing notes. PE also generates its own
 **discovery candidates** from scans (mounts, dependencies, start order, health baselines) and from
@@ -315,9 +357,10 @@ Telegram. Exit: a real incident becomes a persistent mission whose contextualise
 a restart and whose result is visible in PE.
 
 **Phase 2 — Scoped Repair.** Checkpoint, tripwires, grant/approval/standing grants, privileged
-worker tier, hooks, independent verification, crash recovery. First mission: after a canary
-rollback, correct one service's configuration, recreate only that service, pass the pre-agreed
-check (§11 proof 7). Exit: the operator approves once (or has a standing grant), leaves it alone,
+worker tier, hooks, independent verification, crash recovery. First mission: recreate the
+dependents of a recreated network-namespace provider (the incident the operator's server session
+fixed by hand; see the private export), then disk pressure with held-rollback settlement; the
+canary-rollback config correction follows (§11 proof 7). Exit: the operator approves once (or has a standing grant), leaves it alone,
 and sees evidence of success, safe failure, rollback, or a decision request.
 
 **Phase 3 — Change missions.** Add/remove/reshape services with plan/diff checkpoints.
@@ -353,7 +396,9 @@ unbounded autonomy.
 
 1. v3 behaviour and existing installations pass their regression suites; missions disabled by
    default.
-2. Checkpoint restores in-scope files and state exactly; refusal when backups are stale.
+2. Checkpoint restores in-scope files and state exactly; refusal when backups are stale. The
+   worker cannot reach Docker or root by any path (group, TCP socket, unmanaged sudo rule); the
+   §6.8 preflight fails closed on each.
 3. A planted protected-domain change (ingress, DNS file, credential file, firewall, data-volume
    shrink) during a mission pauses the session within one scan interval and offers rollback.
 4. A session without protected-domain credentials cannot alter those domains.
@@ -361,8 +406,11 @@ unbounded autonomy.
    hostile log line that tries to widen the grant has no effect on the grant.
 6. A crash during investigation, execution and verification yields an honest resumable or
    recovery state with no replay of an unknown mutation.
-7. A homelab-rehearsed repair: failed canary rolled back, then an approved bounded correction,
-   only that service recreated, pre-agreed application check passes.
+7. A homelab-rehearsed repair: **a VPN-gateway recreate orphans the containers that join its
+   network namespace; the mission recreates its dependents in dependency order** (a plain restart
+   does not rebind the namespace), then passes an in-namespace application check and a
+   compose-project completeness check. A second rehearsal: a failed canary rolled back, then an
+   approved bounded config correction recreating only that service.
 8. Fixture evaluations of three historical incident shapes: relevant memory retrieved, fact and
    unknown separated, valid structured output, no mutation under Observe/Propose.
 9. Worker and repair flows rehearsed on Ubuntu/systemd and on MOS/sysvinit (local worker or the
@@ -429,6 +477,22 @@ Resolved; these are inputs to Phase 0, not open questions.
    recommendation that contradicts live evidence or confirmed memory does not proceed: live
    evidence wins, the conflict is flagged on the mission, and the memory card is marked for
    review.
+
+### 14.1 Open items raised by the server export (decide in Phase 0)
+
+9. **Unauthenticated Docker TCP socket** on the primary host. The §6.8 preflight makes this a
+   blocker for any Repair worker. Options: close it; bind it to loopback; replace it with an
+   allowlisting socket proxy. Existing consumers (dashboard discovery, multi-host) need the
+   proxy path.
+10. **Backup floor definition.** "Verified recent backup" must be defined per scope: backup
+    coverage (what is covered), recency, and whether a restore has ever been tested. Today the
+    backup tool covers local application data and the Docker data root; NAS-share coverage is
+    unconfirmed and no restore has been tested. A floor that requires a tested restore would
+    refuse everything, so the first definition is *covered and recent*, with restore-tested shown
+    on the card and the restore-validation mission (decision 6c) as the way to earn it.
+11. **MOS parity.** Checkpoint and unit-state reads use systemd properties and fail on MOS. The
+    checkpoint service must be provider-aware; until then MOS is proposal-only (decision 7's
+    fallback applies).
 
 ## 15. What not to do
 

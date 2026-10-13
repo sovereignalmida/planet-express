@@ -86,12 +86,15 @@ Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); th
 - Attach/takeover is available for a live session and is recorded in the event stream.
 
 ### Slice 5 — Checkpoint
+- Checkpoint and unit-state reads go through the host-control provider (systemd and MOS), not direct `systemctl`.
 - Snapshot of in-scope Compose/config files, container and mount state; restore reproduces them
   byte-for-byte including permissions.
 - Refusal when in-scope backups are stale or unverifiable unless explicitly acknowledged.
 - Restore after a mid-mission crash; checkpoint store survives reboot on Ubuntu and on the MOS pool.
 
 ### Slice 6 — Tripwires and grants
+- Setup preflight (brief §6.8): worker identity distinct from core; no unauthenticated Docker TCP reachable; only generator-managed sudoers rules. Each fails closed, with a test per side door.
+- Brokered integration tools hold app API keys server-side; a session env/file scan finds none.
 - Each protected domain has a planted-change test (ingress, DNS file, credential file, firewall,
   data-volume shrink, backup config): session paused within one scan interval, mission
   `paused_tripwire`, rollback offered.
@@ -101,6 +104,7 @@ Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); th
 - Grant hash binds approval; a changed grant invalidates it.
 
 ### Slice 7 — Approval, standing grants, privilege
+- Hook layer enforces the guards an interactive classifier would: refuse secret-store reads, destructive VCS in live trees, publishing.
 - One approval covers all mutations inside scope; anything outside raises a decision card.
 - Standing grants: scoped, expiring, listed, revocable; only incident-backed; never Change/Critical;
   expiry and revoke stop an unattended start.
@@ -110,6 +114,7 @@ Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); th
   closed is a configured, tested behaviour.
 
 ### Slice 8 — Verification and recovery
+- Catalogue includes in-container probe, route probe with resolve override, log-absence window, and compose-project completeness; a Docker `healthy` alone never satisfies a check.
 - A verification plan must exist before any mutation; completion needs the checks plus a fresh
   scan to pass; an agent claim alone never completes a mission.
 - Crash at investigation, execution and verification yields the right state, with no replay.
