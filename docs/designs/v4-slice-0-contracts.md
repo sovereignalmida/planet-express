@@ -540,3 +540,50 @@ and the owning-slice item are handled by moving Change to **slice 10** with the 
 into §6.2 (they affect only Phase 3); the proxy binding, execution predicate and verification-plan
 model are normative now (§3, §6.1, §10). The `approval_id` wording follow-up is fixed in §2.
 Remaining work is owned by slices, not by slice 0.
+
+## 22. Privileged session launcher (slice 3d; DRAFT, needs G1 before code)
+
+Problem found while integrating slice 3: Core runs as an unprivileged user. Spawning a process as the
+worker uid and putting it in a cgroup needs privilege (a non-root writer cannot move another uid's
+process into a cgroup; `setuid` needs `CAP_SETUID`). The previous S3b `CgroupContainment` assumed Core
+had those. This section replaces that assumption.
+
+**Helper.** `pe-launch`, one small root-owned program (`root:<core-group>` mode 0750, installed by setup,
+on MOS on the data pool with the boot hook restoring its sudoers rule). Core runs it as
+`sudo -n /path/pe-launch` with **no arguments**: the sudoers rule is `<core-user> ALL=(root) NOPASSWD:
+/path/pe-launch ""` (the empty-string argument form forbids any argv). All input is a single JSON spec on
+**stdin**: `{session_id, cgroup_root, worker_uid, worker_gid, cwd, argv, env, token}`. Nothing secret is
+ever in argv or the environment of the helper.
+
+**Helper behaviour (all checks fail closed, then exit non-zero before exec):**
+1. Validate: `session_id` matches `^[A-Za-z0-9_-]{1,64}$`; `cgroup_root` equals the configured delegated
+   root (read from a root-owned config the helper loads itself, not from the spec); `worker_uid` is in the
+   configured worker uid range, is not 0 and is not the Core uid; `cwd` is under the configured workspace
+   root, owned by the worker, and not a symlink; `argv[0]` is absolute; `argv`/`env` bounded and free of NUL.
+2. Create `<cgroup_root>/<session_id>` (fails if it exists), then chown **the directory and its
+   `cgroup.procs`, `cgroup.freeze`, `cgroup.kill`, `cgroup.events`** to the Core uid (standard cgroup v2
+   delegation) so Core can freeze, kill and read emptiness without privilege, while the worker cannot.
+3. Create a pipe, write the token into it, keep the read end for the child as fd 3; every other inherited
+   fd above 2 is closed.
+4. Join the cgroup (write own pid to `cgroup.procs`), `setgroups([])`, `setgid`, `setuid` to the worker,
+   verify the ids took effect, set `no_new_privs`, `setsid`, reset resource limits, `chdir(cwd)`, `execve`
+   with exactly the spec env. Child stdout/stderr are the helper's, so Core reads output through the sudo
+   process's pipe. The exec'd pid is not tracked; Core tracks the cgroup, which is the contract (§2.1).
+5. It never runs the worker as root and never changes anything outside its cgroup directory.
+
+**Core side.** `CgroupContainment` gains a `LauncherStrategy` (S3c adds the seam): `SudoLauncher` runs
+the helper as above; `DirectLauncher` (tests/CI, or a Core that already has the capabilities) does the
+same steps in-process. `kill`/`freeze`/`is_empty` always act on the Core-owned cgroup files directly.
+Cleanup is `rmdir` of the session cgroup, so `cgroup_root` is a directory delegated to the Core uid at
+boot (Ubuntu: a systemd unit `Delegate=` or setup-created dir; MOS: a boot script because the cgroup
+tree is RAM-backed). Setup/repair/undo create, verify and remove: helper file, sudoers fragment
+(`visudo -c`), worker account and uid range, delegated cgroup root, boot hook (MOS).
+
+**Threats and tests.** A worker or other local user must not run the helper (mode and sudoers rule);
+a Core compromise gains nothing it lacks today (Core is docker-group = root-equivalent) but the helper
+must still never execute as root, accept paths outside the configured roots, or accept a uid outside
+range; tests cover: bad session id, existing cgroup, uid 0, Core uid, out-of-range uid, symlinked cwd,
+relative argv[0], oversize spec, token absent from `/proc/<pid>/cmdline` and `environ`, fd leakage,
+cgroup membership before exec, Core can freeze/kill/see empty, worker cannot write cgroup files, and
+double-fork escapers stay inside. Root-only tests run on Ubuntu and on the MOS VM via the rehearsal
+script. This section needs a G1 (Codex) review and the operator's sign-off before slice 3d starts.

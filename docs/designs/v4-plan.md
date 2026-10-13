@@ -29,6 +29,8 @@ the production host and v4 work happens on a new branch with no deploy without a
 | 1 | Mission store, state machine, events, leases + fencing | 0 | 2 |
 | 2 | Ship's Memory store, FTS, import format and importer, quarantine | 0 | 1 |
 | 3 | Session supervisor, adapter protocol, reference adapter, contained worker, brief generator | 1, 2 | 4 |
+| 3c | Integrate 3a+3b, wire into daemon (fake containment, no privilege) | 3a, 3b, 4 | — |
+| 3d | Privileged session launcher (`pe-launch`, sudoers, delegated cgroup root, setup/undo, MOS boot hook) | 3c; spec §22 reviewed | 5, 6 (design) |
 | 4 | Mission and memory surfaces: dashboard, Telegram, RPC (worker socket allowlist) | 1, 2 | 3 |
 | 5 | Checkpoint/restore service and backup-freshness check | 1 | 6 |
 | 6 | Tripwire monitor, protected domains, grant schema, grant → credential/env builder | 1, 5 | 5 (design), 7 after |
