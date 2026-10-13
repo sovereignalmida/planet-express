@@ -99,14 +99,19 @@ def _card_text_fields(card: Card):
         yield f"scope[{i}]", tag
 
 
+def check_text_no_secrets(card_id: str, name: str, text: str) -> None:
+    """Raise SecretShapedContent (naming `name` and the line, never the text) if any line looks secret."""
+    for line_no, line in enumerate(text.split("\n"), 1):
+        if _redact(line) != line:
+            raise SecretShapedContent(card_id, f"{name} line {line_no}", "credential assignment or token")
+        for why, pattern in _EXTRA_SECRET_PATTERNS:
+            if pattern.search(line):
+                raise SecretShapedContent(card_id, f"{name} line {line_no}", why)
+
+
 def check_no_secrets(card: Card) -> None:
     for name, text in _card_text_fields(card):
-        for line_no, line in enumerate(text.split("\n"), 1):
-            if _redact(line) != line:
-                raise SecretShapedContent(card.id, f"{name} line {line_no}", "credential assignment or token")
-            for why, pattern in _EXTRA_SECRET_PATTERNS:
-                if pattern.search(line):
-                    raise SecretShapedContent(card.id, f"{name} line {line_no}", why)
+        check_text_no_secrets(card.id, name, text)
 
 
 def _now(now: datetime | None) -> datetime:
@@ -221,6 +226,7 @@ def upsert_candidate(conn: sqlite3.Connection, card: Card, actor: str, *, now: d
         raise ActorNotPermitted(f"{kind} actors cannot attribute a card to the operator")
     card = card.model_copy(update={"status": "candidate"})
     check_no_secrets(card)
+    check_text_no_secrets(card.id, "history detail", detail)  # detail is stored forever
     row = _row(conn, card.id)
     if row is not None and row["status"] != "candidate":
         raise CardExistsError(card.id, row["status"])

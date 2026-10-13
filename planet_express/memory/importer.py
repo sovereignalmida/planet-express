@@ -196,6 +196,10 @@ def build_card(parsed: _Parsed, now: datetime) -> tuple[Card, str]:
     if source != meta.source:
         notes.append(f"declared source: {meta.source}, recorded as {source}")
     if meta.confidence_note:
+        try:
+            store.check_text_no_secrets(meta.id, "confidence_note", meta.confidence_note)
+        except store.SecretShapedContent as exc:
+            raise _Bad(str(exc)) from exc
         notes.append(f"note: {meta.confidence_note}")
     statement = parsed.statement
     if not statement and parsed.steps:
@@ -263,9 +267,11 @@ def _import_one(conn, card: Card, detail: str, actor: str, now: datetime, report
     if store.stored_hash(conn, card.id) == incoming:
         report.unchanged += 1
         return
-    conflict = card.model_copy(update={
-        "id": _conflict_id(card.id, incoming),
-        "conflicts_with": list(dict.fromkeys([card.id, *card.conflicts_with]))})
+    try:  # full validation: the extra edge must not push conflicts_with past its bound
+        conflict = Card(**{**card.model_dump(), "id": _conflict_id(card.id, incoming),
+                           "conflicts_with": list(dict.fromkeys([card.id, *card.conflicts_with]))})
+    except ValidationError as exc:
+        raise _Bad(f"cannot record a conflict with existing card {card.id!r}: {_format_errors(exc)}") from exc
     outcome = store.upsert_candidate(
         conn, conflict, actor, now=now,
         detail=f"{detail}; conflicts with {existing.status} card {card.id}, which was not changed")
@@ -305,6 +311,8 @@ def import_path(conn: sqlite3.Connection, path, *, actor: str = "importer:cli", 
             seen[card.id] = location
             try:
                 _import_one(conn, card, detail, actor, now, report)
+            except _Bad as exc:
+                report.rejected.append(Rejected(location, str(exc)))
             except store.SecretShapedContent as exc:
                 report.rejected.append(Rejected(location, str(exc)))
     except BaseException:

@@ -297,3 +297,34 @@ def test_cli_works_without_any_pe_config(tmp_path):
 def test_render_markdown_is_loadable_yaml_front_matter():
     text = importer.render_markdown(make_card("r1", statement="Body text."))
     assert text.startswith("---\n") and "id: r1" in text and text.rstrip().endswith("Body text.")
+
+
+def test_secret_in_confidence_note_is_rejected_and_nowhere_in_the_db(conn, tmp_path):
+    secret = "PASSWORD=correct-horse-battery-staple"
+    write(tmp_path, "a.md", f"---\nid: a\ntype: fact\nsource: inferred\nconfidence_note: \"{secret}\"\n---\nBody.\n")
+    report = run(conn, tmp_path)
+    assert store.get_card(conn, "a") is None
+    assert len(report.rejected) == 1 and "confidence_note" in report.rejected[0].message
+    assert "correct-horse" not in report.rejected[0].message
+    assert "correct-horse" not in "".join(conn.iterdump())
+
+
+def test_secret_in_evidence_is_rejected_and_nowhere_in_the_db(conn, tmp_path):
+    write(tmp_path, "a.jsonl", json.dumps({
+        "id": "a", "type": "fact", "source": "inferred", "statement": "Body.",
+        "evidence": ["api_token: abcdef0123456789abcdef"]}) + "\n")
+    report = run(conn, tmp_path)
+    assert len(report.rejected) == 1
+    assert "abcdef0123456789" not in "".join(conn.iterdump())
+
+
+def test_conflict_candidate_that_would_exceed_the_bound_is_rejected_not_stored(conn, tmp_path):
+    others = [f"other-{i}" for i in range(16)]
+    confirmed(conn, "a", statement="Approved.", conflicts_with=others)
+    write(tmp_path, "a.jsonl", json.dumps({
+        "id": "a", "type": "fact", "source": "inferred", "statement": "Different.",
+        "conflicts_with": others}) + "\n")
+    report = run(conn, tmp_path)
+    assert len(report.rejected) == 1 and "conflicts_with" in report.rejected[0].message
+    assert report.conflicts == 0
+    assert [c.id for c in store.list_cards(conn)] == ["a"]  # still readable, nothing invalid written
