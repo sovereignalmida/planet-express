@@ -51,9 +51,28 @@ def is_legal(frm: str, to: str) -> bool:
     return to in TRANSITIONS.get(frm, frozenset())
 
 
+def release_for_terminal(conn: sqlite3.Connection, mission_id: str, now: int) -> None:
+    """Free what a finished mission holds: every lease (suspect ones included) and its live session row.
+    `resource_fences` is untouched, so the next holder still gets a higher fence."""
+    freed = [r["resource"] for r in conn.execute(
+        "SELECT resource FROM mission_leases WHERE mission_id=? ORDER BY resource", (mission_id,))]
+    conn.execute("DELETE FROM mission_leases WHERE mission_id=?", (mission_id,))
+    cur = conn.execute("UPDATE mission_sessions SET revoked_at=? WHERE mission_id=? AND revoked_at IS NULL",
+                       (now, mission_id))
+    if freed or cur.rowcount:
+        insert_event(conn, mission_id, "decision", "core",
+                     {"terminal_release": freed, "sessions_revoked": cur.rowcount}, now)
+
+
 def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor: str, now: int) -> str:
     """Take one edge inside the caller's transaction (status CAS, predicate on `executing`, state event).
-    Raises IllegalTransition without logging: the caller decides whether the transaction survives."""
+    Raises IllegalTransition without logging: the caller decides whether the transaction survives.
+
+    Entering a terminal state also frees the mission's leases and revokes its live session row, in this
+    same transaction. That is only safe because the SUPERVISOR MUST HAVE CONFIRMED THE SESSION DEAD (cgroup
+    or uid empty, token and endpoints revoked, contract §2.1) BEFORE it asks for a terminal transition:
+    the lease is what fences a still-running worker out. A `suspect` lease is freed by this path or by
+    leases.release_after_proven_dead, and by nothing else."""
     row = conn.execute("SELECT status, tier FROM missions WHERE id=?", (mission_id,)).fetchone()
     if row is None:
         raise MissionNotFound(mission_id)
@@ -74,6 +93,8 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         f"UPDATE missions SET status=?, updated_at=?{closed} WHERE id=? AND status=?", args)
     if cur.rowcount != 1:
         raise IllegalTransition(f"{mission_id} changed state concurrently")
+    if to in TERMINAL:
+        release_for_terminal(conn, mission_id, now)
     insert_event(conn, mission_id, "state", actor, {"from": frm, "to": to}, now)
     return frm
 

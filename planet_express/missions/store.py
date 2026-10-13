@@ -85,6 +85,13 @@ class MissionStore:
                                     (status,)).fetchall()
         return [Mission(**dict(r)) for r in rows]
 
+    @staticmethod
+    def _check_readable(conn, mission_id: str, **changes: Any) -> None:
+        """Build the row's `Mission` with the proposed values BEFORE writing, so a value the read path would
+        refuse (size caps, enums) never reaches the table. Raises pydantic's ValidationError (a ValueError)."""
+        row = dict(conn.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone())
+        Mission(**{**row, **changes})
+
     def set_grant(self, mission_id: str, grant: Grant, actor: str = "core") -> Mission:
         """Replace a grant. Refused once any approving row exists for the current hash (contract §2); a
         grant that must change after approval is a new mission, or, before any approval, a new hash."""
@@ -98,6 +105,8 @@ class MissionStore:
             if row["status"] not in ("draft", "queued", "investigating", "awaiting_decision", "blocked",
                                      "needs_operator"):
                 raise GrantLocked(f"{mission_id}: grant cannot change while {row['status']}")
+            self._check_readable(conn, mission_id, grant_json=grant.canonical(), tier=grant.tier,
+                                 grant_hash=sha256_hex(grant.model_dump(mode="json")))
             conn.execute(
                 "UPDATE missions SET grant_json=?, grant_hash=?, tier=?, updated_at=? WHERE id=?",
                 (grant.canonical(), sha256_hex(grant.model_dump(mode="json")), grant.tier, now, mission_id),
@@ -115,8 +124,10 @@ class MissionStore:
                 raise MissionNotFound(mission_id)
             if row["plan_hash"] and has_approving_row(conn, mission_id, row["plan_hash"]):
                 raise GrantLocked(f"{mission_id}: plan is approved and immutable")
+            plan_json, plan_hash = canonical_json(plan), sha256_hex(plan)
+            self._check_readable(conn, mission_id, plan_json=plan_json, plan_hash=plan_hash)
             conn.execute("UPDATE missions SET plan_json=?, plan_hash=?, updated_at=? WHERE id=?",
-                         (canonical_json(plan), sha256_hex(plan), now, mission_id))
+                         (plan_json, plan_hash, now, mission_id))
             insert_event(conn, mission_id, "decision", actor, {"plan_replaced": sha256_hex(plan)}, now)
         return self.get_mission(mission_id)
 

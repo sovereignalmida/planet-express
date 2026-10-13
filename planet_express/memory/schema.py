@@ -7,6 +7,7 @@ table can only index real columns of its content table.
 """
 
 import sqlite3
+from contextlib import closing
 
 SCHEMA_VERSION = 1
 
@@ -81,6 +82,17 @@ CREATE TRIGGER IF NOT EXISTS memory_history_no_delete BEFORE DELETE ON memory_hi
     SELECT RAISE(ABORT, 'memory_history is append-only');
 END;
 """
+
+
+def fts5_available() -> bool:
+    """True when this Python's sqlite3 can create an FTS5 table. Core uses it to decide whether the
+    (optional) memory tables belong in the v6 schema."""
+    try:
+        with closing(sqlite3.connect(":memory:")) as conn:
+            conn.execute("CREATE VIRTUAL TABLE _probe USING fts5(x)")
+    except sqlite3.Error:
+        return False
+    return True
 
 
 def require_fts5(conn) -> None:
