@@ -122,7 +122,7 @@ enforceable object; approval binds to its hash.
 |---|---|---|---|
 | Observe | Inspect bounded host state, logs, config, docs | Contained, read-only | Automatic |
 | Propose | Produce diagnosis, diffs, plans, rollback plan | Contained, read-only | Automatic |
-| Repair | Act inside the declared scope: restart, recreate, edit config/Compose, run commands | Docker + scoped sudo, scope-limited credentials | One mission approval, or a **standing grant** |
+| Repair | Act inside the declared scope: restart, recreate, edit config/Compose, run commands | Docker **through a scope-enforcing API proxy** + scoped sudo, brokered credentials | One mission approval, or a **standing grant** |
 | Change | Add/remove/reshape services | As Repair | Approve plan/diff, then execute |
 | Critical | Protected domains (below) or irreversible effects | As Repair | Explicit per-change approval |
 
@@ -387,7 +387,7 @@ unbounded autonomy.
   outcomes in the dashboard and Telegram.
 - Public runtime-adapter contract, external-session import, and one documented reference adapter
   with no bundled skill pack and no required LLM vendor.
-- Checkpoint/restore; tripwire monitor with pause/rollback; grant → credential/environment
+- Checkpoint/restore; Docker API proxy; tripwire monitor with pause/rollback; grant → credential/environment
   builder; standing grants; privileged worker tier with a dedicated Unix identity; hooks.
 - Verification catalogue with pre-agreed checks; crash classification.
 - Budgets (wall time, tool calls, output size, retries); redaction before persistence.
@@ -453,8 +453,9 @@ Resolved; these are inputs to Phase 0, not open questions.
 1. **Protected domains:** the default list (network/ingress/DNS, firewall, credentials and
    identities, persistent data volumes and storage, backup configuration, package management, host
    reboot). None may be touched under a Repair grant; each needs explicit per-change approval.
-2. **Repair privilege:** default is docker plus sudo generated from the grant (exact units and
-   commands, shown at setup). A mission may be **escalated to broad sudo** only by an explicit
+2. **Repair privilege:** raw Docker access is host root, so the default Repair worker reaches Docker
+   only through a **scope-enforcing API proxy** (slice-0 spec §6.1) plus sudo generated from the grant (exact units and
+   commands, shown at setup). A mission may be **escalated to broad sudo and raw Docker** only by an explicit
    per-mission approval, recorded in the audit trail. Broad sudo is never covered by a standing
    grant and never applies to an unattended start.
 3. **Standing grants:** ship in v4.0, **off by default**. Never cover Change, Critical, broad sudo,

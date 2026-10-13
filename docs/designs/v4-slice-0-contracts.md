@@ -1,0 +1,407 @@
+# v4 Slice 0 — Contracts and threat model
+
+Status: DRAFT rev 0.2 (2026-10-13). G1 (Codex) findings folded in; see §19. Awaiting a G1 re-check of §19 before slices start. Parent: `v4-mission-control.md` (v4.1) and
+`v4-plan.md`. This slice produces no product code. Its output is the set of contracts below, which
+slices 1-9 build against, plus the threat model they must defend. Where this document and the
+brief disagree, fix the disagreement here before any slice starts.
+
+Existing seams referenced (verified in the tree): store schema v5 with explicit migrations
+(`planet_express/core/store.py`, `SCHEMA_VERSION = 5`); RPC server with uid allowlist and one handler
+table (`planet_express/integrations/rpc.py`); host-control providers
+(`planet_express/execution/host_control_{systemd,mos}.py`); typed engine and runbooks
+(`planet_express/execution/{engine,runbook,policy}.py`); setup plan/apply/undo journal
+(`planet_express/setup/`); redaction (`planet_express/core/redact.py`).
+
+## 1. Principals and trust
+
+| Principal | Identity | Trust |
+|---|---|---|
+| Operator | dashboard/Telegram session | Approves grants; elevation for Critical |
+| Core | PE daemon user (today in `docker` group) | Owns store, approvals, verification, checkpoints, tripwires |
+| Supervisor | thread/subprocess of Core | Spawns and watches sessions; holds no extra authority |
+| Worker | dedicated Unix user `pe-worker` (never the Core user) | Untrusted-but-capable; privilege per tier |
+| Runtime | agent CLI/process started by Supervisor as Worker | Same as Worker |
+| Remote worker | another host, dedicated key, unix socket forwarded over SSH | Same as Worker, plus network exposure |
+
+Invariant I1: nothing a Worker or Runtime says is evidence of success or permission to mutate.
+Invariant I2: Core never runs agent-supplied text as a command; the Runtime does, as Worker.
+Invariant I3: Worker reaches Core only through the worker socket (§6).
+Invariant I4: **raw Docker access is host root.** A Worker never holds the raw Docker socket, the
+`docker` group, or an unauthenticated Docker TCP port unless the mission is escalated to *broad*
+(§4). The default Repair tier reaches Docker through the **scope-enforcing Docker API proxy** (§6.1).
+Invariant I5: a Core-mediated call carries a fence; a Worker's native mutation does not and cannot.
+So a lease is released or reclaimed only after the session is **provably dead** (§2.1).
+
+## 2. Mission schema (store v6)
+
+New tables, one forward migration v5→v6. `Store.init()` migrates directly today (snapshots are a deploy/setup
+step), so slice 1 adds an upgrade guard: the daemon refuses to run the v5→v6 migration unless a
+snapshot marker younger than 10 minutes exists, written by `deploy`/`setup` after the snapshot. All times
+UTC epoch seconds; all JSON columns validated by Pydantic models on read and write.
+
+```sql
+CREATE TABLE missions (
+  id TEXT PRIMARY KEY,                    -- M-<monotonic>, never reused
+  title TEXT NOT NULL, origin TEXT NOT NULL,   -- incident|operator|maintenance|system|import
+  incident_id TEXT REFERENCES incidents(id),
+  priority INTEGER NOT NULL DEFAULT 50,
+  status TEXT NOT NULL,                    -- state machine §3
+  tier TEXT NOT NULL,                      -- observe|propose|repair|change|critical
+  goal TEXT NOT NULL, success_criteria TEXT NOT NULL,   -- bounded, redacted
+  grant_json TEXT NOT NULL, grant_hash TEXT NOT NULL,
+  standing_grant_id TEXT,                  -- set when start was unattended
+  runtime TEXT NOT NULL, session_ref TEXT, -- adapter name; opaque handle
+  cancel_requested_at INT, cancel_requested_by TEXT,
+  plan_json TEXT, plan_hash TEXT,          -- change/critical: approved plan or diff
+  checkpoint_id TEXT, verification_plan_json TEXT, verification_result_json TEXT,
+  outcome TEXT, outcome_flags TEXT,        -- completed|failed|rolled_back|...; partially_applied
+  created_at INT NOT NULL, updated_at INT NOT NULL, closed_at INT,
+  schema_ver INT NOT NULL DEFAULT 1);
+CREATE TABLE mission_events (             -- append-only; redacted before insert
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, mission_id TEXT NOT NULL REFERENCES missions(id), at INT NOT NULL,
+  kind TEXT NOT NULL,                      -- state|tool|diff|tripwire|decision|artifact|note|takeover
+  actor TEXT NOT NULL,                     -- core|supervisor|worker|operator:<id>
+  body_json TEXT NOT NULL, redaction_applied INT NOT NULL DEFAULT 1);
+CREATE TABLE mission_leases (
+  resource TEXT PRIMARY KEY,               -- canonical id, see §2.3
+  mission_id TEXT NOT NULL REFERENCES missions(id), fence INTEGER NOT NULL,   -- monotonic per resource
+  acquired_at INT NOT NULL, expires_at INT NOT NULL, last_heartbeat INT NOT NULL);
+CREATE TABLE standing_grants (
+  id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, tier TEXT NOT NULL,
+  window_json TEXT, created_by TEXT NOT NULL, created_at INT NOT NULL,
+  expires_at INT NOT NULL, revoked_at INT, version INT NOT NULL);
+CREATE TABLE mission_approvals (           -- the ONLY proof of approval; created+consumed atomically
+  id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id),
+  phase TEXT NOT NULL,                     -- grant | plan | critical:<n> | broad_sudo | no_backup
+  bound_hash TEXT NOT NULL,                -- grant_hash or plan_hash this approval covers
+  decision TEXT NOT NULL, operator TEXT NOT NULL, elevated INT NOT NULL,
+  decided_at INT NOT NULL, UNIQUE (mission_id, phase, bound_hash));
+CREATE TABLE mission_sessions (            -- one live session per mission
+  id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id),
+  token_hash TEXT NOT NULL, issued_at INT NOT NULL, expires_at INT NOT NULL, revoked_at INT,
+  cgroup_path TEXT, leader_pid INT, fence_json TEXT NOT NULL);   -- resource -> fence
+CREATE TABLE mission_artifacts (id TEXT PRIMARY KEY, mission_id TEXT NOT NULL REFERENCES missions(id), name TEXT,
+  sha256 TEXT NOT NULL, bytes INT NOT NULL, path TEXT NOT NULL);   -- files under artifact dir
+```
+
+Rules: strict models (`extra=forbid`, bounded strings/lists, enums as `Literal`) live in
+`planet_express/missions/models.py` (slice 1; G1-reviewed there). Canonical JSON for every hash is
+RFC 8785 (JCS); duplicate keys, NaN/Infinity and non-UTF-8 are rejected before hashing.
+Approval is proven only by a `mission_approvals` row whose `bound_hash` equals the mission's current
+`grant_hash` (or `plan_hash`); `missions` carries no approval pointer. Events are never updated or deleted by mission code (retention job only, §2.2).
+`fence` is read-modify-write under `BEGIN IMMEDIATE`. A mission row's `grant_json` is immutable
+once `approval_id` is set; a change creates a new grant hash and requires re-approval.
+
+### 2.1 Resume and cancel
+- Resume reads `status`, the last event `seq`, the checkpoint and the lease; it never re-sends an
+  accepted mutation. Cancel sets `cancel_requested`; Supervisor kills the session's process group,
+  Core reads host state, and the mission lands in `cancelled` or `needs_operator`.
+- A live session runs in a **delegated cgroup** (v2, `pids`/`freezer`); pause = freeze the cgroup,
+  cancel/kill = freeze, `cgroup.kill`, confirm empty. Where cgroups are unavailable (to be proven on
+  MOS, §18d) the fallback is a per-session Unix identity plus `kill -9 -1` as that uid; a host
+  that can do neither is proposal-only for Repair.
+- **A lease is never reclaimed on TTL alone.** Expiry marks it `suspect`; Core revokes the session
+  token and capability endpoints, kills and confirms the cgroup/uid empty, classifies host state,
+  and only then frees the lease. Core-mediated mutations (typed runbooks, tools, canary, prune)
+  must present the current fence; v3 canary and prune acquire leases through the same manager.
+- Heartbeat: Supervisor refreshes each held lease every `ttl/3`. A lease past `expires_at` is
+  reclaimable; the old holder's fence is stale and Core rejects its calls.
+
+### 2.3 Resource identity and overlap
+Canonical ids are `host:<h>/stack:<s>`, `…/service:<s>/<svc>`, `…/mount:<path>`, `…/path:<abs>`,
+`…/unit:<name>`. Overlap is defined by containment: `stack:s` contains every `service:s/*`, the
+stack's compose paths, and its declared mounts; `mount:/a` contains `path:/a/**` and `mount:/a/b`.
+Acquire expands a request to its containment set and takes all or none inside one
+`BEGIN IMMEDIATE`; two requests conflict iff their expanded sets intersect. Slice 1 tests the
+stack/service/mount/path overlap matrix.
+
+### 2.2 Retention
+Events and artifacts kept 90 days after `closed_at` by default (configurable); the mission row,
+grant, outcome, checkpoint reference and verification result are kept until the operator purges.
+
+## 3. State machine
+
+```
+draft ──► queued ──► investigating ──► awaiting_decision ──► executing ──► verifying
+                         │                    │                   │            │
+                         └────────────────────┴───────────────────┴────────────┴─► completed
+                                                                          failed | rolled_back
+ any non-terminal ──► cancelled | blocked | needs_operator | recovery_required
+ executing ──► paused_tripwire ──► executing | rolled_back | needs_operator
+ recovery_required ──► (investigating | executing | verifying | rolled_back | needs_operator)
+                       chosen by Core's host-state classification, not by the runtime
+```
+
+Terminal: completed, failed, rolled_back, cancelled. Change and Critical missions cannot enter
+`executing` until a `mission_approvals` row for phase `plan` (or `critical:<n>`) bound to the current
+`plan_hash` exists. `blocked` = waiting on a lease or window;
+`needs_operator` = Core cannot proceed without a human. Illegal transitions raise and are logged.
+Observe/Propose missions never enter `executing`.
+
+`rollback_pending` (executing/paused_tripwire/failed-verification → rollback_pending → rolled_back
+| needs_operator) is an explicit non-terminal state while a restore runs. Resumption after a
+runtime outage or crash is **operator-mediated** (brief §14.8); the only automatic restarts are
+Observe/Propose sessions (no mutation possible), within the retry budget.
+
+`partially_applied` is a flag set when ≥1 mutation event was recorded and the end state is not
+`completed`. It forces `needs_operator` or `rolled_back`.
+
+## 4. Grant schema
+
+```json
+{
+ "v": 1, "tier": "repair",
+ "scope": {"stacks": ["media"], "services": ["media/qbittorrent"], "paths": ["~/stacks/media"],
+           "mounts": [], "hosts": ["local"]},
+ "protected": {"resources": [...]},                 // from site config, copied in at approval
+ "exclusions": ["network", "persistent-data", "credentials", "publishing"],
+ "window": {"deny": ["backup"], "allow": null},
+ "sudo": {"mode": "scoped|broad", "rules": [{"unit": "x.service", "actions": ["restart"]}]},
+ "credentials": ["tool:arr-api"],                   // brokered tools, never raw keys
+ "budgets": {"wall_s": 3600, "tool_calls": 200, "output_bytes": 5000000, "retries": 2},
+ "effects": {"max_unexpected_in_scope": 3, "per_resource": {"service:media/*": {"changes": 5}}},
+ "docker": "proxy|raw",                           // raw only with sudo.mode = broad
+ "verification": {"checks": ["<check ids from §10>"], "agreed_at": 0},
+ "backup": {"covered": true, "recent_s": 86400, "acknowledged_no_backup": false}
+}
+```
+
+- `grant_hash` = SHA-256 of the RFC 8785 canonical JSON. Approval binds to it via `mission_approvals`.
+- `docker: raw` is permitted only with `sudo.mode = broad` and an elevated `broad_sudo` approval; the
+  default Repair worker uses the proxy (§6.1).
+- `sudo.mode = broad` requires an elevated per-mission approval, is rejected for standing grants and
+  unattended starts, and is shown at the top of the approval card.
+- Grant validation (Core): scope ⊆ discovered inventory; no protected resource inside scope unless
+  tier = critical; checks exist; budgets within site maxima; backup floor satisfied or acknowledged.
+- A standing grant stores a scope template; a mission starting under it gets a concrete grant
+  whose hash is recorded with `standing_grant_id`. Standing grants never yield tier change/critical,
+  broad sudo, or `acknowledged_no_backup`.
+
+## 5. Policy hook into existing code
+
+- `policy.py` change (slice 7): add `mission` to `RUNBOOK_ORIGINS` (today it is rejected as unknown); it
+  is never in the unattended set, never in `LIMIT_EXEMPT_ORIGINS`, and a mutating typed step from it
+  needs a `mission_approvals` row for the mission's current grant hash (it does not create an
+  unrelated v3 approval). Tests cover each of those.
+- New origin `mission` is **not** in the unattended set. Unattended start is
+  decided solely by `standing_grants`, evaluated by `missions/` code, and recorded on the mission.
+- The v3 typed engine and its attempt limits (T24) are unchanged. A mission may *request* a typed
+  runbook for a known repair; that goes through `CommandService` as origin `mission` and obeys its
+  limits and approvals.
+- Mission mutation by the Worker itself (native tools) is not run by Core; it is bounded by the
+  tier's OS privilege and watched by checkpoint/tripwires/verification (§7-§9).
+
+## 6. Worker socket and RPC
+
+- Separate socket `/run/planetexpress/worker.sock`, mode 0660, group `pe-worker`; the existing
+  `rpc.sock` keeps its uid allowlist and is **never** reachable by `pe-worker`.
+- A second `RpcServer` instance with its own handler dict, whose keys are an explicit allowlist:
+  `mission.get_context`, `mission.post_event`, `mission.heartbeat`, `mission.request_decision`,
+  `mission.submit_result`, `memory.search`, `query.container`, `logs.tail`, `incident.get`,
+  `tool.invoke` (brokered integrations, §8).
+- `SO_PEERCRED` gives uid, pid and gid; the server resolves the pid's cgroup and requires it to equal
+  the `mission_sessions.cgroup_path` (or, in the per-uid fallback, the session's uid). The session
+  token (256-bit, only its hash stored, delivered on an inherited file descriptor, never in argv or
+  env) is checked as well. A same-uid process outside the session cgroup is refused. Handlers
+  receive `(params, session)` so every call is scoped to one mission and its fences. `RpcServer`
+  needs that extension (slice 2/3).
+- Test: the worker uid calling `approval.decide`, `execution.*`, `config.*`, `canary.*`, `auth.*`
+  gets "unknown method" on its socket and a refused connection on `rpc.sock`.
+### 6.1 Scope-enforcing Docker API proxy
+The default Repair worker's `DOCKER_HOST` is a Unix socket served by a Core-owned proxy that
+inspects each Docker API request and refuses: `privileged`, `cap_add` beyond a list, `pid/ipc/
+network_mode: host`, `devices`, bind mounts of the Docker socket or of paths outside the grant's
+`paths`/`mounts`, creating or modifying objects whose resource id is outside the grant, daemon and
+swarm endpoints, `exec` into out-of-scope containers, and image builds with host contexts. It
+applies equally to Compose (which only uses that API). Each accepted write is recorded before it is
+forwarded. The dashboard/discovery consumer and Unraid use a separate read-only allowlisting proxy
+(§14.1 item 9). Proxy rules are a reviewed capability.
+- Remote worker: the same socket forwarded by SSH (`ssh -L`/`-R` with `StreamLocalBindUnlink`),
+  dedicated key restricted with `restrict,permitlisten=...,command=` options. No TCP listener.
+
+## 7. Checkpoint contract
+
+`checkpoint.create(mission_id, scope) -> checkpoint_id`; `checkpoint.restore(id)`.
+
+Captured: in-scope Compose files **and `.env` files**, as full copies under
+`<state>/checkpoints/<id>/` (mode 0600, Core-owned, never readable by the worker; they hold secrets
+at rest on the same host and trust level as the originals) with a manifest of sha256+mode+owner; container
+inspect JSON (image id, mounts, networks, labels, restart policy, health); mount state; listening
+ports; in-scope unit file hashes. Not captured: data volumes (that is the backup's job; §4 floor).
+**Post-change manifest** is captured by Core when the session ends or `verifying` starts (and at each
+tripwire pause). Restore: write back files (compare-and-swap: current hash must equal the post-change
+manifest hash, else refuse, state `needs_operator`, and report the drift), then ask the provider to recreate affected services. Restore is a recorded
+mission event and a verified one (the checks re-run).
+**Restorable (exact comparison):** captured files (bytes, mode, owner) and, after recreate, each
+in-scope service's image id, command, env hash, mounts, networks, labels, restart policy and
+health config. **Observational only:** ports, mount table, unit state, volume contents, runtime
+health. Provider seam: `HostControlProvider` covers only units, logs and metrics, so slice 5
+publishes a versioned `CheckpointProvider` protocol (compose-file discovery, container inspect,
+recreate) built on the existing stack orchestrators, with systemd and MOS implementations. MOS
+parity is claimed only once that implementation passes its tests.
+Backup freshness: Core queries the backup integration for last success time and coverage for each
+in-scope path; result stored in the grant (`backup`).
+
+## 8. Brokered integrations (`tool.invoke`)
+
+A tool is `(name, params model, handler, risk, secret_ref)` registered in Core; the Worker passes
+params, Core injects the secret and calls the application API, returns redacted output. Initial
+tools: `traefik.read`, `compose.dry_run`, `dns.rewrite` (both servers), `arr.queue_item` (read,
+remove with flags), `app.health_get`. Each tool declares scope fields checked against the grant.
+Tools are the **only** way a Worker reaches application credentials. Adding a tool is a
+reviewed capability (listed in `CLAUDE.md`'s v4 surface).
+
+## 9. Tripwires
+
+- Monitor thread in Core scans every `tripwire_interval_s` (default 15) with a hard scan deadline of
+  10 s and a per-signal timeout of 3 s. Two consecutive failed or late scans **fail closed**: pause.
+  The pause SLA (the release-proof number) is `interval + deadline` = 25 s from the change to the
+  recorded `paused_tripwire` event. Defaults for diffs: data-volume shrink >10% size or >5% entries;
+  `effects.max_unexpected_in_scope` as granted. Baselines are the checkpoint's immutable manifest.
+  Matching: a signal's resource id is tested against the grant `scope` and `protected.resources` by
+  the §2.3 containment rules (protected wins). Monitor while any mission is
+  `executing` (and a longer interval during `investigating`), independent of the Leela scan.
+- Signals: container set and per-container image/mounts/networks/labels hash; listening ports
+  (`ss`); mount table; protected-resource file hashes (ingress dynamic config, DNS config,
+  credential files, firewall rule dump hash, backup job config, sudoers, daemon.json); data
+  volume size and entry-count drops beyond a threshold; remote config of named cross-host systems
+  where readable; git remote/push activity in live trees (reflog of tracked trees).
+- Diff rule: each signal is `allowed` (inside grant scope), `unexpected-in-scope`, or `protected`.
+  `protected` pauses; `unexpected-in-scope` is logged and pauses if it exceeds the declared change
+  budget. Pause = freeze the session cgroup (and revoke capability endpoints on kill), mission `paused_tripwire`, operator card
+  with the diff and options: resume, roll back to checkpoint, take over, cancel.
+- Tripwires are advisory against a root-capable agent that actively evades (accepted, brief §6.9);
+  they are the control against mistakes, injected instructions and runaway scope.
+
+## 10. Verification catalogue (typed, Core-executed)
+
+| Check | Params | Passes when |
+|---|---|---|
+| `http` | url or route+resolve override, expect status/regex, timeout | matches, N consecutive times |
+| `exec_probe` | container, argv (allowlisted binaries), expect | exit 0 and output matches |
+| `container_state` | container, expect running + health | matches AND not only health string |
+| `mount_readable` | container or host, path | `stat`/`ls` succeeds inside the consumer |
+| `project_complete` | compose project/dir | every defined service exists and is running |
+| `log_absent` | container, pattern, window_s | no match in window |
+| `file_state` | path, sha256 or mode | matches |
+| `query` | bounded read-only query via brokered tool | matches |
+
+Each check has a strict params model (slice 8, G1-reviewed) with bounded timeout (≤60 s), bounded
+retries, and an operator-owned allowlist of binaries for `exec_probe` in Core config. A baseline
+scan is taken at checkpoint; "no new finding in scope" means no finding absent from the baseline
+whose resource id is contained in the grant scope (§2.3). The set is versioned (`catalogue_v`). A mission's verification plan lists check ids and params,
+is agreed in the grant before mutation, and cannot be changed after approval. Completion requires
+all checks pass **and** a fresh Leela scan has no new finding in scope.
+
+## 11. Supervisor and adapter lifecycle
+
+```
+start(mission) → lease acquire → checkpoint (repair+) → spawn session as worker with env from grant
+   → heartbeat/stream events (redact → persist) → on result/exit → Core verify → close
+```
+- Adapter protocol as in the brief §7. `status()` is advisory; Core's mission row is truth.
+- The session environment is built by Core from the grant: minimal env, brokered tool endpoint, no
+  secret values. Working dir = a per-mission workspace owned by the worker.
+- Crash classification (Core, from host state, never from the runtime): compare checkpoint vs. current;
+  events show accepted mutations; if state == checkpoint → `needs_operator` offering resume (or
+  automatic restart for Observe/Propose only); if state matches the end expectation → verifying;
+  else `recovery_required` → `needs_operator` or `rollback_pending`.
+
+## 12. Hook layer
+
+The reference adapter installs the runtime's pre/post tool hooks, which call
+`mission.post_event` and may block. Blocked classes (enforced even with an unrestricted runtime):
+reading secret stores and `.env` contents; destructive VCS in live trees; publishing; broad
+`rm`/`mkfs`/`dd`-class commands; `docker volume rm`, `prune -a`; edits to sudoers/daemon.json.
+Ask classes: crossing into a protected resource, irreversible-looking operations. Hook failure mode
+is configurable (default: fail closed for blocked classes, fail open with a loud event otherwise).
+
+## 13. Ship's Memory
+
+Schema (`memory_cards`, `memory_fts`, `memory_edges`, `memory_history`): DDL, strict card models and
+FTS triggers are slice 2's deliverable (G1-reviewed there); rules fixed here: FTS5 external-content
+table over title+statement+tags kept in sync by triggers; retrieval orders by scope match, then
+confirmed recency, then BM25, capped at N cards and a byte budget; edit history is append-only;
+every transition records the actor.
+scope filter on JSON tags. Status machine: candidate → confirmed → deprecated; only an operator
+action moves a procedure/constraint to confirmed. Retrieval for a session returns **confirmed**
+cards only, rendered as quoted data with ids; candidates appear in the operator UI only.
+Import format and rules as in `v4-server-memory-export.md`. Importer is idempotent by `id`, never
+overwrites a confirmed card (creates a conflict candidate instead), and rejects secret-shaped
+content using redaction's detector as a pre-check.
+
+## 14. Egress policy
+
+Allowed to leave: briefs, redacted logs, redacted config excerpts, confirmed memory cards, to the
+configured runtime/vendor only. Never: `.env` contents, credential stores, brokered secrets,
+private keys, tokens (detected by redaction + path denylist). Local runtimes unrestricted. Egress
+is recorded as an event (bytes, destination label). Redaction is layer one of three (the others:
+path denylist at the hook layer, credential scoping).
+
+## 15. Setup, undo and uninstall (what slices must add)
+
+Every one of these is a setup step with an undo-journal entry and a repair path: `pe-worker` user and
+group; worker home/workspace/checkpoint dirs (on the data pool for MOS); worker socket; generated
+sudoers file for the worker tier (exact rules, `visudo -c`, shown to operator); docker socket proxy
+and removal of unauthenticated TCP; systemd unit or init script for the supervisor if split out;
+SSH forced-command key for a remote worker. Preflight (brief §6.8) runs in `setup repair` and before
+each Repair start.
+
+## 16. Threat model
+
+| Threat | Vector | Control | Residual |
+|---|---|---|---|
+| Prompt injection from logs/web | hostile text in a container log | data-not-instructions framing; tripwires on effect; hooks; protected resources; no standing grant for change/critical | Medium: agent may act within scope on bad advice |
+| Confused deputy via Core | worker calls Core with attacker aim | worker socket allowlist, session token, scope check on every tool | Low |
+| Worker escapes to root | docker group, open TCP socket, sudo wildcard, unmanaged rules | §6.8 preflight; separate identity; generated sudo; no docker TCP | Medium on a compromised kernel/runtime |
+| Secret exfiltration | logs/configs sent to vendor; agent reads `.env` | egress policy; path denylist; brokered tools; redaction; no key in env | Medium: redaction has known gaps |
+| Memory poisoning | runtime proposes a malicious "procedure" | quarantine; operator confirm; confirmed-only retrieval | Low |
+| Runaway cost/loop | agent loops | budgets; kill; spend best-effort | Low |
+| Destructive VCS/publish | `reset --hard`, push to public remote | hook blocks; protected domain; tripwire on reflog/remote | Low-Medium |
+| Crash replay | supervisor/host dies mid-mutation | event journal before dispatch; Core classifies from host state; no replay | Low |
+| Stale lease | holder dies | TTL + fencing; Core rejects stale fence | Low |
+| Approval bypass | edit grant after approval | immutable grant, hash binding | Low |
+| Downgrade | v3 reads v6 store | v3 refuses newer schema; documented snapshot restore | Operator action |
+| MOS gaps | systemd-only code paths | provider-aware reads; proposal-only until parity | Documented |
+
+## 17. Test and rollout strategy
+
+- Unit and fixture tests per slice; the shared fixtures live in `tests/fixtures/v4/` (synthetic;
+  anonymised mirrors of the private export's incident shapes).
+- A **hostile-fixture suite** (planted secret, hostile log line trying to widen the grant,
+  protected-resource change, stale lease, crash at each phase, forged session token) runs in CI
+  from slice 3 onward.
+- Missions are off by default behind `missions.enabled`. Each slice leaves `v4-next` releasable as
+  v3. Release proof is the brief §11.3 list; each item gets a named test or a rehearsal record in
+  `docs/handoff/v4/`.
+- Rehearsal environments: the repo's test homelab (`tests/homelab`), the Ubuntu dev host, and the
+  MOS VM.
+
+## 18. Decisions this spec closes, and what it leaves open
+
+Closed: store layout (§2), state machine (§3), grant schema and hashing (§4), worker socket (§6),
+checkpoint (§7), tripwire loop (§9), check catalogue (§10), memory rules (§13), egress (§14).
+
+Open for G1 review: (a) one process or two for Core + Supervisor (default: Supervisor is a thread
+pool inside Core with the session as a child process; revisit if crash isolation demands more);
+(b) which runtime is the reference adapter and how its hooks are installed; (c) the exact default
+thresholds for tripwire diffs (data-volume shrink, change budget); (d) per-OS mechanism to keep the
+checkpoint store unreadable by the worker on MOS (no ACLs: groups and modes), **and whether MOS can
+delegate a cgroup per session** (§2.1); if not, the per-uid fallback or proposal-only applies.
+
+## 19. G1 review record (Codex, 2026-10-13) and disposition
+
+All findings accepted; rev 0.2 changes in brackets.
+- Raw Docker is host root, contradicting "worker cannot reach root" [I4, §4 `docker`, §6.1 proxy,
+  brief tier table and release proofs 2-3].
+- Fencing cannot bind native mutations [I5, §2.1 provably-dead reclaim, cgroup/uid fallback].
+- Lease overlap [§2.3]. Stop/kill only the process group [cgroup freeze/kill].
+- Approval bound to hash had no storage [`mission_approvals`]. Change/Critical second approval
+  [`plan_json/plan_hash`, §3]. `rollback_pending` mismatch [§3]. Runtime-outage resume vs. brief [§3, §11].
+- Session token storage and same-uid impersonation [`mission_sessions`, §6 cgroup binding, fd delivery].
+- Checkpoint `.env` restore and missing post-change manifest [§7]. Provider protocol gap [§7
+  `CheckpointProvider`]. Untestable "exactly" [§7 restorable vs observational].
+- Missing: cancel columns/FKs [§2]; models/canonicalization [§2 RFC 8785, strict models in slice 1];
+  change budget and matching [§4 `effects`, §9]; check params and scope predicate [§10]; memory DDL
+  [§13, slice 2]; scan deadline and thresholds [§9].
+- Snapshot-then-migrate claim [§2 upgrade guard]. `mission` origin rejected by `RUNBOOK_ORIGINS` [§5].

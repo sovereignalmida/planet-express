@@ -6,7 +6,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 ## Slice status
 | # | Slice | Status |
 |---|---|---|
-| 0 | Contracts, threat model | export received; brief amended (§6.8, §14.1); spec not yet written |
+| 0 | Contracts, threat model | spec rev 0.2 written (`v4-slice-0-contracts.md`); G1 Codex done and folded in; needs G1 re-check of §19 + operator sign-off |
 | 1 | Mission store | not started |
 | 2 | Ship's Memory | not started |
 | 3 | Supervisor, adapter, worker | not started |
@@ -18,9 +18,9 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | 9 | First Repair, release | not started |
 
 ## Next action
-Write the Slice 0 spec from the brief plus the private export (`docs/private/`, gitignored; copy from
-the server `~/apps/V4-SERVER-AGENT-EXPORT.md` via scp, never commit); run G1 (Codex) on it; then
-slices 1 and 2 in parallel worktrees. Operator must decide brief §14.1 items 9-11 in Phase 0.
+Re-run G1 (`codex exec`, read-only) on `docs/designs/v4-slice-0-contracts.md` §19 changes only; fix or
+decline findings; operator signs off slice 0; then slices 1 and 2 in parallel worktrees (briefs:
+`docs/handoff/v4/S1-brief.md`, `S2-brief.md`, not yet written).
 
 ## Decisions since the brief
 - 2026-10-13: brief §14 decisions 1-8 recorded.

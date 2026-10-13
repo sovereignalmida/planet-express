@@ -50,6 +50,7 @@ rollback strategy. `CLAUDE.md` safety text already updated.
 Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); the server export's gap list is folded in; design reviewed by Codex; no open blocker.
 
 ### Slice 1 — Mission store
+- Strict models + RFC 8785 hashing; approval proven only by `mission_approvals`; resource-containment lease matrix; upgrade guard refuses unsnapshotted migration.
 - Create/transition only along legal edges; illegal transitions rejected and logged.
 - Migration v5→v6 from a real v5 database, idempotent, with a snapshot and a refusal on newer
   schemas preserved.
@@ -104,6 +105,8 @@ Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); th
 - Grant hash binds approval; a changed grant invalidates it.
 
 ### Slice 7 — Approval, standing grants, privilege
+- Docker API proxy (slice-0 spec §6.1): each refusal class has a test (privileged, host mount, socket mount, out-of-scope object, host namespaces); every accepted write is recorded before forwarding.
+- `mission` origin added to policy with the §5 tests.
 - Hook layer enforces the guards an interactive classifier would: refuse secret-store reads, destructive VCS in live trees, publishing.
 - One approval covers all mutations inside scope; anything outside raises a decision card.
 - Standing grants: scoped, expiring, listed, revocable; only incident-backed; never Change/Critical;
