@@ -6,6 +6,7 @@ The real implementations (cgroup v2, per-uid) are S3b's; this module only declar
 fake, so there is no OS access here.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -44,6 +45,8 @@ class _Group:
     ignore_polls: int = 0                               # is_empty() polls the members survive after a kill
     kill_requested: bool = False
     spawns: list[dict] = field(default_factory=list)
+    out_read: int | None = None                         # merged stdout/stderr, created on first write_output
+    out_write: int | None = None
 
 
 class FakeContainment:
@@ -120,9 +123,38 @@ class FakeContainment:
             return
         if group.members:
             raise ContainmentError(f"{cs.session_id} is not empty")
+        self.release_output(cs)
         del self._groups[cs.session_id]
 
+    # ── optional output capture (the same extension the cgroup containment offers the command adapter) ──
+    def output_fd(self, cs: ContainedSession) -> int | None:
+        """Non-blocking read end of the session's merged output, or None before any output / after release."""
+        group = self._group(cs)
+        return group.out_read if group else None
+
+    def release_output(self, cs: ContainedSession) -> None:
+        group = self._group(cs)
+        if group is None:
+            return
+        for name in ("out_read", "out_write"):
+            fd = getattr(group, name)
+            if fd is not None:
+                setattr(group, name, None)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
     # ── simulation controls (tests only) ────────────────────────────────────
+    def write_output(self, session_id: str, data: bytes) -> None:
+        """What a session's process printed. Creates the pipe on first use."""
+        group = self._groups[session_id]
+        if group.out_read is None:
+            group.out_read, group.out_write = os.pipe()
+            os.set_blocking(group.out_read, False)
+            os.set_blocking(group.out_write, False)
+        os.write(group.out_write, data)
+
     def ignore_kill(self, session_id: str, polls: int) -> None:
         """After kill(), the members survive `polls` is_empty() calls."""
         self._groups[session_id].ignore_polls = polls

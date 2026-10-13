@@ -22,6 +22,7 @@ import os
 import pwd
 import re
 import shlex
+import signal
 import sqlite3
 import sys
 import threading
@@ -62,6 +63,7 @@ from planet_express.core.store import INDEFINITE_EXPIRY, SchemaTooNewError, Stor
 from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
+from planet_express.missions.runner import start_mission_runner
 from state_models import MonitorSnapshot, RunStatus
 from telegram_client import TelegramClient
 
@@ -3025,6 +3027,12 @@ def run_bot() -> None:
         start_scan=make_scan_starter(notifier, state, store, commands), missions=missions,
     )
 
+    # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).
+    mission_runner = start_mission_runner(store, config.MISSIONS)
+    if mission_runner is not None:
+        # systemd stops the service with SIGTERM: run the same path as Ctrl-C so sessions are killed and revoked.
+        signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+
     log.info("Good news, everyone! Professor Farnsworth is online.")
     notifier.notify("🚀 <b>Planet Express is online!</b>\nFarnsworth reporting for duty. Send /help for commands.")
 
@@ -3061,6 +3069,8 @@ def run_bot() -> None:
         except KeyboardInterrupt:
             if rpc_server is not None:
                 rpc_server.stop()
+            if mission_runner is not None:
+                mission_runner.stop()
             log.info("Farnsworth shutting down. Goodbye!")
             notifier.notify("🛑 <b>Planet Express going offline.</b>")
             break

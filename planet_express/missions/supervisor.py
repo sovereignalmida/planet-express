@@ -16,35 +16,50 @@ rebuild after a crash.
 
 import contextlib
 import functools
+import hashlib
 import json
+import logging
 import os
 import secrets
 import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from planet_express.core.store import Store
+from planet_express.integrations.rpc import RpcError
+from planet_express.memory import store as memory_store
 from planet_express.memory.models import Card
-from planet_express.memory.retrieval import retrieve
+from planet_express.memory.retrieval import render_card, retrieve
 
 from . import artifacts, leases
 from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, SessionContainment
 from .events import insert_event
 from .models import Mission
-from .runtime import AgentResult, AgentRuntime, AgentUpdate, RunContext
-from .sessions import issue_session, set_leader_pid
+from .runtime import (
+    RUNTIME_EVENT_KINDS,
+    AgentResult,
+    AgentRuntime,
+    AgentUpdate,
+    RunContext,
+)
+from .sessions import SessionRow, issue_session, set_leader_pid
 from .state import TERMINAL, IllegalTransition, MissionNotFound, transition
 from .store import MissionStore
+
+log = logging.getLogger(__name__)
 
 ACTOR = "supervisor"
 SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
+START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
+MAX_MEMORY_HITS = 20
 
 
 class MissionsDisabled(RuntimeError):
@@ -89,6 +104,8 @@ class _Run:
     reason: str | None = None
     result: AgentResult | None = None
     waiting_logged: bool = False
+    brief: str = ""
+    submitted: AgentResult | None = None      # a result the worker handed in over the socket
 
 
 def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
@@ -97,7 +114,7 @@ def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
     try:
         with store._connect() as conn:
             return list(retrieve(conn, tags, mission.goal).cards)
-    except Exception:  # noqa: BLE001 -- adapter/provider code is untrusted; it must not crash the supervisor
+    except Exception:
         return []
 
 
@@ -112,7 +129,7 @@ def _serialised(fn):
 class Supervisor:
     def __init__(self, store: Store, containment: SessionContainment,
                  runtime_factory: Callable[[Mission], AgentRuntime],
-                 clock: Callable[[], float] = time.time, *, enabled: bool = False,
+                 clock: Callable[[], float] = time.time, *, enabled: bool | Callable[[], bool] = False,
                  artifact_dir: Path | None = None, workspace_dir: Path | None = None,
                  memory_provider: Callable[[Mission], Sequence[Card]] | None = None,
                  evidence_provider: Callable[[Mission], Sequence[EvidenceItem]] | None = None,
@@ -123,7 +140,8 @@ class Supervisor:
         self.containment = containment
         self.runtime_factory = runtime_factory
         self.clock = clock
-        self.enabled = enabled
+        self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
+        self._start_failures: dict[str, int] = {}
         self.artifact_dir = Path(artifact_dir) if artifact_dir else store.path.parent / "mission-artifacts"
         self.workspace_dir = Path(workspace_dir) if workspace_dir else store.path.parent / "mission-workspaces"
         self.memory_provider = memory_provider or (lambda m: default_memory_cards(store, m))
@@ -135,6 +153,11 @@ class Supervisor:
         self._lock = threading.RLock()        # start/poll/cancel/recover never interleave in-process
 
     # ── guards ──────────────────────────────────────────────────────────────
+    @property
+    def enabled(self) -> bool:
+        """`missions.enabled`, read at use time so a config reload is honoured."""
+        return bool(self._enabled())
+
     def _require_enabled(self) -> None:
         if not self.enabled:
             raise MissionsDisabled("missions are disabled (missions.enabled is false)")
@@ -184,7 +207,7 @@ class Supervisor:
             os.close(write_fd)
             write_fd = None
             self._start_runtime(mission, run, read_fd)
-        except Exception as exc:  # noqa: BLE001 -- adapter/provider code is untrusted; it must not crash the supervisor
+        except Exception as exc:
             self._note(mission.id, {"start_failed": type(exc).__name__})
             self._kill_and_advance(run, "start_failed")
         finally:
@@ -199,13 +222,14 @@ class Supervisor:
         brief = build_brief(mission, list(self.evidence_provider(mission)), list(self.memory_provider(mission)),
                             self._constraints(mission), max_bytes=self.max_brief_bytes)
         artifacts.store_text(self.store, self.artifact_dir, mission.id, "brief.md", brief.text, ACTOR)
+        run.brief = brief.text
         workspace = self.workspace_dir / mission.id
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         def spawn(argv: Sequence[str], env: dict[str, str] | None = None, cwd: str | None = None,
                   extra_fds: tuple[int, ...] = ()) -> int:
             full_env = {**self.worker_env, **(env or {}), "PE_MISSION_ID": mission.id,
-                        "PE_TOKEN_FD": str(token_fd)}
+                        "PE_SESSION_TOKEN_FD": str(token_fd)}
             return self.containment.spawn(cs, list(argv), full_env, cwd or str(workspace),
                                           pass_fds=(token_fd, *extra_fds))
 
@@ -255,7 +279,7 @@ class Supervisor:
         try:
             raw = run.runtime.status(run.handle)
             update = AgentUpdate.model_validate(raw.model_dump() if isinstance(raw, AgentUpdate) else raw)
-        except Exception as exc:  # noqa: BLE001 -- adapter/provider code is untrusted; it must not crash the supervisor
+        except Exception as exc:
             self._note(run.mission_id, {"runtime_status_error": type(exc).__name__})
             # An adapter whose process vanished may raise instead of reporting: that is a crash, not a bug.
             return self._kill_and_advance(run, "crash" if self.containment.is_empty(run.cs) else "runtime_error")
@@ -271,7 +295,7 @@ class Supervisor:
             leases.heartbeat(self.store, run.mission_id, self.lease_ttl_s)
         except leases.LeaseLost:
             return self._kill_and_advance(run, "lease_lost")
-        if update.state == "finished":
+        if update.state == "finished" or run.submitted is not None:
             return self._collect(run)
         if update.state == "failed" or self.containment.is_empty(run.cs):
             return self._kill_and_advance(run, "crash")
@@ -292,9 +316,9 @@ class Supervisor:
     def _collect(self, run: _Run) -> None:
         assert run.runtime is not None
         try:
-            raw = run.runtime.collect(run.handle)
+            raw = run.submitted if run.submitted is not None else run.runtime.collect(run.handle)
             result = AgentResult.model_validate(raw.model_dump() if isinstance(raw, AgentResult) else raw)
-        except Exception as exc:  # noqa: BLE001 -- adapter/provider code is untrusted; it must not crash the supervisor
+        except Exception as exc:
             self._note(run.mission_id, {"result_invalid": type(exc).__name__})
             return self._kill_and_advance(run, "result_invalid")
         run.output_bytes += len(json.dumps(result.model_dump(mode="json")))
@@ -303,11 +327,33 @@ class Supervisor:
         try:
             artifacts.store_json(self.store, self.artifact_dir, run.mission_id, "result.json",
                                  result.model_dump(mode="json"), ACTOR)
-        except Exception as exc:  # noqa: BLE001 -- a full disk must not leave a live session behind
+        except Exception as exc:
             self._note(run.mission_id, {"result_store_failed": type(exc).__name__})
             return self._kill_and_advance(run, "result_invalid")
         run.result = result
+        self._persist_candidates(run.mission_id, result)
         self._kill_and_advance(run, "result")        # the session is over: make sure nothing outlives it
+
+    def _persist_candidates(self, mission_id: str, result: AgentResult) -> None:
+        """`memory_candidates` become CANDIDATE cards (source `inferred`, actor `runtime:<mission>`): they stay
+        quarantined until an operator confirms them. A bad or secret-shaped one is dropped and recorded."""
+        if not result.memory_candidates:
+            return
+        mission = self.ms.get_mission(mission_id)
+        grant = mission.grant()
+        tags = [f"stack:{x}" for x in grant.scope.stacks] + [f"service:{x}" for x in grant.scope.services]
+        stored = dropped = 0
+        for index, text in enumerate(result.memory_candidates):
+            try:
+                card = _candidate_card(mission_id, index, text, tags, datetime.fromtimestamp(float(self.clock()), UTC))
+                with self.store._write() as conn:
+                    memory_store.upsert_candidate(conn, card, f"runtime:{mission_id}",
+                                                  now=datetime.fromtimestamp(float(self.clock()), UTC))
+                stored += 1
+            except Exception as exc:
+                dropped += 1
+                self._note(mission_id, {"candidate_dropped": index, "why": type(exc).__name__})
+        self._note(mission_id, {"memory_candidates": {"stored": stored, "dropped": dropped}})
 
     # ── ending a session ────────────────────────────────────────────────────
     @_serialised
@@ -388,7 +434,7 @@ class Supervisor:
                 self._note(mission.id, {"restart_after": reason})
                 try:
                     return self._launch(mission)
-                except Exception as exc:  # noqa: BLE001 -- adapter/provider code is untrusted; it must not crash the supervisor
+                except Exception as exc:
                     self._note(mission.id, {"restart_failed": type(exc).__name__})
             else:
                 self._note(mission.id, {"retries_exhausted": reason})
@@ -408,6 +454,60 @@ class Supervisor:
             transition(self.store, mission_id, target, ACTOR)
         except IllegalTransition as exc:
             self._note(mission_id, {"transition_refused": target, "why": str(exc)[:200]})
+
+    # ── the daemon's loop and shutdown ──────────────────────────────────────
+    @_serialised
+    def tick(self) -> None:
+        """One turn of the daemon's poll thread: start queued Observe/Propose missions, then advance every
+        running session. One misbehaving mission never stops the others."""
+        if not self.enabled:
+            return
+        for mission in self.ms.list_missions("queued"):
+            if mission.tier not in ("observe", "propose") or mission.id in self._runs:
+                continue
+            if mission.cancel_requested_at is not None:
+                with contextlib.suppress(Exception):
+                    self._settle_without_session(mission.id, "cancel")
+                continue
+            try:
+                self.start(mission.id)
+                self._start_failures.pop(mission.id, None)
+            except Exception as exc:
+                self._start_failed(mission.id, exc)
+        try:
+            self.poll_all()
+        except Exception:
+            log.exception("mission poll failed")
+            for mission_id in list(self._runs):
+                try:
+                    self.poll(mission_id)
+                except Exception:
+                    log.exception("mission %s poll failed", mission_id)
+
+    def _start_failed(self, mission_id: str, exc: Exception) -> None:
+        count = self._start_failures.get(mission_id, 0) + 1
+        self._start_failures[mission_id] = count
+        log.warning("mission %s did not start (%s), attempt %d", mission_id, type(exc).__name__, count)
+        self._note(mission_id, {"start_failed": type(exc).__name__, "attempt": count})
+        if count >= START_ATTEMPTS and mission_id not in self._runs:
+            self._start_failures.pop(mission_id, None)
+            self._settle_without_session(mission_id, "start_failed")
+
+    @_serialised
+    def shutdown(self) -> None:
+        """Daemon stop: revoke every token and kill every session. Missions are NOT moved on: they stay
+        `investigating`, and `recover()` at the next start restarts them within the retry budget. A session
+        that cannot be proven empty stays tracked (and its cgroup stays), never silently dropped."""
+        for run in list(self._runs.values()):
+            try:
+                self._begin_kill(run, "shutdown")
+                if run.cs is None or self.containment.is_empty(run.cs):
+                    self._revoke(run)
+                    if run.cs is not None:
+                        self.containment.cleanup(run.cs)
+                    self._runs.pop(run.mission_id, None)
+            except Exception:
+                log.exception("could not stop mission %s cleanly", run.mission_id)
 
     # ── restart recovery ────────────────────────────────────────────────────
     @_serialised
@@ -451,6 +551,70 @@ class Supervisor:
         kind = "local_uid" if row["kind"] == "local_uid" else "local_cgroup"
         return ContainedSession(row["id"], kind, row["cgroup_path"], row["session_uid"])
 
+    # ── WorkerBackend: what the worker socket's handlers call ───────────────
+    # Each method is scoped to the one run the (already authenticated) session belongs to, and re-checks
+    # that it is still THE live run: a revoked, replaced or finished session gets the uniform refusal.
+    def _live_run(self, session: SessionRow) -> _Run:
+        run = self._runs.get(session.mission_id)
+        live = self.ms.live_session(session.mission_id) if run is not None else None
+        if (run is None or run.phase != "running" or run.session_id != session.id
+                or live is None or live["id"] != session.id):
+            raise RpcError("Refused", "unauthorized")
+        return run
+
+    @_serialised
+    def get_context(self, session: SessionRow) -> dict:
+        run = self._live_run(session)
+        mission = self.ms.get_mission(run.mission_id)
+        return {"mission_id": mission.id, "title": mission.title, "goal": mission.goal,
+                "success_criteria": mission.success_criteria, "tier": mission.tier,
+                "scope": mission.grant().scope.model_dump(mode="json"), "brief": run.brief}
+
+    @_serialised
+    def post_event(self, session: SessionRow, kind: str, data: dict) -> dict:
+        run = self._live_run(session)
+        if kind not in RUNTIME_EVENT_KINDS:
+            raise RpcError("Invalid params", "bad_params")      # state/decision/artifact events belong to Core
+        try:
+            size = len(json.dumps(data, default=str))
+            self.ms.append_event(run.mission_id, kind, "worker", dict(data))
+        except (TypeError, ValueError):
+            raise RpcError("Invalid params", "bad_params") from None
+        if kind == "tool":
+            run.tool_calls += 1
+        run.output_bytes += size
+        return {"ok": True}
+
+    @_serialised
+    def heartbeat(self, session: SessionRow) -> dict:
+        run = self._live_run(session)
+        try:
+            leases.heartbeat(self.store, run.mission_id, self.lease_ttl_s)
+        except leases.LeaseLost:
+            raise RpcError("Refused", "unauthorized") from None
+        return {"ok": True}
+
+    @_serialised
+    def submit_result(self, session: SessionRow, result: AgentResult) -> dict:
+        run = self._live_run(session)
+        if run.submitted is not None:
+            raise RpcError("A result was already submitted", "conflict")
+        run.submitted = result          # the next poll validates, stores and ends the session
+        self._note(run.mission_id, {"result_submitted": True})
+        return {"accepted": True}
+
+    def memory_search(self, session: SessionRow, query: str, limit: int) -> dict:
+        with self._lock:
+            run = self._live_run(session)
+            mission = self.ms.get_mission(run.mission_id)
+        grant = mission.grant()
+        tags = [f"stack:{x}" for x in grant.scope.stacks] + [f"service:{x}" for x in grant.scope.services]
+        with self.store._connect() as conn:
+            found = retrieve(conn, tags, query, limit=min(limit, MAX_MEMORY_HITS))       # confirmed cards only
+        return {"cards": [{"id": c.id, "type": c.type, "status": c.status, "title": c.title, "text": render_card(c)}
+                          for c in found.cards],
+                "truncated": found.truncated}
+
     # ── external sessions (contract §11.1) ──────────────────────────────────
     def import_external_session(self, mission_id: str, record: dict[str, Any]) -> None:
         """Store an outside session's record as events and artifacts. Evidence only: this method has no
@@ -463,6 +627,19 @@ class Supervisor:
             artifacts.store_text(self.store, self.artifact_dir, mission_id, item.name, item.text, "import:external")
         self.ms.append_event(mission_id, "note", ACTOR, {"external_import": {
             "events": len(parsed.events), "artifacts": len(parsed.artifacts), "evidence_only": True}})
+
+
+def _candidate_card(mission_id: str, index: int, text: str, tags: list[str], now: datetime) -> Card:
+    digest = hashlib.sha256(f"{mission_id}\0{index}\0{text}".encode()).hexdigest()[:16]
+    title = (text.strip().splitlines() or [""])[0][:200] or "candidate"
+    scope = [t for t in tags if len(t) <= 160][:16]
+    try:
+        return Card(id=f"rt-{digest}", title=title, type="fact", scope=scope, statement=text,
+                    source="inferred", created_at=now, evidence=[f"mission:{mission_id}"])
+    except ValueError:
+        # An odd scope value must not cost the candidate its text; the operator widens scope when confirming.
+        return Card(id=f"rt-{digest}", title=title, type="fact", scope=[], statement=text,
+                    source="inferred", created_at=now, evidence=[f"mission:{mission_id}"])
 
 
 __all__ = ["ExternalRecord", "MissionsDisabled", "Supervisor", "UnsupportedTier", "default_memory_cards"]

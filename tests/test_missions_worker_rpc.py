@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-import s3b_stubs  # noqa: F401
+import missions_helpers  # noqa: F401  (sets CASA_CONFIG for the config import)
 from planet_express.integrations.rpc import RpcError, RpcServer, call
 from planet_express.missions.worker_rpc import (
     WORKER_METHODS,
@@ -80,7 +80,7 @@ def env():
     def start(sessions=None, cgroup=CG, backend=None, uid_group=None):
         sessions = sessions or Sessions()
         backend = backend or Backend()
-        auth = WorkerAuthenticator(sessions.resolve, read_cgroup=lambda pid: cgroup)
+        auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: cgroup)
         server = build_worker_server(directory / "worker.sock", backend, auth, group=uid_group,
                                      read_timeout=0.5)
         server.start()
@@ -112,7 +112,7 @@ def test_server_cannot_be_given_the_operator_handler_table(env):
     assert set(server.handlers) == set(WORKER_METHODS)
     with pytest.raises(ValueError):
         build_worker_server(sock.parent / "x.sock", Backend(),
-                            WorkerAuthenticator(Sessions().resolve),
+                            WorkerAuthenticator(None, resolve=Sessions().resolve),
                             group=None, handlers={"approval.decide": lambda p, s: {}})
 
 
@@ -162,7 +162,7 @@ def test_uid_kind_accepts_the_session_uid(env, monkeypatch):
 
 def test_uid_kind_positive_path_via_authenticator_directly():
     sessions = Sessions(Row(kind="local_uid", cgroup_path=None, session_uid=4242))
-    auth = WorkerAuthenticator(sessions.resolve, read_cgroup=lambda pid: None)
+    auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: None)
     from planet_express.integrations.rpc import PeerCred
     assert auth(PeerCred(pid=1, uid=4242, gid=1), {"session_token": TOKEN}) is sessions.row
     assert auth(PeerCred(pid=1, uid=4243, gid=1), {"session_token": TOKEN}) is None
@@ -171,7 +171,7 @@ def test_uid_kind_positive_path_via_authenticator_directly():
 
 def test_fake_kind_is_never_accepted_on_a_real_socket():
     sessions = Sessions(Row(kind="fake"))
-    auth = WorkerAuthenticator(sessions.resolve, read_cgroup=lambda pid: CG)
+    auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: CG)
     from planet_express.integrations.rpc import PeerCred
     assert auth(PeerCred(pid=1, uid=5, gid=5), {"session_token": TOKEN}) is None
 
@@ -210,7 +210,7 @@ def test_valid_calls_reach_the_backend_with_the_session(env):
     assert ask(sock, "mission.post_event", {"kind": "note", "data": {"a": 1}})["ok"]
     assert ask(sock, "mission.heartbeat")["ok"]
     assert ask(sock, "memory.search", {"query": "nfs", "limit": 3})["ok"]
-    r = ask(sock, "mission.submit_result", {"result": {"diagnosis": "d", "confidence": 0.5}})
+    r = ask(sock, "mission.submit_result", {"result": {"diagnosis": "d", "confidence": "medium"}})
     assert r["ok"] and r["result"] == {"accepted": True}
     assert backend.seen == [("event", "note", {"a": 1}), ("hb", "s1"), ("mem", "nfs", 3), ("result", "d")]
 

@@ -8,17 +8,16 @@ import sys
 import time
 from types import SimpleNamespace
 
+import missions_helpers
 import pytest
 
-import s3b_stubs  # noqa: F401
 from planet_express.missions.adapters.command import (
     AgentResultError,
     CommandRuntime,
     EchoRuntime,
-    StartContext,
 )
-from planet_express.missions.containment import ContainedSession
-from planet_express.missions.runtime import AgentResult
+from planet_express.missions.containment import ContainedSession, FakeContainment
+from planet_express.missions.runtime import AgentResult, RunContext
 
 TOKEN = "T0ken" + "x" * 38
 SECRET = "hunter2-planted-secret"
@@ -33,18 +32,18 @@ print("API_TOKEN=" + '__SECRET__')
 mode = sys.argv[1] if len(sys.argv) > 1 else "ok"
 if mode == "ok":
     json.dump({"diagnosis": "disk full", "evidence": ["df shows 100%"], "suggested_actions": ["prune"],
-               "confidence": 0.8}, open("result.json", "w"))
+               "confidence": "high"}, open("result.json", "w"))
 elif mode == "malformed":
     open("result.json", "w").write("{not json")
 elif mode == "extra":
-    json.dump({"diagnosis": "x", "confidence": 0.1, "run_command": "rm -rf /"}, open("result.json", "w"))
+    json.dump({"diagnosis": "x", "confidence": "low", "run_command": "rm -rf /"}, open("result.json", "w"))
 elif mode == "oversize":
-    json.dump({"diagnosis": "x" * 400000, "confidence": 0.1}, open("result.json", "w"))
+    json.dump({"diagnosis": "x" * 400000, "confidence": "low"}, open("result.json", "w"))
 elif mode == "symlink":
     os.symlink("/etc/passwd", "result.json")
 elif mode == "flood":
     sys.stdout.write("A" * 3000000); sys.stdout.flush()
-    json.dump({"diagnosis": "ok", "confidence": 0.5}, open("result.json", "w"))
+    json.dump({"diagnosis": "ok", "confidence": "medium"}, open("result.json", "w"))
 elif mode == "hang":
     import time; time.sleep(60)
 """.replace("__SECRET__", SECRET)
@@ -102,22 +101,40 @@ def parts(tmp_path):
     script = tmp_path / "echo_agent.py"
     script.write_text(ECHO)
     cont = ProcContainment()
+    cont.tmp = tmp_path
 
     def build(mode="ok", **kw):
-        opts = dict(argv=[sys.executable, str(script), mode], workspace_root=tmp_path / "ws",
+        opts = dict(argv=[sys.executable, str(script), mode],
                     worker_socket="/run/test/worker.sock", max_output_bytes=64 * 1024,
                     environ={"PATH": "/usr/bin:/bin", "ANTHROPIC_API_KEY": "sk-should-not-leak",
                              "KEEP_ME": "yes"})
         opts.update(kw)
-        (tmp_path / "ws").mkdir(exist_ok=True)
         return CommandRuntime(cont, **opts)
 
     return SimpleNamespace(build=build, cont=cont, tmp=tmp_path)
 
 
+def output_text(updates):
+    return "".join(str(e.body.get("output", "")) for u in updates for e in u.events)
+
+
 def start(rt, cont, mission_id="m1", brief="# Brief\nfix the thing\n"):
+    """Does what the Supervisor does around `start()`: a token pipe, a `spawn` closure over the containment."""
     cs = cont.create("s-" + mission_id)
-    handle = rt.start(SimpleNamespace(id=mission_id), StartContext(brief=brief, session=cs, token=TOKEN), None)
+    workspace = cont.tmp / "ws" / (mission_id if mission_id.isalnum() else "bad")
+    workspace.mkdir(parents=True, exist_ok=True)
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, TOKEN.encode())
+    os.close(write_fd)
+
+    def spawn(argv, env=None, cwd=None, extra_fds=()):
+        return cont.spawn(cs, list(argv), dict(env or {}), cwd or str(workspace), pass_fds=(read_fd, *extra_fds))
+
+    context = RunContext(brief=brief, session=cs, token_fd=read_fd, env={}, cwd=str(workspace), spawn=spawn)
+    try:
+        handle = rt.start(SimpleNamespace(id=mission_id), context, None)
+    finally:
+        os.close(read_fd)           # the Supervisor closes its copy once start() returns
     return cs, handle
 
 
@@ -139,7 +156,7 @@ def test_echo_child_result_is_parsed_and_validated(parts):
     run_to_exit(rt, h, parts.cont, cs)
     res = rt.collect(h)
     assert isinstance(res, AgentResult)
-    assert res.diagnosis == "disk full" and res.confidence == 0.8 and res.suggested_actions == ["prune"]
+    assert res.diagnosis == "disk full" and res.confidence == "high" and res.suggested_actions == ["prune"]
 
 
 def test_workspace_holds_the_brief_and_is_the_cwd(parts):
@@ -169,6 +186,7 @@ def test_token_is_on_an_inherited_fd_only(parts):
     assert TOKEN not in " ".join(argv) and TOKEN not in json.dumps(env)
     fd = int(env["PE_SESSION_TOKEN_FD"])
     assert pass_fds == (fd,)
+    assert fd != 0 and TOKEN not in env.values()
     with pytest.raises(OSError):
         os.fstat(fd)  # the parent closed its copy after spawn
     seen = json.loads((parts.tmp / "ws" / "m1" / "seen.json").read_text())
@@ -199,7 +217,7 @@ def test_output_is_redacted_and_bounded(parts):
     rt = parts.build("flood", max_output_bytes=20000)
     cs, h = start(rt, parts.cont)
     updates = run_to_exit(rt, h, parts.cont, cs)
-    text = "".join(u.text for u in updates)
+    text = output_text(updates)
     assert SECRET not in text
     assert "[REDACTED]" in text
     assert len(text.encode()) <= 20000 + 200          # cap plus the one truncation notice
@@ -210,7 +228,7 @@ def test_output_is_redacted_and_bounded(parts):
 def test_planted_secret_in_normal_output_is_redacted(parts):
     rt = parts.build()
     cs, h = start(rt, parts.cont)
-    text = "".join(u.text for u in run_to_exit(rt, h, parts.cont, cs))
+    text = output_text(run_to_exit(rt, h, parts.cont, cs))
     assert "brief has" in text and SECRET not in text
 
 
@@ -253,13 +271,14 @@ def test_runtime_reports_not_running_after_exit(parts):
     rt = parts.build()
     cs, h = start(rt, parts.cont)
     updates = run_to_exit(rt, h, parts.cont, cs)
-    assert updates[-1].running is False
+    assert updates[-1].state in ("finished", "failed")
 
 
 def test_echo_runtime_is_a_stub_compatible_adapter():
     rt = EchoRuntime()
-    h = rt.start(SimpleNamespace(id="m9"), StartContext(brief="hello", session=None, token="x"), None)
-    assert rt.status(h).running is False
+    ctx = RunContext(brief="hello", session=None, token_fd=-1, env={}, cwd="/nonexistent", spawn=None)
+    h = rt.start(SimpleNamespace(id="m9"), ctx, None)
+    assert rt.status(h).state == "finished"
     res = rt.collect(h)
     assert isinstance(res, AgentResult) and "hello" in res.diagnosis
     rt.cancel(h)
@@ -270,9 +289,55 @@ def test_redaction_expansion_cannot_exceed_the_output_ceiling(parts, tmp_path):
     script.write_text("import sys\nsys.stdout.write('TOKEN=x\\n' * 20000)\n")
     rt = parts.build(argv=[sys.executable, str(script)], max_output_bytes=10000)
     cs, h = start(rt, parts.cont)
-    text = "".join(u.text for u in run_to_exit(rt, h, parts.cont, cs))
+    text = output_text(run_to_exit(rt, h, parts.cont, cs))
     assert len(text.encode()) <= 10000 + len(TRUNC_NOTE) + 2
     assert "truncated" in text
 
 
 TRUNC_NOTE = "[output truncated]"
+
+
+def test_runtime_without_output_streaming_still_runs_and_reports_state(tmp_path):
+    """FakeContainment has no pipe until a test gives it one: the adapter degrades to no streaming."""
+    cont = FakeContainment()
+    cont.tmp = tmp_path
+    rt = CommandRuntime(cont, argv=["/bin/true"], worker_socket="/run/test/worker.sock")
+    cs, h = start(rt, cont)
+    upd = rt.status(h)
+    assert upd.state == "running" and upd.events == []
+    cont.crash(cs.session_id)
+    assert rt.status(h).state == "failed"          # empty and no result file: a crash, not a result
+    rt.cancel(h)
+
+
+def test_fake_containment_output_is_streamed_redacted_and_released(tmp_path):
+    cont = FakeContainment()
+    cont.tmp = tmp_path
+    rt = CommandRuntime(cont, argv=["/bin/true"], worker_socket="/run/test/worker.sock")
+    cs, h = start(rt, cont)
+    cont.write_output(cs.session_id, ("hello\nAPI_TOKEN=" + SECRET + "\n").encode())
+    text = output_text([rt.status(h)])
+    assert "hello" in text and SECRET not in text
+    rt.cancel(h)
+    assert cont.output_fd(cs) is None               # released
+
+
+def test_status_reports_finished_when_the_child_left_a_result(parts):
+    rt = parts.build()
+    cs, h = start(rt, parts.cont)
+    updates = run_to_exit(rt, h, parts.cont, cs)
+    assert updates[-1].state == "finished"
+
+
+def test_status_reports_failed_when_the_child_died_without_a_result(parts):
+    rt = parts.build("none")
+    cs, h = start(rt, parts.cont)
+    assert run_to_exit(rt, h, parts.cont, cs)[-1].state == "failed"
+
+
+def test_events_are_bounded_note_events_only(parts):
+    rt = parts.build("flood", max_output_bytes=40000)
+    cs, h = start(rt, parts.cont)
+    for u in run_to_exit(rt, h, parts.cont, cs):
+        assert len(u.events) <= 256 and all(e.kind == "note" for e in u.events)
+        assert all(len(str(e.body["output"])) <= 8192 for e in u.events)
