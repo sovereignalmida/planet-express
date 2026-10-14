@@ -507,7 +507,7 @@ def test_a_bad_argv_is_refused_by_the_helper(host, argv, why):
 
 def test_an_oversize_spec_and_oversize_fields_are_refused_by_the_helper(host):
     assert_refused(host, raw_spec(host), "spec too large", data=b"{" + b" " * 70000 + b"}")
-    assert_refused(host, raw_spec(host, env={f"V{i}": "x" * 4000 for i in range(60)}), "env")
+    assert_refused(host, raw_spec(host, env={f"V{i}": "x" * 4000 for i in range(9)}), "env")
     assert_refused(host, raw_spec(host, token="t" * 5000), "token")
     assert_refused(host, raw_spec(host, env={"LD_PRELOAD": "/x.so"}), "env")
 
@@ -599,7 +599,12 @@ def test_a_hostile_core_environment_never_reaches_the_session_either(host, monke
         monkeypatch.setenv(name, value)
     sid, got = host.launch(py(SLEEPER), env={"PATH": "/usr/bin:/bin", "ONLY_THIS": "yes"})
     try:
-        environ = Path(f"/proc/{got['pids'][0]}/environ").read_bytes().split(b"\0")
+        environ = []
+        for _ in range(50):  # the pid is listed before the exec lands; /proc/<pid>/environ is empty until then
+            environ = Path(f"/proc/{got['pids'][0]}/environ").read_bytes().split(b"\0")
+            if any(environ):
+                break
+            time.sleep(0.1)
         assert sorted(e for e in environ if e) == [b"ONLY_THIS=yes", b"PATH=/usr/bin:/bin"]
     finally:
         host.finish(sid)
