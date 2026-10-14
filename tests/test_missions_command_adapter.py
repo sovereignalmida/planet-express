@@ -52,24 +52,35 @@ elif mode == "hang":
 class ProcContainment:
     """Minimal SessionContainment double backed by one real subprocess (no cgroups)."""
 
+    uid_range = (61000, 61998)
+
     def __init__(self):
         self.procs = {}
         self.outs = {}
         self.spawned = []
 
-    def create(self, session_id):
-        return ContainedSession(session_id, "fake", None, None)
+    def cgroup_path(self, session_id):
+        return f"/fake/{session_id}"
 
-    def spawn(self, cs, argv, env, cwd, pass_fds=()):
+    def launch(self, session_id, spec):
+        """What the helper does for the child: the token on a pipe, nothing else inherited. (The real helper puts
+        it at fd 3; a test double cannot dup2 safely between fork and exec, so it passes the fd it has and says
+        which in the env the child reads.)"""
+        cs = ContainedSession(session_id, "local_cgroup", self.cgroup_path(session_id), spec.uid)
         r, w = os.pipe()
         os.set_blocking(r, False)
-        self.spawned.append((list(argv), dict(env), cwd, tuple(pass_fds)))
-        p = subprocess.Popen(argv, env=env, cwd=cwd, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
-                             stdout=w, stderr=subprocess.STDOUT, start_new_session=True)
+        token_r, token_w = os.pipe()
+        os.write(token_w, spec.token.encode())
+        os.close(token_w)
+        self.spawned.append((list(spec.argv), dict(spec.env), spec.cwd, spec.token))
+        env = {**spec.env, "PE_SESSION_TOKEN_FD": str(token_r)}
+        p = subprocess.Popen(list(spec.argv), env=env, cwd=spec.cwd, pass_fds=(token_r,),
+                             stdin=subprocess.DEVNULL, stdout=w, stderr=subprocess.STDOUT, start_new_session=True)
         os.close(w)
-        self.procs[cs.session_id] = p
-        self.outs[cs.session_id] = r
-        return p.pid
+        os.close(token_r)
+        self.procs[session_id] = p
+        self.outs[session_id] = r
+        return cs
 
     def pids(self, cs):
         p = self.procs[cs.session_id]
@@ -120,7 +131,8 @@ def output_text(updates):
 
 def start(rt, cont, mission_id="m1", brief="# Brief\nfix the thing\n"):
     """Does what the Supervisor does around `start()`: a token pipe, a `spawn` closure over the containment."""
-    cs = cont.create("s-" + mission_id)
+    sid = "s-" + mission_id
+    cs = ContainedSession(sid, "local_cgroup", cont.cgroup_path(sid), 61000)
     workspace = cont.tmp / "ws" / (mission_id if mission_id.isalnum() else "bad")
     workspace.mkdir(parents=True, exist_ok=True)
     read_fd, write_fd = os.pipe()
@@ -128,7 +140,12 @@ def start(rt, cont, mission_id="m1", brief="# Brief\nfix the thing\n"):
     os.close(write_fd)
 
     def spawn(argv, env=None, cwd=None, extra_fds=()):
-        return cont.spawn(cs, list(argv), dict(env or {}), cwd or str(workspace), pass_fds=(read_fd, *extra_fds))
+        from planet_express.missions.launcher.spec import LaunchSpec
+        spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), token=TOKEN,
+                          env={**(env or {}), "PE_SESSION_TOKEN_FD": "3"})        # the Supervisor's fixed fd map
+        cont.launch(sid, spec)
+        pids = cont.pids(cs)
+        return pids[0] if pids else 1
 
     context = RunContext(brief=brief, session=cs, token_fd=read_fd, env={}, cwd=str(workspace), spawn=spawn)
     try:
@@ -182,13 +199,10 @@ def test_token_is_on_an_inherited_fd_only(parts):
     rt = parts.build()
     cs, h = start(rt, parts.cont)
     run_to_exit(rt, h, parts.cont, cs)
-    argv, env, cwd, pass_fds = parts.cont.spawned[0]
+    argv, env, cwd, delivered = parts.cont.spawned[0]
     assert TOKEN not in " ".join(argv) and TOKEN not in json.dumps(env)
-    fd = int(env["PE_SESSION_TOKEN_FD"])
-    assert pass_fds == (fd,)
-    assert fd != 0 and TOKEN not in env.values()
-    with pytest.raises(OSError):
-        os.fstat(fd)  # the parent closed its copy after spawn
+    assert env["PE_SESSION_TOKEN_FD"] == "3" and TOKEN not in env.values()     # the launcher's fixed fd map
+    assert delivered == TOKEN                                                  # handed over in the spec, not the env
     seen = json.loads((parts.tmp / "ws" / "m1" / "seen.json").read_text())
     assert seen["tok"] == TOKEN  # the child, and only the child, got it
     assert TOKEN not in json.dumps(seen["env"]) and TOKEN not in json.dumps(seen["argv"])

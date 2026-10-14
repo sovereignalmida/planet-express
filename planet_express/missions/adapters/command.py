@@ -2,11 +2,12 @@
 
 Nothing here knows which agent CLI is behind the argv. The contract with the child is:
 
-  * cwd is the per-mission workspace the Supervisor made (`RunContext.cwd`), owned by the worker; the
-    brief is `BRIEF.md` in it (read-only);
+  * cwd is the per-session workspace the Supervisor made (`RunContext.cwd`). The launcher hands it to the
+    session's uid when it starts the session (this adapter never chowns anything); the brief is `BRIEF.md` in it
+    (read-only);
   * env is minimal: `PE_WORKER_SOCKET`, `PE_SESSION_TOKEN_FD`, a safe PATH/LANG/HOME and the few
-    names the operator allowed. The session token is on an inherited fd (`RunContext.token_fd`, never
-    argv/env); the Supervisor made the pipe and closes its copy once `start()` returns;
+    names the operator allowed. The session token is on fd 3, put there by the launcher (never argv/env); the
+    Supervisor sets `PE_SESSION_TOKEN_FD=3` itself;
   * stdout/stderr come back as bounded, redacted `note` events in `AgentUpdate`s (the child is always
     drained, so a chatty child can never block on a full pipe). A containment without `output_fd`
     simply streams nothing;
@@ -65,7 +66,7 @@ class _Run:
 class CommandRuntime:
     def __init__(self, containment, *, argv, worker_socket, env_allow=(),
                  max_output_bytes=4 * 1024 * 1024, max_result_bytes=MAX_RESULT_BYTES,
-                 environ=None, worker_uid=None, worker_gid=None):
+                 environ=None):
         # Same validation as the config model, so a hand-built runtime cannot be looser than a configured one.
         checked = MissionRuntimeConfig(argv=list(argv), env_allow=list(env_allow))
         if not checked.argv:
@@ -77,8 +78,6 @@ class CommandRuntime:
         self.max_output_bytes = max_output_bytes
         self.max_result_bytes = max_result_bytes
         self.environ = os.environ if environ is None else environ
-        self.worker_uid = worker_uid
-        self.worker_gid = worker_gid
         self._runs: dict[str, _Run] = {}
 
     # --- AgentRuntime ----------------------------------------------------------------------
@@ -139,7 +138,6 @@ class CommandRuntime:
         info = workspace.lstat()   # made by the Supervisor; the adapter never creates or follows it
         if not stat.S_ISDIR(info.st_mode):
             raise ValueError("workspace path is not a directory")
-        self._chown(workspace)
         for name in ("BRIEF.md", "result.json"):
             try:
                 (workspace / name).unlink()  # unlink never follows a link; clears a previous attempt
@@ -150,13 +148,7 @@ class CommandRuntime:
             os.write(fd, brief.encode())
         finally:
             os.close(fd)
-        self._chown(workspace / "BRIEF.md")
         return workspace
-
-    def _chown(self, path):
-        if self.worker_uid is not None:       # needs root or CAP_CHOWN, which the launcher check already demands
-            os.chown(path, self.worker_uid, self.worker_gid if self.worker_gid is not None else -1,
-                     follow_symlinks=False)
 
     def _env(self, workspace, token_fd):
         env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": str(workspace)}

@@ -87,7 +87,7 @@ def test_supervisor_brief_and_events_never_contain_the_token(tmp_path):
     assert hashlib.sha256(rt.token.encode()).hexdigest() == rig.sessions()[0]["token_hash"]
     spawn = rig.cont.spawns(rig.session_ids()[0])[0]          # before the session is cleaned up
     assert rt.token not in " ".join(spawn["argv"]) + str(spawn["env"])
-    assert spawn["pass_fds"] == (rt.context.token_fd,)
+    assert spawn["token"] == rt.token and spawn["env"]["PE_SESSION_TOKEN_FD"] == "3"    # delivered on fd 3 by the launcher
     for _ in range(3):
         rig.sup.poll(rig.mid)
     assert rt.token not in rig.dump()

@@ -27,7 +27,9 @@ def card(card_id, **kw):
 
 def session_of(rig, index=0):
     rt = rig.runtimes[index]
-    return resolve_session(rig.store, MissionStore.hash_token(rt.token), peer_cgroup=rt.context.session.cgroup_path)
+    cs = rt.context.session
+    return resolve_session(rig.store, MissionStore.hash_token(rt.token), peer_cgroup=cs.cgroup_path,
+                           peer_uid=cs.session_uid)
 
 
 def started(tmp_path, **kw):
@@ -218,9 +220,9 @@ def test_tick_does_nothing_when_disabled(tmp_path):
 def test_a_mission_that_cannot_start_repeatedly_is_handed_to_the_operator(tmp_path):
     rig = Rig(tmp_path)
 
-    def broken(session_id):
+    def broken(*args, **kwargs):
         raise OSError("no privilege")
-    rig.cont.create = broken
+    rig.sup.ms.start_session = broken
     for _ in range(5):
         rig.sup.tick()
     assert rig.status() == "needs_operator"
@@ -315,7 +317,7 @@ def test_a_slow_kill_on_one_mission_does_not_block_another_missions_worker_calls
 
 def test_a_failed_relaunch_never_falls_through_to_a_transition_while_a_session_may_run(tmp_path):
     from planet_express.missions.containment import ContainmentError
-    rig = Rig(tmp_path, budgets={"retries": 2}, behaviours=[{"script": [update()]}, {"fail_start": OSError("boom")}])
+    rig = Rig(tmp_path, budgets={"retries": 2}, behaviours=[{"script": [update()]}, {"fail_after_spawn": OSError("boom")}])
     rig.sup.start(rig.mid)
     first = rig.runtimes[0].context.session.session_id
     real_kill = rig.cont.kill
@@ -331,7 +333,8 @@ def test_a_failed_relaunch_never_falls_through_to_a_transition_while_a_session_m
     assert rig.status() == "investigating", "no transition while the new session is not provably empty"
     assert rig.mid in rig.sup._runs and rig.sup._runs[rig.mid].phase == "killing"
     assert not any("needs_operator" in s for s in rig.state_path())
-    second = rig.session_ids()[-1]
+    second = rig.sup._runs[rig.mid].session_id                # the ACTIVE run's session, not an ordering guess
+    assert second != first
     rig.cont.leak_child(second)                               # the new session really has a live member
     with pytest.raises(ContainmentError):
         rig.sup.poll(rig.mid)                                 # retried, still not empty

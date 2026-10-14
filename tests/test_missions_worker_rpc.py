@@ -30,7 +30,7 @@ class Row:
     token_hash: str = hashlib.sha256(TOKEN.encode()).hexdigest()
     kind: str = "local_cgroup"
     cgroup_path: str | None = CG
-    session_uid: int | None = None
+    session_uid: int | None = os.getuid()      # sessions are bound to a unique uid too (cgroup AND uid AND token)
     revoked_at: int | None = None
     expires_at: int = 10**12
 
@@ -77,10 +77,12 @@ def env():
     directory = Path(tempfile.mkdtemp(prefix="pw", dir="/tmp"))
     started = []
 
-    def start(sessions=None, cgroup=CG, backend=None, uid_group=None):
+    def start(sessions=None, cgroup=CG, backend=None, uid_group=None, core_uid=os.getuid() + 1):
         sessions = sessions or Sessions()
         backend = backend or Backend()
-        auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: cgroup)
+        # The test process is the "worker" here, so Core must be some other uid for the identity to be acceptable.
+        auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: cgroup,
+                                   core_uid=core_uid)
         server = build_worker_server(directory / "worker.sock", backend, auth, group=uid_group,
                                      read_timeout=0.5)
         server.start()
@@ -148,9 +150,29 @@ def test_revoked_session_is_refused(env):
 
 
 def test_uid_kind_requires_matching_uid_and_refuses_root_and_core_uid(env):
-    sock, *_ = env(sessions=Sessions(Row(kind="local_uid", cgroup_path=None, session_uid=os.getuid())))
+    sock, *_ = env(sessions=Sessions(Row(kind="local_uid", cgroup_path=None, session_uid=os.getuid())),
+                   core_uid=os.getuid())
     # session uid equals the Core uid: that is not a worker identity, refuse
     assert refused(ask(sock))
+
+
+def test_a_cgroup_session_needs_its_uid_as_well_as_its_cgroup_and_token(env):
+    from planet_express.integrations.rpc import PeerCred
+    for row, uid, ok in ((Row(), os.getuid(), True), (Row(), os.getuid() + 5, False),
+                         (Row(session_uid=None), os.getuid(), False),      # a cgroup session with no uid: refused
+                         (Row(session_uid=0), 0, False),
+                         (Row(session_uid=True), 1, False)):
+        sessions = Sessions(row)
+        auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: CG, core_uid=os.getuid() + 1)
+        got = auth(PeerCred(pid=1, uid=uid, gid=1), {"session_token": TOKEN})
+        assert (got is row) is ok, (row, uid)
+
+
+def test_the_core_uid_is_never_a_session_even_with_the_right_cgroup_and_token():
+    from planet_express.integrations.rpc import PeerCred
+    sessions = Sessions(Row(session_uid=1000))
+    auth = WorkerAuthenticator(None, resolve=sessions.resolve, read_cgroup=lambda pid: CG, core_uid=1000)
+    assert auth(PeerCred(pid=1, uid=1000, gid=1000), {"session_token": TOKEN}) is None
 
 
 def test_uid_kind_accepts_the_session_uid(env, monkeypatch):

@@ -22,7 +22,8 @@ def test_defaults_are_off_and_safe():
     assert c.enabled is False
     assert c.worker_user == "pe-worker"
     assert c.worker_socket == "/run/planetexpress/worker.sock"
-    assert c.cgroup_root == "/sys/fs/cgroup/planetexpress-missions"
+    assert c.cgroup_root == "/sys/fs/cgroup/system.slice/casa-planetexpress.service/sessions"
+    assert c.workspace_root is None
     assert c.runtime.argv == [] and c.runtime.env_allow == []
     assert c.budgets.wall_seconds > 0 and c.budgets.tool_calls > 0
     assert c.budgets.output_bytes > 0 and c.budgets.retries >= 0

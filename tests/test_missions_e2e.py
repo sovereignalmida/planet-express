@@ -1,6 +1,7 @@
 """S3c end to end: a mission created through the S4 service runs on the poll thread (FakeContainment plus a
 fake or echo runtime), and the worker socket authenticates against the real session store."""
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -170,9 +171,11 @@ def test_worker_socket_serves_only_the_live_session_of_the_right_cgroup(tmp_path
     sup.tick()
     rt = runtimes[0]
     cgroup = rt.context.session.cgroup_path
-    server = build_worker_server(sockdir / "worker.sock", sup,
-                                 WorkerAuthenticator(store, read_cgroup=lambda pid: cgroup),
-                                 group=None, read_timeout=0.5)
+    # The test process stands in for the session: its uid must differ from "Core"'s, and the row's uid is its own.
+    with store._write() as conn:
+        conn.execute("UPDATE mission_sessions SET session_uid=?", (os.getuid(),))
+    auth = WorkerAuthenticator(store, read_cgroup=lambda pid: cgroup, core_uid=os.getuid() + 1)
+    server = build_worker_server(sockdir / "worker.sock", sup, auth, group=None, read_timeout=0.5)
     server.start()
     try:
         assert set(server.handlers) == set(WORKER_METHODS)
@@ -182,9 +185,10 @@ def test_worker_socket_serves_only_the_live_session_of_the_right_cgroup(tmp_path
                     session_token=rt.token)["ok"]
         bad = call(sockdir / "worker.sock", "mission.get_context", {}, session_token="0" * 64)
         assert bad["ok"] is False and bad["error"]["code"] == "unauthorized"
-        elsewhere = build_worker_server(sockdir / "w2.sock", sup,
-                                        WorkerAuthenticator(store, read_cgroup=lambda pid: "/fake-cgroup/other"),
-                                        group=None, read_timeout=0.5)
+        elsewhere = build_worker_server(
+            sockdir / "w2.sock", sup,
+            WorkerAuthenticator(store, read_cgroup=lambda pid: "/fake-cgroup/other", core_uid=os.getuid() + 1),
+            group=None, read_timeout=0.5)
         elsewhere.start()
         try:
             other = call(sockdir / "w2.sock", "mission.get_context", {}, session_token=rt.token)
@@ -219,14 +223,6 @@ def cfg(**over):
     return MissionsConfig.model_validate(body)
 
 
-def account(uid=900, gid=900):
-    return lambda name: SimpleNamespace(pw_uid=uid, pw_gid=gid, pw_name=name)
-
-
-def group(gid):
-    return SimpleNamespace(gr_name="pe-worker", gr_gid=gid)
-
-
 def test_disabled_builds_nothing(tmp_path):
     store, _ = make_store(tmp_path)
     assert build_mission_runner(store, MissionsConfig()) is None
@@ -234,47 +230,67 @@ def test_disabled_builds_nothing(tmp_path):
 
 def test_enabled_without_an_agent_command_builds_nothing(tmp_path):
     store, _ = make_store(tmp_path)
-    assert build_mission_runner(store, MissionsConfig(enabled=True), getpwnam=account()) is None
+    assert build_mission_runner(store, MissionsConfig(enabled=True)) is None
 
 
-def test_enabled_assembles_supervisor_runtime_and_a_worker_only_socket(tmp_path):
+def test_enabled_assembles_supervisor_runtime_and_no_global_worker_socket(tmp_path):
     store, _ = make_store(tmp_path)
-    runner = build_mission_runner(store, cfg(worker_socket=str(tmp_path / "w.sock")), getpwnam=account(),
-                                  getgrgid=group, containment=FakeContainment())
+    runner = build_mission_runner(store, cfg(worker_socket=str(tmp_path / "w.sock")), containment=FakeContainment())
     assert runner is not None and runner.supervisor.enabled
-    assert set(runner.worker_server.handlers) == set(WORKER_METHODS)
+    assert runner.worker_server is None                  # sessions get their own socket in their own directory
     runtime = runner.supervisor.runtime_factory(None)
     assert runtime.argv == ["/usr/bin/agent", "--json"] and runtime.worker_socket == str(tmp_path / "w.sock")
-    assert (runtime.worker_uid, runtime.worker_gid) == (900, 900)
+    assert not hasattr(runtime, "worker_uid")            # there is no shared worker account any more
 
 
-def test_a_root_worker_account_is_refused(tmp_path):
+def test_an_injected_containment_is_trusted_and_gets_no_gate_unless_one_is_passed(tmp_path):
     store, _ = make_store(tmp_path)
-    with pytest.raises(ValueError):
-        build_mission_runner(store, cfg(), getpwnam=account(0, 0), containment=FakeContainment())
+    runner = build_mission_runner(store, cfg(), containment=FakeContainment())
+    assert runner.supervisor.preflight_fn is None and runner.supervisor.socket_provider is None
+    gate = lambda: None                                   # noqa: E731 -- stands in for the preflight
+    assert build_mission_runner(store, cfg(), containment=FakeContainment(),
+                                preflight=gate).supervisor.preflight_fn is gate
 
 
-def test_start_mission_runner_never_raises(tmp_path):
+def test_the_real_assembly_is_gated_by_the_preflight_and_serves_per_session_sockets(tmp_path, monkeypatch):
+    from planet_express.missions import runner as runner_module
+    store, _ = make_store(tmp_path)
+    monkeypatch.setattr(runner_module, "build_containment", lambda config: FakeContainment())
+    runner = build_mission_runner(store, cfg(sock_root=str(tmp_path / "socks")))
+    sup = runner.supervisor
+    assert callable(sup.preflight_fn) and isinstance(sup.socket_provider, runner_module.SessionSockets)
+    assert sup.socket_provider.path("S-1") == str(tmp_path / "socks" / "S-1" / "worker.sock")
+    assert runner.worker_server is None
+
+
+def test_a_containment_that_cannot_be_built_stops_mission_control_without_raising(tmp_path, monkeypatch):
+    from planet_express.missions import runner as runner_module
     store, _ = make_store(tmp_path)
 
-    def nobody(name):
-        raise KeyError(name)
-    assert start_mission_runner(store, cfg(), getpwnam=nobody) is None
+    def boom(config):
+        raise RuntimeError("no launcher")
+    monkeypatch.setattr(runner_module, "build_containment", boom)
+    assert start_mission_runner(store, cfg()) is None
     assert start_mission_runner(store, MissionsConfig()) is None
 
 
-def test_the_core_user_cannot_be_the_worker(tmp_path):
-    import os
-    store, _ = make_store(tmp_path)
-    with pytest.raises(ValueError):
-        build_mission_runner(store, cfg(), getpwnam=account(os.geteuid(), 900), containment=FakeContainment())
+def test_the_strategy_is_chosen_by_who_core_is_and_an_explicit_choice_is_never_downgraded():
+    from planet_express.missions.runner import choose_strategy
+    assert choose_strategy("auto", 0) == "direct" and choose_strategy("auto", 1000) == "sudo"
+    assert choose_strategy("sudo", 0) == "sudo" and choose_strategy("direct", 1000) == "direct"
+
+
+def test_an_explicit_direct_launcher_for_a_non_root_core_is_refused_not_downgraded():
+    from planet_express.missions.containment import ContainmentError
+    from planet_express.missions.runner import build_containment
+    with pytest.raises(ContainmentError):
+        build_containment(cfg(launcher="direct"), euid=1000)
 
 
 def test_the_supervisor_reads_the_live_enabled_switch(tmp_path):
     store, _ = make_store(tmp_path)
     flag = {"on": True}
-    runner = build_mission_runner(store, cfg(), getpwnam=account(), getgrgid=group, containment=FakeContainment(),
-                                  enabled=lambda: flag["on"])
+    runner = build_mission_runner(store, cfg(), containment=FakeContainment(), enabled=lambda: flag["on"])
     assert runner.supervisor.enabled
     flag["on"] = False
     assert not runner.supervisor.enabled

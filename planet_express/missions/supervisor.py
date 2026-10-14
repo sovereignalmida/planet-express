@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -39,8 +40,9 @@ from planet_express.memory.retrieval import render_card, retrieve
 
 from . import artifacts, leases
 from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
-from .containment import ContainedSession, SessionContainment
+from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
+from .launcher.spec import LaunchSpec
 from .models import Mission
 from .runtime import (
     RUNTIME_EVENT_KINDS,
@@ -58,6 +60,7 @@ log = logging.getLogger(__name__)
 ACTOR = "supervisor"
 SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
+PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often (an operator may have repaired the host)
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
 MAX_MEMORY_HITS = 20
 
@@ -68,6 +71,10 @@ class MissionsDisabled(RuntimeError):
 
 class UnsupportedTier(RuntimeError):
     """Only Observe/Propose missions run under this supervisor."""
+
+
+class ProposalOnly(RuntimeError):
+    """The launcher preflight failed on this host: no session may start (there is no weaker containment)."""
 
 
 class _Strict(BaseModel):
@@ -104,6 +111,8 @@ class _Run:
     reason: str | None = None
     result: AgentResult | None = None
     waiting_logged: bool = False
+    workspace: Path | None = None             # this session's own directory, removed at reap
+    stop_socket: Callable[[], None] | None = None
     brief: str = ""
     submitted: AgentResult | None = None      # a result the worker handed in over the socket
 
@@ -149,6 +158,18 @@ def _per_session(fn):
     return wrapper
 
 
+class SocketProvider:
+    """Per-session worker sockets (contract 22.8.1). `path(session_id)` is where the session's socket will be, in a
+    directory named for the session under the socket root; `start(cs)` creates that directory, binds the socket and
+    returns a stop callable, all BEFORE the launch (the launcher then chowns them to the session)."""
+
+    def path(self, session_id: str) -> str:
+        raise NotImplementedError
+
+    def start(self, cs: ContainedSession) -> Callable[[], None]:
+        raise NotImplementedError
+
+
 class Supervisor:
     def __init__(self, store: Store, containment: SessionContainment,
                  runtime_factory: Callable[[Mission], AgentRuntime],
@@ -157,8 +178,13 @@ class Supervisor:
                  memory_provider: Callable[[Mission], Sequence[Card]] | None = None,
                  evidence_provider: Callable[[Mission], Sequence[EvidenceItem]] | None = None,
                  worker_env: dict[str, str] | None = None, max_brief_bytes: int = DEFAULT_MAX_BYTES,
-                 lease_ttl_s: int = LEASE_TTL_S):
+                 lease_ttl_s: int = LEASE_TTL_S, socket_provider: "SocketProvider | None" = None,
+                 preflight: Callable[[], Any] | None = None):
         self.store = store
+        self.socket_provider = socket_provider
+        self.preflight_fn = preflight                 # returns a PreflightReport; None means "trusted" (tests)
+        self.preflight_report: Any = None
+        self._preflight_at = 0.0
         self.ms = MissionStore(store)
         self.containment = containment
         self.runtime_factory = runtime_factory
@@ -190,6 +216,26 @@ class Supervisor:
         if not self.enabled:
             raise MissionsDisabled("missions are disabled (missions.enabled is false)")
 
+    def launcher_ready(self) -> bool:
+        """The launcher preflight gate (contract 22.4). True when no preflight is configured, or the last one passed.
+        While it fails the host is proposal-only: it is re-run at most every PREFLIGHT_RETRY_S."""
+        if self.preflight_fn is None:
+            return True
+        now = float(self.clock())
+        report = self.preflight_report
+        if report is None or (not report.ok and now - self._preflight_at >= PREFLIGHT_RETRY_S):
+            try:
+                report = self.preflight_fn()
+            except Exception as exc:       # a preflight that cannot run is a failed preflight
+                from .launcher.preflight import failed_report
+                report = failed_report("unknown", "preflight could not run", type(exc).__name__)
+            self.preflight_report, self._preflight_at = report, now
+            if report.ok:
+                log.info("%s", report.render())
+            else:
+                log.warning("Mission sessions are disabled on this host (proposal-only):\n%s", report.render())
+        return bool(report.ok)
+
     def _note(self, mission_id: str, body: dict[str, Any], kind: str = "note") -> None:
         self.ms.append_event(mission_id, kind, ACTOR, body)
 
@@ -202,6 +248,8 @@ class Supervisor:
     @_per_mission
     def start(self, mission_id: str) -> None:
         self._require_enabled()
+        if not self.launcher_ready():
+            raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         mission = self.ms.get_mission(mission_id)
         if mission.tier not in ("observe", "propose"):
             raise UnsupportedTier(f"{mission.tier} missions are not run by this supervisor")
@@ -214,27 +262,29 @@ class Supervisor:
         self._launch(mission)
 
     def _launch(self, mission: Mission) -> None:
+        if not self.launcher_ready():          # also on a restart after a crash: proposal-only means no session at all
+            raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         grant = mission.grant()
-        cs = self.containment.create(f"S-{secrets.token_hex(8)}")
-        try:
-            _, token = issue_session(self.ms, mission.id, cs, session_ttl_s=grant.budgets.wall_s + SESSION_TTL_PAD_S,
-                                     lease_ttl_s=self.lease_ttl_s, actor=ACTOR,
-                                     expected_grant_hash=mission.grant_hash)
-        except BaseException:
-            self.containment.cleanup(cs)           # nothing was spawned in it, so it is empty
-            raise
+        session_id = f"S-{secrets.token_hex(8)}"
+        # `start_session` is the sole uid allocator: it commits the row (state `launching`, uid held) before any
+        # launcher runs, so nothing is left behind if it refuses.
+        cs, token = issue_session(
+            self.ms, mission.id, session_id, self.containment.cgroup_path(session_id),
+            session_ttl_s=grant.budgets.wall_s + SESSION_TTL_PAD_S, lease_ttl_s=self.lease_ttl_s,
+            uid_range=self.containment.uid_range, actor=ACTOR, expected_grant_hash=mission.grant_hash)
         run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
         self._runs[mission.id] = run
         if self.ms.get_mission(mission.id).cancel_requested_at is not None:
-            return self._kill_and_advance(run, "cancel")     # a cancel raced the launch: nothing is spawned
-        # The token goes to the child on an inherited fd; it never touches argv, env, events or disk.
+            return self._kill_and_advance(run, "cancel")     # a cancel raced the launch: nothing is launched
+        # The launcher hands the token to the child on fd 3 (the helper's token pipe); it never touches argv, env,
+        # events or disk. `read_fd` is Core's own copy for in-process runtimes (tests), never inherited.
         read_fd = write_fd = None
         try:
             read_fd, write_fd = os.pipe()
             os.write(write_fd, token.encode())
             os.close(write_fd)
             write_fd = None
-            self._start_runtime(mission, run, read_fd)
+            self._start_runtime(mission, run, read_fd, token)
         except Exception as exc:
             self._note(mission.id, {"start_failed": type(exc).__name__})
             self._kill_and_advance(run, "start_failed")
@@ -243,7 +293,7 @@ class Supervisor:
                 if fd is not None:
                     os.close(fd)
 
-    def _start_runtime(self, mission: Mission, run: _Run, token_fd: int) -> None:
+    def _start_runtime(self, mission: Mission, run: _Run, token_fd: int, token: str) -> None:
         assert run.cs is not None
         cs = run.cs
         grant = mission.grant()
@@ -251,15 +301,33 @@ class Supervisor:
                             self._constraints(mission), max_bytes=self.max_brief_bytes)
         artifacts.store_text(self.store, self.artifact_dir, mission.id, "brief.md", brief.text, ACTOR)
         run.brief = brief.text
-        workspace = self.workspace_dir / mission.id
+        # One workspace per session: a finished session's directory belongs to its (released) uid, so a retry
+        # never reuses it. The launcher hands this directory to the session uid and keeps Core's group on it.
+        workspace = self.workspace_dir / cs.session_id
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
+        run.workspace = workspace
 
         def spawn(argv: Sequence[str], env: dict[str, str] | None = None, cwd: str | None = None,
                   extra_fds: tuple[int, ...] = ()) -> int:
+            if extra_fds:
+                raise ContainmentError("the launcher's fd map is fixed (0, 1, 2, 3): no extra fds")
             full_env = {**self.worker_env, **(env or {}), "PE_MISSION_ID": mission.id,
-                        "PE_SESSION_TOKEN_FD": str(token_fd)}
-            return self.containment.spawn(cs, list(argv), full_env, cwd or str(workspace),
-                                          pass_fds=(token_fd, *extra_fds))
+                        "PE_SESSION_TOKEN_FD": "3"}          # fd 3 is always the token pipe in the child
+            if self.socket_provider is not None:
+                full_env["PE_WORKER_SOCKET"] = self.socket_provider.path(cs.session_id)
+                # Bound BEFORE the launch (so the agent's first connect cannot find nothing); the launcher then hands
+                # the directory and sockets to the session. Registered first so a failed launch stops it again.
+                run.stop_socket = self.socket_provider.start(cs)
+            spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), env=full_env,
+                              token=token, sock_dir=self.socket_provider is not None)
+            launched = self.containment.launch(cs.session_id, spec)
+            if launched != cs:
+                raise ContainmentError("the launcher started a different session than the one requested")
+            pids = self.containment.pids(cs)
+            leader = pids[0] if pids else None
+            if not self.ms.mark_session_live(cs.session_id, leader):
+                raise ContainmentError("the session was revoked while it launched")
+            return leader or 0
 
         context = RunContext(brief=brief.text, session=cs, token_fd=token_fd, env=dict(self.worker_env),
                              cwd=str(workspace), spawn=spawn)
@@ -267,7 +335,7 @@ class Supervisor:
         run.runtime = runtime
         run.handle = runtime.start(mission, context, grant)
         pid = getattr(run.handle, "pid", None)
-        if isinstance(pid, int):
+        if isinstance(pid, int) and pid:
             set_leader_pid(self.store, cs.session_id, pid)
 
     @staticmethod
@@ -440,7 +508,56 @@ class Supervisor:
         if run.cs is not None:
             self.containment.cleanup(run.cs)
         self._runs.pop(run.mission_id, None)
+        self._reap_session(run)
         self._settle(run)
+
+    def _reap_session(self, run: _Run) -> None:
+        """The session is provably dead and its cgroup is gone: stop its socket, remove its workspace and release its
+        uid. A uid is released only when no process runs as it; otherwise it stays held and `sweep_uids` retries."""
+        if run.stop_socket is not None:
+            with contextlib.suppress(Exception):
+                run.stop_socket()
+            run.stop_socket = None
+        if run.workspace is not None:
+            shutil.rmtree(run.workspace, ignore_errors=True)
+        self._release_uid(run.cs)
+
+    def _release_uid(self, cs: ContainedSession | None) -> None:
+        if cs is None or cs.session_uid is None:
+            return
+        try:
+            if self.containment.uid_in_use(cs.session_uid):
+                self._note_held(cs)
+                return
+        except Exception:
+            log.exception("could not check uid %s", cs.session_uid)
+            return
+        self.ms.release_session_uid(cs.session_id)
+
+    def _note_held(self, cs: ContainedSession) -> None:
+        log.warning("uid %s of session %s still has processes: it stays held", cs.session_uid, cs.session_id)
+
+    def sweep_uids(self) -> int:
+        """Retry releasing the uid of every revoked session (a crash between kill and release, or a straggler that
+        was still running). Kills what is left in the session's cgroup first. Returns how many uids were freed."""
+        freed = 0
+        active = {r.session_id for r in self._runs.values()}
+        for row in self.ms.unreleased_revoked_sessions():
+            if row["id"] in active:
+                continue
+            cs = ContainedSession(row["id"], "local_cgroup", row["cgroup_path"], row["session_uid"])
+            try:
+                if not self.containment.is_empty(cs):
+                    self.containment.kill(cs)
+                if not self.containment.is_empty(cs):
+                    continue
+                self.containment.cleanup(cs)
+                if self.containment.uid_in_use(cs.session_uid):
+                    continue
+                freed += int(self.ms.release_session_uid(cs.session_id))
+            except Exception as exc:
+                log.warning("could not reap session %s: %s", row["id"], type(exc).__name__)
+        return freed
 
     def _settle(self, run: _Run) -> None:
         reason = run.reason or "crash"
@@ -495,6 +612,7 @@ class Supervisor:
         running session. One misbehaving mission never stops the others."""
         if not self.enabled:
             return
+        ready = self.launcher_ready()            # proposal-only: queued missions wait, nothing is started or retried
         for mission in self.ms.list_missions("queued"):
             if mission.tier not in ("observe", "propose") or mission.id in self._runs:
                 continue
@@ -502,11 +620,15 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self._settle_without_session(mission.id, "cancel")
                 continue
+            if not ready:
+                continue
             try:
                 self.start(mission.id)
                 self._start_failures.pop(mission.id, None)
             except Exception as exc:
                 self._start_failed(mission.id, exc)
+        with contextlib.suppress(Exception):
+            self.sweep_uids()
         try:
             self.poll_all()
         except Exception:
@@ -539,6 +661,7 @@ class Supervisor:
                         if run.cs is not None:
                             self.containment.cleanup(run.cs)
                         self._runs.pop(run.mission_id, None)
+                        self._reap_session(run)
             except Exception:
                 log.exception("could not stop mission %s cleanly", run.mission_id)
 
@@ -564,6 +687,8 @@ class Supervisor:
                 # retrying, and the mission is not moved on until containment says the session is empty.
                 log.warning("recovering mission %s failed: %s", mission.id, type(exc).__name__)
                 self._note(mission.id, {"recover_failed": type(exc).__name__})
+        with contextlib.suppress(Exception):
+            self.sweep_uids()                 # a crash between launch and release leaves held uids behind
         return acted
 
     def _adopt(self, mission: Mission, reason: str, *, only_if_live: bool = False) -> bool:
@@ -577,6 +702,7 @@ class Supervisor:
             self.containment.cleanup(cs)          # nothing to supervise; just don't leak the empty cgroup
             return False
         run = _Run(mission.id, cs, None, None, cs.session_id if cs else None, float(self.clock()))
+        run.workspace = self.workspace_dir / cs.session_id if cs else None
         self._runs[mission.id] = run
         self._kill_and_advance(run, reason)
         return True
@@ -587,8 +713,7 @@ class Supervisor:
                                "ORDER BY issued_at DESC, rowid DESC LIMIT 1", (mission_id,)).fetchone()
         if row is None:
             return None
-        kind = "local_uid" if row["kind"] == "local_uid" else "local_cgroup"
-        return ContainedSession(row["id"], kind, row["cgroup_path"], row["session_uid"])
+        return ContainedSession(row["id"], "local_cgroup", row["cgroup_path"], row["session_uid"])
 
     # ── WorkerBackend: what the worker socket's handlers call ───────────────
     # Each method is scoped to the one run the (already authenticated) session belongs to, and re-checks
@@ -684,4 +809,4 @@ def _candidate_card(mission_id: str, index: int, text: str, tags: list[str], now
                     source="inferred", created_at=now, evidence=[f"mission:{mission_id}"])
 
 
-__all__ = ["ExternalRecord", "MissionsDisabled", "Supervisor", "UnsupportedTier", "default_memory_cards"]
+__all__ = ["ExternalRecord", "MissionsDisabled", "ProposalOnly", "SocketProvider", "Supervisor", "UnsupportedTier", "default_memory_cards"]

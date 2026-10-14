@@ -2,13 +2,15 @@
 
 `SessionContainment` is the ONLY authority on whether a session's processes are gone. `is_empty()` is the
 single "provably dead" predicate (contract §2.1): a leased resource is never freed on any other signal.
-The real implementations (cgroup v2, per-uid) are S3b's; this module only declares the interface and the
-fake, so there is no OS access here.
+The real implementation (cgroup v2 through the root launcher, contract section 22) is `containment_cgroup`; this
+module only declares the interface and the fake, so there is no OS access here.
 """
 
 import os
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
+
+from .launcher.spec import LaunchSpec
 
 
 @dataclass(frozen=True)
@@ -20,9 +22,14 @@ class ContainedSession:
 
 
 class SessionContainment(Protocol):
-    def create(self, session_id: str) -> ContainedSession: ...
-    def spawn(self, cs: ContainedSession, argv: list[str], env: dict[str, str], cwd: str,
-              pass_fds: tuple[int, ...] = ()) -> int: ...   # returns the leader pid, already inside cs
+    # The uids `start_session` may allocate from (inclusive); None means this containment has no uid identity.
+    uid_range: tuple[int, int] | None
+
+    def cgroup_path(self, session_id: str) -> str: ...      # where the session's cgroup will be (no side effect)
+    # Contract 22.3: one call replaces create()+spawn(). The launcher makes the cgroup, drops to `spec.uid` (which
+    # `start_session` allocated and committed first), and returns only after success; on failure it cleans up.
+    def launch(self, session_id: str, spec: LaunchSpec) -> ContainedSession: ...
+    def uid_in_use(self, uid: int) -> bool: ...              # does any process still run as this uid
     def pids(self, cs: ContainedSession) -> list[int]: ...
     def freeze(self, cs: ContainedSession) -> None: ...
     def thaw(self, cs: ContainedSession) -> None: ...
@@ -54,34 +61,38 @@ class FakeContainment:
     (`ignore_kill`), a crash of the whole session (`crash`) and a child that escapes the kill (`leak_child`).
     Like a real `kill()` that hit its timeout, `kill()` here may return while members are still alive."""
 
-    def __init__(self) -> None:
+    def __init__(self, uid_range: tuple[int, int] = (60000, 60999)) -> None:
+        self.uid_range = uid_range
         self._groups: dict[str, _Group] = {}
         self._next_pid = 1000
         self._kills: dict[str, int] = {}               # survives cleanup, so tests can see a kill happened
+        self.uids_running: set[int] = set()            # simulation: uids that still have a process somewhere
+        self.fail_launch: Exception | None = None      # simulation: the helper refuses
 
     # ── the protocol ────────────────────────────────────────────────────────
-    def create(self, session_id: str) -> ContainedSession:
+    def cgroup_path(self, session_id: str) -> str:
+        return f"/fake-cgroup/{session_id}"
+
+    def launch(self, session_id: str, spec: LaunchSpec) -> ContainedSession:
+        if self.fail_launch is not None:
+            raise self.fail_launch
         if session_id in self._groups:
             raise ContainmentError(f"{session_id} already exists")
-        cs = ContainedSession(session_id, "fake", f"/fake-cgroup/{session_id}", None)
-        self._groups[session_id] = _Group(cs)
+        if not isinstance(spec.argv, (list, tuple)) or not all(isinstance(a, str) for a in spec.argv):
+            raise ContainmentError("argv must be a list of strings (there is no shell)")
+        cs = ContainedSession(session_id, "local_cgroup", self.cgroup_path(session_id), spec.uid)   # presents as a cgroup
+        group = self._groups[session_id] = _Group(cs)
+        self._next_pid += 1
+        group.members.add(self._next_pid)
+        group.spawns.append({"pid": self._next_pid, "argv": list(spec.argv), "env": dict(spec.env), "cwd": spec.cwd,
+                             "uid": spec.uid, "token": spec.token, "sock_dir": spec.sock_dir})
         return cs
+
+    def uid_in_use(self, uid: int) -> bool:
+        return uid in self.uids_running
 
     def _group(self, cs: ContainedSession) -> _Group | None:
         return self._groups.get(cs.session_id)
-
-    def spawn(self, cs: ContainedSession, argv: list[str], env: dict[str, str], cwd: str,
-              pass_fds: tuple[int, ...] = ()) -> int:
-        group = self._group(cs)
-        if group is None:
-            raise ContainmentError(f"{cs.session_id} does not exist")
-        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
-            raise ContainmentError("argv must be a list of strings (there is no shell)")
-        self._next_pid += 1
-        group.members.add(self._next_pid)
-        group.spawns.append({"pid": self._next_pid, "argv": list(argv), "env": dict(env), "cwd": cwd,
-                             "pass_fds": tuple(pass_fds)})
-        return self._next_pid
 
     def pids(self, cs: ContainedSession) -> list[int]:
         group = self._group(cs)

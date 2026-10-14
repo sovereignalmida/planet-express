@@ -34,6 +34,18 @@ from typing import NamedTuple
 
 from planet_express.memory import schema as _memory_schema
 from planet_express.missions.schema import DDL_V6 as _MISSIONS_DDL_V6
+from planet_express.missions.schema import repair_sessions_table
+
+
+def _repair_sessions(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        repair_sessions_table(conn)
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
 
 
 def ddl_v6() -> str:
@@ -420,7 +432,9 @@ class Store:
                 if conn.execute("PRAGMA user_version").fetchone()[0] == 5:
                     self._migrate_5_to_6(conn)
                 if entry_version >= 5:
-                    # Preserve the old idempotent repair behaviour for a v5/v6 database.
+                    # Preserve the old idempotent repair behaviour for a v5/v6 database. A v6 database made before
+                    # slice 3d first gets its sessions table rebuilt (state, releasable uids).
+                    _repair_sessions(conn)
                     conn.executescript(f"BEGIN IMMEDIATE;\n{_SCHEMA_V5}\n{ddl_v6()};\nCOMMIT;")
             conn.execute("PRAGMA journal_mode = WAL")
         return cutover

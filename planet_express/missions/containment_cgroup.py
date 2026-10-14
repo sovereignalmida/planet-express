@@ -1,48 +1,24 @@
-"""cgroup v2 containment for mission sessions (v4 slice 3b).
+"""cgroup v2 containment for mission sessions (v4 slice 3b, reworked in slice 3d).
 
-One session is one directory under a delegated cgroup root. The leader joins that cgroup BEFORE it
-executes anything, so every descendant (including a double-fork/setsid escaper) is a member and
-`cgroup.kill` reaches it. `is_empty()` reads `cgroup.events` and is the only "provably dead"
-predicate: it fails closed (anything it cannot parse is "not empty").
+One session is one directory under a delegated cgroup root, created BY THE LAUNCHER (contract 22.3): the root
+helper makes `<root>/<session_id>`, hands Core the control files, joins the cgroup BEFORE it drops privilege and
+executes anything, so every descendant (including a double-fork/setsid escaper) is a member and `cgroup.kill`
+reaches it. `launch()` replaces the old create()+spawn(): it returns only after the helper reported success.
+`is_empty()` reads `cgroup.events` and is the only "provably dead" predicate: it fails closed.
 
-How the leader is actually started is a `Launcher` strategy. The default, `DirectLauncher`, forks from
-the Core process: joining a cgroup and dropping to the worker uid/gid need privilege (root, or
-CAP_SETUID/CAP_SETGID plus write access to the cgroup), which Core does not normally have, so it fails
-with a clear message instead of half-working. The real answer is a root-owned launcher invoked through
-an exact sudoers rule (slice 3d), which plugs in here as another `Launcher`. Cgroup writes happen in the
-child *before* the drop, so the worker never needs write access to any cgroup file.
+Which helper strategy starts the leader (`SudoLauncher` or `DirectLauncher`, both the same `pe-launch`) is passed
+in; this class never forks Python itself. Core owns freeze/kill/rmdir of the cgroup it was handed, and a session
+uid has no write access to any cgroup file.
 """
 
-import ctypes
 import os
-import re
-import subprocess
 import time
-from dataclasses import dataclass
-from typing import Protocol
 
 from planet_express.missions.containment import ContainedSession, ContainmentError
+from planet_express.missions.launcher.spec import SESSION_ID, LaunchSpec
+from planet_express.missions.launcher.strategies import LaunchError
 
-_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
-_PR_SET_NO_NEW_PRIVS = 38
-_CAP_CHOWN, _CAP_SETGID, _CAP_SETUID = 0, 6, 7
-
-
-@dataclass(frozen=True)
-class LaunchRequest:
-    """Everything a launcher needs to start a session's leader inside its cgroup, as the worker."""
-    argv: list[str]
-    env: dict[str, str]
-    cwd: str
-    pass_fds: tuple[int, ...]
-    procs_path: str           # the cgroup's cgroup.procs: the leader must be written into it before exec
-    output_fd: int            # the leader's stdout and stderr (a pipe's write end); the caller closes its copy
-    uid: int | None           # drop to this identity before exec; None only in unprivileged tests
-    gid: int | None
-
-
-class Launcher(Protocol):
-    def launch(self, request: LaunchRequest) -> subprocess.Popen: ...
+_ID = SESSION_ID
 
 
 def cgroup2_mountpoint(path: str, mountinfo: str) -> str | None:
@@ -63,107 +39,66 @@ def cgroup2_mount_of(path: str, mountinfo: str) -> bool:
     return cgroup2_mountpoint(path, mountinfo) is not None
 
 
-def _have_caps(*caps: int) -> bool:
+def uid_has_processes(uid: int, proc: str = "/proc") -> bool:
+    """True if any process has `uid` as its real, effective, saved or filesystem uid. Fails closed: an unreadable
+    /proc, or ANY process whose status cannot be read for a reason other than having exited (hidepid, EACCES), counts
+    as 'yes'. Only a process that vanished between the listing and the read is known not to be running."""
     try:
-        with open("/proc/self/status", encoding="ascii", errors="replace") as handle:
-            for line in handle:
-                if line.startswith("CapEff:"):
-                    mask = int(line.split()[1], 16)
-                    return all(mask >> cap & 1 for cap in caps)
-    except (OSError, ValueError, IndexError):
-        pass
+        entries = os.listdir(proc)
+    except OSError:
+        return True
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"{proc}/{name}/status", encoding="ascii", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("Uid:"):
+                        if str(uid) in line.split()[1:5]:
+                            return True
+                        break
+        except (FileNotFoundError, ProcessLookupError):
+            continue                  # gone between listdir and open: it cannot be running
+        except OSError:
+            return True               # present but unreadable: it may well be running as this uid
     return False
 
 
-class DirectLauncher:
-    """Fork from this process, join the cgroup, drop to the worker identity, exec. Needs privilege."""
-
-    def __init__(self):
-        self._libc = ctypes.CDLL(None, use_errno=True)
-
-    def launch(self, request: LaunchRequest) -> subprocess.Popen:
-        drop = request.uid is not None and request.gid is not None
-        if drop and os.geteuid() != 0 and not _have_caps(_CAP_SETUID, _CAP_SETGID, _CAP_CHOWN):
-            raise ContainmentError(
-                "cannot start a mission session as the worker: the Core process lacks root or "
-                "CAP_SETUID/CAP_SETGID/CAP_CHOWN (the worker must own its workspace). "
-                "Sessions need the root-owned launcher (slice 3d); "
-                "pass it as CgroupContainment(launcher=...)")
-        try:
-            procs_fd = os.open(request.procs_path, os.O_WRONLY | os.O_CLOEXEC)
-        except OSError as exc:
-            raise ContainmentError(
-                f"cannot join the session cgroup ({exc.strerror}); the cgroup subtree must be writable by "
-                "the launcher") from exc
-        libc, uid, gid = self._libc, request.uid, request.gid
-
-        def pre_exec():
-            # Order matters: join the cgroup while still privileged, then shed identity, then
-            # forbid regaining it. Any failure aborts the exec (fail closed).
-            os.write(procs_fd, str(os.getpid()).encode())
-            if drop:
-                os.setgroups([])
-                os.setresgid(gid, gid, gid)
-                os.setresuid(uid, uid, uid)
-            if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-                raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
-
-        try:
-            return subprocess.Popen(
-                list(request.argv), env=dict(request.env), cwd=request.cwd, stdin=subprocess.DEVNULL,
-                stdout=request.output_fd, stderr=request.output_fd, close_fds=True,
-                pass_fds=tuple(request.pass_fds), start_new_session=True,
-                preexec_fn=pre_exec,
-            )
-        finally:
-            os.close(procs_fd)
-
-
-def allow_check(containment) -> bool:
-    """Spawn-time re-check of the worker identity (the constructor check can be bypassed only in tests)."""
-    if containment.unprivileged_for_tests:
-        return True
-    return containment.worker_uid not in (0, os.geteuid()) and containment.worker_gid != 0
-
-
 class CgroupContainment:
-    """`SessionContainment` on cgroup v2. `root` is a delegated subtree (e.g. under /sys/fs/cgroup)."""
+    """`SessionContainment` on cgroup v2. `root` is the delegated sessions parent (e.g. under /sys/fs/cgroup)."""
 
-    def __init__(self, root, *, worker_uid, worker_gid, kill_timeout_s=10.0,
-                 sleep=time.sleep, clock=time.monotonic, allow_unprivileged_for_tests=False,
-                 launcher: Launcher | None = None, freeze_timeout_s=5.0, require_cgroup2=True,
-                 mountinfo_path="/proc/self/mountinfo"):
+    def __init__(self, root, *, launcher, uid_range: tuple[int, int] | None = None, sock_root: str | None = None,
+                 kill_timeout_s=10.0, sleep=time.sleep, clock=time.monotonic, require_cgroup2=True,
+                 mountinfo_path="/proc/self/mountinfo", proc="/proc"):
         root = os.fspath(root)
         if not os.path.isabs(root) or os.path.normpath(root) != root.rstrip("/"):
             raise ValueError("cgroup root must be a normalised absolute path")
-        if not allow_unprivileged_for_tests:
-            if not isinstance(worker_uid, int) or not isinstance(worker_gid, int):
-                raise ValueError("worker uid and gid are required: sessions never run as the Core user")
-            if worker_uid == 0 or worker_gid == 0:
-                raise ValueError("the worker must not be root")
-            if worker_uid == os.geteuid():
-                raise ValueError("the worker must not be the Core user")
-            if require_cgroup2:
-                try:
-                    with open(mountinfo_path, encoding="utf-8", errors="replace") as handle:
-                        info = handle.read()
-                except OSError as exc:
-                    raise ContainmentError(f"cannot read the mount table: {exc.strerror}") from exc
-                if not cgroup2_mount_of(os.path.normpath(root), info):
-                    raise ContainmentError(
-                        f"missions.cgroup_root {root} is not on a cgroup v2 mount; mission sessions need "
-                        "a delegated cgroup2 subtree")
+        if uid_range is not None:
+            low, high = uid_range
+            if not (isinstance(low, int) and isinstance(high, int) and 0 < low < high):
+                raise ValueError("the session uid range must be positive and have room for a probe uid")
+        if require_cgroup2:
+            try:
+                with open(mountinfo_path, encoding="utf-8", errors="replace") as handle:
+                    info = handle.read()
+            except OSError as exc:
+                raise ContainmentError(f"cannot read the mount table: {exc.strerror}") from exc
+            if not cgroup2_mount_of(os.path.normpath(root), info):
+                raise ContainmentError(
+                    f"missions.cgroup_root {root} is not on a cgroup v2 mount; mission sessions need "
+                    "a delegated cgroup2 subtree")
         self.root = root.rstrip("/") or "/"
-        self.worker_uid = worker_uid
-        self.worker_gid = worker_gid
+        # `start_session` allocates from [low, high - 1]: the top uid is reserved for preflight's probe session.
+        self.uid_range = None if uid_range is None else (uid_range[0], uid_range[1] - 1)
+        self.sock_root = sock_root
         self.kill_timeout_s = kill_timeout_s
-        self.freeze_timeout_s = freeze_timeout_s
+        self.freeze_timeout_s = 5.0
         self._sleep = sleep
         self._clock = clock
-        self.launcher = launcher or DirectLauncher()
-        self.unprivileged_for_tests = bool(allow_unprivileged_for_tests)
-        self._leaders: dict[str, subprocess.Popen] = {}
-        self._out: dict[str, int] = {}
+        self._proc = proc
+        self.launcher = launcher
+        self._leaders: dict[str, object] = {}
+        self._out: dict[str, object] = {}
 
     # --- low-level file access (overridable seam for tests) ---------------------------------
 
@@ -213,45 +148,71 @@ class CgroupContainment:
 
     # --- SessionContainment ----------------------------------------------------------------
 
-    def create(self, session_id: str) -> ContainedSession:
+    def cgroup_path(self, session_id: str) -> str:
         if not isinstance(session_id, str) or not _ID.fullmatch(session_id):
             raise ValueError("unsafe session id")
-        path = os.path.join(self.root, session_id)
-        try:
-            os.mkdir(path, 0o755)
-        except FileExistsError:
-            raise ContainmentError("cgroup already exists for this session") from None
-        except OSError as exc:
-            raise ContainmentError(f"cannot create cgroup: {exc.strerror}") from exc
-        return ContainedSession(session_id, "local_cgroup", path, self.worker_uid)
+        return os.path.join(self.root, session_id)
 
-    def spawn(self, cs, argv, env, cwd, pass_fds=()):
-        path = self._dir(cs)
-        if not allow_check(self):
-            raise ContainmentError("the worker must not be the Core user or root")
-        if cs.session_id in self._out:
+    def launch(self, session_id: str, spec: LaunchSpec) -> ContainedSession:
+        """Create the cgroup, drop to the session uid and exec, all inside the helper. Returns only after the helper
+        reported success; on failure the helper has removed what it made (or Core's normal kill/cleanup will)."""
+        path = self.cgroup_path(session_id)
+        if session_id in self._leaders:
             raise ContainmentError("session already has a leader")
-        if not argv or not all(isinstance(a, str) for a in argv):
-            raise ValueError("argv must be a non-empty list of strings")
-        read_end, write_end = os.pipe2(os.O_CLOEXEC)
-        os.set_blocking(read_end, False)
-        request = LaunchRequest(
-            argv=list(argv), env=dict(env), cwd=cwd, pass_fds=tuple(pass_fds),
-            procs_path=os.path.join(path, "cgroup.procs"), output_fd=write_end,
-            uid=self.worker_uid, gid=self.worker_gid)
+        if not isinstance(spec, LaunchSpec):
+            raise TypeError("a LaunchSpec is required")
+        # Sessions never run as root or as Core, and only from the reserved range (the probe uid is its top).
+        if spec.uid in (0, os.geteuid()):
+            raise ContainmentError("a session must not run as root or as the Core user")
+        if self.uid_range is not None and not self.uid_range[0] <= spec.uid <= self.uid_range[1] + 1:
+            raise ContainmentError("the session uid is outside the reserved range")
         try:
-            leader = self.launcher.launch(request)
+            launched = self.launcher.start(session_id, spec)
         except ContainmentError:
-            os.close(read_end)
             raise
         except Exception as exc:
-            os.close(read_end)
-            raise ContainmentError(f"spawn failed: {type(exc).__name__}") from exc
-        finally:
-            os.close(write_end)
-        self._leaders[cs.session_id] = leader
-        self._out[cs.session_id] = read_end
-        return leader.pid
+            raise ContainmentError(f"launch failed: {type(exc).__name__}") from exc
+        reported = launched.status.get("cgroup")
+        if reported != path:
+            # The helper's config and Core's disagree about where sessions live: the process runs somewhere Core does
+            # not look. Kill it where the helper says it is, reap it, remove that cgroup and its output pipe, and
+            # refuse the session, so nothing is left tracked under a name nobody will clean up.
+            self._discard_misplaced(launched, str(reported))
+            raise ContainmentError("the launcher put the session in a different cgroup than Core expects")
+        self._leaders[session_id] = launched.proc
+        self._out[session_id] = launched.proc.stdout
+        return ContainedSession(session_id, "local_cgroup", path, spec.uid)
+
+    def _discard_misplaced(self, launched, reported: str) -> None:
+        """Best effort, bounded: kill the cgroup the helper named, reap the leader, remove the (then empty) cgroup."""
+        usable = os.path.isabs(reported) and os.path.normpath(reported) == reported
+        if usable:
+            try:
+                self._write(os.path.join(reported, "cgroup.kill"), "1")
+            except OSError:
+                pass
+        deadline = self._clock() + 2.0
+        while True:
+            reaped = launched.proc.poll() is not None
+            removed = False
+            if usable:
+                try:
+                    self._rmdir(reported)
+                    removed = True
+                except FileNotFoundError:
+                    removed = True
+                except OSError:
+                    pass
+            if (reaped and removed) or self._clock() >= deadline:
+                break
+            self._sleep(0.05)
+        try:
+            launched.proc.stdout.close()
+        except OSError:
+            pass
+
+    def uid_in_use(self, uid: int) -> bool:
+        return uid_has_processes(uid, self._proc)
 
     def pids(self, cs) -> list[int]:
         text = self._read(os.path.join(self._dir(cs), "cgroup.procs"))
@@ -330,23 +291,38 @@ class CgroupContainment:
             pass
         except OSError as exc:
             raise ContainmentError(f"cannot remove cgroup: {exc.strerror}") from exc
+        self._remove_sock_dir(cs.session_id)
+        self._leaders.pop(cs.session_id, None)
+
+    def _remove_sock_dir(self, session_id: str) -> None:
+        """The per-session socket directory (made by Core before the launch, handed to the session's group by the helper): unlink what Core bound in it and
+        remove it. A leftover is harmless (nothing listens) and is retried on the next cleanup."""
+        if not self.sock_root:
+            return
+        path = os.path.join(self.sock_root, session_id)
+        try:
+            for name in os.listdir(path):
+                os.unlink(os.path.join(path, name))
+            os.rmdir(path)
+        except OSError:
+            pass
 
     # --- output capture (extension used by the command adapter) -----------------------------
 
     def output_fd(self, cs) -> int:
-        """Non-blocking read end of the leader's merged stdout/stderr pipe."""
+        """Non-blocking read end of the session's merged stdout/stderr pipe (the helper's own stdout)."""
         try:
-            return self._out[cs.session_id]
-        except KeyError:
+            return self._out[cs.session_id].fileno()
+        except (KeyError, ValueError):
             raise ContainmentError("no output pipe for this session") from None
 
     def release_output(self, cs) -> None:
-        fd = self._out.pop(cs.session_id, None)
-        if fd is not None:
+        handle = self._out.pop(cs.session_id, None)
+        if handle is not None:
             try:
-                os.close(fd)
+                handle.close()
             except OSError:
                 pass
 
 
-__all__ = ["CgroupContainment", "cgroup2_mountpoint", "ContainmentError", "DirectLauncher", "LaunchRequest", "Launcher"]
+__all__ = ["CgroupContainment", "ContainmentError", "LaunchError", "cgroup2_mountpoint", "uid_has_processes"]

@@ -107,13 +107,11 @@ def test_pipe_setup_failure_is_a_start_failure_not_a_stranded_run(tmp_path, monk
 
 
 def test_a_stale_run_never_revokes_or_settles_over_a_replacement_session(tmp_path):
-    from planet_express.missions.sessions import issue_session
     rig = Rig(tmp_path)
     rig.sup.start(rig.mid)
     old = rig.session_ids()[0]
     rig.ms.revoke_session(old)                                   # the old session was revoked elsewhere...
-    replacement = rig.cont.create("S-replacement")
-    sid, _ = issue_session(rig.ms, rig.mid, replacement, session_ttl_s=600, lease_ttl_s=60)   # ...and replaced
+    sid = rig.add_replacement()                                  # ...and replaced
     rig.cont.crash(old)
     rig.sup.poll(rig.mid)                                        # the stale run for `old` wakes up and ends
     assert rig.ms.live_session(rig.mid)["id"] == sid
@@ -121,12 +119,10 @@ def test_a_stale_run_never_revokes_or_settles_over_a_replacement_session(tmp_pat
 
 
 def test_cancel_reaches_a_replacement_session_after_the_stale_run_ends(tmp_path):
-    from planet_express.missions.sessions import issue_session
     rig = Rig(tmp_path)
     rig.sup.start(rig.mid)
     rig.ms.revoke_session(rig.session_ids()[0])
-    replacement = rig.cont.create("S-replacement")
-    issue_session(rig.ms, rig.mid, replacement, session_ttl_s=600, lease_ttl_s=60)
+    rig.add_replacement()
     rig.sup.cancel(rig.mid, "operator:me")
     rig.sup.poll(rig.mid)
     assert rig.status() == "cancelled" and rig.cont.kill_calls("S-replacement") >= 1

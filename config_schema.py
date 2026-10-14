@@ -327,10 +327,25 @@ class MissionsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    # The dedicated unix account sessions run as; never root and never the Core user (setup creates it).
+    # Retired in slice 3d: there is no shared worker account any more (every session runs as its own uid from
+    # `session_uid_min..max`, contract 22.1). Still accepted so an existing config file keeps loading; never read.
     worker_user: str = "pe-worker"
-    # A delegated cgroup v2 subtree; one child cgroup per session.
-    cgroup_root: str = "/sys/fs/cgroup/planetexpress-missions"
+    # Which launcher starts sessions (contract 22.2). `auto` is `direct` when Core runs as root (MOS) and `sudo`
+    # otherwise; an explicit value is never silently downgraded: if its prerequisites are missing the host is
+    # proposal-only.
+    launcher: Literal["auto", "sudo", "direct"] = "auto"
+    # The uid (and same-numbered private gid) range reserved for sessions. The top uid is reserved for preflight.
+    session_uid_min: int = Field(default=61000, gt=0, lt=2**31)
+    session_uid_max: int = Field(default=61999, gt=0, lt=2**31)
+    # Per-session socket directories live here (root/Core owned, mode 0711).
+    sock_root: str = "/run/planetexpress-sessions"
+    # The `sessions` cgroup inside the cgroup Core is delegated (one child cgroup per session). The default is the
+    # systemd layout (`Delegate=yes` on casa-planetexpress.service); on MOS set it to the tree the boot script makes.
+    # The launcher setup writes THIS value into launch.conf, so Core and the helper agree on where sessions live.
+    cgroup_root: str = "/sys/fs/cgroup/system.slice/casa-planetexpress.service/sessions"
+    # Each session gets its own directory here (and the launcher's launch.conf names it as the workspace root).
+    # Unset: `mission-workspaces` next to the state database.
+    workspace_root: str | None = None
     worker_socket: str = "/run/planetexpress/worker.sock"
     runtime: MissionRuntimeConfig = MissionRuntimeConfig()
     budgets: MissionBudgetsConfig = MissionBudgetsConfig()
@@ -341,6 +356,24 @@ class MissionsConfig(BaseModel):
         if not _UNIX_NAME.fullmatch(name) or name == "root":
             raise ValueError("missions.worker_user must be a non-root unix account name")
         return name
+
+    @field_validator("sock_root", "workspace_root")
+    @classmethod
+    def _plain_absolute_path(cls, path: str | None) -> str | None:
+        if path is not None and (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
+                                 or path == "/"):
+            raise ValueError("missions.sock_root and missions.workspace_root must be normalised absolute paths")
+        return path
+
+    @model_validator(mode="after")
+    def _uid_range(self) -> "MissionsConfig":
+        if self.session_uid_max - self.session_uid_min < 2:
+            raise ValueError("missions.session_uid_min..session_uid_max needs room for at least two uids "
+                             "(the top one is reserved for preflight)")
+        import os
+        if self.session_uid_min <= os.geteuid() <= self.session_uid_max:
+            raise ValueError("the session uid range must not contain the Core user's uid")
+        return self
 
     @field_validator("worker_socket")
     @classmethod

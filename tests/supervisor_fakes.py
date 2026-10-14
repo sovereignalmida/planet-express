@@ -24,11 +24,13 @@ def tool_event(name="read_file"):
 
 
 class FakeRuntime:
-    def __init__(self, containment: FakeContainment, script=None, result=None, fail_start=None, raw_result=None):
+    def __init__(self, containment: FakeContainment, script=None, result=None, fail_start=None, raw_result=None,
+                 fail_after_spawn=None):
         self.containment = containment
         self.script = list(script or [])
         self.result = AgentResult(**(result or GOOD_RESULT)) if not isinstance(result, Exception) else result
         self.fail_start = fail_start
+        self.fail_after_spawn = fail_after_spawn      # the session IS launched, then the runtime raises
         self.raw_result = raw_result
         self.token = None
         self.context = None
@@ -40,7 +42,9 @@ class FakeRuntime:
             raise self.fail_start
         self.context = context
         self.token = os.read(context.token_fd, 128).decode()
-        pid = context.spawn(["fake-agent", "--mission", mission.id])
+        pid = context.spawn(["/usr/bin/fake-agent", "--mission", mission.id])
+        if self.fail_after_spawn:
+            raise self.fail_after_spawn
         self.handle = RunHandle(run_id=f"run-{context.session.session_id}", session_id=context.session.session_id,
                                 pid=pid)
         return self.handle
@@ -77,6 +81,15 @@ class Rig:
                                               runtime="fake")
         advance_to(self.ms, self.mission.id, "queued")
 
+    def add_replacement(self, session_id="S-replacement") -> str:
+        """A second, live session for the mission that this supervisor instance did not start (as after a restart)."""
+        from planet_express.missions.launcher.spec import LaunchSpec
+        from planet_express.missions.sessions import issue_session
+        cs, _ = issue_session(self.ms, self.mid, session_id, self.cont.cgroup_path(session_id), session_ttl_s=600,
+                              lease_ttl_s=60, uid_range=self.cont.uid_range)
+        self.cont.launch(session_id, LaunchSpec(uid=cs.session_uid, cwd="/w", argv=("/usr/bin/x",), token="t" * 40))
+        return session_id
+
     def factory(self, mission):
         kw = self.behaviours.pop(0) if self.behaviours else {}
         rt = FakeRuntime(self.cont, **kw)
@@ -100,7 +113,7 @@ class Rig:
         with sqlite3.connect(self.store.path) as conn:
             conn.row_factory = sqlite3.Row
             return [dict(r) for r in conn.execute(
-                "SELECT * FROM mission_sessions WHERE mission_id=? ORDER BY issued_at, id", (self.mid,))]
+                "SELECT * FROM mission_sessions WHERE mission_id=? ORDER BY rowid", (self.mid,))]    # insertion order
 
     def session_ids(self):
         return [s["id"] for s in self.sessions()]
