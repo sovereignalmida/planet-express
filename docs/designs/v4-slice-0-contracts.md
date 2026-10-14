@@ -621,3 +621,36 @@ starts `pe-launch` as a plain subprocess (via `sudo -n` on Ubuntu, directly when
 and all cgroup join, uid/gid drop, `no_new_privs`, fd closing and `execve` happen inside that
 single-threaded helper. Core never runs Python between fork and exec. `DirectLauncher` is the same
 helper without `sudo`, so there is one launch implementation to review and test.
+
+### 22.8 Normative clarifications (rev 3, from the final Codex re-check; these supersede any conflicting wording above)
+1. **Sockets.** No shared `pe-worker` group exists. Per-session worker and proxy sockets live in a
+   per-session directory `<sock_root>/<session_id>/` created by the launcher owned by the Core uid with
+   the session's private gid and mode 0750; Core creates the two sockets inside it and the launcher
+   (root helper) then chowns exactly those paths to `session_uid:session_gid`, mode 0600, before
+   exec. `<sock_root>` is root/Core-owned mode 0711 so a session can traverse to its own directory only.
+   The old `0660 group pe-worker` wording in §6/§6.1 is withdrawn.
+2. **One helper, no in-process path.** Both `DirectLauncher` and `SudoLauncher` invoke the same helper
+   as a plain subprocess (the first only skips `sudo`). §22.2's "in-process" wording is withdrawn.
+3. **UID allocation.** `start_session` is the sole allocator. It commits a session row in state
+   `launching` holding the uid (unique index) **before** the helper runs; the helper only validates the
+   uid it is given. The row becomes `live` after the helper's status line. A uid is released only after
+   the session cgroup is removed and no process runs as that uid. A crash between commit and launch leaves
+   a `launching` row that recovery kills (cgroup + uid sweep) before reuse.
+4. **Interpreter and sudo environment.** The sudo target is a root-owned fixed entry point (a native
+   wrapper, or `/usr/bin/python3 -I -S pe-launch.py` invoked by it). The sudoers fragment sets
+   `Defaults!<path> env_reset, !setenv, !env_editor`; the helper builds its own minimal environment
+   before loading config or code. Tests run it with a hostile Core environment (`PYTHONPATH`,
+   `PYTHONHOME`, `LD_PRELOAD`, `LD_LIBRARY_PATH`) and prove it is ignored.
+5. **FD map and status protocol.** The child gets exactly: fd 0 `/dev/null`; fd 1 and 2 one merged output
+   pipe whose read end Core holds (the helper's own stdout, so it flows through sudo); fd 3 the token pipe
+   read end. Nothing else. Before `execve` the helper writes one framed line
+   `PE-LAUNCH-STATUS {"ok":true,"session_id":...,"uid":...,"cgroup":...}` (or `{"ok":false,"error":...}`
+   with non-zero exit) as the first line of the merged output; Core reads and strips it, then returns the
+   `ContainedSession`. Failure cleanup removes the cgroup and session dir. "No stray fds" is tested by
+   listing `/proc/<child>/fd` and requiring exactly `0,1,2,3`.
+6. **Preflight extended.** Besides create/move/freeze(+confirm)/kill/empty, it enables the `pids`
+   controller on the sessions parent, sets and reads back `pids.max` on a throwaway child, and performs the
+   freeze/kill writes as the **actual Core identity** and the denied writes as a **throwaway session uid**
+   (via the helper), failing the host (proposal-only) if any expectation differs.
+7. **Test wording.** Assert the session uid gets EACCES on *writes* to `cgroup.procs`, `cgroup.freeze`,
+   `cgroup.kill` (and on ancestors' `cgroup.procs`); assert `cgroup.events` readability separately as intended.

@@ -1,5 +1,7 @@
 # S3d — Session launcher (v4 slice 3d)
 
+**Normative: spec §22 INCLUDING §22.8 (rev 3 clarifications), which supersede anything below that conflicts** (notably: `start_session` is the sole uid allocator with a `launching` row committed before the helper runs; both strategies invoke the one helper; per-session sockets chowned by the helper; exact fd map 0,1,2,3 and the `PE-LAUNCH-STATUS` first-line protocol; fixed interpreter + `env_reset, !setenv` sudoers; extended preflight with `pids` and identity-specific write checks).
+
 Spec: `docs/designs/v4-slice-0-contracts.md` §22 (operator-approved 2026-10-13), plus §2.1, §6, §15, §20. Start only
 after slice 3c round 2 is merged into `v4-next`. `git merge --ff-only v4-next` first. Test first; `codex review
 --uncommitted` before each commit; no push; trailer; never run privileged code outside a throwaway
@@ -11,7 +13,7 @@ container/VM (see below). This is a root-privileged component: keep it small and
    `config.py` (loads the root-owned `launch.conf` from a fixed path), and `strategies.py` with
    `SudoLauncher` and `DirectLauncher` (both spawn the SAME helper as a plain subprocess; no `preexec_fn`).
 2. Change the containment protocol per §22.3: one `launch(session_id, spec) -> ContainedSession` replaces
-   `create()+spawn()`; the launcher allocates the unique uid/gid; `ContainedSession` carries cgroup_path and
+   `create()+spawn()`; `start_session` allocates the unique uid/gid (launcher only validates); `ContainedSession` carries cgroup_path and
    session_uid; `output_fd` returned by the launcher. Update `Supervisor`, `FakeContainment`, `CommandRuntime`,
    `worker_rpc` (cgroup AND uid AND token) and `issue_session` accordingly, and the uid allocation in
    `start_session` (transactional, unique `session_uid`, range from config). Keep all tests green or update
