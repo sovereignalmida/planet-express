@@ -36,3 +36,15 @@ installation tests for writable and symlinked ancestors; preflight failure => pr
 are marked and skipped otherwise; provide `scripts/run_privileged_tests.sh` that runs them inside a disposable
 container or on the MOS VM (the orchestrator will run it; do NOT run privileged tests on the developer host).
 Full suite green.
+
+## Carried in from the Codex G3 on merged slice 3 (2026-10-13), must be fixed in this slice
+1. [P1] `CgroupContainment.create()` gives every session the shared worker uid but `mission_sessions.session_uid`
+   is UNIQUE: the second real session fails. Fixed by the unique-uid-per-session allocation in this slice
+   (test: two sequential and two concurrent real-shaped sessions; a revoked session's uid is not reused until empty).
+2. [P1] Remove `Popen(preexec_fn)` from the threaded launch path (§22.7, single exec helper).
+3. [P1] `MissionBudgetsConfig` is parsed but never applied: `MissionService._create_queued()` builds grants with
+   model defaults, so `missions.budgets.*` has no effect. Apply the configured budgets (clamped to the grant model
+   maxima) when grants are created, with tests.
+4. [P2] `tests/test_supervisor_integration.py::test_a_failed_relaunch_never_falls_through...` is flaky (fails ~50%
+   in the full suite): `session_ids()` sorts by `issued_at, id` and both sessions share a fake-clock `issued_at`, so
+   `[-1]` picks the cleaned first session. Select the active run/session id instead of lexical order.
