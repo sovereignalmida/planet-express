@@ -89,10 +89,14 @@ CREATE TABLE IF NOT EXISTS mission_sessions (
     kind TEXT NOT NULL,
     cgroup_path TEXT,
     leader_pid INTEGER,
-    session_uid INTEGER UNIQUE,
-    fence_json TEXT NOT NULL
+    session_uid INTEGER,
+    fence_json TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'live',
+    uid_released_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_live_session ON mission_sessions(mission_id) WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS session_uid_held ON mission_sessions(session_uid)
+    WHERE session_uid IS NOT NULL AND uid_released_at IS NULL;
 CREATE TABLE IF NOT EXISTS resource_fences (
     resource TEXT PRIMARY KEY,
     fence INTEGER NOT NULL
@@ -106,3 +110,22 @@ CREATE TABLE IF NOT EXISTS mission_artifacts (
     path TEXT NOT NULL
 )
 """
+
+_SESSION_COLUMNS = ("id, mission_id, token_hash, issued_at, expires_at, revoked_at, kind, cgroup_path, "
+                    "leader_pid, session_uid, fence_json")
+
+
+def repair_sessions_table(conn) -> None:
+    """A v6 database created before slice 3d has `session_uid INTEGER UNIQUE` (a uid could never be reused) and no
+    `state` or `uid_released_at`. Rebuild the table once, inside the caller's transaction, keeping every row (they
+    become `live`, their uid held). A table that already has the columns is left alone."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(mission_sessions)")}
+    if not columns or "state" in columns:
+        return
+    conn.execute("DROP INDEX IF EXISTS one_live_session")
+    conn.execute("ALTER TABLE mission_sessions RENAME TO mission_sessions_pre3d")
+    start = DDL_V6.index("CREATE TABLE IF NOT EXISTS mission_sessions")
+    conn.execute(DDL_V6[start:DDL_V6.index(");", start) + 1])
+    conn.execute(f"INSERT INTO mission_sessions ({_SESSION_COLUMNS}) SELECT {_SESSION_COLUMNS} "
+                 "FROM mission_sessions_pre3d")
+    conn.execute("DROP TABLE mission_sessions_pre3d")

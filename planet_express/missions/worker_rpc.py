@@ -63,11 +63,16 @@ class WorkerAuthenticator:
     peer_uid=)`. `resolve` replaces that lookup (tests only)."""
 
     def __init__(self, store, *, resolve: Callable[..., Any] | None = None,
-                 read_cgroup: Callable[[int], str | None] | None = None, mount: str = CGROUP_MOUNT):
+                 read_cgroup: Callable[[int], str | None] | None = None, mount: str = CGROUP_MOUNT,
+                 core_uid: int | None = None):
+        self._core_uid = core_uid          # None: this process's own uid at call time (a session is never Core)
         if store is None and resolve is None:
             raise ValueError("a store (or a resolver) is required")
         self._resolve = resolve or (lambda token_hash, **kw: resolve_session(store, token_hash, **kw))
         self._read_cgroup = read_cgroup or (lambda pid: _proc_cgroup(pid, mount))
+
+    def _core(self) -> int:
+        return os.geteuid() if self._core_uid is None else self._core_uid
 
     def __call__(self, peer: PeerCred, request: dict):
         token = request.get("session_token")
@@ -82,11 +87,15 @@ class WorkerAuthenticator:
         # decision that keeps a same-uid process outside the session out.
         kind = getattr(row, "kind", None)
         if kind == "local_cgroup":
-            path = getattr(row, "cgroup_path", None)
-            return row if cgroup is not None and isinstance(path, str) and path == cgroup else None
+            # cgroup AND uid AND token (contract 22.1): a session without a unique uid is never accepted
+            path, uid = getattr(row, "cgroup_path", None), getattr(row, "session_uid", None)
+            ok = (cgroup is not None and isinstance(path, str) and path == cgroup
+                  and isinstance(uid, int) and not isinstance(uid, bool) and uid == peer.uid
+                  and uid not in (0, self._core()))
+            return row if ok else None
         if kind == "local_uid":
             uid = getattr(row, "session_uid", None)
-            ok = isinstance(uid, int) and uid == peer.uid and uid not in (0, os.geteuid())
+            ok = isinstance(uid, int) and uid == peer.uid and uid not in (0, self._core())
             return row if ok else None
         return None  # "fake" sessions have no real identity to bind to
 

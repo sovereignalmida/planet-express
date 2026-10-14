@@ -1,7 +1,9 @@
-"""CgroupContainment against a fake cgroup tree on tmpfs (plain files), plus root-only real tests."""
+"""CgroupContainment against a fake cgroup tree on tmpfs (plain files) and a stand-in launcher.
 
-import json
+The real helper, real cgroups and real uids are exercised by tests/test_launcher_privileged.py (root only)."""
+
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -13,7 +15,39 @@ from planet_express.missions.containment import ContainedSession
 from planet_express.missions.containment_cgroup import (
     CgroupContainment,
     ContainmentError,
+    uid_has_processes,
 )
+from planet_express.missions.launcher.spec import LaunchSpec
+from planet_express.missions.launcher.strategies import LaunchError, Launched
+
+SPEC = LaunchSpec(uid=61005, cwd="/w/s1", argv=("/bin/agent", "--x"), env={"A": "b"}, token="T" * 40)
+
+
+class StubLauncher:
+    """What the helper does to the cgroup tree (make the directory and its control files) without privilege."""
+
+    def __init__(self, root, command=("print('hi')",), cgroup=None, error=None, populated=1):
+        self.root, self.command, self.cgroup, self.error, self.populated = root, command, cgroup, error, populated
+        self.seen = []
+
+    def start(self, session_id, spec):
+        self.seen.append((session_id, spec))
+        if self.error:
+            raise self.error
+        path = Path(self.root) / session_id
+        try:
+            path.mkdir()
+        except FileExistsError:
+            raise LaunchError("the launcher refused: cgroup create") from None
+        (path / "cgroup.events").write_text(f"populated {self.populated}\nfrozen 0\n")
+        (path / "cgroup.procs").write_text("")
+        (path / "cgroup.freeze").write_text("0")
+        (path / "cgroup.kill").write_text("")
+        proc = subprocess.Popen([sys.executable, "-c", *self.command], stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, bufsize=0)
+        os.set_blocking(proc.stdout.fileno(), False)
+        return Launched(proc, {"ok": True, "session_id": session_id, "uid": spec.uid, "gid": spec.uid,
+                               "cgroup": self.cgroup or str(path)})
 
 
 class FakeFsContainment(CgroupContainment):
@@ -56,38 +90,107 @@ def root(tmp_path):
     return d
 
 
-def make(root, cls=CgroupContainment, **kw):
+def make(root, cls=CgroupContainment, launcher=None, **kw):
     kw.setdefault("sleep", lambda s: None)
-    kw.setdefault("allow_unprivileged_for_tests", True)
-    return cls(root, worker_uid=None, worker_gid=None, **kw)
+    kw.setdefault("require_cgroup2", False)
+    kw.setdefault("uid_range", (61000, 61999))
+    return cls(root, launcher=launcher or StubLauncher(root), **kw)
 
 
-def seed_cgroup(cs, populated=1):
-    d = Path(cs.cgroup_path)
-    (d / "cgroup.events").write_text(f"populated {populated}\nfrozen 0\n")
-    (d / "cgroup.procs").write_text("")
-    (d / "cgroup.freeze").write_text("0")
-    (d / "cgroup.kill").write_text("")
+def launched(c, sid="s1", spec=SPEC):
+    cs = c.launch(sid, spec)
+    c.release_output(cs)
+    return cs
 
 
-def test_create_makes_dir_under_root_and_describes_session(root):
+def test_launch_returns_the_identity_the_launcher_made(root):
     c = make(root)
-    cs = c.create("s1")
-    assert cs.kind == "local_cgroup" and cs.session_id == "s1"
-    assert cs.cgroup_path == str(root / "s1") and Path(cs.cgroup_path).is_dir()
+    cs = c.launch("s1", SPEC)
+    assert cs == ContainedSession("s1", "local_cgroup", str(root / "s1"), 61005)
+    assert Path(cs.cgroup_path).is_dir() and c.cgroup_path("s1") == cs.cgroup_path
+    c.release_output(cs)
 
 
 @pytest.mark.parametrize("bad", ["", "../x", "a/b", ".hidden", "x" * 65, "a b", "a\0b"])
-def test_create_rejects_unsafe_ids(root, bad):
+def test_unsafe_session_ids_are_refused(root, bad):
     with pytest.raises(ValueError):
-        make(root).create(bad)
+        make(root).cgroup_path(bad)
+    with pytest.raises(ValueError):
+        make(root).launch(bad, SPEC)
 
 
-def test_create_twice_refused(root):
+def test_launching_the_same_session_twice_is_refused(root):
     c = make(root)
-    c.create("s1")
+    c.launch("s1", SPEC)
     with pytest.raises(ContainmentError):
-        c.create("s1")
+        c.launch("s1", SPEC)
+    c.release_output(ContainedSession("s1", "local_cgroup", str(root / "s1"), 61005))
+
+
+def test_the_spec_reaches_the_launcher_unchanged(root):
+    stub = StubLauncher(root)
+    c = make(root, launcher=stub)
+    c.release_output(c.launch("s1", SPEC))
+    assert stub.seen == [("s1", SPEC)]
+
+
+@pytest.mark.parametrize("uid", [0, os.geteuid(), 999, 62000])
+def test_a_uid_that_is_root_core_or_outside_the_range_is_refused_before_the_launcher_runs(root, uid):
+    stub = StubLauncher(root)
+    spec = LaunchSpec(uid=uid, cwd="/w/x", argv=("/bin/x",), token="T" * 40)
+    with pytest.raises(ContainmentError):
+        make(root, launcher=stub).launch("s1", spec)
+    assert stub.seen == []
+
+
+def test_the_probe_uid_at_the_top_of_the_range_is_accepted(root):
+    c = make(root)                       # the allocatable range stops one short; the probe uid is the top one
+    assert c.uid_range == (61000, 61998)
+    c.release_output(c.launch("s1", LaunchSpec(uid=61999, cwd="/w/x", argv=("/bin/x",), token="T" * 40)))
+
+
+def test_a_launcher_that_refuses_leaves_nothing_tracked(root):
+    c = make(root, launcher=StubLauncher(root, error=LaunchError("the launcher refused: uid")))
+    with pytest.raises(LaunchError):
+        c.launch("s1", SPEC)
+    assert c._leaders == {} and c._out == {}
+
+
+def test_an_unexpected_launcher_exception_becomes_a_containment_error(root):
+    c = make(root, launcher=StubLauncher(root, error=RuntimeError("secret detail")))
+    with pytest.raises(ContainmentError) as exc:
+        c.launch("s1", SPEC)
+    assert "secret detail" not in str(exc.value) and c._leaders == {}
+
+
+def test_a_launcher_that_used_another_cgroup_is_killed_there_removed_and_leaves_nothing_tracked(root, tmp_path):
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "cgroup.kill").write_text("")
+    removed = []
+
+    class Cleaning(FakeFsContainment):
+        def _write(self, path, value):
+            super()._write(path, value)
+            if Path(path).name == "cgroup.kill" and Path(path).parent == other:
+                (other / "cgroup.kill").unlink()                  # the kernel empties it and drops its control files
+
+        def _rmdir(self, path):
+            removed.append(path)
+            super()._rmdir(path)
+
+    c = make(root, Cleaning, launcher=StubLauncher(root, cgroup=str(other), command=("pass",)))
+    with pytest.raises(ContainmentError, match="different cgroup"):
+        c.launch("s1", SPEC)
+    assert set(removed) == {str(other)} and not other.exists()      # the cgroup the helper really used is gone
+    assert c._leaders == {} and c._out == {}                       # and no pipe or leader is left tracked
+
+
+def test_a_misplaced_cgroup_that_cannot_be_removed_is_still_not_left_tracked(root, tmp_path):
+    c = make(root, launcher=StubLauncher(root, cgroup="/nonexistent/elsewhere", command=("pass",)))
+    with pytest.raises(ContainmentError, match="different cgroup"):
+        c.launch("s1", SPEC)
+    assert c._leaders == {} and c._out == {}
 
 
 def test_operations_refuse_a_path_outside_the_root(root, tmp_path):
@@ -107,8 +210,7 @@ def test_operations_refuse_a_path_outside_the_root(root, tmp_path):
 
 def test_freeze_thaw_write_the_protocol_values(root):
     c = make(root, Recording)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = launched(c)
     c.freeze(cs)
     c.thaw(cs)
     assert c.writes == [("cgroup.freeze", "1"), ("cgroup.freeze", "0")]
@@ -116,8 +218,7 @@ def test_freeze_thaw_write_the_protocol_values(root):
 
 def test_kill_is_freeze_then_kill_then_poll_until_empty(root):
     c = make(root, Recording, empty_after_polls=2)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = launched(c)
     c.kill(cs)
     assert c.writes == [("cgroup.freeze", "1"), ("cgroup.kill", "1")]
     assert c.polls >= 3  # polled at least until populated 0 was seen
@@ -131,8 +232,7 @@ def test_kill_does_not_return_while_populated_and_times_out_loudly(root):
         now[0] += s
 
     c = make(root, Recording, sleep=sleep, clock=lambda: now[0], kill_timeout_s=5.0)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = launched(c)
     with pytest.raises(ContainmentError):
         c.kill(cs)
     assert not c.is_empty(cs)  # never claims dead when it is not
@@ -147,7 +247,7 @@ def test_kill_does_not_return_while_populated_and_times_out_loudly(root):
 ])
 def test_is_empty_reads_cgroup_events_and_fails_closed(root, events, expected):
     c = make(root)
-    cs = c.create("s1")
+    cs = launched(c)
     (Path(cs.cgroup_path) / "cgroup.events").write_text(events)
     assert c.is_empty(cs) is expected
 
@@ -160,85 +260,47 @@ def test_is_empty_missing_cgroup_inside_root_means_removed(root):
 
 def test_pids_lists_cgroup_procs(root):
     c = make(root)
-    cs = c.create("s1")
+    cs = launched(c)
     (Path(cs.cgroup_path) / "cgroup.procs").write_text("12\n40\n")
     assert c.pids(cs) == [12, 40]
 
 
 def test_cleanup_refuses_until_empty_then_removes(root):
     c = make(root, FakeFsContainment)
-    cs = c.create("s1")
+    cs = launched(c)
     d = Path(cs.cgroup_path)
-    seed_cgroup(cs, populated=1)
     with pytest.raises(ContainmentError):
         c.cleanup(cs)
     assert d.exists()
-    seed_cgroup(cs, populated=0)
+    (d / "cgroup.events").write_text("populated 0\nfrozen 0\n")
     c.cleanup(cs)
     assert not d.exists()
 
 
-PROBE = r"""
-import json, os, sys
-out = {
-  "in_procs": str(os.getpid()) in open(sys.argv[1]).read(),
-  "env": dict(os.environ),
-  "fds": sorted(int(f) for f in os.listdir("/proc/self/fd")),
-  "sid_is_self": os.getsid(0) == os.getpid(),
-  "cwd": os.getcwd(),
-  "nnp": [l for l in open("/proc/self/status") if l.startswith("NoNewPrivs")][0].split()[1],
-  "pass_fd_data": os.read(int(sys.argv[2]), 100).decode(),
-}
-open("probe.json", "w").write(json.dumps(out))
-"""
+def test_cleanup_removes_the_per_session_socket_directory(root, tmp_path):
+    socks = tmp_path / "socks"
+    (socks / "s1").mkdir(parents=True)
+    (socks / "s1" / "worker.sock").write_text("")
+    c = make(root, FakeFsContainment, sock_root=str(socks))
+    cs = launched(c)
+    (Path(cs.cgroup_path) / "cgroup.events").write_text("populated 0\nfrozen 0\n")
+    c.cleanup(cs)
+    assert not (socks / "s1").exists() and socks.exists()
 
 
-def test_spawn_joins_cgroup_before_exec_and_isolates_the_child(root, tmp_path):
-    c = make(root)
-    cs = c.create("s1")
-    seed_cgroup(cs)
-    work = tmp_path / "work"
-    work.mkdir()
-    r, w = os.pipe()
-    os.write(w, b"tok")
-    os.close(w)
-    leak = os.open(__file__, os.O_RDONLY)
-    os.set_inheritable(leak, True)  # an fd the child must NOT inherit
-    try:
-        pid = c.spawn(cs, [sys.executable, "-c", PROBE, str(Path(cs.cgroup_path) / "cgroup.procs"), str(r)],
-                      {"LC_ALL": "C.UTF-8", "FOO": "bar"}, str(work), (r,))
-        deadline = time.time() + 10
-        while not (work / "probe.json").exists() and time.time() < deadline:
-            time.sleep(0.05)
-        time.sleep(0.1)
-    finally:
-        os.close(leak)
-        os.close(r)
-    out = json.loads((work / "probe.json").read_text())
-    assert out["in_procs"] is True                       # already a member when the program started
-    assert str(pid) in (Path(cs.cgroup_path) / "cgroup.procs").read_text().split()
-    assert {k: v for k, v in out["env"].items() if k != "LC_CTYPE"} == {"LC_ALL": "C.UTF-8", "FOO": "bar"}
-    assert out["sid_is_self"] is True                    # new session
-    assert out["nnp"] == "1"                             # no_new_privs
-    assert out["pass_fd_data"] == "tok"
-    assert leak not in out["fds"] and r in out["fds"]
-    assert len(set(out["fds"]) - {0, 1, 2, r}) <= 1      # only listdir's own fd may remain
-    assert out["cwd"] == str(work)
+def test_cleanup_never_removes_a_socket_dir_while_the_session_is_populated(root, tmp_path):
+    socks = tmp_path / "socks"
+    (socks / "s1").mkdir(parents=True)
+    c = make(root, FakeFsContainment, sock_root=str(socks))
+    cs = launched(c)
+    with pytest.raises(ContainmentError):
+        c.cleanup(cs)
+    assert (socks / "s1").exists()
 
 
-def test_privilege_drop_is_required_unless_explicitly_waived(root):
-    with pytest.raises(ValueError):
-        CgroupContainment(root, worker_uid=None, worker_gid=None)
-    with pytest.raises(ValueError):
-        CgroupContainment(root, worker_uid=0, worker_gid=0)  # the worker is never root
-
-
-def test_output_fd_is_a_nonblocking_pipe_of_child_stdout_and_stderr(root, tmp_path):
-    c = make(root)
-    cs = c.create("s1")
-    seed_cgroup(cs)
-    c.spawn(cs, [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
-            {}, str(tmp_path))
+def test_output_fd_is_a_nonblocking_pipe_of_the_helpers_stdout_and_stderr(root):
+    c = make(root, launcher=StubLauncher(root, command=("import sys; print('out'); print('err', file=sys.stderr)",)))
+    cs = c.launch("s1", SPEC)
     fd = c.output_fd(cs)
     data = b""
     deadline = time.time() + 10
@@ -251,115 +313,16 @@ def test_output_fd_is_a_nonblocking_pipe_of_child_stdout_and_stderr(root, tmp_pa
     c.release_output(cs)
     with pytest.raises(OSError):
         os.fstat(fd)
-
-
-# --- real cgroup v2, root only --------------------------------------------------------------
-
-root_only = pytest.mark.skipif(
-    os.geteuid() != 0 or not Path("/sys/fs/cgroup/cgroup.controllers").exists(),
-    reason="needs root and cgroup v2; see scripts/mission_containment_rehearsal.py",
-)
-
-
-@root_only
-def test_real_cgroup_kill_catches_a_double_forking_escaper(tmp_path):
-    base = Path("/sys/fs/cgroup") / f"pe-test-{os.getpid()}"
-    base.mkdir()
-    try:
-        c = CgroupContainment(base, worker_uid=65534, worker_gid=65534)
-        cs = c.create("s1")
-        script = ("import os,time\n"
-                  "if os.fork()==0:\n os.setsid()\n if os.fork()==0:\n  time.sleep(300)\n os._exit(0)\n"
-                  "time.sleep(300)\n")
-        os.chmod(tmp_path, 0o755)
-        c.spawn(cs, [sys.executable, "-c", script], {}, str(tmp_path))
-        time.sleep(0.5)
-        assert len(c.pids(cs)) >= 2 and not c.is_empty(cs)
-        c.kill(cs)
-        assert c.is_empty(cs)
-        c.cleanup(cs)
-    finally:
-        subprocess.run(["rmdir", str(base)], check=False)
-
-
-# ── S3c: the launcher strategy ──────────────────────────────────────────────
-
-@pytest.mark.skipif(os.geteuid() == 0, reason="the unprivileged failure path needs a non-root caller")
-def test_default_launcher_without_privilege_fails_with_a_clear_message(root, tmp_path):
-    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, sleep=lambda s: None, require_cgroup2=False)
-    cs = c.create("s1")
-    seed_cgroup(cs)
-    with pytest.raises(ContainmentError) as exc:
-        c.spawn(cs, [sys.executable, "-c", "pass"], {}, str(tmp_path))
-    assert "launcher" in str(exc.value) and "CAP_SETUID" in str(exc.value)
-    assert cs.session_id not in c._out and cs.session_id not in c._leaders       # nothing half-started
-    assert c.pids(cs) == []
-
-
-def test_a_custom_launcher_receives_a_complete_request_and_its_leader_is_tracked(root, tmp_path):
-    seen = []
-
-    class Fake:
-        def launch(self, request):
-            seen.append(request)
-            return subprocess.Popen([sys.executable, "-c", "print('hi')"], stdout=request.output_fd,
-                                    stderr=request.output_fd, cwd=request.cwd)
-
-    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, sleep=lambda s: None, launcher=Fake(), require_cgroup2=False)
-    cs = c.create("s1")
-    seed_cgroup(cs)
-    r, w = os.pipe()
-    try:
-        pid = c.spawn(cs, ["/bin/agent", "--x"], {"A": "b"}, str(tmp_path), (r,))
-    finally:
-        os.close(r)
-        os.close(w)
-    req = seen[0]
-    assert (req.argv, req.env, req.cwd, req.pass_fds) == (["/bin/agent", "--x"], {"A": "b"}, str(tmp_path), (r,))
-    assert req.procs_path == str(Path(cs.cgroup_path) / "cgroup.procs")
-    assert (req.uid, req.gid) == (4242, 4242)
-    assert pid == c._leaders["s1"].pid
-    deadline = time.time() + 10
-    data = b""
-    while b"hi" not in data and time.time() < deadline:
-        try:
-            data += os.read(c.output_fd(cs), 100)
-        except BlockingIOError:
-            time.sleep(0.02)
-    assert b"hi" in data
-    c.release_output(cs)
-
-
-def test_a_failing_launcher_leaks_no_pipe(root, tmp_path):
-    class Boom:
-        def launch(self, request):
-            raise RuntimeError("no")
-
-    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, launcher=Boom(), require_cgroup2=False)
-    cs = c.create("s1")
-    seed_cgroup(cs)
-    before = len(os.listdir("/proc/self/fd"))
     with pytest.raises(ContainmentError):
-        c.spawn(cs, ["/bin/x"], {}, str(tmp_path))
-    assert len(os.listdir("/proc/self/fd")) == before
+        c.output_fd(cs)
 
 
-# ── addendum: identity, cgroup2, frozen polling ─────────────────────────────
-
-def test_worker_uid_equal_to_the_core_user_is_refused(root):
-    with pytest.raises(ValueError):
-        CgroupContainment(root, worker_uid=os.geteuid(), worker_gid=4242, require_cgroup2=False)
-
-
-def test_spawn_rechecks_the_worker_identity(root, tmp_path):
-    c = CgroupContainment(root, worker_uid=4242, worker_gid=4242, require_cgroup2=False,
-                          launcher=type("L", (), {"launch": lambda self, r: pytest.fail("launched")})())
-    cs = c.create("s1")
-    seed_cgroup(cs)
-    c.worker_uid = os.geteuid()
+def test_a_session_with_no_output_pipe_says_so(root):
     with pytest.raises(ContainmentError):
-        c.spawn(cs, ["/bin/x"], {}, str(tmp_path))
+        make(root).output_fd(ContainedSession("s1", "local_cgroup", str(root / "s1"), 1))
 
+
+# ── configuration of the containment itself ─────────────────────────────────
 
 def test_cgroup_root_must_be_on_a_cgroup2_mount(root, tmp_path):
     from planet_express.missions.containment_cgroup import cgroup2_mount_of
@@ -373,17 +336,36 @@ def test_cgroup_root_must_be_on_a_cgroup2_mount(root, tmp_path):
     mounts = tmp_path / "mountinfo"
     mounts.write_text("30 1 8:1 / / rw - ext4 /dev/sda1 rw\n")
     with pytest.raises(ContainmentError) as exc:
-        CgroupContainment(root, worker_uid=4242, worker_gid=4242, mountinfo_path=str(mounts))
+        CgroupContainment(root, launcher=StubLauncher(root), mountinfo_path=str(mounts))
     assert "cgroup v2" in str(exc.value)
     mounts.write_text(f"30 1 0:22 / {root.parent} rw - cgroup2 cgroup2 rw\n")
-    CgroupContainment(root, worker_uid=4242, worker_gid=4242, mountinfo_path=str(mounts))
+    CgroupContainment(root, launcher=StubLauncher(root), mountinfo_path=str(mounts))
 
+
+@pytest.mark.parametrize("bad", [(0, 10), (-5, 10), (100, 100), (200, 100)])
+def test_the_uid_range_needs_room_for_a_probe_uid(root, bad):
+    with pytest.raises(ValueError):
+        make(root, uid_range=bad)
+
+
+def test_a_relative_or_unnormalised_root_is_refused(tmp_path):
+    for bad in ("relative", str(tmp_path) + "/a/../b"):
+        with pytest.raises(ValueError):
+            CgroupContainment(bad, launcher=None, require_cgroup2=False)
+
+
+def test_the_containment_has_no_python_fork_path_of_its_own():
+    text = (Path(__file__).resolve().parents[1] / "planet_express/missions/containment_cgroup.py").read_text()
+    for forbidden in ("preexec_fn", "subprocess", "os.fork", "setresuid", "setuid", "shell=True"):
+        assert forbidden not in text, forbidden
+
+
+# ── freezing ────────────────────────────────────────────────────────────────
 
 def test_freeze_waits_for_frozen_1_and_thaw_for_frozen_0(root):
     now = [0.0]
     c = make(root, Recording, sleep=lambda s: now.__setitem__(0, now[0] + s), clock=lambda: now[0])
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = launched(c)
     events = Path(cs.cgroup_path) / "cgroup.events"
     reads = []
     orig = c._read
@@ -414,9 +396,9 @@ def test_freeze_times_out_loudly_and_kill_still_proceeds(root):
     def sleep(s):
         now[0] += s
 
-    c = make(root, Stuck, sleep=sleep, clock=lambda: now[0], freeze_timeout_s=1.0)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    c = make(root, Stuck, sleep=sleep, clock=lambda: now[0])
+    c.freeze_timeout_s = 1.0
+    cs = launched(c)
     with pytest.raises(ContainmentError):
         c.freeze(cs)
     c.writes.clear()
@@ -425,12 +407,11 @@ def test_freeze_times_out_loudly_and_kill_still_proceeds(root):
     assert ("cgroup.kill", "1") in c.writes
 
 
-# ── round 2: missing cgroup, adopted zombies ────────────────────────────────
+# ── missing cgroup, adopted zombies ─────────────────────────────────────────
 
 def test_kill_of_a_cgroup_that_no_longer_exists_is_already_dead(root):
-    import shutil
     c = make(root)
-    cs = c.create("s1")
+    cs = launched(c)
     shutil.rmtree(cs.cgroup_path)               # e.g. after a reboot
     assert c.is_empty(cs)
     c.kill(cs)                                  # must not raise
@@ -438,8 +419,6 @@ def test_kill_of_a_cgroup_that_no_longer_exists_is_already_dead(root):
 
 
 def test_kill_when_cgroup_kill_file_vanishes_mid_way_is_dead_if_empty(root):
-    import shutil
-
     class Vanish(Recording):
         def _write(self, path, value):
             if Path(path).name == "cgroup.kill":
@@ -448,15 +427,15 @@ def test_kill_when_cgroup_kill_file_vanishes_mid_way_is_dead_if_empty(root):
             super()._write(path, value)
 
     c = make(root, Vanish)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = launched(c)
     c.kill(cs)
 
 
 def test_is_empty_reaps_a_dead_child_this_instance_did_not_launch(root):
     c = make(root)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = ContainedSession("s9", "local_cgroup", str(root / "s9"), 61005)
+    (root / "s9").mkdir()
+    (root / "s9" / "cgroup.events").write_text("populated 1\nfrozen 0\n")
     pid = os.fork()
     if pid == 0:
         os._exit(0)
@@ -469,7 +448,7 @@ def test_is_empty_reaps_a_dead_child_this_instance_did_not_launch(root):
         if state == "Z":
             break
         time.sleep(0.01)
-    (Path(cs.cgroup_path) / "cgroup.procs").write_text(f"{pid}\n")
+    (root / "s9" / "cgroup.procs").write_text(f"{pid}\n")
     assert c._leaders == {}                       # a restarted Core has no Popen for it
     c.is_empty(cs)
     with pytest.raises(ChildProcessError):
@@ -478,7 +457,45 @@ def test_is_empty_reaps_a_dead_child_this_instance_did_not_launch(root):
 
 def test_reaping_tolerates_pids_that_are_not_our_children(root):
     c = make(root)
-    cs = c.create("s1")
-    seed_cgroup(cs)
+    cs = launched(c)
     (Path(cs.cgroup_path) / "cgroup.procs").write_text("1\n999999\n")
     assert c.is_empty(cs) is False
+
+
+# ── is any process still running as a uid ───────────────────────────────────
+
+def test_uid_has_processes_reads_proc_and_fails_closed(tmp_path):
+    proc = tmp_path / "proc"
+    for pid, uids in (("10", "0\t0\t0\t0"), ("11", "61005\t61005\t61005\t61005"), ("12", "5\t61007\t5\t5")):
+        (proc / pid).mkdir(parents=True)
+        (proc / pid / "status").write_text(f"Name:\tx\nUid:\t{uids}\nGid:\t0 0 0 0\n")
+    (proc / "self").mkdir()
+    (proc / "11x").mkdir()
+    assert uid_has_processes(61005, str(proc))
+    assert uid_has_processes(61007, str(proc))              # an effective uid counts too
+    assert not uid_has_processes(61006, str(proc))
+    assert uid_has_processes(61005, str(tmp_path / "missing"))   # unreadable /proc: assume the worst
+
+
+def test_a_process_whose_status_cannot_be_read_counts_as_running_hidepid_and_eacces(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("root can read everything")
+    proc = tmp_path / "proc"
+    (proc / "10").mkdir(parents=True)
+    (proc / "10" / "status").write_text("Uid:\t5\t5\t5\t5\n")
+    (proc / "10" / "status").chmod(0)
+    assert uid_has_processes(61005, str(proc)) is True       # unreadable is not the same as gone
+    (proc / "10" / "status").chmod(0o644)
+    assert uid_has_processes(61005, str(proc)) is False
+
+
+def test_a_process_that_vanishes_between_listing_and_reading_is_not_running(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "99").mkdir(parents=True)               # a directory with no status file
+    assert not uid_has_processes(61005, str(proc))
+
+
+def test_uid_in_use_sees_this_process_as_its_own_uid(root):
+    c = make(root)
+    assert c.uid_in_use(os.getuid())
+    assert not c.uid_in_use(61999)

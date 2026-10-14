@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Containment rehearsal for v4 mission sessions. Needs root; prints one JSON document.
+"""Containment rehearsal for v4 mission sessions: drives the REAL launcher and prints one JSON document.
 
-Creates a throwaway cgroup, spawns a process tree as a throwaway uid (a leader, a plain child and a
-double-fork/setsid escaper), proves every member is in the cgroup and runs as that uid with
-no_new_privs, freezes it, kills it, proves `is_empty()`, and removes everything. Exit status 0 only
-if every check passed. Run it on the Ubuntu host and on the MOS VM before relying on containment:
+Run it on the host that will run missions, as the identity Core runs as (root on MOS, the Core user on Ubuntu), after
+the launcher setup steps (session-uid-range, launcher-helper, launcher-sudoers, cgroup-tree, workspace-root,
+socket-root) have been applied:
 
-    sudo python3 scripts/mission_containment_rehearsal.py [--cgroup-base /sys/fs/cgroup] [--uid 61999]
+    python3 scripts/mission_containment_rehearsal.py --workspace-root DIR [--launcher auto|sudo|direct] \\
+        [--cgroup-root DIR] [--sock-root DIR] [--uid-min N] [--uid-max N]
 
-It touches only `<cgroup-base>/pe-rehearsal-<pid>` and a temp dir, and removes both on the way out.
+(the cgroup root, socket root and uid range default to the `missions.*` defaults; pass what your config says)
+
+Step 1 is the launcher preflight (the same one the daemon runs before it starts any session): installation of the
+helper and its config, sudoers, then a throwaway session started through `pe-launch` whose own process proves it
+cannot write the cgroup files, while Core freezes it (confirming `frozen 1`), thaws it, kills it and removes it.
+Step 2 launches a real process tree as a session uid (a leader, a plain child and a double-fork/setsid escaper) and
+proves every member is in the cgroup, runs as that uid with no_new_privs, that Core can freeze and kill the whole
+tree, and that the cgroup empties. Exit status 0 only if the preflight passed and every check passed.
+
+It touches only `<cgroup-root>/PREFLIGHT-*` and `<cgroup-root>/REHEARSAL-*` (and the matching workspace and socket
+directories) and removes them on the way out. Never run it on a machine whose launcher you have not installed on
+purpose: with no helper installed the preflight simply fails, which is the point.
 """
 
 import argparse
 import json
 import os
-import shutil
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -47,64 +56,87 @@ def status_field(pid, key):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--cgroup-base", default="/sys/fs/cgroup")
-    parser.add_argument("--uid", type=int, default=61999, help="throwaway uid/gid (no passwd entry needed)")
+    parser.add_argument("--launcher", choices=("auto", "sudo", "direct"), default="auto")
+    from config_schema import MissionsConfig
+    defaults = MissionsConfig()           # the same values Core and the launcher setup use
+    parser.add_argument("--cgroup-root", default=defaults.cgroup_root)
+    parser.add_argument("--workspace-root", required=True, help="missions.workspace_root (or <state dir>/mission-workspaces)")
+    parser.add_argument("--sock-root", default=defaults.sock_root)
+    parser.add_argument("--uid-min", type=int, default=defaults.session_uid_min)
+    parser.add_argument("--uid-max", type=int, default=defaults.session_uid_max)
     args = parser.parse_args()
-    if os.geteuid() != 0:
-        print(json.dumps({"ok": False, "error": "must run as root"}))
+    if not Path("/sys/fs/cgroup/cgroup.controllers").exists():
+        print(json.dumps({"ok": False, "error": "cgroup v2 is not mounted at /sys/fs/cgroup"}))
         return 2
-    if not Path(args.cgroup_base, "cgroup.controllers").exists():
-        print(json.dumps({"ok": False, "error": "cgroup v2 not mounted at --cgroup-base"}))
-        return 2
-    if args.uid <= 1000:
+    if args.uid_min <= 1000:
         print(json.dumps({"ok": False, "error": "refusing a system-range uid"}))
         return 2
 
-    from planet_express.missions.containment_cgroup import CgroupContainment
+    from types import SimpleNamespace
 
-    report = {"ok": False, "checks": {}, "cgroup": None}
-    checks = report["checks"]
-    base = Path(args.cgroup_base) / f"pe-rehearsal-{os.getpid()}"
-    work = Path(tempfile.mkdtemp(prefix="pe-rehearsal-"))
-    os.chmod(work, 0o755)
-    cs = None
-    base.mkdir()
+    from planet_express.missions.launcher.cgroup_tree import ensure_tree
+    from planet_express.missions.launcher.config import CONF_PATH, HELPER_PATH
+    from planet_express.missions.launcher.preflight import run_preflight
+    from planet_express.missions.launcher.spec import LaunchSpec
+    from planet_express.missions.runner import build_containment, choose_strategy
+
+    cfg = SimpleNamespace(launcher=args.launcher, cgroup_root=args.cgroup_root, session_uid_min=args.uid_min,
+                          session_uid_max=args.uid_max, sock_root=args.sock_root)
+    strategy = choose_strategy(args.launcher, os.geteuid())
+    report = {"ok": False, "strategy": strategy, "preflight": None, "checks": {}, "cgroup": None}
     try:
-        c = CgroupContainment(base, worker_uid=args.uid, worker_gid=args.uid)
-        cs = c.create("rehearsal")
+        ensure_tree(args.cgroup_root)
+    except OSError as exc:
+        report["tree_error"] = f"could not prepare the cgroup tree: {exc.strerror}"
+    containment = build_containment(cfg)
+    preflight = run_preflight(
+        containment, strategy=strategy, workspace_root=args.workspace_root, sock_root=args.sock_root,
+        probe_uid=args.uid_max, helper=HELPER_PATH, conf=CONF_PATH, uid_range=(args.uid_min, args.uid_max),
+        sudo=strategy == "sudo")
+    report["preflight"] = preflight.to_dict()
+    print(preflight.render(), file=sys.stderr)
+    if not preflight.ok:
+        print(json.dumps(report, indent=2))
+        return 1
+
+    checks = report["checks"]
+    sid = f"REHEARSAL-{os.getpid()}"
+    workspace = Path(args.workspace_root) / sid
+    cs = None
+    try:
+        workspace.mkdir(mode=0o700)
+        spec = LaunchSpec(uid=args.uid_min, cwd=str(workspace), argv=(sys.executable, "-c", TREE),
+                          env={"PATH": "/usr/bin:/bin"}, token="r" * 40, sock_dir=False)
+        cs = containment.launch(sid, spec)
         report["cgroup"] = cs.cgroup_path
-        c.spawn(cs, [sys.executable, "-c", TREE], {"PATH": "/usr/bin:/bin"}, str(work))
         time.sleep(1.0)
-        members = c.pids(cs)
+        members = containment.pids(cs)
         checks["tree_has_at_least_3_members"] = len(members) >= 3
-        checks["all_run_as_throwaway_uid"] = all(status_field(p, "Uid") == str(args.uid) for p in members)
-        nnp = [status_field(p, "NoNewPrivs") for p in members]
-        checks["all_no_new_privs"] = bool(nnp) and all(v == "1" for v in nnp)
-        checks["not_empty_while_running"] = not c.is_empty(cs)
-        c.freeze(cs)
-        time.sleep(0.2)
-        events = Path(cs.cgroup_path, "cgroup.events").read_text()
-        checks["frozen"] = "frozen 1" in events
-        c.kill(cs)
-        checks["empty_after_kill"] = c.is_empty(cs)
-        checks["no_members_after_kill"] = c.pids(cs) == []
-        c.cleanup(cs)
+        checks["all_run_as_session_uid"] = all(status_field(p, "Uid") == str(args.uid_min) for p in members)
+        checks["all_no_new_privs"] = bool(members) and all(status_field(p, "NoNewPrivs") == "1" for p in members)
+        checks["not_empty_while_running"] = not containment.is_empty(cs)
+        containment.freeze(cs)
+        checks["frozen"] = "frozen 1" in Path(cs.cgroup_path, "cgroup.events").read_text()
+        containment.thaw(cs)
+        containment.kill(cs)
+        checks["empty_after_kill"] = containment.is_empty(cs)
+        checks["no_members_after_kill"] = containment.pids(cs) == []
+        containment.cleanup(cs)
         checks["cgroup_removed"] = not Path(cs.cgroup_path).exists()
+        checks["uid_free_after_kill"] = not containment.uid_in_use(args.uid_min)
     except Exception as exc:  # noqa: BLE001 -- report, then clean up
         report["error"] = f"{type(exc).__name__}: {exc}"
     finally:
-        if cs is not None and Path(cs.cgroup_path).exists():
+        if cs is not None:
             try:
-                CgroupContainment(base, worker_uid=args.uid, worker_gid=args.uid).kill(cs)
-                os.rmdir(cs.cgroup_path)
+                containment.kill(cs)
+                containment.cleanup(cs)
             except Exception:  # noqa: BLE001
-                report.setdefault("cleanup_error", "could not remove session cgroup")
-        try:
-            os.rmdir(base)
-        except OSError:
-            report.setdefault("cleanup_error", "could not remove rehearsal cgroup")
-        shutil.rmtree(work, ignore_errors=True)
-    report["ok"] = bool(checks) and all(checks.values()) and "error" not in report
+                report.setdefault("cleanup_error", "could not remove the rehearsal session cgroup")
+            containment.release_output(cs)
+        import shutil
+        shutil.rmtree(workspace, ignore_errors=True)
+    report["ok"] = bool(checks) and all(checks.values()) and "error" not in report and preflight.ok
     print(json.dumps(report, indent=2))
     return 0 if report["ok"] else 1
 

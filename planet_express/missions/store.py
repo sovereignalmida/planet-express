@@ -25,6 +25,10 @@ class SessionConflict(RuntimeError):
     """The mission already has a live session."""
 
 
+class NoFreeUid(RuntimeError):
+    """Every uid in the session range is held by a session that has not been reaped yet."""
+
+
 def grant_resources(grant: Grant) -> list[str]:
     """The lease set a grant implies: every scoped stack, service, mount and path on every host."""
     out: list[str] = []
@@ -160,12 +164,19 @@ class MissionStore:
                       declared: Mapping[str, Sequence[str]] | None = None, cgroup_path: str | None = None,
                       leader_pid: int | None = None, session_uid: int | None = None,
                       actor: str = "core", session_id: str | None = None,
-                      expected_grant_hash: str | None = None) -> str:
+                      expected_grant_hash: str | None = None, state: str = "live",
+                      uid_range: tuple[int, int] | None = None) -> str:
         """Status CAS, approval predicate, lease acquire and session insert in ONE BEGIN IMMEDIATE.
 
         Observe and propose missions move queued -> investigating and take no leases (they cannot mutate).
         Repair and above move into `executing`, which re-evaluates the execution predicate, then lease the
-        grant's scope. Any failure rolls everything back, so a refused start leaves no lease behind."""
+        grant's scope. Any failure rolls everything back, so a refused start leaves no lease behind.
+
+        `uid_range` makes this the SOLE uid allocator (contract 22.8.3): the lowest uid in the range that no
+        unreleased session holds is committed on the row, in this same transaction, BEFORE any launcher runs. A
+        row in state `launching` is not a live worker yet (`resolve_session` refuses it); `mark_session_live` flips it."""
+        if state not in ("launching", "live"):
+            raise ValueError("state must be launching or live")
         if not re.fullmatch(r"[0-9a-f]{64}", token_hash):
             raise ValueError("token_hash must be a sha256 hex digest")
         now = self._now()
@@ -192,17 +203,51 @@ class MissionStore:
                 if not wanted:
                     raise ValueError(f"{mission_id}: a {row['tier']} grant with an empty scope has nothing to lease")
                 fences = leases.acquire_in_txn(conn, wanted, mission_id, lease_ttl_s, now, declared)
+            if uid_range is not None and session_uid is None:
+                held = {r[0] for r in conn.execute("SELECT session_uid FROM mission_sessions "
+                                                   "WHERE session_uid IS NOT NULL AND uid_released_at IS NULL")}
+                free = next((u for u in range(uid_range[0], uid_range[1] + 1) if u not in held), None)
+                if free is None:
+                    raise NoFreeUid(f"all session uids in {uid_range[0]}-{uid_range[1]} are held")
+                session_uid = free
             try:
                 conn.execute(
                     "INSERT INTO mission_sessions (id, mission_id, token_hash, issued_at, expires_at, kind, "
-                    "cgroup_path, leader_pid, session_uid, fence_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "cgroup_path, leader_pid, session_uid, fence_json, state) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (session_id, mission_id, token_hash, now, now + session_ttl_s, kind, cgroup_path,
-                     leader_pid, session_uid, canonical_json(fences)),
+                     leader_pid, session_uid, canonical_json(fences), state),
                 )
             except sqlite3.IntegrityError as exc:
                 raise SessionConflict(str(exc)) from exc
             insert_event(conn, mission_id, "note", actor, {"session_started": session_id, "kind": kind}, now)
         return session_id
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM mission_sessions WHERE id=?", (session_id,)).fetchone()
+        return dict(row) if row else None
+
+    def mark_session_live(self, session_id: str, leader_pid: int | None = None) -> bool:
+        """`launching` -> `live`, only while the session is not revoked. False means it was not flipped."""
+        with self.store._write() as conn:
+            cur = conn.execute("UPDATE mission_sessions SET state='live', leader_pid=COALESCE(?, leader_pid) "
+                               "WHERE id=? AND state='launching' AND revoked_at IS NULL", (leader_pid, session_id))
+            return cur.rowcount == 1
+
+    def release_session_uid(self, session_id: str) -> bool:
+        """Free the uid for reuse. Called only after the session cgroup is gone and no process runs as the uid."""
+        with self.store._write() as conn:
+            cur = conn.execute("UPDATE mission_sessions SET uid_released_at=? WHERE id=? "
+                               "AND session_uid IS NOT NULL AND uid_released_at IS NULL", (self._now(), session_id))
+            return cur.rowcount == 1
+
+    def unreleased_revoked_sessions(self) -> list[dict[str, Any]]:
+        """Revoked sessions whose uid is still held: the reaper retries releasing them."""
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM mission_sessions WHERE revoked_at IS NOT NULL "
+                                "AND session_uid IS NOT NULL AND uid_released_at IS NULL").fetchall()
+        return [dict(r) for r in rows]
 
     def revoke_session(self, session_id: str, actor: str = "core") -> None:
         now = self._now()
@@ -243,4 +288,4 @@ class MissionStore:
                          (self._now(), grant_id))
 
 
-__all__ = ["GrantLocked", "MissionStore", "SessionConflict", "grant_resources"]
+__all__ = ["GrantLocked", "MissionStore", "NoFreeUid", "SessionConflict", "grant_resources"]

@@ -3018,7 +3018,7 @@ def run_bot() -> None:
     state.set_rescan_starter(make_rescan_starter(notifier, state, store, commands))
 
     missions = MissionService(
-        store, enabled=lambda: config.MISSIONS_ENABLED,
+        store, enabled=lambda: config.MISSIONS_ENABLED, budgets=lambda: config.MISSIONS.budgets,
         incident_context=lambda incident_id: commands.get_incident_context(
             incident_id, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS),
     )

@@ -32,7 +32,7 @@ from planet_express.memory import retrieval as memory_retrieval
 from planet_express.memory import store as memory_store
 from planet_express.memory.models import SLUG_RE, Card
 from planet_express.missions.events import insert_event, redact_value
-from planet_express.missions.models import Grant, GrantScope, Mission, MissionEvent, Status
+from planet_express.missions.models import Budgets, Grant, GrantScope, Mission, MissionEvent, Status
 from planet_express.missions.state import (
     TERMINAL,
     IllegalTransition,
@@ -83,6 +83,14 @@ class MissionError(Exception):
 
 
 # ── output shaping ────────────────────────────────────────────────────────────
+def _field_max(name: str) -> int:
+    """The `le` bound the Budgets model declares for `name`: the grant model, not the config, owns the maxima."""
+    for meta in Budgets.model_fields[name].metadata:
+        if getattr(meta, "le", None) is not None:
+            return meta.le
+    raise AssertionError(f"Budgets.{name} has no upper bound")
+
+
 def _clip(text: str, limit: int = MAX_TEXT) -> str:
     return text if len(text) <= limit else text[:limit] + "...[truncated]"
 
@@ -221,8 +229,9 @@ def _actor(operator: str) -> str:
 class MissionService:
     def __init__(self, store: Store, *, enabled: Callable[[], bool] | bool = False,
                  incident_context: Callable[[str], dict | None] | None = None,
-                 runtime: str = DEFAULT_RUNTIME):
+                 runtime: str = DEFAULT_RUNTIME, budgets: Callable[[], Any] | None = None):
         self.store = store
+        self._budgets = budgets          # `missions.budgets.*`, read when a grant is created (so a reload is honoured)
         self.missions = MissionStore(store)
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self._incident_context = incident_context
@@ -321,13 +330,25 @@ class MissionService:
                 "next_after_seq": events[-1]["seq"] if events else after_seq,
                 "first_seq": events[0]["seq"] if events else None}
 
+    def _grant_budgets(self) -> Budgets:
+        """The configured per-mission ceilings as a grant's budgets, each clamped to the grant model's own maximum
+        (the config allows any positive number; the grant model is the authority on what a grant may hold)."""
+        if self._budgets is None:
+            return Budgets()
+        cfg = self._budgets()
+        limits = {name: _field_max(name) for name in ("wall_s", "tool_calls", "output_bytes", "retries")}
+        return Budgets(wall_s=min(int(cfg.wall_seconds), limits["wall_s"]),
+                       tool_calls=min(int(cfg.tool_calls), limits["tool_calls"]),
+                       output_bytes=min(int(cfg.output_bytes), limits["output_bytes"]),
+                       retries=min(int(cfg.retries), limits["retries"]))
+
     def _create_queued(self, *, operator: str, title: str, goal: str, tier: str, origin: str,
                        incident_id: str | None, success_criteria: str, scope: dict | None,
                        evidence: dict | None = None) -> dict:
         """Create the mission, queue it and (optionally) record incident evidence in ONE transaction, so no
         failure can leave a half-made mission behind."""
         try:
-            grant = Grant(tier=tier, scope=GrantScope.model_validate(scope or {}))
+            grant = Grant(tier=tier, scope=GrantScope.model_validate(scope or {}), budgets=self._grant_budgets())
         except ValidationError:
             raise MissionError("Invalid scope") from None
         actor = _actor(operator)

@@ -1,24 +1,24 @@
-"""The daemon-side assembly of mission control (v4 slice 3c).
+"""The daemon-side assembly of mission control (v4 slice 3c, launcher wiring in slice 3d).
 
 `start_mission_runner(store, config)` is the single call the daemon makes. With `missions.enabled` false it
 builds nothing and returns None. Enabled, it assembles, from `config.MISSIONS`:
 
-    CgroupContainment (missions.cgroup_root, the worker account)
+    CgroupContainment (missions.cgroup_root, the launcher strategy, the session uid range)
     CommandRuntime    (missions.runtime.argv / env_allow)
-    Supervisor        (the store, the above, missions.enabled read at use time)
-    worker RpcServer  (missions.worker_socket: the five worker methods, the Supervisor as backend)
+    Supervisor        (the store, the above, missions.enabled read at use time, the preflight gate)
+    per-session worker sockets (one RpcServer in each session's own directory, the Supervisor as backend)
 
 and a poll thread that calls `Supervisor.tick()` (start queued Observe/Propose missions, advance running
-ones). `stop()` stops the thread and the socket first (no new worker calls), then kills every session.
+ones). The launcher preflight runs first (and again every few minutes while it fails): a host that fails any step
+is proposal-only and starts no session. `stop()` stops the thread first, then kills every session.
 Missions interrupted by a stop stay `investigating`; `recover()` at the next start deals with them.
 """
 
-import grp
 import logging
 import os
-import pwd
 import threading
 from collections.abc import Callable
+from pathlib import Path
 
 from planet_express.core.store import Store
 from planet_express.missions.adapters.command import CommandRuntime
@@ -27,7 +27,11 @@ from planet_express.missions.containment_cgroup import (
     CgroupContainment,
     cgroup2_mountpoint,
 )
-from planet_express.missions.supervisor import Supervisor
+from planet_express.missions.launcher.cgroup_tree import ensure_tree
+from planet_express.missions.launcher.config import CONF_PATH, HELPER_PATH
+from planet_express.missions.launcher.preflight import PreflightReport, run_preflight
+from planet_express.missions.launcher.strategies import DirectLauncher, SudoLauncher
+from planet_express.missions.supervisor import SocketProvider, Supervisor
 from planet_express.missions.worker_rpc import (
     CGROUP_MOUNT,
     WorkerAuthenticator,
@@ -40,8 +44,10 @@ POLL_INTERVAL_S = 2.0
 
 
 class MissionRunner:
-    def __init__(self, supervisor: Supervisor, worker_server=None, interval_s: float = POLL_INTERVAL_S):
+    def __init__(self, supervisor: Supervisor, worker_server=None, interval_s: float = POLL_INTERVAL_S,
+                 prepare: Callable[[], object] | None = None):
         self.supervisor = supervisor
+        self.prepare = prepare            # host preparation (Core's half of the cgroup layout), before anything runs
         self.worker_server = worker_server
         self.interval_s = interval_s
         self._stop = threading.Event()
@@ -50,6 +56,11 @@ class MissionRunner:
     def start(self) -> None:
         if self._thread is not None:
             raise RuntimeError("mission runner already started")
+        if self.prepare is not None:
+            try:
+                log.info("Mission cgroup tree: %s", self.prepare() or "already in place")
+            except Exception as exc:         # the preflight reports what is then missing and the host is proposal-only
+                log.warning("Could not prepare the mission cgroup tree: %s", exc)
         # The socket first: a session restarted by recover() may call it straight away.
         if self.worker_server is not None:
             self.worker_server.start()
@@ -95,35 +106,85 @@ def _cgroup_mount(root: str) -> str:
         return CGROUP_MOUNT
 
 
+def choose_strategy(mode: str, euid: int) -> str:
+    """`auto` is direct for a root Core and sudo otherwise. An explicit choice is returned as is, never downgraded."""
+    if mode == "auto":
+        return "direct" if euid == 0 else "sudo"
+    return mode
+
+
+def build_containment(cfg, *, euid: int | None = None) -> CgroupContainment:
+    strategy = choose_strategy(cfg.launcher, os.geteuid() if euid is None else euid)
+    launcher = DirectLauncher(HELPER_PATH, euid=euid) if strategy == "direct" else SudoLauncher(HELPER_PATH)
+    return CgroupContainment(cfg.cgroup_root, launcher=launcher, uid_range=(cfg.session_uid_min, cfg.session_uid_max),
+                             sock_root=cfg.sock_root)
+
+
+class SessionSockets(SocketProvider):
+    """One worker RpcServer per session, bound in `<sock_root>/<session_id>/`, which Core makes (it owns sock_root).
+    The launcher then hands the socket to the session's uid and the directory to the session's private group (0750),
+    so only that session can reach it. The server is built with no group: Core cannot chgrp to a uid it is not."""
+
+    def __init__(self, sock_root: str, backend, authenticator, build=build_worker_server):
+        self.sock_root, self.backend, self.authenticator, self._build = sock_root, backend, authenticator, build
+
+    def path(self, session_id: str) -> str:
+        return f"{self.sock_root}/{session_id}/worker.sock"
+
+    def start(self, cs) -> Callable[[], None]:
+        directory = os.path.dirname(self.path(cs.session_id))
+        os.mkdir(directory, 0o700)
+        server = self._build(self.path(cs.session_id), self.backend, self.authenticator, group=None)
+        try:
+            server.start()
+        except BaseException:
+            os.rmdir(directory)
+            raise
+        return server.stop
+
+
+def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None) -> Callable[[], PreflightReport]:
+    strategy = choose_strategy(cfg.launcher, os.geteuid() if euid is None else euid)
+    low, high = cfg.session_uid_min, cfg.session_uid_max
+
+    def run() -> PreflightReport:
+        return run_preflight(
+            containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
+            probe_uid=high, helper=HELPER_PATH, conf=CONF_PATH, uid_range=(low, high), sudo=strategy == "sudo")
+    return run
+
+
 def build_mission_runner(
     store: Store, cfg, *, containment: SessionContainment | None = None,
-    getpwnam: Callable[[str], pwd.struct_passwd] = pwd.getpwnam,
-    getgrgid: Callable[[int], grp.struct_group] = grp.getgrgid,
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
+    preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
-    the config object's own flag."""
+    the config object's own flag. With no injected `containment` the real one is built and the real preflight gates
+    it; an injected containment (tests) is trusted and only gated if a `preflight` is passed too."""
     if not cfg.enabled:
         return None
     if not cfg.runtime.argv:
         log.warning("missions.enabled is true but missions.runtime.argv is empty: no mission will run")
         return None
-    account = getpwnam(cfg.worker_user)
-    if account.pw_uid == 0 or account.pw_gid == 0:
-        raise ValueError("missions.worker_user must not be root")
-    if account.pw_uid == os.geteuid():
-        raise ValueError("missions.worker_user must not be the Core user")
-    if containment is None:
-        containment = CgroupContainment(cfg.cgroup_root, worker_uid=account.pw_uid, worker_gid=account.pw_gid)
+    real = containment is None
+    if real:
+        containment = build_containment(cfg)
     runtime = CommandRuntime(
-        containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
-        worker_uid=account.pw_uid, worker_gid=account.pw_gid)
+        containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket)
     supervisor = Supervisor(
-        store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled))
-    server = build_worker_server(cfg.worker_socket, supervisor, WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)),
-                                 group=getgrgid(account.pw_gid).gr_name)
-    return MissionRunner(supervisor, server, interval_s)
+        store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled),
+        workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None)
+    if real:
+        supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
+        supervisor.socket_provider = socket_provider or SessionSockets(
+            cfg.sock_root, supervisor, WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)))
+    else:
+        supervisor.preflight_fn = preflight
+        supervisor.socket_provider = socket_provider
+    prepare = (lambda: ensure_tree(cfg.cgroup_root)) if real else None
+    return MissionRunner(supervisor, None, interval_s, prepare)
 
 
 def start_mission_runner(store: Store, cfg, **kwargs) -> MissionRunner | None:

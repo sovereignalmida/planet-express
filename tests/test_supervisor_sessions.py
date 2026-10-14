@@ -20,58 +20,87 @@ def setup(tmp_path):
     m = new_mission(ms, Grant.model_validate({"tier": "observe"}))
     advance_to(ms, m.id, "queued")
     cont = FakeContainment()
-    cs = cont.create("S-abc")
-    return store, clock, ms, m, cont, cs
+    return store, clock, ms, m, cont
+
+
+def issue(ms, m, cont, sid="S-abc", **kw):
+    kw.setdefault("session_ttl_s", 600)
+    kw.setdefault("lease_ttl_s", 60)
+    return issue_session(ms, m.id, sid, cont.cgroup_path(sid), uid_range=cont.uid_range, **kw)
+
+
+def live(ms, sid):
+    assert ms.mark_session_live(sid)
 
 
 def test_only_the_hash_is_stored_and_the_right_caller_resolves(tmp_path):
-    store, clock, ms, m, cont, cs = setup(tmp_path)
-    sid, token = issue_session(ms, m.id, cs, session_ttl_s=600, lease_ttl_s=60)
-    assert sid == "S-abc" and len(token) == 64 and int(token, 16) >= 0
+    store, clock, ms, m, cont = setup(tmp_path)
+    cs, token = issue(ms, m, cont)
+    live(ms, cs.session_id)
+    assert cs.session_id == "S-abc" and len(token) == 64 and int(token, 16) >= 0
     with sqlite3.connect(store.path) as conn:
         dump = "\n".join(str(r) for r in conn.execute("SELECT * FROM mission_sessions"))
     assert token not in dump
-    row = resolve_session(store, MissionStore.hash_token(token), peer_cgroup=cs.cgroup_path)
-    assert row and row.id == sid and row.mission_id == m.id
+    row = resolve_session(store, MissionStore.hash_token(token), peer_cgroup=cs.cgroup_path, peer_uid=cs.session_uid)
+    assert row and row.id == "S-abc" and row.mission_id == m.id and row.session_uid == cs.session_uid
 
 
-def test_wrong_token_wrong_cgroup_and_missing_binding_are_rejected(tmp_path):
-    store, clock, ms, m, cont, cs = setup(tmp_path)
-    _, token = issue_session(ms, m.id, cs, session_ttl_s=600, lease_ttl_s=60)
+def test_wrong_token_wrong_cgroup_wrong_uid_and_missing_binding_are_rejected(tmp_path):
+    store, clock, ms, m, cont = setup(tmp_path)
+    cs, token = issue(ms, m, cont)
+    live(ms, cs.session_id)
     h = MissionStore.hash_token(token)
-    assert resolve_session(store, MissionStore.hash_token("0" * 64), peer_cgroup=cs.cgroup_path) is None
-    assert resolve_session(store, h, peer_cgroup="/fake-cgroup/other") is None
+    ok = {"peer_cgroup": cs.cgroup_path, "peer_uid": cs.session_uid}
+    assert resolve_session(store, h, **ok)
+    assert resolve_session(store, MissionStore.hash_token("0" * 64), **ok) is None
+    assert resolve_session(store, h, peer_cgroup="/fake-cgroup/other", peer_uid=cs.session_uid) is None
+    assert resolve_session(store, h, peer_cgroup=cs.cgroup_path, peer_uid=cs.session_uid + 1) is None
+    assert resolve_session(store, h, peer_cgroup=cs.cgroup_path) is None          # cgroup alone is not enough
+    assert resolve_session(store, h, peer_uid=cs.session_uid) is None             # nor is the uid alone
     assert resolve_session(store, h) is None
-    assert resolve_session(store, h, peer_uid=1234) is None
+
+
+def test_a_launching_session_authenticates_only_with_its_full_identity_so_the_first_connect_cannot_race(tmp_path):
+    """The agent may connect the instant it is exec'd, before Core has read the helper's status line and marked the
+    row live. The identity it is bound to (cgroup, uid, token) only exists once the launcher has run, so a launching row
+    is as safe to authenticate as a live one."""
+    store, clock, ms, m, cont = setup(tmp_path)
+    cs, token = issue(ms, m, cont)
+    h = MissionStore.hash_token(token)
+    ok = {"peer_cgroup": cs.cgroup_path, "peer_uid": cs.session_uid}
+    assert ms.get_session("S-abc")["state"] == "launching"
+    assert resolve_session(store, h, **ok).id == "S-abc"
+    assert resolve_session(store, h, peer_cgroup=cs.cgroup_path, peer_uid=cs.session_uid + 1) is None
+    assert resolve_session(store, h, peer_cgroup="/fake-cgroup/other", peer_uid=cs.session_uid) is None
+    assert ms.mark_session_live("S-abc", leader_pid=4242)
+    assert resolve_session(store, h, **ok).leader_pid == 4242
+    assert not ms.mark_session_live("S-abc")                                      # only launching -> live, once
+
+
+def test_a_revoked_session_cannot_go_live(tmp_path):
+    store, clock, ms, m, cont = setup(tmp_path)
+    cs, _ = issue(ms, m, cont)
+    revoke_session(ms, cs.session_id)
+    assert not ms.mark_session_live(cs.session_id)
 
 
 def test_revoked_and_expired_sessions_do_not_resolve(tmp_path):
-    store, clock, ms, m, cont, cs = setup(tmp_path)
-    sid, token = issue_session(ms, m.id, cs, session_ttl_s=600, lease_ttl_s=60)
+    store, clock, ms, m, cont = setup(tmp_path)
+    cs, token = issue(ms, m, cont)
+    live(ms, cs.session_id)
     h = MissionStore.hash_token(token)
+    ok = {"peer_cgroup": cs.cgroup_path, "peer_uid": cs.session_uid}
     clock.t += 599
-    assert resolve_session(store, h, peer_cgroup=cs.cgroup_path)
+    assert resolve_session(store, h, **ok)
     clock.t += 1
-    assert resolve_session(store, h, peer_cgroup=cs.cgroup_path) is None       # expired
+    assert resolve_session(store, h, **ok) is None       # expired
     clock.t -= 100
-    revoke_session(ms, sid)
-    assert resolve_session(store, h, peer_cgroup=cs.cgroup_path) is None       # revoked
-
-
-def test_uid_bound_session_requires_the_uid(tmp_path):
-    store, clock, ms, m, cont, cs = setup(tmp_path)
-    from planet_express.missions.containment import ContainedSession
-    uid_cs = ContainedSession("S-uid", "local_uid", None, 64001)
-    _, token = issue_session(ms, m.id, uid_cs, session_ttl_s=600, lease_ttl_s=60)
-    h = MissionStore.hash_token(token)
-    assert resolve_session(store, h, peer_uid=64001)
-    assert resolve_session(store, h, peer_uid=64002) is None
-    assert resolve_session(store, h, peer_cgroup="/anything") is None
+    revoke_session(ms, cs.session_id)
+    assert resolve_session(store, h, **ok) is None       # revoked
 
 
 def test_one_live_session_per_mission(tmp_path):
-    store, clock, ms, m, cont, cs = setup(tmp_path)
-    issue_session(ms, m.id, cs, session_ttl_s=600, lease_ttl_s=60)
-    cs2 = cont.create("S-def")
+    store, clock, ms, m, cont = setup(tmp_path)
+    issue(ms, m, cont)
     with pytest.raises(SessionConflict):
-        issue_session(ms, m.id, cs2, session_ttl_s=600, lease_ttl_s=60)
+        issue(ms, m, cont, sid="S-def")
