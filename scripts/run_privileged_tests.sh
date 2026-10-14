@@ -57,7 +57,7 @@ case "$MODE" in
     rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ -e "ssh ${PE_SSH_OPTS:-}" \
       "$HERE"/ "root@$TARGET":/root/pe-privileged-tests/
     # shellcheck disable=SC2086
-    exec ssh ${PE_SSH_OPTS:-} "root@$TARGET" "cd /root/pe-privileged-tests && sh scripts/run_privileged_tests.sh --here --i-know-this-is-disposable -- $*"
+    exec ssh ${PE_SSH_OPTS:-} "root@$TARGET" "cd /root/pe-privileged-tests && PE_PYTHON=${PE_PYTHON:-python3} sh scripts/run_privileged_tests.sh --here --i-know-this-is-disposable -- $*"
     ;;
   here)
     [ "$SURE" = yes ] || { echo "refusing: --here needs --i-know-this-is-disposable" >&2; exit 2; }
