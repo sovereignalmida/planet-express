@@ -28,6 +28,15 @@ class FileMeta:
     mode: int
     uid: int
     gid: int
+    mtime_ns: int = 0
+
+
+class Drifted(UnsafePath):
+    """The destination no longer holds what the restore saw a moment ago. `current` is its hash, or a marker."""
+
+    def __init__(self, message: str, current: str | None):
+        super().__init__(message)
+        self.current = current
 
 
 def real_root(path: str) -> str:
@@ -68,7 +77,8 @@ def _open_dir_nofollow(root_real: str, parts: list[str]) -> int:
 
 
 def _meta(st: os.stat_result) -> FileMeta:
-    return FileMeta(st.st_dev, st.st_ino, st.st_size, st.st_mode & 0o7777, st.st_uid, st.st_gid)
+    return FileMeta(st.st_dev, st.st_ino, st.st_size, st.st_mode & 0o7777, st.st_uid, st.st_gid,
+                    st.st_mtime_ns)
 
 
 def open_regular(root_real: str, real: str, *, max_bytes: int) -> tuple[int, FileMeta]:
@@ -191,11 +201,39 @@ def write_acl(fd: int, acl: str) -> bool:
     return bool(done and done.returncode == 0)
 
 
+def _hash_at(dfd: int, name: str, real: str, max_bytes: int) -> str | None:
+    """sha256 of `name` in the directory `dfd`, through the same no-follow open; None when absent. Raises Drifted
+    for anything that is present but not a readable regular file within the limit."""
+    try:
+        pre = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise Drifted(f"{real}: cannot be inspected ({_why(exc)})", "<unreadable>") from None
+    if not stat.S_ISREG(pre.st_mode):
+        raise Drifted(f"{real}: not a regular file ({_kind(pre.st_mode)})", "<not-regular>")
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dfd)
+    except OSError as exc:
+        raise Drifted(f"{real}: cannot be opened ({_why(exc)})", "<unreadable>") from None
+    try:
+        return sha256_bytes(read_all(fd, max_bytes))
+    except UnsafePath:
+        raise Drifted(f"{real}: grew past the size limit", "<oversize>") from None
+    finally:
+        os.close(fd)
+
+
 def write_atomic(root_real: str, real: str, data: bytes, *, mode: int, uid: int, gid: int,
-                 acl: str | None) -> list[str]:
+                 acl: str | None, expect: tuple[str | None] | None = None,
+                 max_bytes: int = 1 << 20) -> list[str]:
     """Replace (or create) one file: temp file in the same directory, fsync, owner/mode/ACL, rename, fsync of
     the directory, all through a directory fd opened without following links. Returns what could not be
-    restored (`owner`, `acl`) so the caller can report it; the bytes and mode are always written or this raises."""
+    restored (`owner`, `acl`) so the caller can report it; the bytes and mode are always written or this raises.
+
+    `expect=(sha,)` re-reads the destination through the same directory fd immediately before the rename and
+    raises Drifted if it no longer hashes to `sha` (None means "absent"). That narrows, but cannot close, the race
+    with a writer that does not take part in any lock: see the service module docstring."""
     parts = _parts(root_real, real)
     try:
         dfd = _open_dir_nofollow(root_real, parts[:-1])
@@ -231,8 +269,13 @@ def write_atomic(root_real: str, real: str, data: bytes, *, mode: int, uid: int,
                             os.fchmod(fd, mode)
                     else:
                         skipped.append("acl")
+                os.fsync(fd)            # again: owner, mode and ACL are metadata the first fsync did not cover
             finally:
                 os.close(fd)
+            if expect is not None:
+                seen = _hash_at(dfd, name, real, max_bytes)
+                if seen != expect[0]:
+                    raise Drifted(f"{real}: changed while it was being restored", seen)
             os.rename(temp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
             temp = None
         finally:
