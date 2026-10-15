@@ -15,8 +15,14 @@ Protocol with fakes and say so in the report. `git merge --ff-only v4-next` firs
    session may see. Default deny: credentials not named in `grant.credentials` are absent from env, cwd tree and
    readable paths. A grant change after approval changes the hash and invalidates `mission_approvals` (test it).
 2. Protected domains: site config `missions.protected` lists CONCRETE resources (contracts §2.3 ids); a built-in
-   default set (ingress dynamic config, DNS config, credential files, firewall dump, backup config, sudoers,
-   `daemon.json`, docker socket) cannot be emptied silently (removing a default needs an explicit recorded
+   default set covering EVERY brief §5.3 domain cannot be emptied silently: ingress/DNS/credential/firewall/backup/sudoers/
+   `daemon.json`/docker-socket files; persistent data volumes and storage mounts (all non-scope mounts and named volumes
+   discovered, plus `/`-level storage paths); package-manager state and invocation (dpkg/apt/pip/npm global dirs, or on
+   MOS its package paths); reboot/shutdown (unit and `systemctl` targets, watched via boot-id/uptime change); publishing
+   (git remotes/push in live trees, new public listeners/ingress routes); destructive VCS in live trees (reflog/HEAD/
+   working-tree-hash watch); and every operator-named cross-host system. Where a domain cannot be a file/resource hash,
+   it gets a named detector with its own planted-change test. This default set is checked in tests so removing a domain
+   fails CI. Removing a default needs an explicit recorded
    override). Setup proposes the list from discovery; the operator confirms. Matching uses §2.3 containment and
    **protected wins**.
 3. `planet_express/missions/tripwire/`: `signals.py` (one collector per signal in §9: containers + per-container
@@ -28,7 +34,8 @@ Protocol with fakes and say so in the report. `git merge --ff-only v4-next` firs
      was seen last".
    - Diff verdict per change: `allowed`, `unexpected_in_scope` (counted against `effects.max_unexpected_in_scope`
      and per_resource budgets), `protected` (immediate pause).
-   - Pause = freeze the session cgroup, revoke capability endpoints, durable write of `paused_tripwire` with the diff
+   - Pause = freeze the session cgroup, revoke capability endpoints, **then `checkpoint.capture_post()` (durable; if it
+     fails the card says rollback is unavailable and offers only take-over/cancel; never offer a rollback that CAS would refuse)**, durable write of `paused_tripwire` with the diff
      (redacted, bounded), operator card payload with options resume / roll back (calls S5 restore) / take over / cancel.
      Budget 30 s worst case change->recorded event; a test measures it with a fake clock and a real-time smoke.
    - The monitor runs while any mission is `executing`, independent of the Leela scan, in its own thread with its
@@ -48,7 +55,7 @@ Protocol with fakes and say so in the report. `git merge --ff-only v4-next` firs
    A Repair-tier start refuses unless all pass; Observe/Propose are unaffected.
 
 ## Acceptance tests (write first)
-- Planted-change test per protected domain: ingress, DNS file, credential file, firewall dump, data-volume shrink
+- Planted-change test per EVERY §5.3 domain (incl. package change, reboot/boot-id change, git push in a live tree, new public ingress, cross-host named system): ingress, DNS file, credential file, firewall dump, data-volume shrink
   (>10% size or >5% entries), backup config, sudoers, daemon.json: session frozen and mission `paused_tripwire`
   within one scan interval + deadline; rollback offered; the pause event carries the diff.
 - Out-of-scope container created / mount added / image changed on a non-scope service => detected the same way.

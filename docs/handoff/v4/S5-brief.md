@@ -23,8 +23,9 @@ does not decide approval. Its entry points are called by later slices and by tes
      orchestrators/docker access (no direct `systemctl`/shell strings, argv only). Docker inspection uses the
      existing docker access path; if only the raw socket exists, read-only calls only.
    - `store.py`: checkpoint root `<state>/checkpoints/<id>/` (dir 0700 Core-owned, files 0600), manifest
-     (sha256, mode, owner uid/gid, size, real path, symlink flag) written atomically, fsynced, then a `COMMITTED`
-     marker file written last; a directory without the marker is garbage and never restorable.
+     (sha256, mode, owner uid/gid, size, real path, symlink flag) written atomically; commit order is: fsync every copied payload file, fsync every
+     directory in the tree, then write+fsync the manifest, then write+fsync the `COMMITTED` marker, then fsync the checkpoint
+     directory and its parent; `COMMITTED` is written last and only then is the checkpoint usable; a directory without the marker is garbage and never restorable.
    - `service.py`: `create(mission_id, scope) -> checkpoint_id`, `capture_post(checkpoint_id)`,
      `restore(checkpoint_id, *, ack_drift=False) -> RestoreReport`, `purge(checkpoint_id)`.
    - `backup.py`: `BackupFreshness` protocol + a config-driven implementation (last-success time and covered paths
@@ -56,6 +57,7 @@ does not decide approval. Its entry points are called by later slices and by tes
 ## Acceptance tests (write first; each side door has one)
 - Byte-for-byte round trip: tree with files of modes 0600/0640/0755, a file with an ACL, a `.env`; capture, mutate,
   restore => identical bytes/mode/owner (owner part skipped when not root, asserted when privileged).
+- Durability: fault-injection test records the order of fsync/rename calls and asserts payload+dirs+manifest are synced before the marker exists.
 - Crash safety: kill between manifest write and marker => directory is quarantined at next start and never restored;
   kill mid-restore (fault-inject after N files) => re-running restore completes and ends identical (idempotent).
 - CAS: a post-change file edited by someone else => restore refuses, writes nothing, reports the path, mission

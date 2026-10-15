@@ -18,7 +18,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 | 9 | First Repair, release | not started |
 
 ## Next action
-NEXT: Claude /code-review on 3d diff (base f0ee1f2); wire setup steps + MOS boot hook; Ubuntu (sudo strategy) rehearsal VM; Phase-1 exit rehearsal (real incident -> mission -> contextualised session survives restart); then slice 5 (checkpoint) and 6 (tripwires+grants) specs + Codex G1 BEFORE any code. Run privileged tests on MOS with: PE_PYTHON=/mnt/data/pe/venv/bin/python scripts/run_privileged_tests.sh --vm 192.168.122.159. Previous text follows.
+3d Claude /code-review DONE (5 fixed, rest logged: result.json readability, repair_sessions_table w/o snapshot, sweep_uids stale rows). S5-brief.md and S6-brief.md written and Codex-G1'd (3 P1s fixed). NEXT: dispatch S5 then S6 (S6 builds against S5 Protocol) on operator go; wire setup steps + MOS boot hook; Ubuntu (sudo strategy) rehearsal VM; Phase-1 exit rehearsal (real incident -> mission -> contextualised session survives restart); then slice 5 (checkpoint) and 6 (tripwires+grants) specs + Codex G1 BEFORE any code. Run privileged tests on MOS with: PE_PYTHON=/mnt/data/pe/venv/bin/python scripts/run_privileged_tests.sh --vm 192.168.122.159. Previous text follows.
 
 Operator signs off slice 0 (`docs/designs/v4-slice-0-contracts.md` rev 0.3); then slices 1 and 2 in parallel worktrees (briefs:
 `docs/handoff/v4/S1-brief.md`, `S2-brief.md`, not yet written).
