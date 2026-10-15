@@ -147,7 +147,7 @@ class SystemdHostControlProvider:
         if lines < 1:
             raise ValueError("lines must be at least 1")
         rc, out, err = bender.run_argv(
-            ["journalctl", "-u", unit, "--no-pager", "-n", str(lines)],
+            ["journalctl", "-u", unit, "--no-pager", "-o", "short-iso", "-n", str(lines)],
             timeout=MONITORING_READ_TIMEOUT_SECONDS,
         )
         if rc != 0:
