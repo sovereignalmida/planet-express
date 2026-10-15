@@ -108,6 +108,7 @@ Exit: operator decisions in §14 of the brief are recorded (done 2026-10-13); th
 - Grant hash binds approval; a changed grant invalidates it.
 
 ### Slice 7 — Approval, standing grants, privilege
+- Carried from S5 review: `CheckpointService.restore(ack_drift=True)` trusts an `operator:` actor string. The RPC layer MUST derive the actor from the authenticated dashboard/Telegram identity (never params) and the worker socket must never reach restore; add a test for each. The supervisor must call `capture_post()` once the session is provably dead, before any restore.
 - Docker API proxy (slice-0 spec §6.1): each refusal class has a test (privileged, host mount, socket mount, out-of-scope object, host namespaces); every accepted write is recorded before forwarding.
 - `mission` origin added to policy with the §5 tests.
 - Hook layer enforces the guards an interactive classifier would: refuse secret-store reads, destructive VCS in live trees, publishing.
