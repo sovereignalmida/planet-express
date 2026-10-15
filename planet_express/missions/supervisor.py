@@ -520,6 +520,10 @@ class Supervisor:
             run.stop_socket = None
         if run.workspace is not None:
             shutil.rmtree(run.workspace, ignore_errors=True)
+            if run.workspace.exists():
+                # A leftover owned by the old uid would be inherited by the next session given this uid.
+                log.warning("workspace %s was not removed: uid %s stays held", run.workspace, run.cs and run.cs.session_uid)
+                return
         self._release_uid(run.cs)
 
     def _release_uid(self, cs: ContainedSession | None) -> None:
@@ -553,6 +557,10 @@ class Supervisor:
                     continue
                 self.containment.cleanup(cs)
                 if self.containment.uid_in_use(cs.session_uid):
+                    continue
+                workspace = self.workspace_dir / row["id"]
+                shutil.rmtree(workspace, ignore_errors=True)
+                if workspace.exists():
                     continue
                 freed += int(self.ms.release_session_uid(cs.session_id))
             except Exception as exc:

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 CONF_PATH = "/etc/planetexpress/launch.conf"
 HELPER_PATH = "/usr/libexec/planetexpress/pe-launch"
 SUDOERS_PATH = "/etc/sudoers.d/planetexpress-launch"
-DEFAULT_UID_RANGE = (61000, 61999)
+DEFAULT_UID_RANGE = (200000, 200999)   # clear of systemd's DynamicUser range (61184-65519) and of normal accounts
 DEFAULT_PIDS_MAX = 512
 
 

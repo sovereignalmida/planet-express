@@ -174,7 +174,7 @@ class MissionStore:
 
         `uid_range` makes this the SOLE uid allocator (contract 22.8.3): the lowest uid in the range that no
         unreleased session holds is committed on the row, in this same transaction, BEFORE any launcher runs. A
-        row in state `launching` is not a live worker yet (`resolve_session` refuses it); `mark_session_live` flips it."""
+        row in state `launching` is not a live worker yet (`resolve_session` still authenticates it: the worker socket must work during launch); `mark_session_live` flips it."""
         if state not in ("launching", "live"):
             raise ValueError("state must be launching or live")
         if not re.fullmatch(r"[0-9a-f]{64}", token_hash):
