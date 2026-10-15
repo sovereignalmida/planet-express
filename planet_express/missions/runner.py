@@ -45,8 +45,9 @@ POLL_INTERVAL_S = 2.0
 
 class MissionRunner:
     def __init__(self, supervisor: Supervisor, worker_server=None, interval_s: float = POLL_INTERVAL_S,
-                 prepare: Callable[[], object] | None = None):
+                 prepare: Callable[[], object] | None = None, tripwire=None):
         self.supervisor = supervisor
+        self.tripwire = tripwire          # `tripwire.TripwireMonitor` or None; it has its own thread and failure isolation
         self.prepare = prepare            # host preparation (Core's half of the cgroup layout), before anything runs
         self.worker_server = worker_server
         self.interval_s = interval_s
@@ -68,6 +69,12 @@ class MissionRunner:
             recovered = self.supervisor.recover()
             if recovered:
                 log.warning("Reconciled %d in-flight mission(s) at startup", len(recovered))
+            if self.tripwire is not None:
+                # Re-freeze every paused session and finish a pause that was begun but not recorded, then watch.
+                acted = self.tripwire.recover()
+                if acted:
+                    log.warning("Tripwire: %d paused mission(s) re-frozen at startup", len(acted))
+                self.tripwire.start()
         except Exception:
             self._stop_server()
             raise
@@ -80,6 +87,11 @@ class MissionRunner:
                 self.supervisor.tick()
             except Exception:
                 log.exception("mission runner tick failed")
+            if self.tripwire is not None:
+                try:
+                    self.tripwire.ensure_running()        # a dead monitor thread pauses everything and restarts
+                except Exception:
+                    log.exception("tripwire monitor check failed")
             self._stop.wait(self.interval_s)
 
     def _stop_server(self) -> None:
@@ -90,6 +102,8 @@ class MissionRunner:
                 log.exception("worker socket did not stop cleanly")
 
     def stop(self) -> None:
+        if self.tripwire is not None:
+            self.tripwire.stop()
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=30)
@@ -159,6 +173,7 @@ def build_mission_runner(
     store: Store, cfg, *, containment: SessionContainment | None = None,
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
+    stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
@@ -172,11 +187,30 @@ def build_mission_runner(
     real = containment is None
     if real:
         containment = build_containment(cfg)
+    if stacks_root is not None and (tool_broker is None or env_policy is None):
+        # Slice 6 controls that need only the store and the config: the brokered tools (keys stay in Core's environment)
+        # and the grant-to-environment policy. The tripwire monitor and the side-door gate need the checkpoint service
+        # and the host's sudoers generator output, which the daemon supplies with slice 7 (`tripwire=`, `repair_gate=`).
+        from planet_express.missions.grants import make_env_policy
+        from planet_express.missions.store import MissionStore
+        from planet_express.missions.tools import broker_from_config, default_registry
+        from planet_express.missions.tripwire.build import build_protected_set
+        protected = build_protected_set(cfg, stacks_root=stacks_root)
+        if tool_broker is None:
+            tool_broker = broker_from_config(cfg, missions=MissionStore(store), stacks_root=stacks_root,
+                                             protected=protected.resources)
+        if env_policy is None:
+            refs = dict(cfg.tool_secret_env)
+            env_policy = make_env_policy(
+                protected=protected, stacks_root=stacks_root, known_tools=default_registry().names(),
+                secret_values=lambda: [v for v in (os.environ.get(var) for var in refs.values()) if v])
     runtime = CommandRuntime(
-        containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket)
+        containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
+        env_policy=env_policy)
     supervisor = Supervisor(
         store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled),
-        workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None)
+        workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
+        repair_gate=repair_gate)
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
         supervisor.socket_provider = socket_provider or SessionSockets(
@@ -185,7 +219,7 @@ def build_mission_runner(
         supervisor.preflight_fn = preflight
         supervisor.socket_provider = socket_provider
     prepare = (lambda: ensure_tree(cfg.cgroup_root)) if real else None
-    return MissionRunner(supervisor, None, interval_s, prepare)
+    return MissionRunner(supervisor, None, interval_s, prepare, tripwire=tripwire)
 
 
 def start_mission_runner(store: Store, cfg, **kwargs) -> MissionRunner | None:

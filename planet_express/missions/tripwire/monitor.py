@@ -1,0 +1,506 @@
+"""The tripwire monitor (contract 9, brief 6.2): continuous state diff against the grant while a mission executes.
+
+    scan (own thread, every `interval_s`; each signal 3 s, the whole scan 10 s)
+      ├─ any signal failed, timed out or missing        ──► pause (fail closed)
+      ├─ baseline unreadable / grant hash changed       ──► pause
+      └─ diff vs the baseline captured at executing start
+            protected / out_of_scope change             ──► pause
+            unexpected_in_scope over budget             ──► pause
+            anything else                               ──► keep going
+
+    pause = freeze the session cgroup ─► close the capability endpoints ─► checkpoint.capture_post() ─► ONE durable
+            transaction (mission -> paused_tripwire + the `tripwire` event carrying the redacted, bounded diff and the
+            operator card). Worst case change -> recorded event: interval + deadline + freeze + write (budget 30 s).
+
+The baseline is the live capture taken at executing start (and checked against the checkpoint's immutable manifest); it is
+never advanced to "whatever was seen last". It is written to disk before the first scan so a Core restart keeps it. A
+paused mission stays paused across a restart: `recover()` freezes its session again, and a pause that was begun but not
+recorded (the `intent` file) is completed. A monitor crash pauses every executing mission and the monitor keeps running.
+Nothing here interprets host text: log lines, labels and file contents only ever reach a hash or a bounded, sanitised detail.
+"""
+
+import fnmatch
+import json
+import logging
+import os
+import re
+import threading
+import time
+from collections.abc import Callable, Collection
+from typing import Any
+
+from planet_express.core.redact import redact
+from planet_express.missions.containment import ContainedSession, SessionContainment
+from planet_express.missions.events import insert_event
+from planet_express.missions.models import Grant, Mission
+from planet_express.missions.resources import BadResource, canon, split
+from planet_express.missions.state import (
+    IllegalTransition,
+    transition,
+    transition_in_txn,
+)
+from planet_express.missions.store import MissionStore, grant_resources
+
+from .diff import Change, DiffContext, clean, diff_snapshots
+from .signals import Scanner, ScanResult, blind_resources
+
+log = logging.getLogger(__name__)
+
+ACTOR = "tripwire"
+STATE_V = 1
+MAX_CHANGES = 30
+MAX_STATE_BYTES = 8 * 1024 * 1024
+PAUSE_SLA_S = 30
+_MISSION_ID = re.compile(r"^M-\d{1,12}$")
+BASE_OPTIONS = ("resume", "roll_back", "take_over", "cancel")
+NO_ROLLBACK_OPTIONS = ("take_over", "cancel")
+
+
+class BlindBaseline(RuntimeError):
+    """The baseline has resources Core can only stat, not read, and the operator has not accepted that."""
+
+
+class RollbackRefused(RuntimeError):
+    """The operator asked for a rollback that cannot be done safely right now."""
+
+
+class TripwireStore:
+    """Durable per-mission state (baseline, budget counters, pause intent): atomic, 0600, in a 0700 directory."""
+
+    def __init__(self, root: str):
+        self.root = root
+
+    def _dir(self, mission_id: str) -> str:
+        if not _MISSION_ID.match(mission_id):
+            raise ValueError("bad mission id")
+        return os.path.join(self.root, mission_id)
+
+    def write(self, mission_id: str, name: str, value: dict[str, Any]) -> None:
+        directory = self._dir(mission_id)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        data = json.dumps(value, sort_keys=True).encode()
+        if len(data) > MAX_STATE_BYTES:
+            raise ValueError("tripwire state too large")
+        tmp = os.path.join(directory, f".{name}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, os.path.join(directory, name))
+        dfd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+
+    def read(self, mission_id: str, name: str) -> dict[str, Any] | None:
+        path = os.path.join(self._dir(mission_id), name)
+        try:
+            with open(path, "rb") as handle:
+                data = handle.read(MAX_STATE_BYTES + 1)
+        except FileNotFoundError:
+            return None
+        if len(data) > MAX_STATE_BYTES:
+            raise ValueError("tripwire state too large")
+        value = json.loads(data)
+        if not isinstance(value, dict):
+            raise ValueError("tripwire state is not an object")
+        return value
+
+    def remove(self, mission_id: str, name: str) -> None:
+        try:
+            os.unlink(os.path.join(self._dir(mission_id), name))
+        except FileNotFoundError:
+            pass
+
+
+def pause_card(ms: MissionStore, mission_id: str) -> dict[str, Any] | None:
+    """The operator card payload of the mission's latest pause, from the durable event."""
+    for event in reversed(ms.events(mission_id)):
+        if event.kind == "tripwire":
+            body = json.loads(event.body_json)
+            if body.get("event") == "tripwire.paused":
+                return body
+    return None
+
+
+class TripwireMonitor:
+    def __init__(self, *, missions: MissionStore, containment: SessionContainment, checkpoint: Any, scanner: Scanner,
+                 state_dir: str, enabled: Callable[[], bool] | bool = False, stacks_root: str | None = None,
+                 interval_s: float = 15.0, investigating_interval_s: float = 60.0,
+                 clock: Callable[[], float] = time.monotonic,
+                 revoke_endpoints: Callable[[str], None] | None = None, crash_backoff_s: float = 5.0,
+                 accept_blind: Collection[str] = ()):
+        self.ms = missions
+        self.containment = containment
+        self.checkpoint = checkpoint
+        self.scanner = scanner
+        self.state = TripwireStore(state_dir)
+        self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
+        self.stacks_root = stacks_root
+        self.interval_s = interval_s
+        self.investigating_interval_s = investigating_interval_s
+        self.clock = clock
+        self.revoke_endpoints = revoke_endpoints or (lambda mission_id: None)
+        self.crash_backoff_s = crash_backoff_s
+        self.accept_blind = frozenset(accept_blind)       # resource ids the operator accepts being unable to read
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self.last_scan_at: float | None = None
+        self.scans = 0
+
+    # ── thread ──────────────────────────────────────────────────────────────
+    @property
+    def enabled(self) -> bool:
+        return bool(self._enabled())
+
+    def start(self) -> threading.Thread | None:
+        """Start the monitor thread. With missions disabled nothing starts and None is returned."""
+        if not self.enabled:
+            return None
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return self._thread
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, daemon=True, name="tripwire-monitor")
+            self._thread.start()
+            return self._thread
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=30)
+
+    def ensure_running(self) -> bool:
+        """The daemon's tick calls this: a monitor thread that died (anything, including BaseException) pauses every
+        executing mission and is restarted. Returns True when it had to act."""
+        if not self.enabled or self._stop.is_set():
+            return False
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            return False
+        if thread is not None:
+            self._pause_all("monitor_died")
+        self.start()
+        return thread is not None
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            wait = self.interval_s
+            try:
+                if self.enabled:
+                    wait = self.tick()
+            except Exception as exc:
+                log.exception("tripwire monitor crashed")
+                self._pause_all("monitor_crashed", f"{type(exc).__name__}")
+                wait = self.crash_backoff_s
+            self._stop.wait(wait)
+
+    def tick(self) -> float:
+        """One turn: scan if any mission is executing. Returns how long to wait before the next one."""
+        executing = self.ms.list_missions("executing")
+        if executing:
+            self.scan_once(executing)
+            return self.interval_s
+        return self.investigating_interval_s if self.ms.list_missions("investigating") else self.interval_s
+
+    # ── a scan ──────────────────────────────────────────────────────────────
+    def scan_once(self, missions: list[Mission] | None = None) -> dict[str, str]:
+        """Scan once and judge every executing mission. Returns {mission id: 'ok' | the pause cause}."""
+        missions = self.ms.list_missions("executing") if missions is None else missions
+        if not missions:
+            return {}
+        result = self.scanner.scan()
+        self.last_scan_at = self.clock()
+        self.scans += 1
+        out: dict[str, str] = {}
+        for mission in missions:
+            try:
+                out[mission.id] = self._judge(mission, result)
+            except Exception as exc:         # noqa: BLE001 - one mission's failure pauses that mission only
+                log.warning("tripwire could not judge %s: %s", mission.id, type(exc).__name__)
+                self._pause(mission, "monitor_error", [], {"error": type(exc).__name__}, result)
+                out[mission.id] = "monitor_error"
+        return out
+
+    def _ctx(self, grant: Grant) -> DiffContext:
+        scope = tuple(canon(r) for r in grant_resources(grant))
+        protected = []
+        for resource in grant.protected.resources:
+            try:
+                protected.append(canon(resource))
+            except BadResource:
+                raise ValueError("grant.protected holds a malformed resource") from None
+        return DiffContext(scope=scope, protected=tuple(protected), stacks_root=self.stacks_root)
+
+    def _judge(self, mission: Mission, result: ScanResult) -> str:
+        if not result.ok:
+            return self._pause(mission, "scan_failed", [], result.errors, result)
+        baseline = self._baseline_for(mission, result)
+        if baseline is None:
+            return "baseline_captured"
+        if baseline == "blind":
+            return self._pause(mission, "blind_baseline", [], {}, result)
+        if baseline == "unreadable":
+            return self._pause(mission, "baseline_unreadable", [], {}, result)
+        if baseline["grant_hash"] != mission.grant_hash or mission.grant().hash() != mission.grant_hash:
+            return self._pause(mission, "grant_changed", [], {}, result)
+        grant = mission.grant()
+        changes = diff_snapshots(baseline["snapshot"], result.snapshot, self._ctx(grant))
+        immediate = [c for c in changes if c.verdict in ("protected", "out_of_scope")]
+        counted = self._count(mission, grant, changes)
+        if immediate:
+            cause = "protected" if any(c.verdict == "protected" for c in immediate) else "out_of_scope"
+            return self._pause(mission, cause, immediate + counted["new"], {}, result)
+        if counted["over"]:
+            return self._pause(mission, counted["over"], counted["new"], {}, result)
+        return "ok"
+
+    def _count(self, mission: Mission, grant: Grant, changes: list[Change]) -> dict[str, Any]:
+        """Distinct changes against the budgets. The baseline never moves, so the same difference shows on every scan:
+        it is counted once, by its key, and the keys are kept on disk so a restart does not count it again."""
+        seen = (self.state.read(mission.id, "budget.json") or {"v": STATE_V, "keys": {}})
+        keys: dict[str, dict] = seen["keys"]
+        new = []
+        for change in changes:
+            if change.key not in keys:
+                keys[change.key] = {"verdict": change.verdict, "resource": change.resource}
+                if change.verdict == "unexpected_in_scope":
+                    new.append(change)
+        unexpected = sum(1 for k in keys.values() if k["verdict"] == "unexpected_in_scope")
+        over = None
+        if unexpected > grant.effects.max_unexpected_in_scope:
+            over = "unexpected_in_scope_budget"
+        for pattern, budget in grant.effects.per_resource.items():
+            hits = sum(1 for k in keys.values() if _matches(k["resource"], pattern))
+            if hits > budget.changes:
+                over = "per_resource_budget"
+        self.state.write(mission.id, "budget.json", {"v": STATE_V, "keys": keys})
+        if new:
+            self.ms.append_event(mission.id, "tripwire", ACTOR, {
+                "event": "tripwire.unexpected_in_scope", "changes": [c.as_dict() for c in new[:MAX_CHANGES]],
+                "total_unexpected": unexpected, "budget": grant.effects.max_unexpected_in_scope})
+        return {"new": new, "over": over}
+
+    # ── baseline ────────────────────────────────────────────────────────────
+    def begin(self, mission_id: str) -> dict[str, Any]:
+        """Capture the live baseline at executing start. The caller (the supervisor, before the session is launched)
+        must see this succeed: a failed capture means the mission must not run."""
+        mission = self.ms.get_mission(mission_id)
+        result = self.scanner.scan()
+        if not result.ok:
+            raise RuntimeError(f"cannot capture the tripwire baseline: {sorted(result.errors)}")
+        return self._capture_baseline(mission, result)
+
+    def _capture_baseline(self, mission: Mission, result: ScanResult) -> dict[str, Any]:
+        drift = self._manifest_drift(mission, result.snapshot)
+        blind = blind_resources(result.snapshot)
+        unaccepted = [b for b in blind if b not in self.accept_blind]
+        if unaccepted:
+            # Fail closed: a watch that cannot read what it watches is not a watch. Fix the permissions (Core needs read
+            # access to its protected paths) or accept the blindness by name in missions.tripwire_accept_blind.
+            raise BlindBaseline(f"the tripwire cannot read: {', '.join(unaccepted[:6])}")
+        record = {"v": STATE_V, "mission_id": mission.id, "grant_hash": mission.grant_hash,
+                  "checkpoint_id": mission.checkpoint_id, "snapshot": result.snapshot,
+                  "manifest_drift": drift, "blind": blind}
+        self.state.write(mission.id, "baseline.json", record)
+        self.ms.append_event(mission.id, "tripwire", ACTOR, {
+            "event": "tripwire.baseline", "checkpoint": mission.checkpoint_id, "blind": blind,
+            "manifest_drift": drift[:MAX_CHANGES],
+            "counts": {k: (len(v) if hasattr(v, "__len__") else 1) for k, v in result.snapshot.items()}})
+        return record
+
+    def _manifest_drift(self, mission: Mission, snapshot: dict[str, Any]) -> list[str]:
+        """Services whose live image or networks already differ from the checkpoint manifest at executing start."""
+        if not mission.checkpoint_id:
+            return []
+        try:
+            facts = self.checkpoint.manifest(mission.checkpoint_id)["facts"]["services"]
+        except Exception:        # noqa: BLE001 - an unreadable manifest is reported by the checkpoint code, not here
+            return ["manifest unreadable"]
+        by_resource = {c["resource"]: c for c in snapshot.get("containers", {}).values()}
+        drifted = []
+        for service, fact in sorted(facts.items()):
+            try:
+                live = by_resource.get(canon(f"service:{service}"))
+            except BadResource:
+                continue
+            if fact is None or live is None:
+                if (fact is None) != (live is None):
+                    drifted.append(clean(service, 120))
+            elif fact["image_id"] != live["image"] or sorted(fact["networks"]) != sorted(live["networks"]):
+                drifted.append(clean(service, 120))
+        return drifted
+
+    def _baseline_for(self, mission: Mission, result: ScanResult) -> dict | str | None:
+        try:
+            record = self.state.read(mission.id, "baseline.json")
+        except (ValueError, OSError):
+            return "unreadable"
+        if record is not None:
+            if record.get("v") != STATE_V or not isinstance(record.get("snapshot"), dict):
+                return "unreadable"
+            return record
+        # No baseline yet. Before the session is live nothing can have changed anything, so take it now; once it
+        # is live the baseline is missing for a reason nobody can vouch for: pause.
+        session = self.ms.live_session(mission.id)
+        if session is None or session["state"] == "launching":
+            try:
+                self._capture_baseline(mission, result)
+            except BlindBaseline:
+                return "blind"
+            return None
+        return "unreadable"
+
+    # ── pause ───────────────────────────────────────────────────────────────
+    def _session(self, mission_id: str) -> ContainedSession | None:
+        with self.ms.store._connect() as conn:
+            row = conn.execute("SELECT * FROM mission_sessions WHERE mission_id=? "
+                               "ORDER BY issued_at DESC, rowid DESC LIMIT 1", (mission_id,)).fetchone()
+        if row is None:
+            return None
+        return ContainedSession(row["id"], "local_cgroup", row["cgroup_path"], row["session_uid"])
+
+    def _pause_all(self, cause: str, detail: str = "") -> None:
+        for mission in self.ms.list_missions("executing"):
+            try:
+                self._pause(mission, cause, [], {"detail": detail} if detail else {}, None)
+            except Exception:
+                log.exception("could not pause %s cleanly; killing its session", mission.id)
+                cs = self._session(mission.id)
+                if cs is not None:
+                    try:
+                        self.containment.kill(cs)
+                    except Exception:
+                        log.exception("could not kill the session of %s", mission.id)
+
+    def _pause(self, mission: Mission, cause: str, changes: list[Change], extra: dict, result: ScanResult | None) -> str:
+        started = self.clock()
+        try:
+            self.state.write(mission.id, "intent.json", {"v": STATE_V, "cause": cause, "grant_hash": mission.grant_hash})
+        except (OSError, ValueError):
+            log.exception("could not write the pause intent for %s; pausing anyway", mission.id)   # freezing comes first
+        frozen = self._freeze(mission.id)
+        try:
+            self.revoke_endpoints(mission.id)
+        except Exception:
+            log.exception("could not close the capability endpoints of %s", mission.id)
+        rollback = self._capture_post(mission)
+        options = list(BASE_OPTIONS if rollback["available"] else NO_ROLLBACK_OPTIONS)
+        shown = changes[:MAX_CHANGES]
+        body: dict[str, Any] = {
+            "event": "tripwire.paused", "cause": cause, "frozen": frozen,
+            "changes": [c.as_dict() for c in shown], "truncated": max(0, len(changes) - len(shown)),
+            "errors": {clean(k, 40): clean(redact(str(v)), 160) for k, v in list(extra.items())[:16]},
+            "rollback": rollback, "card": {"mission": mission.id, "options": options},
+            "scan_errors": {clean(k, 40): clean(v, 160) for k, v in list((result.errors if result else {}).items())[:16]},
+        }
+        body["latency_s"] = round(self.clock() - started, 3)
+        self._record(mission, body)
+        self.state.remove(mission.id, "intent.json")
+        return cause
+
+    def _freeze(self, mission_id: str) -> bool:
+        cs = self._session(mission_id)
+        if cs is None:
+            return False
+        try:
+            self.containment.freeze(cs)
+            return True
+        except Exception:
+            log.exception("could not freeze the session of %s; killing it", mission_id)
+            try:
+                self.containment.kill(cs)
+            except Exception:
+                log.exception("could not kill the session of %s", mission_id)
+            return False
+
+    def _capture_post(self, mission: Mission) -> dict[str, Any]:
+        if not mission.checkpoint_id:
+            return {"available": False, "reason": "this mission has no checkpoint"}
+        try:
+            self.checkpoint.capture_post(mission.checkpoint_id)
+        except Exception as exc:    # noqa: BLE001 - never offer a rollback the restore would refuse
+            return {"available": False, "reason": f"post-change capture failed: {type(exc).__name__}"}
+        return {"available": True, "checkpoint": mission.checkpoint_id}
+
+    def _record(self, mission: Mission, body: dict[str, Any]) -> None:
+        """Mission -> paused_tripwire and the event, in ONE transaction: the pause is recorded or it is not."""
+        now = int(self.ms.store._clock())
+        try:
+            with self.ms.store._write() as conn:
+                transition_in_txn(conn, mission.id, "paused_tripwire", ACTOR, now)
+                insert_event(conn, mission.id, "tripwire", ACTOR, body, now)
+        except IllegalTransition:
+            # No longer executing (it finished, was cancelled or was already paused): keep the evidence anyway.
+            self.ms.append_event(mission.id, "tripwire", ACTOR, {**body, "event": "tripwire.pause_not_applied"})
+
+    # ── restart ─────────────────────────────────────────────────────────────
+    def recover(self) -> list[str]:
+        """At Core start: re-freeze every paused session, and finish a pause that was begun but never recorded."""
+        acted: list[str] = []
+        for mission in self.ms.list_missions("paused_tripwire"):
+            cs = self._session(mission.id)
+            if cs is not None:
+                try:
+                    self.containment.freeze(cs)
+                except Exception:
+                    log.exception("could not re-freeze %s; killing its session", mission.id)
+                    self.containment.kill(cs)
+            self.ms.append_event(mission.id, "tripwire", ACTOR, {"event": "tripwire.refrozen"})
+            acted.append(mission.id)
+        for mission in self.ms.list_missions("executing"):
+            try:
+                intent = self.state.read(mission.id, "intent.json")
+            except (ValueError, OSError):
+                intent = {"cause": "intent_unreadable"}
+            if intent is not None:
+                self._pause(mission, "recovered_pause", [], {"was": clean(intent.get("cause", "?"), 40)}, None)
+                acted.append(mission.id)
+        return acted
+
+    # ── operator action: roll back ──────────────────────────────────────────
+    def roll_back(self, mission_id: str, actor: str) -> Any:
+        """The operator's 'roll back' on a paused mission: kill the (frozen) session, wait until it is provably dead,
+        take the post-change manifest again, then call the checkpoint restore. The restore's own refusals (drift,
+        missing manifest) leave the mission with the operator; they are reported, never overridden here."""
+        if not actor.startswith("operator:") or len(actor) <= 9:
+            raise ValueError("a rollback is an operator decision: pass actor='operator:<name>'")
+        mission = self.ms.get_mission(mission_id)
+        if mission.status != "paused_tripwire":
+            raise RollbackRefused(f"{mission_id} is {mission.status}, not paused_tripwire")
+        card = pause_card(self.ms, mission_id)
+        if not mission.checkpoint_id or not card or not card["rollback"].get("available"):
+            raise RollbackRefused("rollback is not available for this pause")
+        cs = self._session(mission_id)
+        if cs is not None:
+            self.containment.kill(cs)
+            for _ in range(50):
+                if self.containment.is_empty(cs):
+                    break
+                self.containment.kill(cs)
+                time.sleep(0.1)
+            else:
+                raise RollbackRefused("the session is not provably dead")
+            self.containment.cleanup(cs)
+        self.checkpoint.capture_post(mission.checkpoint_id)
+        transition(self.ms.store, mission_id, "rollback_pending", actor)
+        report = self.checkpoint.restore(mission.checkpoint_id, actor=actor)
+        if report.ok:
+            transition(self.ms.store, mission_id, "rolled_back", actor)
+        return report
+
+
+def _matches(resource: str, pattern: str) -> bool:
+    try:
+        _host, kind, name = split(resource)
+    except ValueError:
+        return False
+    return fnmatch.fnmatchcase(f"{kind}:{name}", pattern) or fnmatch.fnmatchcase(resource, pattern)
+
+
+__all__ = ["ACTOR", "PAUSE_SLA_S", "BlindBaseline", "RollbackRefused", "TripwireMonitor", "TripwireStore", "pause_card"]

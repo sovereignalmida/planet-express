@@ -46,6 +46,11 @@ What a second reviewer should attend to, v3 and v4 together:
   approval/decision methods); per-resource leases and fencing; the session supervisor's crash
   classification; redaction before persistence; memory quarantine (candidates are never injected
   into a session until operator-confirmed).
+- **Slice 6 as built:** `missions/grants.py` (validation, grant-to-env builder), `missions/protected.py` (default protected
+  set; override recording), `missions/resources.py` (containment, protected-wins), `missions/tripwire/` (signals, diff,
+  monitor), `missions/launcher/side_doors.py` (worker identity, Docker TCP, sudoers), and `missions/tools.py`. Brokered tools
+  (`tool.invoke`, a reviewed capability, each addition gets the second review): `traefik.read`, `compose.dry_run`,
+  `app.health_get`, `arr.queue_item` (read); `dns.rewrite` (write, gated until slice 7).
 - **Independent verification:** a mission completes only when PE's own pre-agreed checks pass,
   never on an agent's assertion.
 

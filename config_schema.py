@@ -358,6 +358,32 @@ class CheckpointConfig(BaseModel):
         return path
 
 
+class ProtectedOverrideConfig(BaseModel):
+    """A recorded decision to take one resource out of the built-in protected set (v4 slice 6)."""
+    model_config = ConfigDict(extra="forbid")
+
+    resource: str = Field(min_length=1, max_length=512)
+    reason: str = Field(min_length=1, max_length=512)
+    operator: str = Field(pattern=r"^operator:.+$", max_length=128)
+    at: int = Field(ge=0)
+
+
+class CrossHostSystemConfig(BaseModel):
+    """A cross-host system the operator names as protected (NAS exports, edge proxy, router, DNS provider). `path` is a
+    readable copy of its configuration, when there is one; without it the tripwire cannot watch it and says so."""
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    path: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _path(cls, path: str | None) -> str | None:
+        if path is not None and (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path):
+            raise ValueError("missions.cross_host path must be a normalised absolute path")
+        return path
+
+
 class MissionsConfig(BaseModel):
     """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
     model_config = ConfigDict(extra="forbid")
@@ -386,6 +412,49 @@ class MissionsConfig(BaseModel):
     runtime: MissionRuntimeConfig = MissionRuntimeConfig()
     budgets: MissionBudgetsConfig = MissionBudgetsConfig()
     checkpoint: CheckpointConfig = CheckpointConfig()
+    # Tripwires (slice 6). The pause SLA (interval + 10 s scan deadline + freeze + write <= 30 s) holds up to 15 s.
+    tripwire_interval_s: int = Field(default=15, ge=1, le=15)
+    tripwire_investigating_interval_s: int = Field(default=60, ge=15, le=600)
+    # Protected domains: ADDITIONS to the built-in default set, as concrete resource ids (contract 2.3). The default set
+    # cannot be emptied from here: removing one needs a recorded override.
+    # Protected resources Core may be unable to READ (it only stats them): the tripwire is blind to their content, and a
+    # mission refuses to start over one unless it is named here. Concrete resource ids, e.g. host:local/path:/etc/shadow.
+    tripwire_accept_blind: list[str] = []
+    protected: list[str] = []
+    protected_overrides: list[ProtectedOverrideConfig] = []
+    live_trees: list[str] = []            # working trees watched for destructive VCS and pushes
+    cross_host: list[CrossHostSystemConfig] = []
+    package_paths: list[str] = []         # extra package-manager state (on MOS, its package paths)
+    docker_proxy_ports: list[int] = []    # ports of an allowlisting Docker socket proxy the operator vouches for
+    # Brokered tools: tool name -> {name: base url}, and secret ref -> the NAME of a Core environment variable that
+    # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
+    tool_sites: dict[str, dict[str, str]] = {}
+    tool_secret_env: dict[str, str] = {}
+
+    @field_validator("tool_sites")
+    @classmethod
+    def _tool_sites(cls, sites: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+        for tool, urls in sites.items():
+            for name, url in urls.items():
+                if not re.fullmatch(r"https?://[^\s/@]+(/[^\s]*)?", url) or "@" in url:
+                    raise ValueError(f"missions.tool_sites.{tool}.{name}: a plain http(s) URL without credentials")
+        return sites
+
+    @field_validator("tool_secret_env")
+    @classmethod
+    def _tool_secret_env(cls, refs: dict[str, str]) -> dict[str, str]:
+        for ref, var in refs.items():
+            if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", ref) or not _ENV_NAME.fullmatch(var) or var.startswith("PE_"):
+                raise ValueError("missions.tool_secret_env maps a lowercase secret ref to an environment variable name")
+        return refs
+
+    @field_validator("protected", "live_trees", "package_paths", "tripwire_accept_blind")
+    @classmethod
+    def _plain_list(cls, items: list[str]) -> list[str]:
+        for item in items:
+            if not item or len(item) > 512 or "\0" in item:
+                raise ValueError("entries must be non-empty strings of at most 512 characters")
+        return items
 
     @field_validator("worker_user")
     @classmethod
