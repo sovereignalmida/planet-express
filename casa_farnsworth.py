@@ -3028,7 +3028,8 @@ def run_bot() -> None:
     )
 
     # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).
-    mission_runner = start_mission_runner(store, config.MISSIONS, enabled=lambda: config.MISSIONS_ENABLED)
+    mission_runner = start_mission_runner(store, config.MISSIONS, enabled=lambda: config.MISSIONS_ENABLED,
+                                          stacks_root=str(config.STACKS_ROOT))
     shutdown = threading.Event()
     if mission_runner is not None:
         # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff

@@ -11,7 +11,7 @@ name. The grant hash is `Grant.hash()` (RFC 8785 canonical JSON, `canonical.py`)
 
 import os
 import re
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from .models import Grant
@@ -204,6 +204,21 @@ def build_session_env(grant: Grant, *, mission_id: str, workspace: str, worker_s
                       cwd=workspace, dropped=tuple(sorted(dropped)))
 
 
+def make_env_policy(*, protected: ProtectedSet, stacks_root: str | None, known_tools: Collection[str],
+                    secret_values: Callable[[], Collection[str]] = lambda: (),
+                    secret_paths: Collection[str] = ()) -> Callable[[Grant, str, str, Mapping[str, str]], dict[str, str]]:
+    """The hook `CommandRuntime` calls: the allow-listed environment goes through `build_session_env`, so a variable that
+    is secret by name or by value, or a credential the grant does not name, never reaches the session. `secret_values`
+    is read at call time (Core's own tool secrets)."""
+    def policy(grant: Grant, mission_id: str, workspace: str, env: Mapping[str, str]) -> dict[str, str]:
+        built = build_session_env(
+            grant, mission_id=mission_id, workspace=workspace, worker_socket=env.get("PE_WORKER_SOCKET", ""),
+            protected=protected, stacks_root=stacks_root, base_env=env, known_tools=known_tools,
+            secret_values=list(secret_values()), secret_paths=secret_paths)
+        return dict(built.env)
+    return policy
+
+
 def scan_session_env(se: SessionEnv, secrets: Collection[str], *, max_files: int = SCAN_MAX_FILES,
                      max_bytes: int = SCAN_MAX_BYTES) -> list[str]:
     """Where, if anywhere, a known secret is visible to the session: its env, cwd tree and readable files. A hit names
@@ -237,5 +252,5 @@ def scan_session_env(se: SessionEnv, secrets: Collection[str], *, max_files: int
     return hits
 
 
-__all__ = ["EnvLeak", "Inventory", "SessionEnv", "SiteLimits", "build_session_env", "grant_hash", "scan_session_env",
+__all__ = ["EnvLeak", "Inventory", "SessionEnv", "SiteLimits", "build_session_env", "grant_hash", "make_env_policy", "scan_session_env",
            "validate_grant", "with_site_protected"]

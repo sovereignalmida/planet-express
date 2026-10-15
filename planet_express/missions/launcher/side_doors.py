@@ -243,9 +243,12 @@ class DockerTcpExposure(Step):
         bad, proxies = [], []
         for line in res.stdout.decode("utf-8", errors="replace").splitlines():
             fields = line.split()
-            if len(fields) < 4 or fields[0] != "LISTEN":
+            # With one protocol selected `ss` omits the Netid column ("LISTEN 0 4096 local peer"); with several it
+            # leads with it ("tcp LISTEN 0 4096 local peer"). Find the state, then take the local address after it.
+            state = next((i for i, f in enumerate(fields[:2]) if f == "LISTEN"), None)
+            if state is None or len(fields) < state + 4:
                 continue
-            local = fields[3]
+            local = fields[state + 3]
             port = local.rsplit(":", 1)[-1]
             is_daemon = 'users:(("dockerd"' in line
             if not is_daemon and not (port.isdigit() and int(port) in DOCKER_TCP_PORTS):
@@ -298,50 +301,97 @@ def _logical_lines(text: str) -> list[tuple[int, int, str]]:
             continue
         buffer += line
         stripped = buffer.strip()
-        if stripped and not (stripped.startswith("#") and not stripped.startswith("#include")):
+        # `#1001 ALL=...` is a rule for uid 1001, not a comment; only `#include`, `#includedir` and plain text are.
+        if stripped and not (stripped.startswith("#") and not re.match(r"^#(\d|include)", stripped)):
             out.append((start, number, stripped))
         buffer = ""
     return out
+
+
+MAX_INCLUDE_DEPTH = 16
+MAX_SUDOERS_FILES = 512
 
 
 class SudoersManaged(Step):
     name = "sudoers-managed"
 
     def _files(self) -> list[str]:
+        """Every file sudo would read: the main file, `sudoers.d`, and anything they `@include` / `@includedir`,
+        recursively (a nested include is read, a cycle is cut, a target that cannot be resolved or read fails closed)."""
         p = self.p
-        main = _read(p.sudoers)
-        dirs, files = [p.sudoers_dir], [p.sudoers]
-        for _a, _b, line in _logical_lines(main):
-            match = re.match(r"^[@#]includedir\s+(\S+)", line)
-            if match and match.group(1) not in dirs:
-                dirs.append(match.group(1))
-            match = re.match(r"^[@#]include\s+(\S+)", line)
-            if match and match.group(1) not in files:
-                files.append(match.group(1))
-        for directory in dirs:
-            if not os.path.isdir(directory):
+        files: list[str] = []
+        queue: list[tuple[str, int]] = [(p.sudoers, 0)]
+        dirs: list[tuple[str, int, bool]] = [(p.sudoers_dir, 0, False)]       # (dir, depth, named by an include?)
+        seen_dirs: set[str] = set()
+        while queue or dirs:
+            if len(files) > MAX_SUDOERS_FILES:
+                raise StepError("sudoers includes too many files to check")
+            if dirs:
+                directory, depth, explicit = dirs.pop(0)
+                if directory in seen_dirs:
+                    continue
+                if not os.path.isdir(directory):
+                    if explicit:                  # a declared include that cannot be inspected is a failed check
+                        raise StepError(f"@includedir {directory[:80]} is not a readable directory")
+                    continue
+                seen_dirs.add(directory)
+                for name in sorted(os.listdir(directory)):
+                    if "." not in name and not name.endswith("~"):          # sudo itself ignores the others
+                        queue.append((os.path.join(directory, name), depth))
                 continue
-            for name in sorted(os.listdir(directory)):
-                if "." in name or name.endswith("~"):
-                    continue                      # sudo itself ignores these
-                path = os.path.join(directory, name)
-                if path not in files:
-                    files.append(path)
+            path, depth = queue.pop(0)
+            if path in files:
+                continue
+            if depth > MAX_INCLUDE_DEPTH:
+                raise StepError(f"sudoers includes nest deeper than {MAX_INCLUDE_DEPTH}: {path}")
+            text = _read(path)                    # an included file that cannot be read is a failed check
+            files.append(path)
+            for _a, _b, line in _logical_lines(text):
+                match = re.match(r"^[@#]include(dir)?\s+(.+)$", line)
+                if not match:
+                    continue
+                target = match.group(2).strip().strip('"')
+                if "%" in target:
+                    raise StepError(f"{path}: an include with a substitution ({target[:60]}) cannot be checked")
+                if not target.startswith("/"):
+                    target = os.path.normpath(os.path.join(os.path.dirname(path), target))
+                if match.group(1):
+                    dirs.append((target, depth + 1, True))
+                else:
+                    queue.append((target, depth + 1))
         return files
 
-    def _principals(self) -> tuple[set[str], dict[str, set[str]]]:
+    def _principals(self) -> tuple[set[str], int | None, set[int]]:
+        """Names, Core's uid and the gids it belongs to: what a sudoers user token must match to reach Core."""
         p = self.p
         passwd, groups = _passwd(_read(p.passwd)), _groups(_read(p.group))
         names = {p.core_user, "ALL"}
-        primary = next((gid for n, _u, gid in passwd if n == p.core_user), None)
+        core = next(((u, g) for n, u, g in passwd if n == p.core_user), None)
+        gids = {core[1]} if core else set()
         for gname, (gid, members) in groups.items():
-            if p.core_user in members or gid == primary:
+            if p.core_user in members or gid == (core[1] if core else None):
                 names.add("%" + gname)
-        return names, {}
+                gids.add(gid)
+        return names, (core[0] if core else None), gids
+
+    def _reaches(self, token: str, names: set[str], core_uid: int | None, gids: set[int]) -> bool:
+        """Does one sudoers user token name Core, or any session uid or gid?"""
+        p = self.p
+        if token in names:
+            return True
+        match = re.fullmatch(r"#(\d+)", token)
+        if match:
+            uid = int(match.group(1))
+            return uid == core_uid or p.uid_min <= uid <= p.uid_max
+        match = re.fullmatch(r"%#(\d+)", token)
+        if match:
+            gid = int(match.group(1))
+            return gid in gids or p.uid_min <= gid <= p.uid_max
+        return False
 
     def _violations(self) -> dict[str, list[tuple[int, int, str, str]]]:
         p = self.p
-        principals, _ = self._principals()
+        names, core_uid, gids = self._principals()
         files = self._files()
         aliases: dict[str, set[str]] = {}
         texts: dict[str, str] = {}
@@ -372,7 +422,7 @@ class SudoersManaged(Step):
                     continue
                 users = {u.strip() for u in " ".join(tokens[:-1]).split(",") if u.strip()}
                 users |= {x for u in list(users) for x in aliases.get(u, ())}
-                if not users & principals:
+                if not any(self._reaches(u, names, core_uid, gids) for u in users):
                     continue
                 cmds = re.sub(r"^\s*\([^)]*\)\s*", "", right)
                 cmds = re.sub(r"\b[A-Z_]+:\s*", "", cmds)

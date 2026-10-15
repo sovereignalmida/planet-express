@@ -151,6 +151,76 @@ def test_the_runner_without_a_monitor_is_unchanged():
     assert sup.calls[0] == "recover" and sup.calls[-1] == "shutdown"
 
 
+@pytest.fixture
+def cgroup2_mount(tmp_path, monkeypatch):
+    import config_schema
+    path = tmp_path / "mountinfo"
+    path.write_text("25 1 0:22 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n")
+    monkeypatch.setattr(config_schema, "MOUNTINFO_PATH", str(path))
+
+
+def test_command_runtime_applies_the_env_policy_before_spawning(tmp_path):
+    from planet_express.missions.adapters.command import CommandRuntime
+    from planet_express.missions.containment import ContainedSession
+    from planet_express.missions.grants import make_env_policy
+    from planet_express.missions.models import Grant
+    from planet_express.missions.runtime import RunContext
+    from planet_express.missions.tools import default_registry
+
+    prot = build_protected_set(MissionsConfig(), stacks_root=str(tmp_path))
+    policy = make_env_policy(protected=prot, stacks_root=str(tmp_path), known_tools=default_registry().names(),
+                             secret_values=lambda: ["super-secret-value-123456"])
+    seen = []
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ctx = RunContext(brief="b", session=ContainedSession("S-1", "fake", None, 60001), token_fd=7, env={}, cwd=str(ws),
+                     spawn=lambda argv, env, cwd, fds: seen.append(dict(env)) or 4242)
+    rt = CommandRuntime(FakeContainment(), argv=["/usr/bin/agent"], worker_socket="/run/w.sock",
+                        env_allow=["INNOCENT", "LANG"],
+                        environ={"INNOCENT": "xx-super-secret-value-123456", "LANG": "C"}, env_policy=policy)
+    mission = SimpleNamespace(id="M-1")
+    grant = Grant.model_validate({"tier": "propose", "scope": {"stacks": ["media"]}, "credentials": ["tool:arr.queue_item"]})
+    rt.start(mission, ctx, grant)
+    env = seen[0]
+    assert "INNOCENT" not in env and env["LANG"] == "C"                 # secret by value: dropped whatever its name
+    assert env["PE_TOOLS"] == "arr.queue_item" and env["PE_SESSION_TOKEN_FD"] == "7"
+    assert env["PE_WORKER_SOCKET"] == "/run/w.sock" and env["PE_MISSION_ID"] == "M-1"
+    assert "super-secret-value-123456" not in "".join(env.values())
+
+
+def test_a_failing_env_policy_stops_the_start(tmp_path):
+    from planet_express.missions.adapters.command import CommandRuntime
+    from planet_express.missions.containment import ContainedSession
+    from planet_express.missions.runtime import RunContext
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    ctx = RunContext(brief="b", session=ContainedSession("S-1", "fake", None, 60001), token_fd=7, env={}, cwd=str(ws),
+                     spawn=lambda *a: pytest.fail("a session was spawned"))
+
+    def policy(*a):
+        raise RuntimeError("cannot build the environment")
+    rt = CommandRuntime(FakeContainment(), argv=["/usr/bin/agent"], worker_socket="/run/w.sock", env_policy=policy)
+    with pytest.raises(RuntimeError):
+        rt.start(SimpleNamespace(id="M-1"), ctx, None)
+
+
+def test_build_mission_runner_wires_the_broker_and_env_policy_and_passes_the_rest_through(tmp_path, cgroup2_mount):
+    from planet_express.missions.runner import build_mission_runner
+    store, _ = make_store(tmp_path)
+    c = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/agent"]},
+                       tool_sites={"arr.queue_item": {"sonarr": "http://s.lan:8989"}},
+                       tool_secret_env={"arr-api": "ARR_API_KEY"})
+    gate, trip = (lambda: None), object()
+    runner = build_mission_runner(store, c, containment=FakeContainment(), stacks_root=str(tmp_path),
+                                  repair_gate=gate, tripwire=trip)
+    sup = runner.supervisor
+    assert sup.tool_broker is not None and sup.tool_broker.sites["arr.queue_item"].urls == {"sonarr": "http://s.lan:8989"}
+    assert sup.repair_gate is gate and runner.tripwire is trip
+    assert sup.runtime_factory(None).env_policy is not None
+    bare = build_mission_runner(store, c, containment=FakeContainment())
+    assert bare.supervisor.tool_broker is None and bare.supervisor.runtime_factory(None).env_policy is None
+
+
 def test_the_monitor_and_the_broker_close_together_on_a_pause(tmp_path):
     from planet_express.missions.tools import ToolBroker, ToolSite, default_registry
     rig = make_rig(tmp_path)

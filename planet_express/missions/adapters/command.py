@@ -66,7 +66,7 @@ class _Run:
 class CommandRuntime:
     def __init__(self, containment, *, argv, worker_socket, env_allow=(),
                  max_output_bytes=4 * 1024 * 1024, max_result_bytes=MAX_RESULT_BYTES,
-                 environ=None):
+                 environ=None, env_policy=None):
         # Same validation as the config model, so a hand-built runtime cannot be looser than a configured one.
         checked = MissionRuntimeConfig(argv=list(argv), env_allow=list(env_allow))
         if not checked.argv:
@@ -78,6 +78,9 @@ class CommandRuntime:
         self.max_output_bytes = max_output_bytes
         self.max_result_bytes = max_result_bytes
         self.environ = os.environ if environ is None else environ
+        # Grant -> environment (slice 6): `env_policy(grant, mission_id, workspace, env) -> env` has the last word on
+        # what the session sees (`grants.make_env_policy`). An exception from it stops the start: fail closed.
+        self.env_policy = env_policy
         self._runs: dict[str, _Run] = {}
 
     # --- AgentRuntime ----------------------------------------------------------------------
@@ -89,6 +92,9 @@ class CommandRuntime:
         cs = context.session
         workspace = self._prepare_workspace(Path(context.cwd), context.brief)
         env = self._env(workspace, context.token_fd)
+        if self.env_policy is not None:
+            env = dict(self.env_policy(grant, mission_id, str(workspace), env))
+            env["PE_SESSION_TOKEN_FD"] = str(context.token_fd)
         pid = context.spawn(list(self.argv), env, str(workspace), ())
         run_id = f"{mission_id}:{cs.session_id}"
         self._runs[run_id] = _Run(cs, workspace)

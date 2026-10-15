@@ -308,6 +308,78 @@ def test_sudoers_undo_refuses_once_the_file_moved_on(host):
     assert bad.read_text() == "something else entirely\n"
 
 
+def test_docker_tcp_parses_ss_with_and_without_the_netid_column(host):
+    for line in ('tcp   LISTEN 0 4096 0.0.0.0:2375 0.0.0.0:* users:(("dockerd",pid=812,fd=9))',
+                 'LISTEN 0 4096 0.0.0.0:2375 0.0.0.0:* users:(("dockerd",pid=812,fd=9))',
+                 "tcp LISTEN 0 4096 [::]:2376 [::]:*"):
+        host.ss = line + "\n"
+        probe = DockerTcpExposure(host.paths()).probe()
+        assert not probe.ok and "listening socket" in probe.detail, line
+    host.ss = "tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\nLISTEN 0 128 127.0.0.1:631 0.0.0.0:*\n"
+    assert DockerTcpExposure(host.paths()).probe().ok
+
+
+@pytest.mark.parametrize("rule", [
+    "#1001 ALL=(root) NOPASSWD: ALL",                     # Core by numeric uid
+    "#61005 ALL=(root) NOPASSWD: /bin/sh",                # a session uid
+    "%#1001 ALL=(root) NOPASSWD: /bin/sh",                # Core's primary gid
+    "%#998 ALL=(root) NOPASSWD: /bin/sh",                 # the docker gid Core is a member of
+    "%#61100 ALL=(root) NOPASSWD: /bin/sh",               # a session gid
+])
+def test_sudoers_numeric_principals_are_not_comments(host, rule):
+    (host.etc / "sudoers.d" / "numeric").write_text(rule + "\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and "numeric" in probe.detail
+
+
+def test_sudoers_numeric_rules_for_other_uids_are_ignored(host):
+    (host.etc / "sudoers.d" / "numeric").write_text("#1000 ALL=(ALL) NOPASSWD: ALL\n%#4242 ALL=(ALL) ALL\n")
+    assert SudoersManaged(host.paths()).probe().ok
+
+
+def test_sudoers_nested_includes_are_read(host):
+    extra = host.tmp / "opt" / "extra-sudoers"
+    extra.parent.mkdir()
+    extra.write_text("planetexpress ALL=(root) NOPASSWD: ALL\n")
+    (host.etc / "sudoers.d" / "chain").write_text(f"#include {extra}\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and "extra-sudoers" in probe.detail
+
+
+def test_sudoers_relative_and_directory_includes_are_followed_and_cycles_are_cut(host):
+    nested = host.tmp / "opt" / "more.d"
+    nested.mkdir(parents=True)
+    (nested / "rule").write_text("planetexpress ALL=(root) NOPASSWD: ALL\n")
+    (host.etc / "sudoers.d" / "chain").write_text("@include ../loop\n@includedir " + str(nested) + "\n")
+    (host.etc / "loop").write_text(f"@include {host.etc}/sudoers.d/chain\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and "rule" in probe.detail
+
+
+def test_sudoers_an_include_that_cannot_be_resolved_or_read_fails_closed(host):
+    (host.etc / "sudoers.d" / "chain").write_text("@include /nonexistent/file\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and probe.blocked
+    (host.etc / "sudoers.d" / "chain").write_text("@include /etc/sudoers.%h\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and probe.blocked and "substitution" in probe.detail
+
+
+def test_sudoers_a_missing_includedir_fails_closed(host):
+    (host.etc / "sudoers.d" / "chain").write_text("@includedir /nonexistent/dir.d\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and probe.blocked and "includedir" in probe.detail
+
+
+def test_sudoers_a_long_include_chain_fails_closed(host):
+    for i in range(20):
+        (host.etc / f"c{i}").write_text(f"@include {host.etc}/c{i + 1}\n")
+    (host.etc / "c20").write_text("# end\n")
+    (host.etc / "sudoers.d" / "chain").write_text(f"@include {host.etc}/c0\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and "deeper" in probe.detail
+
+
 # ── the gate ────────────────────────────────────────────────────────────────────────────────────────
 
 def test_the_repair_gate_passes_only_when_every_side_door_is_closed(host):
