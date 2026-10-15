@@ -8,6 +8,16 @@ operator acknowledges the drift, in which case the drifted bytes are kept first.
 and leaves the mission's reference. Entry points are for the supervisor and tests; no operator RPC lives here.
 
 File contents never appear in an event, a log line or an error string: only paths, hashes and field names.
+
+Residual races, stated plainly. There is no cross-process lock on the files a mission touches, and POSIX has no
+"replace this inode only if it is still that inode". Restore therefore narrows the window rather than closing it:
+every destination is hashed through the same directory fd and O_NOFOLLOW open immediately before its rename, and
+a mismatch aborts and is reported as drift. A writer that changes the file between that check and the rename
+still wins the race; the supervisor must have proven the session dead (and fenced) before it restores.
+
+The `operator:` actor check in `restore(ack_drift=True)` is a guard against internal callers, not authentication.
+The authenticated identity is derived by the slice 7 RPC layer from the dashboard or Telegram session and is
+never taken from request parameters.
 """
 
 import logging
@@ -22,7 +32,13 @@ import yaml
 
 from ..events import insert_event
 from ..models import Grant, Mission
-from ..state import NON_TERMINAL, IllegalTransition, MissionNotFound, transition
+from ..state import (
+    NON_TERMINAL,
+    TERMINAL,
+    IllegalTransition,
+    MissionNotFound,
+    transition,
+)
 from ..store import MissionStore
 from . import safefs
 from .backup import BackupFreshness
@@ -81,10 +97,12 @@ class CheckpointId(str):
     """The checkpoint id, carrying the one flag the caller needs: `no_backup` (the grant was acknowledged without
     a verified backup, so the caller classes the mission Critical; this module never changes a tier)."""
     no_backup: bool = False
+    facts_unavailable: tuple[str, ...] = ()       # stacks whose compose file was not valid YAML: files captured, no service facts
 
-    def __new__(cls, value: str, no_backup: bool = False):
+    def __new__(cls, value: str, no_backup: bool = False, facts_unavailable: tuple[str, ...] = ()):
         obj = super().__new__(cls, value)
         obj.no_backup = no_backup
+        obj.facts_unavailable = facts_unavailable
         return obj
 
 
@@ -117,7 +135,7 @@ class CheckpointScope:
 
 @dataclass
 class RestoreReport:
-    status: str                                      # done | refused
+    status: str                                      # done | refused | failed
     drifted: list[dict[str, str | None]] = field(default_factory=list)
     written: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
@@ -126,6 +144,12 @@ class RestoreReport:
     meta_skipped: list[dict[str, Any]] = field(default_factory=list)     # owner/ACL that could not be set
     observational: dict[str, Any] = field(default_factory=dict)          # reported, never asserted
     reason: str | None = None
+    written_stacks: set[str] = field(default_factory=set)
+
+    @property
+    def partial(self) -> bool:
+        """Some files were written and the restore did not finish: the host is half-restored."""
+        return self.status != "done" and bool(self.written)
 
     @property
     def ok(self) -> bool:
@@ -149,6 +173,12 @@ class _Hooks:
         pass
 
     def before_capture(self, planned: "list[_Planned]") -> None:
+        pass
+
+    def after_file_read(self, real: str) -> None:
+        pass
+
+    def before_reserve(self, mission_id: str) -> None:
         pass
 
 
@@ -182,9 +212,11 @@ class CheckpointService:
         """Quarantine every directory without the COMMITTED marker; report committed ones no mission references."""
         self._require_enabled()
         quarantined = self.store.quarantine_uncommitted()
+        self.store.purge_quarantine(self._now())
         referenced = {m.checkpoint_id for m in self.missions.list_missions() if m.checkpoint_id}
         unreferenced = [c for c in self.store.list_ids() if c not in referenced]
-        return {"quarantined": quarantined, "unreferenced": unreferenced}
+        return {"quarantined": quarantined, "unreferenced": unreferenced,
+                "purge_pending": self.store.pending_removals()}
 
     # ── create ──────────────────────────────────────────────────────────────
     def create(self, mission_id: str, scope: CheckpointScope) -> CheckpointId:
@@ -212,34 +244,58 @@ class CheckpointService:
         except BaseException:
             self.store.discard(checkpoint_id)
             raise
+        self.hooks.before_reserve(mission_id)
+        # Reserve the mission's slot atomically: the loser of a race keeps nothing.
+        terminal = tuple(TERMINAL)
         now = self._now()
+        reserved = False
         with self.missions.store._write() as conn:
-            conn.execute("UPDATE missions SET checkpoint_id=?, updated_at=? WHERE id=? AND checkpoint_id IS NULL",
-                         (checkpoint_id, now, mission_id))
-            insert_event(conn, mission_id, "note", "core",
-                         {"event": "checkpoint.created", "checkpoint": checkpoint_id, "files": len(planned),
-                          "bytes": total, "no_backup": no_backup,
-                          "hashes": {p.real: m["sha256"] for p, m in zip(planned, manifest["files"], strict=True)}},
-                         now)
-        return CheckpointId(checkpoint_id, no_backup)
+            cur = conn.execute(
+                "UPDATE missions SET checkpoint_id=?, updated_at=? WHERE id=? AND checkpoint_id IS NULL "
+                f"AND status NOT IN ({','.join('?' * len(terminal))})", (checkpoint_id, now, mission_id, *terminal))
+            if cur.rowcount == 1:
+                reserved = True
+                insert_event(conn, mission_id, "note", "core",
+                             {"event": "checkpoint.created", "checkpoint": checkpoint_id, "files": len(planned),
+                              "bytes": sum(f["size"] for f in manifest["files"]), "no_backup": no_backup,
+                              "facts_unavailable": manifest["facts_unavailable"],
+                              "hashes": {f["path"]: f["sha256"] for f in manifest["files"]}}, now)
+        if not reserved:
+            self.store.remove(checkpoint_id)
+            raise CheckpointExists(f"{mission_id} already has a checkpoint, or is no longer live")
+        return CheckpointId(checkpoint_id, no_backup, tuple(manifest["facts_unavailable"]))
 
     def validate_scope(self, scope: CheckpointScope) -> list[_Planned]:
         """Everything in scope must be a regular file Core can read, inside the stacks root after realpath,
-        under the size limit. Anything else is REFUSED, never skipped. Nothing is written."""
+        under the size limit. Anything else is REFUSED, never skipped. Files a compose file names in `env_file:`
+        and `include:` are in scope too, under the same rules. Nothing is written."""
         planned: list[_Planned] = []
         seen: set[str] = set()
 
-        def add(path: str, stack: str | None, kind: str) -> None:
+        def add(path: str, stack: str | None, kind: str, required: bool = True, depth: int = 0) -> None:
             try:
                 real, symlink = safefs.resolve_in_root(self.stacks_root, path)
                 if real in seen:
                     return
-                fd, meta = safefs.open_regular(self.stacks_root, real, max_bytes=self.settings.max_file_bytes)
-                os.close(fd)
+                try:
+                    fd, meta = safefs.open_regular(self.stacks_root, real, max_bytes=self.settings.max_file_bytes)
+                except safefs.UnsafePath:
+                    if not required and safefs.is_absent(self.stacks_root, real):
+                        return
+                    raise
+                try:
+                    data = safefs.read_all(fd, self.settings.max_file_bytes) if kind in _PARSED else b""
+                finally:
+                    os.close(fd)
             except safefs.UnsafePath as exc:
                 raise ScopeRefused(str(exc)) from None
             seen.add(real)
             planned.append(_Planned(path, real, symlink, stack, kind, meta))
+            if kind in _PARSED:
+                if depth >= MAX_INCLUDE_DEPTH:
+                    raise ScopeRefused(f"{real}: includes are nested more than {MAX_INCLUDE_DEPTH} deep")
+                for ref, ref_kind, ref_required in _references(data, os.path.dirname(real)):
+                    add(ref, stack, ref_kind, ref_required, depth + 1)
 
         stacks = set(scope.stacks) | {s.split("/", 1)[0] for s in scope.services}
         for stack in sorted(stacks):
@@ -269,6 +325,8 @@ class CheckpointService:
     def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned],
                  no_backup: bool) -> dict[str, Any]:
         files, compose_docs = [], {}
+        captured = 0
+        store_base = self.store.total_bytes() if self.store.root.exists() else 0
         for index, item in enumerate(planned):
             try:
                 fd, meta = safefs.open_regular(self.stacks_root, item.real, max_bytes=self.settings.max_file_bytes)
@@ -282,21 +340,42 @@ class CheckpointService:
                     data = safefs.read_all(fd, self.settings.max_file_bytes)
                 except safefs.UnsafePath as exc:
                     raise ScopeRefused(str(exc)) from None
-                now = os.fstat(fd)
-                if (now.st_dev, now.st_ino) != (meta.dev, meta.ino):
+                self.hooks.after_file_read(item.real)
+                # A torn read: size or mtime moved under us, we read a different length than the file had, or a
+                # second pass over the same fd hashes differently from the bytes we kept.
+                after = os.fstat(fd)
+                os.lseek(fd, 0, os.SEEK_SET)
+                again = safefs.sha256_bytes(safefs.read_all(fd, self.settings.max_file_bytes + 1))
+                if ((after.st_size, after.st_mtime_ns) != (meta.size, meta.mtime_ns) or len(data) != meta.size
+                        or again != safefs.sha256_bytes(data)):
                     raise ScopeRefused(f"{item.real}: changed while it was captured")
+            except safefs.UnsafePath as exc:
+                raise ScopeRefused(str(exc)) from None
             finally:
                 os.close(fd)
+            # What was actually read is what counts against the limits, not what fstat promised.
+            captured += len(data)
+            if len(data) > self.settings.max_file_bytes:
+                raise ScopeRefused(f"{item.real}: {len(data)} bytes exceeds the {self.settings.max_file_bytes} byte limit")
+            if captured > self.settings.max_total_bytes:
+                raise DiskGuardError(f"captured {captured} bytes; the per-checkpoint limit is "
+                                     f"{self.settings.max_total_bytes}")
+            if store_base + captured > self.settings.max_store_bytes:
+                raise DiskGuardError(f"the checkpoint store would exceed {self.settings.max_store_bytes} bytes")
             self.store.write_payload(checkpoint_id, index, data)
             files.append({"idx": index, "path": item.real, "given_path": item.path, "symlink": item.symlink,
                           "stack": item.stack, "kind": item.kind, "sha256": safefs.sha256_bytes(data),
                           "mode": meta.mode, "uid": meta.uid, "gid": meta.gid, "size": len(data), "acl": acl})
-            if item.kind in ("compose", "override"):
+            if item.kind in _PARSED:
                 compose_docs.setdefault(item.stack, []).append(data)
 
-        services = set(scope.services)
+        services, unavailable = set(scope.services), []
         for stack in scope.stacks:
-            services |= {f"{stack}/{name}" for name in _compose_services(compose_docs.get(stack, []))}
+            names = _compose_services(compose_docs.get(stack, []))
+            if names is None:
+                unavailable.append(stack)           # invalid YAML: files are still captured, facts are not
+            else:
+                services |= {f"{stack}/{name}" for name in names}
         try:
             facts = {
                 "services": {s: (f.to_dict() if (f := self.provider.inspect(s)) else None) for s in sorted(services)},
@@ -308,6 +387,7 @@ class CheckpointService:
             raise ScopeRefused(str(exc)) from None
         return {"v": MANIFEST_V, "id": checkpoint_id, "mission_id": mission_id, "created_at": self._now(),
                 "stacks_root": self.stacks_root, "no_backup": no_backup, "files": files, "facts": facts,
+                "facts_unavailable": sorted(unavailable),
                 "scope": {"stacks": list(scope.stacks), "services": list(scope.services),
                           "units": list(scope.units)}}
 
@@ -344,6 +424,7 @@ class CheckpointService:
             return None, None, str(exc), None
 
     def capture_post(self, checkpoint_id: str) -> None:
+        """Take the post-change manifest. The caller does this only once the session is provably dead."""
         self._require_enabled()
         manifest = self._manifest(checkpoint_id)
         files, changed = {}, []
@@ -359,7 +440,14 @@ class CheckpointService:
 
     # ── restore ─────────────────────────────────────────────────────────────
     def restore(self, checkpoint_id: str, *, ack_drift: bool = False, actor: str = "core") -> RestoreReport:
+        """Restore every captured file (compare-and-swap) and recreate the affected services.
+
+        Never raises for a failure after the restore started: it reports `refused` or `failed`, says which files
+        were already written (`partial`), records the event and moves the mission to needs_operator."""
         self._require_enabled()
+        # The actor string is NOT authentication. The authenticated operator identity is derived by the RPC layer
+        # (slice 7) from the dashboard or Telegram session and passed here; it is never taken from request
+        # params. This check only stops internal callers from acknowledging drift as `core`.
         if ack_drift and not actor.startswith("operator:"):
             raise ValueError("acknowledging drift is an operator decision: pass actor='operator:<name>'")
         manifest = self._manifest(checkpoint_id)
@@ -374,69 +462,31 @@ class CheckpointService:
         post = self.store.read_post(checkpoint_id)
         self._event(mission_id, "checkpoint.restore_started", actor,
                     {"checkpoint": checkpoint_id, "ack_drift": ack_drift, "post_manifest": post is not None})
-
         report = RestoreReport(status="done")
-        pending: list[tuple[dict[str, Any], bytes | None]] = []
-        for entry in manifest["files"]:
-            current, data, problem, meta = self._current(entry)
-            if problem is not None:
-                report.drifted.append({"path": entry["path"], "expected": None, "current": None,
-                                       "reason": problem})
-                continue
-            expected = entry["sha256"]
-            if post is not None:
-                expected = (post["files"].get(entry["path"]) or {}).get("sha256", entry["sha256"])
-                if (post["files"].get(entry["path"]) or {}).get("problem"):
-                    expected = "<unreadable>"
-            if current == entry["sha256"] and _metadata_matches(entry, meta):
-                report.unchanged.append(entry["path"])
-                continue
-            if current != expected and current != entry["sha256"]:
-                report.drifted.append({"path": entry["path"], "expected": expected, "current": current})
-            pending.append((entry, data))
-
-        uncomparable = [d for d in report.drifted if d.get("reason")]
-        if report.drifted and (not ack_drift or uncomparable):
-            report.status = "refused"
-            report.reason = ("a file cannot be compared or its drifted bytes cannot be kept" if uncomparable
-                             else "files changed since the post-change manifest")
+        if post is None:
+            # Without a post-change manifest there is nothing to tell the session's changes from someone else's.
+            # The caller captures it once the session is provably dead, then asks again.
+            report.status, report.reason = "refused", "needs_post_capture"
             self._event(mission_id, "checkpoint.restore_refused", actor,
-                        {"checkpoint": checkpoint_id, "drifted": report.drifted, "reason": report.reason})
-            try:
-                transition(self.missions.store, mission_id, "needs_operator", "core")
-            except IllegalTransition:
-                pass                                   # already there, or terminal: the report still says why
+                        {"checkpoint": checkpoint_id, "reason": report.reason})
             return report
-
-        drift_paths = {d["path"] for d in report.drifted}
-        for entry, data in pending:
-            if entry["path"] in drift_paths and data is not None:
-                report.drift_saved.append(
-                    self.store.save_drift(checkpoint_id, entry["idx"], safefs.sha256_bytes(data), data))
-        written_stacks: set[str] = set()
-        for entry, _data in pending:
-            try:
-                skipped = safefs.write_atomic(self.stacks_root, entry["path"], payloads[entry["idx"]],
-                                              mode=entry["mode"], uid=entry["uid"], gid=entry["gid"],
-                                              acl=entry.get("acl"))
-            except safefs.UnsafePath as exc:
-                report.status = "refused"
-                report.reason = str(exc)
-                self._event(mission_id, "checkpoint.restore_refused", actor,
-                            {"checkpoint": checkpoint_id, "reason": report.reason, "written": report.written})
-                try:
-                    transition(self.missions.store, mission_id, "needs_operator", "core")
-                except IllegalTransition:
-                    pass
-                return report
-            report.written.append(entry["path"])
-            if skipped:
-                report.meta_skipped.append({"path": entry["path"], "skipped": skipped})
-            if entry.get("stack"):
-                written_stacks.add(entry["stack"])
-            self.hooks.after_file_restored(len(report.written))
-
-        self._recreate_and_compare(manifest, written_stacks, report)
+        try:
+            self._restore_files(checkpoint_id, manifest, payloads, post, ack_drift, actor, report)
+        except Exception as exc:                    # noqa: BLE001 - nothing may escape a half-done restore
+            report.status = "failed"
+            report.reason = _safe_reason(exc)
+            self._stop(mission_id, checkpoint_id, actor, report)
+            return report
+        if report.status == "refused":
+            self._stop(mission_id, checkpoint_id, actor, report)
+            return report
+        try:
+            self._recreate_and_compare(manifest, report)
+        except Exception as exc:                    # noqa: BLE001
+            report.status = "failed"
+            report.reason = f"recreate or comparison failed: {_safe_reason(exc)}"
+            self._stop(mission_id, checkpoint_id, actor, report)
+            return report
         self._event(mission_id, "checkpoint.restore_done", actor,
                     {"checkpoint": checkpoint_id, "written": report.written, "unchanged": report.unchanged,
                      "drift_saved": report.drift_saved,
@@ -444,11 +494,73 @@ class CheckpointService:
                      "meta_skipped": report.meta_skipped, "observational": report.observational})
         return report
 
-    def _recreate_and_compare(self, manifest: dict[str, Any], written_stacks: set[str], report: RestoreReport) -> None:
+    def _stop(self, mission_id: str, checkpoint_id: str, actor: str, report: RestoreReport) -> None:
+        """Record a restore that did not finish, and hand the mission to the operator."""
+        try:
+            self._event(mission_id, "checkpoint.restore_refused", actor,
+                        {"checkpoint": checkpoint_id, "status": report.status, "reason": report.reason,
+                         "partial": report.partial, "written": report.written, "drifted": report.drifted})
+        except Exception:                           # noqa: BLE001
+            log.warning("checkpoint %s: could not record the restore outcome", checkpoint_id)
+        try:
+            transition(self.missions.store, mission_id, "needs_operator", "core")
+        except IllegalTransition:
+            pass                                    # already there, or terminal: the report still says why
+
+    def _restore_files(self, checkpoint_id: str, manifest: dict[str, Any], payloads: dict[int, bytes],
+                       post: dict[str, Any], ack_drift: bool, actor: str, report: RestoreReport) -> None:
+        pending: list[tuple[dict[str, Any], bytes | None, str | None]] = []
+        for entry in manifest["files"]:
+            current, data, problem, meta = self._current(entry)
+            if problem is not None:
+                report.drifted.append({"path": entry["path"], "expected": None, "current": None, "reason": problem})
+                continue
+            recorded = post["files"].get(entry["path"]) or {}
+            expected = "<unreadable>" if recorded.get("problem") else recorded.get("sha256", entry["sha256"])
+            if current == entry["sha256"] and _metadata_matches(entry, meta):
+                report.unchanged.append(entry["path"])
+                continue
+            if current != expected and current != entry["sha256"]:
+                report.drifted.append({"path": entry["path"], "expected": expected, "current": current})
+            pending.append((entry, data, current))
+
+        uncomparable = [d for d in report.drifted if d.get("reason")]
+        if report.drifted and (not ack_drift or uncomparable):
+            report.status = "refused"
+            report.reason = ("a file cannot be compared or its drifted bytes cannot be kept" if uncomparable
+                             else "files changed since the post-change manifest")
+            return
+
+        drift_paths = {d["path"] for d in report.drifted}
+        for entry, data, _seen in pending:
+            if entry["path"] in drift_paths and data is not None:
+                report.drift_saved.append(
+                    self.store.save_drift(checkpoint_id, entry["idx"], safefs.sha256_bytes(data), data))
+        for entry, _data, seen in pending:
+            try:
+                skipped = safefs.write_atomic(self.stacks_root, entry["path"], payloads[entry["idx"]],
+                                              mode=entry["mode"], uid=entry["uid"], gid=entry["gid"],
+                                              acl=entry.get("acl"), expect=(seen,),
+                                              max_bytes=self.settings.max_file_bytes)
+            except safefs.Drifted as exc:
+                report.drifted.append({"path": entry["path"], "expected": seen, "current": exc.current})
+                report.status, report.reason = "refused", "a file changed while it was being restored"
+                return
+            except safefs.UnsafePath as exc:
+                report.status, report.reason = "refused", str(exc)
+                return
+            report.written.append(entry["path"])
+            if skipped:
+                report.meta_skipped.append({"path": entry["path"], "skipped": skipped})
+            if entry.get("stack"):
+                report.written_stacks.add(entry["stack"])
+            self.hooks.after_file_restored(len(report.written))
+
+    def _recreate_and_compare(self, manifest: dict[str, Any], report: RestoreReport) -> None:
         captured = manifest["facts"]["services"]
         affected = []
         for service, before in captured.items():
-            if service.split("/", 1)[0] in written_stacks:
+            if service.split("/", 1)[0] in report.written_stacks:
                 affected.append(service)
                 continue
             try:
@@ -456,14 +568,23 @@ class CheckpointService:
             except ProviderError:
                 affected.append(service)
                 continue
-            if _facts_dict(now) != before:
+            if before is not None and _facts_dict(now) != before:
                 affected.append(service)
         if affected:
             result = self.provider.recreate(affected)
             if not result.ok:
                 report.unrestored.append({"service": ",".join(affected), "fields": ["recreate"],
                                           "reason": result.error or "recreate failed"})
+        for stack in manifest.get("facts_unavailable", []):
+            report.unrestored.append({"service": stack, "fields": ["unverifiable"],
+                                      "reason": "the compose file was not valid YAML when captured"})
         for service, before in captured.items():
+            if before is None:
+                # Nothing was observed at capture (no container, or none inspectable): there is nothing to
+                # compare against, so this is unknown, never "no difference".
+                report.unrestored.append({"service": service, "fields": ["unverifiable"],
+                                          "reason": "no container facts were captured"})
+                continue
             try:
                 after = _facts_dict(self.provider.inspect(service))
             except ProviderError as exc:
@@ -471,7 +592,7 @@ class CheckpointService:
                 continue
             if after == before:
                 continue
-            if before is None or after is None:
+            if after is None:
                 report.unrestored.append({"service": service, "fields": ["existence"]})
                 continue
             fields = [f for f in RESTORABLE_FIELDS if before.get(f) != after.get(f)]
@@ -498,11 +619,14 @@ class CheckpointService:
         self._require_enabled()
         self.store.dir_for(checkpoint_id)
         for mission in self._referencing(checkpoint_id):
-            if mission.status not in ("completed", "failed", "rolled_back", "cancelled"):
+            if mission.status not in TERMINAL:
                 raise CheckpointInUse(f"{mission.id} is {mission.status} and still references {checkpoint_id}")
         if not self.store.dir_for(checkpoint_id).exists():
             return False
-        self.store.remove(checkpoint_id)
+        if not self.store.remove(checkpoint_id):
+            log.warning("checkpoint %s: removal incomplete; it is unusable and will be retried at the next "
+                        "startup scan", checkpoint_id)
+            return False
         for mission in self._referencing(checkpoint_id):
             self._event(mission.id, "checkpoint.purged", "core", {"checkpoint": checkpoint_id})
         return True
@@ -523,6 +647,10 @@ class CheckpointService:
         return [m for m in self.missions.list_missions() if m.checkpoint_id == checkpoint_id]
 
 
+_PARSED = ("compose", "override", "include")
+MAX_INCLUDE_DEPTH = 5
+
+
 def _metadata_matches(entry: dict[str, Any], meta: safefs.FileMeta | None) -> bool:
     """Same mode, and the same owner wherever Core could set one (only root can chown)."""
     if meta is None or meta.mode != entry["mode"]:
@@ -534,16 +662,70 @@ def _facts_dict(facts: ContainerFacts | None) -> dict[str, Any] | None:
     return facts.to_dict() if facts is not None else None
 
 
-def _compose_services(documents: Sequence[bytes]) -> list[str]:
+def _compose_services(documents: Sequence[bytes]) -> list[str] | None:
+    """Service names across the compose documents, or None when any of them is not valid YAML."""
     names: set[str] = set()
     for data in documents:
         try:
             doc = yaml.safe_load(data)
         except yaml.YAMLError:
-            raise ScopeRefused("a compose file in scope is not valid YAML") from None
+            return None
         if isinstance(doc, dict) and isinstance(doc.get("services"), dict):
             names |= {str(k) for k in doc["services"]}
     return sorted(names)
+
+
+def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool]]:
+    """(path, kind, required) for every `env_file:` and `include:` entry in one compose document. Invalid YAML
+    yields nothing (the caller records facts as unavailable). A path with interpolation cannot be resolved by
+    Core and refuses the scope."""
+    try:
+        doc = yaml.safe_load(data)
+    except yaml.YAMLError:
+        return []
+    if not isinstance(doc, dict):
+        return []
+    out: list[tuple[str, str, bool]] = []
+
+    def take(value: Any, kind: str, inherited: bool = True) -> None:
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            required = inherited
+            if isinstance(item, dict):
+                required = inherited and item.get("required", True) is not False
+                item = item.get("path")
+            if isinstance(item, list):
+                for sub_item in item:
+                    take(sub_item, kind, required)
+                continue
+            if not isinstance(item, str) or not item:
+                continue
+            if "$" in item:
+                raise ScopeRefused(f"{item}: a path with variables cannot be captured")
+            out.append((item if item.startswith("/") else os.path.join(base_dir, item), kind, required))
+
+    for entry in doc.get("include") if isinstance(doc.get("include"), list) else [doc.get("include")]:
+        if isinstance(entry, dict):
+            take(entry.get("path"), "include", entry.get("required", True) is not False)
+            if entry.get("env_file") is not None:
+                take(entry["env_file"], "env_file")
+        elif entry is not None:
+            take(entry, "include")
+    services = doc.get("services")
+    if isinstance(services, dict):
+        for service in services.values():
+            if isinstance(service, dict) and service.get("env_file") is not None:
+                take(service["env_file"], "env_file")
+    return out
+
+
+def _safe_reason(exc: BaseException) -> str:
+    """A reason fit for an event: our own errors say what they mean, anything else is its type (and OS reason)."""
+    if isinstance(exc, (safefs.UnsafePath, ProviderError, CheckpointError)):
+        return str(exc)[:300]
+    if isinstance(exc, OSError) and exc.strerror:
+        return f"{type(exc).__name__}: {exc.strerror}"
+    return type(exc).__name__
 
 
 __all__ = [

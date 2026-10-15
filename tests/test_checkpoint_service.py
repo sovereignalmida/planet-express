@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from checkpoint_fakes import COMPOSE, make_env, tree
+from checkpoint_fakes import COMPOSE, SECRET, make_env, tree
 from missions_helpers import advance_to
 
 from planet_express.missions.checkpoint import (
@@ -192,13 +192,18 @@ def test_ack_drift_restores_and_keeps_drifted_bytes(tmp_path):
     assert tree(env.stacks) == original
 
 
-def test_restore_without_post_manifest_compares_to_original(tmp_path):
+def test_restore_without_post_manifest_refuses_needs_post_capture(tmp_path):
     env = make_env(tmp_path)
     cid = env.svc.create(env.mission.id, env.scope)
-    env.compose.write_text("changed with no session\n")
-    report = env.svc.restore(cid)             # session never started: current != original is drift
-    assert report.status == "refused"
-    assert env.svc.restore(cid, ack_drift=True, actor="operator:me").status == "done"
+    env.compose.write_text("session edit\n")
+    before = tree(env.stacks)
+    report = env.svc.restore(cid)
+    assert report.status == "refused" and report.reason == "needs_post_capture"
+    assert tree(env.stacks) == before and status(env) == "draft"          # nothing written, no operator hand-off
+    assert json.loads(events(env, "checkpoint.restore_refused")[-1].body_json)["reason"] == "needs_post_capture"
+    env.svc.capture_post(cid)                       # the caller does this once the session is provably dead
+    assert env.svc.restore(cid).status == "done"
+    assert env.compose.read_text() == COMPOSE
 
 
 # ── refusals ────────────────────────────────────────────────────────────────
@@ -524,3 +529,257 @@ def test_providers_read_unit_files_from_their_own_dirs(tmp_path):
     mos = MosCheckpointProvider(SimpleNamespace(stacks_root=tmp_path), read_text=read)
     assert sysd.unit_hashes(["a.service"])["a.service"] != "absent"
     assert mos.unit_hashes(["a.service"])["a.service"] == "absent" and mos.unit_hashes(["a"])["a"] != "absent"
+
+
+# ── review round: provider project name and compose chain ───────────────────
+def test_recreate_passes_every_compose_file_and_the_project_name(tmp_path):
+    env = make_env(tmp_path)
+    (env.stacks / "media" / "docker-compose.override.yml").write_text("services: {web: {}}\n")
+    assert env.provider.recreate(["media/web"]).ok
+    argv = env.docker.calls[-1]
+    base, override = str(env.compose.resolve()), str((env.stacks / "media" / "docker-compose.override.yml").resolve())
+    assert argv[:6] == ["docker", "compose", "-p", "media", "-f", base] and argv[6:8] == ["-f", override]
+
+
+def test_project_name_honours_name_key_else_sanitised_directory(tmp_path):
+    env = make_env(tmp_path)
+    (env.stacks / "Media.App").mkdir()
+    (env.stacks / "Media.App" / "docker-compose.yml").write_text("services: {}\n")
+    assert env.provider.project_name("Media.App") == "mediaapp"
+    (env.stacks / "Named").mkdir()
+    (env.stacks / "Named" / "docker-compose.yml").write_text("name: Custom_Proj!\nservices: {}\n")
+    assert env.provider.project_name("Named") == "custom_proj"
+    env.docker.containers[("mediaapp", "web")] = env.docker.containers[("media", "web")]
+    assert env.provider.inspect("Media.App/web") is not None            # the label filter used the project name
+    ps = next(c for c in env.docker.calls if c[:3] == ["docker", "ps", "-aq"])
+    assert "label=com.docker.compose.project=mediaapp" in ps
+
+
+def test_service_with_no_container_is_unverifiable_not_unchanged(tmp_path):
+    env = make_env(tmp_path)
+    env.compose.write_text(COMPOSE + "  db:\n    image: postgres\n")
+    cid = env.svc.create(env.mission.id, env.scope)           # no container exists for db
+    env.compose.write_text("x\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert report.status == "done" and not report.ok
+    assert {"service": "media/db", "fields": ["unverifiable"],
+            "reason": "no container facts were captured"} in report.unrestored
+
+
+# ── review round: restore never escapes half-done ───────────────────────────
+def mutate_and_post(env, cid):
+    env.compose.write_text("session one\n")
+    env.dotenv.write_text("session two\n")
+    env.svc.capture_post(cid)
+
+
+def test_write_failure_reports_partial_restore_and_hands_to_operator(tmp_path, monkeypatch):
+    from planet_express.missions.checkpoint import safefs
+    env = make_env(tmp_path)
+    cid = env.svc.create(env.mission.id, env.scope)
+    mutate_and_post(env, cid)
+    real, calls = safefs.write_atomic, []
+
+    def flaky(*a, **kw):
+        calls.append(a[1])
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        return real(*a, **kw)
+    monkeypatch.setattr(safefs, "write_atomic", flaky)
+    report = env.svc.restore(cid)
+    assert report.status == "failed" and report.partial and len(report.written) == 1
+    assert "No space left" in report.reason
+    ev = json.loads(events(env, "checkpoint.restore_refused")[-1].body_json)
+    assert ev["partial"] is True and ev["written"] == report.written
+    assert status(env) == "needs_operator"
+
+
+def test_recreate_exception_is_reported_not_raised(tmp_path, monkeypatch):
+    env = make_env(tmp_path)
+    cid = env.svc.create(env.mission.id, env.scope)
+    mutate_and_post(env, cid)
+    monkeypatch.setattr(env.provider, "recreate", lambda services: (_ for _ in ()).throw(RuntimeError("boom")))
+    report = env.svc.restore(cid)
+    assert report.status == "failed" and report.partial and "RuntimeError" in report.reason
+    assert status(env) == "needs_operator" and events(env, "checkpoint.restore_refused")
+
+
+def test_destination_revalidated_just_before_rename(tmp_path, monkeypatch):
+    from planet_express.missions.checkpoint import safefs
+    env = make_env(tmp_path)
+    cid = env.svc.create(env.mission.id, env.scope)
+    mutate_and_post(env, cid)
+    real, count = safefs.write_atomic, []
+
+    def racing(root, path, *a, **kw):
+        count.append(path)
+        if len(count) == 2:
+            Path(path).write_text("someone raced us\n")         # lands after the pre-check, before the rename
+        return real(root, path, *a, **kw)
+    monkeypatch.setattr(safefs, "write_atomic", racing)
+    report = env.svc.restore(cid)
+    assert report.status == "refused" and report.partial and len(report.written) == 1
+    assert [d["path"] for d in report.drifted] == [count[1]]
+    assert Path(count[1]).read_text() == "someone raced us\n"          # not overwritten
+    assert not [p for p in env.stacks.rglob("*.tmp")]
+    assert status(env) == "needs_operator"
+
+
+def test_write_atomic_fsyncs_after_metadata_and_before_rename(tmp_path, monkeypatch):
+    from planet_express.missions.checkpoint import safefs
+    root = safefs.real_root(str(tmp_path))
+    target = tmp_path / "f"
+    target.write_text("old")
+    log = []
+    real = {n: getattr(os, n) for n in ("fsync", "fchmod", "fchown", "rename")}
+    def spy(name):
+        def wrapper(*a, **k):
+            log.append(name)
+            return real[name](*a, **k)
+        return wrapper
+    for name in real:
+        monkeypatch.setattr(os, name, spy(name))
+    safefs.write_atomic(root, str(target), b"new", mode=0o640, uid=os.getuid(), gid=os.getgid(), acl=None)
+    last_meta = max(i for i, n in enumerate(log) if n in ("fchmod", "fchown"))
+    rename = log.index("rename")
+    assert any(n == "fsync" for n in log[last_meta + 1:rename])
+
+
+# ── review round: capture accounting, torn reads, atomic slot ───────────────
+def test_bytes_actually_read_count_against_the_total(tmp_path):
+    class Grow(_Hooks):
+        def before_capture(self, planned):
+            with open(next(p.real for p in planned if p.real.endswith(".env")), "ab") as handle:
+                handle.write(b"#" * 500)
+    size = len(COMPOSE) + len(SECRET)
+    env = make_env(tmp_path, hooks=Grow(), settings=CheckpointSettings(max_total_bytes=size + 10))
+    with pytest.raises(DiskGuardError):
+        env.svc.create(env.mission.id, env.scope)
+    assert leftovers(env) == []
+
+
+def test_store_limit_counts_actual_bytes(tmp_path):
+    class Grow(_Hooks):
+        def before_capture(self, planned):
+            with open(next(p.real for p in planned if p.real.endswith(".env")), "ab") as handle:
+                handle.write(b"#" * 500)
+    size = len(COMPOSE) + len(SECRET)
+    env = make_env(tmp_path, hooks=Grow(), settings=CheckpointSettings(max_store_bytes=size + 10))
+    with pytest.raises(DiskGuardError):
+        env.svc.create(env.mission.id, env.scope)
+    assert leftovers(env) == []
+
+
+@pytest.mark.parametrize("keep_mtime", [False, True])
+def test_torn_read_is_refused(tmp_path, keep_mtime):
+    class Writer(_Hooks):
+        def after_file_read(self, real):
+            if real.endswith(".env"):
+                before = os.stat(real)
+                with open(real, "r+b") as handle:              # same inode, same length, different bytes
+                    handle.write(b"X" * before.st_size)
+                if keep_mtime:
+                    os.utime(real, ns=(before.st_atime_ns, before.st_mtime_ns))
+    env = make_env(tmp_path, hooks=Writer())
+    with pytest.raises(ScopeRefused, match="changed while it was captured"):
+        env.svc.create(env.mission.id, env.scope)
+    assert leftovers(env) == []
+
+
+def test_slot_is_reserved_atomically_and_the_loser_keeps_nothing(tmp_path):
+    class Winner(_Hooks):
+        def before_reserve(self, mission_id):
+            with env.ms.store._write() as conn:
+                conn.execute("UPDATE missions SET checkpoint_id='C-winner' WHERE id=?", (mission_id,))
+    env = make_env(tmp_path, hooks=Winner())
+    with pytest.raises(CheckpointExists):
+        env.svc.create(env.mission.id, env.scope)
+    assert leftovers(env) == [] and events(env, "checkpoint.created") == []
+
+
+def test_slot_refused_when_mission_went_terminal_during_capture(tmp_path):
+    class Cancel(_Hooks):
+        def before_reserve(self, mission_id):
+            advance_to(env.ms, mission_id, "cancelled")
+    env = make_env(tmp_path, hooks=Cancel())
+    with pytest.raises(CheckpointExists):
+        env.svc.create(env.mission.id, env.scope)
+    assert leftovers(env) == [] and env.ms.get_mission(env.mission.id).checkpoint_id is None
+
+
+# ── review round: invalid YAML, env_file and include ────────────────────────
+def test_invalid_yaml_captures_files_and_marks_facts_unavailable(tmp_path):
+    env = make_env(tmp_path)
+    env.compose.write_text("services: [unclosed\n")
+    cid = env.svc.create(env.mission.id, env.scope)
+    assert cid.facts_unavailable == ("media",)
+    manifest = env.svc.store.read_manifest(cid)
+    assert manifest["facts_unavailable"] == ["media"] and manifest["facts"]["services"] == {}
+    assert len(manifest["files"]) == 2
+    env.compose.write_text("x\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert report.status == "done" and env.compose.read_text() == "services: [unclosed\n"
+    assert any(u["fields"] == ["unverifiable"] and u["service"] == "media" for u in report.unrestored)
+
+
+def test_env_file_and_include_entries_are_captured(tmp_path):
+    env = make_env(tmp_path)
+    media = env.stacks / "media"
+    (media / "app.env").write_text("K=v\n")
+    (media / "extra").mkdir()
+    (media / "extra" / "inc.yml").write_text("services:\n  worker:\n    env_file: [inc.env]\n")
+    (media / "extra" / "inc.env").write_text("I=1\n")
+    env.compose.write_text("include:\n  - extra/inc.yml\n  - path: [missing.yml]\n    required: false\n"
+                           "services:\n  web:\n    image: x\n    env_file:\n      - app.env\n"
+                           "      - path: opt.env\n        required: false\n")
+    cid = env.svc.create(env.mission.id, env.scope)
+    names = {Path(f["path"]).name for f in env.svc.store.read_manifest(cid)["files"]}
+    assert {"app.env", "inc.yml", "inc.env", ".env", "docker-compose.yml"} <= names
+    assert "opt.env" not in names
+
+
+def test_unreadable_reference_refuses_scope(tmp_path):
+    env = make_env(tmp_path)
+    for text, why in (("services:\n  web:\n    env_file: gone.env\n", "cannot be inspected"),
+                      ("services:\n  web:\n    env_file: ../outside.env\n", "'..'"),
+                      ("services:\n  web:\n    env_file: /etc/passwd\n", "outside the stacks root"),
+                      ("services:\n  web:\n    env_file: ${X}/a.env\n", "variables")):
+        env.compose.write_text(text)
+        with pytest.raises(ScopeRefused, match=why):
+            env.svc.create(env.mission.id, env.scope)
+        assert leftovers(env) == []
+
+
+# ── review round: quarantine accounting and incomplete purge ────────────────
+def test_quarantine_is_counted_separately_and_expires(tmp_path):
+    import time
+    env = make_env(tmp_path)
+    store = CheckpointStore(env.root)
+    cid = "C-" + "cd" * 8
+    store.new_checkpoint(cid)
+    store.write_payload(cid, 0, b"x" * 100)
+    assert env.svc.startup_scan()["quarantined"] == [cid]
+    assert store.total_bytes() == 0 and store.quarantine_bytes() == 100
+    env.clock.t = time.time() + 3600
+    env.svc.startup_scan()
+    assert (env.root / ".quarantine" / cid).exists()                 # younger than 24 h
+    env.clock.t = time.time() + 25 * 3600
+    env.svc.startup_scan()
+    assert not (env.root / ".quarantine" / cid).exists()
+
+
+def test_incomplete_purge_is_not_success_and_retries_at_startup(tmp_path, monkeypatch):
+    from planet_express.missions.checkpoint import store as store_module
+    env = make_env(tmp_path)
+    cid = env.svc.create(env.mission.id, env.scope)
+    advance_to(env.ms, env.mission.id, "cancelled")
+    monkeypatch.setattr(store_module.shutil, "rmtree", lambda *a, **k: None)
+    assert env.svc.purge(cid) is False
+    assert events(env, "checkpoint.purged") == []
+    assert not (env.root / cid).exists()                             # unusable at once
+    assert env.svc.store.pending_removals() == [f".purging-{cid}"]
+    monkeypatch.undo()
+    assert env.svc.startup_scan()["purge_pending"] == []
+    assert env.svc.store.pending_removals() == []

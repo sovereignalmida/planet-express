@@ -53,7 +53,7 @@ def test_config_defaults_and_validation():
 def test_startup_scan_reports_unreferenced_committed(tmp_path):
     env = make_env(tmp_path)
     cid = env.svc.create(env.mission.id, env.scope)
-    assert env.svc.startup_scan() == {"quarantined": [], "unreferenced": []}
+    assert env.svc.startup_scan() == {"quarantined": [], "unreferenced": [], "purge_pending": []}
     with env.ms.store._write() as conn:
         conn.execute("UPDATE missions SET checkpoint_id=NULL WHERE id=?", (env.mission.id,))
     assert env.svc.startup_scan()["unreferenced"] == [cid]

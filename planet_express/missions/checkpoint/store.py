@@ -133,16 +133,49 @@ class CheckpointStore:
         return sorted(p.name for p in self.root.iterdir() if ID_RE.fullmatch(p.name) and p.is_dir())
 
     def total_bytes(self) -> int:
+        """Bytes of live checkpoints. The quarantine is counted separately (`quarantine_bytes`)."""
         total = 0
-        for base, _dirs, names in os.walk(self.root):
-            if os.path.basename(base) == QUARANTINE:
-                continue
+        for base, dirs, names in os.walk(self.root):
+            if base == str(self.root):
+                dirs[:] = [d for d in dirs if d != QUARANTINE]
             for name in names:
                 try:
                     total += os.lstat(os.path.join(base, name)).st_size
                 except OSError:
                     pass
         return total
+
+    def quarantine_bytes(self) -> int:
+        total = 0
+        for base, _dirs, names in os.walk(self.root / QUARANTINE):
+            for name in names:
+                try:
+                    total += os.lstat(os.path.join(base, name)).st_size
+                except OSError:
+                    pass
+        return total
+
+    def purge_quarantine(self, now: float, max_age_s: int = 24 * 3600) -> list[str]:
+        """Delete quarantined directories not touched for `max_age_s` (rename sets ctime, so this is time since
+        quarantine). Returns what was removed."""
+        quarantine = self.root / QUARANTINE
+        if not quarantine.is_dir():
+            return []
+        removed = []
+        for entry in sorted(quarantine.iterdir()):
+            try:
+                age = now - max(entry.lstat().st_ctime, entry.lstat().st_mtime)
+            except OSError:
+                continue
+            if age >= max_age_s:
+                shutil.rmtree(entry, ignore_errors=True)
+                if not entry.exists():
+                    removed.append(entry.name)
+        return removed
+
+    def pending_removals(self) -> list[str]:
+        """Directories a purge renamed away but could not finish deleting."""
+        return sorted(p.name for p in self.root.glob(".purging-*")) if self.root.is_dir() else []
 
     # ── post manifest and drift ─────────────────────────────────────────────
     def write_post(self, checkpoint_id: str, post: dict[str, Any]) -> None:
@@ -186,21 +219,24 @@ class CheckpointStore:
             os.rename(self.dir_for(checkpoint_id), target)
             moved.append(checkpoint_id)
         for leftover in self.root.glob(".purging-*") if self.root.is_dir() else ():
-            shutil.rmtree(leftover, ignore_errors=True)      # a purge that crashed after the rename
+            shutil.rmtree(leftover, ignore_errors=True)      # a purge that crashed or failed after the rename
         if moved:
             self._fsync_dir(self.root)
         return moved
 
-    def remove(self, checkpoint_id: str) -> None:
+    def remove(self, checkpoint_id: str) -> bool:
+        """True when nothing is left. A directory that could not be fully deleted stays as `.purging-<id>`
+        (unusable, listed by `pending_removals`) and is retried at the next startup scan."""
         directory = self.dir_for(checkpoint_id)
         if not directory.exists():
-            return
+            return True
         doomed = self.root / f".purging-{checkpoint_id}"
         if doomed.exists():
             shutil.rmtree(doomed, ignore_errors=True)
         os.rename(directory, doomed)          # unusable the instant it leaves the id namespace
         self._fsync_dir(self.root)
         shutil.rmtree(doomed, ignore_errors=True)
+        return not doomed.exists()
 
 
 def _dump(obj: dict[str, Any]) -> bytes:
