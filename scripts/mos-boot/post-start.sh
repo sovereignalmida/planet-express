@@ -24,6 +24,12 @@ pe_post_start() {
         [ -r "$PE_HOME/default/$_pe_name" ] && cp "$PE_HOME/default/$_pe_name" "/etc/default/$_pe_name"
     done
 
+    # Mission control's sessions cgroup lives in RAM too: recreate it before Core starts (written by the launcher
+    # setup step "cgroup-tree"; absent unless missions were set up).
+    if [ -x "$PE_HOME/launcher-boot.sh" ]; then
+        "$PE_HOME/launcher-boot.sh" || echo "launcher-boot.sh failed; missions will stay proposal-only" >&2
+    fi
+
     /etc/init.d/casa-planetexpress start
     sleep 10
     /etc/init.d/casa-dashboard start
