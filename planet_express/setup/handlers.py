@@ -1643,10 +1643,177 @@ class BootHookRemove:
         return "; ".join(n for n in notes if n)
 
 
+# ----------------------------------------------------------------------------------------------------------
+# The session launcher's host steps (contract 22.5). The step classes live beside the launcher, written against plain
+# paths so a test can point them at a throwaway tree; these handlers give each the plan's discipline: `check` is the
+# step's probe (read-only), `act` its repair with the evidence journaled before the write, `verify` reads the host
+# back, `inverse` reverts from that evidence and refuses once the host has moved. They run as root and do their own
+# careful file work (no symlink followed, atomic replace) rather than going through `Host`, which is used only to look
+# up the Core account. The launcher module is imported when a handler runs, never at import time.
+
+class _JournalAdapter:
+    """What a launcher step writes to a journal is evidence; the plan's journal wants it under the step's own id."""
+
+    def __init__(self, ctx):
+        self._ctx = ctx
+
+    def append(self, type_, **data):
+        if type_ == "evidence":
+            self._ctx.evidence(**data["data"])
+
+
+class _LauncherHandler:
+    def __init__(self, paths_for=None):
+        # `paths_for(ctx) -> Paths`: replaceable so tests act on a temp tree. The default reads the real Core account.
+        self._paths_for = paths_for or self._host_paths
+
+    @staticmethod
+    def _host_paths(ctx):
+        from planet_express.missions.launcher.setup_steps import Paths
+        p = ctx.step.params
+        account = ctx.host.lookup_user(p["core_user"])
+        if account is None:
+            raise StepFailure(f"no such user: {p['core_user']}")
+        extra = {"boot_script": p["boot_script"]} if p.get("boot_script") else {}
+        return Paths(core_uid=account[0], core_gid=account[1], core_user=p["core_user"], flavour=p["flavour"],
+                     uid_min=p["uid_min"], uid_max=p["uid_max"], sock_root=p["sock_root"], cgroup_root=p["cgroup_root"],
+                     workspace_root=p["workspace_root"], **extra)
+
+    def _step(self, ctx):
+        from planet_express.missions.launcher.setup_steps import launcher_steps
+        name = ctx.step.params["name"]
+        for candidate in launcher_steps(self._paths_for(ctx)):
+            if candidate.name == name:
+                return candidate
+        raise StepFailure(f"{name} does not apply on a {ctx.step.params['flavour']} host")
+
+    def _read(self, ctx, call):
+        """A read-only question about the host: its answer, or a Refuse naming why it could not be asked."""
+        from planet_express.missions.launcher.setup_steps import StepError
+        try:
+            return call(self._step(ctx))
+        except StepFailure as exc:
+            return Refuse(exc.reason)
+        except (StepError, OSError) as exc:
+            return Refuse(str(exc))
+
+    def _change(self, ctx, call):
+        from planet_express.missions.launcher.setup_steps import StepError, StepRefused
+        try:
+            return call(self._step(ctx))
+        except (StepError, StepRefused) as exc:
+            raise StepFailure(str(exc)) from exc
+        except OSError as exc:
+            raise StepFailure(f"{exc.filename or ''} {exc.strerror}".strip(), "unknown") from exc
+
+    def _evidence(self, ctx) -> dict:
+        """Everything this step journaled, merged; the directories it made accumulate across attempts."""
+        merged: dict = {}
+        dirs: list[str] = []
+        for entry in ctx.prior_evidence():
+            merged.update(entry)
+            dirs += entry.get("created_dirs", [])
+        if dirs:
+            merged["created_dirs"] = list(dict.fromkeys(dirs))
+        return merged
+
+    def reconcile(self, ctx) -> Effect:
+        """After a crash. Directories the step was about to make and that now exist are its own (it journals the intent
+        first), so they are recorded for undo before anything else; then the host decides whether the step happened."""
+        try:
+            step = self._step(ctx)
+        except StepFailure:
+            return "unknown"
+        evidence = self._evidence(ctx)
+        adopted = [d for d in step.adopt_interrupted(evidence) if d not in evidence.get("created_dirs", [])]
+        if adopted:
+            ctx.evidence(created_dirs=adopted)
+        return self.verify(ctx)
+
+
+class LauncherStep(_LauncherHandler):
+    """`launcher.step`: make one launcher step true."""
+
+    def check(self, ctx):
+        state = self._read(ctx, lambda step: step.written())
+        if isinstance(state, Refuse):
+            return state
+        if state.ok:
+            return Satisfied(state.detail or f"{ctx.step.params['name']} is already in place")
+        if state.blocked:
+            return Refuse(state.detail)
+        from planet_express.missions.launcher.setup_steps import launcher_steps
+        for other in launcher_steps(self._paths_for(ctx)):        # before the first write, not at the step that needs it
+            reason = other.preflight()
+            if reason:
+                return Refuse(reason)
+        violation = self._read(ctx, lambda step: self._changed_since_the_plan(ctx.step.params, step))
+        if isinstance(violation, Refuse):
+            return violation
+        return Refuse(violation) if violation else Proceed()
+
+    @staticmethod
+    def _changed_since_the_plan(params: dict, step) -> str | None:
+        """The compare-and-swap of `file.write`, for the one file this step writes: never replace a file that is not
+        what the plan was made against (the bytes the step would write count as fine; the probe has dealt with those)."""
+        from planet_express.missions.launcher.setup_steps import read_regular
+        file = step.owned_file()
+        if file is None:
+            return None
+        path, data, _ = file
+        current = read_regular(path)
+        return _AtomicFile._cas_violation({"path": path, **{k: params[k] for k in ("expect_absent", "expected_sha256")
+                                                            if k in params}},
+                                          None if current is None else sha256(current), sha256(data))
+
+    def act(self, ctx):
+        self._change(ctx, lambda step: step.repair(_JournalAdapter(ctx)))
+        ctx.log(f"{ctx.step.params['name']}: done")
+
+    def verify(self, ctx) -> Effect:
+        state = self._read(ctx, lambda step: step.written())
+        if isinstance(state, Refuse):
+            return "unknown"
+        return "applied" if state.ok else "not_applied"
+
+    def inverse(self, ctx) -> str:
+        evidence = self._evidence(ctx)
+        if not evidence:
+            raise Irreversible("setup changed nothing here")
+        return self._change(ctx, lambda step: step.undo(_JournalAdapter(ctx), evidence))
+
+
+class LauncherRemove(_LauncherHandler):
+    """`launcher.remove`: take one launcher step's artifacts away (uninstall), if they are exactly what setup writes."""
+
+    def check(self, ctx):
+        found = self._read(ctx, lambda step: step.removal())
+        if isinstance(found, Refuse):
+            return found
+        path, why = found
+        return Satisfied(why) if path is None else Proceed()
+
+    def act(self, ctx):
+        ctx.log(self._change(ctx, lambda step: step.remove(_JournalAdapter(ctx))))
+
+    def verify(self, ctx) -> Effect:
+        found = self._read(ctx, lambda step: step.removal())
+        if isinstance(found, Refuse):
+            return "unknown"
+        return "applied" if found[0] is None else "not_applied"
+
+    def inverse(self, ctx) -> str:
+        evidence = self._evidence(ctx)
+        if not evidence.get("removed"):
+            raise Irreversible("setup removed nothing here")
+        return self._change(ctx, lambda step: step.restore(evidence))
+
+
 HANDLERS = {"dir.ensure": DirEnsure(), "file.write": FileWrite(), "verify.smoke": VerifySmoke(),
             "sudoers.install": SudoersInstall(), "dashboard.init": DashboardInit(),
             "access.provision": AccessProvision(),
             "state.snapshot": StateSnapshot(), "python.env": PythonEnv(),
             "service.install": ServiceInstall(), "boot_hook.install": BootHookInstall(),
             "service.enable": ServiceEnable(), "file.remove": FileRemove(), "service.disable": ServiceDisable(),
-            "boot_hook.remove": BootHookRemove()}
+            "boot_hook.remove": BootHookRemove(),
+            "launcher.step": LauncherStep(), "launcher.remove": LauncherRemove()}

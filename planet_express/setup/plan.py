@@ -360,6 +360,9 @@ def _build(b: _Builder) -> None:
              "if_exists": "keep", "already_present": b.present("/etc/sudoers.d/planetexpress"), "content": snippet},
             depends_on=(config_id,))
 
+    if _missions_on(a):
+        _launcher_steps(b, p, depends_on=(config_id,) + tuple(dir_ids[:2]))
+
     access_id = b.add(
         "access.provision", "Give the dashboard read-only access", "planetexpress-web",
         {"method": "groups" if mos else "acl", "install_dir": a.install_dir, "run_user": a.run_as,
@@ -476,6 +479,128 @@ def _build(b: _Builder) -> None:
         b.warnings.append("The services are enabled but not started, because they cannot start without Telegram credentials.")
 
 
+def _missions_on(a: SetupAnswers) -> bool:
+    return a.missions is not None and a.missions.enabled
+
+
+def _launcher_params(b: _Builder, p: dict) -> dict:
+    """The values every launcher step shares (and `launcher.remove` repeats, so its comparison is exact)."""
+    m, mos = b.a.missions, b.init == "mos"
+    return {"core_user": b.a.run_as, "flavour": "mos" if mos else "systemd",
+            "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
+            "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
+            **({"boot_script": f"{p['home']}/launcher-boot.sh"} if mos else {})}
+
+
+def _launcher_paths(params: dict):
+    """The launcher module's own paths for these values; only used to render text. The Core uid and gid are read
+    from the host when a step runs, so nothing shown here depends on them."""
+    from planet_express.missions.launcher.setup_steps import Paths
+    extra = {"boot_script": params["boot_script"]} if "boot_script" in params else {}
+    return Paths(core_uid=0, core_gid=0, core_user=params["core_user"], flavour=params["flavour"],
+                 uid_min=params["uid_min"], uid_max=params["uid_max"], sock_root=params["sock_root"],
+                 cgroup_root=params["cgroup_root"], workspace_root=params["workspace_root"], **extra)
+
+
+def _launcher_expectation(b: _Builder, path: str) -> dict | None:
+    """What `apply` must find at a file a launcher step writes (absent, or this hash), from the scan. A path the scan did
+    not look at records nothing, which `apply` reads strictly: it creates the file if it is absent and replaces nothing
+    that is there. None (the plan is blocked) when the file exists and could not be read."""
+    seen = b.d["existing_pe"]
+    if path not in seen.get("present", {}):
+        return {}
+    if not seen["present"][path]:
+        return {"expect_absent": True}
+    digest = seen.get("sha256", {}).get(path)
+    if not digest:
+        b.blocked.append(f"{path} exists but could not be read, so setup cannot prove what it would replace. "
+                         "Run setup as root so it can read it.")
+        return None
+    return {"expected_sha256": digest}
+
+
+def _launcher_step_objects(params: dict) -> list:
+    from planet_express.missions.launcher.setup_steps import launcher_steps
+    return launcher_steps(_launcher_paths(params))
+
+
+def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> None:
+    """Mission control's host setup (contract 22.5): the launcher's named steps, each reversible and needing root.
+    On MOS there is no sudo, so no sudoers; the cgroup tree is a script the boot hook already runs."""
+    from planet_express.missions.launcher.config import (
+        CONF_PATH,
+        HELPER_PATH,
+        SUDOERS_PATH,
+    )
+    from planet_express.missions.launcher.setup_steps import LauncherSudoers
+    params = _launcher_params(b, p)
+    paths = _launcher_paths(params)
+    mos = paths.flavour == "mos"
+    steps = {s.name: s for s in _launcher_step_objects(params)}
+    if "launcher-sudoers" in steps and steps["launcher-sudoers"].unsafe():
+        b.blocked.append(f"Mission control cannot be set up: {steps['launcher-sudoers'].unsafe()}.")
+        return
+    # The helper trusts launch.conf and itself only under root-owned directories nobody else can write. A directory this
+    # same plan makes for the service (the config directory, by default /etc/planetexpress) can never be one.
+    for target in (CONF_PATH, HELPER_PATH):
+        for made in b.steps:
+            if (made.kind == "dir.ensure" and made.params.get("owner", "root") != "root"
+                    and (target == made.target or target.startswith(made.target.rstrip("/") + "/"))):
+                b.blocked.append(
+                    f"Mission control cannot be set up with this plan: {target} must sit under root-owned directories the "
+                    f"service cannot write (otherwise the service could rewrite its own launch rules), but this plan makes "
+                    f"{made.target} owned by {made.params['owner']} so the dashboard can edit the config. Put the config "
+                    "in a directory of its own, or set up mission control after the install.")
+                return
+    shown = f"{params['uid_min']}-{params['uid_max']}"
+    cgroup_path, cgroup_text, _ = steps["cgroup-tree"].wanted()
+    text = {
+        "session-uid-range": ("Reserve the session uid range", CONF_PATH, "R2", b.text(
+            f"Writes {CONF_PATH} (root, 0600): the uids {shown} reserved for mission sessions, Core's own uid and gid "
+            f"(read when this runs), and the cgroup, workspace and socket roots. Refuses if any account or group already "
+            f"uses a number in {shown}.")),
+        "launcher-helper": ("Install the session launcher", HELPER_PATH, "R3", b.text(
+            f"Installs {HELPER_PATH} (root, 0755) from pe_launch.py, the one program that starts a session as one of "
+            f"those uids. Its directory chain must be root-owned and not writable by others, or setup stops.")),
+        "launcher-sudoers": ("Let Core start sessions through the launcher", SUDOERS_PATH, "R3", {
+            "type": "file", "path": SUDOERS_PATH, "mode": "0440", "owner": "root:root", "if_exists": "replace",
+            "content": LauncherSudoers(paths).wanted().decode()}),
+        "cgroup-tree": ("Delegate a cgroup to Core" if not mos else "Recreate the sessions cgroup at every boot",
+                        cgroup_path, "R3" if mos else "R2", {
+            "type": "file", "path": cgroup_path, "mode": "0700" if mos else "0644", "owner": "root:root",
+            "if_exists": "replace", "content": cgroup_text.decode()}),
+        "workspace-root": ("Make the workspace directory", params["workspace_root"], "R2", b.text(
+            f"Creates {params['workspace_root']} owned by {params['core_user']}, mode 0711: each session's own directory "
+            "is made inside it.")),
+        "socket-root": ("Make the socket directory", params["sock_root"], "R2", b.text(
+            f"Creates {params['sock_root']} owned by {params['core_user']}, mode 0711: each session's sockets live in a "
+            "directory of its own inside it.")),
+    }
+    last = depends_on
+    for name, launcher_step in steps.items():
+        title, target, risk, preview = text[name]
+        preview = {**preview, "path": target} if preview["type"] == "text" else preview
+        file = launcher_step.owned_file()
+        expect = _launcher_expectation(b, file[0]) if file else {}
+        if expect is None:
+            return
+        step_id = b.add("launcher.step", title, name, {"name": name, **params, **expect}, preview, risk=risk,
+                        depends_on=last)
+        last = (step_id,)
+    b.warnings.append(
+        "Mission control is set up on the host only. Core reads missions.* from its config, so put the same values "
+        f"there (missions.enabled: true, session_uid_min/max {shown}, sock_root {params['sock_root']}, cgroup_root "
+        f"{params['cgroup_root']}, workspace_root {params['workspace_root']}); launch.conf is written from these answers "
+        "and the helper refuses a request that disagrees with it.")
+    if mos:
+        b.warnings.append(f"On MOS the sessions cgroup is recreated at every boot by {params['boot_script']}, which the "
+                          "boot hook already runs before Core starts. MOS has no sudo, so no sudoers rule is written; "
+                          "Core runs as root and starts sessions through the helper directly.")
+    else:
+        b.warnings.append("The cgroup delegation takes effect when casa-planetexpress is next restarted; until then the "
+                          "step is written but sessions stay proposal-only.")
+
+
 def _mos_defaults(name: str, p: dict, a: SetupAnswers) -> str:
     base = [f"DAEMON_DIR={a.install_dir}", f"PYTHON={p['venv']}/bin/python"]
     if name == "casa-planetexpress":
@@ -534,6 +659,10 @@ def _will_not_touch(b: _Builder, p: dict) -> None:
         else:
             b.not_touched.append("No sudoers grant is written: Planet Express gets no privileged commands.")
 
+    if _missions_on(a):
+        b.not_touched.append("Mission control gets exactly one sudo rule, for the launcher program and nothing else; no other "
+                             "sudoers file is touched." if systemd else
+                             "No sudoers file is created for mission control: MOS has no sudo.")
     for path in (p["env"], p["dash_env"]):
         if b.present(path):
             b.not_touched.append(f"The existing {path} is kept, not overwritten.")
@@ -626,6 +755,17 @@ def _uninstall(b: _Builder) -> None:
         for name in names:
             remove(f"Remove the {name} unit", f"/etc/systemd/system/{name}.service", reload=True)
         remove("Remove the sudo grant", "/etc/sudoers.d/planetexpress", risk="R3")
+    if _missions_on(a):
+        params = _launcher_params(b, p)
+        launcher = [s.name for s in _launcher_step_objects(params)]
+        for name in reversed(launcher):
+            b.add("launcher.remove", f"Remove {name} (if setup made it)", name, {"name": name, **params},
+                  b.text(f"Takes away what the launcher setup made for {name}, only if it is exactly what setup writes "
+                         "(a directory only if it is empty). Anything else stays. A private record lets undo put it back."))
+        b.warnings.append("Stop every running mission session first: removing the launcher while one runs leaves it unable "
+                          "to be stopped cleanly.")
+        b.not_touched.append("Mission workspaces and sockets with anything in them are kept (a directory is removed only "
+                             "when it is empty), and so is any launcher file that is not exactly what setup wrote.")
     if not any(step.kind != "state.snapshot" for step in b.steps) and not b.blocked:
         b.warnings.append("No Planet Express services, units or grants were found to remove. Only the "
                           "files you wrote (config, secrets, state, the checkout) are here, and those are kept.")

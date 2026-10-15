@@ -9,8 +9,11 @@
 
 Same discipline as `planet_express/setup/` (probe reads only; repair compares what it saw and refuses over
 anything that is not setup's; undo reverts from journaled evidence and refuses once the host has moved), written
-against plain paths so they can run on a throwaway tree in tests. They are not yet entries in the setup plan's
-step catalogue: `launcher_steps()` is the one place a plan builder (or `python -m ...launcher.setup_steps`) takes them from.
+against plain paths so they can run on a throwaway tree in tests. They are entries in the setup plan's
+catalogue as `launcher.step` and `launcher.remove` (`planet_express/setup/handlers.py` wraps each of these in the plan's
+check/act/verify/inverse discipline); `launcher_steps()` is the one place a plan builder (or
+`python -m ...launcher.setup_steps`) takes them from. Removal (uninstall) takes away only what is byte-for-byte what
+setup would write and only a directory that is empty; undoing a removal puts it back.
 
 Nothing here executes a shell. `visudo -c` is the one external program, run as argv with a minimal environment.
 """
@@ -89,7 +92,8 @@ class Paths:
     group: str = "/etc/group"
     visudo: str = "/usr/sbin/visudo"
     systemctl: str = "/usr/bin/systemctl"
-    check_delegation: bool = True                  # require Core's cgroup to exist and be Core's (tests may turn it off)
+    mountinfo: str = "/proc/self/mountinfo"
+    check_delegation: bool = True                 # require Core's cgroup to exist and be Core's (tests may turn it off)
     run: Callable = field(default=subprocess.run, repr=False)
 
     @classmethod
@@ -170,6 +174,23 @@ def ensure_dir(path: str, mode: int, uid: int, gid: int, created: list[str]) -> 
         os.chmod(path, mode)
 
 
+def ensure_parent(path: str, mode: int, uid: int, gid: int, created: list[str]) -> None:
+    """Make `path` and any missing parents (each with `mode`), recording what was created. Unlike `ensure_dir` it never
+    touches a directory that already exists: that may be somebody else's (the service's own config directory, say), so
+    its owner and mode are left exactly as they are, and a probe of the chain decides whether it is acceptable."""
+    parts, missing = Path(path), []
+    while not os.path.lexists(parts):
+        missing.append(str(parts))
+        parts = parts.parent
+    for name in reversed(missing):
+        os.mkdir(name, mode)
+        os.chown(name, uid, gid)
+        os.chmod(name, mode)
+        created.append(name)
+    if not stat.S_ISDIR(os.lstat(path).st_mode):
+        raise StepError(f"{path} exists and is not a directory")
+
+
 def trusted_chain(path: str, paths: Paths) -> str | None:
     """None if every ancestor and the file are root-owned, unwritable by others, and no symlink; else why not."""
     try:
@@ -209,6 +230,123 @@ class Step:
 
     def undo(self, journal, evidence: dict) -> str:
         raise NotImplementedError
+
+    def preflight(self) -> str | None:
+        """Why no launcher step should write anything on this host yet, or None."""
+        return None
+
+    def written(self) -> Probe:
+        """Is what setup writes in place? Differs from `probe` only where a step needs more than a file (a restart)."""
+        return self.probe()
+
+    def owned_file(self) -> tuple[str, bytes, int] | None:
+        """(path, content, mode) of the one file this step writes, or None if it writes none (or cannot say safely)."""
+        return None
+
+    def owned_dir(self) -> tuple[str, int, int, int] | None:
+        """(path, mode, uid, gid) of the one directory this step makes, or None."""
+        return None
+
+    def removal(self) -> tuple[str | None, str]:
+        """(what removal would take away, why nothing otherwise). Never anything that is not exactly what setup writes:
+        a file with other content, or a directory with anything in it, stays. A symlink where a file belongs is an error."""
+        file = self.owned_file()
+        if file is not None:
+            path, data, _ = file
+            current = read_regular(path)
+            if current is None:
+                return None, f"{path}: already absent"
+            if current != data:
+                return None, f"{path}: left in place, it is not what setup writes"
+            return path, ""
+        directory = self.owned_dir()
+        if directory is None:
+            return None, "nothing to remove"
+        path, mode, uid, gid = directory
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return None, f"{path}: already absent"
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_gid != gid or stat.S_IMODE(info.st_mode) != mode:
+            return None, f"{path}: left in place, it is not the directory setup makes"
+        if os.listdir(path):
+            return None, f"{path}: left in place, it is not empty"
+        return path, ""
+
+    def remove(self, journal) -> str:
+        path, why = self.removal()
+        if path is None:
+            return why
+        file = self.owned_file()
+        if file is not None:
+            _, data, mode = file
+            journal.append("evidence", step=self.name, data={"removed": {"kind": "file", "path": path, "mode": mode,
+                                                                          "content": data.decode("utf-8")}})
+            os.unlink(path)
+        else:
+            _, mode, uid, gid = self.owned_dir()
+            journal.append("evidence", step=self.name, data={"removed": {"kind": "dir", "path": path, "mode": mode,
+                                                                          "uid": uid, "gid": gid}})
+            os.rmdir(path)
+        self._after_change()
+        return f"{path}: removed"
+
+    def restore(self, evidence: dict) -> str:
+        """Undo a `remove`: put back what it took, only if nothing has taken its place."""
+        gone = evidence.get("removed")
+        if not gone:
+            return "nothing was removed"
+        path = gone["path"]
+        if os.path.lexists(path):
+            raise StepRefused(f"{path} exists again; left as it is")
+        if gone["kind"] == "file":
+            ensure_parent(os.path.dirname(path), 0o755, self.p.owner_uid, self.p.owner_gid, [])
+            problem = trusted_dir_chain(os.path.dirname(path), self.p)
+            if problem:
+                raise StepRefused(f"not restoring {path}: {problem}")
+            write_atomic(path, gone["content"].encode("utf-8"), gone["mode"], self.p.owner_uid, self.p.owner_gid)
+        else:
+            ensure_dir(path, gone["mode"], gone["uid"], gone["gid"], [])
+        self._after_change()
+        return f"{path}: put back"
+
+    def _after_change(self) -> None:
+        """Tell the host a file this step owns came or went, where it needs telling (the cgroup drop-in)."""
+
+    # Directories made on the way are journaled as an intent BEFORE they exist, so a crash cannot leave one unrecorded.
+    def dir_identity(self) -> tuple[int, int]:
+        """(uid, mode) of the directories this step makes, which is how an interrupted creation is recognised."""
+        return self.p.owner_uid, 0o755
+
+    def _journal_intent(self, journal, directory: str) -> None:
+        missing, probe = [], Path(directory)
+        while not os.path.lexists(probe):
+            missing.append(str(probe))
+            probe = probe.parent
+        if missing:
+            journal.append("evidence", step=self.name, data={"intent_dirs": list(reversed(missing))})
+
+    def _make_parents(self, journal, directory: str) -> list[str]:
+        created: list[str] = []
+        self._journal_intent(journal, directory)
+        ensure_parent(directory, 0o755, self.p.owner_uid, self.p.owner_gid, created)
+        return created
+
+    def adopt_interrupted(self, evidence: dict) -> list[str]:
+        """After a crash: the directories that were about to be made and now exist, exactly as this step makes them, are
+        this step's, so undo removes them. A directory that was there before the intent is never in the list."""
+        if "intent_dirs" not in evidence:
+            return []
+        uid, mode = self.dir_identity()
+        found = []
+        for directory in evidence["intent_dirs"]:
+            try:
+                info = os.lstat(directory)
+            except OSError:
+                continue
+            if stat.S_ISDIR(info.st_mode) and info.st_uid == uid and stat.S_IMODE(info.st_mode) == mode:
+                found.append(directory)
+        return found
 
     # a shared undo for a file this step wrote: remove it only if it is still byte-for-byte what we wrote
     def _undo_file(self, path: str, evidence: dict) -> str:
@@ -257,6 +395,12 @@ class SessionUidRange(Step):
                     out.append(f"{kind} {fields[0]} ({hit[0]})")
         return out
 
+    def owned_file(self):
+        try:
+            return self.p.conf, self.p.launch_conf().render().encode(), 0o600
+        except ConfError:
+            return None
+
     def probe(self) -> Probe:
         try:
             expected = self.p.launch_conf()
@@ -266,6 +410,10 @@ class SessionUidRange(Step):
         if hits:
             return Probe(False, f"the range {self.p.uid_min}-{self.p.uid_max} is already used by {', '.join(hits[:3])}",
                          blocked=True)
+        directory = os.path.dirname(self.p.conf)
+        problem = trusted_dir_chain(directory, self.p) if os.path.isdir(directory) else None
+        if problem:
+            return Probe(False, f"{problem}: launch.conf needs a root-owned directory that others cannot write", blocked=True)
         try:
             current = read_regular(self.p.conf)
         except StepError as exc:
@@ -286,8 +434,10 @@ class SessionUidRange(Step):
             raise StepError(state.detail)
         data = self.p.launch_conf().render().encode()
         previous = read_regular(self.p.conf)
-        created: list[str] = []
-        ensure_dir(os.path.dirname(self.p.conf), 0o755, self.p.owner_uid, self.p.owner_gid, created)
+        created = self._make_parents(journal, os.path.dirname(self.p.conf))
+        problem = trusted_dir_chain(os.path.dirname(self.p.conf), self.p)
+        if problem:
+            raise StepError(f"refusing to write launch.conf: {problem}")
         journal.append("evidence", step=self.name, data={"previous_sha256": None if previous is None else sha256(previous),
                                                          "previous": _text(previous),
                                                          "sha256": sha256(data), "created_dirs": created})
@@ -318,6 +468,12 @@ class LauncherHelper(Step):
         # The only edit: the interpreter line names this host's python3, with -I (isolated) and -S (no site).
         return (f"#!{self.p.interpreter} -IS\n" + "".join(lines[1:])).encode("utf-8")
 
+    def owned_file(self):
+        try:
+            return self.p.helper, self.wanted(), 0o755
+        except StepError:
+            return None
+
     def probe(self) -> Probe:
         try:
             current = read_regular(self.p.helper)
@@ -342,8 +498,7 @@ class LauncherHelper(Step):
         if state.blocked:
             raise StepError(state.detail)
         wanted, previous = self.wanted(), read_regular(self.p.helper)
-        created: list[str] = []
-        ensure_dir(os.path.dirname(self.p.helper), 0o755, self.p.owner_uid, self.p.owner_gid, created)
+        created = self._make_parents(journal, os.path.dirname(self.p.helper))
         problem = trusted_dir_chain(os.path.dirname(self.p.helper), self.p)
         if problem:
             raise StepError(f"refusing to install the helper: {problem}; fix the directory chain first")
@@ -386,7 +541,7 @@ class LauncherSudoers(Step):
             return False
         return result.returncode == 0
 
-    def _unsafe(self) -> str | None:
+    def unsafe(self) -> str | None:
         """Both values become text in a sudoers rule: a user name and an absolute path of plain characters, nothing else
         (no newline, no space, no glob, no `,` or `:` that sudoers gives a meaning)."""
         if not _UNIX_NAME.fullmatch(self.p.core_user):
@@ -395,8 +550,11 @@ class LauncherSudoers(Step):
             return f"the helper path {self.p.helper!r} has characters that are not allowed in a sudoers rule"
         return None
 
+    def owned_file(self):
+        return None if self.unsafe() else (self.p.sudoers, self.wanted(), 0o440)
+
     def probe(self) -> Probe:
-        problem = self._unsafe()
+        problem = self.unsafe()
         if problem:
             return Probe(False, problem, blocked=True)
         try:
@@ -470,6 +628,19 @@ class CgroupTree(Step):
                 f"echo +pids > {q_control} 2>/dev/null || true\n")
         return self.p.boot_script, body.encode(), 0o700
 
+    def preflight(self) -> str | None:
+        """Checked before ANY launcher step writes: sessions need a delegated cgroup2 subtree strictly below a cgroup2 mount."""
+        if not self.p.check_delegation:
+            return None
+        from planet_express.missions.containment_cgroup import cgroup2_mountpoint
+        try:
+            mount = cgroup2_mountpoint(self.p.cgroup_root, Path(self.p.mountinfo).read_text(encoding="utf-8", errors="replace"))
+        except OSError as exc:
+            return f"cannot read the mount table to check missions.cgroup_root ({exc.strerror})"
+        if mount is None or os.path.normpath(mount) == os.path.normpath(self.p.cgroup_root):
+            return f"missions.cgroup_root {self.p.cgroup_root} is not a directory below a cgroup v2 mount"
+        return None
+
     def _unsafe_for_shell(self) -> str | None:
         if self.p.flavour != "systemd" and not _SHELL_SAFE.fullmatch(self.p.cgroup_root):
             return (f"missions.cgroup_root {self.p.cgroup_root!r} has characters that are not allowed in the MOS boot "
@@ -515,6 +686,37 @@ class CgroupTree(Step):
         state = self._file_state()
         return self.active() if state.ok else state
 
+    def owned_file(self):
+        if self._unsafe_for_shell():
+            return None
+        path, data, mode = self.wanted()
+        return path, data, mode
+
+    def _reload_pending(self) -> bool:
+        """systemd knows the drop-in changed but has not reloaded: a write whose `daemon-reload` failed or never ran."""
+        unit = os.path.basename(os.path.dirname(self.p.unit_dropin)).removesuffix(".d")
+        try:
+            result = self.p.run([self.p.systemctl, "show", "--property=NeedDaemonReload", "--value", unit],
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+                                env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0 and result.stdout.strip() == b"yes"
+
+    def written(self) -> Probe:
+        """The file, and on systemd that systemd has read it: a drop-in written but not reloaded is not done."""
+        state = self._file_state()
+        if state.ok and self.p.flavour == "systemd" and self.p.check_delegation and self._reload_pending():
+            return Probe(False, f"{state.detail} is written but systemd has not reloaded it (daemon-reload is pending)")
+        return state
+
+    def _after_change(self) -> None:
+        if self.p.flavour == "systemd":
+            try:
+                self._daemon_reload()
+            except StepError:
+                pass                       # the file is what matters; the next daemon-reload picks it up
+
     def repair(self, journal) -> dict:
         state = self._file_state()
         if state.blocked:
@@ -523,7 +725,7 @@ class CgroupTree(Step):
         previous = read_regular(path)
         created: list[str] = []
         if not state.ok:
-            ensure_dir(os.path.dirname(path), 0o755, self.p.owner_uid, self.p.owner_gid, created)
+            created = self._make_parents(journal, os.path.dirname(path))
             journal.append("evidence", step=self.name, data={
                 "previous_sha256": None if previous is None else sha256(previous), "previous": _text(previous),
                 "sha256": sha256(data), "created_dirs": created, "path": path})
@@ -551,6 +753,7 @@ class CgroupTree(Step):
             write_atomic(path, previous.encode(), mode, self.p.owner_uid, self.p.owner_gid)
             detail += " (the previous file was restored)"
         self._undo_dirs(evidence)
+        self._after_change()
         return detail
 
 
@@ -565,6 +768,9 @@ class _CoreDir(Step):
     def path(self) -> str:
         return getattr(self.p, self.attr)
 
+    def owned_dir(self):
+        return self.path, self.mode, self.p.core_uid, self.p.core_gid
+
     def probe(self) -> Probe:
         try:
             info = os.lstat(self.path)
@@ -573,15 +779,21 @@ class _CoreDir(Step):
         if not stat.S_ISDIR(info.st_mode):
             return Probe(False, f"{self.path} is not a directory (a symlink or file is never replaced)", blocked=True)
         if info.st_uid != self.p.core_uid or stat.S_IMODE(info.st_mode) != self.mode:
-            return Probe(False, f"{self.path} must be owned by the Core user with mode {self.mode:04o}")
+            # It is there and it is not what setup makes: it may hold somebody's data, so setup never chowns or chmods it.
+            return Probe(False, f"{self.path} exists, owned by uid {info.st_uid} with mode {stat.S_IMODE(info.st_mode):04o}, "
+                                f"not by the Core user with mode {self.mode:04o}; setup does not change a directory it did "
+                                "not make (fix it by hand or choose another path)", blocked=True)
         return Probe(True, self.path)
+
+    def dir_identity(self) -> tuple[int, int]:
+        return self.p.core_uid, self.mode
 
     def repair(self, journal) -> dict:
         state = self.probe()
         if state.blocked:
             raise StepError(state.detail)
         created: list[str] = []
-        journal.append("evidence", step=self.name, data={"created_dirs": [], "intent": self.path})
+        self._journal_intent(journal, self.path)
         ensure_dir(self.path, self.mode, self.p.core_uid, self.p.core_gid, created)
         journal.append("evidence", step=self.name, data={"created_dirs": created})
         if not self.probe().ok:

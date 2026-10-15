@@ -14,10 +14,15 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    ValidationError,
     field_validator,
+    model_validator,
 )
 
+from config_schema import MissionsConfig
 from planet_express.setup.steps import AbsPath, Name
+
+_MISSIONS_DEFAULTS = MissionsConfig()      # the one source of the defaults, so config, Core and setup cannot drift
 
 # Powers are risk tiers, because `autonomy.forbidden_risks` is the only gate the config can enforce
 # (docs/designs/setup-plan.md, invariant 3). Canary updates and safe prune are both R2, so they
@@ -90,6 +95,28 @@ class SudoUnit(_Strict):
         return value
 
 
+class MissionsAnswers(_Strict):
+    """Set up the host for mission control (the session launcher, docs/designs/v4-slice-0-contracts.md 22.5). Off unless
+    `enabled` is said outright, so an answer file that mentions `missions` without it changes nothing. The values default
+    to `missions.*` in config_schema; the same ones must be in the config Core reads, because launch.conf is written from
+    these and the helper checks Core's requests against it."""
+    enabled: bool = False
+    session_uid_min: int = _MISSIONS_DEFAULTS.session_uid_min
+    session_uid_max: int = _MISSIONS_DEFAULTS.session_uid_max
+    sock_root: AbsPath = _MISSIONS_DEFAULTS.sock_root
+    cgroup_root: AbsPath = _MISSIONS_DEFAULTS.cgroup_root
+    workspace_root: AbsPath | None = None      # unset: `mission-workspaces` in the state directory, as Core defaults it
+
+    @model_validator(mode="after")
+    def _as_the_config_would_accept_it(self):
+        try:
+            MissionsConfig(enabled=False, session_uid_min=self.session_uid_min, session_uid_max=self.session_uid_max,
+                           sock_root=self.sock_root, cgroup_root=self.cgroup_root, workspace_root=self.workspace_root)
+        except ValidationError as exc:
+            raise ValueError(str(exc.errors()[0]["msg"]).removeprefix("Value error, ")) from None
+        return self
+
+
 class SetupAnswers(_Strict):
     story: Literal["fresh", "adopt", "repair", "uninstall"] = "fresh"
     # The account the service runs as. Root is refused except on a host with no sudo, and only when
@@ -109,3 +136,5 @@ class SetupAnswers(_Strict):
     llm: Llm | None = None
     operator: Operator | None = None
     start_services: bool = False
+    # Absent (the default) or `enabled: false`: nothing about mission control is planned.
+    missions: MissionsAnswers | None = None

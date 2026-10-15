@@ -277,7 +277,7 @@ def test_evidence_is_journaled_before_each_write(tmp_path):
     journal = MemoryJournal()
     repair_all(launcher_steps(p), journal)
     kinds = [e["type"] for e in journal.events if e.get("step") == "launcher-helper"]
-    assert kinds == ["step_started", "evidence", "step_ok"]
+    assert kinds[0] == "step_started" and kinds[-1] == "step_ok" and kinds[1:-1] and set(kinds[1:-1]) == {"evidence"}
     assert journal.evidence("launcher-helper")["sha256"]
 
 

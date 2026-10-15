@@ -261,11 +261,15 @@ KNOWN_SYSTEM_PATHS = (
     "/etc/init.d/casa-planetexpress", "/etc/init.d/casa-dashboard",
     "/boot/optional/scripts/post-start.sh", "/boot/optional/scripts/shutdown.sh",
     "/etc/default/casa-planetexpress", "/etc/default/casa-dashboard",
+    # Mission control's launcher (planet_express/missions/launcher/config.py and setup_steps.py): a mission setup plan
+    # records what is at each of these so it replaces nothing it did not see.
+    "/etc/planetexpress/launch.conf", "/usr/libexec/planetexpress/pe-launch", "/etc/sudoers.d/planetexpress-launch",
+    "/etc/systemd/system/casa-planetexpress.service.d/launcher.conf",
 )
 # Beside a candidate install location. Every file `plan` may write has to be probed here or above: `plan`
 # only claims "absent" or "unchanged" about paths this report says it looked at.
 INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env",
-                 "default/casa-planetexpress", "default/casa-dashboard")
+                 "default/casa-planetexpress", "default/casa-dashboard", "launcher-boot.sh")
 
 
 def _existing_pe(env, storage: dict) -> dict:
