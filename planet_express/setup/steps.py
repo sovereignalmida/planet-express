@@ -246,6 +246,54 @@ class BootHookRemove(_Params):
     marker: Name = "planetexpress"
 
 
+class _LauncherParams(_Params):
+    """One of the session launcher's host steps (contract 22.5 of docs/designs/v4-slice-0-contracts.md). `name` picks
+    which; the rest is the shared configuration every one of them reads, so no step can disagree with another about
+    the uid range or the paths. What each does is fixed in `planet_express/missions/launcher/setup_steps.py`: there
+    is no free-form content here, and the helper, sudoers and launch.conf text is generated from these values."""
+    name: Literal["session-uid-range", "launcher-helper", "launcher-sudoers", "cgroup-tree", "workspace-root",
+                  "socket-root"]
+    core_user: Name
+    flavour: Literal["systemd", "mos"]
+    uid_min: int = Field(gt=0, lt=2**31)
+    uid_max: int = Field(gt=0, lt=2**31)
+    sock_root: AbsPath
+    cgroup_root: AbsPath
+    workspace_root: AbsPath
+    boot_script: AbsPath | None = None      # MOS only: the script that recreates the cgroup tree at every boot
+
+    @model_validator(mode="after")
+    def _coherent(self):
+        if self.uid_max - self.uid_min < 2:
+            raise ValueError("the session uid range needs room for at least two uids (the top one is reserved)")
+        if self.flavour == "mos" and not self.boot_script:
+            raise ValueError("a MOS launcher step needs the boot script that recreates the cgroup tree")
+        if self.flavour == "systemd" and self.boot_script:
+            raise ValueError("only MOS has a boot script")
+        if self.name == "launcher-sudoers" and self.flavour != "systemd":
+            raise ValueError("there is no sudo on MOS, so no launcher sudoers")
+        return self
+
+
+class LauncherStep(_LauncherParams):
+    # What the one file this step writes looked like when the plan was made (compare-and-swap, as `file.write`): an
+    # absent file must still be absent, a present one must still hash to this. Neither is a plan that will not replace
+    # a file that is there. Directory steps write no file and carry neither.
+    expect_absent: bool = False
+    expected_sha256: Sha256 | None = None
+
+    @model_validator(mode="after")
+    def _expectation_is_coherent(self):
+        if self.expect_absent and self.expected_sha256:
+            raise ValueError("a file cannot be expected both absent and present")
+        return self
+
+
+class LauncherRemove(_LauncherParams):
+    """Take one launcher step's artifacts away again (uninstall): only what is byte-for-byte what setup would write,
+    only a directory that is empty. The same values as the install, so the comparison is exact."""
+
+
 class Kind:
     def __init__(self, model: type[_Params], risk: Risk, reversible: bool, needs_root: bool, label: str):
         self.model, self.risk, self.reversible, self.needs_root, self.label = (
@@ -269,4 +317,6 @@ CATALOGUE: dict[str, Kind] = {
     "service.disable": Kind(ServiceDisable, "R2", True, True, "Stop and disable a service"),
     "file.remove": Kind(FileRemove, "R2", True, True, "Remove a file"),
     "boot_hook.remove": Kind(BootHookRemove, "R3", True, True, "Remove the MOS boot hooks"),
+    "launcher.step": Kind(LauncherStep, "R3", True, True, "Set up the session launcher"),
+    "launcher.remove": Kind(LauncherRemove, "R3", True, True, "Remove the session launcher setup"),
 }
