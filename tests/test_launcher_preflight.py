@@ -606,3 +606,16 @@ def test_a_kill_that_failed_is_retried_in_the_cleanup(tmp_path):
     c.kill = flaky
     report = preflight(tmp_path, c, helper, conf, ws)
     assert not report.ok and len(attempts) == 2 and [p for p in Path(c.root).iterdir() if p.is_dir()] == []
+
+
+def test_a_workspace_under_a_private_directory_is_reported_as_unreachable(tmp_path):
+    c, launcher, helper, conf, ws = tree(tmp_path)
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    private.chmod(0o700)
+    inner = private / "ws"
+    inner.mkdir()
+    report = preflight(tmp_path, c, helper, conf, inner, check_reach=True)
+    assert not report.ok
+    assert "workspace root reachable by session users" in report.render()
+    assert "missions.workspace_root" in report.render()

@@ -242,12 +242,32 @@ def _step(report: PreflightReport, name: str, action, detail: str = "") -> None:
         report.add(name, False, str(exc) or type(exc).__name__)
 
 
+def _untraversable(path: str) -> str | None:
+    """The first directory on the way to `path` that a session uid could not search (no other-execute), or None."""
+    current = os.path.abspath(path)
+    while True:
+        try:
+            if not os.stat(current).st_mode & 0o001:
+                return current
+        except OSError:
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
 def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock_root: str | None, probe_uid: int,
-              python: str, token: str = "p" * 40, wait_s: float = 10.0) -> None:
+              python: str, token: str = "p" * 40, wait_s: float = 10.0, check_reach: bool = False) -> None:
     """Launch, freeze (+confirm), thaw, kill (+confirm empty), remove: all as the real Core identity."""
     sid = "PREFLIGHT-" + os.urandom(4).hex()
     workspace = os.path.join(workspace_root, sid)
     cs: ContainedSession | None = None
+    blocked = _untraversable(workspace_root) if check_reach else None
+    if blocked:
+        report.add("workspace root reachable by session users", False,
+                   f"{blocked} is not searchable by other users; set missions.workspace_root outside Core's private data dir")
+        return
     try:
         os.mkdir(workspace, 0o700)
     except OSError as exc:
@@ -314,7 +334,7 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
 
 def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root: str | None, probe_uid: int,
                   helper: str, conf: str, python: str = "/usr/bin/python3", trusted_uid: int = 0, below: str = "/",
-                  uid_range: tuple[int, int] | None = None, sudo: bool = False,
+                  uid_range: tuple[int, int] | None = None, sudo: bool = False, check_reach: bool = False,
                   run=subprocess.run, getpwall=None, getgrall=None) -> PreflightReport:
     report = PreflightReport(strategy)
     if uid_range is not None:
@@ -333,7 +353,7 @@ def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root:
         report.add("probe interpreter", False, f"{python} is not an executable file")
         return report
     run_probe(report, containment, workspace_root=workspace_root, sock_root=sock_root, probe_uid=probe_uid,
-              python=python)
+              python=python, check_reach=check_reach)
     return report
 
 

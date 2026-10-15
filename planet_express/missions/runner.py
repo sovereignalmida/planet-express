@@ -150,7 +150,8 @@ def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: 
     def run() -> PreflightReport:
         return run_preflight(
             containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
-            probe_uid=high, helper=HELPER_PATH, conf=CONF_PATH, uid_range=(low, high), sudo=strategy == "sudo")
+            probe_uid=high, helper=HELPER_PATH, conf=CONF_PATH, uid_range=(low, high), sudo=strategy == "sudo",
+            check_reach=True)
     return run
 
 
