@@ -322,6 +322,42 @@ class MissionBudgetsConfig(BaseModel):
     retries: int = Field(default=2, ge=0)
 
 
+class CheckpointBackupSource(BaseModel):
+    """A backup the checkpoint floor can ask about: the tree it covers and the file whose mtime is its last
+    verified success."""
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    marker: str
+
+    @field_validator("path", "marker")
+    @classmethod
+    def _absolute(cls, value: str) -> str:
+        if not value.startswith("/") or "\0" in value:
+            raise ValueError("checkpoint backup paths must be absolute")
+        return value
+
+
+class CheckpointConfig(BaseModel):
+    """Checkpoint limits (v4 slice 5). Sizes are bytes."""
+    model_config = ConfigDict(extra="forbid")
+
+    root: str | None = None          # unset: `checkpoints` next to the state database (MOS: on the data pool)
+    max_file_bytes: int = Field(default=1024 * 1024, gt=0)
+    max_total_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
+    max_store_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
+    retention_days: int = Field(default=90, gt=0)
+    backup_sources: list[CheckpointBackupSource] = []
+
+    @field_validator("root")
+    @classmethod
+    def _root(cls, path: str | None) -> str | None:
+        if path is not None and (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
+                                 or path == "/"):
+            raise ValueError("missions.checkpoint.root must be a normalised absolute path")
+        return path
+
+
 class MissionsConfig(BaseModel):
     """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
     model_config = ConfigDict(extra="forbid")
@@ -349,6 +385,7 @@ class MissionsConfig(BaseModel):
     worker_socket: str = "/run/planetexpress/worker.sock"
     runtime: MissionRuntimeConfig = MissionRuntimeConfig()
     budgets: MissionBudgetsConfig = MissionBudgetsConfig()
+    checkpoint: CheckpointConfig = CheckpointConfig()
 
     @field_validator("worker_user")
     @classmethod
