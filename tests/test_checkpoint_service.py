@@ -25,6 +25,7 @@ from planet_express.missions.checkpoint import (
     CheckpointScope,
     DiskGuardError,
     MosCheckpointProvider,
+    ScopeChanged,
     ScopeRefused,
     SystemdCheckpointProvider,
 )
@@ -541,18 +542,51 @@ def test_recreate_passes_every_compose_file_and_the_project_name(tmp_path):
     assert argv[:6] == ["docker", "compose", "-p", "media", "-f", base] and argv[6:8] == ["-f", override]
 
 
-def test_project_name_honours_name_key_else_sanitised_directory(tmp_path):
+def test_project_name_comes_from_compose_config_not_a_guess(tmp_path):
     env = make_env(tmp_path)
     (env.stacks / "Media.App").mkdir()
-    (env.stacks / "Media.App" / "docker-compose.yml").write_text("services: {}\n")
-    assert env.provider.project_name("Media.App") == "mediaapp"
-    (env.stacks / "Named").mkdir()
-    (env.stacks / "Named" / "docker-compose.yml").write_text("name: Custom_Proj!\nservices: {}\n")
-    assert env.provider.project_name("Named") == "custom_proj"
-    env.docker.containers[("mediaapp", "web")] = env.docker.containers[("media", "web")]
-    assert env.provider.inspect("Media.App/web") is not None            # the label filter used the project name
+    (env.stacks / "Media.App" / "docker-compose.yml").write_text("services: {web: {}}\n")
+    # COMPOSE_PROJECT_NAME in .env, `name: ${VAR}` and an uppercase directory: only compose knows the answer
+    env.docker.projects["Media.App"] = "from_dotenv"
+    env.docker.containers[("from_dotenv", "web")] = env.docker.containers[("media", "web")]
+    assert env.provider.project_name("Media.App") == "from_dotenv"
+    assert env.provider.inspect("Media.App/web") is not None
     ps = next(c for c in env.docker.calls if c[:3] == ["docker", "ps", "-aq"])
-    assert "label=com.docker.compose.project=mediaapp" in ps
+    assert "label=com.docker.compose.project=from_dotenv" in ps
+    assert env.provider.recreate(["Media.App/web"]).ok
+    up = env.docker.calls[-1]
+    assert up[up.index("-p") + 1] == "from_dotenv"
+    config = next(c for c in env.docker.calls if c[-3:] == ["config", "--format", "json"])
+    assert config[:2] == ["docker", "compose"] and "-f" in config
+
+
+def test_unresolvable_project_omits_p_and_is_unverifiable(tmp_path):
+    env = make_env(tmp_path)
+    env.docker.config_ok = False
+    assert env.provider.project_name("media") is None
+    assert env.provider.inspect("media/web") is None          # no guess, so no container is matched
+    assert not any(c[:3] == ["docker", "ps", "-aq"] for c in env.docker.calls)
+    assert env.provider.recreate(["media/web"]).ok
+    assert "-p" not in env.docker.calls[-1]
+    cid = env.svc.create(env.mission.id, env.scope)
+    env.compose.write_text("x\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert any(u["service"] == "media/web" and u["fields"] == ["unverifiable"] for u in report.unrestored)
+
+
+def test_legacy_compose_file_precedence(tmp_path):
+    env = make_env(tmp_path)
+    media = env.stacks / "media"
+    (media / "docker-compose.yaml").write_text("services: {}\n")
+    (media / "docker-compose.override.yml").write_text("services: {}\n")
+    (media / "docker-compose.override.yaml").write_text("services: {}\n")
+    chain = [Path(c.path).name for c in env.provider.compose_chain("media")]
+    assert chain == ["docker-compose.yaml", "docker-compose.override.yaml"]
+    (media / "compose.yml").write_text("services: {}\n")
+    assert Path(env.provider.compose_chain("media")[0].path).name == "compose.yml"
+    (media / "compose.yaml").write_text("services: {}\n")
+    assert Path(env.provider.compose_chain("media")[0].path).name == "compose.yaml"
 
 
 def test_service_with_no_container_is_unverifiable_not_unchanged(tmp_path):
@@ -783,3 +817,58 @@ def test_incomplete_purge_is_not_success_and_retries_at_startup(tmp_path, monkey
     monkeypatch.undo()
     assert env.svc.startup_scan()["purge_pending"] == []
     assert env.svc.store.pending_removals() == []
+
+
+# ── review round 2: project_directory, references re-expanded at capture ────
+def test_include_project_directory_carries_into_nested_references(tmp_path):
+    env = make_env(tmp_path)
+    media = env.stacks / "media"
+    (media / "sub").mkdir()
+    (media / "shared").mkdir()
+    (media / "sub" / "inc.yml").write_text("services:\n  w:\n    env_file: nested.env\n")
+    (media / "shared" / "nested.env").write_text("N=1\n")                    # relative to project_directory
+    env.compose.write_text("include:\n  - path: sub/inc.yml\n    project_directory: shared\n"
+                           "services:\n  web:\n    image: x\n")
+    cid = env.svc.create(env.mission.id, env.scope)
+    paths = {f["path"] for f in env.svc.store.read_manifest(cid)["files"]}
+    assert os.path.realpath(media / "shared" / "nested.env") in paths
+    # without project_directory the same reference resolves next to the included file
+    (media / "sub" / "nested.env").write_text("N=2\n")
+    env2 = make_env(tmp_path / "b")
+    m2 = env2.stacks / "media"
+    (m2 / "sub").mkdir()
+    (m2 / "sub" / "inc.yml").write_text("services:\n  w:\n    env_file: nested.env\n")
+    (m2 / "sub" / "nested.env").write_text("N=2\n")
+    env2.compose.write_text("include:\n  - path: sub/inc.yml\nservices:\n  web:\n    image: x\n")
+    cid2 = env2.svc.create(env2.mission.id, env2.scope)
+    assert os.path.realpath(m2 / "sub" / "nested.env") in {f["path"] for f in env2.svc.store.read_manifest(cid2)["files"]}
+
+
+def test_reference_added_between_validation_and_capture_retries_once(tmp_path):
+    class Edit(_Hooks):
+        calls = 0
+
+        def before_capture(self, planned):
+            Edit.calls += 1
+            if Edit.calls == 1:
+                (env.stacks / "media" / "late.env").write_text("L=1\n")
+                env.compose.write_text(COMPOSE + "  other:\n    image: y\n    env_file: late.env\n")
+    env = make_env(tmp_path, hooks=Edit())
+    cid = env.svc.create(env.mission.id, env.scope)
+    names = {Path(f["path"]).name for f in env.svc.store.read_manifest(cid)["files"]}
+    assert "late.env" in names and Edit.calls == 2 and len(list(env.root.iterdir())) == 1
+
+
+def test_reference_changing_on_every_attempt_is_refused(tmp_path):
+    class Edit(_Hooks):
+        calls = 0
+
+        def before_capture(self, planned):
+            Edit.calls += 1
+            name = f"late{Edit.calls}.env"
+            (env.stacks / "media" / name).write_text("L=1\n")
+            env.compose.write_text(COMPOSE + f"  other:\n    image: y\n    env_file: {name}\n")
+    env = make_env(tmp_path, hooks=Edit())
+    with pytest.raises(ScopeChanged):
+        env.svc.create(env.mission.id, env.scope)
+    assert leftovers(env) == [] and env.ms.get_mission(env.mission.id).checkpoint_id is None

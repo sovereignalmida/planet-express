@@ -30,6 +30,7 @@ from .service import (
     CheckpointSettings,
     DiskGuardError,
     RestoreReport,
+    ScopeChanged,
     ScopeRefused,
 )
 
@@ -38,5 +39,6 @@ __all__ = [
     "CheckpointError", "CheckpointExists", "CheckpointId", "CheckpointInUse", "CheckpointNotFound",
     "CheckpointProvider", "CheckpointScope", "CheckpointService", "CheckpointSettings", "ComposeFile",
     "ConfiguredBackupFreshness", "ContainerFacts", "DiskGuardError", "MosCheckpointProvider", "ProviderError",
-    "RecreateResult", "RestoreReport", "ScopeRefused", "SystemdCheckpointProvider",
+    "RecreateResult", "RestoreReport", "ScopeChanged", "ScopeRefused",
+    "SystemdCheckpointProvider",
 ]

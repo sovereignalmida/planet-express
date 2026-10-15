@@ -40,6 +40,8 @@ class FakeDocker:
         self.fix_on_recreate = True
         self.recreate_ok = True
         self.ports = ["tcp 0.0.0.0:80"]
+        self.projects: dict[str, str] = {}        # stack dir -> the name `compose config` reports
+        self.config_ok = True
 
     def __call__(self, argv, timeout):
         self.calls.append(list(argv))
@@ -50,6 +52,11 @@ class FakeDocker:
         if argv[:2] == ["docker", "inspect"]:
             _, project, service = argv[2].split("-", 2)
             return 0, json.dumps([self.containers[(project, service)]]), ""
+        if argv[-3:] == ["config", "--format", "json"]:
+            stack = Path(argv[argv.index("-f") + 1]).parent.name
+            if not self.config_ok:
+                return 1, "", "compose config failed"
+            return 0, json.dumps({"name": self.projects.get(stack, stack.lower()), "services": {}}), ""
         if "up" in argv and "--force-recreate" in argv:
             if not self.recreate_ok:
                 return 1, "", "boom"
