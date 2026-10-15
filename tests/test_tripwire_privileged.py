@@ -62,6 +62,11 @@ def core_user():
         os.unlink(BAD)
 
 
+needs_sudo = pytest.mark.skipif(not os.path.isdir("/etc/sudoers.d") or shutil.which("visudo") is None,
+                             reason="needs sudo (/etc/sudoers.d and visudo): MOS has neither")
+
+
+@needs_sudo
 def test_real_sudoers_unmanaged_wildcard_is_found_repaired_and_undone(core_user):
     original = f"{CORE_USER} ALL=(root) NOPASSWD: /usr/bin/systemctl restart *\n"
     Path(BAD).write_text(original)
@@ -77,6 +82,7 @@ def test_real_sudoers_unmanaged_wildcard_is_found_repaired_and_undone(core_user)
     assert Path(BAD).read_text() == original
 
 
+@needs_sudo
 def test_real_sudoers_repair_refuses_without_approval(core_user):
     Path(BAD).write_text(f"{CORE_USER} ALL=(ALL) NOPASSWD: ALL\n")
     os.chmod(BAD, 0o440)
