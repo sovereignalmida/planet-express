@@ -42,6 +42,11 @@ class FakeDocker:
         self.ports = ["tcp 0.0.0.0:80"]
         self.projects: dict[str, str] = {}        # stack dir -> the name `compose config` reports
         self.config_ok = True
+        self.config_output = None          # replace the `compose config` document
+
+    def bounded(self, argv, timeout, max_bytes):
+        rc, out, err = self(argv, timeout)
+        return rc, out[-max_bytes:], err[-max_bytes:], len(out) > max_bytes or len(err) > max_bytes
 
     def __call__(self, argv, timeout):
         self.calls.append(list(argv))
@@ -56,6 +61,8 @@ class FakeDocker:
             stack = Path(argv[argv.index("-f") + 1]).parent.name
             if not self.config_ok:
                 return 1, "", "compose config failed"
+            if self.config_output is not None:
+                return 0, self.config_output, ""
             return 0, json.dumps({"name": self.projects.get(stack, stack.lower()), "services": {}}), ""
         if "up" in argv and "--force-recreate" in argv:
             if not self.recreate_ok:
@@ -90,7 +97,7 @@ def make_env(tmp_path: Path, *, enabled=True, provider_cls=SystemdCheckpointProv
     env.dotenv.write_text(SECRET)
     env.dotenv.chmod(0o600)
     env.docker = FakeDocker()
-    env.provider = provider_cls(SimpleNamespace(stacks_root=env.stacks), run=env.docker,
+    env.provider = provider_cls(SimpleNamespace(stacks_root=env.stacks), run=env.docker, run_bounded=env.docker.bounded,
                                 read_text=lambda path: (_ for _ in ()).throw(OSError(path)))
     env.backup = ConfiguredBackupFreshness([BackupSource(p, m) for p, m in sources], mtime=mtime)
     env.root = tmp_path / "state" / "checkpoints"

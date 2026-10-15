@@ -872,3 +872,61 @@ def test_reference_changing_on_every_attempt_is_refused(tmp_path):
     with pytest.raises(ScopeChanged):
         env.svc.create(env.mission.id, env.scope)
     assert leftovers(env) == [] and env.ms.get_mission(env.mission.id).checkpoint_id is None
+
+
+# ── review round 3: implicit .env of includes, bounded `compose config` ─────
+def test_include_without_env_file_captures_implicit_dotenv_candidates(tmp_path):
+    env = make_env(tmp_path)
+    media = env.stacks / "media"
+    for d in ("sub", "shared", "other"):
+        (media / d).mkdir()
+    (media / "sub" / "inc.yml").write_text("services: {}\n")
+    (media / "sub" / ".env").write_text("A=1\n")
+    (media / "shared" / ".env").write_text("B=1\n")
+    env.compose.write_text("include:\n  - path: sub/inc.yml\n    project_directory: shared\n"
+                           "  - path: other/inc2.yml\n    env_file: other/custom.env\n"
+                           "services:\n  web:\n    image: x\n")
+    (media / "other" / "inc2.yml").write_text("services: {}\n")
+    (media / "other" / "custom.env").write_text("C=1\n")
+    (media / "other" / ".env").write_text("NOT=captured\n")        # explicit env_file: no implicit .env
+    cid = env.svc.create(env.mission.id, env.scope)
+    paths = {f["path"] for f in env.svc.store.read_manifest(cid)["files"]}
+    assert os.path.realpath(media / "sub" / ".env") in paths and os.path.realpath(media / "shared" / ".env") in paths
+    assert os.path.realpath(media / "other" / "custom.env") in paths
+    assert os.path.realpath(media / "other" / ".env") not in paths
+    # CAS applies like any captured file: an edit after the post manifest blocks the restore
+    (media / "shared" / ".env").write_text("B=changed\n")
+    env.svc.capture_post(cid)
+    (media / "shared" / ".env").write_text("B=other\n")
+    assert env.svc.restore(cid).status == "refused"
+
+
+def test_include_without_any_dotenv_is_fine(tmp_path):
+    env = make_env(tmp_path)
+    (env.stacks / "media" / "inc.yml").write_text("services: {}\n")
+    env.compose.write_text("include:\n  - inc.yml\nservices:\n  web:\n    image: x\n")
+    assert env.svc.create(env.mission.id, env.scope)
+
+
+def test_compose_config_output_is_capped_and_never_leaks(tmp_path, caplog):
+    import logging
+    env = make_env(tmp_path)
+    secret = "SUPER-SECRET-VALUE-9f8e7d"
+    env.docker.config_output = json.dumps({"name": "media", "pad": secret * 400_000})      # ~10 MB
+    with caplog.at_level(logging.DEBUG):
+        assert env.provider.project_name("media") is None
+        assert env.provider.inspect("media/web") is None
+        cid = env.svc.create(env.mission.id, env.scope)
+        env.compose.write_text("x\n")
+        env.svc.capture_post(cid)
+        report = env.svc.restore(cid)
+    assert any(u["fields"] == ["unverifiable"] for u in report.unrestored)
+    everything = json.dumps([e.body_json for e in env.ms.events(env.mission.id)]) + caplog.text + repr(report)
+    assert secret not in everything
+    assert env.docker.calls and not any(c[:3] == ["docker", "ps", "-aq"] for c in env.docker.calls)
+
+
+def test_compose_config_name_is_read_from_a_document_full_of_secrets(tmp_path):
+    env = make_env(tmp_path)
+    env.docker.config_output = json.dumps({"name": "media", "services": {"web": {"environment": {"K": "s3cr3t"}}}})
+    assert env.provider.project_name("media") == "media"

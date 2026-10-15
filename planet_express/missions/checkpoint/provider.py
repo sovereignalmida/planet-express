@@ -28,9 +28,12 @@ COMPOSE_NAMES = (*BASE_NAMES, *OVERRIDE_NAMES, ".env")
 # The facts restore asserts after a recreate (contract §7 "Restorable"): compared exactly.
 RESTORABLE_FIELDS = ("image_id", "command", "env_hash", "mounts", "networks", "labels", "restart_policy", "health")
 DOCKER_TIMEOUT_S = 30
+# `compose config` prints every resolved value, secrets included: bounded, and only `name` is ever kept.
+CONFIG_MAX_BYTES = 2 * 1024 * 1024
 RECREATE_TIMEOUT_S = 180
 
 Runner = Callable[[list[str], int], tuple[int, str, str]]
+BoundedRunner = Callable[[list[str], int, int], tuple[int, str, str, bool]]
 
 
 class ProviderError(Exception):
@@ -108,11 +111,17 @@ def default_runner(argv: list[str], timeout: int) -> tuple[int, str, str]:
     return bender.run_argv(argv, timeout)
 
 
+def default_bounded_runner(argv: list[str], timeout: int, max_bytes: int) -> tuple[int, str, str, bool]:
+    import casa_bender as bender
+    return bender.run_argv_bounded(argv, timeout, max_bytes)
+
+
 @dataclass
 class _DockerCheckpointProvider:
     """Shared mechanics. `orchestrator` supplies `stacks_root`; compose and unit locations are per host kind."""
     orchestrator: Any
     run: Runner = field(default=default_runner)
+    run_bounded: BoundedRunner = field(default=default_bounded_runner)
     compose_argv: Sequence[str] = ("docker", "compose")
     unit_dirs: Sequence[str] = ()
     read_text: Callable[[str], str] = lambda path: Path(path).read_text(encoding="utf-8", errors="replace")
@@ -149,13 +158,16 @@ class _DockerCheckpointProvider:
         if not chain:
             return None
         files = [arg for c in chain for arg in ("-f", c.real_path)]
-        rc, out, _err = self.run([*self.compose_argv, *files, "config", "--format", "json"], DOCKER_TIMEOUT_S)
-        if rc != 0:
-            return None
+        rc, out, _err, truncated = self.run_bounded(
+            [*self.compose_argv, *files, "config", "--format", "json"], DOCKER_TIMEOUT_S, CONFIG_MAX_BYTES)
+        if rc != 0 or truncated:
+            return None                      # failed, timed out or too large: unverifiable, output discarded
         try:
             name = json.loads(out).get("name")
         except (ValueError, AttributeError):
             return None
+        finally:
+            out = ""                         # the document holds resolved secrets: nothing but `name` survives
         return name if isinstance(name, str) and name else None
 
     def _container_id(self, service: str) -> str | None:
