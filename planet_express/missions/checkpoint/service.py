@@ -754,6 +754,19 @@ def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool, str | 
             take(entry.get("path"), "include", entry.get("required", True) is not False, child)
             if entry.get("env_file") is not None:
                 take(entry["env_file"], "env_file")
+            else:
+                # No env_file on the include: Compose loads a `.env` implicitly. Which directory it reads is not
+                # confirmed (the project_directory, the included file's own directory, or the including project's),
+                # so every candidate that exists is captured. Over-capturing is safe; missing one is not.
+                first = entry.get("path")
+                first = first[0] if isinstance(first, list) and first else first
+                candidates = [child] if child else []
+                if isinstance(first, str) and first and "$" not in first:
+                    included = first if first.startswith("/") else os.path.join(base_dir, first)
+                    candidates.append(os.path.dirname(included))
+                candidates.append(base_dir)
+                for directory in dict.fromkeys(candidates):
+                    out.append((os.path.join(directory, ".env"), "env_file", False, None))
         elif entry is not None:
             take(entry, "include")
     services = doc.get("services")
