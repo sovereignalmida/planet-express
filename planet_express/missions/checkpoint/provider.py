@@ -15,17 +15,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Protocol
 
-import yaml
-
 from planet_express.core.redact import redact
 
 PROVIDER_VERSION = 1
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 SERVICE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]{0,127})/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$")
 # Compose's own selection: the first base file that exists, then the first override that exists.
-BASE_NAMES = ("compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml")
-OVERRIDE_NAMES = ("compose.override.yaml", "compose.override.yml", "docker-compose.override.yml",
-                  "docker-compose.override.yaml")
+BASE_NAMES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
+OVERRIDE_NAMES = ("compose.override.yaml", "compose.override.yml", "docker-compose.override.yaml",
+                  "docker-compose.override.yml")
 COMPOSE_NAMES = (*BASE_NAMES, *OVERRIDE_NAMES, ".env")
 # The facts restore asserts after a recreate (contract §7 "Restorable"): compared exactly.
 RESTORABLE_FIELDS = ("image_id", "command", "env_hash", "mounts", "networks", "labels", "restart_policy", "health")
@@ -143,19 +141,22 @@ class _DockerCheckpointProvider:
         override = next((found[n] for n in OVERRIDE_NAMES if n in found), None)
         return [c for c in (base, override) if c is not None]
 
-    def project_name(self, stack: str) -> str:
-        """The project name compose derives: a top-level `name:` (the last file that sets one wins), else the
-        directory name, lowercased and stripped to [a-z0-9_-]."""
-        chosen = stack
-        for compose in self.compose_chain(stack):
-            try:
-                doc = yaml.safe_load(Path(compose.real_path).read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, yaml.YAMLError):
-                continue
-            if isinstance(doc, dict) and isinstance(doc.get("name"), str) and "$" not in doc["name"]:
-                chosen = doc["name"]
-        cleaned = re.sub(r"[^a-z0-9_-]", "", chosen.lower()).lstrip("_-")
-        return cleaned or re.sub(r"[^a-z0-9_-]", "", stack.lower()) or stack
+    def project_name(self, stack: str) -> str | None:
+        """The project name Compose itself resolves for this stack (`config --format json`, same -f chain), which
+        accounts for `name:`, COMPOSE_PROJECT_NAME, `.env` and the directory rules. Never guessed: when the CLI
+        fails or says nothing this is None, and callers treat the stack's facts as unverifiable."""
+        chain = self.compose_chain(stack)
+        if not chain:
+            return None
+        files = [arg for c in chain for arg in ("-f", c.real_path)]
+        rc, out, _err = self.run([*self.compose_argv, *files, "config", "--format", "json"], DOCKER_TIMEOUT_S)
+        if rc != 0:
+            return None
+        try:
+            name = json.loads(out).get("name")
+        except (ValueError, AttributeError):
+            return None
+        return name if isinstance(name, str) and name else None
 
     def _container_id(self, service: str) -> str | None:
         match = SERVICE_RE.fullmatch(service)
@@ -163,6 +164,8 @@ class _DockerCheckpointProvider:
             raise ProviderError(f"{service!r} is not <stack>/<service>")
         stack, name = match.groups()
         project = self.project_name(stack)
+        if project is None:
+            return None                      # unknown project: no container can be matched, never a guess
         rc, out, _err = self.run(
             ["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}",
              "--filter", f"label=com.docker.compose.service={name}"], DOCKER_TIMEOUT_S)
@@ -232,9 +235,11 @@ class _DockerCheckpointProvider:
             if not chain:
                 return RecreateResult(False, tuple(done), f"{stack}: no compose file")
             files = [arg for c in chain for arg in ("-f", c.real_path)]
+            project = self.project_name(stack)
+            flag = ["-p", project] if project else []         # unresolved: let Compose decide for itself
             rc, out, err = self.run(
-                [*self.compose_argv, "-p", self.project_name(stack), *files, "up", "-d", "--force-recreate",
-                 "--no-deps", *names], RECREATE_TIMEOUT_S)
+                [*self.compose_argv, *flag, *files, "up", "-d", "--force-recreate", "--no-deps", *names],
+                RECREATE_TIMEOUT_S)
             if rc != 0:
                 return RecreateResult(False, tuple(done), redact((err or out or "compose failed").strip())[:200])
             done += [f"{stack}/{n}" for n in names]

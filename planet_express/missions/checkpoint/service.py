@@ -93,6 +93,11 @@ class CheckpointInUse(CheckpointError):
     pass
 
 
+class ScopeChanged(CheckpointError):
+    """A compose file changed between validation and capture so that the files it references no longer match
+    the validated set. The checkpoint was discarded."""
+
+
 class CheckpointId(str):
     """The checkpoint id, carrying the one flag the caller needs: `no_backup` (the grant was acknowledged without
     a verified backup, so the caller classes the mission Critical; this module never changes a tier)."""
@@ -164,6 +169,7 @@ class _Planned:
     stack: str | None
     kind: str
     meta: safefs.FileMeta
+    base: str = ""       # directory its relative references resolve against
 
 
 class _Hooks:
@@ -235,15 +241,23 @@ class CheckpointService:
         if self.store.root.exists() and self.store.total_bytes() + total > self.settings.max_store_bytes:
             raise DiskGuardError(f"the checkpoint store would exceed {self.settings.max_store_bytes} bytes")
 
-        checkpoint_id = "C-" + secrets.token_hex(8)
-        try:
-            self.hooks.before_capture(planned)
-            self.store.new_checkpoint(checkpoint_id)
-            manifest = self._capture(checkpoint_id, mission_id, scope, planned, no_backup)
-            self.store.commit(checkpoint_id, manifest)
-        except BaseException:
-            self.store.discard(checkpoint_id)
-            raise
+        checkpoint_id, manifest = None, None
+        for attempt in (1, 2):
+            checkpoint_id = "C-" + secrets.token_hex(8)
+            try:
+                self.hooks.before_capture(planned)
+                self.store.new_checkpoint(checkpoint_id)
+                manifest = self._capture(checkpoint_id, mission_id, scope, planned, no_backup)
+                self.store.commit(checkpoint_id, manifest)
+                break
+            except ScopeChanged:
+                self.store.discard(checkpoint_id)
+                if attempt == 2:
+                    raise
+                planned = self.validate_scope(scope)          # one retry against what the files say now
+            except BaseException:
+                self.store.discard(checkpoint_id)
+                raise
         self.hooks.before_reserve(mission_id)
         # Reserve the mission's slot atomically: the loser of a race keeps nothing.
         terminal = tuple(TERMINAL)
@@ -272,7 +286,8 @@ class CheckpointService:
         planned: list[_Planned] = []
         seen: set[str] = set()
 
-        def add(path: str, stack: str | None, kind: str, required: bool = True, depth: int = 0) -> None:
+        def add(path: str, stack: str | None, kind: str, required: bool = True, depth: int = 0,
+                child_base: str | None = None) -> None:
             try:
                 real, symlink = safefs.resolve_in_root(self.stacks_root, path)
                 if real in seen:
@@ -290,12 +305,13 @@ class CheckpointService:
             except safefs.UnsafePath as exc:
                 raise ScopeRefused(str(exc)) from None
             seen.add(real)
-            planned.append(_Planned(path, real, symlink, stack, kind, meta))
+            base = child_base or os.path.dirname(real)
+            planned.append(_Planned(path, real, symlink, stack, kind, meta, base))
             if kind in _PARSED:
                 if depth >= MAX_INCLUDE_DEPTH:
                     raise ScopeRefused(f"{real}: includes are nested more than {MAX_INCLUDE_DEPTH} deep")
-                for ref, ref_kind, ref_required in _references(data, os.path.dirname(real)):
-                    add(ref, stack, ref_kind, ref_required, depth + 1)
+                for ref, ref_kind, ref_required, ref_base in _references(data, base):
+                    add(ref, stack, ref_kind, ref_required, depth + 1, ref_base)
 
         stacks = set(scope.stacks) | {s.split("/", 1)[0] for s in scope.services}
         for stack in sorted(stacks):
@@ -324,7 +340,7 @@ class CheckpointService:
 
     def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned],
                  no_backup: bool) -> dict[str, Any]:
-        files, compose_docs = [], {}
+        files, compose_docs, parsed = [], {}, []
         captured = 0
         store_base = self.store.total_bytes() if self.store.root.exists() else 0
         for index, item in enumerate(planned):
@@ -368,6 +384,8 @@ class CheckpointService:
                           "mode": meta.mode, "uid": meta.uid, "gid": meta.gid, "size": len(data), "acl": acl})
             if item.kind in _PARSED:
                 compose_docs.setdefault(item.stack, []).append(data)
+                parsed.append((item, data))
+        self._check_references(planned, parsed)
 
         services, unavailable = set(scope.services), []
         for stack in scope.stacks:
@@ -390,6 +408,24 @@ class CheckpointService:
                 "facts_unavailable": sorted(unavailable),
                 "scope": {"stacks": list(scope.stacks), "services": list(scope.services),
                           "units": list(scope.units)}}
+
+    def _check_references(self, planned: list[_Planned], parsed: list[tuple[_Planned, bytes]]) -> None:
+        """Expand the references again from the bytes that were actually captured. If the set differs from the
+        validated one, a compose file changed in between and what was captured is not what was validated."""
+        validated = {p.real for p in planned}
+        expected = {p.real for p in planned if p.kind in ("include", "env_file")}
+        found: set[str] = set()
+        for item, data in parsed:
+            for ref, _kind, required, _base in _references(data, item.base):
+                try:
+                    real, _ = safefs.resolve_in_root(self.stacks_root, ref)
+                except safefs.UnsafePath:
+                    raise ScopeChanged(f"{item.real}: a reference changed during capture") from None
+                if not required and safefs.is_absent(self.stacks_root, real):
+                    continue
+                found.add(real)
+        if found - validated or expected - found:
+            raise ScopeChanged("a compose file changed between validation and capture")
 
     # ── post-change manifest ────────────────────────────────────────────────
     def _manifest(self, checkpoint_id: str) -> dict[str, Any]:
@@ -675,8 +711,11 @@ def _compose_services(documents: Sequence[bytes]) -> list[str] | None:
     return sorted(names)
 
 
-def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool]]:
-    """(path, kind, required) for every `env_file:` and `include:` entry in one compose document. Invalid YAML
+def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool, str | None]]:
+    """(path, kind, required, child_base) for every `env_file:` and `include:` entry in one compose document.
+    `child_base` is where the included file's own relative references resolve: the include's `project_directory`
+    when it sets one, else the included file's directory (None). An include's own `env_file` resolves against
+    the including file's directory. Invalid YAML
     yields nothing (the caller records facts as unavailable). A path with interpolation cannot be resolved by
     Core and refuses the scope."""
     try:
@@ -685,9 +724,9 @@ def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool]]:
         return []
     if not isinstance(doc, dict):
         return []
-    out: list[tuple[str, str, bool]] = []
+    out: list[tuple[str, str, bool, str | None]] = []
 
-    def take(value: Any, kind: str, inherited: bool = True) -> None:
+    def take(value: Any, kind: str, inherited: bool = True, child_base: str | None = None) -> None:
         items = value if isinstance(value, list) else [value]
         for item in items:
             required = inherited
@@ -696,17 +735,23 @@ def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool]]:
                 item = item.get("path")
             if isinstance(item, list):
                 for sub_item in item:
-                    take(sub_item, kind, required)
+                    take(sub_item, kind, required, child_base)
                 continue
             if not isinstance(item, str) or not item:
                 continue
             if "$" in item:
                 raise ScopeRefused(f"{item}: a path with variables cannot be captured")
-            out.append((item if item.startswith("/") else os.path.join(base_dir, item), kind, required))
+            out.append((item if item.startswith("/") else os.path.join(base_dir, item), kind, required, child_base))
 
     for entry in doc.get("include") if isinstance(doc.get("include"), list) else [doc.get("include")]:
         if isinstance(entry, dict):
-            take(entry.get("path"), "include", entry.get("required", True) is not False)
+            project_dir = entry.get("project_directory")
+            if isinstance(project_dir, str) and "$" in project_dir:
+                raise ScopeRefused(f"{project_dir}: a path with variables cannot be captured")
+            child = None
+            if isinstance(project_dir, str) and project_dir:
+                child = project_dir if project_dir.startswith("/") else os.path.join(base_dir, project_dir)
+            take(entry.get("path"), "include", entry.get("required", True) is not False, child)
             if entry.get("env_file") is not None:
                 take(entry["env_file"], "env_file")
         elif entry is not None:
