@@ -459,6 +459,11 @@ class CheckpointService:
         except safefs.UnsafePath as exc:
             return None, None, str(exc), None
 
+    def manifest(self, checkpoint_id: str) -> dict[str, Any]:
+        """The committed, immutable manifest (read-only: tripwires compare their baseline against it)."""
+        self._require_enabled()
+        return self._manifest(checkpoint_id)
+
     def capture_post(self, checkpoint_id: str) -> None:
         """Take the post-change manifest. The caller does this only once the session is provably dead."""
         self._require_enabled()

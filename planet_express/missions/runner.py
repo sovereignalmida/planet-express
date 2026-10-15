@@ -45,8 +45,9 @@ POLL_INTERVAL_S = 2.0
 
 class MissionRunner:
     def __init__(self, supervisor: Supervisor, worker_server=None, interval_s: float = POLL_INTERVAL_S,
-                 prepare: Callable[[], object] | None = None):
+                 prepare: Callable[[], object] | None = None, tripwire=None):
         self.supervisor = supervisor
+        self.tripwire = tripwire          # `tripwire.TripwireMonitor` or None; it has its own thread and failure isolation
         self.prepare = prepare            # host preparation (Core's half of the cgroup layout), before anything runs
         self.worker_server = worker_server
         self.interval_s = interval_s
@@ -68,6 +69,12 @@ class MissionRunner:
             recovered = self.supervisor.recover()
             if recovered:
                 log.warning("Reconciled %d in-flight mission(s) at startup", len(recovered))
+            if self.tripwire is not None:
+                # Re-freeze every paused session and finish a pause that was begun but not recorded, then watch.
+                acted = self.tripwire.recover()
+                if acted:
+                    log.warning("Tripwire: %d paused mission(s) re-frozen at startup", len(acted))
+                self.tripwire.start()
         except Exception:
             self._stop_server()
             raise
@@ -80,6 +87,11 @@ class MissionRunner:
                 self.supervisor.tick()
             except Exception:
                 log.exception("mission runner tick failed")
+            if self.tripwire is not None:
+                try:
+                    self.tripwire.ensure_running()        # a dead monitor thread pauses everything and restarts
+                except Exception:
+                    log.exception("tripwire monitor check failed")
             self._stop.wait(self.interval_s)
 
     def _stop_server(self) -> None:
@@ -90,6 +102,8 @@ class MissionRunner:
                 log.exception("worker socket did not stop cleanly")
 
     def stop(self) -> None:
+        if self.tripwire is not None:
+            self.tripwire.stop()
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=30)

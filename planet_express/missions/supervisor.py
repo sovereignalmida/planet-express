@@ -73,6 +73,11 @@ class UnsupportedTier(RuntimeError):
     """Only Observe/Propose missions run under this supervisor."""
 
 
+class RepairRefused(UnsupportedTier):
+    """A mutating-tier start refused because a side door around the worker boundary is open (brief 6.8), or because
+    nobody could say it is closed. A subclass of UnsupportedTier: mutating tiers were already refused here."""
+
+
 class ProposalOnly(RuntimeError):
     """The launcher preflight failed on this host: no session may start (there is no weaker containment)."""
 
@@ -179,8 +184,11 @@ class Supervisor:
                  evidence_provider: Callable[[Mission], Sequence[EvidenceItem]] | None = None,
                  worker_env: dict[str, str] | None = None, max_brief_bytes: int = DEFAULT_MAX_BYTES,
                  lease_ttl_s: int = LEASE_TTL_S, socket_provider: "SocketProvider | None" = None,
-                 preflight: Callable[[], Any] | None = None):
+                 preflight: Callable[[], Any] | None = None, tool_broker: Any = None,
+                 repair_gate: Callable[[], Any] | None = None):
         self.store = store
+        self.repair_gate = repair_gate                # side-door report (brief 6.8); None means a repair start is refused
+        self.tool_broker = tool_broker                # `missions.tools.ToolBroker`; None: every tool call is refused
         self.socket_provider = socket_provider
         self.preflight_fn = preflight                 # returns a PreflightReport; None means "trusted" (tests)
         self.preflight_report: Any = None
@@ -252,6 +260,7 @@ class Supervisor:
             raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         mission = self.ms.get_mission(mission_id)
         if mission.tier not in ("observe", "propose"):
+            self.require_repair_preconditions()
             raise UnsupportedTier(f"{mission.tier} missions are not run by this supervisor")
         if mission_id in self._runs:
             raise ValueError(f"{mission_id} already has a running session")
@@ -260,6 +269,21 @@ class Supervisor:
         if mission.cancel_requested_at is not None:
             raise IllegalTransition(f"{mission_id} has a cancel requested")
         self._launch(mission)
+
+    def require_repair_preconditions(self) -> None:
+        """Brief 6.8: a Repair-tier (or higher) worker starts only if every side door is closed. Asked afresh every time,
+        because a door can open between missions. A gate that is missing, crashes or returns anything but a passing
+        report refuses; Observe and Propose never come here."""
+        if self.repair_gate is None:
+            raise RepairRefused("the side-door preflight is not configured, so no mutating mission may start")
+        try:
+            report = self.repair_gate()
+            ok = bool(report.ok)
+            reason = None if ok else (report.reason or "a side door is open")
+        except Exception as exc:                   # noqa: BLE001 - a gate that cannot run is a closed gate
+            raise RepairRefused(f"the side-door preflight could not run ({type(exc).__name__})") from None
+        if not ok:
+            raise RepairRefused(reason)
 
     def _launch(self, mission: Mission) -> None:
         if not self.launcher_ready():          # also on a restart after a crash: proposal-only means no session at all
@@ -791,6 +815,14 @@ class Supervisor:
                 "truncated": found.truncated}
 
     # ── external sessions (contract §11.1) ──────────────────────────────────
+    @_per_session
+    def tool_invoke(self, session: SessionRow, name: str, params: dict) -> dict:
+        """A brokered tool call (contract 8): the live run only, and only if a broker is configured."""
+        self._live_run(session)
+        if self.tool_broker is None:
+            raise RpcError("Refused", "unauthorized")
+        return self.tool_broker.invoke(session, name, params)
+
     def import_external_session(self, mission_id: str, record: dict[str, Any]) -> None:
         """Store an outside session's record as events and artifacts. Evidence only: this method has no
         path to a transition, and it cannot write state or decision events."""
@@ -817,4 +849,5 @@ def _candidate_card(mission_id: str, index: int, text: str, tags: list[str], now
                     source="inferred", created_at=now, evidence=[f"mission:{mission_id}"])
 
 
-__all__ = ["ExternalRecord", "MissionsDisabled", "ProposalOnly", "SocketProvider", "Supervisor", "UnsupportedTier", "default_memory_cards"]
+__all__ = ["ExternalRecord", "MissionsDisabled", "ProposalOnly", "RepairRefused", "SocketProvider", "Supervisor",
+           "UnsupportedTier", "default_memory_cards"]

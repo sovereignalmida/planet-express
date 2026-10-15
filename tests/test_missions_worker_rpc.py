@@ -1,4 +1,4 @@
-"""Worker socket: per-call peer + session authentication and the five-method allowlist."""
+"""Worker socket: per-call peer + session authentication and the six-method allowlist."""
 
 import hashlib
 import os
@@ -103,10 +103,10 @@ def refused(resp):
     return resp["ok"] is False and resp["error"] == {"code": "unauthorized", "message": "Refused"}
 
 
-def test_handler_table_is_exactly_the_five_worker_methods():
+def test_handler_table_is_exactly_the_six_worker_methods():
     assert set(build_worker_handlers(Backend())) == set(WORKER_METHODS) == {
         "mission.get_context", "mission.post_event", "mission.heartbeat",
-        "mission.submit_result", "memory.search"}
+        "mission.submit_result", "memory.search", "tool.invoke"}
 
 
 def test_server_cannot_be_given_the_operator_handler_table(env):
@@ -199,7 +199,7 @@ def test_fake_kind_is_never_accepted_on_a_real_socket():
 
 
 @pytest.mark.parametrize("method", ["approval.decide", "execution.abort", "config.get",
-                                    "mission.request_decision", "tool.invoke", "nope"])
+                                    "mission.request_decision", "nope"])
 def test_methods_outside_the_allowlist_are_refused_for_everyone(env, method):
     sock, *_ = env()
     # authenticated peer: the method simply does not exist on this socket

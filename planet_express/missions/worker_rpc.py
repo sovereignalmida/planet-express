@@ -1,4 +1,4 @@
-"""The worker socket: five methods, every call authenticated by peer identity AND session token.
+"""The worker socket: six methods, every call authenticated by peer identity AND session token.
 
 A second `RpcServer` with its own handler table whose keys are fixed here. It is never given the
 operator handler table (`build_worker_server` refuses any key outside `WORKER_METHODS`), and the
@@ -29,9 +29,11 @@ WORKER_METHODS = (
     "mission.heartbeat",
     "mission.submit_result",
     "memory.search",
+    "tool.invoke",
 )
 CGROUP_MOUNT = "/sys/fs/cgroup"
 MAX_EVENT_DATA_BYTES = 16 * 1024
+MAX_TOOL_PARAMS_BYTES = 16 * 1024
 _TOKEN_LEN = (16, 256)
 _BAD_PATH = re.compile(r"[\x00-\x1f\x7f]|\(deleted\)")
 
@@ -108,6 +110,7 @@ class WorkerBackend(Protocol):
     def heartbeat(self, session) -> dict: ...
     def submit_result(self, session, result: AgentResult) -> dict: ...
     def memory_search(self, session, query: str, limit: int) -> dict: ...
+    def tool_invoke(self, session, name: str, params: dict) -> dict: ...
 
 
 class _Empty(BaseModel):
@@ -136,6 +139,19 @@ class _Search(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=512)
     limit: int = Field(default=5, ge=1, le=20)
+
+
+class _Tool(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    params: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _bounded(self):
+        import json
+        if len(json.dumps(self.params, allow_nan=False, default=str)) > MAX_TOOL_PARAMS_BYTES:
+            raise ValueError("tool params too large")
+        return self
 
 
 def _parse(model, params):
@@ -167,12 +183,17 @@ def build_worker_handlers(backend: WorkerBackend) -> dict[str, Callable[[dict, A
         p = _parse(_Search, params)
         return backend.memory_search(session, p.query, p.limit)
 
+    def tool_invoke(params, session):
+        p = _parse(_Tool, params)
+        return backend.tool_invoke(session, p.name, p.params)
+
     handlers = {
         "mission.get_context": get_context,
         "mission.post_event": post_event,
         "mission.heartbeat": heartbeat,
         "mission.submit_result": submit_result,
         "memory.search": memory_search,
+        "tool.invoke": tool_invoke,
     }
     assert set(handlers) == set(WORKER_METHODS)
     return handlers
