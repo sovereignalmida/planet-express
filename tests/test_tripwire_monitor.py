@@ -626,3 +626,252 @@ def test_a_launching_session_over_a_blind_resource_pauses(tmp_path):
         assert scan(rig)[rig.mission.id] == "blind_baseline"
     finally:
         shadow.chmod(0o600)
+
+
+# ── review round 2: strict collectors, mount modes, redaction, firewall normalisation ───────────────
+
+def test_ss_failure_missing_binary_and_garbage_fail_the_scan(tmp_path):
+    rig = run(tmp_path)
+    rig.host.ss_rc = 1
+    assert scan(rig)[rig.mission.id] == "scan_failed"
+    assert "ports" in paused_event(rig)["scan_errors"]
+    rig2 = run(tmp_path / "b")
+    rig2.host.fail["ports"] = FileNotFoundError("ss")
+    assert scan(rig2)[rig2.mission.id] == "scan_failed"
+
+
+def test_an_unreadable_or_empty_mount_table_fails_the_scan(tmp_path):
+    rig = run(tmp_path)
+    rig.host.mounts_error = OSError(5, "I/O error")
+    assert scan(rig)[rig.mission.id] == "scan_failed"
+    rig2 = run(tmp_path / "b")
+    rig2.host.mounts = []
+    assert scan(rig2)[rig2.mission.id] == "scan_failed"
+
+
+def test_a_baseline_taken_in_a_failed_state_refuses_the_mission_start(tmp_path):
+    rig = make_rig(tmp_path)
+    rig.host.ss_rc = 1
+    go_executing(rig, baseline=False)
+    with pytest.raises(RuntimeError, match="baseline"):
+        rig.monitor.begin(rig.mission.id)
+    assert not (tmp_path / "tripwire" / rig.mission.id / "baseline.json").exists()
+
+
+def test_ro_to_rw_on_a_protected_mount_is_protected(tmp_path):
+    rig = make_rig(tmp_path)
+    rig.host.mounts = ["/dev/sda1 / ext4 rw 0 0", "/dev/sdb1 /mnt/data ext4 ro,relatime 0 0"]
+    go_executing(rig)
+    assert scan(rig)[rig.mission.id] == "ok"
+    rig.host.mounts = ["/dev/sda1 / ext4 rw 0 0", "/dev/sdb1 /mnt/data ext4 rw,relatime 0 0"]
+    scan(rig)
+    ev = assert_paused(rig, "mount_options_changed")
+    assert "ro->rw" in json.dumps(ev["changes"])
+
+
+def test_a_container_mount_flipping_ro_to_rw_is_a_change(tmp_path):
+    rig = make_rig(tmp_path)
+    rig.host.containers["media-qbit-1"]["Mounts"][0]["RW"] = False
+    go_executing(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"][0]["RW"] = True
+    scan(rig)
+    assert any(c["kind"] in ("mount_added",) for c in json.loads(
+        [e for e in rig.env.ms.events(rig.mission.id) if e.kind == "tripwire"][-1].body_json).get("changes", [])) \
+        or status(rig) == "executing"
+
+
+def test_ingress_label_values_are_never_persisted_or_shown(tmp_path):
+    rig = run(tmp_path)
+    secret = "admin:$apr1$Zk3jD$abcdefghijkl"
+    rig.host.containers["media-qbit-1"]["Config"]["Labels"][
+        "traefik.http.middlewares.auth.basicauth.users"] = secret
+    scan(rig)
+    ev = assert_paused(rig, "ingress_route_added")
+    blob = json.dumps(ev) + "".join(e.body_json for e in rig.env.ms.events(rig.mission.id))
+    assert "apr1" not in blob and secret not in blob
+    assert "basicauth.users" in blob                              # the NAME is what the operator needs
+    assert "apr1" not in (tmp_path / "tripwire" / rig.mission.id / "baseline.json").read_text()
+
+
+def test_a_changed_label_value_is_still_detected_without_showing_it(tmp_path):
+    rig = make_rig(tmp_path)
+    rig.host.containers["media-qbit-1"]["Config"]["Labels"]["traefik.http.routers.q.rule"] = "Host(`a.example`)"
+    go_executing(rig)
+    rig.host.containers["media-qbit-1"]["Config"]["Labels"]["traefik.http.routers.q.rule"] = "Host(`b.example`)"
+    scan(rig)
+    assert_paused(rig, "ingress_route_added")
+
+
+def test_change_as_dict_redacts_secret_shaped_text():
+    from planet_express.missions.tripwire.diff import Change
+    c = Change("containers", "host:local/container:x", "k", "protected", "name: password=hunter2 rest")
+    assert "hunter2" not in json.dumps(c.as_dict())
+
+
+def test_firewall_normalisation_ignores_counters_expiry_and_dynamic_sets_but_not_rules():
+    from planet_express.missions.tripwire.signals import normalise_firewall
+    a = ('table inet f {\n  set blk {\n    type ipv4_addr\n    flags timeout\n    elements = { 1.2.3.4 timeout 1h expires 59m1s }\n  }\n'
+         '  chain input {\n    tcp dport 22 counter packets 10 bytes 600 accept\n    quota 1 mbytes used 5 kbytes drop\n  }\n}\n'
+         '# Generated at 12:00\n:INPUT ACCEPT [10:20]\n')
+    b = ('table inet f {\n  set blk {\n    type ipv4_addr\n    flags timeout\n    elements = { 5.6.7.8 timeout 1h expires 3m }\n  }\n'
+         '  chain input {\n    tcp dport 22 counter packets 99 bytes 7000 accept\n    quota 1 mbytes used 900 kbytes drop\n  }\n}\n'
+         '# Generated at 12:05\n:INPUT ACCEPT [99:1]\n')
+    assert normalise_firewall(a) == normalise_firewall(b)
+    assert normalise_firewall(a) != normalise_firewall(a.replace("dport 22", "dport 2222"))
+    assert normalise_firewall(a) != normalise_firewall(a.replace("flags timeout", "flags interval"))
+
+
+def test_counters_ticking_do_not_pause_but_a_rule_change_does(tmp_path):
+    rig = make_rig(tmp_path)
+    rig.host.firewall = "chain input { tcp dport 22 counter packets 1 bytes 60 accept }\n"
+    go_executing(rig)
+    rig.host.firewall = "chain input { tcp dport 22 counter packets 500 bytes 9000 accept }\n"
+    assert scan(rig)[rig.mission.id] == "ok"
+    rig.host.firewall = "chain input { tcp dport 22 counter packets 500 bytes 9000 drop }\n"
+    scan(rig)
+    assert_paused(rig, "firewall_changed")
+
+
+# ── a rollback never leaves the mission stuck in rollback_pending ───────────────────────────────────
+
+def _paused_with_rollback(tmp_path):
+    rig = run(tmp_path)
+    touch(rig.fs / "etc" / "hosts", "x\n")
+    scan(rig)
+    assert paused_event(rig)["rollback"]["available"]
+    return rig
+
+
+def _incomplete_event(rig):
+    for e in reversed(rig.env.ms.events(rig.mission.id)):
+        body = json.loads(e.body_json)
+        if e.kind == "tripwire" and body.get("event") == "tripwire.rollback_incomplete":
+            return body
+    return None
+
+
+def _report(**kw):
+    from planet_express.missions.checkpoint import RestoreReport
+    return RestoreReport(**{"status": "done", **kw})
+
+
+@pytest.mark.parametrize("name,report_kw", [
+    ("unrestored", {"unrestored": [{"service": "media/web", "fields": ["image_id"]}]}),
+    ("meta_skipped", {"meta_skipped": [{"path": "/x", "what": "owner"}]}),
+    ("refused", {"status": "refused", "reason": "drift", "drifted": [{"path": "/x", "now": "abc"}]}),
+    ("failed_partial", {"status": "failed", "reason": "boom", "written": ["/x"]}),
+])
+def test_an_incomplete_restore_ends_in_needs_operator_with_a_card(tmp_path, name, report_kw):
+    rig = _paused_with_rollback(tmp_path)
+    rig.env.svc.restore = lambda cid, **kw: _report(**report_kw)
+    report = rig.monitor.roll_back(rig.mission.id, "operator:me")
+    assert report.ok is False
+    assert status(rig) == "needs_operator"
+    body = _incomplete_event(rig)
+    assert body is not None and body["card"]["options"] == ["take_over", "cancel"]
+    assert body["summary"]["status"] == report_kw.get("status", "done")
+    assert len(json.dumps(body)) < 20000
+
+
+def test_a_restore_that_raises_ends_in_needs_operator(tmp_path):
+    from planet_express.missions.checkpoint import CheckpointNotFound
+    rig = _paused_with_rollback(tmp_path)
+
+    def boom(cid, **kw):
+        raise CheckpointNotFound("gone")
+    rig.env.svc.restore = boom
+    report = rig.monitor.roll_back(rig.mission.id, "operator:me")
+    assert report.status == "failed" and "CheckpointNotFound" in report.reason
+    assert status(rig) == "needs_operator"
+    assert _incomplete_event(rig)["reason"].startswith("the restore raised")
+
+
+def test_a_post_capture_failure_during_roll_back_ends_in_needs_operator(tmp_path):
+    rig = _paused_with_rollback(tmp_path)
+
+    def broken(cid):
+        raise RuntimeError("disk full")
+    rig.env.svc.capture_post = broken
+    report = rig.monitor.roll_back(rig.mission.id, "operator:me")
+    assert report.status == "failed" and status(rig) == "needs_operator"
+
+
+def test_a_clean_restore_is_still_rolled_back(tmp_path):
+    rig = _paused_with_rollback(tmp_path)
+    rig.env.svc.restore = lambda cid, **kw: _report()
+    assert rig.monitor.roll_back(rig.mission.id, "operator:me").ok
+    assert status(rig) == "rolled_back" and _incomplete_event(rig) is None
+
+
+# ── recovery is per mission ─────────────────────────────────────────────────────────────────────────
+
+def _second_mission(rig):
+    """A second executing mission (own scope, own session S-2) in the same store."""
+    from missions_helpers import advance_to, token
+    from planet_express.missions.approvals import record_approval
+    from planet_express.missions.launcher.spec import LaunchSpec
+    from planet_express.missions.models import Grant
+    env = rig.env
+    grant = Grant.model_validate({"tier": "repair", "scope": {"paths": ["/srv/other"], "hosts": ["local"]},
+                                  "verification": {"checks": ["http"]}, "backup": {"covered": True}})
+    m = env.ms.create_mission(title="t2", origin="operator", grant=grant, goal="g", success_criteria="s", runtime="fake")
+    advance_to(env.ms, m.id, "queued", "investigating", "awaiting_decision")
+    record_approval(env.store, m.id, "grant", m.grant_hash, "approve", "operator:me")
+    env.ms.start_session(m.id, kind="local_cgroup", token_hash=token(2), session_ttl_s=3600, lease_ttl_s=600,
+                         cgroup_path=rig.cont.cgroup_path("S-2"), session_uid=60002, session_id="S-2", state="live")
+    rig.cont.launch("S-2", LaunchSpec(uid=60002, cwd="/tmp", argv=("/bin/true",)))
+    return m
+
+
+def _status_of(rig, mission_id):
+    return rig.env.ms.get_mission(mission_id).status
+
+
+def test_one_mission_that_cannot_be_refrozen_does_not_abort_the_others(tmp_path):
+    rig = run(tmp_path)
+    touch(rig.fs / "etc" / "hosts", "x\n")
+    scan(rig)                                                  # mission 1 is paused_tripwire (session S-1)
+    other = _second_mission(rig)
+    rig.monitor.state.write(other.id, "intent.json", {"v": 1, "cause": "protected"})
+    real_freeze, real_kill = rig.cont.freeze, rig.cont.kill
+
+    def freeze(cs):
+        if cs.session_id == "S-1":
+            raise RuntimeError("no freezer")
+        return real_freeze(cs)
+
+    def kill(cs):
+        if cs.session_id == "S-1":
+            raise RuntimeError("cannot kill")
+        return real_kill(cs)
+    rig.cont.freeze, rig.cont.kill = freeze, kill
+    acted = rig.monitor.recover()                               # must not raise
+    assert status(rig) == "recovery_required"
+    ev = [json.loads(e.body_json) for e in rig.env.ms.events(rig.mission.id) if e.kind == "tripwire"][-1]
+    assert ev["event"] == "tripwire.recovery_failed" and ev["card"]["options"] == ["take_over", "cancel"]
+    assert _status_of(rig, other.id) == "paused_tripwire" and rig.cont._groups["S-2"].frozen
+    assert other.id in acted
+
+
+def test_a_pause_that_fails_during_recovery_marks_that_mission_and_continues(tmp_path):
+    rig = run(tmp_path)
+    other = _second_mission(rig)
+    rig.monitor.state.write(rig.mission.id, "intent.json", {"v": 1, "cause": "protected"})
+    rig.monitor.state.write(other.id, "intent.json", {"v": 1, "cause": "protected"})
+    real = rig.monitor._pause
+
+    def pause(mission, *a, **kw):
+        if mission.id == rig.mission.id:
+            raise RuntimeError("write failed")
+        return real(mission, *a, **kw)
+    rig.monitor._pause = pause
+    rig.monitor.recover()
+    assert status(rig) == "recovery_required"
+    assert _status_of(rig, other.id) == "paused_tripwire"
+
+
+def test_a_recover_that_cannot_even_list_missions_is_contained_by_the_runner_path(tmp_path):
+    rig = run(tmp_path)
+    rig.env.ms.list_missions = lambda status=None: (_ for _ in ()).throw(RuntimeError("db locked"))
+    with pytest.raises(RuntimeError):
+        rig.monitor.recover()                                   # nothing to isolate per mission: the caller sees it

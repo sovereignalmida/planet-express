@@ -35,8 +35,7 @@ from planet_express.missions.launcher.setup_steps import (
 
 DOCKER_TCP_PORTS = (2375, 2376)
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
-_TCP_HOST = re.compile(r"""(?:-H|--host)[ =]+["']?(tcp://[^\s"']+)""")
-_LISTEN_PORT = re.compile(r"ListenStream\s*=\s*(?:[^\s:]*:)?(2375|2376)\b")
+_TCP_HOST = re.compile(r"""(?:-H|--host)[ =]*["']?(tcp://[^\s"']*)""", re.IGNORECASE)
 MAX_FILE = 1 << 20
 
 
@@ -199,14 +198,14 @@ class DockerTcpExposure(Step):
         if not isinstance(doc, dict):
             raise StepError(f"{self.p.daemon_json} is not a JSON object")
         hosts = doc.get("hosts", [])
-        if not isinstance(hosts, list):
-            raise StepError(f"{self.p.daemon_json}: hosts is not a list")
+        if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
+            raise StepError(f"{self.p.daemon_json}: hosts is not a list of strings")
         tls = doc.get("tlsverify") is True and bool(doc.get("tlscacert"))
         return [f"{h} (hosts in {self.p.daemon_json}, no client-verified TLS)" for h in hosts
-                if isinstance(h, str) and h.startswith("tcp://") and not tls]
+                if h.strip().lower().startswith("tcp://") and not tls]
 
-    def _units(self) -> list[str]:
-        found = []
+    def _unit_files(self) -> list[str]:
+        out = []
         for root in self.p.docker_units:
             if not os.path.isdir(root):
                 continue
@@ -214,22 +213,38 @@ class DockerTcpExposure(Step):
                 if dirpath[len(root):].count(os.sep) >= 2:
                     dirs[:] = []
                     continue
+                in_dropin = dirpath.endswith((".service.d", ".socket.d")) and os.path.basename(dirpath).startswith("docker")
                 for name in sorted(files):
-                    if not (name.startswith("docker") and name.endswith((".service", ".socket", ".conf")) or dirpath.endswith(("docker.service.d", "docker.socket.d"))):
+                    if in_dropin or (name.startswith("docker") and name.endswith((".service", ".socket", ".conf"))):
+                        out.append(os.path.join(dirpath, name))
+        return out
+
+    def _units(self) -> list[str]:
+        """TCP exposure in docker's units and drop-ins: `-H`/`--host` with tcp:// (any spelling), and any TCP
+        ListenStream in a docker socket unit. An ExecStart that expands variables cannot be judged: fail closed."""
+        found = []
+        for path in self._unit_files():
+            data = read_regular(path)
+            if data is None:
+                continue
+            body = data[:MAX_FILE].decode("utf-8", errors="replace").replace("\\\n", " ")
+            socket_unit = ".socket" in path
+            for line in body.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("#", ";")):
+                    continue
+                if stripped.startswith("ExecStart"):
+                    value = stripped.split("=", 1)[1] if "=" in stripped else ""
+                    if "dockerd" in value and "$" in value:
+                        raise StepError(f"cannot tell what {path} passes to dockerd (it expands a variable)")
+                    if "--tlsverify" in value:
                         continue
-                    path = os.path.join(dirpath, name)
-                    text = read_regular(path)
-                    if text is None:
-                        continue
-                    body = text[:MAX_FILE].decode("utf-8", errors="replace")
-                    for line in body.splitlines():
-                        stripped = line.strip()
-                        if stripped.startswith("ExecStart") and "--tlsverify" not in stripped:
-                            for host in _TCP_HOST.findall(stripped):
-                                found.append(f"{host} (ExecStart in {path}, no client-verified TLS)")
-                        match = _LISTEN_PORT.search(stripped)
-                        if match and not stripped.startswith("#"):
-                            found.append(f"port {match.group(1)} (docker socket unit {path})")
+                    for host in _TCP_HOST.findall(value):
+                        found.append(f"{host} (ExecStart in {path}, no client-verified TLS)")
+                elif stripped.startswith("ListenStream") and socket_unit:
+                    listen = stripped.split("=", 1)[1].strip() if "=" in stripped else ""
+                    if listen and not listen.startswith(("/", "@")):
+                        found.append(f"ListenStream={listen} (docker socket unit {path})")
         return found
 
     def _live(self) -> tuple[list[str], list[str]]:
@@ -286,6 +301,9 @@ class DockerTcpExposure(Step):
 
 # ── (c) sudoers ───────────────────────────────────────────────────────────────────────────────────
 
+_ALIAS_KINDS = ("User", "Runas", "Host", "Cmnd")
+_ALIAS_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+_ALIAS_SPLIT = re.compile(r"\s*:\s*(?=[A-Z][A-Z0-9_]*\s*=)")
 _SKIP = re.compile(r"^(Defaults|Cmnd_Alias|Host_Alias|Runas_Alias|User_Alias|@include|#include|@includedir|#includedir)\b")
 
 
@@ -368,8 +386,11 @@ class SudoersManaged(Step):
         names = {p.core_user, "ALL"}
         core = next(((u, g) for n, u, g in passwd if n == p.core_user), None)
         gids = {core[1]} if core else set()
+        sessions = {n for n, u, g in passwd if p.uid_min <= u <= p.uid_max or p.uid_min <= g <= p.uid_max}
+        names |= sessions                                  # session accounts, when there are named ones
         for gname, (gid, members) in groups.items():
-            if p.core_user in members or gid == (core[1] if core else None):
+            if (p.core_user in members or gid == (core[1] if core else None) or p.uid_min <= gid <= p.uid_max
+                    or sessions & set(members)):
                 names.add("%" + gname)
                 gids.add(gid)
         return names, (core[0] if core else None), gids
@@ -390,46 +411,101 @@ class SudoersManaged(Step):
         return False
 
     def _violations(self) -> dict[str, list[tuple[int, int, str, str]]]:
+        """Rules that reach Core or any session identity and are not the generator's, plus every line this reader cannot
+        parse with confidence (reported as `unparseable`: when in doubt the host is NOT clean)."""
         p = self.p
         names, core_uid, gids = self._principals()
-        files = self._files()
-        aliases: dict[str, set[str]] = {}
         texts: dict[str, str] = {}
-        for path in files:
+        for path in self._files():
             data = read_regular(path)
             if data is None:
                 continue
             if len(data) >= MAX_FILE:
                 raise StepError(f"{path} is too large to check")
             texts[path] = data.decode("utf-8", errors="replace")
-            for _a, _b, line in _logical_lines(texts[path]):
-                match = re.match(r"^User_Alias\s+(\w+)\s*=\s*(.*)$", line)
+        aliases: dict[str, dict[str, list[str]]] = {k: {} for k in _ALIAS_KINDS}
+        for text in texts.values():
+            for _a, _b, line in _logical_lines(text):
+                match = re.match(r"^(User|Runas|Host|Cmnd)_Alias\s+(.*)$", line)
                 if match:
-                    aliases[match.group(1)] = {u.strip() for u in match.group(2).split(":")[0].split(",")}
+                    for definition in _ALIAS_SPLIT.split(match.group(2)):
+                        name, eq, members = definition.partition("=")
+                        if eq and _ALIAS_NAME.fullmatch(name.strip()):
+                            aliases[match.group(1)][name.strip()] = [m.strip() for m in members.split(",") if m.strip()]
         out: dict[str, list[tuple[int, int, str, str]]] = {}
+
+        def note(path: str, first: int, last: int, line: str, kind: str) -> None:
+            out.setdefault(path, []).append((first, last, line, kind))
+
         for path, text in texts.items():
             expected = p.managed.get(path)
             if expected is not None:
                 if text.encode() != expected:
-                    out.setdefault(path, []).append((0, 0, "", "managed file differs from the generator output"))
+                    note(path, 0, 0, "", "managed file differs from the generator output")
                 continue
             for first, last, line in _logical_lines(text):
-                if _SKIP.match(line) or "=" not in line:
+                if _SKIP.match(line):
                     continue
-                left, _, right = line.partition("=")
-                tokens = left.split()
-                if len(tokens) < 2:
+                parsed = self._parse_rule(line, aliases)
+                if parsed is None:
+                    note(path, first, last, line, "unparseable")
                     continue
-                users = {u.strip() for u in " ".join(tokens[:-1]).split(",") if u.strip()}
-                users |= {x for u in list(users) for x in aliases.get(u, ())}
+                users, cmds = parsed
                 if not any(self._reaches(u, names, core_uid, gids) for u in users):
                     continue
-                cmds = re.sub(r"^\s*\([^)]*\)\s*", "", right)
-                cmds = re.sub(r"\b[A-Z_]+:\s*", "", cmds)
                 kind = ("wildcard" if "*" in cmds else "ALL" if re.search(r"(^|[\s,])ALL($|[\s,])", cmds)
                         else "unmanaged")
-                out.setdefault(path, []).append((first, last, line, kind))
+                note(path, first, last, line, kind)
         return out
+
+    @staticmethod
+    def _expand_users(token: str, table: dict[str, list[str]], seen: frozenset = frozenset()) -> list[str] | None:
+        """Leaf user tokens of one user spec item, through User_Aliases. None: it cannot be resolved with confidence."""
+        if token.startswith("!"):
+            return []                                   # a negation never ADDS a user
+        if token.startswith(("+", "%+")):
+            return None                                 # a netgroup: not resolvable here
+        if _ALIAS_NAME.fullmatch(token) and token != "ALL":
+            if token not in table or token in seen:
+                return None                             # undefined (or circular) alias
+            leaves: list[str] = []
+            for member in table[token]:
+                inner = SudoersManaged._expand_users(member, table, seen | {token})
+                if inner is None:
+                    return None
+                leaves += inner
+            return leaves
+        return [token]
+
+    def _parse_rule(self, line: str, aliases: dict[str, dict[str, list[str]]]) -> tuple[list[str], str] | None:
+        """(user leaf tokens, command text) of a `users hosts = (runas) tags: cmds` rule, or None if unsure."""
+        left, eq, right = line.partition("=")
+        if not eq or not right.strip():
+            return None
+        groups: list[str] = []
+        current = ""
+        for token in left.split():
+            if current and (current.endswith(",") or token.startswith(",")):
+                current += token
+            else:
+                if current:
+                    groups.append(current)
+                current = token
+        if current:
+            groups.append(current)
+        if len(groups) != 2 or groups[0].endswith(",") or groups[1].endswith(","):
+            return None
+        users: list[str] = []
+        for item in (u for u in groups[0].split(",") if u):
+            leaves = self._expand_users(item, aliases["User"])
+            if leaves is None:
+                return None
+            users += leaves
+        cmds = re.sub(r"^\s*\([^)]*\)\s*", "", right)
+        cmds = re.sub(r"\b[A-Z_]+:\s*", "", cmds)
+        for word in re.findall(r"[A-Z][A-Z0-9_]*", cmds):
+            cmds += " " + " ".join(aliases["Cmnd"].get(word, []))
+        return users, cmds
 
     def probe(self) -> Probe:
         try:

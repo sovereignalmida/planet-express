@@ -249,3 +249,75 @@ def test_no_secret_is_in_the_session_env_cwd_readable_files_or_broker_responses(
     assert not any(v in json.dumps(out) for v in SECRETS.values())
     assert se.tools == ("arr.queue_item",) and "arr-api" not in json.dumps(dict(se.env))
     assert Inventory(stacks=("media",)).stacks == ("media",)
+
+
+# ── review round 2: SQL accounting, refusal cap ─────────────────────────────────────────────────────
+
+def test_accounting_does_not_parse_the_event_log(tmp_path):
+    ms, m, broker, sess, http, _ = setup(tmp_path)
+    broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})
+    ms.events = lambda *a, **k: (_ for _ in ()).throw(AssertionError("the broker read the whole event log"))
+    assert broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 2})["ok"]
+    assert broker._calls_used(m.id) == 2 and broker._output_used(m.id) > 0
+
+
+def test_refusals_are_capped_per_session_then_the_session_is_stopped_and_events_stop_growing(tmp_path):
+    ms, m, broker, sess, http, _ = setup(tmp_path, creds=())
+    hits = []
+    broker.on_refusal_cap = hits.append
+    for _ in range(broker.refusal_cap + 15):
+        with pytest.raises(RpcError):
+            broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 7})
+    refused = [e for e in events(ms, m.id) if json.loads(e.body_json)["event"] == "tool.refused"]
+    assert len(refused) == broker.refusal_cap                    # growth is bounded, not one row per hostile call
+    assert len(hits) == 1 and hits[0].id == sess.id
+    assert any(json.loads(e.body_json)["event"] == "tool.refusal_cap" for e in events(ms, m.id))
+
+
+def test_after_the_cap_even_a_valid_call_is_refused_for_that_session_only(tmp_path):
+    ms, m, broker, sess, http, _ = setup(tmp_path)
+    broker.on_refusal_cap = lambda s: None
+    for _ in range(broker.refusal_cap):
+        with pytest.raises(RpcError):
+            broker.invoke(sess, "nope", {})
+    with pytest.raises(RpcError):
+        broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})
+    assert http.calls == []
+    other = Sess("S-2", m.id)
+    assert broker.invoke(other, "arr.queue_item", {"app": "sonarr", "id": 1})["ok"]
+
+
+def test_a_failing_cap_hook_does_not_unblock_the_session(tmp_path):
+    ms, m, broker, sess, http, _ = setup(tmp_path)
+
+    def boom(session):
+        raise RuntimeError("cannot freeze")
+    broker.on_refusal_cap = boom
+    for _ in range(broker.refusal_cap + 2):
+        with pytest.raises(RpcError):
+            broker.invoke(sess, "nope", {})
+    with pytest.raises(RpcError):
+        broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})
+    assert http.calls == []
+
+
+def test_the_supervisor_freezes_a_session_that_hits_the_refusal_cap(tmp_path):
+    from supervisor_fakes import Rig, update
+
+    from planet_express.missions.sessions import SessionRow
+    from planet_express.missions.tools import ToolBroker, default_registry
+    rig = Rig(tmp_path, tier="propose", behaviours=[{"script": [update("running")] * 50}])
+    rig.sup.tool_broker = ToolBroker(default_registry(), missions=rig.ms, secrets=lambda r: None, sites={},
+                                     stacks_root=str(tmp_path))
+    rig.sup.tool_broker.on_refusal_cap = rig.sup.freeze_for_tool_abuse
+    rig.sup.start(rig.mid)
+    row = rig.ms.live_session(rig.mid)
+    session = SessionRow(id=row["id"], mission_id=rig.mid, kind=row["kind"], cgroup_path=row["cgroup_path"],
+                         leader_pid=row["leader_pid"], session_uid=row["session_uid"], issued_at=row["issued_at"],
+                         expires_at=row["expires_at"], fences={})
+    group = rig.cont._groups[row["id"]]
+    for _ in range(rig.sup.tool_broker.refusal_cap):
+        with pytest.raises(RpcError):
+            rig.sup.tool_invoke(session, "nope", {})
+    assert group.frozen is True
+    assert any("tool_abuse" in e.body_json for e in rig.ms.events(rig.mid))

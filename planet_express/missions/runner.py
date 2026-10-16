@@ -194,8 +194,11 @@ def build_mission_runner(
         from planet_express.missions.grants import make_env_policy
         from planet_express.missions.store import MissionStore
         from planet_express.missions.tools import broker_from_config, default_registry
-        from planet_express.missions.tripwire.build import build_protected_set
-        protected = build_protected_set(cfg, stacks_root=stacks_root)
+        from planet_express.missions.tripwire.build import (
+            build_protected_set,
+            protected_override_recorder,
+        )
+        protected = build_protected_set(cfg, stacks_root=stacks_root, record=protected_override_recorder(store))
         if tool_broker is None:
             tool_broker = broker_from_config(cfg, missions=MissionStore(store), stacks_root=stacks_root,
                                              protected=protected.resources)

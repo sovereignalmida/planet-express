@@ -441,27 +441,59 @@ class TripwireMonitor:
 
     # ── restart ─────────────────────────────────────────────────────────────
     def recover(self) -> list[str]:
-        """At Core start: re-freeze every paused session, and finish a pause that was begun but never recorded."""
+        """At Core start: re-freeze every paused session, and finish a pause that was begun but never recorded.
+
+        Per mission and isolated: one that cannot be re-frozen (and cannot be killed) or whose pause cannot be completed is
+        marked `recovery_required` with an event and a log line, and the others are still recovered. Only a failure to list
+        the missions at all raises: there is nothing to isolate then, and Core must not start unwatched."""
         acted: list[str] = []
         for mission in self.ms.list_missions("paused_tripwire"):
-            cs = self._session(mission.id)
-            if cs is not None:
-                try:
-                    self.containment.freeze(cs)
-                except Exception:
-                    log.exception("could not re-freeze %s; killing its session", mission.id)
-                    self.containment.kill(cs)
-            self.ms.append_event(mission.id, "tripwire", ACTOR, {"event": "tripwire.refrozen"})
-            acted.append(mission.id)
+            try:
+                cs = self._session(mission.id)
+                if cs is not None:
+                    try:
+                        self.containment.freeze(cs)
+                    except Exception:
+                        log.exception("could not re-freeze %s; killing its session", mission.id)
+                        self.containment.kill(cs)
+                self.ms.append_event(mission.id, "tripwire", ACTOR, {"event": "tripwire.refrozen"})
+                acted.append(mission.id)
+            except Exception as exc:       # noqa: BLE001
+                self._recovery_failed(mission.id, f"re-freezing failed ({type(exc).__name__})")
         for mission in self.ms.list_missions("executing"):
             try:
-                intent = self.state.read(mission.id, "intent.json")
-            except (ValueError, OSError):
-                intent = {"cause": "intent_unreadable"}
-            if intent is not None:
-                self._pause(mission, "recovered_pause", [], {"was": clean(intent.get("cause", "?"), 40)}, None)
-                acted.append(mission.id)
+                try:
+                    intent = self.state.read(mission.id, "intent.json")
+                except (ValueError, OSError):
+                    intent = {"cause": "intent_unreadable"}
+                if intent is not None:
+                    self._pause(mission, "recovered_pause", [], {"was": clean(intent.get("cause", "?"), 40)}, None)
+                    acted.append(mission.id)
+            except Exception as exc:       # noqa: BLE001
+                self._recovery_failed(mission.id, f"completing the pause failed ({type(exc).__name__})")
         return acted
+
+    def _recovery_failed(self, mission_id: str, reason: str) -> None:
+        """A mission whose session could not be held at restart. Stop its session if at all possible, and hand it to the
+        operator as `recovery_required`. Never raises: it is the last resort."""
+        log.error("tripwire recovery of %s failed: %s", mission_id, reason)
+        try:
+            cs = self._session(mission_id)
+            if cs is not None:
+                try:
+                    self.containment.kill(cs)
+                except Exception:
+                    log.exception("could not kill the session of %s", mission_id)
+            body = {"event": "tripwire.recovery_failed", "reason": clean(reason, 200),
+                    "card": {"mission": mission_id, "options": list(NO_ROLLBACK_OPTIONS)}}
+            now = int(self.ms.store._clock())
+            with self.ms.store._write() as conn:
+                row = conn.execute("SELECT status FROM missions WHERE id=?", (mission_id,)).fetchone()
+                if row is not None and row["status"] not in ("recovery_required", "completed", "failed", "rolled_back", "cancelled"):
+                    transition_in_txn(conn, mission_id, "recovery_required", ACTOR, now)
+                insert_event(conn, mission_id, "tripwire", ACTOR, body, now)
+        except Exception:
+            log.exception("could not record the failed recovery of %s", mission_id)
 
     # ── operator action: roll back ──────────────────────────────────────────
     def roll_back(self, mission_id: str, actor: str) -> Any:
@@ -478,20 +510,65 @@ class TripwireMonitor:
             raise RollbackRefused("rollback is not available for this pause")
         cs = self._session(mission_id)
         if cs is not None:
-            self.containment.kill(cs)
-            for _ in range(50):
-                if self.containment.is_empty(cs):
-                    break
+            try:
                 self.containment.kill(cs)
-                time.sleep(0.1)
-            else:
-                raise RollbackRefused("the session is not provably dead")
-            self.containment.cleanup(cs)
-        self.checkpoint.capture_post(mission.checkpoint_id)
-        transition(self.ms.store, mission_id, "rollback_pending", actor)
-        report = self.checkpoint.restore(mission.checkpoint_id, actor=actor)
+                for _ in range(50):
+                    if self.containment.is_empty(cs):
+                        break
+                    self.containment.kill(cs)
+                    time.sleep(0.1)
+                else:
+                    raise RollbackRefused("the session is not provably dead")
+            except RollbackRefused:
+                raise
+            except Exception as exc:        # noqa: BLE001 - the mission stays paused; the operator can try again
+                raise RollbackRefused(f"the session could not be stopped ({type(exc).__name__})") from None
+            try:
+                self.containment.cleanup(cs)
+            except Exception:               # noqa: BLE001 - an empty cgroup left behind is the reaper's to remove
+                log.warning("could not remove the cgroup of %s", mission_id)
+        # From here on every outcome ends in a DEFINED state: rolled_back on a clean restore, otherwise needs_operator
+        # with the report and a card. Nothing is left in paused_tripwire half-done or in rollback_pending.
+        try:
+            self.checkpoint.capture_post(mission.checkpoint_id)
+            transition(self.ms.store, mission_id, "rollback_pending", actor)
+        except Exception as exc:            # noqa: BLE001
+            return self._rollback_failed(mission_id, f"the post-change capture failed ({type(exc).__name__})", None)
+        try:
+            report = self.checkpoint.restore(mission.checkpoint_id, actor=actor)
+        except Exception as exc:            # noqa: BLE001 - a restore that raised may have written some files
+            return self._rollback_failed(mission_id, f"the restore raised {type(exc).__name__}", None)
         if report.ok:
             transition(self.ms.store, mission_id, "rolled_back", actor)
+            return report
+        self._rollback_failed(mission_id, report.reason or "the restore did not complete cleanly", report)
+        return report
+
+    def _rollback_failed(self, mission_id: str, reason: str, report: Any) -> Any:
+        """Hand the mission to the operator with what happened. The event carries a bounded summary and a card."""
+        from planet_express.missions.checkpoint import RestoreReport
+        summary: dict[str, Any] = {"status": "failed"}
+        if report is not None:
+            summary = {
+                "status": report.status, "partial": report.partial, "written": [clean(w, 160) for w in report.written[:20]],
+                "drifted": [clean(json.dumps(d, sort_keys=True), 200) for d in report.drifted[:10]],
+                "unrestored": [{"service": clean(u.get("service", "?"), 80), "fields": [clean(f, 40) for f in u.get("fields", [])[:10]]}
+                               for u in report.unrestored[:10]],
+                "meta_skipped": len(report.meta_skipped)}
+        else:
+            report = RestoreReport(status="failed", reason=reason)
+        body = {"event": "tripwire.rollback_incomplete", "reason": clean(reason, 200), "summary": summary,
+                "card": {"mission": mission_id, "options": list(NO_ROLLBACK_OPTIONS)}}
+        now = int(self.ms.store._clock())
+        try:
+            with self.ms.store._write() as conn:
+                row = conn.execute("SELECT status FROM missions WHERE id=?", (mission_id,)).fetchone()
+                if row is not None and row["status"] != "needs_operator":
+                    transition_in_txn(conn, mission_id, "needs_operator", ACTOR, now)
+                insert_event(conn, mission_id, "tripwire", ACTOR, body, now)
+        except Exception:
+            log.exception("could not hand %s to the operator after a failed rollback", mission_id)
+            raise
         return report
 
 

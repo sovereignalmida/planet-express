@@ -204,6 +204,75 @@ def test_docker_tcp_repair_is_refused_and_says_what_to_do(host):
     assert "2375" in (host.etc / "docker" / "daemon.json").read_text()
 
 
+def _unit(host, name, text, sub=None):
+    d = host.tmp / "systemd" / (sub or "")
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(text)
+
+
+@pytest.mark.parametrize("exec_start", [
+    "/usr/bin/dockerd -H fd:// \\\n  -H tcp://0.0.0.0:2375",                  # continued line
+    "/usr/bin/dockerd -Htcp://0.0.0.0:2375",                                   # no separator
+    "/usr/bin/dockerd --host=tcp://127.0.0.1:2375",
+    "/usr/bin/dockerd --host tcp://[::]:2375",
+    "/usr/bin/dockerd -H=tcp://[::1]:2375 -H fd://",
+    "/usr/bin/dockerd -H 'tcp://0.0.0.0:2375'",
+    "/usr/bin/dockerd \\\n -H fd:// \\\n --containerd=/run/c.sock \\\n -H tcp://:2375",
+])
+def test_docker_tcp_exec_start_forms(host, exec_start):
+    _unit(host, "docker.service", f"[Service]\nExecStart={exec_start}\n")
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and "tcp://" in probe.detail, exec_start
+
+
+def test_docker_tcp_continued_exec_start_with_verified_tls_passes(host):
+    _unit(host, "docker.service", "[Service]\nExecStart=/usr/bin/dockerd \\\n  -H tcp://0.0.0.0:2376 \\\n  --tlsverify --tlscacert=/ca.pem\n")
+    assert DockerTcpExposure(host.paths()).probe().ok
+
+
+@pytest.mark.parametrize("listen", ["0.0.0.0:2375", "[::]:2375", "[::1]:2375", "127.0.0.1:9999", "2375", "*:2376"])
+def test_docker_tcp_socket_unit_listen_stream_forms(host, listen):
+    _unit(host, "docker.socket", f"[Socket]\nListenStream=/run/docker.sock\nListenStream={listen}\n")
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and "docker.socket" in probe.detail, listen
+
+
+def test_docker_tcp_unix_listen_stream_is_fine(host):
+    _unit(host, "docker.socket", "[Socket]\nListenStream=/run/docker.sock\nListenStream=@abstract\n")
+    assert DockerTcpExposure(host.paths()).probe().ok
+
+
+def test_docker_tcp_drop_ins_are_read(host):
+    _unit(host, "10-tcp.conf", "[Service]\nExecStart=\nExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2375\n",
+          sub="docker.service.d")
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and "10-tcp.conf" in probe.detail
+    _unit(host, "20-sock.conf", "[Socket]\nListenStream=0.0.0.0:2375\n", sub="docker.socket.d")
+    assert "20-sock.conf" in DockerTcpExposure(host.paths()).probe().detail
+
+
+@pytest.mark.parametrize("line", [
+    "ExecStart=/usr/bin/dockerd $DOCKER_OPTS",
+    "ExecStart=/usr/bin/dockerd ${OPTIONS}",
+])
+def test_docker_tcp_unresolvable_exec_start_fails_closed(host, line):
+    _unit(host, "docker.service", f"[Service]\n{line}\n")
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and probe.blocked and "cannot" in probe.detail
+
+
+def test_docker_tcp_daemon_json_hosts_with_a_tcp_entry_among_others(host):
+    (host.etc / "docker" / "daemon.json").write_text('{"hosts": ["fd://", "tcp://[::]:2375", "unix:///x"]}\n')
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and "tcp://[::]:2375" in probe.detail
+
+
+def test_docker_tcp_hosts_that_are_not_strings_fail_closed(host):
+    (host.etc / "docker" / "daemon.json").write_text('{"hosts": [2375, {"a": 1}]}\n')
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and probe.blocked
+
+
 # ── (c) sudoers ─────────────────────────────────────────────────────────────────────────────────────
 
 def test_sudoers_passes_with_only_managed_rules_and_distro_defaults(host):
@@ -378,6 +447,75 @@ def test_sudoers_a_long_include_chain_fails_closed(host):
     (host.etc / "sudoers.d" / "chain").write_text(f"@include {host.etc}/c0\n")
     probe = SudoersManaged(host.paths()).probe()
     assert not probe.ok and "deeper" in probe.detail
+
+
+def _add_session_accounts(host):
+    host.passwd.write_text(host.passwd.read_text() + "sess:x:61005:61005::/nonexistent:/sbin/nologin\n")
+    host.group.write_text(host.group.read_text() + "sessgrp:x:61100:\nops:x:5000:sess\n")
+
+
+@pytest.mark.parametrize("rule", [
+    "sess ALL=(root) NOPASSWD: /bin/sh",                               # a session account by name
+    "%sessgrp ALL=(root) NOPASSWD: /bin/sh",                           # a group whose gid is a session gid
+    "%ops ALL=(root) NOPASSWD: /bin/sh",                               # a group with a session account as a member
+    "chris, sess ALL=(root) /bin/sh",                                  # user list with a space after the comma
+    "planetexpress web1, web2 = (root) NOPASSWD: /bin/sh",             # host list with spaces
+    "planetexpress web1 ,web2 =(root) /bin/sh",
+    "!bob, planetexpress ALL=(ALL) ALL",
+])
+def test_sudoers_session_identities_and_list_forms_are_reached(host, rule):
+    _add_session_accounts(host)
+    (host.etc / "sudoers.d" / "x").write_text(rule + "\n")
+    assert not SudoersManaged(host.paths()).probe().ok
+
+
+@pytest.mark.parametrize("text", [
+    "User_Alias ADMINS = chris : OPS = planetexpress\nOPS ALL=(root) /bin/sh\n",     # second of two definitions
+    "User_Alias A = planetexpress\nUser_Alias B = bob, A\nB ALL=(ALL) ALL\n",       # alias of an alias
+    "User_Alias A = sess\nA ALL=(ALL) ALL\n",
+    "Runas_Alias R = root : S = daemon\nplanetexpress ALL=(S) /bin/sh\n",
+    "Cmnd_Alias C = /usr/bin/systemctl restart *\nplanetexpress ALL=(root) C\n",
+    "Host_Alias H = web1, web2\nplanetexpress H=(root) /bin/sh\n",
+    "User_Alias A = chris, \\\n  planetexpress\nA ALL=(ALL) ALL\n",                # continued definition
+])
+def test_sudoers_aliases_are_resolved(host, text):
+    _add_session_accounts(host)
+    (host.etc / "sudoers.d" / "x").write_text(text)
+    assert not SudoersManaged(host.paths()).probe().ok
+
+
+def test_sudoers_cmnd_alias_with_a_wildcard_is_labelled(host):
+    (host.etc / "sudoers.d" / "x").write_text("Cmnd_Alias C = /usr/bin/systemctl restart *\nplanetexpress ALL=(root) C\n")
+    assert "wildcard" in SudoersManaged(host.paths()).probe().detail
+
+
+@pytest.mark.parametrize("text", [
+    "planetexpress garbage\n",                         # cannot be parsed with confidence
+    "FOO ALL=(ALL) ALL\n",                              # an alias that is never defined
+    "+netgroup ALL=(ALL) ALL\n",                        # a netgroup cannot be resolved here
+    "planetexpress ALL ALL = (root) /bin/sh\n",         # too many fields before the =
+    "just some words without structure\n",
+])
+def test_sudoers_lines_that_cannot_be_parsed_fail_closed(host, text):
+    (host.etc / "sudoers.d" / "x").write_text(text)
+    probe = SudoersManaged(host.paths()).probe()
+    assert not probe.ok and "unparseable" in probe.detail
+
+
+def test_sudoers_rules_for_other_people_through_aliases_still_pass(host):
+    _add_session_accounts(host)
+    (host.etc / "sudoers.d" / "x").write_text(
+        "User_Alias ADMINS = chris, bob : OPS = alice\nHost_Alias H = a, b\nCmnd_Alias C = /bin/ls\n"
+        "ADMINS H = (root) C\nOPS ALL=(ALL) ALL\nchris web1, web2 = (root) /bin/sh\n")
+    probe = SudoersManaged(host.paths()).probe()
+    assert probe.ok, probe.detail
+
+
+def test_sudoers_repair_comments_out_a_multi_line_rule_and_an_alias_rule(host):
+    (host.etc / "sudoers.d" / "x").write_text("User_Alias A = planetexpress\nA ALL=(root) \\\n  NOPASSWD: /bin/sh\n")
+    step = SudoersManaged(host.paths())
+    step.repair(MemoryJournal())
+    assert step.probe().ok
 
 
 # ── the gate ────────────────────────────────────────────────────────────────────────────────────────

@@ -18,6 +18,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from planet_express.core.redact import redact
 from planet_express.missions.resources import BadResource, canon, classify
 
 Verdict = Literal["allowed", "unexpected_in_scope", "protected", "out_of_scope"]
@@ -35,7 +36,8 @@ SEVERITY = {"allowed": 0, "unexpected_in_scope": 1, "out_of_scope": 2, "protecte
 
 
 def clean(text: Any, limit: int = MAX_DETAIL) -> str:
-    return _CTRL.sub("?", str(text))[:limit]
+    """Control characters out, secrets redacted, length bounded: every host-derived string goes through here."""
+    return _CTRL.sub("?", redact(str(text)))[:limit]
 
 
 @dataclass(frozen=True)
@@ -107,6 +109,18 @@ def _storage_mounts(lines: Iterable[str]) -> dict[str, str]:
     return out
 
 
+_PROPAGATION = frozenset({"shared", "slave", "private", "unbindable", "rshared", "rslave", "rprivate"})
+
+
+def _mount_state(line: str) -> tuple[str, str, str, tuple[str, ...]]:
+    """(device, fstype, ro|rw, propagation words): what a remount can change that matters."""
+    parts = line.split()
+    opts = parts[3].split(",") if len(parts) > 3 else []
+    mode = "ro" if "ro" in opts else "rw"
+    words = tuple(sorted(w for w in (*opts, *(x.split(":")[0] for x in parts[4:])) if w in _PROPAGATION))
+    return parts[0], parts[2] if len(parts) > 2 else "", mode, words
+
+
 def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
     out: list[Change] = []
     routes_res = ctx.rid("detector:ingress_routes")
@@ -138,9 +152,9 @@ def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
                 continue
             out.append(Change("containers", nres if v == "protected" and nres else res, "network_added", v,
                               f"{label}: {clean(net, 80)}"))
-        old = {tuple(m[:3]) for m in b["mounts"]}
+        old = {tuple(m[:4]) for m in b["mounts"]}
         for m in sorted(c["mounts"]):
-            if tuple(m[:3]) in old:
+            if tuple(m[:4]) in old:
                 continue
             src = ctx.rid(f"path:{m[1]}") if m[1].startswith("/") else None
             where = ctx.cls(src) if src else "out_of_scope"
@@ -154,7 +168,7 @@ def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
                 continue
             out.append(Change("containers", src or res, "mount_added", v, f"{label}: {clean(m[1], 120)}"))
         for m in sorted(b["mounts"]):
-            if tuple(m[:3]) not in {tuple(x[:3]) for x in c["mounts"]}:
+            if tuple(m[:4]) not in {tuple(x[:4]) for x in c["mounts"]}:
                 out.append(Change("containers", res, "mount_removed", ctx.verdict(res), f"{label}: {clean(m[1], 120)}"))
     return out
 
@@ -184,6 +198,14 @@ def _mounts(base: Sequence[str], cur: Sequence[str], ctx: DiffContext) -> list[C
         res = ctx.rid(f"mount:{target}")
         if res:
             out.append(Change("mounts", res, "mount_removed", ctx.verdict(res), clean(target, 120)))
+    for target in sorted(set(b) & set(c)):
+        old, new = _mount_state(b[target]), _mount_state(c[target])
+        if old != new:
+            res = ctx.rid(f"mount:{target}")
+            if res:
+                what = f"{old[2]}->{new[2]}" if old[2] != new[2] else "device, type or propagation changed"
+                out.append(Change("mounts", res, "mount_options_changed", ctx.verdict(res, "unexpected_in_scope"),
+                                  f"{clean(target, 100)}: {what}"))
     return out
 
 
