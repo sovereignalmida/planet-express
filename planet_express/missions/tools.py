@@ -14,6 +14,7 @@ Adding a tool is a reviewed capability (listed in CLAUDE.md's v4 surface).
 """
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -35,6 +36,8 @@ from planet_express.missions.resources import BadResource, canon, classify
 from planet_express.missions.store import MissionStore, grant_resources
 
 ACTOR = "tool-broker"
+REFUSAL_CAP = 20
+log = logging.getLogger(__name__)
 MAX_OUTPUT_BYTES = 32 * 1024
 MAX_HTTP_BYTES = 1 << 20
 HTTP_TIMEOUT_S = 5
@@ -208,7 +211,8 @@ class ToolBroker:
     def __init__(self, registry: ToolRegistry, *, missions: MissionStore, secrets: Callable[[str], str | None],
                  sites: Mapping[str, ToolSite], stacks_root: str, protected: Collection[str] = (),
                  http: HttpFn = default_http, runner: Callable[[list[str], int], tuple[int, str, str]] | None = None,
-                 write_gate: Callable[[str, str, dict], bool] | None = None, max_output_bytes: int = MAX_OUTPUT_BYTES):
+                 write_gate: Callable[[str, str, dict], bool] | None = None, max_output_bytes: int = MAX_OUTPUT_BYTES,
+                 refusal_cap: int = REFUSAL_CAP, on_refusal_cap: Callable[[Any], None] | None = None):
         self.registry = registry
         self.ms = missions
         self.secrets = secrets
@@ -219,6 +223,8 @@ class ToolBroker:
         self.runner = runner or _default_runner
         self.write_gate = write_gate        # slice 7 supplies it; until then every write tool is refused
         self.max_output_bytes = max_output_bytes
+        self.refusal_cap = refusal_cap
+        self.on_refusal_cap = on_refusal_cap
         self._revoked: set[str] = set()
         self._lock = threading.Lock()
 
@@ -233,15 +239,32 @@ class ToolBroker:
 
     # ── the call ────────────────────────────────────────────────────────────
     def invoke(self, session: Any, name: str, params: dict) -> dict:
-        mission_id = session.mission_id
+        mission_id, sid = session.mission_id, str(getattr(session, "id", ""))
+        if self._count(mission_id, "tool.refusal_cap", sid)[0]:
+            raise RpcError("Refused", "unauthorized")      # a session that hit the cap gets nothing, and nothing is written
         try:
             return self._invoke(session, name, params)
         except ToolRefused as exc:
-            self._record(mission_id, "tool.refused", name, params, reason=str(exc)[:200])
+            self._refused(mission_id, sid, name, params, str(exc)[:200])
             raise RpcError("Refused", "unauthorized") from None
         except _BadParams as exc:
-            self._record(mission_id, "tool.refused", name, params, reason=f"bad params: {exc}"[:200])
+            self._refused(mission_id, sid, name, params, f"bad params: {exc}"[:200])
             raise RpcError("Invalid params", "bad_params") from None
+
+    def _refused(self, mission_id: str, sid: str, name: str, params: dict, reason: str) -> None:
+        """Record a refusal, up to `refusal_cap` per session. The call that reaches the cap records one more event and
+        fires `on_refusal_cap` (the supervisor freezes the session); from then on the session is refused outright."""
+        used = self._count(mission_id, "tool.refused", sid)[0]
+        if used >= self.refusal_cap:
+            return
+        self._record(mission_id, "tool.refused", name, params, reason=reason, session=sid)
+        if used + 1 >= self.refusal_cap:
+            self._record(mission_id, "tool.refusal_cap", name, {}, reason=f"{self.refusal_cap} refused calls", session=sid)
+            if self.on_refusal_cap is not None:
+                try:
+                    self.on_refusal_cap(_SessionRef(sid, mission_id))
+                except Exception:
+                    log.exception("the refusal-cap hook failed for session %s", sid)
 
     def _invoke(self, session: Any, name: str, params: dict) -> dict:
         try:
@@ -322,18 +345,30 @@ class ToolBroker:
         except (LookupError, sqlite3.IntegrityError):   # the mission does not exist: nothing to attach it to
             pass
 
-    def _tool_events(self, mission_id: str) -> list[dict]:
-        out = []
-        for e in self.ms.events(mission_id):
-            if e.kind == "tool" and e.actor == ACTOR:
-                out.append(json.loads(e.body_json))
-        return out
+    def _count(self, mission_id: str, event: str, session: str | None = None) -> tuple[int, int]:
+        """(rows, sum of `bytes`) of this broker's `tool` events with this `event` name, by SQL: the log is never read
+        into memory, however long the mission has run."""
+        sql = ("SELECT COUNT(*), COALESCE(SUM(json_extract(body_json, '$.bytes')), 0) FROM mission_events "
+               "WHERE mission_id=? AND kind='tool' AND actor=? AND json_extract(body_json, '$.event')=?")
+        args: list[Any] = [mission_id, ACTOR, event]
+        if session is not None:
+            sql += " AND json_extract(body_json, '$.session')=?"
+            args.append(session)
+        with self.ms.store._connect() as conn:
+            row = conn.execute(sql, args).fetchone()
+        return int(row[0]), int(row[1])
 
     def _calls_used(self, mission_id: str) -> int:
-        return sum(1 for b in self._tool_events(mission_id) if b.get("event") == "tool.invoke")
+        return self._count(mission_id, "tool.invoke")[0]
 
     def _output_used(self, mission_id: str) -> int:
-        return sum(int(b.get("bytes", 0)) for b in self._tool_events(mission_id) if b.get("event") == "tool.invoke")
+        return self._count(mission_id, "tool.invoke")[1]
+
+
+@dataclass(frozen=True)
+class _SessionRef:
+    id: str
+    mission_id: str
 
 
 def broker_from_config(cfg: Any, *, missions: MissionStore, stacks_root: str, protected: Collection[str] = (),

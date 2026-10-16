@@ -46,6 +46,8 @@ class Host:
         self.mounts = ["/dev/sda1 / ext4 rw 0 0", "/dev/sdb1 /mnt/data ext4 rw 0 0", "proc /proc proc rw 0 0"]
         self.firewall = "table inet filter { chain input { policy drop; } }\n"
         self.fail: dict[str, Exception] = {}
+        self.ss_rc = 0
+        self.mounts_error: OSError | None = None
         self.stacks = "/srv/stacks"
 
     def _docs(self):
@@ -55,6 +57,11 @@ class Host:
     def runner(self, argv, timeout):
         if argv[:3] == ["docker", "ps", "-aq"]:
             return 0, "\n".join(d["Id"] for d in self._docs()), ""
+        if argv[0] == "ss":
+            if "ports" in self.fail:
+                raise self.fail["ports"]
+            lines = [f"{p.split()[0]} LISTEN 0 128 {p.split()[1]} 0.0.0.0:*" for p in self.ports]
+            return self.ss_rc, "\n".join(lines), ""
         if argv[:2] == ["nft", "list"]:
             return 0, self.firewall, ""
         if argv[0] == "iptables-save":
@@ -68,14 +75,10 @@ class Host:
             return 0, out, "", False
         return 127, "", "unexpected argv", False
 
-    # the provider surface the collectors use
-    def listening_ports(self):
-        if "ports" in self.fail:
-            raise self.fail["ports"]
-        return list(self.ports)
-
-    def mount_table(self):
-        return list(self.mounts)
+    def read_mounts(self):
+        if self.mounts_error:
+            raise self.mounts_error
+        return "\n".join(self.mounts)
 
 
 class Rig:
@@ -137,7 +140,7 @@ def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_t
     rig.mission = env.ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s",
                                         runtime="fake")
     env.mission = rig.mission
-    scan_env = ScanEnv(runner=rig.host.runner, bounded=rig.host.bounded, provider=rig.host, protected=rig.protected,
+    scan_env = ScanEnv(runner=rig.host.runner, bounded=rig.host.bounded, read_mounts=rig.host.read_mounts, protected=rig.protected,
                        fs_root=str(fs), volume_paths=volume_paths(rig.protected), clock=env.clock)
     rig.scan_env = scan_env
     rig.scanner = Scanner(scan_env, signal_timeout_s=(scan_kw or {}).get("signal_timeout_s", 3.0),

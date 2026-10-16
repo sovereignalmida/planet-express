@@ -55,8 +55,9 @@ def sha(data: bytes) -> str:
 class ScanEnv:
     runner: Runner
     bounded: BoundedRunner
-    provider: CheckpointProvider
     protected: ProtectedSet
+    read_mounts: Callable[[], str] | None = None       # tests; default reads /proc/self/mounts under fs_root
+    provider: CheckpointProvider | None = None        # no longer read: ports and mounts are collected strictly here
     fs_root: str = "/"
     package_paths: Sequence[str] = DEFAULT_PACKAGE_FILES
     volume_paths: Sequence[tuple[str, str]] = ()          # (resource id, host path) of data volumes to watch
@@ -219,7 +220,10 @@ def collect_containers(env: ScanEnv) -> dict[str, Any]:
             mounts = sorted([m.get("Type", ""), m.get("Source", ""), m.get("Destination", ""), bool(m.get("RW", True))]
                             for m in doc.get("Mounts") or [])
             nets = sorted(((doc.get("NetworkSettings") or {}).get("Networks") or {}).keys())
-            routes = sorted(f"{k}={v}"[:200] for k, v in labels.items() if _ROUTE_LABEL.match(k))[:MAX_ROUTE_LABELS]
+            # Ingress labels can carry credentials (basicauth users, header values): keep the NAME and a hash of the VALUE,
+            # so a changed value still shows as a change and no value is ever persisted or shown.
+            routes = sorted(f"{k[:150]}#{sha(v.encode())[:12]}" for k, v in labels.items()
+                            if _ROUTE_LABEL.match(k))[:MAX_ROUTE_LABELS]
             result[name] = {
                 "resource": _container_resource(name, labels), "image": str(doc.get("Image", "")),
                 "mounts": mounts, "networks": [str(n) for n in nets],
@@ -231,11 +235,39 @@ def collect_containers(env: ScanEnv) -> dict[str, Any]:
 
 
 def collect_ports(env: ScanEnv) -> list[str]:
-    return sorted(env.provider.listening_ports())
+    """Listening sockets from `ss`. Unlike the checkpoint provider (which reports nothing on failure) a failed, missing or
+    unparseable `ss` is a FAILED signal: an empty list would read as "every listener is gone"."""
+    try:
+        rc, out, _err = env.runner(["ss", "-H", "-ltnu"], DOCKER_TIMEOUT_S)
+    except OSError as exc:
+        raise SignalError(f"ss could not be run ({type(exc).__name__})") from None
+    if rc != 0:
+        raise SignalError(f"ss failed (exit {rc})")
+    rows = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5:
+            rows.add(f"{parts[0]} {parts[4]}")
+        elif parts:
+            raise SignalError("ss printed a line this reader does not understand")
+    return sorted(rows)
 
 
 def collect_mounts(env: ScanEnv) -> list[str]:
-    return sorted(env.provider.mount_table())
+    """The mount table, with options (so ro -> rw is a change). Unreadable or empty is a failed signal."""
+    try:
+        text = env.read_mounts() if env.read_mounts else _read_text(env.real("/proc/self/mounts"))
+    except OSError as exc:
+        raise SignalError(f"the mount table is unreadable ({exc.strerror})") from None
+    rows = sorted(line.strip() for line in text.splitlines() if line.strip())
+    if not rows:
+        raise SignalError("the mount table is empty")
+    return rows
+
+
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        return handle.read(4 << 20)
 
 
 def collect_files(env: ScanEnv) -> dict[str, str]:
@@ -243,6 +275,24 @@ def collect_files(env: ScanEnv) -> dict[str, str]:
 
 
 _COUNTERS = re.compile(r"\[\d+:\d+\]")
+_NFT_COUNTS = re.compile(r"\bpackets \d+ bytes \d+")
+_NFT_EXPIRES = re.compile(r"\s+expires\s+\S+")
+_NFT_QUOTA_USED = re.compile(r"\bused \d+(?:\s+[kmg]?bytes)?", re.IGNORECASE)
+_NFT_ELEMENTS = re.compile(r"elements\s*=\s*\{[^}]*\}", re.DOTALL)
+
+
+def normalise_firewall(text: str) -> str:
+    """The stable rule text of an `nft list ruleset` / `iptables-save` dump. EXCLUDED, because they change on their own
+    and would pause every mission: comment lines (timestamps), iptables chain counters `[n:n]`, nft `packets N bytes M`
+    (counter and counter-object values), `expires <time>` on set elements, quota `used N`, and the CONTENT of set
+    `elements = { ... }` (dynamic sets such as fail2ban's grow and shrink; the set's declaration, type and flags stay).
+    A changed rule, policy, chain or set declaration still changes the hash."""
+    lines = (line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    body = "\n".join(lines)
+    body = _NFT_ELEMENTS.sub("elements = { }", body)
+    for pattern, repl in ((_COUNTERS, ""), (_NFT_COUNTS, ""), (_NFT_EXPIRES, ""), (_NFT_QUOTA_USED, "used")):
+        body = pattern.sub(repl, body)
+    return "\n".join(" ".join(line.split()) for line in body.splitlines() if line.strip())
 
 
 def collect_firewall(env: ScanEnv) -> dict[str, Any]:
@@ -254,8 +304,7 @@ def collect_firewall(env: ScanEnv) -> dict[str, Any]:
             # Not root, or the tool refused. Say so in the baseline instead of hashing an error as if it were rules:
             # the firewall domain is then blind and the baseline event says it is.
             return {"tool": argv[0], "unreadable": rc}
-        text = "\n".join(line for line in out.splitlines() if not line.startswith("#"))
-        return {"tool": argv[0], "sha": sha(_COUNTERS.sub("", text).encode())}
+        return {"tool": argv[0], "sha": sha(normalise_firewall(out).encode())}
     return {"tool": "none"}
 
 

@@ -232,3 +232,31 @@ def test_the_monitor_and_the_broker_close_together_on_a_pause(tmp_path):
     rig.monitor.scan_once()
     assert status(rig) == "paused_tripwire" and rig.mission.id in broker._revoked
     assert doc("x")["Name"] == "/x"
+
+
+OVERRIDE = {"resource": "path:/etc/hosts", "reason": "managed by dhcp, password=hunter2", "operator": "operator:chris", "at": 3}
+
+
+def test_overrides_without_a_record_sink_are_refused():
+    with pytest.raises(ValueError, match="record"):
+        build_protected_set(MissionsConfig(protected_overrides=[OVERRIDE]), stacks_root="/s")
+
+
+def test_an_override_through_the_runner_leaves_a_durable_redacted_record(tmp_path, cgroup2_mount):
+    from planet_express.missions.runner import build_mission_runner
+    store, _ = make_store(tmp_path)
+    c = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/agent"]}, protected_overrides=[OVERRIDE])
+    build_mission_runner(store, c, containment=FakeContainment(), stacks_root=str(tmp_path))
+    rows = [e for e in store.list_events() if e["kind"] == "mission.protected_override"]
+    assert len(rows) == 1
+    payload = rows[0]["payload"]
+    assert payload["resource"] == "host:local/path:/etc/hosts" and payload["operator"] == "operator:chris"
+    assert "dhcp" in payload["reason"] and "hunter2" not in payload["reason"]
+
+
+def test_no_overrides_means_no_record_and_no_refusal(tmp_path, cgroup2_mount):
+    from planet_express.missions.runner import build_mission_runner
+    store, _ = make_store(tmp_path)
+    c = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/agent"]})
+    assert build_mission_runner(store, c, containment=FakeContainment(), stacks_root=str(tmp_path)) is not None
+    assert not [e for e in store.list_events() if e["kind"] == "mission.protected_override"]

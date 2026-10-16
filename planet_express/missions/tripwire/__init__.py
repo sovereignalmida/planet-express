@@ -3,6 +3,9 @@
 `signals` reads host state, `diff` judges a change (allowed / unexpected_in_scope / protected / out_of_scope), and
 `monitor` runs the scan in its own thread and pauses the mission (freeze, post-change capture, durable event) on
 anything it cannot vouch for. With missions disabled nothing here starts a thread.
+
+Accepted behaviour (operator decision): any HEAD, ref or reflog change in a live git tree pauses the mission, including
+the agent's own commit. Firewall dumps are normalised before hashing (see `signals.normalise_firewall` for what is excluded).
 """
 
 from .diff import Change, DiffContext, diff_snapshots

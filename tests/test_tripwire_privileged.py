@@ -141,7 +141,7 @@ def test_real_signals_are_stable_across_two_scans_and_see_a_planted_change(tmp_p
             return sorted(Path("/proc/self/mounts").read_text().splitlines())
 
     protected = build_protected(site=[], discovery=Discovery(stacks_root="/srv/stacks"))
-    env = ScanEnv(runner=runner, bounded=bounded, provider=Provider(), protected=protected)
+    env = ScanEnv(runner=runner, bounded=bounded, protected=protected)
     signals = {"files": collect_files, "firewall": collect_firewall, "boot": collect_boot, "packages": collect_packages,
                "ports": collect_ports, "mounts": collect_mounts}
     scanner = Scanner(env, signals)

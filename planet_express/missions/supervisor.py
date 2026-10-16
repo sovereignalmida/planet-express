@@ -189,6 +189,8 @@ class Supervisor:
         self.store = store
         self.repair_gate = repair_gate                # side-door report (brief 6.8); None means a repair start is refused
         self.tool_broker = tool_broker                # `missions.tools.ToolBroker`; None: every tool call is refused
+        if tool_broker is not None and getattr(tool_broker, "on_refusal_cap", None) is None:
+            tool_broker.on_refusal_cap = self.freeze_for_tool_abuse
         self.socket_provider = socket_provider
         self.preflight_fn = preflight                 # returns a PreflightReport; None means "trusted" (tests)
         self.preflight_report: Any = None
@@ -815,6 +817,18 @@ class Supervisor:
                 "truncated": found.truncated}
 
     # ── external sessions (contract §11.1) ──────────────────────────────────
+    def freeze_for_tool_abuse(self, session: Any) -> None:
+        """A session that keeps asking for tools it may not use: freeze its cgroup and close its endpoints. Frozen, it
+        cannot act; its wall-time budget (or the operator) ends it."""
+        run = self._runs.get(session.mission_id)
+        if run is None or run.cs is None or run.session_id != session.id:
+            return
+        self.containment.freeze(run.cs)
+        self._note(session.mission_id, {"tool_abuse": "frozen", "session": session.id})
+        revoke = getattr(self.tool_broker, "revoke", None)
+        if revoke is not None:
+            revoke(session.mission_id)
+
     @_per_session
     def tool_invoke(self, session: SessionRow, name: str, params: dict) -> dict:
         """A brokered tool call (contract 8): the live run only, and only if a broker is configured."""
