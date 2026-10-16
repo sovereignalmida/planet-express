@@ -27,8 +27,16 @@ classifier; slice 7 will call them from the approval flow; slice 9 rehearses end
      `container_state`: running AND (health, if defined) AND not restarting; a Docker `healthy` string alone never
      satisfies any check. `project_complete`: every service the compose project defines exists and runs (reuse the
      S5 provider's compose-config reading; unknown/unreadable project = FAIL, not pass). `log_absent`: bounded window,
-     bounded bytes, pattern is a literal or a safe-bounded regex (reject catastrophic patterns by length and a
-     timeout). `query`: only through the brokered tool registry, read-only tools.
+     bounded bytes, pattern is a LITERAL substring by default; a regex is allowed only through a linear-time engine
+     (no backtracking; if none is vendored, regex is unavailable and the check refuses) or a killable subprocess with a
+     hard deadline. An in-process stdlib `re` match can hold the interpreter and is NOT acceptable. Test `(a+)+$` on a
+     long input fails closed within the deadline. `query`: only through the brokered tool registry, read-only tools.
+   - `baseline.py`: a normalized, bounded, redacted FINDING record `{kind, resource_id (§2.3 canonical), key_hash,
+     severity}` derived from `casa_leela.run_full()` snapshot sections by one normalizer used for BOTH the baseline
+     (captured and persisted next to the checkpoint when it is created, immutable, hash recorded in the manifest) and
+     the fresh scan. Sections the normalizer cannot map to a resource id become `unscoped` findings that count as
+     in-scope for any mission (fail closed), never silently dropped. Tests: same host state => identical records;
+     fault present at baseline => ignored; new fault in scope => fails; new fault out of scope => ignored.
    - `runner.py`: `Verifier.run(mission) -> VerificationResult` runs every check, records each result as a mission
      event (redacted, bounded), takes a FRESH scan and compares with the baseline captured at checkpoint: "no new
      finding in scope" = no finding absent from the baseline whose resource id is contained in the grant scope
