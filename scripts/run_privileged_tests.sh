@@ -13,7 +13,8 @@
 #   scripts/run_privileged_tests.sh --here --i-know-this-is-disposable
 #                                                    # run in place: ONLY when this machine is itself disposable
 #
-# Environment: PE_TEST_IMAGE (docker image, default python:3.13-bookworm), PE_PYTHON (interpreter for --here and
+# Environment: PE_VM_DIR (--vm: where the tree is copied, default /root/pe-privileged-tests; use a world-searchable
+# directory such as /opt/pe-privileged-tests for the sudo strategy, whose unprivileged Core must read the tests), PE_TEST_IMAGE (docker image, default python:3.13-bookworm), PE_PYTHON (interpreter for --here and
 # --vm, default python3), PE_SSH_OPTS (extra ssh options). Extra arguments after `--` go to pytest.
 set -eu
 
@@ -55,12 +56,12 @@ case "$MODE" in
     # sudo strategy; its tests are skipped without it).
     # shellcheck disable=SC2086
     rsync -a --delete --exclude .git --exclude .venv --exclude __pycache__ -e "ssh ${PE_SSH_OPTS:-}" \
-      "$HERE"/ "root@$TARGET":/root/pe-privileged-tests/
+      "$HERE"/ "root@$TARGET":${PE_VM_DIR:-/root/pe-privileged-tests}/
     # shellcheck disable=SC2086
     QUOTED=""
     for a in "$@"; do QUOTED="$QUOTED '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"; done
     # shellcheck disable=SC2086
-    exec ssh ${PE_SSH_OPTS:-} "root@$TARGET" "cd /root/pe-privileged-tests && PE_PYTHON='${PE_PYTHON:-python3}' sh scripts/run_privileged_tests.sh --here --i-know-this-is-disposable -- $QUOTED"
+    exec ssh ${PE_SSH_OPTS:-} "root@$TARGET" "chmod -R o+rX ${PE_VM_DIR:-/root/pe-privileged-tests} && cd ${PE_VM_DIR:-/root/pe-privileged-tests} && PE_PYTHON='${PE_PYTHON:-python3}' sh scripts/run_privileged_tests.sh --here --i-know-this-is-disposable -- $QUOTED"
     ;;
   here)
     [ "$SURE" = yes ] || { echo "refusing: --here needs --i-know-this-is-disposable" >&2; exit 2; }
