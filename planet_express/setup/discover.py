@@ -269,7 +269,7 @@ KNOWN_SYSTEM_PATHS = (
 # Beside a candidate install location. Every file `plan` may write has to be probed here or above: `plan`
 # only claims "absent" or "unchanged" about paths this report says it looked at.
 INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.env",
-                 "default/casa-planetexpress", "default/casa-dashboard", "launcher-boot.sh", "launch/launch.conf")
+                 "default/casa-planetexpress", "default/casa-dashboard", "launcher-boot.sh", "launch/launch.conf", "launch/pe-launch")
 
 
 def _existing_pe(env, storage: dict) -> dict:

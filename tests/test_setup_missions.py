@@ -25,6 +25,7 @@ from planet_express.setup.undo import undo as _undo
 
 REPO = str(Path(__file__).resolve().parent.parent)
 NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "cgroup-tree", "workspace-root", "socket-root"]
+MOS_NAMES = ["session-uid-range", "launcher-helper", "helper-store", "cgroup-tree", "workspace-root", "socket-root"]
 ON = {"enabled": True}
 
 
@@ -196,7 +197,8 @@ def test_on_mos_there_is_no_sudoers_and_the_cgroup_script_is_the_one_the_boot_ho
     p = plan(mos_report(), mos_answers(missions=ON))
     assert p.applicable, p.blocked
     steps = launcher(p)
-    assert [s.target for s in steps] == [n for n in NAMES if n != "launcher-sudoers"]
+    # MOS also keeps a persistent copy of the helper (root is RAM), right after the helper itself
+    assert [s.target for s in steps] == MOS_NAMES
     assert not any(s.kind == "sudoers.install" for s in p.steps)
     cgroup = {s.target: s for s in steps}["cgroup-tree"]
     assert cgroup.params["boot_script"] == "/mnt/data/pe/launcher-boot.sh" and cgroup.params["flavour"] == "mos"
@@ -636,7 +638,7 @@ def test_a_mos_uninstall_has_no_sudoers_removal_and_removes_the_boot_script():
     live = discover(mos(files=files), repo_root="/mnt/data/pe/planet-express")
     p = plan(live, mos_answers(story="uninstall", missions=ON))
     assert p.applicable, p.blocked
-    assert [s.target for s in removals(p)] == [n for n in reversed(NAMES) if n != "launcher-sudoers"]
+    assert [s.target for s in removals(p)] == list(reversed(MOS_NAMES))
     assert next(s for s in removals(p) if s.target == "cgroup-tree").params["boot_script"] == "/mnt/data/pe/launcher-boot.sh"
 
 
@@ -650,3 +652,18 @@ def test_on_mos_launch_conf_sits_under_the_data_pool_and_core_is_told_where():
     systemd = plan(systemd_report(), answers(missions=ON))
     assert all("conf" not in s.params for s in launcher(systemd))
     assert not any("launch_conf" in w for w in systemd.warnings)
+
+
+def test_mos_plan_keeps_the_helper_across_reboots_and_the_boot_script_records_its_hash():
+    p = plan(mos_report(), mos_answers(missions=ON))
+    by = {s.target: s for s in launcher(p)}
+    store = by["helper-store"]
+    assert store.params["helper_store"] == "/mnt/data/pe/launch/pe-launch" and store.needs_root and store.reversible
+    assert store.preview["path"] == "/mnt/data/pe/launch/pe-launch" and "boot script" in store.preview["text"]
+    order = [s.target for s in launcher(p)]
+    assert order.index("launcher-helper") < order.index("helper-store") < order.index("cgroup-tree")
+    script = by["cgroup-tree"].preview["content"]
+    assert "store=/mnt/data/pe/launch/pe-launch" in script and "live=/usr/libexec/planetexpress/pe-launch" in script
+    assert "install -m 0755 -o root -g root" in script
+    systemd = plan(systemd_report(), answers(missions=ON))
+    assert "helper-store" not in {s.target for s in launcher(systemd)}

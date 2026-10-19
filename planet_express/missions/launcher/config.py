@@ -23,6 +23,11 @@ def mos_conf_path(home: str) -> str:
     return f"{home.rstrip('/')}/launch/launch.conf"
 
 
+def mos_helper_store_path(home: str) -> str:
+    """The persistent copy of the helper on MOS (root is RAM): beside launch.conf, installed into HELPER_PATH at boot."""
+    return f"{home.rstrip('/')}/launch/pe-launch"
+
+
 class ConfError(ValueError):
     pass
 
@@ -92,4 +97,4 @@ def load(path: str = CONF_PATH) -> LaunchConf:
         os.close(fd)
 
 
-__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "ConfError", "LaunchConf", "load"]
+__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "ConfError", "LaunchConf", "load"]

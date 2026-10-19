@@ -2,6 +2,7 @@
 
     session-uid-range   launch.conf: the reserved uid range (and Core's identity), checked free of accounts
     launcher-helper     the root-owned pe-launch under a root-owned, non-symlink chain
+    helper-store        (MOS) its persistent copy under the data pool, installed at every boot by the boot script
     launcher-sudoers    Ubuntu only: `Core ALL=(root) NOPASSWD: pe-launch ""`, checked with visudo
     cgroup-tree         systemd: a Delegate=yes drop-in; MOS: a boot script on the data pool
     workspace-root      where each session's own directory is made (Core owned, traversable)
@@ -80,6 +81,7 @@ class Paths:
     sock_root: str = _DEFAULTS.sock_root
     helper: str = HELPER_PATH
     conf: str = CONF_PATH
+    helper_store: str = ""                        # MOS only: the persistent copy the boot script installs from
     sudoers: str = SUDOERS_PATH
     unit_dropin: str = UNIT_DROPIN
     boot_script: str = "/mnt/data/pe/launcher-boot.sh"
@@ -461,6 +463,9 @@ class SessionUidRange(Step):
 class LauncherHelper(Step):
     name = "launcher-helper"
 
+    def target(self) -> str:
+        return self.p.helper
+
     def wanted(self) -> bytes:
         lines = SOURCE.read_text(encoding="utf-8").splitlines(keepends=True)
         if not lines or not lines[0].startswith("#!"):
@@ -480,58 +485,72 @@ class LauncherHelper(Step):
 
     def owned_file(self):
         try:
-            return self.p.helper, self.wanted(), 0o755
+            return self.target(), self.wanted(), 0o755
         except StepError:
             return None
 
     def probe(self) -> Probe:
         try:
-            current = read_regular(self.p.helper)
+            current = read_regular(self.target())
             wanted = self.wanted()
         except StepError as exc:
             return Probe(False, str(exc), blocked=True)
-        problem = trusted_dir_chain(os.path.dirname(self.p.helper), self.p) if os.path.isdir(os.path.dirname(self.p.helper)) else None
+        problem = trusted_dir_chain(os.path.dirname(self.target()), self.p) if os.path.isdir(os.path.dirname(self.target())) else None
         if problem:
             return Probe(False, problem, blocked=True)
         if current is None:
-            return Probe(False, f"{self.p.helper} is absent")
+            return Probe(False, f"{self.target()} is absent")
         if current != wanted:
-            return Probe(False, f"{self.p.helper} differs from this version's helper")
-        info = os.lstat(self.p.helper)
+            return Probe(False, f"{self.target()} differs from this version's helper")
+        info = os.lstat(self.target())
         if info.st_uid != self.p.owner_uid or stat.S_IMODE(info.st_mode) != 0o755:
-            return Probe(False, f"{self.p.helper} must be owned by root with mode 0755")
-        problem = trusted_chain(self.p.helper, self.p)
-        return Probe(problem is None, problem or self.p.helper, blocked=problem is not None)
+            return Probe(False, f"{self.target()} must be owned by root with mode 0755")
+        problem = trusted_chain(self.target(), self.p)
+        return Probe(problem is None, problem or self.target(), blocked=problem is not None)
 
     def repair(self, journal) -> dict:
         state = self.probe()
         if state.blocked:
             raise StepError(state.detail)
-        wanted, previous = self.wanted(), read_regular(self.p.helper)
-        created = self._make_parents(journal, os.path.dirname(self.p.helper))
-        problem = trusted_dir_chain(os.path.dirname(self.p.helper), self.p)
+        wanted, previous = self.wanted(), read_regular(self.target())
+        created = self._make_parents(journal, os.path.dirname(self.target()))
+        problem = trusted_dir_chain(os.path.dirname(self.target()), self.p)
         if problem:
             raise StepError(f"refusing to install the helper: {problem}; fix the directory chain first")
         journal.append("evidence", step=self.name, data={"previous_sha256": None if previous is None else sha256(previous),
                                                          "previous": _text(previous),
                                                          "sha256": sha256(wanted), "created_dirs": created})
-        write_atomic(self.p.helper, wanted, 0o755, self.p.owner_uid, self.p.owner_gid)
+        write_atomic(self.target(), wanted, 0o755, self.p.owner_uid, self.p.owner_gid)
         if not self.probe().ok:
             raise StepError("the helper was installed but does not pass its own checks")
         return {"sha256": sha256(wanted), "created_dirs": created,
                 "previous": None if previous is None else previous.decode("utf-8", errors="replace")}
 
     def undo(self, journal, evidence: dict) -> str:
-        detail = self._undo_file(self.p.helper, evidence)
+        detail = self._undo_file(self.target(), evidence)
         previous = evidence.get("previous")
-        if previous is not None and not os.path.exists(self.p.helper):
-            write_atomic(self.p.helper, previous.encode(), 0o755, self.p.owner_uid, self.p.owner_gid)
+        if previous is not None and not os.path.exists(self.target()):
+            write_atomic(self.target(), previous.encode(), 0o755, self.p.owner_uid, self.p.owner_gid)
             detail += " (the previous file was restored)"
         self._undo_dirs(evidence)
         return detail
 
 
 # ── 3. sudoers (Ubuntu only) ───────────────────────────────────────────────────────────────────────
+
+
+class HelperStore(LauncherHelper):
+    """MOS only. Root is RAM there, so the helper at its real path is gone after every boot. This keeps a persistent copy
+    under the data pool (the same bytes, root-owned 0755, the whole chain checked exactly as for the live copy) which the
+    boot script installs into the real path at every boot, only if its sha256 is the one setup recorded."""
+    name = "helper-store"
+
+    def applies(self) -> bool:
+        return self.p.flavour == "mos" and bool(self.p.helper_store)
+
+    def target(self) -> str:
+        return self.p.helper_store
+
 
 class LauncherSudoers(Step):
     name = "launcher-sudoers"
@@ -636,7 +655,45 @@ class CgroupTree(Step):
                 f"set -e\nmkdir -p {q_parent} {q_sessions}\n"
                 "echo +pids > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true\n"
                 f"echo +pids > {q_control} 2>/dev/null || true\n")
+        if self.p.helper_store:
+            body += self._helper_install()
         return self.p.boot_script, body.encode(), 0o700
+
+    def _helper_install(self) -> str:
+        """Put the helper back at its real path (MOS root is RAM). From the persistent copy only, only if every directory
+        above it and the file are root-owned, not group/world writable and not a symlink, and only if its sha256 is the
+        one recorded here when setup ran. Anything else is refused and logged, and the script exits non-zero."""
+        want = sha256(LauncherHelper(self.p).wanted())
+        store, live = shlex.quote(self.p.helper_store), shlex.quote(self.p.helper)
+        live_dir = shlex.quote(os.path.dirname(self.p.helper))
+        return (
+            "rc=0\n"
+            "trusted() {\n"
+            "    t=$1\n"
+            "    while [ -n \"$t\" ]; do\n"
+            "        [ -L \"$t\" ] && return 1\n"
+            "        s=$(stat -c '%u %a' \"$t\" 2>/dev/null) || return 1\n"
+            "        [ \"${s% *}\" = 0 ] || return 1\n"
+            "        [ $(( 0${s#* } & 022 )) -eq 0 ] || return 1\n"
+            "        [ \"$t\" = / ] && break\n"
+            "        t=$(dirname \"$t\")\n"
+            "    done\n"
+            "    return 0\n"
+            "}\n"
+            "digest() { sha256sum \"$1\" 2>/dev/null | cut -d' ' -f1; }\n"
+            f"store={store}\nlive={live}\nwant={want}\n"
+            "if [ -f \"$store\" ] && trusted \"$store\" && [ \"$(digest \"$store\")\" = \"$want\" ] \\\n"
+            f"        && install -d -m 0755 -o root -g root {live_dir} \\\n"
+            "        && install -m 0755 -o root -g root \"$store\" \"$live.new\" && mv -f \"$live.new\" \"$live\" \\\n"
+            "        && trusted \"$live\" && [ \"$(digest \"$live\")\" = \"$want\" ]; then\n"
+            "    echo \"launcher-boot: session helper installed at $live\" >&2\n"
+            "else\n"
+            "    rm -f \"$live.new\" \"$live\"\n"
+            "    echo \"launcher-boot: refusing to install the session helper ($store is missing, not root-owned, "
+            "writable, a symlink, or not the recorded version)\" >&2\n"
+            "    rc=1\n"
+            "fi\n"
+            "exit $rc\n")
 
     def preflight(self) -> str | None:
         """Checked before ANY launcher step writes: sessions need a delegated cgroup2 subtree strictly below a cgroup2 mount."""
@@ -652,6 +709,9 @@ class CgroupTree(Step):
         return None
 
     def _unsafe_for_shell(self) -> str | None:
+        for path in (self.p.helper, self.p.helper_store):
+            if self.p.flavour != "systemd" and path and not _SHELL_SAFE.fullmatch(path):
+                return f"{path!r} has characters that are not allowed in the MOS boot script"
         if self.p.flavour != "systemd" and not _SHELL_SAFE.fullmatch(self.p.cgroup_root):
             return (f"missions.cgroup_root {self.p.cgroup_root!r} has characters that are not allowed in the MOS boot "
                     "script (letters, digits and . _ @ + / - only)")
@@ -829,7 +889,7 @@ class SocketRoot(_CoreDir):
 
 def launcher_steps(paths: Paths) -> list[Step]:
     """The steps in dependency order, minus those that do not apply on this host's flavour."""
-    steps = [SessionUidRange(paths), LauncherHelper(paths), LauncherSudoers(paths), CgroupTree(paths),
+    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), CgroupTree(paths),
              WorkspaceRoot(paths), SocketRoot(paths)]
     return [s for s in steps if s.applies()]
 

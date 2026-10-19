@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from planet_express.missions.launcher.config import mos_conf_path
+from planet_express.missions.launcher.config import mos_conf_path, mos_helper_store_path
 from planet_express.setup.answers import FORBIDDEN_RISKS_BY_TIER, SetupAnswers
 from planet_express.setup.steps import CATALOGUE
 
@@ -491,14 +491,15 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
     return {"core_user": b.a.run_as, "flavour": "mos" if mos else "systemd",
             "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
             "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
-            **({"boot_script": f"{p['home']}/launcher-boot.sh", "conf": mos_conf_path(p["home"])} if mos else {})}
+            **({"boot_script": f"{p['home']}/launcher-boot.sh", "conf": mos_conf_path(p["home"]),
+                                "helper_store": mos_helper_store_path(p["home"])} if mos else {})}
 
 
 def _launcher_paths(params: dict):
     """The launcher module's own paths for these values; only used to render text. The Core uid and gid are read
     from the host when a step runs, so nothing shown here depends on them."""
     from planet_express.missions.launcher.setup_steps import Paths
-    extra = {k: params[k] for k in ("boot_script", "conf") if k in params}
+    extra = {k: params[k] for k in ("boot_script", "conf", "helper_store") if k in params}
     return Paths(core_uid=0, core_gid=0, core_user=params["core_user"], flavour=params["flavour"],
                  uid_min=params["uid_min"], uid_max=params["uid_max"], sock_root=params["sock_root"],
                  cgroup_root=params["cgroup_root"], workspace_root=params["workspace_root"], **extra)
@@ -567,6 +568,11 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         "launcher-helper": ("Install the session launcher", HELPER_PATH, "R3", b.text(
             f"Installs {HELPER_PATH} (root, 0755) from pe_launch.py, the one program that starts a session as one of "
             f"those uids. Its directory chain must be root-owned and not writable by others, or setup stops.")),
+        "helper-store": ("Keep the session launcher across reboots", paths.helper_store, "R3", b.text(
+            f"MOS only: root is RAM, so {HELPER_PATH} is gone after every boot. Keeps the same program at "
+            f"{paths.helper_store} (root, 0755, under the data pool; its whole directory chain must be root-owned and not "
+            f"writable by others, or setup stops). The boot script ({params.get('boot_script')}) copies it back to "
+            f"{HELPER_PATH} at every boot, only if its sha256 is the one recorded in that script, else it refuses.")),
         "launcher-sudoers": ("Let Core start sessions through the launcher", SUDOERS_PATH, "R3", {
             "type": "file", "path": SUDOERS_PATH, "mode": "0440", "owner": "root:root", "if_exists": "replace",
             "content": LauncherSudoers(paths).wanted().decode()}),

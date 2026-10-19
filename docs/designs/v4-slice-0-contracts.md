@@ -677,3 +677,11 @@ helper without `sudo`, so there is one launch implementation to review and test.
 - **Plan.** The fresh-systemd block (service-owned `/etc/planetexpress` above launch.conf) no longer applies and is
   gone as a standing outcome; the guard remains for any plan that makes a service-owned directory above launch.conf
   or the helper. A symlinked or writable chain already on the host is refused when the step runs.
+- **MOS reboot.** MOS root is RAM, so the helper at `/usr/libexec/planetexpress/pe-launch` vanishes at every boot.
+  The MOS-only step `helper-store` keeps the same bytes at `<PE_HOME>/launch/pe-launch` (root, 0755, chain checked by
+  the same walk as the live copy). The boot script (the `cgroup-tree` file, run by the boot hook before Core) installs it
+  back with `install -m 0755 -o root -g root`, but only if the store and every ancestor are root-owned, not
+  group/world writable and not symlinks, and its sha256 equals the one recorded in the script when setup wrote it;
+  otherwise it removes any live copy, logs a refusal and exits non-zero (missions stay proposal-only). The installed
+  copy is then subject to the helper's own checks again (preflight). The rehearsal script takes `--launch-conf`
+  (default: `missions.launch_conf` from Core's config if it loads, else the fixed path).
