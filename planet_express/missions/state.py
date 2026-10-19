@@ -5,7 +5,10 @@ import sqlite3
 from planet_express.core.store import Store
 
 from .approvals import evaluate
+from .canonical import CanonicalError, loads_strict, sha256_hex
 from .events import insert_event
+from .models import Grant
+from .verify.plan import parse_result
 
 TERMINAL = frozenset({"completed", "failed", "rolled_back", "cancelled"})
 NON_TERMINAL = frozenset({
@@ -51,6 +54,38 @@ def is_legal(frm: str, to: str) -> bool:
     return to in TRANSITIONS.get(frm, frozenset())
 
 
+MUTATING_TIERS = frozenset({"repair", "change", "critical"})
+
+
+def completion_problems(row: sqlite3.Row) -> list[str]:
+    """Why this mission may NOT be completed (contract 10). Only Core's own verification can complete a mutating
+    mission: the state must be `verifying`, and the stored result must be `passed`, for THIS grant hash, THIS
+    checkpoint and THIS plan. An agent's say-so, a result for an older grant and a result for a changed plan all fail.
+    This runs inside the transition's own transaction, so a direct store call cannot get around it."""
+    if row["tier"] not in MUTATING_TIERS:
+        return []
+    if row["status"] != "verifying":
+        return [f"a {row['tier']} mission completes only from verifying (it is {row['status']})"]
+    result = parse_result(row["verification_result_json"])
+    if result is None:
+        return ["there is no readable verification result"]
+    problems = []
+    if result.status != "passed":
+        problems.append("the verification result is not passed")
+    if result.grant_hash != row["grant_hash"]:
+        problems.append("the verification result is for a different grant hash")
+    if not row["checkpoint_id"] or result.checkpoint_id != row["checkpoint_id"]:
+        problems.append("the verification result is for a different checkpoint")
+    try:
+        grant = Grant.model_validate(loads_strict(row["grant_json"]))
+        plan_sha = sha256_hex(loads_strict(row["verification_plan_json"])) if row["verification_plan_json"] else None
+    except (CanonicalError, ValueError):
+        return [*problems, "the grant or the verification plan is unreadable"]
+    if plan_sha is None or plan_sha != grant.verification.plan_sha256 or result.plan_sha256 != plan_sha:
+        problems.append("the verification result is not for the plan the grant approved")
+    return problems
+
+
 def release_for_terminal(conn: sqlite3.Connection, mission_id: str, now: int) -> None:
     """Free what a finished mission holds: every lease (suspect ones included) and its live session row.
     `resource_fences` is untouched, so the next holder still gets a higher fence."""
@@ -73,7 +108,7 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
     or uid empty, token and endpoints revoked, contract §2.1) BEFORE it asks for a terminal transition:
     the lease is what fences a still-running worker out. A `suspect` lease is freed by this path or by
     leases.release_after_proven_dead, and by nothing else."""
-    row = conn.execute("SELECT status, tier FROM missions WHERE id=?", (mission_id,)).fetchone()
+    row = conn.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone()
     if row is None:
         raise MissionNotFound(mission_id)
     frm, tier = row["status"], row["tier"]
@@ -87,10 +122,16 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         verdict = evaluate(conn, mission_id, now)
         if not verdict.ok:
             raise IllegalTransition("execution predicate not satisfied: " + "; ".join(verdict.reasons))
+    if to == "completed":
+        problems = completion_problems(row)
+        if problems:
+            raise IllegalTransition("completion refused: " + "; ".join(problems))
     closed = ", closed_at=?" if to in TERMINAL else ""
+    # A result belongs to one pass through `verifying`: leaving it for more work (or entering it afresh) voids it.
+    voided = ", verification_result_json=NULL" if to in ("executing", "verifying") else ""
     args = (to, now, *((now,) if to in TERMINAL else ()), mission_id, frm)
     cur = conn.execute(
-        f"UPDATE missions SET status=?, updated_at=?{closed} WHERE id=? AND status=?", args)
+        f"UPDATE missions SET status=?, updated_at=?{closed}{voided} WHERE id=? AND status=?", args)
     if cur.rowcount != 1:
         raise IllegalTransition(f"{mission_id} changed state concurrently")
     if to in TERMINAL:

@@ -21,7 +21,7 @@ from planet_express.missions.grants import (
     validate_grant,
     with_site_protected,
 )
-from planet_express.missions.models import Grant
+from planet_express.missions.models import Grant, VerificationPlan
 from planet_express.missions.protected import Discovery, build_protected
 from planet_express.missions.store import GrantLocked, MissionStore
 
@@ -33,13 +33,17 @@ CHECKS = {"http", "container_state"}
 TOOLS = {"arr.queue_item", "traefik.read"}
 
 
+PLAN = VerificationPlan.model_validate(
+    {"catalogue_v": 1, "checks": [{"id": "http", "check": "http", "params": {"url": "http://localhost/"}}]})
+
+
 def protected(**kw):
     return build_protected(site=["service:media/traefik"], discovery=Discovery(stacks_root=STACKS, **kw))
 
 
 def grant(**over):
     body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]},
-            "verification": {"checks": ["http"]}, "backup": {"covered": True}}
+            "verification": {"checks": ["http"], "plan_sha256": PLAN.hash()}, "backup": {"covered": True}}
     body.update(over)
     g = Grant.model_validate(body)
     return with_site_protected(g, protected())
@@ -48,6 +52,7 @@ def grant(**over):
 def problems(g, **over):
     kw = dict(inventory=INV, protected=protected(), known_checks=CHECKS, known_tools=TOOLS, limits=LIMITS,
               stacks_root=STACKS)
+    kw.setdefault("verification_plan", PLAN)
     kw.update(over)
     return validate_grant(g, **kw)
 

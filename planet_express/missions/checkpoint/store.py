@@ -21,6 +21,7 @@ ID_RE = re.compile(r"^C-[0-9a-f]{16}$")
 MARKER = "COMMITTED"
 MANIFEST = "manifest.json"
 POST = "post.json"
+BASELINE = "baseline.json"
 QUARANTINE = ".quarantine"
 Trace = Callable[[str, str], None]
 
@@ -90,11 +91,23 @@ class CheckpointStore:
     def write_payload(self, checkpoint_id: str, index: int, data: bytes) -> None:
         self._write_new(self.dir_for(checkpoint_id) / "files" / str(index), data)
 
+    def write_baseline(self, checkpoint_id: str, data: bytes) -> None:
+        """The scan baseline (slice 8), written before the commit like a payload: immutable once COMMITTED."""
+        self._write_new(self.dir_for(checkpoint_id) / BASELINE, data)
+
+    def read_baseline(self, checkpoint_id: str) -> bytes | None:
+        if not self.is_committed(checkpoint_id):
+            raise StoreError(f"{checkpoint_id} is not committed")
+        path = self.dir_for(checkpoint_id) / BASELINE
+        return path.read_bytes() if path.is_file() and not path.is_symlink() else None
+
     def commit(self, checkpoint_id: str, manifest: dict[str, Any]) -> None:
         directory = self.dir_for(checkpoint_id)
         payloads = sorted((directory / "files").iterdir())
         for payload in payloads:
             self._fsync_file(payload)
+        if (directory / BASELINE).exists():
+            self._fsync_file(directory / BASELINE)
         for tree_dir in (directory / "files", directory):
             self._fsync_dir(tree_dir)
         self._write_new(directory / MANIFEST, _dump(manifest))

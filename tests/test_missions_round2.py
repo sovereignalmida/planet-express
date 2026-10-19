@@ -149,7 +149,7 @@ def lease_count(store):
         return conn.execute("SELECT COUNT(*) FROM mission_leases").fetchone()[0]
 
 
-@pytest.mark.parametrize("path", [("cancelled",), ("verifying", "completed"), ("failed",),
+@pytest.mark.parametrize("path", [("cancelled",), ("verifying", "failed"), ("failed",),
                                   ("paused_tripwire", "rolled_back")])
 def test_terminal_transition_frees_leases_and_session(tmp_path, path):
     store, ms, m, sid = started(tmp_path)
