@@ -1674,7 +1674,7 @@ class _LauncherHandler:
         account = ctx.host.lookup_user(p["core_user"])
         if account is None:
             raise StepFailure(f"no such user: {p['core_user']}")
-        extra = {k: p[k] for k in ("boot_script", "conf") if p.get(k)}
+        extra = {k: p[k] for k in ("boot_script", "conf", "helper_store") if p.get(k)}
         return Paths(core_uid=account[0], core_gid=account[1], core_user=p["core_user"], flavour=p["flavour"],
                      uid_min=p["uid_min"], uid_max=p["uid_max"], sock_root=p["sock_root"], cgroup_root=p["cgroup_root"],
                      workspace_root=p["workspace_root"], **extra)

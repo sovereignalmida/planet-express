@@ -54,6 +54,19 @@ def status_field(pid, key):
     return None
 
 
+def resolve_launch_conf(given, env=None):
+    """--launch-conf if given; else `missions.launch_conf` from Core's config when that loads; else the fixed default."""
+    from planet_express.missions.launcher.config import CONF_PATH
+    if given:
+        return given
+    try:
+        from config_io import load_config_file
+        path = (env if env is not None else os.environ).get("CASA_CONFIG", "/etc/planetexpress/config.yaml")
+        return load_config_file(Path(path)).missions.launch_conf
+    except Exception:                      # unreadable, absent or invalid config: the default is the safe answer
+        return CONF_PATH
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--launcher", choices=("auto", "sudo", "direct"), default="auto")
@@ -62,6 +75,8 @@ def main():
     parser.add_argument("--cgroup-root", default=defaults.cgroup_root)
     parser.add_argument("--workspace-root", required=True, help="missions.workspace_root (or <state dir>/mission-workspaces)")
     parser.add_argument("--sock-root", default=defaults.sock_root)
+    parser.add_argument("--launch-conf", default=None,
+                        help="missions.launch_conf (default: from Core's config if it loads, else the fixed default path)")
     parser.add_argument("--uid-min", type=int, default=defaults.session_uid_min)
     parser.add_argument("--uid-max", type=int, default=defaults.session_uid_max)
     args = parser.parse_args()
@@ -75,7 +90,7 @@ def main():
     from types import SimpleNamespace
 
     from planet_express.missions.launcher.cgroup_tree import ensure_tree
-    from planet_express.missions.launcher.config import CONF_PATH, HELPER_PATH
+    from planet_express.missions.launcher.config import HELPER_PATH
     from planet_express.missions.launcher.preflight import run_preflight
     from planet_express.missions.launcher.spec import LaunchSpec
     from planet_express.missions.runner import build_containment, choose_strategy
@@ -91,7 +106,7 @@ def main():
     containment = build_containment(cfg)
     preflight = run_preflight(
         containment, strategy=strategy, workspace_root=args.workspace_root, sock_root=args.sock_root,
-        probe_uid=args.uid_max, helper=HELPER_PATH, conf=CONF_PATH, uid_range=(args.uid_min, args.uid_max),
+        probe_uid=args.uid_max, helper=HELPER_PATH, conf=resolve_launch_conf(args.launch_conf), uid_range=(args.uid_min, args.uid_max),
         sudo=strategy == "sudo")
     report["preflight"] = preflight.to_dict()
     print(preflight.render(), file=sys.stderr)

@@ -502,3 +502,88 @@ def test_a_conf_path_the_helper_text_cannot_carry_is_refused(tmp_path):
     p = paths(tmp_path, flavour="mos", conf='/x/"; import os #/launch.conf')
     with pytest.raises(StepError):
         launcher_steps(p)[1].wanted()
+
+
+# -- MOS: the helper survives a reboot (root is RAM) ---------------------------------------------------------------
+
+def mos_paths(tmp_path):
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data").chmod(0o755)
+    return paths(tmp_path, flavour="mos", conf=mos_conf_path(str(tmp_path / "data" / "pe")),
+                 helper_store=str(tmp_path / "data" / "pe" / "launch" / "pe-launch"))
+
+
+def test_on_mos_a_persistent_helper_copy_is_kept_beside_the_conf_and_matches_the_live_helper(tmp_path):
+    p = mos_paths(tmp_path)
+    steps = launcher_steps(p)
+    assert [s.name for s in steps] == ["session-uid-range", "launcher-helper", "helper-store", "cgroup-tree",
+                                       "workspace-root", "socket-root"]
+    repair_all(steps, MemoryJournal())
+    assert Path(p.helper_store).read_bytes() == Path(p.helper).read_bytes()
+    assert oct(os.lstat(p.helper_store).st_mode & 0o777) == "0o755"
+    assert all(s.probe().ok for s in steps if s.name in ("helper-store", "launcher-helper"))
+    # the store is held to the same chain check: a group-writable directory above it blocks it
+    os.chmod(tmp_path / "data" / "pe" / "launch", 0o775)
+    assert by_name(launcher_steps(p))["helper-store"].probe().blocked
+    # and a systemd host has no such step
+    assert "helper-store" not in [s.name for s in launcher_steps(paths(tmp_path / "x")) ] if (tmp_path / "x").mkdir() is None else True
+
+
+def test_a_rebooted_mos_host_probes_the_live_helper_as_absent_but_the_store_as_fine(tmp_path):
+    p = mos_paths(tmp_path)
+    repair_all(launcher_steps(p), MemoryJournal())
+    os.unlink(p.helper)                                       # RAM root: gone after the reboot
+    by = by_name(launcher_steps(p))
+    assert not by["launcher-helper"].probe().ok and by["helper-store"].probe().ok
+
+
+def test_the_mos_boot_script_installs_the_helper_only_from_a_trusted_copy_with_the_recorded_hash(tmp_path):
+    import hashlib
+    p = mos_paths(tmp_path)
+    text = by_name(launcher_steps(p))["cgroup-tree"].wanted()[1].decode()
+    want = hashlib.sha256(Path(__file__).resolve().parents[1].joinpath(
+        "planet_express/missions/launcher/pe_launch.py").read_bytes().split(b"\n", 1)[1].replace(
+        CONF_PATH.encode(), p.conf.encode()).join([b"#!/usr/bin/python3 -IS\n", b""])).hexdigest()
+    assert f"want={want}" in text
+    assert f"store={p.helper_store}" in text and f"live={p.helper}" in text
+    assert "install -m 0755 -o root -g root" in text and "sha256sum" in text and "rc=1" in text
+    assert "[ -L " in text and "& 022" in text                      # symlink and group/world-writable refusals
+    assert text.rstrip().endswith("exit $rc")
+    # a systemd cgroup step and a MOS one without a store carry none of this
+    assert "install -m" not in by_name(launcher_steps(paths(tmp_path / "y", flavour="mos") if (tmp_path / "y").mkdir() is None else None))["cgroup-tree"].wanted()[1].decode()
+
+
+def run_boot(tmp_path, p):
+    script = tmp_path / "boot.sh"
+    text = by_name(launcher_steps(p))["cgroup-tree"].wanted()[1].decode()
+    # run only the helper-install part, as the invoking user (never root here): skip the cgroup lines and root ownership
+    part = text[text.index("rc=0"):].replace("-o root -g root", "").replace('[ "$t" = / ] && break', f'[ "$t" = {tmp_path} ] && break').replace('[ "${s% *}" = 0 ]', f'[ "${{s% *}}" = {ME} ]')
+    script.write_text("#!/bin/sh\n" + part)
+    return subprocess.run(["/bin/sh", str(script)], capture_output=True, text=True)
+
+
+def test_the_boot_script_text_really_runs_and_installs_refuses_a_changed_copy_and_a_writable_chain(tmp_path):
+    p = mos_paths(tmp_path)
+    repair_all(launcher_steps(p), MemoryJournal())
+    os.unlink(p.helper)
+    ok = run_boot(tmp_path, p)
+    assert ok.returncode == 0 and Path(p.helper).read_bytes() == Path(p.helper_store).read_bytes(), ok.stderr
+    assert oct(os.lstat(p.helper).st_mode & 0o777) == "0o755"
+    # a store whose bytes are not the recorded ones is refused, and nothing is left at the live path
+    Path(p.helper_store).write_bytes(b"#!/bin/sh\necho pwned\n")
+    os.chmod(p.helper_store, 0o755)
+    bad = run_boot(tmp_path, p)
+    assert bad.returncode == 1 and "refusing" in bad.stderr and not os.path.exists(p.helper)
+    # restore the right bytes, but make the directory group-writable: refused
+    Path(p.helper_store).write_bytes(by_name(launcher_steps(p))["launcher-helper"].wanted())
+    os.chmod(tmp_path / "data" / "pe" / "launch", 0o775)
+    writable = run_boot(tmp_path, p)
+    assert writable.returncode == 1 and not os.path.exists(p.helper)
+    # a symlinked store is refused too
+    os.chmod(tmp_path / "data" / "pe" / "launch", 0o755)
+    real = tmp_path / "real"
+    real.write_bytes(Path(p.helper_store).read_bytes())
+    os.chmod(real, 0o755)
+    os.unlink(p.helper_store)
+    os.symlink(real, p.helper_store)
+    assert run_boot(tmp_path, p).returncode == 1 and not os.path.exists(p.helper)

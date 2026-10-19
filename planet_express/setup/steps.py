@@ -251,7 +251,7 @@ class _LauncherParams(_Params):
     which; the rest is the shared configuration every one of them reads, so no step can disagree with another about
     the uid range or the paths. What each does is fixed in `planet_express/missions/launcher/setup_steps.py`: there
     is no free-form content here, and the helper, sudoers and launch.conf text is generated from these values."""
-    name: Literal["session-uid-range", "launcher-helper", "launcher-sudoers", "cgroup-tree", "workspace-root",
+    name: Literal["session-uid-range", "launcher-helper", "helper-store", "launcher-sudoers", "cgroup-tree", "workspace-root",
                   "socket-root"]
     core_user: Name
     flavour: Literal["systemd", "mos"]
@@ -261,6 +261,7 @@ class _LauncherParams(_Params):
     cgroup_root: AbsPath
     workspace_root: AbsPath
     boot_script: AbsPath | None = None      # MOS only: the script that recreates the cgroup tree at every boot
+    helper_store: AbsPath | None = None     # MOS only: the persistent helper copy installed at every boot
     conf: AbsPath | None = None             # MOS only: where launch.conf lives (under the data pool; Ubuntu has a fixed path)
 
     @model_validator(mode="after")
@@ -269,8 +270,10 @@ class _LauncherParams(_Params):
             raise ValueError("the session uid range needs room for at least two uids (the top one is reserved)")
         if self.flavour == "mos" and not self.boot_script:
             raise ValueError("a MOS launcher step needs the boot script that recreates the cgroup tree")
-        if self.flavour == "systemd" and (self.boot_script or self.conf):
+        if self.flavour == "systemd" and (self.boot_script or self.conf or self.helper_store):
             raise ValueError("only MOS has a boot script and a movable launch.conf")
+        if self.name == "helper-store" and self.flavour != "mos":
+            raise ValueError("only MOS keeps a persistent helper copy")
         if self.name == "launcher-sudoers" and self.flavour != "systemd":
             raise ValueError("there is no sudo on MOS, so no launcher sudoers")
         return self
