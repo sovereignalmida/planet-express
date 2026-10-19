@@ -446,3 +446,32 @@ def test_retries_are_bounded_by_the_check_and_by_core_config():
     calls.clear()
     r = run_check(chk("mount_readable", path="/d", container="app", retries=3), check_env(bounded, max_retries=0))
     assert not r.ok and r.attempts == 1 and len(calls) == 1
+
+
+def test_host_header_brackets_ipv6_literals():
+    from planet_express.missions.verify.checks import host_header_for
+    assert host_header_for("::1", 8080, 80) == "[::1]:8080"
+    assert host_header_for("::1", 80, 80) == "[::1]"
+    assert host_header_for("app.example", 8080, 80) == "app.example:8080"
+    assert host_header_for("app.example", 443, 443) == "app.example"
+
+
+def test_ipv6_url_is_probed_with_a_bracketed_host_header():
+    import socket
+    if not socket.has_ipv6:
+        pytest.skip("no ipv6")
+    class V6(http.server.ThreadingHTTPServer):
+        address_family = socket.AF_INET6
+
+    try:
+        server = V6(("::1", 0), _Echo)
+    except OSError:
+        pytest.skip("no ipv6 loopback")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        r = run_check(chk("http", url=f"http://[::1]:{port}/", consecutive=1, expect_body='"host": "[::1]:%d"' % port),
+                      check_env(http=default_http))
+        assert r.ok, r.detail
+    finally:
+        server.shutdown()

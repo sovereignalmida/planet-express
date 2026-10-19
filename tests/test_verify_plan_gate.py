@@ -216,3 +216,60 @@ def test_observe_and_propose_missions_are_not_gated(tmp_path):
 
 def test_verification_plan_model_is_the_hashed_one():
     assert VerificationPlan is not None and plan_of(HTTP).hash() == parse_plan({"catalogue_v": 1, "checks": [HTTP]}).hash()
+
+
+# ── the store itself enforces the binding (not only validate_grant) ─────────
+def raw_mission(ms, grant):
+    return ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s", runtime="fake")
+
+
+def plant_approval(store, m):
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("INSERT INTO mission_approvals (id, mission_id, phase, bound_hash, decision, operator, elevated, "
+                     "decided_at) VALUES ('A-planted', ?, 'grant', ?, 'approve', 'operator:me', 0, 1)",
+                     (m.id, m.grant_hash))
+
+
+@pytest.mark.parametrize("tier", ["repair", "change", "critical"])
+def test_a_mutating_grant_without_a_plan_cannot_be_approved_or_executed(tmp_path, tier):
+    from planet_express.missions.approvals import execution_predicate, record_approval
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    m = raw_mission(ms, Grant.model_validate({"tier": tier, "scope": {"stacks": ["media"]}}))     # no plan_sha256
+    with pytest.raises(ValueError, match="plan_sha256"):
+        record_approval(store, m.id, "grant", m.grant_hash, "approve", "operator:me")
+    plant_approval(store, m)                                       # an approval row that got in some other way
+    verdict = execution_predicate(store, m.id)
+    assert not verdict.ok and any("plan_sha256" in r for r in verdict.reasons)
+    for state in ("queued", "investigating", "awaiting_decision"):
+        transition(store, m.id, state, "operator:me")
+    with pytest.raises(IllegalTransition, match="plan_sha256"):
+        transition(store, m.id, "executing", "core")
+    assert ms.get_mission(m.id).status == "awaiting_decision"
+
+
+def test_a_grant_naming_a_plan_that_was_never_stored_cannot_execute_and_storing_it_unblocks(tmp_path):
+    from planet_express.missions.approvals import execution_predicate, record_approval
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    plan = plan_of(HTTP)
+    m = raw_mission(ms, grant_for(plan))
+    with pytest.raises(ValueError, match="plan is missing"):
+        record_approval(store, m.id, "grant", m.grant_hash, "approve", "operator:me")
+    plant_approval(store, m)
+    assert not execution_predicate(store, m.id).ok
+    ms.set_verification_plan(m.id, plan)
+    assert execution_predicate(store, m.id).ok
+    # a tampered stored plan (store-level bypass) blocks it again
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE missions SET verification_plan_json=? WHERE id=?",
+                     (plan_of({**HTTP, "id": "other"}).model_dump_json(), m.id))
+    assert not execution_predicate(store, m.id).ok
+
+
+def test_observe_and_propose_approval_is_unaffected_by_the_plan_rule(tmp_path):
+    from planet_express.missions.approvals import record_approval
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    m = raw_mission(ms, Grant.model_validate({"tier": "propose"}))
+    assert record_approval(store, m.id, "grant", m.grant_hash, "approve", "operator:me")

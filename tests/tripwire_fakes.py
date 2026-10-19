@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from checkpoint_fakes import make_env
-from missions_helpers import advance_to, token
+from missions_helpers import DEFAULT_PLAN, advance_to, token, with_default_plan
 
 from planet_express.missions.approvals import record_approval
 from planet_express.missions.containment import FakeContainment
@@ -135,10 +135,11 @@ def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_t
     body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]},
             "verification": {"checks": ["http"]}, "backup": {"covered": True}}
     body.update(grant_over or {})
-    grant = with_site_protected(Grant.model_validate(body), rig.protected)
+    grant = with_site_protected(with_default_plan(Grant.model_validate(body)), rig.protected)
     # replace the S5 draft mission by one carrying this grant
     rig.mission = env.ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s",
                                         runtime="fake")
+    rig.mission = env.ms.set_verification_plan(rig.mission.id, DEFAULT_PLAN)
     env.mission = rig.mission
     scan_env = ScanEnv(runner=rig.host.runner, bounded=rig.host.bounded, read_mounts=rig.host.read_mounts, protected=rig.protected,
                        fs_root=str(fs), volume_paths=volume_paths(rig.protected), clock=env.clock)

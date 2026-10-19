@@ -61,6 +61,7 @@ ACTOR = "supervisor"
 SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
 PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often (an operator may have repaired the host)
+VERIFY_WORKERS = 2            # verifications run on their own small pool, never on the poll thread
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
 MAX_MEMORY_HITS = 20
 
@@ -210,6 +211,9 @@ class Supervisor:
         self.max_brief_bytes = max_brief_bytes
         self.lease_ttl_s = lease_ttl_s
         self._runs: dict[str, _Run] = {}
+        self._verify_pool: Any = None
+        self._verifying: dict[str, Any] = {}
+        self._verify_guard = threading.Lock()
         self._locks: dict[str, threading.RLock] = {}      # one per mission: its start/poll/cancel never interleave
         self._locks_guard = threading.Lock()
 
@@ -293,18 +297,24 @@ class Supervisor:
             raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         grant = mission.grant()
         session_id = f"S-{secrets.token_hex(8)}"
-        # `start_session` is the sole uid allocator: it commits the row (state `launching`, uid held) before any
-        # launcher runs, so nothing is left behind if it refuses.
-        cs, token = issue_session(
-            self.ms, mission.id, session_id, self.containment.cgroup_path(session_id),
-            session_ttl_s=grant.budgets.wall_s + SESSION_TTL_PAD_S, lease_ttl_s=self.lease_ttl_s,
-            uid_range=self.containment.uid_range, actor=ACTOR, expected_grant_hash=mission.grant_hash)
-        run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
-        self._runs[mission.id] = run
-        # Intent is journaled BEFORE the session starts (contract 11): after a crash, recovery reads it and never
-        # replays an intent whose effect it cannot establish.
+        # Intent is journaled FIRST (contract 11), before anything is registered, issued or launched: a failed journal
+        # write raises here with nothing started, no `launching` row and no uid held. A launch that is then refused
+        # closes its own intent as `not_applied`.
         recovery.journal_intent(self.ms, mission.id, "investigation" if mission.status == "investigating" else "execution",
                                 f"session {session_id} start", actor=ACTOR)
+        # `start_session` is the sole uid allocator: it commits the row (state `launching`, uid held) before any
+        # launcher runs, so nothing is left behind if it refuses.
+        try:
+            cs, token = issue_session(
+                self.ms, mission.id, session_id, self.containment.cgroup_path(session_id),
+                session_ttl_s=grant.budgets.wall_s + SESSION_TTL_PAD_S, lease_ttl_s=self.lease_ttl_s,
+                uid_range=self.containment.uid_range, actor=ACTOR, expected_grant_hash=mission.grant_hash)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                recovery.close_open_intents(self.ms, mission.id, "not_applied", actor=ACTOR)
+            raise
+        run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
+        self._runs[mission.id] = run
         if self.ms.get_mission(mission.id).cancel_requested_at is not None:
             return self._kill_and_advance(run, "cancel")     # a cancel raced the launch: nothing is launched
         # The launcher hands the token to the child on fd 3 (the helper's token pipe); it never touches argv, env,
@@ -601,6 +611,10 @@ class Supervisor:
     def _settle(self, run: _Run) -> None:
         reason = run.reason or "crash"
         mission = self.ms.get_mission(run.mission_id)
+        if mission.tier in ("observe", "propose"):
+            # The session is dead and an observe/propose session could not have changed anything: the intent is closed.
+            with contextlib.suppress(Exception):
+                recovery.close_open_intents(self.ms, mission.id, "not_applied", actor=ACTOR)
         if mission.status in TERMINAL:
             return
         live = self.ms.live_session(mission.id)
@@ -648,42 +662,74 @@ class Supervisor:
         except IllegalTransition as exc:
             self._note(mission_id, {"transition_refused": target, "why": str(exc)[:200]})
 
-    def verify_and_close(self, mission_id: str) -> str:
-        """A mutating mission's session has ended and the mission is `verifying`: run Core's verifier and take the edge
-        its result allows. `completed` is reachable only through a passed result for the current grant hash (the store
-        enforces that again); a failed one goes to rollback (when the grant says so and a checkpoint exists) or to the
-        operator, with the summary in an event and the outcome. The agent's own report is never an input."""
+    def verify_and_close(self, mission_id: str, *, wait: bool = False) -> str:
+        """A mutating mission's session has ended and the mission is `verifying`: hand it to the verification worker
+        (a small bounded pool, NOT the poll thread and NOT under the mission lock) and return at once. The mission stays
+        `verifying` while it runs, so cancel and the tripwire freeze stay responsive. `wait=True` blocks for the result
+        (tests, tools). One verification per mission at a time; a second request joins the first."""
         self._require_enabled()
-        with self._lock_for(mission_id):
-            mission = self.ms.get_mission(mission_id)
-            if mission.status != "verifying":
-                return mission.status
-            target, flags, summary = "needs_operator", None, {"event": "verify.unavailable"}
-            if self.verifier is not None:
-                try:
-                    result = self.verifier.run(mission)
-                    summary = {"event": "verify.closed", "status": result.status, "reason": result.reason,
-                               "failed_checks": [c.id for c in result.checks if not c.ok][:20]}
-                    if result.status == "passed":
-                        target = "completed"
-                    else:
-                        flags = "partially_applied"
-                        if mission.grant().on_verify_fail == "rollback" and mission.checkpoint_id:
-                            target = "rollback_pending"
-                except Exception as exc:                  # noqa: BLE001 - a verifier that breaks is a failed verification
-                    log.exception("verifier for %s raised", mission_id)
-                    summary = {"event": "verify.error", "error": type(exc).__name__}
-                    flags = "partially_applied"
-            self._note(mission_id, summary)
+        if self.ms.get_mission(mission_id).status != "verifying":
+            return self.ms.get_mission(mission_id).status
+        with self._verify_guard:
+            if self._verify_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._verify_pool = ThreadPoolExecutor(max_workers=VERIFY_WORKERS, thread_name_prefix="pe-verify")
+            future = self._verifying.get(mission_id)
+            if future is None or future.done():
+                future = self._verify_pool.submit(self._verify_job, mission_id)
+                self._verifying[mission_id] = future
+        return future.result() if wait else "verifying"
+
+    def _verify_job(self, mission_id: str) -> str:
+        """Runs on a verification worker. The verifier itself runs WITHOUT the mission lock; the lock is taken only to
+        re-read the mission and take the one transition its result allows. `completed` is reachable only through a passed
+        result for the current grant hash (the store enforces that again, and a repeat run finds the mission already
+        moved on and does nothing, so a restart or a duplicate job cannot complete twice). The agent's report is never
+        an input."""
+        mission = self.ms.get_mission(mission_id)
+        if mission.status != "verifying":
+            return mission.status
+        target, flags, summary = "needs_operator", None, {"event": "verify.unavailable"}
+        if self.verifier is not None:
             try:
-                transition(self.store, mission_id, target, ACTOR)
-            except IllegalTransition as exc:
-                self._note(mission_id, {"transition_refused": target, "why": str(exc)[:200]})
-                with contextlib.suppress(IllegalTransition):
-                    transition(self.store, mission_id, "needs_operator", ACTOR)
-                    target, flags = "needs_operator", flags or "partially_applied"
-            self.ms.set_outcome(mission_id, target, flags, ACTOR)
-            return target
+                result = self.verifier.run(mission)
+                summary = {"event": "verify.closed", "status": result.status, "reason": result.reason,
+                           "failed_checks": [c.id for c in result.checks if not c.ok][:20]}
+                if result.status == "passed":
+                    target = "completed"
+                else:
+                    flags = "partially_applied"
+                    if mission.grant().on_verify_fail == "rollback" and mission.checkpoint_id:
+                        target = "rollback_pending"
+            except Exception as exc:                      # noqa: BLE001 - a verifier that breaks is a failed verification
+                log.exception("verifier for %s raised", mission_id)
+                summary = {"event": "verify.error", "error": type(exc).__name__}
+                flags = "partially_applied"
+        with self._lock_for(mission_id):
+            current = self.ms.get_mission(mission_id)
+            if current.status != "verifying" or current.grant_hash != mission.grant_hash:
+                # Cancelled, paused, rolled back or re-granted while the verification ran: that decision stands, and
+                # this result decides nothing and sets no outcome.
+                self._note(mission_id, {"verify_superseded": current.status})
+                return current.status
+            self._note(mission_id, summary)
+            for attempt in (target, "needs_operator"):
+                try:
+                    transition(self.store, mission_id, attempt, ACTOR)
+                    break
+                except IllegalTransition as exc:
+                    self._note(mission_id, {"transition_refused": attempt, "why": str(exc)[:200]})
+                    if self.ms.get_mission(mission_id).status != "verifying":
+                        break                              # something else moved it (a cancel): leave it alone
+            final = self.ms.get_mission(mission_id).status
+            if final in ("completed", "needs_operator", "rollback_pending"):
+                # The label is the state the mission actually ended in, never the one we intended.
+                if final == "completed":
+                    recovery.close_open_intents(self.ms, mission_id, "applied", actor=ACTOR)
+                elif flags is None:
+                    flags = "partially_applied"
+                self.ms.set_outcome(mission_id, final, None if final == "completed" else flags, ACTOR)
+            return final
 
     # ── the daemon's loop and shutdown ──────────────────────────────────────
     def tick(self) -> None:
@@ -731,6 +777,8 @@ class Supervisor:
         """Daemon stop: revoke every token and kill every session. Missions are NOT moved on: they stay
         `investigating`, and `recover()` at the next start restarts them within the retry budget. A session
         that cannot be proven empty stays tracked (and its cgroup stays), never silently dropped."""
+        if self._verify_pool is not None:
+            self._verify_pool.shutdown(wait=False, cancel_futures=True)     # a verification is re-run after restart
         for run in list(self._runs.values()):
             try:
                 with self._lock_for(run.mission_id):

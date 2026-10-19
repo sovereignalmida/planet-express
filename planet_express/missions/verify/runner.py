@@ -15,7 +15,7 @@ from ..canonical import CanonicalError, loads_strict
 from ..models import Mission, VerificationPlan
 from ..resources import BadResource, canon
 from ..store import MissionStore, grant_resources
-from .baseline import Finding, in_scope, new_findings, normalize
+from .baseline import Finding, TooManyFindings, in_scope, new_findings, normalize
 from .checks import CheckEnv, run_check
 from .plan import (
     CheckResult,
@@ -156,6 +156,9 @@ class Verifier:
             return ScanResult(ok=False, error="grant scope is malformed"), "the grant scope is malformed"
         try:
             fresh = self._fresh_scan()
+        except TooManyFindings:
+            return (ScanResult(ok=False, error="too many findings to compare", baseline_findings=len(baseline)),
+                    "too many findings to compare")
         except Exception as exc:                                # noqa: BLE001
             return (ScanResult(ok=False, error=f"scan failed ({type(exc).__name__})", baseline_findings=len(baseline)),
                     "the fresh scan failed")

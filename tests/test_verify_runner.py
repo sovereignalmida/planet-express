@@ -16,6 +16,7 @@ from planet_express.missions.checkpoint import CheckpointCorrupt, CheckpointErro
 from planet_express.missions.supervisor import Supervisor
 from planet_express.missions.verify.baseline import (
     MAX_FINDINGS,
+    TooManyFindings,
     UNSCOPED,
     baseline_document,
     in_scope,
@@ -77,8 +78,8 @@ def test_records_are_redacted_and_bounded():
     dump = json.dumps([f.model_dump() for f in normalize(snap)])
     assert "SECRET-9" not in dump and "API_KEY" not in dump
     many = snapshot(disk=[{"mount": f"/m{i}", "alert": "HIGH"} for i in range(MAX_FINDINGS + 50)])
-    out = normalize(many)
-    assert len(out) <= MAX_FINDINGS and any(f.kind == "overflow" for f in out)
+    with pytest.raises(TooManyFindings, match="too many findings to compare"):
+        normalize(many)                                                               # never truncated silently
 
 
 def test_baseline_vs_fresh_and_scope():
@@ -289,7 +290,7 @@ def supervisor(rig, verifier="default", enabled=True):
 
 def test_verify_and_close_completes_only_on_a_passed_result(tmp_path):
     rig = build(tmp_path)
-    assert supervisor(rig).verify_and_close(rig.mid) == "completed"
+    assert supervisor(rig).verify_and_close(rig.mid, wait=True) == "completed"
     m = rig.ms.get_mission(rig.mid)
     assert m.status == "completed" and m.outcome == "completed" and m.outcome_flags is None
     assert json.loads(m.verification_result_json)["status"] == "passed"
@@ -298,7 +299,7 @@ def test_verify_and_close_completes_only_on_a_passed_result(tmp_path):
 def test_verify_and_close_failed_goes_to_the_operator_with_the_summary(tmp_path):
     rig = build(tmp_path)
     rig.fresh = media_down()
-    assert supervisor(rig).verify_and_close(rig.mid) == "needs_operator"
+    assert supervisor(rig).verify_and_close(rig.mid, wait=True) == "needs_operator"
     m = rig.ms.get_mission(rig.mid)
     assert m.status == "needs_operator" and m.outcome == "needs_operator" and m.outcome_flags == "partially_applied"
     closed = [e for e in result_events(rig) if e["event"] == "verify.closed"]
@@ -308,16 +309,16 @@ def test_verify_and_close_failed_goes_to_the_operator_with_the_summary(tmp_path)
 def test_verify_and_close_rolls_back_when_the_grant_says_so(tmp_path):
     rig = build(tmp_path, on_verify_fail="rollback")
     rig.fresh = media_down()
-    assert supervisor(rig).verify_and_close(rig.mid) == "rollback_pending"
+    assert supervisor(rig).verify_and_close(rig.mid, wait=True) == "rollback_pending"
     assert rig.ms.get_mission(rig.mid).outcome == "rollback_pending"
 
 
 def test_verify_and_close_without_a_verifier_or_with_a_broken_one_never_completes(tmp_path):
     rig = build(tmp_path)
-    assert supervisor(rig, verifier=None).verify_and_close(rig.mid) == "needs_operator"
+    assert supervisor(rig, verifier=None).verify_and_close(rig.mid, wait=True) == "needs_operator"
     rig = build(tmp_path / "b")
     rig.verifier.run = lambda m: 1 / 0
-    assert supervisor(rig).verify_and_close(rig.mid) == "needs_operator"
+    assert supervisor(rig).verify_and_close(rig.mid, wait=True) == "needs_operator"
     assert rig.ms.get_mission(rig.mid).status == "needs_operator"
 
 
@@ -330,12 +331,102 @@ def test_a_verifier_that_claims_pass_without_storing_a_result_is_stopped_by_the_
             return VerificationResult(status="passed", grant_hash=mission.grant_hash, checkpoint_id=mission.checkpoint_id,
                                       plan_sha256=rig.plan.hash(), at=1)       # returned, never stored
 
-    assert supervisor(rig, verifier=Liar()).verify_and_close(rig.mid) == "needs_operator"
+    assert supervisor(rig, verifier=Liar()).verify_and_close(rig.mid, wait=True) == "needs_operator"
     assert rig.ms.get_mission(rig.mid).status == "needs_operator"
 
 
 def test_missions_disabled_means_nothing_runs(tmp_path):
     rig = build(tmp_path)
     with pytest.raises(Exception, match="disabled"):
-        supervisor(rig, enabled=False).verify_and_close(rig.mid)
+        supervisor(rig, enabled=False).verify_and_close(rig.mid, wait=True)
     assert rig.ms.get_mission(rig.mid).status == "verifying" and rig.run.calls == []
+
+
+def test_too_many_findings_in_the_fresh_scan_fails_verification(tmp_path):
+    rig = build(tmp_path)
+    rig.fresh = snapshot(disk=[{"mount": f"/m{i}", "alert": "HIGH"} for i in range(MAX_FINDINGS + 5)])
+    result = verified(rig)
+    assert result.status == "failed" and result.scan.ok is False
+    assert "too many findings to compare" in result.reason and result.scan.error == "too many findings to compare"
+
+
+def test_a_parent_finding_caused_by_a_narrow_mission_is_in_scope():
+    narrow = ["host:local/service:media/web"]
+    parent = normalize(snapshot(stack_completeness=[{"stack": "media", "status": "unknown", "alert": "MEDIUM",
+                                                     "missing_services": [], "services": {}}]))[0]
+    assert parent.resource_id == "host:local/stack:media" and in_scope(parent, narrow)
+    assert not in_scope(parent, ["host:local/service:photos/app"])
+    disk = normalize(snapshot(disk=[{"mount": "/mnt", "alert": "HIGH"}]))[0]
+    assert in_scope(disk, ["host:local/path:/mnt/data/app"]) and not in_scope(disk, ["host:local/path:/srv/x"])
+
+
+# ── core_read shares the session gate ───────────────────────────────────────
+def broker_rig(tmp_path, credentials):
+    from pydantic import BaseModel, ConfigDict
+
+    from planet_express.missions.tools import Tool, ToolBroker, ToolRegistry
+
+    class P(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        x: int = 1
+
+    reg = ToolRegistry()
+    reg.register(Tool("t.read", P, lambda p, ctx: (200, "answer"), "read", None))
+    reg.register(Tool("t.write", P, lambda p, ctx: (200, "done"), "write", None))
+    rig = build(tmp_path, grant_over={"credentials": credentials})
+    broker = ToolBroker(reg, missions=rig.ms, secrets=lambda ref: None, sites={}, stacks_root="/srv/stacks")
+    return rig, broker
+
+
+def test_core_read_needs_the_grant_to_name_the_tool(tmp_path):
+    from planet_express.missions.tools import ToolRefused
+    rig, broker = broker_rig(tmp_path, [])
+    with pytest.raises(ToolRefused, match="does not name this tool"):
+        broker.core_read(rig.mid, "t.read", {"x": 1})
+    rig, broker = broker_rig(tmp_path / "b", ["tool:t.read"])
+    assert broker.core_read(rig.mid, "t.read", {"x": 1})["output"] == "answer"
+    with pytest.raises(ToolRefused):                                       # write tools are never a Core read
+        broker.core_read(rig.mid, "t.write", {})
+
+
+def test_core_read_is_closed_by_a_tripwire_pause_and_to_non_verifying_missions(tmp_path):
+    from planet_express.missions.tools import ToolRefused
+    rig, broker = broker_rig(tmp_path, ["tool:t.read"])
+    broker.revoke(rig.mid)
+    with pytest.raises(ToolRefused, match="endpoints are closed"):
+        broker.core_read(rig.mid, "t.read", {})
+    broker.restore(rig.mid)
+    assert broker.core_read(rig.mid, "t.read", {})["ok"] is True
+    rig, broker = broker_rig(tmp_path / "b", ["tool:t.read"])
+    with sqlite3.connect(rig.store.path) as conn:
+        conn.execute("UPDATE missions SET status='executing' WHERE id=?", (rig.mid,))
+    with pytest.raises(ToolRefused, match="endpoints are closed"):
+        broker.core_read(rig.mid, "t.read", {})
+
+
+def test_a_scope_changed_retry_takes_a_fresh_baseline_that_matches_the_committed_checkpoint(tmp_path):
+    from checkpoint_fakes import make_env
+
+    from planet_express.missions.checkpoint.service import _Hooks
+    scans = [snapshot(), media_down()]                       # the host changes between the two attempts
+    taken = []
+
+    class Edit(_Hooks):
+        calls = 0
+
+        def before_capture(self, planned):
+            Edit.calls += 1
+            if Edit.calls == 1:                              # a late file reference: ScopeChanged on the first attempt
+                (env.stacks / "media" / "late.env").write_text("L=1\n")
+                env.compose.write_text(COMPOSE + "  other:\n    image: y\n    env_file: late.env\n")
+
+    def provider():
+        taken.append(1)
+        return normalize(scans[min(len(taken), 2) - 1])
+
+    from checkpoint_fakes import COMPOSE
+    env = make_env(tmp_path, hooks=Edit())
+    env.svc.baseline_provider = provider
+    cid = env.svc.create(env.mission.id, env.scope)
+    assert Edit.calls == 2 and len(taken) == 2
+    assert env.svc.baseline(cid) == normalize(media_down())  # the second attempt's scan, not the first
