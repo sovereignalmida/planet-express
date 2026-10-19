@@ -154,6 +154,17 @@ def test_absent_global_checks_never_emit_false_healthy_observations():
     assert kinds == {"configured_mounts", "unraid_exports", "vpn_port_forwarding"}
 
 
+def test_unarmed_automounts_are_a_medium_observation():
+    def rows(unarmed):
+        snapshot = {"mounts": {"missing": [], "unarmed_automounts": unarmed}}
+        return {(r.kind, r.resource): (r.condition, r.severity, r.details)
+                for r in observations_from_snapshot(snapshot)}
+
+    assert rows(["mnt-casabu.automount"])[("automounts_armed", "host-automounts")] == (
+        "failing", "MEDIUM", {"unarmed": ["mnt-casabu.automount"]})
+    assert rows([])[("automounts_armed", "host-automounts")] == ("healthy", None, {"unarmed": []})
+
+
 def test_incident_lifecycle_unknown_missing_retry_and_receipts(tmp_path):
     clock = Clock()
     store = _store(tmp_path, clock)

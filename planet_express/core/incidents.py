@@ -127,6 +127,14 @@ def observations_from_snapshot(snapshot: dict) -> list[Observation]:
                                          f"missing mounts: {', '.join(map(str, missing))}"
                                          if missing else "mounts reachable",
                                          {"missing": [_text(v) for v in missing[:100]]}))
+    if isinstance(mounts, dict) and isinstance(mounts.get("unarmed_automounts"), list):
+        unarmed = mounts["unarmed_automounts"]
+        observations.append(_observation("automounts_armed", "host-automounts",
+                                         "failing" if unarmed else "healthy",
+                                         "MEDIUM" if unarmed else None,
+                                         f"automounts not armed: {', '.join(map(str, unarmed))}"
+                                         if unarmed else "automounts armed",
+                                         {"unarmed": [_text(v) for v in unarmed[:100]]}))
 
     unraid = snapshot.get("unraid_exports")
     if isinstance(unraid, dict) and "reachable" in unraid:
