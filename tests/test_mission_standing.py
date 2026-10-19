@@ -273,3 +273,78 @@ def test_names_resolve_at_creation_and_an_unknown_name_is_reported():
     assert window.resolve_names({"deny": ["backup", "12:00-13:00"], "allow": None}, named) == {
         "deny": ["01:00-02:00", "sun", "12:00-13:00"], "allow": None}
     assert window.unreadable(window.resolve_names({"deny": ["nap"], "allow": None}, named)) == ["nap"]
+
+
+# ── Codex round 1: atomic supersede, id allocation, and a reachable standing path ─────────────────
+
+CHECKS = [{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}]
+
+
+def test_a_failed_supersede_leaves_the_old_version_active_and_never_two_active(stack):
+    import sqlite3
+    st = stack(start_monitor=False)
+    make_standing(st)
+    with sqlite3.connect(st.store.path) as conn:                 # the new version's id is already taken: the insert fails
+        conn.execute("INSERT INTO standing_grants (id, scope_json, tier, window_json, created_by, created_at, expires_at, version) "
+                     "VALUES ('SG-1-v2', '{}', 'repair', NULL, 'x', 1, 99999999, 2)")
+    with pytest.raises(FlowError) as exc:
+        st.flow.standing_supersede("operator:alice", "SG-1-v1", scope=SCOPE, ttl_s=7200, elevated=True)
+    assert exc.value.code == "conflict"
+    assert st.flow._standing_row("SG-1-v1")["state"] == "active"            # not revoked: the replacement never happened
+
+
+def test_standing_ids_are_allocated_with_a_retry_when_two_creates_race(stack, monkeypatch):
+    st = stack(start_monitor=False)
+    real = st.flow.ms.create_standing_grant
+    seen = []
+
+    def racing(**kw):
+        if not seen:
+            seen.append(kw["grant_id"])
+            real(**{**kw, "created_by": "operator:other"})            # the other request wins this number
+        return real(**kw)
+    monkeypatch.setattr(st.flow.ms, "create_standing_grant", racing)
+    made = make_standing(st)
+    assert made["id"] != seen[0] and made["id"].startswith("SG-") and made["created_by"] == "operator:alice"
+    assert len(st.flow.standing_list(include_inactive=True)["standing_grants"]) == 2
+
+
+def test_an_operator_can_propose_a_repair_for_an_incident_under_a_standing_grant_and_core_decides_the_approval(stack):
+    st = stack()
+    make_standing(st)
+    made = st.flow.propose_repair("operator:alice", title="t", goal="g", scope=SCOPE, standing_grant_id="SG-1-v1",
+                                  checks=CHECKS, incident_id=add_incident(st.store, "a" * 12))
+    assert made["unattended"] and st.ms.get_mission(made["mission_id"]).standing_grant_id == "SG-1-v1"
+    assert st.drive(made["mission_id"]) == "completed"
+    assert any(e.actor == "operator:alice" for e in st.ms.events(made["mission_id"]))      # the proposer is on the record
+    with pytest.raises(FlowError) as exc:                                                    # an incident is required
+        st.flow.propose_repair("operator:alice", title="t", goal="g", scope=SCOPE, standing_grant_id="SG-1-v1", checks=CHECKS)
+    assert exc.value.code == "forbidden"
+
+
+def test_the_rpc_takes_a_standing_id_but_never_an_actor_and_names_it_in_the_expected_shape(stack):
+    from planet_express.application.mission_service import MissionService
+    from planet_express.integrations.rpc import RpcError
+    st = stack()
+    make_standing(st)
+    svc = MissionService(st.store, enabled=lambda: True)
+    svc.flow = st.flow
+    handler = svc.handlers()["mission.propose_repair"]
+    base = {"operator": "alice", "title": "t", "goal": "g", "scope": SCOPE, "checks": CHECKS,
+            "incident_id": add_incident(st.store, "d" * 12), "standing_grant_id": "SG-1-v1"}
+    made = handler(base)
+    assert made["unattended"] and st.ms.get_mission(made["mission_id"]).standing_grant_id == "SG-1-v1"
+    for bad in ({"standing_grant_id": "SG-1"}, {"actor": "core"}, {"_internal": True}):
+        with pytest.raises(RpcError) as exc:
+            handler({**base, **bad})
+        assert exc.value.code == "bad_request"
+
+
+def test_nobody_can_pass_core_as_the_actor_to_skip_the_operator_requirement(stack):
+    st = stack(start_monitor=False)
+    make_standing(st)
+    spec = {"title": "t", "goal": "g", "scope": SCOPE, "incident_id": add_incident(st.store, "b" * 12), "checks": CHECKS}
+    for kw in ({}, {"standing_grant_id": "SG-1-v1"}):                                       # only start_under_standing may speak as core
+        with pytest.raises(FlowError) as exc:
+            st.flow.propose_repair("core", **spec, **kw)
+        assert exc.value.code == "forbidden"

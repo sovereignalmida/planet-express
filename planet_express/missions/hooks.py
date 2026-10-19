@@ -476,11 +476,20 @@ def policy_for(cfg: Any, protected_resources: Sequence[str] = (), *, stacks_root
 
 # ── the CLI the runtime's hook configuration invokes ──────────────────────────────────────────────────
 
+POLICY_ENV = "PE_HOOK_POLICY"      # the policy, as JSON, put in the session's environment by Core at launch
+LOG_ENV = "PE_HOOK_LOG"            # where the hook records its calls; the Supervisor drains it into the mission's events
+HOOK_LOG_NAME = ".pe-hook.log"
+MAX_POLICY_BYTES = 16384
+MAX_LOG_LINE = 4096
+
+
 def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Mapping[str, str] | None = None) -> int:
     """`python -m planet_express.missions.hooks pre|post`: reads the runtime's hook JSON on stdin. Exit 0 allows (printing a
-    JSON permission decision for `ask`), exit 2 blocks with the reason on stderr. The policy comes from the file named by
-    PE_HOOK_POLICY_FILE (written by Core); the NAME of that file is the only thing read from the environment, and nothing in the
-    environment or the input can switch the hook off. An unreadable policy fails closed."""
+    JSON permission decision for `ask`), exit 2 blocks with the reason on stderr. The policy is the JSON in PE_HOOK_POLICY,
+    which Core put in the environment the runtime was started with (a hook is run by the runtime, not by a tool command, so
+    nothing a model types can change it); nothing in the input can switch the hook off, and a missing or unreadable policy
+    falls back to the default one, which fails closed for blocked classes. The session token never reaches a hook: calls are
+    recorded to PE_HOOK_LOG, which Core reads (bounded, as untrusted data) and appends to the mission's events."""
     argv = list(sys.argv[1:] if argv is None else argv)
     stdin = sys.stdin if stdin is None else stdin
     stderr = sys.stderr if stderr is None else stderr
@@ -490,11 +499,13 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
         print("usage: hooks pre|post", file=stderr)
         return 2
     try:
-        with open(environ["PE_HOOK_POLICY_FILE"], encoding="utf-8") as handle:
-            policy = HookPolicy.from_json(handle.read(65536))
-    except (KeyError, OSError, ValueError):
+        text = environ[POLICY_ENV]
+        if len(text) > MAX_POLICY_BYTES:
+            raise ValueError("policy too large")
+        policy = HookPolicy.from_json(text)
+    except (KeyError, ValueError):
         policy = HookPolicy()                              # the default policy fails closed for blocked classes
-    runner = HookRunner(policy, post=_socket_poster(environ))
+    runner = HookRunner(policy, post=_log_poster(environ))
     raw = stdin.read(MAX_COMMAND_CHARS * 4)
     if which == "post":
         runner.post_hook(raw)
@@ -513,18 +524,22 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
     return 0
 
 
-def _socket_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:
-    """Posts through the worker socket when the runtime gave the hook the session's socket and a readable token file. Without
-    both there is no way to record, and the hook says so (it still decides)."""
-    sock, token_file = environ.get("PE_WORKER_SOCKET"), environ.get("PE_HOOK_TOKEN_FILE")
-    if not sock or not token_file:
+def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:
+    """One JSON line per call appended to PE_HOOK_LOG (never following a symlink). Without a log path there is nothing to
+    record to, and the hook says so; it still decides."""
+    path = environ.get(LOG_ENV)
+    if not path:
         return None
 
-    def post(kind: str, data: dict) -> Any:
-        from planet_express.integrations.rpc import call
-        with open(token_file, encoding="ascii") as handle:
-            token = handle.read(300).strip()
-        return call(sock, "mission.post_event", {"kind": kind, "data": data}, session_token=token)
+    def post(kind: str, data: dict) -> None:
+        line = json.dumps({"kind": kind, "data": data}, separators=(",", ":"), default=str)
+        if len(line) > MAX_LOG_LINE:
+            line = json.dumps({"kind": kind, "data": {"hook": str(data.get("hook"))[:8], "truncated": True}})
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, line.encode("utf-8") + b"\n")
+        finally:
+            os.close(fd)
     return post
 
 

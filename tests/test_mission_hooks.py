@@ -245,10 +245,7 @@ def test_the_event_record_is_bounded_and_carries_no_full_command_dump():
 # ── the CLI the runtime invokes ──────────────────────────────────────────────────────────────────────
 
 def cli(which, payload, tmp_path, policy=None, env=None):
-    policy_file = tmp_path / "policy.json"
-    if policy is not None:
-        policy_file.write_text(policy.to_json())
-    environ = {"PE_HOOK_POLICY_FILE": str(policy_file), **(env or {})}
+    environ = {**({"PE_HOOK_POLICY": policy.to_json()} if policy is not None else {}), **(env or {})}
     out, err = io.StringIO(), io.StringIO()
     stdout = sys.stdout
     sys.stdout = out
@@ -267,6 +264,22 @@ def test_cli_blocks_with_exit_2_asks_with_json_and_allows_with_exit_0(tmp_path):
     code, out, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "ls"}}, tmp_path, POLICY)
     assert code == 0 and out == ""
     assert cli("post", {"tool_name": "Bash", "tool_input": {"command": "ls"}}, tmp_path, POLICY)[0] == 0
+
+
+def test_cli_records_each_call_to_the_hook_log_without_following_a_symlink_and_never_sees_a_token(tmp_path):
+    log = tmp_path / ".pe-hook.log"
+    env = {"PE_HOOK_LOG": str(log), "PE_WORKER_SOCKET": "/run/w.sock"}
+    cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}}, tmp_path, POLICY, env)
+    cli("post", {"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {}}, tmp_path, POLICY, env)
+    lines = [json.loads(x) for x in log.read_text().splitlines()]
+    assert [x["kind"] for x in lines] == ["tool", "note"] and lines[0]["data"]["verdict"] == "block"
+    assert oct(log.stat().st_mode & 0o777) == "0o600"
+    target = tmp_path / "victim"
+    link = tmp_path / "linked.log"
+    link.symlink_to(target)
+    code, _, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}}, tmp_path, POLICY,
+                       {"PE_HOOK_LOG": str(link)})
+    assert code == 2 and "could not be recorded" in err and not target.exists()       # the decision stands; nothing was followed
 
 
 def test_cli_with_an_unreadable_policy_uses_the_closed_default_and_the_environment_cannot_switch_it_off(tmp_path):

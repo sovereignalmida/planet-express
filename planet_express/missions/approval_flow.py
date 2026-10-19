@@ -188,14 +188,23 @@ class ApprovalFlow:
                        success_criteria: str | None = None, budgets: dict | None = None, sudo: dict | None = None,
                        docker: str = "proxy", exclusions: list[str] | None = None, credentials: list[str] | None = None,
                        on_verify_fail: str = "needs_operator", acknowledged_no_backup: bool = False,
-                       incident_id: str | None = None, standing_grant_id: str | None = None) -> dict[str, Any]:
+                       incident_id: str | None = None, standing_grant_id: str | None = None,
+                       _internal: bool = False) -> dict[str, Any]:
         """Create a Repair mission waiting in `awaiting_decision` with its approval card. The grant is validated by Core
         (scope within the inventory, no protected resource, budgets within site maximums, backup floor) BEFORE anyone is asked.
         With `standing_grant_id` the unattended path runs (`approvals.evaluate`); a refusal there is NOT an error: the mission
         is made without the standing grant and the card says why, so an operator decides instead."""
+        # Two ways to name a standing grant: Core's own automation (`start_under_standing`, actor "core": nobody is asked) and
+        # an operator proposing a repair for an incident under a standing grant (the proposer is authenticated and recorded;
+        # whether an approval is still needed is decided by `approvals.evaluate`, never by the proposer).
         unattended = standing_grant_id is not None
-        if not unattended:
+        if actor == "core":
+            if not _internal or standing_grant_id is None:
+                raise FlowError("this is an operator decision", "forbidden")
+        else:
             require_actor(actor)
+        if unattended and not incident_id:
+            raise FlowError("a standing grant covers incident-backed missions only", "forbidden")
         if self.validator is None or self.protected is None:
             raise FlowError("Repair missions are not configured on this host", "unavailable")
         try:
@@ -224,7 +233,7 @@ class ApprovalFlow:
         if reasons:
             raise FlowError("The grant is not valid: " + "; ".join(_clip(r, 160) for r in reasons[:6]), "invalid_grant")
         origin = "incident" if incident_id else "operator"
-        who = actor if not unattended else "core"
+        who = actor
         try:
             mission = self.ms.create_mission(
                 title=redact(title), origin=origin, grant=grant, goal=redact(goal),
@@ -284,7 +293,7 @@ class ApprovalFlow:
         denied window it is accepted (the supervisor then starts it); otherwise it waits as an ordinary approval card."""
         if not kwargs.get("incident_id"):
             raise FlowError("a standing grant covers incident-backed missions only", "forbidden")
-        return self.propose_repair("core", standing_grant_id=standing_grant_id, **kwargs)
+        return self.propose_repair("core", standing_grant_id=standing_grant_id, _internal=True, **kwargs)
 
     # ── deciding ────────────────────────────────────────────────────────────
     def approve(self, actor: str, mission_id: str, phase: str, bound_hash: str, *, elevated: bool = False) -> dict[str, Any]:
@@ -410,13 +419,20 @@ class ApprovalFlow:
         if elevated is not True:
             raise FlowError("Creating a standing grant needs an elevated dashboard session", "elevation_required")
         scope_d, win, expires = self._check_standing(scope, tier, ttl_s, window_spec)
-        with self.store._write() as conn:
-            n = conn.execute("SELECT COUNT(*) FROM standing_grants").fetchone()[0] + 1
-            while conn.execute("SELECT 1 FROM standing_grants WHERE id LIKE ?", (f"SG-{n}-v%",)).fetchone():
-                n += 1
-        grant_id = f"SG-{n}-v1"
-        self.ms.create_standing_grant(grant_id=grant_id, scope=scope_d, tier=tier, created_by=actor, expires_at=expires,
-                                      window=win, version=1)
+        for _attempt in range(8):
+            with self.store._connect() as conn:
+                n = conn.execute("SELECT COUNT(*) FROM standing_grants").fetchone()[0] + 1
+                while conn.execute("SELECT 1 FROM standing_grants WHERE id LIKE ?", (f"SG-{n}-v%",)).fetchone():
+                    n += 1
+            grant_id = f"SG-{n}-v1"
+            try:
+                self.ms.create_standing_grant(grant_id=grant_id, scope=scope_d, tier=tier, created_by=actor,
+                                              expires_at=expires, window=win, version=1)
+                break
+            except sqlite3.IntegrityError:               # a concurrent create took this number between the read and the insert
+                continue
+        else:
+            raise FlowError("Could not allocate a standing grant id; try again", "conflict")
         self._audit("mission.standing_created", standing=grant_id, operator=actor, expires_at=expires)
         return self._standing_row(grant_id)
 
@@ -437,11 +453,10 @@ class ApprovalFlow:
         base = grant_id.rsplit("-v", 1)[0]
         new_id = f"{base}-v{old['version'] + 1}"
         try:
-            self.ms.create_standing_grant(grant_id=new_id, scope=scope_d, tier=old["tier"], created_by=actor,
-                                          expires_at=expires, window=win, version=old["version"] + 1)
+            self.ms.supersede_standing_grant(old_id=grant_id, grant_id=new_id, scope=scope_d, tier=old["tier"], created_by=actor,
+                                             expires_at=expires, window=win, version=old["version"] + 1)
         except sqlite3.IntegrityError:
             raise FlowError("That version already exists", "conflict") from None
-        self.ms.revoke_standing_grant(grant_id)
         self._audit("mission.standing_superseded", standing=new_id, replaces=grant_id, operator=actor)
         return self._standing_row(new_id)
 

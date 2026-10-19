@@ -344,6 +344,20 @@ class MissionStore:
                 (grant_id, scope_json, tier, window_json, created_by, self._now(), expires_at, version),
             )
 
+    def supersede_standing_grant(self, *, old_id: str, grant_id: str, scope: Mapping[str, Any], tier: str, created_by: str,
+                                 expires_at: int, window: Mapping[str, Any] | None, version: int) -> None:
+        """A new version and the revocation of the one it replaces, in ONE transaction: a crash can never leave both active."""
+        from .models import GrantScope, Window
+        scope_json = canonical_json(GrantScope.model_validate(scope).model_dump(mode="json"))
+        window_json = canonical_json(Window.model_validate(window).model_dump(mode="json")) if window else None
+        now = self._now()
+        with self.store._write() as conn:
+            conn.execute(
+                "INSERT INTO standing_grants (id, scope_json, tier, window_json, created_by, created_at, "
+                "expires_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (grant_id, scope_json, tier, window_json, created_by, now, expires_at, version))
+            conn.execute("UPDATE standing_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (now, old_id))
+
     def revoke_standing_grant(self, grant_id: str) -> None:
         with self.store._write() as conn:
             conn.execute("UPDATE standing_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL",

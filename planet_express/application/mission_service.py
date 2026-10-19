@@ -667,7 +667,8 @@ class MissionService:
                 p, {**op, "title": _str(256), "goal": _str(8192), "scope": _dict, "checks": _checks},
                 {"success_criteria": _str(8192), "budgets": _dict, "sudo": _dict, "docker": _choice("proxy", "raw"),
                  "exclusions": _tags, "credentials": _tags, "on_verify_fail": _choice("needs_operator", "rollback"),
-                 "acknowledged_no_backup": _bool, "incident_id": _pattern(INCIDENT_ID_RE, "an incident id")}))
+                 "acknowledged_no_backup": _bool, "incident_id": _pattern(INCIDENT_ID_RE, "an incident id"),
+                 "standing_grant_id": _pattern(STANDING_ID_RE, "a standing grant id")}))
 
         def approve(p):
             v = _params(p, {**mid, **op, **grant_hash, "phase": _pattern(_PHASE, "an approval phase")}, elev)

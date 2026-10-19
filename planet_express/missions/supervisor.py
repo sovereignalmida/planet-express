@@ -28,6 +28,7 @@ import logging
 import os
 import secrets
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -48,6 +49,7 @@ from . import approvals, artifacts, leases, recovery
 from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
+from .hooks import HOOK_LOG_NAME
 from .launcher.spec import LaunchSpec
 from .models import Mission
 from .runtime import (
@@ -77,6 +79,10 @@ VERIFY_WORKERS = 2            # verifications run on their own small pool, never
 VERIFY_SHUTDOWN_WAIT_S = 5.0  # shutdown waits at most this long for in-flight verifications
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
 MAX_MEMORY_HITS = 20
+MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll
+MAX_HOOK_LINES = 200
+MAX_HOOK_LINE = 4096
+MAX_HOOK_FIELD = 400
 MAX_DECISION_REQUESTS = 5       # worker-raised decision cards per mission; they never approve anything
 MAX_DECISION_TEXT = 1000
 MAX_OPTION_TEXT = 120
@@ -148,6 +154,7 @@ class _Run:
     brief: str = ""
     submitted: AgentResult | None = None      # a result the worker handed in over the socket
     paused_at: float | None = None            # a tripwire pause is not session time: the wall budget does not run meanwhile
+    hook_offset: int = 0                      # how much of the session's hook log has been read
 
 
 def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
@@ -214,8 +221,10 @@ class Supervisor:
                  lease_ttl_s: int = LEASE_TTL_S, socket_provider: "SocketProvider | None" = None,
                  preflight: Callable[[], Any] | None = None, tool_broker: Any = None,
                  repair_gate: Callable[[], Any] | None = None, verifier: Any = None,
-                 checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None):
+                 checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None,
+                 hook_policy: Callable[[Mission], str] | None = None):
         self.store = store
+        self.hook_policy = hook_policy                # Mission -> the hook policy JSON put in the session's environment
         self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
         self.tripwire = tripwire                      # `tripwire.TripwireMonitor`; None: no Repair mission can start
         self.docker_proxy = docker_proxy              # slice 7b: `.resume(mission_id, grant_hash)`; None: nothing to re-enable
@@ -427,6 +436,11 @@ class Supervisor:
                 raise ContainmentError("the launcher's fd map is fixed (0, 1, 2, 3): no extra fds")
             full_env = {**self.worker_env, **(env or {}), "PE_MISSION_ID": mission.id,
                         "PE_SESSION_TOKEN_FD": "3"}          # fd 3 is always the token pipe in the child
+            if self.hook_policy is not None:
+                # The hook layer's inputs, set by Core and nowhere else: the policy it enforces and where it records. The
+                # runtime's hooks inherit them; the session token is never given to a hook (it is on fd 3 only).
+                full_env["PE_HOOK_POLICY"] = self.hook_policy(mission)
+                full_env["PE_HOOK_LOG"] = str(workspace / HOOK_LOG_NAME)
             if self.socket_provider is not None:
                 full_env["PE_WORKER_SOCKET"] = self.socket_provider.path(cs.session_id)
                 # Bound BEFORE the launch (so the agent's first connect cannot find nothing); the launcher then hands
@@ -509,6 +523,7 @@ class Supervisor:
             # An adapter whose process vanished may raise instead of reporting: that is a crash, not a bug.
             return self._kill_and_advance(run, "crash" if self.containment.is_empty(run.cs) else "runtime_error")
         self._record(run, update)
+        self._drain_hook_log(run)
         grant = mission.grant()
         elapsed = float(self.clock()) - run.started_at
         for name, over in (("wall", elapsed > grant.budgets.wall_s),
@@ -537,6 +552,53 @@ class Supervisor:
                 self._note(run.mission_id, {"dropped_event": event.kind})
             run.output_bytes += size
         run.output_bytes += update.output_bytes
+
+    def _drain_hook_log(self, run: _Run) -> None:
+        """Append what the session's hooks recorded to the mission's events. The log lives in the session's own workspace, so
+        everything in it is untrusted data: opened without following a symlink, regular files only, a bounded read per poll,
+        complete lines only, a bounded number of them, each parsed strictly and cut down to a few clipped string fields. The
+        events carry actor `worker` and kind `tool` or `note`: nothing a hook line says can name a state or a decision."""
+        if self.hook_policy is None or run.workspace is None:
+            return
+        try:
+            fd = os.open(run.workspace / HOOK_LOG_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            return
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return
+            os.lseek(fd, run.hook_offset, os.SEEK_SET)
+            data = os.read(fd, MAX_HOOK_READ)
+        except OSError:
+            return
+        finally:
+            os.close(fd)
+        end = data.rfind(b"\n") + 1
+        if end == 0:
+            if len(data) >= MAX_HOOK_READ:
+                run.hook_offset += len(data)              # one enormous line: skip it
+            return
+        run.hook_offset += end
+        for raw in data[:end].splitlines()[:MAX_HOOK_LINES]:
+            if len(raw) > MAX_HOOK_LINE:
+                continue
+            try:
+                line = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(line, dict) or line.get("kind") not in ("tool", "note") or not isinstance(line.get("data"), dict):
+                continue
+            body = {"via": "hook"}
+            for key in ("hook", "tool", "verdict", "class", "reason", "input", "outcome"):
+                value = line["data"].get(key)
+                if isinstance(value, str):
+                    body[key] = value[:MAX_HOOK_FIELD]
+            if len(body) == 1:
+                continue                                  # nothing a hook records: not an event
+            self.ms.append_event(run.mission_id, line["kind"], "worker", body)
+            run.output_bytes += len(raw)
+            if line["kind"] == "tool":
+                run.tool_calls += 1
 
     def _collect(self, run: _Run) -> None:
         assert run.runtime is not None
