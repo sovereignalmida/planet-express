@@ -14,10 +14,11 @@ import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .models import Grant
+from .models import Grant, VerificationPlan
 from .protected import ProtectedSet
 from .resources import BadResource, canon, contains, split
 from .store import grant_resources
+from .verify.plan import binding_problems
 
 _SECRETISH = re.compile(r"(KEY|TOKEN|SECRET|PASS|PASSWD|PASSWORD|CRED|AUTH|COOKIE|SESSION|PRIVATE|CERT)", re.IGNORECASE)
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -67,7 +68,8 @@ def _under_root(path: str, roots: Iterable[str]) -> bool:
 
 
 def validate_grant(grant: Grant, *, inventory: Inventory, protected: ProtectedSet, known_checks: Collection[str],
-                   known_tools: Collection[str], limits: SiteLimits, stacks_root: str | None = None) -> list[str]:
+                   known_tools: Collection[str], limits: SiteLimits, stacks_root: str | None = None,
+                   verification_plan: VerificationPlan | None = None) -> list[str]:
     """Every reason this grant must not be offered for approval; empty means valid."""
     out: list[str] = []
     scope = grant.scope
@@ -123,6 +125,9 @@ def validate_grant(grant: Grant, *, inventory: Inventory, protected: ProtectedSe
     for check in grant.verification.checks:
         if check not in known_checks:
             out.append(f"verification check {check[:64]!r} does not exist")
+    if grant.tier in REPAIR_UP:
+        # Contract 10: the plan exists, is valid, and is the one the grant's hash names (so it cannot change after approval).
+        out += binding_problems(grant, verification_plan)
     for cred in grant.credentials:
         name = cred[5:] if cred.startswith("tool:") else None
         if name is None or name not in known_tools:

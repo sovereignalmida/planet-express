@@ -173,7 +173,7 @@ def build_mission_runner(
     store: Store, cfg, *, containment: SessionContainment | None = None,
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
-    stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None,
+    stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None, verifier=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
@@ -213,7 +213,7 @@ def build_mission_runner(
     supervisor = Supervisor(
         store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
-        repair_gate=repair_gate)
+        repair_gate=repair_gate, verifier=verifier)
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
         supervisor.socket_provider = socket_provider or SessionSockets(

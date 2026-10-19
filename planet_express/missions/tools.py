@@ -251,6 +251,44 @@ class ToolBroker:
             self._refused(mission_id, sid, name, params, f"bad params: {exc}"[:200])
             raise RpcError("Invalid params", "bad_params") from None
 
+    def core_read(self, mission_id: str, name: str, params: dict) -> dict:
+        """A READ-ONLY tool call made by Core itself for a verification `query` check (slice 8). It is not a session
+        call: no session token, no endpoint switch and no use of the session's call budget (events are `tool.verify`,
+        which `_count` does not add up), but everything else holds: the tool must exist and be `risk == "read"`, its
+        params must parse, the scope fields must be inside the mission's grant and clear of protected resources, and
+        the secret never leaves Core. Any refusal raises ToolRefused or _BadParams to the caller, who fails the check."""
+        mission = self.ms.get_mission(mission_id)
+        if mission.status != "verifying":
+            raise ToolRefused(f"verification queries run only while verifying ({mission.status})")
+        tool = self.registry.get(name) if isinstance(name, str) else None
+        if tool is None or tool.risk != "read":
+            raise ToolRefused("unknown or non-read tool")
+        grant = mission.grant()
+        try:
+            parsed = tool.params.model_validate(params)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise _BadParams(type(exc).__name__) from None
+        self._check_scope(tool, parsed, grant)
+        secret = None
+        if tool.secret_ref:
+            secret = self.secrets(tool.secret_ref)
+            if not secret:
+                raise ToolRefused("the tool's secret is not configured")
+        ctx = ToolContext(secret, self.sites.get(name, ToolSite()), self.http, self.runner, self.stacks_root)
+        try:
+            status, text = tool.handler(parsed, ctx)
+        except ToolRefused:
+            raise
+        except Exception as exc:               # noqa: BLE001 - an application failure is a result
+            text, status = f"{type(exc).__name__}", 599
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+        text, truncated = _clip(redact(text), self.max_output_bytes)
+        ok = 200 <= status < 300
+        self._record(mission_id, "tool.verify", name, params, ok=ok, status=status, nbytes=len(text.encode()),
+                     truncated=truncated)
+        return {"ok": ok, "status": status, "output": text if ok else "", "truncated": truncated}
+
     def _refused(self, mission_id: str, sid: str, name: str, params: dict, reason: str) -> None:
         """Record a refusal, up to `refusal_cap` per session. The call that reaches the cap records one more event and
         fires `on_refusal_cap` (the supervisor freezes the session); from then on the session is refused outright."""

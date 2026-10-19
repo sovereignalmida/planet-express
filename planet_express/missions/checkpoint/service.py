@@ -192,8 +192,12 @@ class CheckpointService:
     def __init__(self, *, mission_store: MissionStore, root: Path | str, stacks_root: Path | str,
                  provider: CheckpointProvider, backup: BackupFreshness,
                  settings: CheckpointSettings | None = None, enabled: Callable[[], bool] | bool = True,
-                 trace: Callable[[str, str], None] | None = None, hooks: _Hooks | None = None):
+                 trace: Callable[[str, str], None] | None = None, hooks: _Hooks | None = None,
+                 baseline_provider: Callable[[], Sequence[Any]] | None = None):
         self.missions = mission_store
+        # Slice 8: returns the normalised scan findings (`verify.baseline.Finding`) at this moment. When set, a
+        # checkpoint is not created without one (a failed scan is a refusal): verification compares against it.
+        self.baseline_provider = baseline_provider
         self.store = CheckpointStore(root, trace=trace)
         self.stacks_root = safefs.real_root(str(stacks_root))
         self.provider = provider
@@ -241,6 +245,16 @@ class CheckpointService:
         if self.store.root.exists() and self.store.total_bytes() + total > self.settings.max_store_bytes:
             raise DiskGuardError(f"the checkpoint store would exceed {self.settings.max_store_bytes} bytes")
 
+        baseline_text, baseline_sha, baseline_count = None, None, 0
+        if self.baseline_provider is not None:
+            from ..verify.baseline import baseline_document
+            try:
+                findings = list(self.baseline_provider())
+                baseline_text, baseline_sha = baseline_document(findings)
+                baseline_count = len(findings)
+            except Exception as exc:                    # noqa: BLE001 - no baseline, no checkpoint
+                raise CheckpointError(f"the baseline scan failed ({type(exc).__name__}); no checkpoint was taken") from None
+
         checkpoint_id, manifest = None, None
         for attempt in (1, 2):
             checkpoint_id = "C-" + secrets.token_hex(8)
@@ -248,6 +262,10 @@ class CheckpointService:
                 self.hooks.before_capture(planned)
                 self.store.new_checkpoint(checkpoint_id)
                 manifest = self._capture(checkpoint_id, mission_id, scope, planned, no_backup)
+                manifest["baseline"] = None
+                if baseline_text is not None:
+                    self.store.write_baseline(checkpoint_id, baseline_text.encode("utf-8"))
+                    manifest["baseline"] = {"sha256": baseline_sha, "findings": baseline_count}
                 self.store.commit(checkpoint_id, manifest)
                 break
             except ScopeChanged:
@@ -463,6 +481,26 @@ class CheckpointService:
         """The committed, immutable manifest (read-only: tripwires compare their baseline against it)."""
         self._require_enabled()
         return self._manifest(checkpoint_id)
+
+    def baseline(self, checkpoint_id: str) -> list[Any] | None:
+        """The scan baseline taken with this checkpoint, or None when it has none. Its hash must match the manifest's:
+        a baseline that was altered after the commit raises CheckpointCorrupt rather than being believed."""
+        self._require_enabled()
+        manifest = self._manifest(checkpoint_id)
+        recorded = manifest.get("baseline")
+        if not recorded:
+            return None
+        try:
+            data = self.store.read_baseline(checkpoint_id)
+        except (OSError, StoreError):
+            data = None
+        if data is None or safefs.sha256_bytes(data) != recorded.get("sha256"):
+            raise CheckpointCorrupt(f"{checkpoint_id}: the scan baseline is missing or does not match its manifest hash")
+        from ..verify.baseline import load_baseline
+        try:
+            return load_baseline(data.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            raise CheckpointCorrupt(f"{checkpoint_id}: the scan baseline is unreadable") from None
 
     def capture_post(self, checkpoint_id: str) -> None:
         """Take the post-change manifest. The caller does this only once the session is provably dead."""

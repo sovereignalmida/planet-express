@@ -146,6 +146,68 @@ class MissionStore:
             insert_event(conn, mission_id, "decision", actor, {"plan_replaced": sha256_hex(plan)}, now)
         return self.get_mission(mission_id)
 
+    def set_verification_plan(self, mission_id: str, plan: Any, actor: str = "core") -> Mission:
+        """Attach the verification plan (contract 10). It must be valid and, for a mutating grant, the exact plan the
+        grant's `verification.plan_sha256` names: a different plan has a different hash, so it cannot be attached
+        under an approved grant, and a changed plan means a changed grant hash and a new approval."""
+        from .verify.plan import PlanInvalid, binding_problems, plan_hash, validate_plan
+        now = self._now()
+        with self.store._write() as conn:
+            row = conn.execute("SELECT grant_json, grant_hash, verification_plan_json FROM missions WHERE id=?",
+                               (mission_id,)).fetchone()
+            if row is None:
+                raise MissionNotFound(mission_id)
+            try:
+                validate_plan(plan)
+            except PlanInvalid as exc:
+                raise ValueError(str(exc)) from None
+            grant = Grant.model_validate_json(row["grant_json"])
+            problems = binding_problems(grant, plan)
+            if problems:
+                raise ValueError("; ".join(problems))
+            plan_json = canonical_json(plan.model_dump(mode="json"))
+            if (row["verification_plan_json"] and row["verification_plan_json"] != plan_json
+                    and has_approving_row(conn, mission_id, row["grant_hash"])):
+                raise GrantLocked(f"{mission_id}: the verification plan is approved and immutable")
+            self._check_readable(conn, mission_id, verification_plan_json=plan_json)
+            conn.execute("UPDATE missions SET verification_plan_json=?, updated_at=? WHERE id=?",
+                         (plan_json, now, mission_id))
+            insert_event(conn, mission_id, "decision", actor, {"verification_plan_set": plan_hash(plan)}, now)
+        return self.get_mission(mission_id)
+
+    def set_verification_result(self, mission_id: str, result: Any, actor: str = "core") -> Mission:
+        """Store Core's verification result. Only while `verifying`, and only for the mission's CURRENT grant hash
+        and checkpoint: a result for anything else is refused here and would be refused by the completion gate too."""
+        now = self._now()
+        with self.store._write() as conn:
+            row = conn.execute("SELECT status, grant_hash, checkpoint_id FROM missions WHERE id=?",
+                               (mission_id,)).fetchone()
+            if row is None:
+                raise MissionNotFound(mission_id)
+            if row["status"] != "verifying":
+                raise ValueError(f"{mission_id}: a verification result is stored only while verifying ({row['status']})")
+            if result.grant_hash != row["grant_hash"] or result.checkpoint_id != row["checkpoint_id"]:
+                raise ValueError(f"{mission_id}: the result is not for the current grant hash and checkpoint")
+            text = result.canonical()
+            self._check_readable(conn, mission_id, verification_result_json=text)
+            conn.execute("UPDATE missions SET verification_result_json=?, updated_at=? WHERE id=?",
+                         (text, now, mission_id))
+            insert_event(conn, mission_id, "decision", actor,
+                         {"verification_result": result.status, "checks": len(result.checks)}, now)
+        return self.get_mission(mission_id)
+
+    def set_outcome(self, mission_id: str, outcome: str | None, flags: str | None = None, actor: str = "core") -> Mission:
+        """Record how a mission ended (`outcome`, `partially_applied` in `flags`). A label only: it decides nothing."""
+        now = self._now()
+        with self.store._write() as conn:
+            self._check_readable(conn, mission_id, outcome=outcome, outcome_flags=flags)
+            cur = conn.execute("UPDATE missions SET outcome=?, outcome_flags=?, updated_at=? WHERE id=?",
+                               (outcome, flags, now, mission_id))
+            if cur.rowcount != 1:
+                raise MissionNotFound(mission_id)
+            insert_event(conn, mission_id, "decision", actor, {"outcome": outcome, "flags": flags}, now)
+        return self.get_mission(mission_id)
+
     # ── events ──────────────────────────────────────────────────────────────
     def append_event(self, mission_id: str, kind: str, actor: str, body: dict[str, Any]) -> int:
         """Redacts the body, then inserts. There is deliberately no update or delete here."""

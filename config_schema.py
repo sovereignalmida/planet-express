@@ -384,6 +384,29 @@ class CrossHostSystemConfig(BaseModel):
         return path
 
 
+_VERIFY_SHELLS = frozenset({"sh", "bash", "dash", "ash", "zsh", "ksh", "csh", "tcsh", "fish", "busybox", "env"})
+
+
+class VerifyConfig(BaseModel):
+    """Verification limits (v4 slice 8). The allowlist is the operator's: empty means `exec_probe` is unavailable."""
+    model_config = ConfigDict(extra="forbid")
+
+    exec_allowlist: list[str] = []                 # binaries an `exec_probe` may run inside a container (exact argv[0])
+    check_timeout_cap_s: int = Field(default=60, ge=1, le=60)
+    scan_timeout_s: int = Field(default=120, ge=10, le=600)
+    max_retries: int = Field(default=2, ge=0, le=3)
+    max_output_bytes: int = Field(default=64 * 1024, ge=1024, le=1024 * 1024)
+
+    @field_validator("exec_allowlist")
+    @classmethod
+    def _allowlist(cls, binaries: list[str]) -> list[str]:
+        for item in binaries:
+            if (not item or len(item) > 128 or any(c.isspace() or c == "\0" for c in item) or item.startswith("-")
+                    or posixpath.basename(item) in _VERIFY_SHELLS):
+                raise ValueError("missions.verify.exec_allowlist: a binary name or absolute path, never a shell")
+        return binaries
+
+
 class MissionsConfig(BaseModel):
     """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
     model_config = ConfigDict(extra="forbid")
@@ -412,6 +435,7 @@ class MissionsConfig(BaseModel):
     runtime: MissionRuntimeConfig = MissionRuntimeConfig()
     budgets: MissionBudgetsConfig = MissionBudgetsConfig()
     checkpoint: CheckpointConfig = CheckpointConfig()
+    verify: VerifyConfig = VerifyConfig()
     # Tripwires (slice 6). The pause SLA (interval + 10 s scan deadline + freeze + write <= 30 s) holds up to 15 s.
     tripwire_interval_s: int = Field(default=15, ge=1, le=15)
     tripwire_investigating_interval_s: int = Field(default=60, ge=15, le=600)
