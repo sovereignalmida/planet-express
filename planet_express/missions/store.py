@@ -21,6 +21,10 @@ class GrantLocked(RuntimeError):
     """An approving row already exists for this grant hash, so the grant is immutable."""
 
 
+class StandingGrantInactive(RuntimeError):
+    """The standing grant a change was meant to replace is already revoked (or gone): nothing was written."""
+
+
 class SessionConflict(RuntimeError):
     """The mission already has a live session."""
 
@@ -352,11 +356,15 @@ class MissionStore:
         window_json = canonical_json(Window.model_validate(window).model_dump(mode="json")) if window else None
         now = self._now()
         with self.store._write() as conn:
+            # Conditional on the old row still being active, checked FIRST: a revoke that landed after the caller read it
+            # must not be undone by a new active version, so zero rows updated aborts the whole transaction.
+            cur = conn.execute("UPDATE standing_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (now, old_id))
+            if cur.rowcount != 1:
+                raise StandingGrantInactive(f"{old_id} is not an active standing grant")
             conn.execute(
                 "INSERT INTO standing_grants (id, scope_json, tier, window_json, created_by, created_at, "
                 "expires_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (grant_id, scope_json, tier, window_json, created_by, now, expires_at, version))
-            conn.execute("UPDATE standing_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (now, old_id))
 
     def revoke_standing_grant(self, grant_id: str) -> None:
         with self.store._write() as conn:
@@ -364,4 +372,4 @@ class MissionStore:
                          (self._now(), grant_id))
 
 
-__all__ = ["GrantLocked", "MissionStore", "NoFreeUid", "SessionConflict", "grant_resources"]
+__all__ = ["GrantLocked", "MissionStore", "NoFreeUid", "SessionConflict", "StandingGrantInactive", "grant_resources"]

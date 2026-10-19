@@ -27,7 +27,7 @@ from planet_express.missions.containment_cgroup import (
     CgroupContainment,
     cgroup2_mountpoint,
 )
-from planet_express.missions.hooks import policy_for
+from planet_express.missions.hooks import install_claude_code, policy_for
 from planet_express.missions.launcher.cgroup_tree import ensure_tree
 from planet_express.missions.launcher.config import CONF_PATH, HELPER_PATH
 from planet_express.missions.launcher.preflight import PreflightReport, run_preflight
@@ -241,7 +241,9 @@ def build_mission_runner(
         store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
         repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
-        hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json())
+        hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json(),
+        hook_install=((lambda workspace: install_claude_code(workspace, cfg.hooks.command))
+                      if cfg.hooks.install_claude_code else None))
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
         supervisor.socket_provider = socket_provider or SessionSockets(

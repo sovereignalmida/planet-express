@@ -293,6 +293,26 @@ def test_a_failed_supersede_leaves_the_old_version_active_and_never_two_active(s
     assert st.flow._standing_row("SG-1-v1")["state"] == "active"            # not revoked: the replacement never happened
 
 
+def test_a_supersede_cannot_resurrect_a_grant_that_was_revoked_after_it_was_read(stack):
+    import sqlite3
+    from planet_express.missions.store import StandingGrantInactive
+    st = stack(start_monitor=False)
+    make_standing(st)
+    st.flow.standing_revoke("operator:bob", "SG-1-v1")                    # the other operator's revoke landed first
+    with pytest.raises(StandingGrantInactive):
+        st.flow.ms.supersede_standing_grant(old_id="SG-1-v1", grant_id="SG-1-v2", scope=SCOPE, tier="repair",
+                                            created_by="operator:alice", expires_at=10**9, window=None, version=2)
+    with sqlite3.connect(st.store.path) as conn:
+        assert [r[0] for r in conn.execute("SELECT id FROM standing_grants")] == ["SG-1-v1"]    # no new active version appeared
+    real = st.flow.ms.supersede_standing_grant
+    st.flow.ms.supersede_standing_grant = lambda **kw: (_ for _ in ()).throw(StandingGrantInactive("revoked meanwhile"))
+    make_standing(st)                                                                           # SG-2-v1, active
+    with pytest.raises(FlowError) as exc:
+        st.flow.standing_supersede("operator:alice", "SG-2-v1", scope=SCOPE, ttl_s=7200, elevated=True)
+    assert exc.value.code == "conflict"
+    st.flow.ms.supersede_standing_grant = real
+
+
 def test_standing_ids_are_allocated_with_a_retry_when_two_creates_race(stack, monkeypatch):
     st = stack(start_monitor=False)
     real = st.flow.ms.create_standing_grant

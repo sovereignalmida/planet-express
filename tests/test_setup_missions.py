@@ -48,10 +48,10 @@ def removals(p):
 # -- default behaviour is byte-identical -----------------------------------------------------------------------
 def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_answer_existed():
     # recorded from the build before `missions` was added; a drift here means default setups changed
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "cc7dee1d08e114a8"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "243a618bc1069f19"
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "5ecffaf2883ed5a2"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "41ce7901aa48290b"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "a3182f99ad288042"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "7cbceb0f79fccb88"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"

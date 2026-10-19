@@ -273,7 +273,7 @@ def test_cli_records_each_call_to_the_hook_log_without_following_a_symlink_and_n
     cli("post", {"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {}}, tmp_path, POLICY, env)
     lines = [json.loads(x) for x in log.read_text().splitlines()]
     assert [x["kind"] for x in lines] == ["tool", "note"] and lines[0]["data"]["verdict"] == "block"
-    assert oct(log.stat().st_mode & 0o777) == "0o600"
+    assert oct(log.stat().st_mode & 0o777) == "0o640"                          # the workspace group (Core) can read it
     target = tmp_path / "victim"
     link = tmp_path / "linked.log"
     link.symlink_to(target)

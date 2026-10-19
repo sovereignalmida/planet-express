@@ -25,7 +25,7 @@ from .events import insert_event
 from .grants import with_site_protected
 from .models import Budgets, Grant, GrantScope, Mission, VerificationPlan
 from .state import IllegalTransition, MissionNotFound, transition, transition_in_txn
-from .store import MissionStore
+from .store import MissionStore, StandingGrantInactive
 from .verify.plan import PlanInvalid, validate_plan
 
 log = logging.getLogger("planetexpress.missions.approval_flow")
@@ -457,6 +457,8 @@ class ApprovalFlow:
                                              expires_at=expires, window=win, version=old["version"] + 1)
         except sqlite3.IntegrityError:
             raise FlowError("That version already exists", "conflict") from None
+        except StandingGrantInactive:
+            raise FlowError("That standing grant version was revoked meanwhile", "conflict") from None
         self._audit("mission.standing_superseded", standing=new_id, replaces=grant_id, operator=actor)
         return self._standing_row(new_id)
 

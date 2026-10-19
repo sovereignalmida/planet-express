@@ -44,6 +44,60 @@ def test_without_a_hook_policy_nothing_is_added_to_the_environment(tmp_path):
     assert "PE_HOOK_POLICY" not in env and "PE_HOOK_LOG" not in env
 
 
+def test_the_claude_code_settings_run_this_module_before_and_after_every_tool_call(tmp_path):
+    from planet_express.missions.hooks import claude_code_settings, install_claude_code
+    command = ["/opt/pe/venv/bin/python", "-m", "planet_express.missions.hooks"]
+    settings = claude_code_settings(command)
+    assert settings["hooks"]["PreToolUse"][0]["matcher"] == "*"
+    assert settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "/opt/pe/venv/bin/python -m planet_express.missions.hooks pre"
+    assert settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"].endswith(" post")
+    tricky = claude_code_settings(["/opt/my dir/python", "-m", "x;rm"])
+    assert "'/opt/my dir/python'" in tricky["hooks"]["PreToolUse"][0]["hooks"][0]["command"]     # quoted, never re-split
+    path = install_claude_code(tmp_path, command)
+    assert path == tmp_path / ".claude" / "settings.json" and json.loads(path.read_text()) == settings
+
+
+def test_the_supervisor_installs_the_hooks_into_each_session_workspace_before_launch_and_a_failed_install_stops_the_start(tmp_path):
+    from planet_express.missions.hooks import install_claude_code
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 3}])
+    seen, launched_before = [], []
+
+    def install(workspace):
+        seen.append(workspace)
+        install_claude_code(workspace, ["/opt/pe/python", "-m", "planet_express.missions.hooks"])
+        launched_before.append(bool(rig.session_ids() and rig.cont.spawns(rig.session_ids()[0])))
+    rig.sup.hook_install = install
+    rig.sup.start(rig.mid)
+    assert (seen[0] / ".claude" / "settings.json").exists() and rig.status() == "investigating"
+    assert launched_before == [False]                                                       # written before the session launched
+
+    broken = Rig(tmp_path / "b", behaviours=[{"script": [update()] * 3}])
+    broken.sup.hook_install = lambda workspace: (_ for _ in ()).throw(OSError("cannot write"))
+    broken.sup.start(broken.mid)
+    assert broken.status() == "needs_operator" and broken.cont.spawns(broken.session_ids()[0]) == []   # nothing was launched
+
+
+def test_the_config_requires_a_command_to_install_and_the_runner_installs_only_when_asked(tmp_path):
+    import pytest
+    from config_schema import MissionsConfig
+    from missions_helpers import make_store
+    from planet_express.missions.containment import FakeContainment
+    from planet_express.missions.runner import build_mission_runner
+    with pytest.raises(ValueError):
+        MissionsConfig(enabled=True, hooks={"install_claude_code": True})
+    with pytest.raises(ValueError):
+        MissionsConfig(enabled=True, hooks={"command": ["python", "-m", "x"]})            # not absolute
+    store, _ = make_store(tmp_path)
+    plain = build_mission_runner(store, MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/a"]}), containment=FakeContainment())
+    assert plain.supervisor.hook_install is None and plain.supervisor.hook_policy is not None
+    cfg = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/a"]},
+                         hooks={"install_claude_code": True, "command": ["/opt/pe/python", "-m", "planet_express.missions.hooks"]})
+    installed = build_mission_runner(store, cfg, containment=FakeContainment())
+    assert installed.supervisor.hook_install is not None
+    installed.supervisor.hook_install(tmp_path)
+    assert (tmp_path / ".claude" / "settings.json").exists()
+
+
 def test_hook_lines_become_events_exactly_once_and_count_against_the_budgets(tmp_path):
     rig, log = started(tmp_path)
     log.write_text(json.dumps({"kind": "tool", "data": {"hook": "pre", "tool": "Bash", "verdict": "block", "class": "publish",

@@ -35,6 +35,7 @@ import shlex
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 Verdict = Literal["allow", "ask", "block"]
@@ -524,6 +525,26 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
     return 0
 
 
+def claude_code_settings(command: Sequence[str]) -> dict:
+    """The Claude Code `hooks` settings that run this module before and after every tool call. `command` is the absolute argv
+    that starts it, e.g. ["/opt/pe/venv/bin/python", "-m", "planet_express.missions.hooks"]."""
+    base = " ".join(shlex.quote(part) for part in command)
+
+    def entry(which: str) -> list[dict]:
+        return [{"matcher": "*", "hooks": [{"type": "command", "command": f"{base} {which}"}]}]
+    return {"hooks": {"PreToolUse": entry("pre"), "PostToolUse": entry("post")}}
+
+
+def install_claude_code(workspace: Path, command: Sequence[str]) -> Path:
+    """Write the hook settings into a session workspace before the session launches. A failure raises: a mission configured
+    to run under hooks does not start without them."""
+    target = Path(workspace) / ".claude" / "settings.json"
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+    target.write_text(json.dumps(claude_code_settings(command), indent=2) + "\n", encoding="utf-8")
+    target.chmod(0o644)
+    return target
+
+
 def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:
     """One JSON line per call appended to PE_HOOK_LOG (never following a symlink). Without a log path there is nothing to
     record to, and the hook says so; it still decides."""
@@ -535,15 +556,17 @@ def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None
         line = json.dumps({"kind": kind, "data": data}, separators=(",", ":"), default=str)
         if len(line) > MAX_LOG_LINE:
             line = json.dumps({"kind": kind, "data": {"hook": str(data.get("hook"))[:8], "truncated": True}})
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o640)
         try:
+            os.fchmod(fd, 0o640)                      # Core reads it through the workspace's group, whatever the umask was
             os.write(fd, line.encode("utf-8") + b"\n")
         finally:
             os.close(fd)
     return post
 
 
-__all__ = ["ALLOW", "BLOCKED_CLASSES", "Decision", "HookPolicy", "HookRunner", "classify", "main", "policy_for"]
+__all__ = ["ALLOW", "BLOCKED_CLASSES", "Decision", "HookPolicy", "HookRunner", "claude_code_settings", "classify",
+           "install_claude_code", "main", "policy_for"]
 
 if __name__ == "__main__":
     raise SystemExit(main())

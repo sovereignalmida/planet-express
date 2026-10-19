@@ -222,8 +222,10 @@ class Supervisor:
                  preflight: Callable[[], Any] | None = None, tool_broker: Any = None,
                  repair_gate: Callable[[], Any] | None = None, verifier: Any = None,
                  checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None,
-                 hook_policy: Callable[[Mission], str] | None = None):
+                 hook_policy: Callable[[Mission], str] | None = None,
+                 hook_install: Callable[[Path], object] | None = None):
         self.store = store
+        self.hook_install = hook_install              # Path -> writes the runtime's hook settings into the session workspace
         self.hook_policy = hook_policy                # Mission -> the hook policy JSON put in the session's environment
         self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
         self.tripwire = tripwire                      # `tripwire.TripwireMonitor`; None: no Repair mission can start
@@ -429,6 +431,8 @@ class Supervisor:
         workspace = self.workspace_dir / cs.session_id
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
         run.workspace = workspace
+        if self.hook_install is not None:
+            self.hook_install(workspace)          # raises -> the start fails: a mission configured for hooks never runs without
 
         def spawn(argv: Sequence[str], env: dict[str, str] | None = None, cwd: str | None = None,
                   extra_fds: tuple[int, ...] = ()) -> int:

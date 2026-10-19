@@ -412,7 +412,20 @@ class MissionHooksConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     blocked_failure: Literal["closed", "open"] = "closed"      # input that might be a blocked class: block (closed) or allow
-    other_failure: Literal["closed", "open"] = "open"          # anything else: allow with a loud event (open) or block
+    other_failure: Literal["closed", "open"] = "open"          # anything else: allow with a loud event (open) or block (closed)
+    # Installing the hooks into the agent runtime is runtime-specific. With `install_claude_code` Core writes Claude Code's
+    # hook settings into each session workspace before launch, running `command` (an absolute argv that starts
+    # `planet_express.missions.hooks`, readable by the session uid). Off by default; on without a command is refused.
+    command: list[str] = []
+    install_claude_code: bool = False
+
+    @model_validator(mode="after")
+    def _install_needs_a_command(self) -> "MissionHooksConfig":
+        if self.command and (not self.command[0].startswith("/") or any(not a or "\0" in a for a in self.command)):
+            raise ValueError("missions.hooks.command must start with an absolute program path and have no empty or NUL items")
+        if self.install_claude_code and not self.command:
+            raise ValueError("missions.hooks.install_claude_code needs missions.hooks.command")
+        return self
 
 
 class MissionsConfig(BaseModel):
