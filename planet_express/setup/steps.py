@@ -261,6 +261,7 @@ class _LauncherParams(_Params):
     cgroup_root: AbsPath
     workspace_root: AbsPath
     boot_script: AbsPath | None = None      # MOS only: the script that recreates the cgroup tree at every boot
+    conf: AbsPath | None = None             # MOS only: where launch.conf lives (under the data pool; Ubuntu has a fixed path)
 
     @model_validator(mode="after")
     def _coherent(self):
@@ -268,8 +269,8 @@ class _LauncherParams(_Params):
             raise ValueError("the session uid range needs room for at least two uids (the top one is reserved)")
         if self.flavour == "mos" and not self.boot_script:
             raise ValueError("a MOS launcher step needs the boot script that recreates the cgroup tree")
-        if self.flavour == "systemd" and self.boot_script:
-            raise ValueError("only MOS has a boot script")
+        if self.flavour == "systemd" and (self.boot_script or self.conf):
+            raise ValueError("only MOS has a boot script and a movable launch.conf")
         if self.name == "launcher-sudoers" and self.flavour != "systemd":
             raise ValueError("there is no sudo on MOS, so no launcher sudoers")
         return self

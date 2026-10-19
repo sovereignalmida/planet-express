@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from launcher_support import load_helper
 
-from planet_express.missions.launcher.config import LaunchConf
+from planet_express.missions.launcher.config import CONF_PATH, LaunchConf, mos_conf_path
 from planet_express.missions.launcher.setup_steps import (
     LauncherSudoers,
     MemoryJournal,
@@ -97,7 +97,8 @@ def test_conf_helper_and_sudoers_have_the_documented_content_and_modes(tmp_path)
     text = helper.read_text()
     assert text.startswith("#!/usr/bin/python3 -IS\n") and oct(helper.stat().st_mode & 0o777) == "0o755"
     source = Path(__file__).resolve().parents[1] / "planet_express/missions/launcher/pe_launch.py"
-    assert text.split("\n", 1)[1] == source.read_text().split("\n", 1)[1]            # only the interpreter line differs
+    expected = source.read_text().split("\n", 1)[1].replace(f'CONF_PATH = "{CONF_PATH}"', f'CONF_PATH = "{p.conf}"')
+    assert text.split("\n", 1)[1] == expected      # only the interpreter line and (off the default) the CONF_PATH line differ
     sudoers = Path(p.sudoers).read_text()
     assert f"Defaults!{p.helper} env_reset, !setenv, !env_editor" in sudoers
     assert f'pe ALL=(root) NOPASSWD: {p.helper} ""' in sudoers
@@ -469,3 +470,35 @@ def test_a_core_user_that_is_not_a_plain_name_blocks_the_sudoers_step(tmp_path, 
 def test_a_helper_path_with_sudoers_metacharacters_blocks_the_sudoers_step(tmp_path, helper):
     p = paths(tmp_path, helper=helper)
     assert LauncherSudoers(p).probe().blocked
+
+
+def test_the_helper_and_core_copies_of_the_conf_path_agree_and_sit_in_a_directory_of_their_own():
+    assert load_helper().CONF_PATH == CONF_PATH == "/etc/planetexpress-launch/launch.conf"
+    assert os.path.dirname(CONF_PATH) != "/etc/planetexpress" and os.path.dirname(CONF_PATH) != "/etc"
+    from config_schema import MissionsConfig
+    assert MissionsConfig().launch_conf == CONF_PATH
+
+
+def test_the_default_helper_text_is_the_source_but_for_the_interpreter_line(tmp_path):
+    p = paths(tmp_path, conf=CONF_PATH)
+    source = (Path(__file__).resolve().parents[1] / "planet_express/missions/launcher/pe_launch.py").read_text()
+    assert launcher_steps(p)[1].wanted().decode().split("\n", 1)[1] == source.split("\n", 1)[1]
+
+
+def test_a_moved_conf_is_written_into_the_helper_text_and_the_helper_still_checks_the_whole_chain(tmp_path):
+    p = paths(tmp_path, flavour="mos", conf=mos_conf_path(str(tmp_path / "data" / "pe")))
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data").chmod(0o755)
+    repair_all(launcher_steps(p), MemoryJournal())
+    text = Path(p.helper).read_text()
+    assert text.count(f'CONF_PATH = "{p.conf}"') == 1 and CONF_PATH not in text.replace(f'"{p.conf}"', "")
+    assert p.conf.endswith("/launch/launch.conf") and oct(os.lstat(os.path.dirname(p.conf)).st_mode & 0o777) == "0o755"
+    # a group-writable ancestor (the data pool) is refused by the same walk the helper runs
+    os.chmod(tmp_path / "data" / "pe", 0o775)
+    assert launcher_steps(p)[0].probe().blocked
+
+
+def test_a_conf_path_the_helper_text_cannot_carry_is_refused(tmp_path):
+    p = paths(tmp_path, flavour="mos", conf='/x/"; import os #/launch.conf')
+    with pytest.raises(StepError):
+        launcher_steps(p)[1].wanted()

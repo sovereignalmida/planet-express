@@ -9,6 +9,7 @@ Never imports `config`: setup runs before any config exists.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import re
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from planet_express.missions.launcher.config import mos_conf_path
 from planet_express.setup.answers import FORBIDDEN_RISKS_BY_TIER, SetupAnswers
 from planet_express.setup.steps import CATALOGUE
 
@@ -489,14 +491,14 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
     return {"core_user": b.a.run_as, "flavour": "mos" if mos else "systemd",
             "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
             "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
-            **({"boot_script": f"{p['home']}/launcher-boot.sh"} if mos else {})}
+            **({"boot_script": f"{p['home']}/launcher-boot.sh", "conf": mos_conf_path(p["home"])} if mos else {})}
 
 
 def _launcher_paths(params: dict):
     """The launcher module's own paths for these values; only used to render text. The Core uid and gid are read
     from the host when a step runs, so nothing shown here depends on them."""
     from planet_express.missions.launcher.setup_steps import Paths
-    extra = {"boot_script": params["boot_script"]} if "boot_script" in params else {}
+    extra = {k: params[k] for k in ("boot_script", "conf") if k in params}
     return Paths(core_uid=0, core_gid=0, core_user=params["core_user"], flavour=params["flavour"],
                  uid_min=params["uid_min"], uid_max=params["uid_max"], sock_root=params["sock_root"],
                  cgroup_root=params["cgroup_root"], workspace_root=params["workspace_root"], **extra)
@@ -528,7 +530,6 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
     """Mission control's host setup (contract 22.5): the launcher's named steps, each reversible and needing root.
     On MOS there is no sudo, so no sudoers; the cgroup tree is a script the boot hook already runs."""
     from planet_express.missions.launcher.config import (
-        CONF_PATH,
         HELPER_PATH,
         SUDOERS_PATH,
     )
@@ -537,12 +538,16 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
     paths = _launcher_paths(params)
     mos = paths.flavour == "mos"
     steps = {s.name: s for s in _launcher_step_objects(params)}
+    conf_path = paths.conf
     if "launcher-sudoers" in steps and steps["launcher-sudoers"].unsafe():
         b.blocked.append(f"Mission control cannot be set up: {steps['launcher-sudoers'].unsafe()}.")
         return
-    # The helper trusts launch.conf and itself only under root-owned directories nobody else can write. A directory this
-    # same plan makes for the service (the config directory, by default /etc/planetexpress) can never be one.
-    for target in (CONF_PATH, HELPER_PATH):
+    # The helper trusts launch.conf and itself only under root-owned directories nobody else can write. launch.conf has
+    # a directory of its own (/etc/planetexpress-launch; on MOS under the data pool), so a fresh install no longer
+    # collides with the service-owned config directory. This stays as the guard for a plan that nevertheless makes a
+    # service-owned directory above either file (a config directory chosen over them). A symlinked or group/world
+    # writable chain already on the host is caught when the step runs: its probe and the helper refuse it.
+    for target in (conf_path, HELPER_PATH):
         for made in b.steps:
             if (made.kind == "dir.ensure" and made.params.get("owner", "root") != "root"
                     and (target == made.target or target.startswith(made.target.rstrip("/") + "/"))):
@@ -555,8 +560,8 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
     shown = f"{params['uid_min']}-{params['uid_max']}"
     cgroup_path, cgroup_text, _ = steps["cgroup-tree"].wanted()
     text = {
-        "session-uid-range": ("Reserve the session uid range", CONF_PATH, "R2", b.text(
-            f"Writes {CONF_PATH} (root, 0600): the uids {shown} reserved for mission sessions, Core's own uid and gid "
+        "session-uid-range": ("Reserve the session uid range", conf_path, "R2", b.text(
+            f"Writes {conf_path} (root, 0600, in {os.path.dirname(conf_path)}, a directory of its own: root, 0755): the uids {shown} reserved for mission sessions, Core's own uid and gid "
             f"(read when this runs), and the cgroup, workspace and socket roots. Refuses if any account or group already "
             f"uses a number in {shown}.")),
         "launcher-helper": ("Install the session launcher", HELPER_PATH, "R3", b.text(
@@ -590,7 +595,8 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
     b.warnings.append(
         "Mission control is set up on the host only. Core reads missions.* from its config, so put the same values "
         f"there (missions.enabled: true, session_uid_min/max {shown}, sock_root {params['sock_root']}, cgroup_root "
-        f"{params['cgroup_root']}, workspace_root {params['workspace_root']}); launch.conf is written from these answers "
+        f"{params['cgroup_root']}, workspace_root {params['workspace_root']}"
+        + (f", launch_conf {conf_path}" if mos else "") + "); launch.conf is written from these answers "
         "and the helper refuses a request that disagrees with it.")
     if mos:
         b.warnings.append(f"On MOS the sessions cgroup is recreated at every boot by {params['boot_script']}, which the "

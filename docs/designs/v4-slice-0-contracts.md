@@ -572,7 +572,7 @@ binding; the helper's own install path, GID, and delegated file ownership were u
   exact missing prerequisite; a host that can do neither is proposal-only.
 - Install hardening (both): the helper and its config live at fixed root-owned paths whose every ancestor
   directory is root-owned, not group/world writable, and not a symlink (`/usr/libexec/planetexpress/`,
-  `/etc/planetexpress/launch.conf` 0600 root); the helper opens paths with `O_NOFOLLOW`/`openat2
+  `/etc/planetexpress-launch/launch.conf` 0600 root, in a directory of its own, 0755 root:root; see 22.9); the helper opens paths with `O_NOFOLLOW`/`openat2
   RESOLVE_NO_SYMLINKS`, checks the cgroup root with `statfs` for `CGROUP2_SUPER_MAGIC`, and installation
   tests cover writable and symlinked ancestors. It is never installed under a Core-writable path.
 
@@ -602,7 +602,7 @@ binding; the helper's own install path, GID, and delegated file ownership were u
   missions: there is no weaker fallback containment (decided 2026-10-13).
 
 ### 22.5 Setup, repair, undo (named steps, each with probe, repair and undo)
-`session-uid-range`, `launcher-helper` (file, config, ancestors check), `launcher-sudoers` (Ubuntu only;
+`session-uid-range` (writes launch.conf, 22.9), `launcher-helper` (file, config, ancestors check), `launcher-sudoers` (Ubuntu only;
 fragment `/etc/sudoers.d/planetexpress-launch`, `visudo -c`, and a probe that `sudo -n pe-launch` works and
 `pe-launch --x` is refused; must not be skipped when the legacy sudoers file is preserved),
 `cgroup-tree` (systemd unit settings or MOS boot script), `workspace-root`. MOS: all state on the data pool,
@@ -654,3 +654,26 @@ helper without `sudo`, so there is one launch implementation to review and test.
    (via the helper), failing the host (proposal-only) if any expectation differs.
 7. **Test wording.** Assert the session uid gets EACCES on *writes* to `cgroup.procs`, `cgroup.freeze`,
    `cgroup.kill` (and on ancestors' `cgroup.procs`); assert `cgroup.events` readability separately as intended.
+
+### 22.9 Where launch.conf lives (operator-approved move, supersedes the `/etc/planetexpress/launch.conf` wording above)
+- **Why it moved.** `/etc/planetexpress` is the service's config directory and a fresh Ubuntu install makes it
+  service-owned, so the helper's own trusted-chain check (every ancestor root-owned, not group/world writable,
+  no symlink) refused a launch.conf there and the setup plan was blocked whenever missions were on.
+- **Ubuntu/systemd.** Fixed path `/etc/planetexpress-launch/launch.conf`: file 0600 root:root, directory 0755
+  root:root, made by the `session-uid-range` step (`ensure_parent`: it never re-owns a directory that already
+  exists; the probe of the chain decides whether it is acceptable). Undo removes the file and a directory the step
+  made, never one that was there. The constant is duplicated in `planet_express/missions/launcher/config.py`
+  (`CONF_PATH`) and `pe_launch.py` (stdlib-only); `tests/test_launcher_setup_steps.py` asserts they agree, and
+  `missions.launch_conf` in Core's config defaults to the same value.
+- **MOS (root is RAM).** `<PE_HOME>/launch/launch.conf` on the data pool (`mos_conf_path(home)`), the `launch`
+  directory made root:root 0755 by the same step. The helper never takes this path from a caller: setup installs it
+  with its one `CONF_PATH = "..."` line rewritten to that path (root-owned text; the path must match a strict
+  character class), and the step's probe compares the installed helper byte for byte with that text. Core is told
+  the same path as `missions.launch_conf` (the setup preview says so) so its preflight checks the right file; a wrong
+  value only makes that check fail. The setup plan carries it as the optional `conf` parameter of a MOS launcher step.
+- **Nothing was weakened.** The helper still walks the whole chain of the file (and the directory) and refuses any
+  ancestor not owned by root, writable by group/other, or a symlink; on MOS that includes `<PE_HOME>` and the data
+  pool mount point. A host where those are not root-owned is blocked at the step, not accommodated.
+- **Plan.** The fresh-systemd block (service-owned `/etc/planetexpress` above launch.conf) no longer applies and is
+  gone as a standing outcome; the guard remains for any plan that makes a service-owned directory above launch.conf
+  or the helper. A symlinked or writable chain already on the host is refused when the step runs.

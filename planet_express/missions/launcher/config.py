@@ -10,11 +10,17 @@ import os
 import stat
 from dataclasses import asdict, dataclass
 
-CONF_PATH = "/etc/planetexpress/launch.conf"
+CONF_PATH = "/etc/planetexpress-launch/launch.conf"   # a root-owned directory of its own (0755); pe_launch.py duplicates it
 HELPER_PATH = "/usr/libexec/planetexpress/pe-launch"
 SUDOERS_PATH = "/etc/sudoers.d/planetexpress-launch"
 DEFAULT_UID_RANGE = (200000, 200999)   # clear of systemd's DynamicUser range (61184-65519) and of normal accounts
 DEFAULT_PIDS_MAX = 512
+
+
+def mos_conf_path(home: str) -> str:
+    """MOS root is RAM, so launch.conf lives under the data pool, in a `launch` directory setup makes root-owned 0755.
+    The helper installed on MOS has this path written into it; Core is told it as `missions.launch_conf`."""
+    return f"{home.rstrip('/')}/launch/launch.conf"
 
 
 class ConfError(ValueError):
@@ -86,4 +92,4 @@ def load(path: str = CONF_PATH) -> LaunchConf:
         os.close(fd)
 
 
-__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "ConfError", "LaunchConf", "load"]
+__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "ConfError", "LaunchConf", "load"]
