@@ -53,8 +53,11 @@ def test_the_claude_code_settings_run_this_module_before_and_after_every_tool_ca
     assert settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"].endswith(" post")
     tricky = claude_code_settings(["/opt/my dir/python", "-m", "x;rm"])
     assert "'/opt/my dir/python'" in tricky["hooks"]["PreToolUse"][0]["hooks"][0]["command"]     # quoted, never re-split
-    path = install_claude_code(tmp_path, command)
-    assert path == tmp_path / ".claude" / "settings.json" and json.loads(path.read_text()) == settings
+    env = install_claude_code(tmp_path, command)
+    assert json.loads((tmp_path / "settings.json").read_text()) == settings
+    assert env == {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+    # the privileged launcher hands over regular files directly in the workspace and rejects directories: this is a flat file
+    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"] and not any(p.is_dir() for p in tmp_path.iterdir())
 
 
 def test_the_supervisor_installs_the_hooks_into_each_session_workspace_before_launch_and_a_failed_install_stops_the_start(tmp_path):
@@ -64,11 +67,12 @@ def test_the_supervisor_installs_the_hooks_into_each_session_workspace_before_la
 
     def install(workspace):
         seen.append(workspace)
-        install_claude_code(workspace, ["/opt/pe/python", "-m", "planet_express.missions.hooks"])
         launched_before.append(bool(rig.session_ids() and rig.cont.spawns(rig.session_ids()[0])))
+        return install_claude_code(workspace, ["/opt/pe/python", "-m", "planet_express.missions.hooks"])
     rig.sup.hook_install = install
     rig.sup.start(rig.mid)
-    assert (seen[0] / ".claude" / "settings.json").exists() and rig.status() == "investigating"
+    assert (seen[0] / "settings.json").exists() and rig.status() == "investigating"
+    assert rig.cont.spawns(rig.session_ids()[0])[0]["env"]["CLAUDE_CONFIG_DIR"] == str(seen[0])    # the runtime is pointed at it
     assert launched_before == [False]                                                       # written before the session launched
 
     broken = Rig(tmp_path / "b", behaviours=[{"script": [update()] * 3}])
@@ -94,8 +98,8 @@ def test_the_config_requires_a_command_to_install_and_the_runner_installs_only_w
                          hooks={"install_claude_code": True, "command": ["/opt/pe/python", "-m", "planet_express.missions.hooks"]})
     installed = build_mission_runner(store, cfg, containment=FakeContainment())
     assert installed.supervisor.hook_install is not None
-    installed.supervisor.hook_install(tmp_path)
-    assert (tmp_path / ".claude" / "settings.json").exists()
+    assert installed.supervisor.hook_install(tmp_path) == {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+    assert (tmp_path / "settings.json").exists()
 
 
 def test_hook_lines_become_events_exactly_once_and_count_against_the_budgets(tmp_path):

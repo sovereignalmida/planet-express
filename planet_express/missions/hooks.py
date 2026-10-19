@@ -535,14 +535,15 @@ def claude_code_settings(command: Sequence[str]) -> dict:
     return {"hooks": {"PreToolUse": entry("pre"), "PostToolUse": entry("post")}}
 
 
-def install_claude_code(workspace: Path, command: Sequence[str]) -> Path:
-    """Write the hook settings into a session workspace before the session launches. A failure raises: a mission configured
-    to run under hooks does not start without them."""
-    target = Path(workspace) / ".claude" / "settings.json"
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
+def install_claude_code(workspace: Path, command: Sequence[str]) -> dict[str, str]:
+    """Write the hook settings into a session workspace before the session launches, and return the environment that makes
+    the runtime read them. The privileged launcher hands over only regular files directly inside the workspace (no
+    directories), so the settings are a flat `settings.json` and Claude Code is pointed at the workspace as its config
+    directory with CLAUDE_CONFIG_DIR. A failure raises: a mission configured to run under hooks does not start without them."""
+    target = Path(workspace) / "settings.json"
     target.write_text(json.dumps(claude_code_settings(command), indent=2) + "\n", encoding="utf-8")
     target.chmod(0o644)
-    return target
+    return {"CLAUDE_CONFIG_DIR": str(workspace)}
 
 
 def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:
