@@ -20,13 +20,13 @@ sudo scope are S7b; until S7b lands a mutating-tier start still refuses (the §6
    them to the Supervisor. The supervisor: creates the checkpoint before the first mutation (refusing without a
    baseline/backup per S5), calls `capture_post()` once the session is provably dead, runs `verify_and_close` when a
    session ends, and on crash recovery calls `recovery.collect_host_state/classify/apply_classification`
-   (the `recover()` loop no longer skips mutating tiers; it must not replay). `missions.tripwire_accept_blind` plumbed.
+   (the `recover()` loop no longer skips mutating tiers; it must not replay). `missions.tripwire_accept_blind` plumbed. The monitor is passed to `MissionRunner` as its `tripwire` dependency so the runner calls `start()` and `ensure_running()` on every loop: a launched Repair session without a RUNNING monitor is a defect (test: monitor thread dead => runner restarts it or pauses every executing mission; a Repair launch is refused while the monitor is not running).
 2. **Approval flow**: operator RPC + dashboard + Telegram to approve/deny a mission's grant (bound to `grant_hash`
    via `mission_approvals`), with elevated approval for `sudo.mode=broad`/`docker=raw`/`acknowledged_no_backup`/Critical.
    The approval card shows scope, tier, protected exclusions, budgets, verification plan, sudo scope, backup status at
    the TOP when broad/no-backup. The ACTOR is derived from the authenticated dashboard/Telegram identity, never from
    params (carried item: `CheckpointService.restore(ack_drift=True)` actor). Operator actions for tripwire cards:
-   resume (reopen broker via `broker.restore`, thaw cgroup), roll back (`monitor.roll_back`), take over, cancel.
+   resume (reopen broker via `broker.restore`, re-enable the session's Docker proxy (S7b) after re-authorizing the grant hash, then thaw the cgroup; acceptance test: a resumed Repair worker can still use its proxy), roll back (`monitor.roll_back`), take over, cancel.
 3. **Standing grants** (scoped, expiring, listed, revocable, versioned; incident-backed only; never Change/Critical,
    broad sudo or `acknowledged_no_backup`): create/list/revoke RPC + UI; unattended start decided solely by
    `missions/` code (`approvals.evaluate`), recorded with `standing_grant_id`; expiry and revoke stop an unattended

@@ -13,8 +13,7 @@ Give the Repair worker Docker access that cannot reach root: a deny-by-default, 
 Unix socket, plus a generated scoped sudoers file that the worker/launcher tier uses, shown in setup and removed by undo.
 
 ## Deliver
-1. `planet_express/missions/dockerproxy/`: a proxy server per contracts §6.1: own Unix socket per session (created by
-   Core at issuance, 0660 to the session user, removed at revoke), session token required on every connection,
+1. `planet_express/missions/dockerproxy/`: a proxy server per contracts §6.1: own Unix socket per session, created through the S3d launcher's socket handoff (spec §22.8: Core binds, the root helper validates and chowns to `session_uid:session_gid` mode 0600 inside the per-session socket directory; an unprivileged Core on Ubuntu cannot chown, so NO Core-side chown/0660 and no broader permissions; extend `SessionSockets`/the helper's socket-directory contents check to allow the proxy socket name and test that any other name is still refused), removed at revoke, session token required on every connection,
    every write checks: session not revoked, cgroup/uid binding, grant hash still approved, resource id inside the
    session's effective scope and current fences, tripwire/broker not paused. Deny-by-default endpoint and API-version
    allowlist, per-endpoint field allowlists, the full refusal list and container create/update field rules from §6.1
@@ -33,7 +32,7 @@ Unix socket, plus a generated scoped sudoers file that the worker/launcher tier 
    this generator's output (hash) as "managed". `sudo.mode=broad` stays an elevated per-mission approval (S7a) and is
    never generated for standing grants.
 4. Supervisor/runner hook: create the proxy socket with the session (so the worker env/mount sees only its own),
-   tear it down at revoke/kill/pause; `docker: raw` only when `sudo.mode=broad`.
+   close it at revoke/kill; on PAUSE keep the socket but reject every request (503) until resume re-authorizes (S7a resume reopens it before thawing); a resume acceptance test is required; `docker: raw` only when `sudo.mode=broad`.
 
 ## Acceptance tests (write first; each refusal class has one)
 - Refusals: privileged, host mount, docker-socket mount, out-of-scope container/network/volume/image object, each host
