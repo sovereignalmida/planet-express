@@ -62,6 +62,7 @@ SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
 PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often (an operator may have repaired the host)
 VERIFY_WORKERS = 2            # verifications run on their own small pool, never on the poll thread
+VERIFY_SHUTDOWN_WAIT_S = 5.0  # shutdown waits at most this long for in-flight verifications
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
 MAX_MEMORY_HITS = 20
 
@@ -214,6 +215,7 @@ class Supervisor:
         self._verify_pool: Any = None
         self._verifying: dict[str, Any] = {}
         self._verify_guard = threading.Lock()
+        self._shutting_down = False
         self._locks: dict[str, threading.RLock] = {}      # one per mission: its start/poll/cancel never interleave
         self._locks_guard = threading.Lock()
 
@@ -300,7 +302,7 @@ class Supervisor:
         # Intent is journaled FIRST (contract 11), before anything is registered, issued or launched: a failed journal
         # write raises here with nothing started, no `launching` row and no uid held. A launch that is then refused
         # closes its own intent as `not_applied`.
-        recovery.journal_intent(self.ms, mission.id, "investigation" if mission.status == "investigating" else "execution",
+        intent_id = recovery.journal_intent(self.ms, mission.id, "investigation" if mission.status == "investigating" else "execution",
                                 f"session {session_id} start", actor=ACTOR)
         # `start_session` is the sole uid allocator: it commits the row (state `launching`, uid held) before any
         # launcher runs, so nothing is left behind if it refuses.
@@ -311,7 +313,7 @@ class Supervisor:
                 uid_range=self.containment.uid_range, actor=ACTOR, expected_grant_hash=mission.grant_hash)
         except BaseException:
             with contextlib.suppress(Exception):
-                recovery.close_open_intents(self.ms, mission.id, "not_applied", actor=ACTOR)
+                recovery.journal_done(self.ms, mission.id, intent_id, "not_applied", actor=ACTOR)   # only OUR intent
             raise
         run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
         self._runs[mission.id] = run
@@ -706,6 +708,11 @@ class Supervisor:
                 summary = {"event": "verify.error", "error": type(exc).__name__}
                 flags = "partially_applied"
         with self._lock_for(mission_id):
+            if self._shutting_down:
+                # The daemon is stopping: this result is dropped (nothing committed), the mission stays `verifying`
+                # and the restart re-classifies it and verifies again.
+                self._note(mission_id, {"verify_dropped": "shutdown"})
+                return "verifying"
             current = self.ms.get_mission(mission_id)
             if current.status != "verifying" or current.grant_hash != mission.grant_hash:
                 # Cancelled, paused, rolled back or re-granted while the verification ran: that decision stands, and
@@ -777,8 +784,13 @@ class Supervisor:
         """Daemon stop: revoke every token and kill every session. Missions are NOT moved on: they stay
         `investigating`, and `recover()` at the next start restarts them within the retry budget. A session
         that cannot be proven empty stays tracked (and its cgroup stays), never silently dropped."""
+        self._shutting_down = True                  # in-flight verification jobs drop their result under the lock
         if self._verify_pool is not None:
             self._verify_pool.shutdown(wait=False, cancel_futures=True)     # a verification is re-run after restart
+            deadline = time.monotonic() + VERIFY_SHUTDOWN_WAIT_S
+            for future in list(self._verifying.values()):
+                with contextlib.suppress(Exception):
+                    future.result(max(0.0, deadline - time.monotonic()))
         for run in list(self._runs.values()):
             try:
                 with self._lock_for(run.mission_id):
