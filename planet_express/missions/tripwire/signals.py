@@ -234,6 +234,11 @@ def collect_containers(env: ScanEnv) -> dict[str, Any]:
     return result
 
 
+_SS_NETIDS = frozenset({"tcp", "udp"})
+_SS_STATES = frozenset({"LISTEN", "UNCONN"})
+_SS_ADDR = re.compile(r"\S*:\S+")
+
+
 def collect_ports(env: ScanEnv) -> list[str]:
     """Listening sockets from `ss`. Unlike the checkpoint provider (which reports nothing on failure) a failed, missing or
     unparseable `ss` is a FAILED signal: an empty list would read as "every listener is gone"."""
@@ -246,7 +251,7 @@ def collect_ports(env: ScanEnv) -> list[str]:
     rows = set()
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) >= 5:
+        if len(parts) >= 5 and parts[0] in _SS_NETIDS and parts[1] in _SS_STATES and _SS_ADDR.fullmatch(parts[4]):
             rows.add(f"{parts[0]} {parts[4]}")
         elif parts:
             raise SignalError("ss printed a line this reader does not understand")
@@ -278,18 +283,20 @@ _COUNTERS = re.compile(r"\[\d+:\d+\]")
 _NFT_COUNTS = re.compile(r"\bpackets \d+ bytes \d+")
 _NFT_EXPIRES = re.compile(r"\s+expires\s+\S+")
 _NFT_QUOTA_USED = re.compile(r"\bused \d+(?:\s+[kmg]?bytes)?", re.IGNORECASE)
-_NFT_ELEMENTS = re.compile(r"elements\s*=\s*\{[^}]*\}", re.DOTALL)
+# Only a set DECLARED with a timeout is dynamic (fail2ban and friends); a static allow/deny set keeps its elements.
+_NFT_DYNAMIC_ELEMENTS = re.compile(
+    r"(set\s+\S+\s*\{[^{}]*?\b(?:flags[^\n]*\btimeout\b|timeout\s+\S+)[^{}]*?)elements\s*=\s*\{[^}]*\}", re.DOTALL)
 
 
 def normalise_firewall(text: str) -> str:
     """The stable rule text of an `nft list ruleset` / `iptables-save` dump. EXCLUDED, because they change on their own
     and would pause every mission: comment lines (timestamps), iptables chain counters `[n:n]`, nft `packets N bytes M`
-    (counter and counter-object values), `expires <time>` on set elements, quota `used N`, and the CONTENT of set
-    `elements = { ... }` (dynamic sets such as fail2ban's grow and shrink; the set's declaration, type and flags stay).
+    (counter and counter-object values), `expires <time>` on set elements, quota `used N`, and the CONTENT of `elements = { ... }`
+    in sets declared with a timeout (dynamic sets such as fail2ban's); static sets keep their elements.
     A changed rule, policy, chain or set declaration still changes the hash."""
     lines = (line for line in text.splitlines() if not line.lstrip().startswith("#"))
     body = "\n".join(lines)
-    body = _NFT_ELEMENTS.sub("elements = { }", body)
+    body = _NFT_DYNAMIC_ELEMENTS.sub(r"\1elements = { }", body)
     for pattern, repl in ((_COUNTERS, ""), (_NFT_COUNTS, ""), (_NFT_EXPIRES, ""), (_NFT_QUOTA_USED, "used")):
         body = pattern.sub(repl, body)
     return "\n".join(" ".join(line.split()) for line in body.splitlines() if line.strip())

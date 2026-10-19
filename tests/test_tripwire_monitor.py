@@ -875,3 +875,25 @@ def test_a_recover_that_cannot_even_list_missions_is_contained_by_the_runner_pat
     rig.env.ms.list_missions = lambda status=None: (_ for _ in ()).throw(RuntimeError("db locked"))
     with pytest.raises(RuntimeError):
         rig.monitor.recover()                                   # nothing to isolate per mission: the caller sees it
+
+
+# -- Codex G3 on the S6 review fixes ------------------------------------------------------------------------
+def test_a_static_nft_set_keeps_its_elements_in_the_fingerprint_but_a_timeout_set_does_not():
+    from planet_express.missions.tripwire.signals import normalise_firewall
+    static = "table inet f {\n set allow {\n type ipv4_addr\n elements = { 10.0.0.1 }\n }\n}"
+    changed = static.replace("10.0.0.1", "0.0.0.0/0")
+    assert normalise_firewall(static) != normalise_firewall(changed)
+    dyn = "table inet f {\n set ban {\n type ipv4_addr\n flags timeout\n elements = { 1.2.3.4 expires 5m }\n }\n}"
+    other = dyn.replace("1.2.3.4 expires 5m", "5.6.7.8 expires 9m")
+    assert normalise_firewall(dyn) == normalise_firewall(other)
+
+
+def test_malformed_successful_ss_output_is_a_failed_signal():
+    import pytest
+    from planet_express.missions.tripwire.signals import ScanEnv, SignalError, collect_ports
+    env = ScanEnv.__new__(ScanEnv)
+    env.runner = lambda argv, timeout: (0, "garbage a b c d\n", "")
+    with pytest.raises(SignalError):
+        collect_ports(env)
+    env.runner = lambda argv, timeout: (0, "tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\n", "")
+    assert collect_ports(env) == ["tcp 0.0.0.0:22"]

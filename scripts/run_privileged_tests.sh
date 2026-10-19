@@ -44,7 +44,7 @@ case "$MODE" in
     exec docker run --rm --privileged --cgroupns=private -e PE_PRIVILEGED_TESTS_OK=1 \
       -v "$HERE":/src:ro "$IMAGE" sh -c '
         set -eu
-        apt-get update -qq && apt-get install -y -qq sudo passwd >/dev/null
+        apt-get update -qq && apt-get install -y -qq sudo passwd iproute2 >/dev/null
         cp -a /src /work && cd /work
         pip install -q -r requirements-dev.txt
         python -m pytest '"$TESTS"' -v -p no:cacheprovider "$@"
