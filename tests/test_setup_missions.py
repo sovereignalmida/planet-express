@@ -30,7 +30,7 @@ ON = {"enabled": True}
 
 def mreport(**kw):
     """A systemd host whose service already keeps its config inside the install directory (so no service-owned
-    /etc/planetexpress is made, which mission control cannot share with launch.conf)."""
+    /etc/planetexpress is made; no longer required now that launch.conf has its own directory, kept so these plans stay minimal)."""
     files = {"/etc/systemd/system/casa-planetexpress.service":
              "[Service]\nWorkingDirectory=/opt/pe\nEnvironment=CASA_CONFIG=/opt/pe/config.yaml\n",
              "/opt/pe/config.yaml": "", **kw.pop("files", {})}
@@ -47,11 +47,14 @@ def removals(p):
 
 # -- default behaviour is byte-identical -----------------------------------------------------------------------
 def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_answer_existed():
-    # recorded from the build before `missions` was added; a drift here means default setups changed
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "6f080e9edb314070"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "9daa4d83df09acee"
+    # recorded from the build before `missions` was added; a drift here means default setups changed.
+    # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
+    # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
+    # plan are unchanged. The uninstall id is unchanged.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "36f5928adffdc9b4"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "f2086f43efed1cb9"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "093d963a7dd3e0cf"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "9a74458960851e52"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
@@ -100,17 +103,30 @@ def test_on_systemd_the_plan_gains_the_six_named_reversible_root_steps_in_order(
     assert not removals(p)
 
 
-def test_a_fresh_plan_that_makes_the_service_own_etc_planetexpress_cannot_also_hold_launch_conf_there():
+def test_a_fresh_plan_that_makes_the_service_own_etc_planetexpress_no_longer_collides_with_launch_conf():
+    # launch.conf has its own directory (/etc/planetexpress-launch), so the service-owned /etc/planetexpress is no longer
+    # an ancestor of it and the fresh Ubuntu plan is applicable with missions on.
+    p = plan(systemd_report(), answers(missions=ON))
+    assert p.applicable and not p.blocked
+    conf = next(s for s in launcher(p) if s.target == "session-uid-range")
+    assert conf.preview["path"] == "/etc/planetexpress-launch/launch.conf"
+    assert "/etc/planetexpress-launch" in conf.preview["text"] and "0755" in conf.preview["text"]
+
+
+def test_a_launcher_file_under_a_directory_the_plan_makes_for_the_service_is_still_blocked(monkeypatch):
+    # the guard stays: here the helper would sit under the service-owned /etc/planetexpress this fresh plan creates
+    import planet_express.missions.launcher.config as launcher_config
+    monkeypatch.setattr(launcher_config, "HELPER_PATH", "/etc/planetexpress/pe-launch")
     p = plan(systemd_report(), answers(missions=ON))
     assert not p.applicable and not p.steps
-    assert "/etc/planetexpress/launch.conf" in p.blocked[0] and "root-owned" in p.blocked[0]
+    assert "/etc/planetexpress/pe-launch" in p.blocked[0] and "root-owned" in p.blocked[0]
 
 
 def test_each_launcher_file_step_carries_what_the_scan_saw_at_its_path():
     absent = {s.target: s.params for s in launcher(plan(mreport(), answers(missions=ON)))}
     assert absent["session-uid-range"]["expect_absent"] and absent["launcher-sudoers"]["expect_absent"]
     assert not absent["workspace-root"]["expect_absent"] and "expected_sha256" not in absent["socket-root"]
-    held = mreport(files={"/etc/planetexpress/launch.conf": "old\n", "/usr/libexec/planetexpress/pe-launch": "#!x\n"})
+    held = mreport(files={"/etc/planetexpress-launch/launch.conf": "old\n", "/usr/libexec/planetexpress/pe-launch": "#!x\n"})
     steps = {s.target: s.params for s in launcher(plan(held, answers(missions=ON)))}
     assert len(steps["session-uid-range"]["expected_sha256"]) == 64 and not steps["session-uid-range"]["expect_absent"]
     assert len(steps["launcher-helper"]["expected_sha256"]) == 64
@@ -125,8 +141,8 @@ def test_a_path_the_scan_did_not_look_at_records_no_expectation_so_apply_replace
 
 
 def test_a_launcher_file_that_exists_but_could_not_be_read_blocks_the_plan():
-    report = mreport(files={"/etc/planetexpress/launch.conf": "old\n"})
-    del report["existing_pe"]["sha256"]["/etc/planetexpress/launch.conf"]
+    report = mreport(files={"/etc/planetexpress-launch/launch.conf": "old\n"})
+    del report["existing_pe"]["sha256"]["/etc/planetexpress-launch/launch.conf"]
     p = plan(report, answers(missions=ON))
     assert not p.applicable and "launch.conf" in p.blocked[0] and "could not be read" in p.blocked[0]
 
@@ -171,7 +187,7 @@ def test_every_launcher_preview_says_what_will_be_written_and_where():
         assert s.preview["type"] in ("file", "text") and s.preview["path"]
         assert s.preview.get("content") or s.preview["text"]
     assert "61000-61999" in by["session-uid-range"].preview["text"]
-    assert by["session-uid-range"].preview["path"] == "/etc/planetexpress/launch.conf"
+    assert by["session-uid-range"].preview["path"] == "/etc/planetexpress-launch/launch.conf"
     assert "Delegate=yes" in by["cgroup-tree"].preview["content"]
     assert by["workspace-root"].preview["type"] == "text" and "/opt/pe/state/mission-workspaces" in by["workspace-root"].preview["text"]
 
@@ -622,3 +638,15 @@ def test_a_mos_uninstall_has_no_sudoers_removal_and_removes_the_boot_script():
     assert p.applicable, p.blocked
     assert [s.target for s in removals(p)] == [n for n in reversed(NAMES) if n != "launcher-sudoers"]
     assert next(s for s in removals(p) if s.target == "cgroup-tree").params["boot_script"] == "/mnt/data/pe/launcher-boot.sh"
+
+
+def test_on_mos_launch_conf_sits_under_the_data_pool_and_core_is_told_where():
+    p = plan(mos_report(), mos_answers(missions=ON))
+    assert p.applicable
+    by = {s.target: s for s in launcher(p)}
+    assert all(s.params["conf"] == "/mnt/data/pe/launch/launch.conf" for s in by.values())
+    assert by["session-uid-range"].preview["path"] == "/mnt/data/pe/launch/launch.conf"
+    assert any("launch_conf /mnt/data/pe/launch/launch.conf" in w for w in p.warnings)
+    systemd = plan(systemd_report(), answers(missions=ON))
+    assert all("conf" not in s.params for s in launcher(systemd))
+    assert not any("launch_conf" in w for w in systemd.warnings)

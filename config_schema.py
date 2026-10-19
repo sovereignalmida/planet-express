@@ -431,6 +431,9 @@ class MissionsConfig(BaseModel):
     # Each session gets its own directory here (and the launcher's launch.conf names it as the workspace root).
     # Unset: `mission-workspaces` next to the state database.
     workspace_root: str | None = None
+    # Where the root helper's trust file is (the same path setup wrote it to). Only MOS changes this (its root is RAM, so
+    # it sits under the data pool); a wrong value cannot widen anything, the preflight's install check just fails.
+    launch_conf: str = "/etc/planetexpress-launch/launch.conf"
     worker_socket: str = "/run/planetexpress/worker.sock"
     runtime: MissionRuntimeConfig = MissionRuntimeConfig()
     budgets: MissionBudgetsConfig = MissionBudgetsConfig()
@@ -487,12 +490,12 @@ class MissionsConfig(BaseModel):
             raise ValueError("missions.worker_user must be a non-root unix account name")
         return name
 
-    @field_validator("sock_root", "workspace_root")
+    @field_validator("sock_root", "workspace_root", "launch_conf")
     @classmethod
     def _plain_absolute_path(cls, path: str | None) -> str | None:
         if path is not None and (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
                                  or path == "/"):
-            raise ValueError("missions.sock_root and missions.workspace_root must be normalised absolute paths")
+            raise ValueError("missions.sock_root, workspace_root and launch_conf must be normalised absolute paths")
         return path
 
     @model_validator(mode="after")

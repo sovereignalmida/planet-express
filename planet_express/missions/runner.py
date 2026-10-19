@@ -28,7 +28,7 @@ from planet_express.missions.containment_cgroup import (
     cgroup2_mountpoint,
 )
 from planet_express.missions.launcher.cgroup_tree import ensure_tree
-from planet_express.missions.launcher.config import CONF_PATH, HELPER_PATH
+from planet_express.missions.launcher.config import HELPER_PATH
 from planet_express.missions.launcher.preflight import PreflightReport, run_preflight
 from planet_express.missions.launcher.strategies import DirectLauncher, SudoLauncher
 from planet_express.missions.supervisor import SocketProvider, Supervisor
@@ -164,7 +164,7 @@ def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: 
     def run() -> PreflightReport:
         return run_preflight(
             containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
-            probe_uid=high, helper=HELPER_PATH, conf=CONF_PATH, uid_range=(low, high), sudo=strategy == "sudo",
+            probe_uid=high, helper=HELPER_PATH, conf=cfg.launch_conf, uid_range=(low, high), sudo=strategy == "sudo",
             check_reach=True)
     return run
 

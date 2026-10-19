@@ -38,7 +38,10 @@ import signal
 import stat
 import sys
 
-CONF_PATH = "/etc/planetexpress/launch.conf"
+# A directory of its own: /etc/planetexpress is the service's config directory (service-owned on a fresh install), so a
+# trust file there would fail this helper's own root-owned-chain check. On MOS (root is RAM) setup installs this helper
+# with this one line rewritten to <PE_HOME>/launch/launch.conf (setup_steps.LauncherHelper.wanted); nothing else edits it.
+CONF_PATH = "/etc/planetexpress-launch/launch.conf"
 STATUS_PREFIX = "PE-LAUNCH-STATUS "
 CGROUP2_SUPER_MAGIC = 0x63677270
 TIMEOUT_S = 10          # shorter than Core's wait (strategies.LAUNCH_TIMEOUT_S): a helper Core gave up on is already dead

@@ -465,8 +465,18 @@ class LauncherHelper(Step):
         lines = SOURCE.read_text(encoding="utf-8").splitlines(keepends=True)
         if not lines or not lines[0].startswith("#!"):
             raise StepError("the helper source has no interpreter line")
-        # The only edit: the interpreter line names this host's python3, with -I (isolated) and -S (no site).
-        return (f"#!{self.p.interpreter} -IS\n" + "".join(lines[1:])).encode("utf-8")
+        # Two edits. The interpreter line names this host's python3, with -I (isolated) and -S (no site). And where the
+        # trust file is not at the fixed default (MOS: root is RAM, so it is under the data pool), the one CONF_PATH line
+        # names it: the helper never takes that path from its caller, only from its own root-owned text.
+        body = "".join(lines[1:])
+        if self.p.conf != CONF_PATH:
+            if not _SHELL_SAFE.fullmatch(self.p.conf):
+                raise StepError("the launch.conf path has characters the helper text will not carry")
+            default_line = f'CONF_PATH = "{CONF_PATH}"'
+            if body.count(default_line) != 1:
+                raise StepError("the helper source has no single CONF_PATH line to rewrite")
+            body = body.replace(default_line, f'CONF_PATH = "{self.p.conf}"')
+        return (f"#!{self.p.interpreter} -IS\n" + body).encode("utf-8")
 
     def owned_file(self):
         try:
