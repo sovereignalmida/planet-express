@@ -245,22 +245,15 @@ class CheckpointService:
         if self.store.root.exists() and self.store.total_bytes() + total > self.settings.max_store_bytes:
             raise DiskGuardError(f"the checkpoint store would exceed {self.settings.max_store_bytes} bytes")
 
-        baseline_text, baseline_sha, baseline_count = None, None, 0
-        if self.baseline_provider is not None:
-            from ..verify.baseline import baseline_document
-            try:
-                findings = list(self.baseline_provider())
-                baseline_text, baseline_sha = baseline_document(findings)
-                baseline_count = len(findings)
-            except Exception as exc:                    # noqa: BLE001 - no baseline, no checkpoint
-                raise CheckpointError(f"the baseline scan failed ({type(exc).__name__}); no checkpoint was taken") from None
-
         checkpoint_id, manifest = None, None
         for attempt in (1, 2):
             checkpoint_id = "C-" + secrets.token_hex(8)
             try:
                 self.hooks.before_capture(planned)
                 self.store.new_checkpoint(checkpoint_id)
+                # The scan baseline is taken PER ATTEMPT, so the one committed describes the host the committed
+                # capture saw (a ScopeChanged retry takes a fresh one).
+                baseline_text, baseline_sha, baseline_count = self._take_baseline()
                 manifest = self._capture(checkpoint_id, mission_id, scope, planned, no_backup)
                 manifest["baseline"] = None
                 if baseline_text is not None:
@@ -296,6 +289,17 @@ class CheckpointService:
             self.store.remove(checkpoint_id)
             raise CheckpointExists(f"{mission_id} already has a checkpoint, or is no longer live")
         return CheckpointId(checkpoint_id, no_backup, tuple(manifest["facts_unavailable"]))
+
+    def _take_baseline(self) -> tuple[str | None, str | None, int]:
+        if self.baseline_provider is None:
+            return None, None, 0
+        from ..verify.baseline import baseline_document
+        try:
+            findings = list(self.baseline_provider())
+            text, sha = baseline_document(findings)
+        except Exception as exc:                        # noqa: BLE001 - no baseline, no checkpoint
+            raise CheckpointError(f"the baseline scan failed ({type(exc).__name__}); no checkpoint was taken") from None
+        return text, sha, len(findings)
 
     def validate_scope(self, scope: CheckpointScope) -> list[_Planned]:
         """Everything in scope must be a regular file Core can read, inside the stacks root after realpath,

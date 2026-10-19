@@ -253,39 +253,15 @@ class ToolBroker:
 
     def core_read(self, mission_id: str, name: str, params: dict) -> dict:
         """A READ-ONLY tool call made by Core itself for a verification `query` check (slice 8). It is not a session
-        call: no session token, no endpoint switch and no use of the session's call budget (events are `tool.verify`,
-        which `_count` does not add up), but everything else holds: the tool must exist and be `risk == "read"`, its
-        params must parse, the scope fields must be inside the mission's grant and clear of protected resources, and
-        the secret never leaves Core. Any refusal raises ToolRefused or _BadParams to the caller, who fails the check."""
-        mission = self.ms.get_mission(mission_id)
-        if mission.status != "verifying":
-            raise ToolRefused(f"verification queries run only while verifying ({mission.status})")
-        tool = self.registry.get(name) if isinstance(name, str) else None
-        if tool is None or tool.risk != "read":
-            raise ToolRefused("unknown or non-read tool")
-        grant = mission.grant()
-        try:
-            parsed = tool.params.model_validate(params)
-        except (ValidationError, ValueError, TypeError) as exc:
-            raise _BadParams(type(exc).__name__) from None
-        self._check_scope(tool, parsed, grant)
-        secret = None
-        if tool.secret_ref:
-            secret = self.secrets(tool.secret_ref)
-            if not secret:
-                raise ToolRefused("the tool's secret is not configured")
-        ctx = ToolContext(secret, self.sites.get(name, ToolSite()), self.http, self.runner, self.stacks_root)
-        try:
-            status, text = tool.handler(parsed, ctx)
-        except ToolRefused:
-            raise
-        except Exception as exc:               # noqa: BLE001 - an application failure is a result
-            text, status = f"{type(exc).__name__}", 599
-        if secret:
-            text = text.replace(secret, "[REDACTED]")
-        text, truncated = _clip(redact(text), self.max_output_bytes)
+        call: no session token and no use of the session's call budget (events are `tool.verify`, which `_count` does not
+        add up). Everything else is the SAME gate a session call passes (`_gate`): the grant must name `tool:<name>`, the
+        endpoint switch must be open (a tripwire pause closes it), the scope fields must be inside the grant and clear of
+        protected resources. On top of that the mission must be `verifying` and the tool must be `risk == "read"`. Any
+        refusal raises ToolRefused or _BadParams to the caller, who fails the check."""
+        mission, tool, _grant, parsed = self._gate(mission_id, name, params, states=("verifying",), read_only=True)
+        status, text, truncated = self._call(tool, parsed, name)
         ok = 200 <= status < 300
-        self._record(mission_id, "tool.verify", name, params, ok=ok, status=status, nbytes=len(text.encode()),
+        self._record(mission.id, "tool.verify", name, params, ok=ok, status=status, nbytes=len(text.encode()),
                      truncated=truncated)
         return {"ok": ok, "status": status, "output": text if ok else "", "truncated": truncated}
 
@@ -304,12 +280,16 @@ class ToolBroker:
                 except Exception:
                     log.exception("the refusal-cap hook failed for session %s", sid)
 
-    def _invoke(self, session: Any, name: str, params: dict) -> dict:
+    def _gate(self, mission_id: str, name: str, params: dict, *, states: tuple[str, ...],
+              read_only: bool) -> tuple[Any, Tool, Grant, BaseModel]:
+        """The one gate both a session call (`_invoke`) and a Core verification read (`core_read`) pass, so the two
+        cannot drift: mission live in `states`, endpoints not closed by a tripwire pause, tool known, named in the grant,
+        write tools gated, params parse, scope inside the grant."""
         try:
-            mission = self.ms.get_mission(session.mission_id)
+            mission = self.ms.get_mission(mission_id)
         except LookupError:
             raise ToolRefused("no such mission") from None
-        if mission.status not in LIVE_STATES or mission.id in self._revoked:
+        if mission.status not in states or mission.id in self._revoked:
             raise ToolRefused(f"endpoints are closed ({mission.status})")
         tool = self.registry.get(name) if isinstance(name, str) else None
         if tool is None:
@@ -317,18 +297,17 @@ class ToolBroker:
         grant = mission.grant()
         if f"tool:{name}" not in grant.credentials:
             raise ToolRefused("the grant does not name this tool")
-        if tool.risk == "write" and (self.write_gate is None or not self.write_gate(mission.id, name, params)):
+        if tool.risk == "write" and (read_only or self.write_gate is None or not self.write_gate(mission.id, name, params)):
             raise ToolRefused("write tools are gated until slice 7")
         try:
             parsed = tool.params.model_validate(params)
         except (ValidationError, ValueError, TypeError) as exc:
             raise _BadParams(type(exc).__name__) from None
         self._check_scope(tool, parsed, grant)
-        used = self._calls_used(mission.id)
-        if used >= grant.budgets.tool_calls:
-            raise ToolRefused("tool-call budget exhausted")
-        if self._output_used(mission.id) >= grant.budgets.output_bytes:
-            raise ToolRefused("output budget exhausted")
+        return mission, tool, grant, parsed
+
+    def _call(self, tool: Tool, parsed: BaseModel, name: str) -> tuple[int, str, bool]:
+        """Fetch the secret, run the handler, scrub and clip the answer: (status, text, truncated)."""
         secret = None
         if tool.secret_ref:
             secret = self.secrets(tool.secret_ref)
@@ -344,6 +323,16 @@ class ToolBroker:
         if secret:
             text = text.replace(secret, "[REDACTED]")
         text, truncated = _clip(redact(text), self.max_output_bytes)
+        return status, text, truncated
+
+    def _invoke(self, session: Any, name: str, params: dict) -> dict:
+        mission, tool, grant, parsed = self._gate(session.mission_id, name, params, states=LIVE_STATES, read_only=False)
+        used = self._calls_used(mission.id)
+        if used >= grant.budgets.tool_calls:
+            raise ToolRefused("tool-call budget exhausted")
+        if self._output_used(mission.id) >= grant.budgets.output_bytes:
+            raise ToolRefused("output budget exhausted")
+        status, text, truncated = self._call(tool, parsed, name)
         ok = 200 <= status < 300
         self._record(mission.id, "tool.invoke", name, params, ok=ok, status=status, nbytes=len(text.encode()),
                      truncated=truncated)

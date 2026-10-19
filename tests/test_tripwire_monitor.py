@@ -807,14 +807,17 @@ def test_a_clean_restore_is_still_rolled_back(tmp_path):
 
 def _second_mission(rig):
     """A second executing mission (own scope, own session S-2) in the same store."""
-    from missions_helpers import advance_to, token
+    from missions_helpers import advance_to, token, with_default_plan
     from planet_express.missions.approvals import record_approval
     from planet_express.missions.launcher.spec import LaunchSpec
     from planet_express.missions.models import Grant
     env = rig.env
     grant = Grant.model_validate({"tier": "repair", "scope": {"paths": ["/srv/other"], "hosts": ["local"]},
                                   "verification": {"checks": ["http"]}, "backup": {"covered": True}})
-    m = env.ms.create_mission(title="t2", origin="operator", grant=grant, goal="g", success_criteria="s", runtime="fake")
+    m = env.ms.create_mission(title="t2", origin="operator", grant=with_default_plan(grant), goal="g", success_criteria="s", runtime="fake")
+    from missions_helpers import DEFAULT_PLAN
+    env.ms.set_verification_plan(m.id, DEFAULT_PLAN)
+    m = env.ms.get_mission(m.id)
     advance_to(env.ms, m.id, "queued", "investigating", "awaiting_decision")
     record_approval(env.store, m.id, "grant", m.grant_hash, "approve", "operator:me")
     env.ms.start_session(m.id, kind="local_cgroup", token_hash=token(2), session_ttl_s=3600, lease_ttl_s=600,
@@ -897,3 +900,14 @@ def test_malformed_successful_ss_output_is_a_failed_signal():
         collect_ports(env)
     env.runner = lambda argv, timeout: (0, "tcp LISTEN 0 4096 0.0.0.0:22 0.0.0.0:*\n", "")
     assert collect_ports(env) == ["tcp 0.0.0.0:22"]
+
+
+def test_an_nft_meter_flags_dynamic_does_not_change_the_fingerprint_but_a_static_set_does():
+    from planet_express.missions.tripwire.signals import normalise_firewall
+    meter = ("table inet f {\n set ssh_meter {\n type ipv4_addr\n size 65535\n flags dynamic\n"
+             " elements = { 1.2.3.4 counter packets 3 bytes 180 }\n }\n chain input {\n tcp dport 22 accept\n }\n}")
+    other = meter.replace("1.2.3.4 counter packets 3 bytes 180", "9.9.9.9 counter packets 80 bytes 4000")
+    assert normalise_firewall(meter) == normalise_firewall(other)
+    assert normalise_firewall(meter) != normalise_firewall(meter.replace("dport 22", "dport 2222"))
+    static = "table inet f {\n set allow {\n type ipv4_addr\n elements = { 10.0.0.1 }\n }\n}"
+    assert normalise_firewall(static) != normalise_firewall(static.replace("10.0.0.1", "0.0.0.0/0"))

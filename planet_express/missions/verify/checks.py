@@ -273,6 +273,12 @@ class HttpResponse:
     truncated: bool = False
 
 
+def host_header_for(host: str, port: int, default_port: int) -> str:
+    """The Host header value: an IPv6 literal is bracketed (`[::1]:8080`), the port is dropped when it is the default."""
+    name = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return name if port == default_port else f"{name}:{port}"
+
+
 def default_http(req: HttpRequest) -> HttpResponse:
     """GET, no redirects, bounded body and wall-clock. With `resolve_to` the TCP connection goes to that address while
     the Host header and the TLS SNI/verification name stay the real host (a route probe against one specific backend)."""
@@ -282,7 +288,7 @@ def default_http(req: HttpRequest) -> HttpResponse:
         if req.scheme == "https":
             sock = ssl.create_default_context().wrap_socket(sock, server_hostname=req.host)
         default_port = 443 if req.scheme == "https" else 80
-        host_header = req.host if req.port == default_port else f"{req.host}:{req.port}"
+        host_header = host_header_for(req.host, req.port, default_port)
         conn = http.client.HTTPConnection(req.host, req.port, timeout=req.timeout_s)
         conn.sock = sock                      # an already-connected socket: http.client will not dial again
         conn.request("GET", req.target, headers={"Host": host_header, "User-Agent": "planet-express-verify",
@@ -402,6 +408,8 @@ def _exec_available(env: CheckEnv, argv0: str) -> str | None:
 
 
 def check_exec_probe(p: ExecProbeParams, env: CheckEnv, timeout_s: int) -> Outcome:
+    # KNOWN LIMIT: on a timeout the runner kills the `docker exec` CLIENT, not the process it started inside the
+    # container, which may keep running. The probes are operator-allowlisted binaries chosen to be short and read-only.
     refusal = _exec_available(env, p.argv[0])
     if refusal:
         return _fail(refusal)

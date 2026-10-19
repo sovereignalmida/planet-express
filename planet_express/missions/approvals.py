@@ -11,7 +11,8 @@ from typing import NamedTuple
 from planet_express.core.store import Store
 
 from .canonical import CanonicalError, loads_strict, sha256_hex
-from .models import PHASE_RE, Grant, GrantScope, StandingGrant
+from .models import PHASE_RE, Grant, GrantScope, StandingGrant, VerificationPlan
+from .verify.plan import binding_problems
 
 TIER_RANK = {"observe": 0, "propose": 1, "repair": 2, "change": 3, "critical": 4}
 ELEVATED_PHASES = ("broad_sudo", "no_backup")
@@ -41,6 +42,12 @@ def record_approval(store: Store, mission_id: str, phase: str, bound_hash: str, 
         raise ValueError("decision must be approve or deny")
     approval_id = f"A-{uuid.uuid4().hex[:16]}"
     with store._write() as conn:
+        if decision == "approve":
+            row = conn.execute("SELECT tier, grant_json, verification_plan_json FROM missions WHERE id=?",
+                               (mission_id,)).fetchone()
+            problems = verification_plan_problems(row) if row is not None else []
+            if problems:
+                raise ValueError("cannot approve: " + "; ".join(problems))
         try:
             conn.execute(
                 "INSERT INTO mission_approvals (id, mission_id, phase, bound_hash, decision, operator, "
@@ -53,6 +60,21 @@ def record_approval(store: Store, mission_id: str, phase: str, bound_hash: str, 
                 raise ApprovalConflict(f"{phase} already decided for this hash") from exc
             raise
     return approval_id
+
+
+def verification_plan_problems(row: sqlite3.Row) -> list[str]:
+    """Contract 10 at the store level: a repair/change/critical mission is approvable and executable only with a grant that
+    carries `verification.plan_sha256` AND a stored plan that is valid and hashes to it. Not a `validate_grant` courtesy:
+    this runs inside `record_approval` and the execution predicate, whoever calls them."""
+    if TIER_RANK.get(row["tier"], 0) < TIER_RANK["repair"]:
+        return []
+    try:
+        grant = Grant.model_validate(loads_strict(row["grant_json"]))
+        plan = (VerificationPlan.model_validate(loads_strict(row["verification_plan_json"]))
+                if row["verification_plan_json"] else None)
+    except (CanonicalError, ValueError):
+        return ["the grant or the verification plan is unreadable"]
+    return binding_problems(grant, plan)
 
 
 def _approved(conn: sqlite3.Connection, mission_id: str, phase: str, bound_hash: str,
@@ -119,7 +141,7 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
     if grant.tier != m["tier"]:
         return Verdict(False, ("grant tier does not match mission tier",))
 
-    reasons: list[str] = []
+    reasons: list[str] = list(verification_plan_problems(m))
     if m["standing_grant_id"]:
         reasons += _standing_reasons(conn, m["standing_grant_id"], grant, now)
     else:

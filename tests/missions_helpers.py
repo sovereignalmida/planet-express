@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent / "config.example.yaml"))
 
 from planet_express.core.store import Store, write_snapshot_marker
-from planet_express.missions.models import Grant
+from planet_express.missions.models import Grant, VerificationPlan
 from planet_express.missions.store import MissionStore
 
 
@@ -29,16 +29,34 @@ def make_store(tmp_path: Path, clock: Clock | None = None) -> tuple[Store, Clock
     return store, clock
 
 
+# Every repair/change/critical mission needs a verification plan the grant names (slice 8, enforced by the store).
+DEFAULT_PLAN = VerificationPlan.model_validate(
+    {"catalogue_v": 1, "checks": [{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}]})
+
+
 def repair_grant(**over) -> Grant:
-    body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]}}
+    body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]},
+            "verification": {"checks": ["default"], "plan_sha256": DEFAULT_PLAN.hash()}}
     body.update(over)
     return Grant.model_validate(body)
 
 
+def with_default_plan(grant: Grant) -> Grant:
+    """A mutating grant that names no plan gets the default one (observe/propose are left alone)."""
+    if grant.tier in ("observe", "propose") or grant.verification.plan_sha256:
+        return grant
+    body = grant.model_dump(mode="json")
+    body["verification"] = {**body["verification"], "checks": ["default"], "plan_sha256": DEFAULT_PLAN.hash()}
+    return Grant.model_validate(body)
+
+
 def new_mission(ms: MissionStore, grant: Grant | None = None, **kw):
-    grant = grant or repair_grant()
-    return ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s",
-                             runtime="fake", **kw)
+    grant = with_default_plan(grant or repair_grant())
+    mission = ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s",
+                                runtime="fake", **kw)
+    if grant.verification.plan_sha256 == DEFAULT_PLAN.hash():
+        mission = ms.set_verification_plan(mission.id, DEFAULT_PLAN)
+    return mission
 
 
 def advance_to(ms: MissionStore, mission_id: str, *states: str, actor: str = "operator:me"):

@@ -93,13 +93,13 @@ def test_unchanged_from_checkpoint_needs_the_operator_and_offers_resume(tmp_path
     assert c.phase == PHASES[status] and not c.partially_applied
 
 
-@pytest.mark.parametrize("status", ["investigating", "executing", "verifying"])
+@pytest.mark.parametrize("status", ["executing", "verifying", "recovery_required"])
 def test_matching_the_end_expectation_goes_to_verifying(tmp_path, status):
     rig = make(tmp_path)
     expected = end_state(rig)
     c = classify(change_with_expectation(rig, status, expected), host(rig), rig.manifest, rig.ms.events(rig.mid))
     assert c.state == "verifying" and c.next_state is None and not c.partially_applied
-    assert c.phase == PHASES[status]
+    assert c.phase == PHASES.get(status, "execution")
 
 
 @pytest.mark.parametrize("status", ["investigating", "executing", "verifying"])
@@ -237,3 +237,20 @@ def test_recovery_cannot_complete_a_mission(tmp_path):
     c = Classification("verifying", "claimed", "verification")
     assert apply_classification(rig.ms, rig.mid, c) == "verifying"          # already there: nothing moves it to completed
     assert rig.ms.get_mission(rig.mid).status != "completed"
+
+
+@pytest.mark.parametrize("status", ["investigating", "rollback_pending", "paused_tripwire", "needs_operator"])
+def test_a_mission_not_in_an_executing_phase_is_never_routed_to_verifying(tmp_path, status):
+    rig = make(tmp_path)
+    expected = end_state(rig)
+    c = classify(change_with_expectation(rig, status, expected), host(rig), rig.manifest, rig.ms.events(rig.mid))
+    assert c.state == "needs_operator" and c.state != "verifying" and "an operator decides" in c.reason
+
+
+def test_an_empty_comparison_is_not_unchanged(tmp_path):
+    rig = make(tmp_path)
+    assert matches_checkpoint(HostState(), {"files": [], "facts": {"services": {}, "units": {}}}) is False
+    empty = dict(rig.manifest, files=[], facts={"services": {}, "units": {}, "ports": [], "mounts": []})
+    c = classify(mission_in(rig, "executing"), host(rig), empty, [])
+    assert c.state == "recovery_required" and c.next_state == "needs_operator" and c.partially_applied
+    assert c.state != "verifying"

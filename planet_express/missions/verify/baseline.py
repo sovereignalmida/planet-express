@@ -29,6 +29,10 @@ SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 INFORMATIONAL = frozenset({"timestamp", "agent", "mode", "docker_disk", "image_candidates", "system"})
 
 
+class TooManyFindings(ValueError):
+    """More findings than can be compared. Never truncated: a truncated set could hide the one that matters."""
+
+
 class Finding(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -153,9 +157,7 @@ def normalize(snapshot: Mapping[str, Any], *, host: str = DEFAULT_HOST) -> list[
             add(f"section:{section}"[:64], UNSCOPED, section, "MEDIUM")
 
     if len(out) > MAX_FINDINGS:
-        kept = sorted(out.values(), key=lambda f: f.key)[:MAX_FINDINGS - 1]
-        out = {f.key: f for f in kept}
-        add("overflow", UNSCOPED, "more than the finding cap", "MEDIUM")
+        raise TooManyFindings("too many findings to compare")
     return sorted(out.values(), key=lambda f: f.key)
 
 
@@ -187,10 +189,12 @@ def load_baseline(text: str) -> list[Finding]:
 
 
 def in_scope(finding: Finding, scope_ids: Iterable[str], *, stacks_root: str | None = None) -> bool:
-    """Unscoped findings are in scope for every mission; a resource finding is in scope when a scope id contains it."""
+    """Unscoped findings are in scope for every mission. A resource finding is in scope when a scope id contains it OR it
+    contains a scope id: a parent (stack, mount, path) fault can be caused by a narrow mission inside it."""
     if finding.resource_id == UNSCOPED:
         return True
-    return any(contains(s, finding.resource_id, stacks_root=stacks_root) for s in scope_ids)
+    return any(contains(s, finding.resource_id, stacks_root=stacks_root)
+               or contains(finding.resource_id, s, stacks_root=stacks_root) for s in scope_ids)
 
 
 def new_findings(baseline: Iterable[Finding], fresh: Iterable[Finding]) -> list[Finding]:

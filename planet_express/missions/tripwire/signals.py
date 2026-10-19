@@ -283,9 +283,9 @@ _COUNTERS = re.compile(r"\[\d+:\d+\]")
 _NFT_COUNTS = re.compile(r"\bpackets \d+ bytes \d+")
 _NFT_EXPIRES = re.compile(r"\s+expires\s+\S+")
 _NFT_QUOTA_USED = re.compile(r"\bused \d+(?:\s+[kmg]?bytes)?", re.IGNORECASE)
-# Only a set DECLARED with a timeout is dynamic (fail2ban and friends); a static allow/deny set keeps its elements.
+# Only a set DECLARED with a timeout or `flags dynamic` (a meter) is dynamic (fail2ban, rate limiters); a static allow/deny set keeps its elements.
 _NFT_DYNAMIC_ELEMENTS = re.compile(
-    r"(set\s+\S+\s*\{[^{}]*?\b(?:flags[^\n]*\btimeout\b|timeout\s+\S+)[^{}]*?)elements\s*=\s*\{[^}]*\}", re.DOTALL)
+    r"(set\s+\S+\s*\{[^{}]*?\b(?:flags[^\n]*\b(?:timeout|dynamic)\b|timeout\s+\S+)[^{}]*?)elements\s*=\s*\{[^}]*\}", re.DOTALL)
 
 
 def normalise_firewall(text: str) -> str:

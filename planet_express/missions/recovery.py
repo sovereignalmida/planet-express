@@ -27,6 +27,9 @@ log = logging.getLogger("planetexpress.missions.recovery")
 TRUSTED_ACTORS = frozenset({"core", "supervisor"})
 RESTORABLE = ("image_id", "command", "env_hash", "mounts", "networks", "labels", "restart_policy", "health")
 PHASES = ("investigation", "execution", "verification")
+# Only a crash in these states may be routed to `verifying`. A mission that is rolling back, paused by a tripwire, waiting
+# for an operator or still investigating is never promoted toward completion by a classification.
+VERIFY_FROM = frozenset({"executing", "recovery_required", "verifying"})
 MUTATING = ("repair", "change", "critical")
 
 
@@ -47,6 +50,14 @@ def journal_done(ms: MissionStore, mission_id: str, intent_id: str, effect: str,
     if effect not in ("applied", "not_applied", "rolled_back"):
         raise ValueError(f"unknown effect {effect!r}")
     ms.append_event(mission_id, "note", actor, {"event": "intent.done", "id": intent_id, "effect": effect})
+
+
+def close_open_intents(ms: MissionStore, mission_id: str, effect: str, *, actor: str = "core") -> int:
+    """Close every open intent of a mission with `effect` (Core has established it). Returns how many were closed."""
+    ids = open_intents(ms.events(mission_id))
+    for intent_id in ids:
+        journal_done(ms, mission_id, intent_id, effect, actor=actor)
+    return len(ids)
 
 
 def _body(event: MissionEvent) -> dict[str, Any]:
@@ -115,8 +126,12 @@ def collect_host_state(checkpoint_service: Any, manifest: Mapping[str, Any]) -> 
 
 
 def matches_checkpoint(host: HostState, manifest: Mapping[str, Any]) -> bool:
-    """Is the host exactly as the checkpoint recorded it? Anything unknown is "no"."""
+    """Is the host exactly as the checkpoint recorded it? Anything unknown is "no", and so is an EMPTY comparison: a
+    manifest that covers no file, service or unit shows nothing about the host, so it cannot prove "unchanged"."""
     if not host.readable:
+        return False
+    facts = manifest.get("facts", {})
+    if not (manifest.get("files") or facts.get("services") or facts.get("units")):
         return False
     for entry in manifest.get("files", []):
         if entry["path"] not in host.files or host.files[entry["path"]] != entry["sha256"]:
@@ -219,6 +234,10 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
         return Classification("needs_operator", "the host is as the checkpoint recorded it: nothing was applied", phase,
                               offers=("resume", "cancel"), refused_replays=unknown)
     if matches_expectation(host_state, end_expectation(mission)):
+        if mission.status not in VERIFY_FROM:
+            return Classification("needs_operator", f"the host matches the expected end state but the mission is "
+                                  f"{mission.status}: an operator decides", phase, offers=("take_over", "cancel"),
+                                  partially_applied=True, refused_replays=unknown)
         return Classification("verifying", "the host matches the end state the approved plan expects", phase,
                               partially_applied=False, refused_replays=unknown)
     reason = ("the host could not be read completely" if not host_state.readable
