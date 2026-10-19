@@ -204,3 +204,30 @@ def test_a_settled_observe_session_leaves_no_open_intent(tmp_path):
             break
     assert rig.status() == "awaiting_decision"
     assert recovery.open_intents(rig.ms.events(rig.mid)) == []
+
+
+def test_shutdown_during_a_slow_verification_drops_the_result_and_leaves_the_mission_verifying(tmp_path):
+    rig = build(tmp_path)
+    slow = SlowVerifier(rig)
+    sup = supervisor(rig, slow)
+    sup.verify_and_close(rig.mid)
+    assert slow.started.wait(5)
+    threading.Timer(0.3, slow.release.set).start()          # the verification finishes while shutdown is waiting
+    sup.shutdown()
+    m = rig.ms.get_mission(rig.mid)
+    assert m.status == "verifying" and m.outcome is None
+    assert any("verify_dropped" in e.body_json for e in rig.ms.events(rig.mid))
+    assert not any('"to": "completed"' in e.body_json for e in rig.ms.events(rig.mid) if e.kind == "state")
+
+
+def test_a_refused_session_closes_only_its_own_intent_not_an_earlier_crashed_one(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    earlier = recovery.journal_intent(rig.ms, rig.mid, "execution", "crashed earlier", actor="supervisor")
+
+    def refuse(*a, **k):
+        raise RuntimeError("no uid")
+
+    monkeypatch.setattr(sup_mod, "issue_session", refuse)
+    with pytest.raises(RuntimeError):
+        rig.sup.start(rig.mid)
+    assert recovery.open_intents(rig.ms.events(rig.mid)) == [earlier]
