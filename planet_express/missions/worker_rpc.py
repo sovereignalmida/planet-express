@@ -1,4 +1,4 @@
-"""The worker socket: six methods, every call authenticated by peer identity AND session token.
+"""The worker socket: seven methods, every call authenticated by peer identity AND session token.
 
 A second `RpcServer` with its own handler table whose keys are fixed here. It is never given the
 operator handler table (`build_worker_server` refuses any key outside `WORKER_METHODS`), and the
@@ -27,6 +27,7 @@ WORKER_METHODS = (
     "mission.get_context",
     "mission.post_event",
     "mission.heartbeat",
+    "mission.request_decision",
     "mission.submit_result",
     "memory.search",
     "tool.invoke",
@@ -36,6 +37,14 @@ MAX_EVENT_DATA_BYTES = 16 * 1024
 MAX_TOOL_PARAMS_BYTES = 16 * 1024
 _TOKEN_LEN = (16, 256)
 _BAD_PATH = re.compile(r"[\x00-\x1f\x7f]|\(deleted\)")
+
+
+def refuse_session_uids(allowed_uids, uid_min: int, uid_max: int) -> None:
+    """The operator socket (`rpc.sock`) must never admit a worker: no uid it allows may fall in the session uid range
+    (contract 6). Called by the daemon before it starts the operator server; a violation stops that server from starting."""
+    clash = sorted(u for u in allowed_uids if uid_min <= u <= uid_max)
+    if clash:
+        raise ValueError(f"the operator socket would admit session uid(s) {clash}: refusing to start it")
 
 
 def parse_proc_cgroup(text: str, mount: str = CGROUP_MOUNT) -> str | None:
@@ -108,6 +117,7 @@ class WorkerBackend(Protocol):
     def get_context(self, session) -> dict: ...
     def post_event(self, session, kind: str, data: dict) -> dict: ...
     def heartbeat(self, session) -> dict: ...
+    def request_decision(self, session, summary: str, options: list[str]) -> dict: ...
     def submit_result(self, session, result: AgentResult) -> dict: ...
     def memory_search(self, session, query: str, limit: int) -> dict: ...
     def tool_invoke(self, session, name: str, params: dict) -> dict: ...
@@ -127,6 +137,20 @@ class _PostEvent(BaseModel):
         import json
         if len(json.dumps(self.data, allow_nan=False, default=str)) > MAX_EVENT_DATA_BYTES:
             raise ValueError("event data too large")
+        return self
+
+
+class _Decision(BaseModel):
+    """A card for the operator. Free text only: it carries no mission id, grant, hash or phase, so there is nothing in it that
+    could name an approval row, and `request_decision` has no path to one."""
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(min_length=1, max_length=1000)
+    options: list[str] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def _short(self):
+        if any(len(o) > 120 for o in self.options):
+            raise ValueError("option too long")
         return self
 
 
@@ -174,6 +198,10 @@ def build_worker_handlers(backend: WorkerBackend) -> dict[str, Callable[[dict, A
         _parse(_Empty, params)
         return backend.heartbeat(session)
 
+    def request_decision(params, session):
+        p = _parse(_Decision, params)
+        return backend.request_decision(session, p.summary, p.options)
+
     def submit_result(params, session):
         p = _parse(_Submit, params)
         result = _parse(AgentResult, p.result)
@@ -191,6 +219,7 @@ def build_worker_handlers(backend: WorkerBackend) -> dict[str, Callable[[dict, A
         "mission.get_context": get_context,
         "mission.post_event": post_event,
         "mission.heartbeat": heartbeat,
+        "mission.request_decision": request_decision,
         "mission.submit_result": submit_result,
         "memory.search": memory_search,
         "tool.invoke": tool_invoke,

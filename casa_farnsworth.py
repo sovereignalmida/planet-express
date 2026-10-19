@@ -1892,7 +1892,11 @@ def handle_message(
             help_text += (
                 "\n/missions — Active missions\n"
                 "/mission `<id>` — One mission's summary\n"
-                "/cancel_mission `<id>` — Cancel (or request cancel of) a mission"
+                "/cancel_mission `<id>` — Cancel (or request cancel of) a mission\n"
+                "/mission_card `<id>` — A repair mission's approval card\n"
+                "/approve `<id>` `<hash8>` — Approve the next step of a card (never an elevated one)\n"
+                "/deny `<id>` `<hash8>` — Deny and close a repair mission\n"
+                "/resume `<id>`, /rollback `<id>`, /takeover `<id>` — Act on a tripwire pause"
             )
         notifier.notify(help_text)
 
@@ -2005,6 +2009,17 @@ def _telegram_operator(msg: dict) -> str:
     sender = msg.get("from") or {}
     return (f"@{sender['username']} ({sender.get('id')})" if sender.get("username")
             else str(sender.get("id", "telegram")))
+
+
+def _repair_wiring():
+    """What the Repair tier needs from the host and Core cannot derive (slice 7a). None with missions off."""
+    if not config.MISSIONS_ENABLED:
+        return None
+    from planet_express.missions.assembly import RepairWiring
+    from planet_express.missions.checkpoint import MosCheckpointProvider, SystemdCheckpointProvider
+    provider_cls = MosCheckpointProvider if config.HOST_CONTROL_PROVIDER == "mos" else SystemdCheckpointProvider
+    return RepairWiring(provider=provider_cls(config.get_stack_orchestrator()), scan=leela.run_full,
+                        core_user=pwd.getpwuid(os.geteuid()).pw_name)
 
 
 def _mission_operator(msg: dict) -> str:
@@ -2801,6 +2816,9 @@ def _start_dashboard_rpc(
                 continue
         if not allowed_uids:
             raise ValueError("no resolvable RPC peer users")
+        if config.MISSIONS_ENABLED:
+            from planet_express.missions.worker_rpc import refuse_session_uids
+            refuse_session_uids(allowed_uids, config.MISSIONS.session_uid_min, config.MISSIONS.session_uid_max)
         server = RpcServer(
             config.RPC_SOCKET,
             build_core_handlers(commands, store, notifier, chat, config_service,
@@ -3029,7 +3047,12 @@ def run_bot() -> None:
 
     # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).
     mission_runner = start_mission_runner(store, config.MISSIONS, enabled=lambda: config.MISSIONS_ENABLED,
-                                          stacks_root=str(config.STACKS_ROOT))
+                                          stacks_root=str(config.STACKS_ROOT), repair_wiring=_repair_wiring())
+    if mission_runner is not None:
+        # The approval flow answers the dashboard and Telegram only when the Repair controls were built; without them
+        # every approval method says "unavailable" (observe/propose missions are unaffected).
+        from planet_express.missions.assembly import build_approval_flow
+        missions.flow = build_approval_flow(store, config.MISSIONS, mission_runner, mission_runner.controls)
     shutdown = threading.Event()
     if mission_runner is not None:
         # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff

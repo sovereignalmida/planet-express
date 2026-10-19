@@ -1,10 +1,12 @@
 """Operator surfaces for missions and Ship's Memory (v4 slice 4).
 
 Everything an operator can do to a mission or a memory card through the dashboard RPC or Telegram goes
-through here. It is deliberately small: it reads, creates Observe/Propose missions, asks for a cancel and
-confirms or deprecates memory cards. It has no worker-facing code and no mutation capability: nothing here
-can raise a mission above `propose`, approve anything, or touch the execution engine, policy or the
-host-mutation lock.
+through here. It reads, creates Observe/Propose missions, asks for a cancel and confirms or deprecates memory cards. It has no
+worker-facing code and never touches the execution engine, policy or the host-mutation lock. Since slice 7a it also
+fronts the approval flow (`missions.approval_flow.ApprovalFlow`): the card, approve/deny bound to the grant hash,
+standing grants and the operator's actions on a tripwire card. The flow is attached by the daemon; without it those
+methods answer "unavailable". Elevated approvals need `elevated: true`, which only the dashboard sends and only from an
+authenticated elevated session; Telegram never can.
 
 Rules every method follows:
 - Gated by `enabled()`; when the flag is off every call raises MissionError("disabled").
@@ -28,11 +30,18 @@ from pydantic import ValidationError
 from planet_express.core.redact import redact
 from planet_express.core.store import Store
 from planet_express.execution.actions import TargetTimeout
-from planet_express.memory import retrieval as memory_retrieval
-from planet_express.memory import store as memory_store
+from planet_express.memory import retrieval as memory_retrieval, store as memory_store
 from planet_express.memory.models import SLUG_RE, Card
+from planet_express.missions.approval_flow import ApprovalFlow, FlowError
 from planet_express.missions.events import insert_event, redact_value
-from planet_express.missions.models import Budgets, Grant, GrantScope, Mission, MissionEvent, Status
+from planet_express.missions.models import (
+    Budgets,
+    Grant,
+    GrantScope,
+    Mission,
+    MissionEvent,
+    Status,
+)
 from planet_express.missions.state import (
     TERMINAL,
     IllegalTransition,
@@ -75,7 +84,7 @@ _TERMINAL_SQL = ",".join(f"'{x}'" for x in sorted(TERMINAL_STATUSES))
 
 class MissionError(Exception):
     """A typed refusal. `code` is one of disabled, bad_request, not_found, forbidden, conflict,
-    unavailable, timeout."""
+    unavailable, timeout, and (approval flow) stale, elevation_required, invalid_grant."""
 
     def __init__(self, message: str, code: str = "bad_request"):
         super().__init__(message)
@@ -217,6 +226,16 @@ def _dict(value):
     return value
 
 
+STANDING_ID_RE = re.compile(r"SG-[0-9]{1,6}-v[0-9]{1,4}")
+_PHASE = re.compile(r"(grant|plan|broad_sudo|no_backup|critical:[0-9]{1,6})")
+
+
+def _checks(value):
+    if not isinstance(value, list) or not 1 <= len(value) <= 64 or not all(isinstance(c, dict) for c in value):
+        raise ValueError("expected 1 to 64 verification checks")
+    return value
+
+
 _OPERATOR_CHECK = _pattern(_OPERATOR, "a plain operator name")
 _MISSION_CHECK = _pattern(MISSION_ID_RE, "a mission id such as M-12")
 _PAGE = {"limit": _int(1, MAX_PAGE), "offset": _int(0, MAX_OFFSET)}
@@ -237,6 +256,7 @@ class MissionService:
         self._incident_context = incident_context
         self._runtime = runtime
         self._incident_lock = threading.Lock()
+        self.flow: ApprovalFlow | None = None      # attached by the daemon (slice 7a); None: approvals are unavailable
 
     # ── gate ────────────────────────────────────────────────────────────────
     def enabled(self) -> bool:
@@ -513,6 +533,56 @@ class MissionService:
     def memory_deprecate(self, card_id: str, *, operator: str, reason: str = "") -> dict:
         return self._card_change(memory_store.deprecate, card_id, _actor(operator), redact(reason))
 
+    # ── approval flow (slice 7a) ────────────────────────────────────────────
+    def _flow(self) -> ApprovalFlow:
+        if self.flow is None:
+            raise MissionError("Repair missions are not available on this host", "unavailable")
+        return self.flow
+
+    def _flowed(self, call: Callable[[ApprovalFlow], Any]) -> Any:
+        self._require_enabled()
+        try:
+            return call(self._flow())
+        except FlowError as exc:
+            raise MissionError(str(exc), exc.code) from None
+
+    def approval_card(self, mission_id: str) -> dict:
+        return self._flowed(lambda f: f.card(mission_id))
+
+    def propose_repair(self, *, operator: str, **spec: Any) -> dict:
+        return self._flowed(lambda f: f.propose_repair(_actor(operator), **spec))
+
+    def approve_mission(self, mission_id: str, *, operator: str, phase: str, grant_hash: str, elevated: bool = False) -> dict:
+        return self._flowed(lambda f: f.approve(_actor(operator), mission_id, phase, grant_hash, elevated=elevated))
+
+    def deny_mission(self, mission_id: str, *, operator: str, grant_hash: str) -> dict:
+        return self._flowed(lambda f: f.deny(_actor(operator), mission_id, grant_hash))
+
+    def resume_mission(self, mission_id: str, *, operator: str) -> dict:
+        return self._flowed(lambda f: f.resume(_actor(operator), mission_id))
+
+    def rollback_mission(self, mission_id: str, *, operator: str, ack_drift: bool = False) -> dict:
+        return self._flowed(lambda f: f.roll_back(_actor(operator), mission_id, ack_drift=ack_drift))
+
+    def takeover_mission(self, mission_id: str, *, operator: str) -> dict:
+        return self._flowed(lambda f: f.take_over(_actor(operator), mission_id))
+
+    def standing_create(self, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
+                        elevated: bool = False) -> dict:
+        return self._flowed(lambda f: f.standing_create(_actor(operator), scope=scope, ttl_s=ttl_s, window_spec=window,
+                                                        elevated=elevated))
+
+    def standing_supersede(self, grant_id: str, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
+                           elevated: bool = False) -> dict:
+        return self._flowed(lambda f: f.standing_supersede(_actor(operator), grant_id, scope=scope, ttl_s=ttl_s,
+                                                           window_spec=window, elevated=elevated))
+
+    def standing_revoke(self, grant_id: str, *, operator: str) -> dict:
+        return self._flowed(lambda f: f.standing_revoke(_actor(operator), grant_id))
+
+    def standing_list(self, *, include_inactive: bool = False) -> dict:
+        return self._flowed(lambda f: f.standing_list(include_inactive=include_inactive))
+
     # ── RPC ─────────────────────────────────────────────────────────────────
     def handlers(self) -> dict[str, Callable[[Any], Any]]:
         """The RPC method table. Each wrapper checks the flag before it looks at params, so a disabled host
@@ -584,20 +654,85 @@ class MissionService:
             return self.memory_search(**_params(p, {"query": _str(500, blank=True)},
                                                 {"scope": _tags, "limit": _int(1, MAX_SEARCH)}))
 
-        table = {"mission.list": list_, "mission.get": get, "mission.events": events, "mission.create": create,
+        elev = {"elevated": _bool}
+        grant_hash = {"grant_hash": _pattern(re.compile(r"[0-9a-f]{64}"), "a grant hash")}
+        standing_id = {"standing_id": _pattern(STANDING_ID_RE, "a standing grant id")}
+        scope_t = {"scope": _dict, "ttl_s": _int(60, 30 * 86400)}
+
+        def card_(p):
+            return self.approval_card(_params(p, mid)["mission_id"])
+
+        def propose_repair(p):
+            return self.propose_repair(**_params(
+                p, {**op, "title": _str(256), "goal": _str(8192), "scope": _dict, "checks": _checks},
+                {"success_criteria": _str(8192), "budgets": _dict, "sudo": _dict, "docker": _choice("proxy", "raw"),
+                 "exclusions": _tags, "credentials": _tags, "on_verify_fail": _choice("needs_operator", "rollback"),
+                 "acknowledged_no_backup": _bool, "incident_id": _pattern(INCIDENT_ID_RE, "an incident id")}))
+
+        def approve(p):
+            v = _params(p, {**mid, **op, **grant_hash, "phase": _pattern(_PHASE, "an approval phase")}, elev)
+            return self.approve_mission(v["mission_id"], operator=v["operator"], phase=v["phase"],
+                                        grant_hash=v["grant_hash"], elevated=v.get("elevated", False))
+
+        def deny(p):
+            v = _params(p, {**mid, **op, **grant_hash})
+            return self.deny_mission(v["mission_id"], operator=v["operator"], grant_hash=v["grant_hash"])
+
+        def resume(p):
+            v = _params(p, {**mid, **op})
+            return self.resume_mission(v["mission_id"], operator=v["operator"])
+
+        def rollback(p):
+            v = _params(p, {**mid, **op}, {"ack_drift": _bool})
+            return self.rollback_mission(v["mission_id"], operator=v["operator"], ack_drift=v.get("ack_drift", False))
+
+        def takeover(p):
+            v = _params(p, {**mid, **op})
+            return self.takeover_mission(v["mission_id"], operator=v["operator"])
+
+        def standing_create(p):
+            v = _params(p, {**op, **scope_t}, {"window": _dict, **elev})
+            return self.standing_create(operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
+                                        window=v.get("window"), elevated=v.get("elevated", False))
+
+        def standing_supersede(p):
+            v = _params(p, {**op, **standing_id, **scope_t}, {"window": _dict, **elev})
+            return self.standing_supersede(v["standing_id"], operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
+                                           window=v.get("window"), elevated=v.get("elevated", False))
+
+        def standing_revoke(p):
+            v = _params(p, {**op, **standing_id})
+            return self.standing_revoke(v["standing_id"], operator=v["operator"])
+
+        def standing_list(p):
+            return self.standing_list(**_params(p, {}, {"include_inactive": _bool}))
+
+        table = {"mission.approval_card": card_, "mission.propose_repair": propose_repair, "mission.approve": approve,
+                 "mission.deny": deny, "mission.resume": resume, "mission.rollback": rollback,
+                 "mission.takeover": takeover, "standing.create": standing_create,
+                 "standing.supersede": standing_supersede, "standing.revoke": standing_revoke,
+                 "standing.list": standing_list,
+                 "mission.list": list_, "mission.get": get, "mission.events": events, "mission.create": create,
                  "mission.cancel": cancel, "mission.from_incident": from_incident,
                  "memory.candidates": candidates, "memory.cards": cards, "memory.review_due": review_due,
                  "memory.confirm": confirm, "memory.reverify": reverify, "memory.deprecate": deprecate, "memory.search": search}
         return {name: wrap(fn) for name, fn in table.items()}
 
     # ── Telegram ────────────────────────────────────────────────────────────
-    TELEGRAM_COMMANDS = frozenset({"/missions", "/mission", "/cancel_mission"})
+    TELEGRAM_COMMANDS = frozenset({"/missions", "/mission", "/cancel_mission", "/mission_card", "/approve", "/deny",
+                                  "/resume", "/rollback", "/takeover"})
+    # Approval-flow commands. The operator is the Telegram sender (never a parameter), no command here can be elevated, and
+    # /approve is bound to the first 8 hex digits of the grant hash printed on the card, so it cannot approve a card that
+    # changed after it was read.
+    _FLOW_COMMANDS = frozenset({"/mission_card", "/approve", "/deny", "/resume", "/rollback", "/takeover"})
 
     def telegram(self, text: str, operator: str) -> str:
         """Answer /missions, /mission <id> and /cancel_mission <id> in plain text. The caller has already
         established that the message came from the configured operator chat."""
         parts = text.split()
         cmd, args = parts[0].lower(), parts[1:]
+        if cmd in self._FLOW_COMMANDS:
+            return self._telegram_flow(cmd, args, operator)
         try:
             if cmd == "/missions":
                 if args:
@@ -615,6 +750,45 @@ class MissionService:
             return f"{out['id']}: {note}."
         except MissionError as exc:
             return f"{exc}" if exc.code != "not_found" else f"No such mission: {args[0] if args else ''}".strip()
+
+    def _telegram_flow(self, cmd: str, args: list[str], operator: str) -> str:
+        wants_hash = cmd in ("/approve", "/deny")
+        if (len(args) != (2 if wants_hash else 1) or MISSION_ID_RE.fullmatch(args[0]) is None
+                or (wants_hash and re.fullmatch(r"[0-9a-f]{8}", args[1]) is None)):
+            return f"Usage: {cmd} M-<number>" + (" <first 8 characters of the grant hash on the card>" if wants_hash else "")
+        if _OPERATOR.fullmatch(operator) is None:
+            return "Cannot identify the operator."
+        mission_id = args[0]
+        try:
+            self._require_enabled()
+            if cmd == "/mission_card":
+                return _render_card(self.approval_card(mission_id))
+            card = self.approval_card(mission_id)
+            if wants_hash:
+                if not card["grant_hash"].startswith(args[1]):
+                    return "That hash is not this mission's current grant hash. Read the card again: /mission_card " + mission_id
+                if cmd == "/deny":
+                    out = self.deny_mission(mission_id, operator=operator, grant_hash=card["grant_hash"])
+                    return f"{mission_id}: denied; the mission is {out['status']}."
+                pending = [r for r in card["required"] if r["state"] == "pending"]
+                if not pending:
+                    return f"{mission_id}: nothing left to approve."
+                if pending[0]["elevated"]:
+                    return (f"{mission_id}: the {pending[0]['phase']} approval needs an elevated dashboard session. "
+                            "Telegram cannot give it.")
+                out = self.approve_mission(mission_id, operator=operator, phase=pending[0]["phase"],
+                                           grant_hash=card["grant_hash"], elevated=False)
+                left = [r["phase"] for r in out["required"] if r["state"] == "pending"]
+                return (f"{mission_id}: {pending[0]['phase']} approved." +
+                        (f" Still needed (dashboard): {', '.join(left)}." if left else " It will start shortly."))
+            if cmd == "/resume":
+                return f"{mission_id}: resumed ({self.resume_mission(mission_id, operator=operator)['status']})."
+            if cmd == "/rollback":
+                out = self.rollback_mission(mission_id, operator=operator)
+                return f"{mission_id}: rollback {out['restore']}; the mission is {out['status']}."
+            return f"{mission_id}: taken over ({self.takeover_mission(mission_id, operator=operator)['status']})."
+        except MissionError as exc:
+            return f"{exc}" if exc.code != "not_found" else f"No such mission: {mission_id}"
 
     def _telegram_list(self) -> str:
         self._require_enabled()
@@ -646,6 +820,29 @@ class MissionService:
             row = conn.execute("SELECT * FROM mission_events WHERE mission_id=? ORDER BY seq DESC LIMIT 1",
                                (mission_id,)).fetchone()
         return None if row is None else _event_out(MissionEvent(**dict(row)))
+
+
+def _render_card(card: dict) -> str:
+    """The approval card as plain text, elevated risks first. The first 8 characters of the grant hash bind /approve."""
+    lines = [f"{card['mission_id']} [{card['status']}/{card['tier']}] {card['title']}"]
+    lines += [f"!! {w['text']}" for w in card["warnings"]]
+    b = card["backup"]
+    lines.append(f"backup: {'covered' if b.get('covered') else 'NOT covered'}"
+                 + (" (no-backup acknowledged)" if b.get("acknowledged_no_backup") else ""))
+    scope = card["scope"]
+    lines.append("scope: " + ", ".join(f"{k}={','.join(v)}" for k, v in scope.items() if v))
+    lines.append(f"protected excluded: {card['protected']['count']} resources")
+    bud = card["budgets"]
+    lines.append(f"budgets: {bud['wall_s']}s, {bud['tool_calls']} tools, {bud['output_bytes']} bytes, retries {bud['retries']}")
+    lines.append("verification: " + (", ".join(f"{c['id']}({c['check']})" for c in card["verification"]["checks"]) or "none")
+                 + f"; on failure {card['verification']['on_verify_fail']}")
+    sudo = card["sudo"]
+    lines.append(f"sudo: {sudo['mode']}" + (" " + ", ".join(f"{r['unit']}:{'/'.join(r['actions'])}" for r in sudo["rules"]) if sudo["rules"] else "")
+                 + f"; docker: {card['docker']}")
+    lines.append("approvals: " + ", ".join(f"{r['phase']}={r['state']}{'*' if r['elevated'] else ''}" for r in card["required"])
+                 + " (* needs the dashboard)")
+    lines.append(f"grant hash: {card['grant_hash'][:8]}")
+    return "\n".join(lines)
 
 
 __all__ = ["MissionError", "MissionService"]

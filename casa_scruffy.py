@@ -902,6 +902,18 @@ _MISSION_NOTICES = {
     "conflict": "That mission is already closed.",
     "not_found": "That mission no longer exists.",
     "disabled": "Missions are disabled on this host.",
+    "approved": "Approval recorded.",
+    "denied": "Mission denied and closed.",
+    "resumed": "Mission resumed.",
+    "rolled_back": "Rollback finished. Check the mission status below.",
+    "taken_over": "The worker was stopped. The host is yours.",
+    "stale": "That card was out of date. Read it again before deciding.",
+    "elevation_required": "That approval needs an elevated session. Elevate with your passphrase, then try again.",
+    "refused": "That could not be done now. The event stream says why.",
+    "unavailable": "Repair missions are not available on this host.",
+    "invalid_grant": "The grant is not valid; see the event stream.",
+    "standing_created": "Standing grant created.",
+    "standing_revoked": "Standing grant revoked.",
 }
 CLOSED_ON_BOARD = 50
 _MEMORY_NOTICES = {
@@ -973,9 +985,105 @@ def register_mission_pages(app, core) -> None:
             if error.code == "disabled":
                 return shell("mission_detail.html", page="missions", disabled=True, notice=None)
             refuse(error)
+        card = None
+        if mission["tier"] not in ("observe", "propose") and mission["status"] in (
+                "awaiting_decision", "paused_tripwire", "needs_operator", "recovery_required", "rollback_pending"):
+            try:
+                card = core("mission.approval_card", {"mission_id": mission_id})
+            except RpcError:
+                card = None          # an unavailable card hides the controls; it never blocks reading the mission
         return shell("mission_detail.html", page="missions", disabled=False, m=mission, events=events,
-                     view=view, closed=mission["status"] in TERMINAL_STATUSES,
+                     view=view, closed=mission["status"] in TERMINAL_STATUSES, card=card,
                      notice=notice_for(_MISSION_NOTICES))
+
+    def mission_action(mission_id, method, extra, done):
+        """One operator action on a mission. The operator is `g.operator` (the authenticated dashboard identity); the form
+        supplies no identity. `elevated` is True only when THIS request holds a live elevated session."""
+        if MISSION_ID_RE.fullmatch(mission_id) is None:
+            abort(404)
+        elevated = app.elevated_operator() is not None
+        try:
+            core(method, {"mission_id": mission_id, "operator": g.operator, **extra(elevated)})
+            if elevated:
+                app.elevation_acted()
+            notice = done
+        except RpcError as error:
+            if error.code == "bad_request":
+                abort(400)
+            notice = error.code if error.code in ("stale", "elevation_required", "unavailable", "invalid_grant",
+                                                  "not_found", "disabled") else "refused"
+        return redirect(url_for("mission_page", mission_id=mission_id, notice=notice))
+
+    @app.post("/missions/<mission_id>/approve")
+    def mission_approve(mission_id):
+        return mission_action(mission_id, "mission.approve", lambda elevated: {
+            "phase": request.form.get("phase", ""), "grant_hash": request.form.get("grant_hash", ""),
+            "elevated": elevated}, "approved")
+
+    @app.post("/missions/<mission_id>/deny")
+    def mission_deny(mission_id):
+        return mission_action(mission_id, "mission.deny",
+                              lambda elevated: {"grant_hash": request.form.get("grant_hash", "")}, "denied")
+
+    @app.post("/missions/<mission_id>/resume")
+    def mission_resume(mission_id):
+        return mission_action(mission_id, "mission.resume", lambda elevated: {}, "resumed")
+
+    @app.post("/missions/<mission_id>/rollback")
+    def mission_rollback(mission_id):
+        return mission_action(mission_id, "mission.rollback",
+                              lambda elevated: {"ack_drift": request.form.get("ack_drift") == "1"}, "rolled_back")
+
+    @app.post("/missions/<mission_id>/takeover")
+    def mission_takeover(mission_id):
+        return mission_action(mission_id, "mission.takeover", lambda elevated: {}, "taken_over")
+
+    @app.get("/missions/standing")
+    def standing_page():
+        try:
+            listing = core("standing.list", {"include_inactive": request.args.get("all") == "1"})
+        except RpcError as error:
+            if error.code in ("disabled", "unavailable"):
+                return shell("mission_standing.html", page="missions", disabled=True, notice=None, standing=None)
+            raise
+        return shell("mission_standing.html", page="missions", disabled=False, standing=listing["standing_grants"],
+                     notice=notice_for(_MISSION_NOTICES))
+
+    @app.post("/missions/standing")
+    def standing_create():
+        def listed(name):
+            return [x.strip() for x in request.form.get(name, "").split(",") if x.strip()]
+        try:
+            hours = int(request.form.get("hours", ""))
+        except ValueError:
+            abort(400)
+        deny = listed("deny")
+        elevated = app.elevated_operator() is not None
+        try:
+            core("standing.create", {
+                "operator": g.operator, "scope": {"stacks": listed("stacks"), "services": listed("services")},
+                "ttl_s": hours * 3600, "elevated": elevated, **({"window": {"deny": deny}} if deny else {})})
+            if elevated:
+                app.elevation_acted()
+            notice = "standing_created"
+        except RpcError as error:
+            if error.code == "bad_request":
+                abort(400)
+            notice = error.code if error.code in ("elevation_required", "unavailable", "disabled") else "refused"
+        return redirect(url_for("standing_page", notice=notice))
+
+    @app.post("/missions/standing/<standing_id>/revoke")
+    def standing_revoke(standing_id):
+        if re.fullmatch(r"SG-[0-9]{1,6}-v[0-9]{1,4}", standing_id) is None:
+            abort(404)
+        try:
+            core("standing.revoke", {"operator": g.operator, "standing_id": standing_id})
+            notice = "standing_revoked"
+        except RpcError as error:
+            if error.code == "bad_request":
+                abort(400)
+            notice = error.code if error.code in ("not_found", "unavailable", "disabled") else "refused"
+        return redirect(url_for("standing_page", notice=notice))
 
     @app.post("/missions/<mission_id>/cancel")
     def mission_cancel(mission_id):

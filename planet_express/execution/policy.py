@@ -16,9 +16,12 @@ RISK_LEVELS = ("R0", "R1", "R2", "R3", "R4")
 OPERATOR_ORIGINS = frozenset({"telegram", "telegram-direct", "dashboard", "dashboard-direct"})
 RUNBOOK_ORIGINS = frozenset({
     "telegram", "telegram-direct", "dashboard", "dashboard-direct", "incident", "chat",
-    "planner", "zoidberg", "system", "install", "amy",
+    "planner", "zoidberg", "system", "install", "amy", "mission",
 })
 DIRECT_RUNBOOK_ORIGINS = frozenset({"telegram-direct", "dashboard-direct"})
+# `mission` (v4) is deliberately absent from LIMIT_EXEMPT_ORIGINS and from the automatic exceptions inside
+# `decide_runbook`: a mission's typed step obeys T24's attempt limits and is never unattended. Its mutating steps run only
+# under the mission's own approval row (see `decide_runbook(mission_approved=...)`).
 # Origins whose runs are not counted by T24's attempt limits. Operator origins, because a human
 # asking for something is the gate the limits stand in for — and `rollback`, because an undo is the
 # safety valve: you always roll back something that just happened, so a cooldown on the target
@@ -109,8 +112,14 @@ def allows_direct_request(risk: str, origin: str, *,
 
 def decide_runbook(
     runbook: runbooks.Runbook, origin: str, *, autonomy: AutonomyConfig | None = None,
+    mission_approved: bool = False,
 ) -> RunbookDecision:
-    """Apply the existing risk policy to a fully validated multi-step runbook."""
+    """Apply the existing risk policy to a fully validated multi-step runbook.
+
+    `mission_approved` is only ever read for origin `mission`, and only the missions package may compute it
+    (`missions.approvals.mission_step_approved`): True means a `mission_approvals` row exists for the mission's CURRENT grant
+    hash. A mission's mutating typed step without it is refused outright (it never becomes an unrelated v3 approval card);
+    with it, the mission approval is the approval, so the step is allowed without a second card. It is never automatic."""
     autonomy = config.AUTONOMY if autonomy is None else autonomy
     if origin not in RUNBOOK_ORIGINS:
         return RunbookDecision(False, False, False, None, f"unknown origin {origin!r}", [])
@@ -132,6 +141,17 @@ def decide_runbook(
         return RunbookDecision(
             False, False, False, computed_risk,
             f"runbook is {computed_risk}: never allowed", pairs,
+        )
+    if origin == "mission":
+        if computed_risk != "R0" and not mission_approved:
+            return RunbookDecision(
+                False, False, False, computed_risk,
+                "a mission's mutating step needs an approval for the mission's current grant hash", pairs,
+            )
+        if computed_risk == "R0":
+            return RunbookDecision(True, False, False, computed_risk, "R0: a read from a mission", pairs)
+        return RunbookDecision(
+            True, False, False, computed_risk, f"{computed_risk}: covered by the mission's approval", pairs,
         )
     if origin in DIRECT_RUNBOOK_ORIGINS:
         if not allows_direct_request(computed_risk, origin, autonomy=autonomy):

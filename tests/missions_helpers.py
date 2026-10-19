@@ -50,9 +50,20 @@ def with_default_plan(grant: Grant) -> Grant:
     return Grant.model_validate(body)
 
 
+def add_incident(store: Store, incident_id: str = "c" * 12) -> str:
+    """A real incident row (missions.incident_id is a foreign key to it)."""
+    with store._write() as conn:
+        conn.execute("INSERT OR IGNORE INTO incident_reconciliations VALUES ('scan1', 'ts', 1, 1)")
+        conn.execute("INSERT INTO incidents VALUES (?, ?, 1, 'container_health', 'media/plex', 'open', "
+                     "'failing', 'HIGH', 'plex is unhealthy', '{}', 'scan1', 1, 1, NULL, 1)",
+                     (incident_id, "fp-" + incident_id))
+    return incident_id
+
+
 def new_mission(ms: MissionStore, grant: Grant | None = None, **kw):
     grant = with_default_plan(grant or repair_grant())
-    mission = ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s",
+    origin = kw.pop("origin", "operator")
+    mission = ms.create_mission(title="t", origin=origin, grant=grant, goal="g", success_criteria="s",
                                 runtime="fake", **kw)
     if grant.verification.plan_sha256 == DEFAULT_PLAN.hash():
         mission = ms.set_verification_plan(mission.id, DEFAULT_PLAN)

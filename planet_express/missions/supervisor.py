@@ -1,4 +1,4 @@
-"""The mission Supervisor (contract §11) for Observe/Propose missions.
+"""The mission Supervisor (contract §11) for Observe/Propose missions and, from slice 7, Repair missions.
 
 It owns spawning, the brief, budgets, heartbeats, and the order of operations at the end of a session:
 
@@ -6,7 +6,13 @@ It owns spawning, the brief, budgets, heartbeats, and the order of operations at
 
 `is_empty()` is the sole "provably dead" predicate. Nothing here requests a terminal (or any other)
 transition on a runtime's say-so, a timeout or a status report. Observe/Propose sessions can never enter
-`executing`; a mutating tier is refused at `start()`.
+`executing`; a mutating tier is refused at `start()` unless the daemon wired the checkpoint service, the tripwire monitor and
+the verifier (slice 7a), the side-door gate is closed and the mission is approved.
+
+A Repair mission waits in `awaiting_decision` for its approval rows. When the one execution predicate holds, `start()` takes the
+checkpoint (refused without a backup or baseline), captures the tripwire baseline, and only then issues the session (which takes
+the mission into `executing`). When the session is provably dead the post-change manifest is captured, and the end of the session
+is decided from host state: a result goes to verification, anything else is classified by `recovery` and never replayed.
 
 The Supervisor is poll-driven and holds no thread: `poll(mission_id)` advances one session by one step, so
 it is deterministic under test. Per-run state lives in memory, but everything that decides a transition is
@@ -38,7 +44,7 @@ from planet_express.memory import store as memory_store
 from planet_express.memory.models import Card
 from planet_express.memory.retrieval import render_card, retrieve
 
-from . import artifacts, leases, recovery
+from . import approvals, artifacts, leases, recovery
 from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
@@ -52,7 +58,13 @@ from .runtime import (
     RunContext,
 )
 from .sessions import SessionRow, issue_session, set_leader_pid
-from .state import TERMINAL, IllegalTransition, MissionNotFound, transition
+from .state import (
+    TERMINAL,
+    IllegalTransition,
+    MissionNotFound,
+    transition,
+    transition_in_txn,
+)
 from .store import MissionStore
 
 log = logging.getLogger(__name__)
@@ -65,6 +77,10 @@ VERIFY_WORKERS = 2            # verifications run on their own small pool, never
 VERIFY_SHUTDOWN_WAIT_S = 5.0  # shutdown waits at most this long for in-flight verifications
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
 MAX_MEMORY_HITS = 20
+MAX_DECISION_REQUESTS = 5       # worker-raised decision cards per mission; they never approve anything
+MAX_DECISION_TEXT = 1000
+MAX_OPTION_TEXT = 120
+MAX_OPTIONS = 6
 
 
 class MissionsDisabled(RuntimeError):
@@ -78,6 +94,15 @@ class UnsupportedTier(RuntimeError):
 class RepairRefused(UnsupportedTier):
     """A mutating-tier start refused because a side door around the worker boundary is open (brief 6.8), or because
     nobody could say it is closed. A subclass of UnsupportedTier: mutating tiers were already refused here."""
+
+
+class RepairNotReady(RepairRefused):
+    """A Repair start that cannot happen yet for a reason that may clear by itself (no approval, the monitor is not running, the
+    side doors are open): the mission waits and the poll loop asks again. Not counted as a failed start."""
+
+
+class ResumeRefused(RuntimeError):
+    """An operator action on a tripwire card that cannot be taken now (the message says why and is safe to show)."""
 
 
 class ProposalOnly(RuntimeError):
@@ -122,6 +147,7 @@ class _Run:
     stop_socket: Callable[[], None] | None = None
     brief: str = ""
     submitted: AgentResult | None = None      # a result the worker handed in over the socket
+    paused_at: float | None = None            # a tripwire pause is not session time: the wall budget does not run meanwhile
 
 
 def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
@@ -187,8 +213,12 @@ class Supervisor:
                  worker_env: dict[str, str] | None = None, max_brief_bytes: int = DEFAULT_MAX_BYTES,
                  lease_ttl_s: int = LEASE_TTL_S, socket_provider: "SocketProvider | None" = None,
                  preflight: Callable[[], Any] | None = None, tool_broker: Any = None,
-                 repair_gate: Callable[[], Any] | None = None, verifier: Any = None):
+                 repair_gate: Callable[[], Any] | None = None, verifier: Any = None,
+                 checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None):
         self.store = store
+        self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
+        self.tripwire = tripwire                      # `tripwire.TripwireMonitor`; None: no Repair mission can start
+        self.docker_proxy = docker_proxy              # slice 7b: `.resume(mission_id, grant_hash)`; None: nothing to re-enable
         self.verifier = verifier                      # `verify.runner.Verifier`; None: a verifying mission goes to the operator
         self.repair_gate = repair_gate                # side-door report (brief 6.8); None means a repair start is refused
         self.tool_broker = tool_broker                # `missions.tools.ToolBroker`; None: every tool call is refused
@@ -204,6 +234,7 @@ class Supervisor:
         self.clock = clock
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self._start_failures: dict[str, int] = {}
+        self._waiting: dict[str, str] = {}               # mission id -> the last "cannot start yet" reason noted
         self.artifact_dir = Path(artifact_dir) if artifact_dir else store.path.parent / "mission-artifacts"
         self.workspace_dir = Path(workspace_dir) if workspace_dir else store.path.parent / "mission-workspaces"
         self.memory_provider = memory_provider or (lambda m: default_memory_cards(store, m))
@@ -270,7 +301,9 @@ class Supervisor:
         mission = self.ms.get_mission(mission_id)
         if mission.tier not in ("observe", "propose"):
             self.require_repair_preconditions()
-            raise UnsupportedTier(f"{mission.tier} missions are not run by this supervisor")
+            if mission.tier != "repair" or not self.mutating_ready:
+                raise UnsupportedTier(f"{mission.tier} missions are not run by this supervisor")
+            return self._start_repair(mission)
         if mission_id in self._runs:
             raise ValueError(f"{mission_id} already has a running session")
         if mission.status != "queued":
@@ -279,20 +312,58 @@ class Supervisor:
             raise IllegalTransition(f"{mission_id} has a cancel requested")
         self._launch(mission)
 
+    @property
+    def mutating_ready(self) -> bool:
+        """Slice 7a: the three things a Repair mission cannot run without are wired. Missing any, a mutating start is refused."""
+        return self.checkpoint is not None and self.tripwire is not None and self.verifier is not None
+
+    def _start_repair(self, mission: Mission) -> None:
+        """Checkpoint, tripwire baseline, then the session. Every refusal leaves the mission in `awaiting_decision` with
+        nothing launched. The approval predicate is asked first and again, atomically, by `issue_session`."""
+        if mission.id in self._runs:
+            raise ValueError(f"{mission.id} already has a running session")
+        if mission.status != "awaiting_decision":
+            raise IllegalTransition(f"{mission.id} is {mission.status}, not awaiting_decision")
+        if mission.cancel_requested_at is not None:
+            raise IllegalTransition(f"{mission.id} has a cancel requested")
+        verdict = approvals.execution_predicate(self.store, mission.id)
+        if not verdict.ok:
+            raise RepairNotReady("; ".join(verdict.reasons)[:300])
+        if not getattr(self.tripwire, "running", False):
+            # A Repair session without a running monitor is a defect: nothing would pause it. The runner restarts the
+            # monitor on its next loop; the start waits for that.
+            raise RepairNotReady("the tripwire monitor is not running")
+        if mission.checkpoint_id is None:
+            from .checkpoint import CheckpointScope
+            grant = mission.grant()
+            scope = CheckpointScope.from_grant_scope(grant.scope, units=tuple(r.unit for r in grant.sudo.rules))
+            try:
+                created = self.checkpoint.create(mission.id, scope)
+            except Exception as exc:                  # noqa: BLE001 - no checkpoint, no mutation (S5: backup floor, baseline)
+                self._note(mission.id, {"checkpoint_refused": type(exc).__name__, "why": str(exc)[:200]})
+                raise RepairRefused(f"no checkpoint could be taken ({type(exc).__name__})") from None
+            self._note(mission.id, {"checkpoint_taken": str(created), "no_backup": bool(getattr(created, "no_backup", False))})
+        try:
+            self.tripwire.begin(mission.id)
+        except Exception as exc:                      # noqa: BLE001 - a baseline that cannot be captured means no session
+            self._note(mission.id, {"baseline_refused": type(exc).__name__, "why": str(exc)[:200]})
+            raise RepairRefused(f"the tripwire baseline could not be captured ({type(exc).__name__})") from None
+        self._launch(self.ms.get_mission(mission.id))
+
     def require_repair_preconditions(self) -> None:
         """Brief 6.8: a Repair-tier (or higher) worker starts only if every side door is closed. Asked afresh every time,
         because a door can open between missions. A gate that is missing, crashes or returns anything but a passing
         report refuses; Observe and Propose never come here."""
         if self.repair_gate is None:
-            raise RepairRefused("the side-door preflight is not configured, so no mutating mission may start")
+            raise RepairNotReady("the side-door preflight is not configured, so no mutating mission may start")
         try:
             report = self.repair_gate()
             ok = bool(report.ok)
             reason = None if ok else (report.reason or "a side door is open")
         except Exception as exc:                   # noqa: BLE001 - a gate that cannot run is a closed gate
-            raise RepairRefused(f"the side-door preflight could not run ({type(exc).__name__})") from None
+            raise RepairNotReady(f"the side-door preflight could not run ({type(exc).__name__})") from None
         if not ok:
-            raise RepairRefused(reason)
+            raise RepairNotReady(reason)
 
     def _launch(self, mission: Mission) -> None:
         if not self.launcher_ready():          # also on a restart after a crash: proposal-only means no session at all
@@ -386,8 +457,12 @@ class Supervisor:
         grant = mission.grant()
         budgets = (f"Budgets: {grant.budgets.wall_s}s wall time, {grant.budgets.tool_calls} tool calls, "
                    f"{grant.budgets.output_bytes} output bytes.")
-        out = [f"This mission is {mission.tier}: observe and propose only; make no changes to the host.",
-               "Stay inside the scope above; never touch a protected resource.", budgets]
+        if mission.tier in ("observe", "propose"):
+            first = f"This mission is {mission.tier}: observe and propose only; make no changes to the host."
+        else:
+            first = (f"This mission is {mission.tier}: you may change only what the grant's scope names, and a verification "
+                     "plan Core agreed beforehand decides whether you succeeded, not your own report.")
+        out = [first, "Stay inside the scope above; never touch a protected resource.", budgets]
         out += [f"Excluded: {x}" for x in grant.exclusions]
         return out
 
@@ -410,10 +485,22 @@ class Supervisor:
         if run.runtime is None or run.cs is None:
             return self._kill_and_advance(run, "crash")      # a run that never started cannot be trusted
         mission = self.ms.get_mission(run.mission_id)
-        if mission.status != "investigating":
-            return self._kill_and_advance(run, "state_changed")
         if mission.cancel_requested_at is not None:
             return self._kill_and_advance(run, "cancel")
+        expected = "executing" if mission.tier == "repair" else "investigating"
+        if mission.tier == "repair" and mission.status == "paused_tripwire":
+            # The monitor froze the session and paused the mission: leave both alone (no kill, no budget clock) until an
+            # operator resumes, rolls back, takes over or cancels. The lease is kept alive so a resume is not fenced out.
+            if run.paused_at is None:
+                run.paused_at = float(self.clock())
+            with contextlib.suppress(leases.LeaseLost):
+                leases.heartbeat(self.store, run.mission_id, self.lease_ttl_s)
+            return
+        if mission.status != expected:
+            return self._kill_and_advance(run, "state_changed")
+        if run.paused_at is not None:
+            run.started_at += float(self.clock()) - run.paused_at
+            run.paused_at = None
         try:
             raw = run.runtime.status(run.handle)
             update = AgentUpdate.model_validate(raw.model_dump() if isinstance(raw, AgentUpdate) else raw)
@@ -516,6 +603,139 @@ class Supervisor:
             elif not self._adopt(self.ms.get_mission(mission_id), "cancel"):
                 self._settle_without_session(mission_id, "cancel")
 
+    # ── operator actions on a Repair mission (the actor is the authenticated operator, built by the caller) ──
+    @staticmethod
+    def _operator(actor: str) -> str:
+        if not actor.startswith("operator:") or len(actor) <= len("operator:"):
+            raise ValueError("this is an operator decision: pass actor='operator:<name>'")
+        return actor
+
+    def _repair_mission(self, mission_id: str, *statuses: str) -> Mission:
+        mission = self.ms.get_mission(mission_id)
+        if mission.tier != "repair":
+            raise ResumeRefused(f"{mission_id} is not a repair mission")
+        if mission.status not in statuses:
+            raise ResumeRefused(f"{mission_id} is {mission.status}; this action needs {' or '.join(statuses)}")
+        return mission
+
+    @_per_mission
+    def resume(self, mission_id: str, actor: str) -> str:
+        """Operator 'resume' on a tripwire card. In this order, every step before the thaw able to refuse: the grant hash is
+        re-authorised (the execution predicate), the tripwire baseline is re-taken (the operator has seen what tripped it), the
+        mission goes back to `executing`, the brokered endpoints and the session's Docker proxy are re-opened, and only then is
+        the cgroup thawed. A failure after the transition freezes and pauses it again. After a Core restart there is no
+        supervised session to thaw, so a resume is refused (roll back, take over or cancel instead)."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        mission = self._repair_mission(mission_id, "paused_tripwire")
+        run = self._runs.get(mission_id)
+        if run is None or run.phase != "running" or run.cs is None:
+            raise ResumeRefused("no supervised session for this mission (Core restarted): roll back, take over or cancel")
+        if mission.cancel_requested_at is not None:
+            raise ResumeRefused("a cancel is already requested")
+        verdict = approvals.execution_predicate(self.store, mission_id)
+        if not verdict.ok:
+            raise ResumeRefused("the approval no longer covers this grant: " + "; ".join(verdict.reasons)[:200])
+        if self.tripwire is None or not getattr(self.tripwire, "running", False):
+            raise ResumeRefused("the tripwire monitor is not running")
+        try:
+            self.tripwire.begin(mission_id)               # accept what the operator reviewed as the new baseline
+        except Exception as exc:                          # noqa: BLE001
+            raise ResumeRefused(f"the tripwire baseline could not be re-taken ({type(exc).__name__})") from None
+        try:
+            transition(self.store, mission_id, "executing", actor)
+        except IllegalTransition as exc:
+            raise ResumeRefused(str(exc)[:200]) from None
+        try:
+            restore = getattr(self.tool_broker, "restore", None)
+            if restore is not None:
+                restore(mission_id)
+            if self.docker_proxy is not None:
+                self.docker_proxy.resume(mission_id, mission.grant_hash)
+            self.containment.thaw(run.cs)
+        except Exception as exc:                          # noqa: BLE001 - back to paused, frozen and closed
+            self._pause_again(mission_id, run, actor, type(exc).__name__)
+            raise ResumeRefused(f"the session could not be resumed ({type(exc).__name__}); it stays paused") from None
+        if run.paused_at is not None:
+            run.started_at += float(self.clock()) - run.paused_at      # the pause was not session time
+            run.paused_at = None
+        self.ms.append_event(mission_id, "decision", actor, {"event": "mission.resumed", "grant_hash": mission.grant_hash})
+        return "executing"
+
+    def _pause_again(self, mission_id: str, run: _Run, actor: str, why: str) -> None:
+        with contextlib.suppress(Exception):
+            revoke = getattr(self.tool_broker, "revoke", None)
+            if revoke is not None:
+                revoke(mission_id)
+        with contextlib.suppress(Exception):
+            if run.cs is not None:
+                self.containment.freeze(run.cs)
+        try:
+            now = int(self.store._clock())
+            with self.store._write() as conn:
+                transition_in_txn(conn, mission_id, "paused_tripwire", "core", now)
+                insert_event(conn, mission_id, "decision", "core", {"event": "mission.resume_failed", "by": actor, "why": why}, now)
+        except Exception:                                 # noqa: BLE001
+            log.exception("could not re-pause %s after a failed resume; killing its session", mission_id)
+            if run.cs is not None:
+                with contextlib.suppress(Exception):
+                    self.containment.kill(run.cs)
+
+    @_per_mission
+    def roll_back(self, mission_id: str, actor: str, *, ack_drift: bool = False) -> Any:
+        """Operator 'roll back'. A paused mission goes through the monitor (kill, wait for empty, capture, restore). A
+        mission the session has already left (needs_operator, recovery_required, rollback_pending, verifying) is restored here
+        after proving no session is alive. The restore's own refusals (drift, missing manifest) are reported and left with
+        the operator; `ack_drift` is the operator's explicit acknowledgement that overrides a drift refusal."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        mission = self._repair_mission(mission_id, "paused_tripwire", "needs_operator", "recovery_required",
+                                       "rollback_pending", "verifying")
+        if self.checkpoint is None or not mission.checkpoint_id:
+            raise ResumeRefused("this mission has no checkpoint to restore")
+        if mission.status == "paused_tripwire":
+            if ack_drift:
+                raise ResumeRefused("acknowledging drift is for a restore the first attempt refused; roll back first")
+            report = self.tripwire.roll_back(mission_id, actor)
+        else:
+            self._stop_session_for_restore(mission_id)
+            self.checkpoint.capture_post(mission.checkpoint_id)
+            if mission.status != "rollback_pending":
+                transition(self.store, mission_id, "rollback_pending", actor)
+            report = self.checkpoint.restore(mission.checkpoint_id, ack_drift=ack_drift, actor=actor)
+            if report.ok:
+                transition(self.store, mission_id, "rolled_back", actor)
+        if self.ms.get_mission(mission_id).status == "rolled_back":
+            with contextlib.suppress(Exception):
+                recovery.close_open_intents(self.ms, mission_id, "rolled_back", actor=ACTOR)
+        return report
+
+    def _stop_session_for_restore(self, mission_id: str) -> None:
+        run = self._runs.get(mission_id)
+        if run is not None and run.phase == "running":
+            raise ResumeRefused("the session is still running: cancel or take over first")
+        cs = run.cs if run is not None else self._last_session(mission_id)
+        if cs is not None and not self.containment.is_empty(cs):
+            self.containment.kill(cs)
+            if not self.containment.is_empty(cs):
+                raise ResumeRefused("the session is not provably dead")
+        if self.ms.live_session(mission_id) is not None and cs is None:
+            raise ResumeRefused("a live session exists that cannot be located")
+
+    @_per_mission
+    def take_over(self, mission_id: str, actor: str) -> None:
+        """Operator 'take over': stop the worker for good and hand the host to the operator (`needs_operator`, with a
+        `takeover` event). Nothing is rolled back and nothing is verified."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        mission = self._repair_mission(mission_id, "paused_tripwire", "executing", "recovery_required")
+        self.ms.append_event(mission_id, "takeover", actor, {"event": "mission.takeover", "from": mission.status})
+        run = self._runs.get(mission_id)
+        if run is not None:
+            self._kill_and_advance(run, "takeover")
+        elif not self._adopt(mission, "takeover"):
+            self._settle_repair(self.ms.get_mission(mission_id), "takeover", None)
+
     def _kill_and_advance(self, run: _Run, reason: str) -> None:
         self._begin_kill(run, reason)
         self._advance(run)
@@ -548,11 +768,21 @@ class Supervisor:
                 self._note(run.mission_id, {"waiting_for_empty": run.reason})
             return
         self._revoke(run)
+        self._capture_post(run.mission_id)             # the session is provably dead: only now is the post-change manifest honest
         if run.cs is not None:
             self.containment.cleanup(run.cs)
         self._runs.pop(run.mission_id, None)
         self._reap_session(run)
         self._settle(run)
+
+    def _capture_post(self, mission_id: str) -> None:
+        mission = self.ms.get_mission(mission_id)
+        if mission.tier != "repair" or not mission.checkpoint_id or self.checkpoint is None:
+            return
+        try:
+            self.checkpoint.capture_post(mission.checkpoint_id)
+        except Exception as exc:                       # noqa: BLE001 - the restore refuses without it and says so
+            self._note(mission_id, {"capture_post_failed": type(exc).__name__})
 
     def _reap_session(self, run: _Run) -> None:
         """The session is provably dead and its cgroup is gone: stop its socket, remove its workspace and release its
@@ -626,6 +856,8 @@ class Supervisor:
             if mission.cancel_requested_at is not None or reason == "cancel":
                 self._adopt(mission, "cancel")           # a cancel must still reach the replacement
             return
+        if mission.tier == "repair":
+            return self._settle_repair(mission, reason, run.result)
         if mission.status == "verifying" and reason == "result":
             self.verify_and_close(mission.id)            # the session is dead: Core's own verification decides
             return
@@ -648,6 +880,51 @@ class Supervisor:
             else:
                 self._note(mission.id, {"retries_exhausted": reason})
         self._settle_without_session(mission.id, reason, run.result)
+
+    def _settle_repair(self, mission: Mission, reason: str, result: AgentResult | None) -> None:
+        """The end of a Repair session, decided from the store and the host, never from the runtime. A result moves the mission
+        to verification (the agent's report decides nothing). A cancel cancels. A take-over hands the host to the operator.
+        Anything else (crash, budget, lease loss, restart) is classified from host state and is NEVER replayed: there is no
+        automatic restart of a mutating session."""
+        if reason == "cancel" or mission.cancel_requested_at is not None:
+            return self._settle_without_session(mission.id, "cancel")
+        if reason == "takeover":
+            try:
+                transition(self.store, mission.id, "needs_operator", ACTOR)
+            except IllegalTransition as exc:
+                self._note(mission.id, {"transition_refused": "needs_operator", "why": str(exc)[:200]})
+            return
+        if mission.status == "verifying":
+            self.verify_and_close(mission.id)            # a restart lands here: verification is read-only, so run it again
+            return
+        if mission.status != "executing":
+            # paused by a tripwire, or someone else already moved it: the session is dead and cleaned up; leave the state
+            self._note(mission.id, {"session_ended": reason, "left_in": mission.status})
+            return
+        if reason == "result" and result is not None:
+            try:
+                transition(self.store, mission.id, "verifying", ACTOR)
+            except IllegalTransition as exc:
+                self._note(mission.id, {"transition_refused": "verifying", "why": str(exc)[:200]})
+                return
+            self.verify_and_close(mission.id)
+            return
+        self._classify_and_apply(mission, reason)
+
+    def _classify_and_apply(self, mission: Mission, reason: str) -> None:
+        manifest = host = None
+        if mission.checkpoint_id and self.checkpoint is not None:
+            try:
+                manifest = self.checkpoint.manifest(mission.checkpoint_id)
+                host = recovery.collect_host_state(self.checkpoint, manifest)
+            except Exception as exc:                   # noqa: BLE001 - an unreadable host is classified as such
+                self._note(mission.id, {"host_state_unreadable": type(exc).__name__})
+                manifest = host = None
+        c = recovery.classify(mission, host, manifest, self.ms.events(mission.id))
+        self._note(mission.id, {"session_ended": reason, "classified": c.state})
+        final = recovery.apply_classification(self.ms, mission.id, c, actor=ACTOR)
+        if final == "verifying":
+            self.verify_and_close(mission.id)
 
     def _settle_without_session(self, mission_id: str, reason: str, result: AgentResult | None = None) -> None:
         mission = self.ms.get_mission(mission_id)
@@ -759,6 +1036,8 @@ class Supervisor:
                 self._start_failures.pop(mission.id, None)
             except Exception as exc:
                 self._start_failed(mission.id, exc)
+        if self.mutating_ready:
+            self._start_approved_repairs(ready)
         with contextlib.suppress(Exception):
             self.sweep_uids()
         try:
@@ -770,6 +1049,33 @@ class Supervisor:
                     self.poll(mission_id)
                 except Exception:
                     log.exception("mission %s poll failed", mission_id)
+
+    def _start_approved_repairs(self, ready: bool) -> None:
+        """Repair missions wait in `awaiting_decision` for approval. Each tick, those whose execution predicate holds are started.
+        A start that cannot happen yet (the monitor or a side door not ready) just waits and is noted once per reason; any
+        other refusal is a failed start and, after START_ATTEMPTS, hands the mission to the operator."""
+        for mission in self.ms.list_missions("awaiting_decision"):
+            if mission.tier != "repair" or mission.id in self._runs:
+                continue
+            if mission.cancel_requested_at is not None:
+                with contextlib.suppress(Exception):
+                    self._settle_without_session(mission.id, "cancel")
+                continue
+            if not ready or not approvals.execution_predicate(self.store, mission.id).ok:
+                continue
+            try:
+                self.start(mission.id)
+                self._start_failures.pop(mission.id, None)
+                self._waiting.pop(mission.id, None)
+            except RepairNotReady as exc:
+                self._wait_noted(mission.id, str(exc))
+            except Exception as exc:                  # noqa: BLE001 - one mission's start never stops the others
+                self._start_failed(mission.id, exc)
+
+    def _wait_noted(self, mission_id: str, why: str) -> None:
+        if self._waiting.get(mission_id) != why:
+            self._waiting[mission_id] = why
+            self._note(mission_id, {"start_waiting": why[:300]})
 
     def _start_failed(self, mission_id: str, exc: Exception) -> None:
         count = self._start_failures.get(mission_id, 0) + 1
@@ -814,6 +1120,9 @@ class Supervisor:
         for mission in self.ms.list_missions():
             if mission.id in self._runs or mission.status in TERMINAL or mission.status in ("draft", "queued"):
                 continue
+            if mission.tier == "repair":
+                self._recover_repair(mission)
+                continue
             if mission.tier not in ("observe", "propose"):
                 continue
             reason = "cancel" if mission.cancel_requested_at is not None else "recover"
@@ -829,6 +1138,28 @@ class Supervisor:
         with contextlib.suppress(Exception):
             self.sweep_uids()                 # a crash between launch and release leaves held uids behind
         return acted
+
+    def _recover_repair(self, mission: Mission) -> None:
+        """A Repair mission found in flight at startup. Nothing is replayed and nothing restarts by itself:
+        - paused_tripwire: the monitor's own `recover()` re-freezes it; the supervisor leaves it alone;
+        - executing: whatever its last session left is killed and, once provably empty, the end is classified from host state;
+        - verifying: a leftover session is killed, then verification (read-only) runs again;
+        - needs_operator / recovery_required / rollback_pending: a leftover session is killed, the state is the operator's;
+        - awaiting_decision / blocked: no session exists, nothing to do."""
+        if not self.mutating_ready or mission.status in ("awaiting_decision", "blocked", "paused_tripwire"):
+            return
+        reason = "cancel" if mission.cancel_requested_at is not None else "recover"
+        try:
+            with self._lock_for(mission.id):
+                adopted = self._adopt(mission, reason, only_if_live=mission.status != "executing")
+                if not adopted:
+                    if mission.status == "executing":
+                        self._settle_repair(mission, reason, None)     # no session left at all: classify from the host
+                    elif mission.status == "verifying" and reason != "cancel":
+                        self.verify_and_close(mission.id)
+        except Exception as exc:                       # noqa: BLE001 - one mission must not block the others
+            log.warning("recovering mission %s failed: %s", mission.id, type(exc).__name__)
+            self._note(mission.id, {"recover_failed": type(exc).__name__})
 
     def _adopt(self, mission: Mission, reason: str, *, only_if_live: bool = False) -> bool:
         """Take over a session this supervisor instance did not start: kill whatever its last session left in
@@ -887,6 +1218,21 @@ class Supervisor:
             run.tool_calls += 1
         run.output_bytes += size
         return {"ok": True}
+
+    @_per_session
+    def request_decision(self, session: SessionRow, summary: str, options: list[str]) -> dict:
+        """`mission.request_decision`: the worker asks the operator something. It records a CARD (a note event the surfaces
+        list) and does nothing else: no state changes, no approval row, no grant edit. A bounded number per session."""
+        run = self._live_run(session)
+        asked = sum(1 for e in self.ms.events(run.mission_id)
+                    if e.actor == "worker" and '"decision.requested"' in e.body_json)
+        if asked >= MAX_DECISION_REQUESTS:
+            raise RpcError("Refused", "unauthorized")
+        body = {"event": "decision.requested", "summary": summary[:MAX_DECISION_TEXT],
+                "options": [str(o)[:MAX_OPTION_TEXT] for o in options[:MAX_OPTIONS]], "session": session.id}
+        self.ms.append_event(run.mission_id, "note", "worker", body)
+        run.output_bytes += len(json.dumps(body))
+        return {"recorded": True}
 
     @_per_session
     def heartbeat(self, session: SessionRow) -> dict:
@@ -968,5 +1314,6 @@ def _candidate_card(mission_id: str, index: int, text: str, tags: list[str], now
                     source="inferred", created_at=now, evidence=[f"mission:{mission_id}"])
 
 
-__all__ = ["ExternalRecord", "MissionsDisabled", "ProposalOnly", "RepairRefused", "SocketProvider", "Supervisor",
+__all__ = ["ExternalRecord", "MissionsDisabled", "ProposalOnly", "RepairNotReady", "RepairRefused", "ResumeRefused",
+           "SocketProvider", "Supervisor",
            "UnsupportedTier", "default_memory_cards"]

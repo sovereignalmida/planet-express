@@ -24,6 +24,63 @@
   {% endif %}
 </section>
 
+{% if card %}
+<section class="panel" aria-label="Approval card">
+  <div class="panel-head-row"><h3>{{ 'TRIPWIRE PAUSE' if m.status == 'paused_tripwire' else 'APPROVAL CARD' }}</h3>
+    <span class="panel-head-note">grant {{ card.grant_hash[:8] }}{% if card.standing_grant_id %} · standing {{ card.standing_grant_id }}{% endif %}</span></div>
+  {% for w in card.warnings %}<div class="mc-notice" role="alert"><strong>{{ w.kind | upper }}</strong> {{ w.text }}</div>{% endfor %}
+  <dl class="mc-facts">
+    <dt>BACKUP</dt><dd>{{ 'covered' if card.backup.covered else 'NOT covered' }}{% if card.backup.acknowledged_no_backup %} · no-backup acknowledged{% endif %}{% if card.backup.state %} · {{ card.backup.state }}{% endif %}</dd>
+    <dt>SCOPE</dt><dd class="mc-pre">{{ card.scope | tojson(indent=1) }}</dd>
+    <dt>PROTECTED</dt><dd>{{ card.protected.count }} resources excluded{% if card.protected.exclusions %} · {{ card.protected.exclusions | join(', ') }}{% endif %}</dd>
+    <dt>BUDGETS</dt><dd>{{ card.budgets.wall_s }}s · {{ card.budgets.tool_calls }} tool calls · {{ card.budgets.output_bytes }} bytes · {{ card.budgets.retries }} retries</dd>
+    <dt>VERIFICATION</dt><dd class="mc-pre">{% for c in card.verification.checks %}{{ c.id }} ({{ c.check }}) {{ c.params | tojson }}
+{% endfor %}on failure: {{ card.verification.on_verify_fail }}</dd>
+    <dt>SUDO</dt><dd>{{ card.sudo.mode }}{% for r in card.sudo.rules %} · {{ r.unit }}: {{ r.actions | join('/') }}{% endfor %} · docker {{ card.docker }}</dd>
+    {% if card.credentials %}<dt>TOOLS</dt><dd>{{ card.credentials | join(', ') }}</dd>{% endif %}
+  </dl>
+  {% if m.status == 'awaiting_decision' %}
+  <h4>APPROVALS</h4>
+  {% for r in card.required %}
+  <form method="post" action="{{ url_for('mission_approve', mission_id=m.id) }}" class="mc-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="phase" value="{{ r.phase }}">
+    <input type="hidden" name="grant_hash" value="{{ r.bound }}">
+    <span class="status-chip{{ ' ok' if r.state == 'approve' }}">{{ r.phase }} · {{ r.state }}{{ ' · needs elevation' if r.elevated }}</span>
+    {% if r.state == 'pending' %}<button class="pe-btn" type="submit">APPROVE {{ r.phase | upper }}</button>{% endif %}
+  </form>
+  {% endfor %}
+  <form method="post" action="{{ url_for('mission_deny', mission_id=m.id) }}" class="mc-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="grant_hash" value="{{ card.grant_hash }}">
+    <button class="pe-btn warn" type="submit">DENY AND CLOSE</button>
+  </form>
+  {% endif %}
+  {% if card.tripwire %}
+  <dl class="mc-facts">
+    <dt>CAUSE</dt><dd>{{ card.tripwire.cause }}{% if card.tripwire.frozen %} · session frozen{% endif %}</dd>
+    <dt>CHANGES</dt><dd class="mc-pre">{{ card.tripwire.changes | tojson(indent=1) }}</dd>
+    <dt>ROLLBACK</dt><dd>{{ 'available' if card.tripwire.rollback.available else card.tripwire.rollback.reason }}</dd>
+  </dl>
+  {% endif %}
+  {% if m.status in ('paused_tripwire', 'needs_operator', 'recovery_required', 'rollback_pending') %}
+  <div class="mc-form">
+    {% if m.status == 'paused_tripwire' %}
+    <form method="post" action="{{ url_for('mission_resume', mission_id=m.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="pe-btn" type="submit">RESUME</button></form>
+    {% endif %}
+    {% if card.tripwire is none or card.tripwire.rollback.available %}
+    <form method="post" action="{{ url_for('mission_rollback', mission_id=m.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% if m.status != 'paused_tripwire' %}<label><input type="checkbox" name="ack_drift" value="1"> I accept overwriting what changed since</label>{% endif %}
+      <button class="pe-btn warn" type="submit">ROLL BACK</button></form>
+    {% endif %}
+    {% if m.status in ('paused_tripwire', 'recovery_required') %}
+    <form method="post" action="{{ url_for('mission_takeover', mission_id=m.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}"><button class="pe-btn warn" type="submit">TAKE OVER</button></form>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="panel" aria-label="Result">
   <div class="panel-head-row"><h3>RESULT</h3></div>
   {% if m.result.outcome or m.result.flags or m.result.verification %}

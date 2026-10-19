@@ -174,6 +174,12 @@ def test_plan_hash_mismatch_fails_closed(tmp_path):
 
 
 # ── standing grants ─────────────────────────────────────────────────────────
+def inc(ms, n=1):
+    """Keyword arguments for an incident-backed mission (standing grants cover those only)."""
+    from missions_helpers import add_incident
+    return {"origin": "incident", "incident_id": add_incident(ms.store, f"{n:012x}")}
+
+
 def standing(ms, now_plus=3600, tier="repair", scope=None):
     ms.create_standing_grant(grant_id="SG-1", scope=scope or {"stacks": ["media"], "hosts": ["local"]},
                              tier=tier, created_by="operator:me", expires_at=int(ms._now()) + now_plus)
@@ -182,7 +188,7 @@ def standing(ms, now_plus=3600, tier="repair", scope=None):
 def test_standing_grant_satisfies_without_approval_row(tmp_path):
     store, clock, ms, _ = setup(tmp_path)
     standing(ms)
-    m = new_mission(ms, standing_grant_id="SG-1")
+    m = new_mission(ms, standing_grant_id="SG-1", **inc(ms))
     assert ok(store, m)
     clock.t += 7200
     assert not ok(store, m)  # expired
@@ -191,12 +197,12 @@ def test_standing_grant_satisfies_without_approval_row(tmp_path):
 def test_standing_grant_revoked_or_out_of_scope(tmp_path):
     store, _, ms, _ = setup(tmp_path)
     standing(ms)
-    m = new_mission(ms, standing_grant_id="SG-1")
-    wide = new_mission(ms, repair_grant(scope={"stacks": ["media", "secrets"]}), standing_grant_id="SG-1")
+    m = new_mission(ms, standing_grant_id="SG-1", **inc(ms))
+    wide = new_mission(ms, repair_grant(scope={"stacks": ["media", "secrets"]}), standing_grant_id="SG-1", **inc(ms, 2))
     assert ok(store, m) and not ok(store, wide)
     ms.revoke_standing_grant("SG-1")
     assert not ok(store, m)
-    missing = new_mission(ms, standing_grant_id="SG-nope")
+    missing = new_mission(ms, standing_grant_id="SG-nope", **inc(ms, 3))
     assert not ok(store, missing)
 
 
