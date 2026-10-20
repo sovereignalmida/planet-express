@@ -18,7 +18,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
-from planet_express.missions.launcher.config import mos_conf_path, mos_helper_store_path
+from planet_express.missions.launcher.config import ancestor_problem, mos_launcher_paths
 from planet_express.setup.answers import FORBIDDEN_RISKS_BY_TIER, SetupAnswers
 from planet_express.setup.steps import CATALOGUE
 
@@ -491,8 +491,7 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
     return {"core_user": b.a.run_as, "flavour": "mos" if mos else "systemd",
             "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
             "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
-            **({"boot_script": f"{p['home']}/launcher-boot.sh", "conf": mos_conf_path(p["home"]),
-                                "helper_store": mos_helper_store_path(p["home"])} if mos else {})}
+            **(mos_launcher_paths(p["home"]) if mos else {})}
 
 
 def _launcher_paths(params: dict):
@@ -558,6 +557,23 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
                     f"{made.target} owned by {made.params['owner']} so the dashboard can edit the config. Put the config "
                     "in a directory of its own, or set up mission control after the install.")
                 return
+    if mos:
+        # The helper trusts a chain only if every directory is root-owned and unwritable by others. Report an ancestor
+        # that is not (on the real MOS VM /mnt/data belongs to uid mos) as a block with the exact fix; never relax it.
+        known = b.d["existing_pe"].get("ancestors", {})
+        for target in (paths.conf, paths.helper_store):
+            current, chain = os.path.dirname(target), []
+            while current != "/":
+                chain.append(current)
+                current = os.path.dirname(current)
+            for directory in reversed(chain):
+                if directory in known:
+                    uid, mode, is_link = known[directory]
+                    problem = ancestor_problem(directory, uid, mode, is_link)
+                    if problem:
+                        b.blocked.append(f"Mission control cannot be set up on this MOS host: {problem}. "
+                                         f"(Checked for {target}.) Setup does not change it for you; fix it, then plan again.")
+                        return
     shown = f"{params['uid_min']}-{params['uid_max']}"
     cgroup_path, cgroup_text, _ = steps["cgroup-tree"].wanted()
     text = {

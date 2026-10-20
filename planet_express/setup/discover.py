@@ -272,6 +272,10 @@ INSTALL_FILES = ("config.yaml", "planetexpress.env", "planetexpress-dashboard.en
                  "default/casa-planetexpress", "default/casa-dashboard", "launcher-boot.sh", "launch/launch.conf", "launch/pe-launch")
 
 
+def host_init_is_mos(facts: dict) -> bool:
+    return facts["host"]["init_system"] == "mos"
+
+
 def _existing_pe(env, storage: dict) -> dict:
     """Is Planet Express already here, and where? A systemd unit or /etc/default says where the
     install and its config actually are, which is not always the default path."""
@@ -429,6 +433,15 @@ def discover(env=None, *, repo_root: str | None = None, stacks_root: str | None 
         "privileges": _privileges(env),
     }
     facts["existing_pe"] = _existing_pe(env, facts["storage"])
+    if host_init_is_mos(facts) and hasattr(env, "ancestry"):
+        # Who owns the directories above where a MOS install keeps the launcher's files: the helper trusts only a
+        # root-owned chain, so the plan reports a block (with the fix) instead of failing later at apply.
+        ancestors = {}
+        for home in sorted({str(Path(c).parent) if c.endswith("/planet-express") else c
+                            for c in facts["storage"]["candidate_install_paths"]}):
+            ancestors.update(env.ancestry(f"{home}/launch/launch.conf"))
+        if ancestors:
+            facts["existing_pe"]["ancestors"] = ancestors
     facts["stacks"] = _stacks(env, roots, containers, facts["existing_pe"]["forbidden_stacks"])
     facts["checks"] = _checks(facts)
     counts = {s: sum(1 for c in facts["checks"] if c["status"] == s) for s in ("ok", "warn", "blocked")}

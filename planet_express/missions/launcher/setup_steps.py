@@ -38,6 +38,8 @@ from planet_express.missions.launcher.config import (
     SUDOERS_PATH,
     ConfError,
     LaunchConf,
+    ancestor_problem,
+    mos_launcher_paths,
 )
 
 SOURCE = Path(pe_launch.__file__)
@@ -193,12 +195,36 @@ def ensure_parent(path: str, mode: int, uid: int, gid: int, created: list[str]) 
         raise StepError(f"{path} exists and is not a directory")
 
 
+def _chain_fix(path: str, paths: Paths, file_ok: bool) -> str:
+    """When the helper's own walk refuses on ownership or mode, name the first directory it refuses and the exact fix."""
+    parts = [p for p in path.split("/") if p]
+    current = ""
+    for index in range(len(parts) + 1):
+        directory = current or "/"
+        if index == len(parts) and file_ok:
+            return ""
+        if paths.below != "/" and (paths.below == directory or paths.below.startswith(directory.rstrip("/") + "/")):
+            current = current + "/" + parts[index] if index < len(parts) else current
+            continue
+        try:
+            info = os.lstat(directory)
+        except OSError:
+            return ""
+        problem = ancestor_problem(directory, info.st_uid if info.st_uid != paths.owner_uid else 0, info.st_mode,
+                                   stat.S_ISLNK(info.st_mode))
+        if problem and (info.st_uid != paths.owner_uid or info.st_mode & 0o022 or stat.S_ISLNK(info.st_mode)):
+            return f" ({problem})"
+        if index < len(parts):
+            current = current + "/" + parts[index]
+    return ""
+
+
 def trusted_chain(path: str, paths: Paths) -> str | None:
     """None if every ancestor and the file are root-owned, unwritable by others, and no symlink; else why not."""
     try:
         pe_launch.check_trusted_path(path, trusted_uid=paths.owner_uid, below=paths.below)
     except pe_launch.Refused as exc:
-        return f"{path}: {exc.code}"
+        return f"{path}: {exc.code}{_chain_fix(path, paths, True)}"
     except OSError as exc:
         return f"{path}: {exc.strerror}"
     return None
@@ -208,7 +234,7 @@ def trusted_dir_chain(path: str, paths: Paths) -> str | None:
     try:
         pe_launch.check_trusted_path(path, trusted_uid=paths.owner_uid, file_ok=False, below=paths.below)
     except pe_launch.Refused as exc:
-        return f"{path}: {exc.code}"
+        return f"{path}: {exc.code}{_chain_fix(path, paths, False)}"
     except OSError as exc:
         return f"{path}: {exc.strerror}"
     return None
@@ -972,6 +998,15 @@ def undo_all(steps: list[Step], journal) -> dict[str, str]:
     return out
 
 
+def cli_paths(args, core_uid: int, core_gid: int) -> Paths:
+    """The CLI's Paths. On MOS the conf, helper store and boot script come from PE_HOME through the one function the
+    setup plan uses; Ubuntu keeps the fixed defaults."""
+    extra = mos_launcher_paths(args.pe_home) if args.flavour == "mos" else {}
+    return Paths(core_uid=core_uid, core_gid=core_gid, core_user=args.core_user, flavour=args.flavour,
+                 workspace_root=args.workspace_root, cgroup_root=args.cgroup_root, sock_root=args.sock_root,
+                 uid_min=args.uid_min, uid_max=args.uid_max, **extra)
+
+
 def main(argv: list[str] | None = None) -> int:               # pragma: no cover -- a thin CLI over the above
     import argparse
     import pwd
@@ -981,6 +1016,8 @@ def main(argv: list[str] | None = None) -> int:               # pragma: no cover
     parser.add_argument("action", choices=("probe", "repair", "undo"))
     parser.add_argument("--core-user", required=True)
     parser.add_argument("--flavour", choices=("systemd", "mos"), default="systemd")
+    parser.add_argument("--pe-home", default="/mnt/data/pe", help="MOS only: PE_HOME, where launch.conf, the helper copy and "
+                        "the boot script live (the setup plan derives them the same way)")
     parser.add_argument("--journal-dir", default="/var/lib/planetexpress/setup-journal")
     parser.add_argument("--workspace-root", required=True, help="missions.workspace_root (or <state dir>/mission-workspaces)")
     parser.add_argument("--cgroup-root", default=_DEFAULTS.cgroup_root, help="missions.cgroup_root")
@@ -989,9 +1026,7 @@ def main(argv: list[str] | None = None) -> int:               # pragma: no cover
     parser.add_argument("--uid-max", type=int, default=_DEFAULTS.session_uid_max)
     args = parser.parse_args(argv)
     account = pwd.getpwnam(args.core_user)
-    paths = Paths(core_uid=account.pw_uid, core_gid=account.pw_gid, core_user=args.core_user, flavour=args.flavour,
-                  workspace_root=args.workspace_root, cgroup_root=args.cgroup_root, sock_root=args.sock_root,
-                  uid_min=args.uid_min, uid_max=args.uid_max)
+    paths = cli_paths(args, account.pw_uid, account.pw_gid)
     steps = launcher_steps(paths)
     if args.action == "probe":
         for name, state in probe_all(steps).items():

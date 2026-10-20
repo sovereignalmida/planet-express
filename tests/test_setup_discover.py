@@ -17,7 +17,8 @@ DOCKER_UP = {("docker", "--version"): (0, "Docker version 29.7.2, build abc\n"),
 
 
 class FakeEnv:
-    def __init__(self, files=None, dirs=(), runs=None, euid=0, free=None, machine="x86_64"):
+    def __init__(self, files=None, dirs=(), runs=None, euid=0, free=None, machine="x86_64", owners=None):
+        self.owners = dict(owners or {})
         self.files = dict(files or {})
         self.dirs = set(dirs)
         self.runs = dict(runs or {})
@@ -37,6 +38,16 @@ class FakeEnv:
 
     def is_dir(self, path):
         return path in self.dirs
+
+    def ancestry(self, path):
+        """Directory ownership for the plan's chain check: `owners` maps a directory to (uid, mode, is_symlink)."""
+        import os
+        out, current = {}, os.path.dirname(path)
+        while current != "/":
+            if current in self.owners:
+                out[current] = list(self.owners[current])
+            current = os.path.dirname(current)
+        return out
 
     def glob(self, pattern):
         import fnmatch

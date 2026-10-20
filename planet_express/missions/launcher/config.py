@@ -28,6 +28,24 @@ def mos_helper_store_path(home: str) -> str:
     return f"{home.rstrip('/')}/launch/pe-launch"
 
 
+def mos_launcher_paths(home: str) -> dict:
+    """The three MOS-only launcher paths, derived from PE_HOME in one place (the setup plan and the CLI both use it)."""
+    home = home.rstrip("/")
+    return {"boot_script": f"{home}/launcher-boot.sh", "conf": mos_conf_path(home),
+            "helper_store": mos_helper_store_path(home)}
+
+
+def ancestor_problem(path: str, uid: int, mode: int, is_link: bool = False) -> str | None:
+    """Why a directory above a trusted file cannot be trusted by the helper (None if it can), with the exact fix. The rule
+    is the helper's own: a real directory, owned by root, not group/world writable. Nothing here relaxes it."""
+    if is_link:
+        return f"{path} is a symlink; the helper refuses a symlink anywhere in the chain. Replace it with a real directory"
+    if uid != 0 or mode & 0o022:
+        return (f"{path} is owned by uid {uid} with mode {mode & 0o7777:04o}, but the helper trusts only root-owned "
+                f"directories nobody else can write. Fix: chown root:root {path} && chmod 755 {path}")
+    return None
+
+
 class ConfError(ValueError):
     pass
 
@@ -97,4 +115,4 @@ def load(path: str = CONF_PATH) -> LaunchConf:
         os.close(fd)
 
 
-__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "ConfError", "LaunchConf", "load"]
+__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "mos_launcher_paths", "ancestor_problem", "ConfError", "LaunchConf", "load"]

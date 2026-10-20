@@ -45,6 +45,20 @@ class SystemEnv:
     def is_dir(self, path: str) -> bool:
         return os.path.isdir(path)
 
+    def ancestry(self, path: str) -> dict:
+        """{directory: [uid, mode, is_symlink]} for each existing directory above `path` (read-only; for ownership checks)."""
+        out, current = {}, os.path.dirname(path)
+        while True:
+            try:
+                info = os.lstat(current)
+            except OSError:
+                pass
+            else:
+                out[current] = [info.st_uid, info.st_mode & 0o7777, os.path.islink(current)]
+            if current == "/":
+                return out
+            current = os.path.dirname(current)
+
     def glob(self, pattern: str) -> list[str]:
         return sorted(glob.glob(pattern))
 

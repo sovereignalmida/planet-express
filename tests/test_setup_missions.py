@@ -677,3 +677,45 @@ def test_a_helper_store_step_without_its_path_fails_validation():
         LauncherStep(name="helper-store", core_user="pe", flavour="mos", uid_min=61000, uid_max=61999,
                      sock_root="/run/pe/s", cgroup_root="/sys/fs/cgroup/pe/sessions", workspace_root="/mnt/data/pe/ws",
                      boot_script="/mnt/data/pe/launcher-boot.sh")
+
+
+def mos_owned(**owners):
+    from test_setup_discover import mos as _mos
+    return discover(_mos(owners=owners), repo_root="/mnt/data/pe/planet-express")
+
+
+def test_a_mos_data_pool_owned_by_another_user_blocks_the_plan_with_the_exact_fix():
+    # the real MOS VM: /mnt/data belongs to uid 1000 (`mos`), so the helper would refuse the chain
+    report = mos_owned(**{"/mnt/data": (1000, 0o755, False), "/mnt/data/pe": (0, 0o755, False), "/mnt": (0, 0o755, False)})
+    p = plan(report, mos_answers(missions=ON))
+    assert not p.applicable and not p.steps
+    assert "chown root:root /mnt/data && chmod 755 /mnt/data" in p.blocked[0] and "uid 1000" in p.blocked[0]
+
+
+def test_a_group_writable_or_symlinked_mos_ancestor_also_blocks_and_a_clean_chain_does_not():
+    writable = mos_owned(**{"/mnt/data": (0, 0o775, False)})
+    assert "chmod 755 /mnt/data" in plan(writable, mos_answers(missions=ON)).blocked[0]
+    link = mos_owned(**{"/mnt/data": (0, 0o755, True)})
+    assert "symlink" in plan(link, mos_answers(missions=ON)).blocked[0]
+    clean = mos_owned(**{"/mnt/data": (0, 0o755, False), "/mnt/data/pe": (0, 0o755, False)})
+    assert plan(clean, mos_answers(missions=ON)).applicable
+
+
+def test_the_cli_derives_the_mos_paths_from_pe_home_with_the_plans_function_and_ubuntu_is_unchanged():
+    import argparse
+
+    from planet_express.missions.launcher.config import CONF_PATH, HELPER_PATH, mos_launcher_paths
+    from planet_express.missions.launcher.setup_steps import cli_paths, launcher_steps
+    common = dict(core_user="root", workspace_root="/w", cgroup_root="/c/sessions", sock_root="/s", uid_min=61000,
+                  uid_max=61999, pe_home="/mnt/data/pe")
+    mos_paths = cli_paths(argparse.Namespace(flavour="mos", **common), 0, 0)
+    derived = mos_launcher_paths("/mnt/data/pe")
+    assert (mos_paths.conf, mos_paths.helper_store, mos_paths.boot_script) == (
+        derived["conf"], derived["helper_store"], derived["boot_script"])
+    assert mos_paths.conf == "/mnt/data/pe/launch/launch.conf" and mos_paths.helper_store == "/mnt/data/pe/launch/pe-launch"
+    assert "helper-store" in [s.name for s in launcher_steps(mos_paths)]
+    other = cli_paths(argparse.Namespace(flavour="mos", **{**common, "pe_home": "/mnt/tank/pe/"}), 0, 0)
+    assert other.conf == "/mnt/tank/pe/launch/launch.conf"
+    ubuntu_paths = cli_paths(argparse.Namespace(flavour="systemd", **common), 0, 0)
+    assert ubuntu_paths.conf == CONF_PATH and ubuntu_paths.helper == HELPER_PATH and ubuntu_paths.helper_store == ""
+    assert "helper-store" not in [s.name for s in launcher_steps(ubuntu_paths)]
