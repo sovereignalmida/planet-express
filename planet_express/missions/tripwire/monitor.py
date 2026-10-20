@@ -169,6 +169,12 @@ class TripwireMonitor:
             self._thread.start()
             return self._thread
 
+    @property
+    def running(self) -> bool:
+        """The monitor thread is alive and not stopping. A Repair launch is refused unless this is True (slice 7a)."""
+        thread = self._thread
+        return bool(self.enabled and thread is not None and thread.is_alive() and not self._stop.is_set())
+
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread

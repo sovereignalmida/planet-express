@@ -407,6 +407,27 @@ class VerifyConfig(BaseModel):
         return binaries
 
 
+class MissionHooksConfig(BaseModel):
+    """What the reference adapter's pre-tool hook does when it cannot decide (contract 12). A speed bump, not the boundary."""
+    model_config = ConfigDict(extra="forbid")
+
+    blocked_failure: Literal["closed", "open"] = "closed"      # input that might be a blocked class: block (closed) or allow
+    other_failure: Literal["closed", "open"] = "open"          # anything else: allow with a loud event (open) or block (closed)
+    # Installing the hooks into the agent runtime is runtime-specific. With `install_claude_code` Core writes Claude Code's
+    # hook settings into each session workspace before launch, running `command` (an absolute argv that starts
+    # `planet_express.missions.hooks`, readable by the session uid). Off by default; on without a command is refused.
+    command: list[str] = []
+    install_claude_code: bool = False
+
+    @model_validator(mode="after")
+    def _install_needs_a_command(self) -> "MissionHooksConfig":
+        if self.command and (not self.command[0].startswith("/") or any(not a or "\0" in a for a in self.command)):
+            raise ValueError("missions.hooks.command must start with an absolute program path and have no empty or NUL items")
+        if self.install_claude_code and not self.command:
+            raise ValueError("missions.hooks.install_claude_code needs missions.hooks.command")
+        return self
+
+
 class MissionsConfig(BaseModel):
     """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
     model_config = ConfigDict(extra="forbid")
@@ -439,6 +460,10 @@ class MissionsConfig(BaseModel):
     budgets: MissionBudgetsConfig = MissionBudgetsConfig()
     checkpoint: CheckpointConfig = CheckpointConfig()
     verify: VerifyConfig = VerifyConfig()
+    hooks: MissionHooksConfig = MissionHooksConfig()
+    # Named time windows for standing grants (`window.deny: [backup]` resolves here when the grant is created). Each entry is
+    # `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]` (see missions/window.py).
+    windows: dict[str, list[str]] = {}
     # Tripwires (slice 6). The pause SLA (interval + 10 s scan deadline + freeze + write <= 30 s) holds up to 15 s.
     tripwire_interval_s: int = Field(default=15, ge=1, le=15)
     tripwire_investigating_interval_s: int = Field(default=60, ge=15, le=600)
@@ -457,6 +482,15 @@ class MissionsConfig(BaseModel):
     # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
     tool_sites: dict[str, dict[str, str]] = {}
     tool_secret_env: dict[str, str] = {}
+
+    @field_validator("windows")
+    @classmethod
+    def _windows(cls, named: dict[str, list[str]]) -> dict[str, list[str]]:
+        from planet_express.missions.window import parse_entry
+        for name, entries in named.items():
+            if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) or not entries or any(parse_entry(e) is None for e in entries):
+                raise ValueError(f"missions.windows.{name}: a lowercase name and a list of valid window entries")
+        return named
 
     @field_validator("tool_sites")
     @classmethod

@@ -13,6 +13,7 @@ from planet_express.core.store import Store
 from .canonical import CanonicalError, loads_strict, sha256_hex
 from .models import PHASE_RE, Grant, GrantScope, StandingGrant, VerificationPlan
 from .verify.plan import binding_problems
+from .window import allowed as window_allowed
 
 TIER_RANK = {"observe": 0, "propose": 1, "repair": 2, "change": 3, "critical": 4}
 ELEVATED_PHASES = ("broad_sudo", "no_backup")
@@ -99,11 +100,22 @@ def _scope_within(inner: GrantScope, outer: GrantScope) -> bool:
                for f in ("stacks", "services", "paths", "mounts", "hosts"))
 
 
-def _standing_reasons(conn: sqlite3.Connection, standing_id: str, grant: Grant, now: int) -> list[str]:
+def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, now: int) -> list[str]:
+    standing_id = m["standing_grant_id"]
     row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (standing_id,)).fetchone()
     if row is None:
         return ["standing grant does not exist"]
     reasons = []
+    # Incident-backed only (brief 5.2): an unattended start answers one open incident, never a free-standing request.
+    if not m["incident_id"] or m["origin"] != "incident":
+        reasons.append("standing grants cover incident-backed missions only")
+    try:
+        window = loads_strict(row["window_json"]) if row["window_json"] else None
+        ok, why = window_allowed(window, now)
+    except (CanonicalError, ValueError, AttributeError, TypeError):
+        ok, why = False, "the standing grant's window is unreadable"
+    if not ok:
+        reasons.append(f"standing grant window: {why}")
     if row["revoked_at"] is not None:
         reasons.append("standing grant is revoked")
     if row["expires_at"] <= now:
@@ -143,7 +155,7 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
 
     reasons: list[str] = list(verification_plan_problems(m))
     if m["standing_grant_id"]:
-        reasons += _standing_reasons(conn, m["standing_grant_id"], grant, now)
+        reasons += _standing_reasons(conn, m, grant, now)
     else:
         # (a) the current-grant approval
         if not _approved(conn, mission_id, "grant", grant_hash, False):
@@ -180,6 +192,15 @@ def _plan_reasons(conn: sqlite3.Connection, m: sqlite3.Row) -> list[str]:
         if not _approved(conn, m["id"], f"critical:{index}", m["plan_hash"], True):
             reasons.append(f"protected touch {index} needs an elevated critical:{index} approval")
     return reasons
+
+
+def mission_step_approved(store: Store, mission_id: str) -> bool:
+    """Whether a typed step from origin `mission` may run mutating: the mission's CURRENT grant hash has an approving row
+    (or a valid standing grant), judged by the one predicate. This is what `policy.decide_runbook(mission_approved=)` takes."""
+    try:
+        return bool(execution_predicate(store, mission_id))
+    except Exception:                                    # noqa: BLE001 - anything unreadable is "not approved"
+        return False
 
 
 def execution_predicate(store: Store, mission_id: str) -> Verdict:

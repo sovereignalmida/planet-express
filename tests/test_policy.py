@@ -159,7 +159,7 @@ def _runbook(step_type="service.restart"):
 
 
 def test_runbook_policy_accepts_every_declared_origin():
-    for origin in policy.RUNBOOK_ORIGINS:
+    for origin in policy.RUNBOOK_ORIGINS - {"mission"}:       # `mission` has its own tests (test_mission_policy_origin.py)
         runbook = _runbook()
         decision = policy.decide_runbook(runbook, origin)
         if origin in policy.DIRECT_RUNBOOK_ORIGINS:

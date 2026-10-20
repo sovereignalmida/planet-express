@@ -27,6 +27,7 @@ from planet_express.missions.containment_cgroup import (
     CgroupContainment,
     cgroup2_mountpoint,
 )
+from planet_express.missions.hooks import install_claude_code, policy_for
 from planet_express.missions.launcher.cgroup_tree import ensure_tree
 from planet_express.missions.launcher.config import HELPER_PATH
 from planet_express.missions.launcher.preflight import PreflightReport, run_preflight
@@ -45,8 +46,10 @@ POLL_INTERVAL_S = 2.0
 
 class MissionRunner:
     def __init__(self, supervisor: Supervisor, worker_server=None, interval_s: float = POLL_INTERVAL_S,
-                 prepare: Callable[[], object] | None = None, tripwire=None):
+                 prepare: Callable[[], object] | None = None, tripwire=None, startup: list[Callable[[], object]] | None = None):
         self.supervisor = supervisor
+        self.startup = list(startup or [])      # e.g. the checkpoint store's startup scan; each is isolated and logged
+        self.controls = None                    # `assembly.RepairControls` when the daemon wired the Repair tier
         self.tripwire = tripwire          # `tripwire.TripwireMonitor` or None; it has its own thread and failure isolation
         self.prepare = prepare            # host preparation (Core's half of the cgroup layout), before anything runs
         self.worker_server = worker_server
@@ -65,6 +68,11 @@ class MissionRunner:
         # The socket first: a session restarted by recover() may call it straight away.
         if self.worker_server is not None:
             self.worker_server.start()
+        for step in self.startup:
+            try:
+                log.info("Mission startup step: %s", step())
+            except Exception:
+                log.exception("a mission startup step failed")
         try:
             recovered = self.supervisor.recover()
             if recovered:
@@ -174,6 +182,7 @@ def build_mission_runner(
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
     stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None, verifier=None,
+    repair_wiring=None, docker_proxy=None, checkpoint=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
@@ -187,7 +196,8 @@ def build_mission_runner(
     real = containment is None
     if real:
         containment = build_containment(cfg)
-    if stacks_root is not None and (tool_broker is None or env_policy is None):
+    protected = None
+    if stacks_root is not None and (tool_broker is None or env_policy is None or repair_wiring is not None):
         # Slice 6 controls that need only the store and the config: the brokered tools (keys stay in Core's environment)
         # and the grant-to-environment policy. The tripwire monitor and the side-door gate need the checkpoint service
         # and the host's sudoers generator output, which the daemon supplies with slice 7 (`tripwire=`, `repair_gate=`).
@@ -207,13 +217,33 @@ def build_mission_runner(
             env_policy = make_env_policy(
                 protected=protected, stacks_root=stacks_root, known_tools=default_registry().names(),
                 secret_values=lambda: [v for v in (os.environ.get(var) for var in refs.values()) if v])
+    controls = None
+    if repair_wiring is not None and protected is not None:
+        # Slice 7a: the checkpoint service, tripwire monitor, verifier and side-door gate, all or none. A failure to build any of
+        # them leaves the host without Repair capability (observe/propose still run); it never yields a partial safety net.
+        from planet_express.missions.assembly import build_repair_controls
+        try:
+            controls = build_repair_controls(store, cfg, repair_wiring, containment=containment, broker=tool_broker,
+                                             protected=protected, stacks_root=stacks_root,
+                                             enabled=enabled or (lambda: cfg.enabled), proxy=docker_proxy)
+        except Exception as exc:
+            log.warning("Repair missions are not available: %s: %s", type(exc).__name__, exc)
+        else:
+            tripwire, verifier, repair_gate, checkpoint = (controls.tripwire, controls.verifier, controls.repair_gate,
+                                                           controls.checkpoint)
+            if tool_broker is not None and tool_broker.write_gate is None:
+                from planet_express.missions.assembly import mission_write_gate
+                tool_broker.write_gate = mission_write_gate(store)
     runtime = CommandRuntime(
         containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
         env_policy=env_policy)
     supervisor = Supervisor(
         store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
-        repair_gate=repair_gate, verifier=verifier)
+        repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
+        hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json(),
+        hook_install=((lambda workspace: install_claude_code(workspace, cfg.hooks.command))
+                      if cfg.hooks.install_claude_code else None))
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
         supervisor.socket_provider = socket_provider or SessionSockets(
@@ -222,7 +252,10 @@ def build_mission_runner(
         supervisor.preflight_fn = preflight
         supervisor.socket_provider = socket_provider
     prepare = (lambda: ensure_tree(cfg.cgroup_root)) if real else None
-    return MissionRunner(supervisor, None, interval_s, prepare, tripwire=tripwire)
+    runner = MissionRunner(supervisor, None, interval_s, prepare, tripwire=tripwire,
+                           startup=[checkpoint.startup_scan] if checkpoint is not None else [])
+    runner.controls = controls
+    return runner
 
 
 def start_mission_runner(store: Store, cfg, **kwargs) -> MissionRunner | None:

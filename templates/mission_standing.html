@@ -1,0 +1,36 @@
+{% extends "missions_base.html" %}
+{% block title %}Standing grants{% endblock %}
+{% block content %}
+<section class="panel" aria-label="Standing grants">
+  <div class="panel-head-row">
+    <a class="pe-link-out" href="{{ url_for('missions_page') }}">‹ MISSIONS</a>
+    <h3>STANDING GRANTS</h3>
+    <span class="panel-head-note">repair tier only · incident-backed · expiring · never change, critical, broad sudo or no-backup</span>
+  </div>
+  {% for g in standing %}
+  <div class="mc-event">
+    <span class="status-chip{{ ' ok' if g.state == 'active' }}">{{ g.state | upper }}</span>
+    <span class="mc-event-actor">{{ g.id }}</span>
+    <span class="mc-pre">{{ g.scope | tojson }} · expires {{ g.expires_at }}{% if g.window %} · window {{ g.window | tojson }}{% endif %} · by {{ g.created_by }}</span>
+    {% if g.state == 'active' %}
+    <form method="post" action="{{ url_for('standing_revoke', standing_id=g.id) }}" class="mc-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="pe-btn warn" type="submit">REVOKE</button>
+    </form>
+    {% endif %}
+  </div>
+  {% else %}<p class="muted-body">No active standing grants. Every Repair mission waits for an approval.</p>{% endfor %}
+  <p class="mc-pager"><a class="pe-link-out" href="{{ url_for('standing_page', all=1) }}">SHOW REVOKED AND EXPIRED</a></p>
+</section>
+<section class="panel" aria-label="New standing grant">
+  <div class="panel-head-row"><h3>NEW STANDING GRANT</h3><span class="panel-head-note">needs an elevated session</span></div>
+  <form method="post" action="{{ url_for('standing_create') }}" class="mc-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Stacks (comma separated) <input name="stacks" maxlength="400"></label>
+    <label>Services, stack/service (comma separated) <input name="services" maxlength="400"></label>
+    <label>Expires in hours (1 to 720) <input name="hours" type="number" min="1" max="720" required></label>
+    <label>Never start during (UTC, e.g. 02:00-03:30 or sat,sun) <input name="deny" maxlength="200"></label>
+    <button class="pe-btn" type="submit">CREATE</button>
+  </form>
+</section>
+{% endblock %}
