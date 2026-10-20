@@ -274,6 +274,8 @@ class _LauncherParams(_Params):
             raise ValueError("only MOS has a boot script and a movable launch.conf")
         if self.name == "helper-store" and self.flavour != "mos":
             raise ValueError("only MOS keeps a persistent helper copy")
+        if self.name == "helper-store" and not self.helper_store:
+            raise ValueError("the helper-store step needs the path of the persistent helper copy")
         if self.name == "launcher-sudoers" and self.flavour != "systemd":
             raise ValueError("there is no sudo on MOS, so no launcher sudoers")
         return self

@@ -667,3 +667,13 @@ def test_mos_plan_keeps_the_helper_across_reboots_and_the_boot_script_records_it
     assert "install -m 0755 -o root -g root" in script
     systemd = plan(systemd_report(), answers(missions=ON))
     assert "helper-store" not in {s.target for s in launcher(systemd)}
+
+
+def test_a_helper_store_step_without_its_path_fails_validation():
+    import pytest
+    from pydantic import ValidationError
+    from planet_express.setup.steps import LauncherStep
+    with pytest.raises(ValidationError):
+        LauncherStep(name="helper-store", core_user="pe", flavour="mos", uid_min=61000, uid_max=61999,
+                     sock_root="/run/pe/s", cgroup_root="/sys/fs/cgroup/pe/sessions", workspace_root="/mnt/data/pe/ws",
+                     boot_script="/mnt/data/pe/launcher-boot.sh")
