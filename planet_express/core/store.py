@@ -720,8 +720,11 @@ class Store:
                     "SELECT * FROM incidents ORDER BY last_seen DESC, id DESC LIMIT ?", (limit,)
                 ).fetchall()
             else:
+                # Resolved rows by when they were resolved: a dismissed incident keeps the
+                # last_seen of its final observation, which can be weeks old.
+                order = "resolved_at" if status == "resolved" else "last_seen"
                 rows = conn.execute(
-                    "SELECT * FROM incidents WHERE status=? ORDER BY last_seen DESC, id DESC LIMIT ?",
+                    f"SELECT * FROM incidents WHERE status=? ORDER BY {order} DESC, id DESC LIMIT ?",
                     (status, limit),
                 ).fetchall()
         return [self._incident_row(row) for row in rows]

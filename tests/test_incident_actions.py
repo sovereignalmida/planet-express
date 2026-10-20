@@ -354,3 +354,16 @@ def test_dismissal_is_busy_during_scan_and_releases_the_lock(tmp_path):
     result = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
     assert not result.ok and "Busy" in result.reason
     assert env.store.get_incident(env.incident["id"])["status"] == "open"
+
+
+def test_a_dismissed_incident_heads_the_resolved_list(tmp_path):
+    env = IncidentEnv(tmp_path)
+    newer = dict(observation(), fingerprint=fingerprint("container_health", "CASA_NEW"),
+                 resource="CASA_NEW")
+    env.store.reconcile_incidents("d" * 64, "2026-09-18T13:00:00Z", [newer])
+    env.store.reconcile_incidents("c" * 64, "2026-09-18T14:00:00Z",
+                                  [dict(newer, condition="healthy", severity=None)])
+    _later_scan_without_the_incident(env)
+    assert env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4).ok
+    resolved = env.store.list_incidents("resolved", 1)
+    assert [row["id"] for row in resolved] == [env.incident["id"]]
