@@ -43,15 +43,15 @@ class Upstream:
         self.socket_path, self.timeout = socket_path, timeout
 
     def open(self, method: str, target: str, *, body: bytes | Iterable[bytes] | None = None, length: int | None = None,
-             content_type: str | None = None, chunked: bool = False) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
+             content_type: str | None = None) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
         conn = _UnixConnection(self.socket_path, self.timeout)
         headers = {"Host": "docker", "Connection": "close"}
         if content_type:
             headers["Content-Type"] = content_type
-        if not chunked and (body is not None or method in ("POST", "PUT")):
+        if body is not None or method in ("POST", "PUT"):
             headers["Content-Length"] = str(length if length is not None else len(body or b""))
         try:
-            conn.request(method, target, body=body, headers=headers, encode_chunked=chunked)
+            conn.request(method, target, body=body, headers=headers)
             return conn, conn.getresponse()
         except (OSError, http.client.HTTPException) as exc:
             conn.close()

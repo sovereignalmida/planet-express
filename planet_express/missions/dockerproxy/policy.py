@@ -329,6 +329,8 @@ class Policy:
     # -- matching -------------------------------------------------------------------------------
 
     def match(self, head: Head) -> tuple[Route, dict[str, str]]:
+        if not self.versions:
+            raise Refusal("the daemon's API version is older than this proxy supports")
         if head.version is not None and head.version not in self.versions:
             raise Refusal("unknown API version")
         wrong_method = False
@@ -455,7 +457,7 @@ class Policy:
 
     @property
     def max_minor(self) -> int:
-        return max(int(v[3:]) for v in self.versions)
+        return max((int(v[3:]) for v in self.versions), default=0)
 
     def container_verdict(self, info: ContainerInfo) -> str:
         scope = self.scope

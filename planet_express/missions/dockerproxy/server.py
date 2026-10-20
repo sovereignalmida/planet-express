@@ -277,13 +277,14 @@ class ProxyServer:
         body: Any = plan.body
         length = None
         ctype = "application/json" if plan.body is not None else None
-        chunked = False
         if route.body == "raw" and plan.raw_length < 0:
-            body = iter_chunked(conn, head.leftover, cap=self.policy.archive_cap, timeout=self.limits.body_s)
-            chunked, ctype = True, "application/x-tar"
+            # Decoded and validated IN FULL (bounded by the archive cap) before anything reaches the daemon: a malformed
+            # terminal chunk must not leave a half-applied upload behind.
+            body = b"".join(iter_chunked(conn, head.leftover, cap=self.policy.archive_cap, timeout=self.limits.body_s))
+            length, ctype = len(body), "application/x-tar"
         elif route.body == "raw":
             body, length, ctype = self._client_body(conn, head, plan.raw_length), plan.raw_length, "application/x-tar"
-        cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype, chunked=chunked)
+        cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype)
         try:
             data = resp.read(self.limits.json_response + 1)
             if len(data) > self.limits.json_response:

@@ -798,3 +798,26 @@ def test_chunked_bodies_are_refused_on_every_endpoint_but_the_archive_upload(pro
         status, _, _ = chunked(proxy.path, target, [b"{}"], method=method)
         assert status == 400, target
     assert proxy.daemon.writes() == []
+
+
+def test_a_chunked_upload_whose_last_chunk_is_malformed_reaches_the_daemon_not_at_all(proxy):
+    """Review finding: validate the whole body before the first byte is forwarded."""
+    body = b"5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n"
+    head = (b"PUT /v1.43/containers/qbittorrent/archive?path=/config HTTP/1.1\r\nHost: d\r\nX-PE-Session: good\r\n"
+            b"Transfer-Encoding: chunked\r\nContent-Type: application/x-tar\r\n\r\n")
+    status, _, _ = talk(proxy.path, head + body)
+    assert status == 400
+    assert [r for r in proxy.daemon.requests if "archive" in r["target"] and r["method"] == "PUT"] == []
+
+
+def test_a_daemon_older_than_the_floor_gets_a_controlled_refusal_not_a_500(env):
+    env.daemon.api_version = "1.30"
+    path = os.path.join(env.dir, "ro.sock")
+    ro = build_read_only(path, upstream=env.upstream)
+    ro.start()
+    try:
+        for target in ("/_ping", "/v1.41/containers/json"):
+            status, _, body = request(path, "GET", target, token=None, version=None, raw_target=True)
+            assert status == 403 and b"older" in body
+    finally:
+        ro.stop()
