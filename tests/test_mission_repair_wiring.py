@@ -77,6 +77,27 @@ def test_the_checkpoint_root_and_backup_sources_come_from_config(tmp_path):
     assert runner.controls.backup_status(_grant(stack="media"))["covered"] is True
 
 
+def test_backup_status_reports_the_worst_path_not_the_first(tmp_path):
+    from planet_express.missions.models import Grant
+    store, _ = make_store(tmp_path)
+    stacks = stacks_tree(tmp_path)
+    fresh, old = tmp_path / "fresh.marker", tmp_path / "old.marker"
+    fresh.write_text("x")
+    old.write_text("x")
+    os.utime(fresh, (999_990, 999_990))
+    os.utime(old, (1_000_000 - 90_000, 1_000_000 - 90_000))                 # older than the grant's 24 h floor
+    sources = [{"path": f"{stacks}/media", "marker": str(fresh)}, {"path": f"{stacks}/photos", "marker": str(old)}]
+    runner = build_mission_runner(store, cfg(checkpoint={"backup_sources": sources}), containment=FakeContainment(),
+                                  stacks_root=stacks, repair_wiring=wiring(stacks))
+    both = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media", "photos"]}})
+    status = runner.controls.backup_status(both)
+    assert status["state"] == "stale" and status["covered"] is False
+    assert sorted(p["state"] for p in status["paths"]) == ["ok", "stale"]
+    reverse = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["photos", "media"]}})
+    assert runner.controls.backup_status(reverse)["state"] == "stale"          # the order of the scope changes nothing
+    assert runner.controls.backup_status(_grant("media"))["state"] == "ok"
+
+
 def _grant(stack="media"):
     from planet_express.missions.models import Grant
     return Grant.model_validate({"tier": "repair", "scope": {"stacks": [stack]}})

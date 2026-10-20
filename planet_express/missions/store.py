@@ -336,10 +336,20 @@ class MissionStore:
         return hashlib.sha256(token.encode()).hexdigest()
 
     # ── standing grants ─────────────────────────────────────────────────────
+    @staticmethod
+    def _standing_scope_json(scope: Mapping[str, Any], ceilings: Mapping[str, Any] | None) -> str:
+        """The scope (a `GrantScope`) and, when given, its ceilings, under the one `ceilings` key in the same document."""
+        from .models import GrantScope, StandingCeilings
+        body = GrantScope.model_validate(scope).model_dump(mode="json")
+        if ceilings is not None:
+            body["ceilings"] = StandingCeilings.model_validate(ceilings).model_dump(mode="json")
+        return canonical_json(body)
+
     def create_standing_grant(self, *, grant_id: str, scope: Mapping[str, Any], tier: str, created_by: str,
-                              expires_at: int, window: Mapping[str, Any] | None = None, version: int = 1) -> None:
-        from .models import GrantScope, Window
-        scope_json = canonical_json(GrantScope.model_validate(scope).model_dump(mode="json"))
+                              expires_at: int, window: Mapping[str, Any] | None = None, version: int = 1,
+                              ceilings: Mapping[str, Any] | None = None) -> None:
+        from .models import Window
+        scope_json = self._standing_scope_json(scope, ceilings)
         window_json = canonical_json(Window.model_validate(window).model_dump(mode="json")) if window else None
         with self.store._write() as conn:
             conn.execute(
@@ -349,10 +359,11 @@ class MissionStore:
             )
 
     def supersede_standing_grant(self, *, old_id: str, grant_id: str, scope: Mapping[str, Any], tier: str, created_by: str,
-                                 expires_at: int, window: Mapping[str, Any] | None, version: int) -> None:
+                                 expires_at: int, window: Mapping[str, Any] | None, version: int,
+                                 ceilings: Mapping[str, Any] | None = None) -> None:
         """A new version and the revocation of the one it replaces, in ONE transaction: a crash can never leave both active."""
-        from .models import GrantScope, Window
-        scope_json = canonical_json(GrantScope.model_validate(scope).model_dump(mode="json"))
+        from .models import Window
+        scope_json = self._standing_scope_json(scope, ceilings)
         window_json = canonical_json(Window.model_validate(window).model_dump(mode="json")) if window else None
         now = self._now()
         with self.store._write() as conn:

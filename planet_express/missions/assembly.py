@@ -158,7 +158,8 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         for path in dict.fromkeys(targets):
             st = backup.status(path, now=now, recent_s=grant.backup.recent_s)
             states.append({"path": path, "state": st.state, "last_success_at": st.last_success_at})
-        worst = "ok" if all(x["state"] == "ok" for x in states) and states else (states[0]["state"] if states else "unverifiable")
+        rank = {"ok": 0, "stale": 1, "unverifiable": 2, "absent": 3}               # the worst path decides, not the first
+        worst = max((x["state"] for x in states), key=lambda st_: rank.get(st_, 3)) if states else "unverifiable"
         return {"covered": bool(states) and all(x["state"] == "ok" for x in states), "state": worst,
                 "acknowledged_no_backup": grant.backup.acknowledged_no_backup, "paths": states[:16]}
 

@@ -48,6 +48,15 @@ class GrantScope(_Strict):
     hosts: ShortList = ["local"]
 
 
+class StandingCeilings(_Strict):
+    """What an unattended start under a standing grant may carry beyond its scope. Everything defaults to nothing: no brokered
+    tools, no sudo rules, and budgets no larger than `Budgets()`'s own defaults."""
+    credentials: ShortList = []              # the `tool:<name>` credentials a mission may name
+    sudo_units: ShortList = []               # the units a scoped sudo rule may name
+    budgets: "Budgets | None" = None         # per-field maxima; None means the model defaults
+    exclusions: ShortList = []               # exclusions the mission's grant must carry (a superset is fine)
+
+
 class Protected(_Strict):
     resources: ShortList = []
 

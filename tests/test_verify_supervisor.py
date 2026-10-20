@@ -23,7 +23,7 @@ from planet_express.missions.verify.plan import VerificationResult
 
 
 def supervisor(rig, verifier=None):
-    return Supervisor(rig.store, None, None, enabled=True, verifier=verifier or rig.verifier)
+    return Supervisor(rig.store, None, None, enabled=True, verifier=verifier or rig.verifier, checkpoint=rig.svc)
 
 
 def passed_for(rig, mission):

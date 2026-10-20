@@ -240,6 +240,67 @@ def test_cancel_works_on_a_paused_mission(stack):
     assert st.status(mid) == "cancelled" and st.ms.live_session(mid) is None
 
 
+def test_cancelling_a_session_that_already_changed_the_host_holds_the_mission_for_the_operator(stack):
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    original = st.env.compose.read_text()
+    st.env.compose.write_text(original + "# half applied\n")
+    st.sup.cancel(mid, "operator:alice")
+    mission = st.ms.get_mission(mid)
+    assert mission.status == "needs_operator" and mission.outcome_flags == "partially_applied"      # never straight to cancelled
+    held = noted(st, mid, "cancel.held")
+    assert held and held[0]["offers"] == ["rollback", "take_over"]
+    assert mission.cancel_requested_by == "operator:alice"                                            # the cancel is on the record
+    assert st.ms.live_session(mid) is None
+    st.sup.tick()
+    st.sup.tick()
+    assert len(noted(st, mid, "cancel.held")) == 1 and st.status(mid) == "needs_operator"            # reported once, not every tick
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["status"] == "rolled_back" and st.env.compose.read_text() == original
+
+
+def test_cancelling_a_session_that_changed_nothing_cancels(stack):
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.sup.cancel(mid, "operator:alice")
+    assert st.status(mid) == "cancelled" and not noted(st, mid, "cancel.held")
+
+
+def test_the_operator_surface_cannot_close_a_possibly_changed_repair_mission_as_cancelled(stack):
+    from planet_express.application.mission_service import MissionService
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.env.compose.write_text(st.env.compose.read_text() + "# half applied\n")
+    st.cont.crash(st.runtimes[0].context.session.session_id)
+    st.sup.tick()
+    assert st.status(mid) in ("needs_operator", "recovery_required") and st.ms.live_session(mid) is None
+    svc = MissionService(st.store, enabled=lambda: True)
+    out = svc.cancel_mission(mid, operator="alice")                       # no live session: this used to cancel at once
+    assert out["status"] in ("needs_operator", "recovery_required") and out["cancel_requested"] is True
+    st.sup.tick()
+    assert st.status(mid) in ("needs_operator", "recovery_required") and noted(st, mid, "cancel.held")
+
+
+def test_a_requested_cancel_of_a_mission_whose_host_matches_the_checkpoint_closes_cancelled(stack):
+    from planet_express.application.mission_service import MissionService
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.cont.crash(st.runtimes[0].context.session.session_id)
+    st.sup.tick()
+    assert st.status(mid) == "needs_operator"
+    MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    st.sup.tick()
+    assert st.status(mid) == "cancelled"
+
+
 def test_wall_clock_does_not_run_while_a_mission_is_paused(stack):
     st = stack(behaviours=[{"script": [update()] * 10}])
     mid = st.propose(budgets={"wall_s": 100})["mission_id"]

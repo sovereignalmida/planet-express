@@ -79,8 +79,8 @@ VERIFY_WORKERS = 2            # verifications run on their own small pool, never
 VERIFY_SHUTDOWN_WAIT_S = 5.0  # shutdown waits at most this long for in-flight verifications
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
 MAX_MEMORY_HITS = 20
-MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll
-MAX_HOOK_LINES = 200
+MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll (the final drain reads on until it is empty)
+MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
 MAX_HOOK_FIELD = 400
 MAX_DECISION_REQUESTS = 5       # worker-raised decision cards per mission; they never approve anything
@@ -155,6 +155,9 @@ class _Run:
     submitted: AgentResult | None = None      # a result the worker handed in over the socket
     paused_at: float | None = None            # a tripwire pause is not session time: the wall budget does not run meanwhile
     hook_offset: int = 0                      # how much of the session's hook log has been read
+    hook_log_fault: bool = False              # a shrunk or vanished log has been reported once
+    hook_dir: Path | None = None              # the Core-owned directory holding this session's hook settings
+    hook_sha: str | None = None               # sha256 of settings.json at launch: it is checked at every poll
 
 
 def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
@@ -223,9 +226,10 @@ class Supervisor:
                  repair_gate: Callable[[], Any] | None = None, verifier: Any = None,
                  checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None,
                  hook_policy: Callable[[Mission], str] | None = None,
-                 hook_install: Callable[[Path], Mapping[str, str] | None] | None = None):
+                 hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None):
         self.store = store
-        self.hook_install = hook_install              # Path -> writes the runtime's hook settings into the session workspace
+        self.hook_install = hook_install              # Path -> writes the runtime's hook settings into that (Core-owned) directory
+        self.hook_root = Path(hook_root) if hook_root else None    # Core-owned, session-readable, never session-writable
         self.hook_policy = hook_policy                # Mission -> the hook policy JSON put in the session's environment
         self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
         self.tripwire = tripwire                      # `tripwire.TripwireMonitor`; None: no Repair mission can start
@@ -245,6 +249,7 @@ class Supervisor:
         self.clock = clock
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self._start_failures: dict[str, int] = {}
+        self._cancel_held: set[str] = set()     # missions whose held cancel has been recorded
         self._waiting: dict[str, str] = {}               # mission id -> the last "cannot start yet" reason noted
         self.artifact_dir = Path(artifact_dir) if artifact_dir else store.path.parent / "mission-artifacts"
         self.workspace_dir = Path(workspace_dir) if workspace_dir else store.path.parent / "mission-workspaces"
@@ -433,8 +438,19 @@ class Supervisor:
         run.workspace = workspace
         install_env: dict[str, str] = {}
         if self.hook_install is not None:
-            # raises -> the start fails: a mission configured for hooks never runs without them
-            install_env = dict(self.hook_install(workspace) or {})
+            # The settings that install the hooks live OUTSIDE the session-owned workspace, in a directory Core owns (0755,
+            # settings.json 0644): the session can read them and cannot edit or delete them. Its hash is taken now and checked
+            # at every poll. Anything that raises here fails the start: a mission configured for hooks never runs without them.
+            if self.hook_root is None:
+                raise ContainmentError("hooks are configured to install but no Core-owned hook root is")
+            hook_dir = self.hook_root / cs.session_id
+            hook_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
+            hook_dir.chmod(0o755)
+            run.hook_dir = hook_dir
+            install_env = dict(self.hook_install(hook_dir) or {})
+            settings = hook_dir / "settings.json"
+            settings.chmod(0o644)
+            run.hook_sha = hashlib.sha256(settings.read_bytes()).hexdigest()
         def spawn(argv: Sequence[str], env: dict[str, str] | None = None, cwd: str | None = None,
                   extra_fds: tuple[int, ...] = ()) -> int:
             if extra_fds:
@@ -520,6 +536,9 @@ class Supervisor:
         if run.paused_at is not None:
             run.started_at += float(self.clock()) - run.paused_at
             run.paused_at = None
+        if not self._hook_settings_intact(run):
+            self._note(run.mission_id, {"hook_settings": "changed or missing", "session": run.session_id})
+            return self._kill_and_advance(run, "hook_tamper")        # a session that edited its own hooks does not keep running
         try:
             raw = run.runtime.status(run.handle)
             update = AgentUpdate.model_validate(raw.model_dump() if isinstance(raw, AgentUpdate) else raw)
@@ -558,33 +577,74 @@ class Supervisor:
             run.output_bytes += size
         run.output_bytes += update.output_bytes
 
-    def _drain_hook_log(self, run: _Run) -> None:
-        """Append what the session's hooks recorded to the mission's events. The log lives in the session's own workspace, so
-        everything in it is untrusted data: opened without following a symlink, regular files only, a bounded read per poll,
-        complete lines only, a bounded number of them, each parsed strictly and cut down to a few clipped string fields. The
-        events carry actor `worker` and kind `tool` or `note`: nothing a hook line says can name a state or a decision."""
-        if self.hook_policy is None or run.workspace is None:
-            return
+    def _hook_settings_intact(self, run: _Run) -> bool:
+        if run.hook_sha is None or run.hook_dir is None:
+            return True
         try:
-            fd = os.open(run.workspace / HOOK_LOG_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            fd = os.open(run.hook_dir / "settings.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
-            return
+            return False
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return False
+            return hashlib.sha256(os.read(fd, 1 << 20)).hexdigest() == run.hook_sha
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
+    def _hook_log_fault(self, run: _Run, what: str) -> None:
+        if not run.hook_log_fault:
+            run.hook_log_fault = True
+            self._note(run.mission_id, {"hook_log_fault": what, "session": run.session_id})
+
+    def _drain_hook_log(self, run: _Run, *, final: bool = False) -> None:
+        """Append what the session's hooks recorded to the mission's events. The log lives in the session's own workspace, so
+        everything in it is untrusted data: opened without following a symlink, regular files only, a bounded read per poll,
+        complete lines only, EVERY complete line in what was read (the offset advances by exactly what was processed, so nothing is
+        skipped and nothing is read twice), each parsed strictly and cut down to a few clipped string fields. The events carry
+        actor `worker` and kind `tool` or `note`: nothing a hook line says can name a state or a decision. `final=True` (after
+        the session is provably dead, before anything is settled) reads on until the log is empty. A log that shrank or vanished
+        is reported as a session fault."""
+        if self.hook_policy is None or run.workspace is None:
+            return
+        for _ in range(MAX_FINAL_DRAINS if final else 1):
+            if not self._drain_once(run):
                 return
+
+    def _drain_once(self, run: _Run) -> bool:
+        """Read and process one chunk. True when there may be more to read."""
+        assert run.workspace is not None
+        try:
+            fd = os.open(run.workspace / HOOK_LOG_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            if run.hook_offset > 0:
+                self._hook_log_fault(run, "the log disappeared")
+            return False
+        except OSError:
+            return False
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return False
+            if info.st_size < run.hook_offset:
+                self._hook_log_fault(run, "the log is shorter than what was already read")
+                run.hook_offset = info.st_size
+                return False
             os.lseek(fd, run.hook_offset, os.SEEK_SET)
             data = os.read(fd, MAX_HOOK_READ)
         except OSError:
-            return
+            return False
         finally:
             os.close(fd)
         end = data.rfind(b"\n") + 1
         if end == 0:
             if len(data) >= MAX_HOOK_READ:
                 run.hook_offset += len(data)              # one enormous line: skip it
-            return
+                return True
+            return False
         run.hook_offset += end
-        for raw in data[:end].splitlines()[:MAX_HOOK_LINES]:
+        for raw in data[:end].splitlines():
             if len(raw) > MAX_HOOK_LINE:
                 continue
             try:
@@ -604,6 +664,7 @@ class Supervisor:
             run.output_bytes += len(raw)
             if line["kind"] == "tool":
                 run.tool_calls += 1
+        return len(data) >= MAX_HOOK_READ                  # a full chunk: there may be more behind it
 
     def _collect(self, run: _Run) -> None:
         assert run.runtime is not None
@@ -835,6 +896,7 @@ class Supervisor:
                 self._note(run.mission_id, {"waiting_for_empty": run.reason})
             return
         self._revoke(run)
+        self._drain_hook_log(run, final=True)          # what the dead session's hooks recorded last, before anything is judged
         self._capture_post(run.mission_id)             # the session is provably dead: only now is the post-change manifest honest
         if run.cs is not None:
             self.containment.cleanup(run.cs)
@@ -858,6 +920,8 @@ class Supervisor:
             with contextlib.suppress(Exception):
                 run.stop_socket()
             run.stop_socket = None
+        if run.hook_dir is not None:
+            shutil.rmtree(run.hook_dir, ignore_errors=True)
         if run.workspace is not None:
             shutil.rmtree(run.workspace, ignore_errors=True)
             if run.workspace.exists():
@@ -954,7 +1018,7 @@ class Supervisor:
         Anything else (crash, budget, lease loss, restart) is classified from host state and is NEVER replayed: there is no
         automatic restart of a mutating session."""
         if reason == "cancel" or mission.cancel_requested_at is not None:
-            return self._settle_without_session(mission.id, "cancel")
+            return self._settle_repair_cancel(mission)
         if reason == "takeover":
             try:
                 transition(self.store, mission.id, "needs_operator", ACTOR)
@@ -978,6 +1042,45 @@ class Supervisor:
             return
         self._classify_and_apply(mission, reason)
 
+    def _settle_repair_cancel(self, mission: Mission) -> None:
+        """A cancel of a Repair mission whose session may have changed the host. The host is classified FIRST: unchanged from
+        the checkpoint means `cancelled`; anything else (changed, unreadable, no manifest) means `needs_operator` with the cancel
+        recorded and a rollback offered. A mission is never closed `cancelled` over a half-applied host."""
+        if mission.status in TERMINAL:
+            return
+        unchanged = not mission.checkpoint_id          # no checkpoint: no session was ever allowed to start, nothing was applied
+        if mission.checkpoint_id and self.checkpoint is not None:
+            try:
+                manifest = self.checkpoint.manifest(mission.checkpoint_id)
+                unchanged = recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest)
+            except Exception as exc:                   # noqa: BLE001 - an unreadable host is not "unchanged"
+                self._note(mission.id, {"host_state_unreadable": type(exc).__name__})
+                unchanged = False
+        if unchanged:
+            return self._settle_without_session(mission.id, "cancel", _force=True)
+        if mission.id in self._cancel_held:
+            return
+        self._cancel_held.add(mission.id)
+        self.ms.set_outcome(mission.id, mission.outcome, "partially_applied", ACTOR)
+        self.ms.append_event(mission.id, "decision", ACTOR, {
+            "event": "cancel.held", "reason": "the host differs from the checkpoint, so the mission is not closed as cancelled",
+            "offers": ["rollback", "take_over"], "cancel_requested_by": mission.cancel_requested_by})
+        if mission.status not in ("needs_operator", "recovery_required", "rollback_pending"):
+            try:
+                transition(self.store, mission.id, "needs_operator", ACTOR)
+            except IllegalTransition as exc:
+                self._note(mission.id, {"transition_refused": "needs_operator", "why": str(exc)[:200]})
+
+    def _finish_pending_repair_cancels(self) -> None:
+        """A cancel asked for through a surface that cannot judge the host (MissionService) is finished here, the same way."""
+        for status in ("executing", "paused_tripwire", "verifying", "needs_operator", "recovery_required", "rollback_pending"):
+            for mission in self.ms.list_missions(status):
+                if (mission.tier == "repair" and mission.cancel_requested_at is not None and mission.id not in self._runs
+                        and self.ms.live_session(mission.id) is None):
+                    with contextlib.suppress(Exception):
+                        with self._lock_for(mission.id):
+                            self._settle_repair_cancel(self.ms.get_mission(mission.id))
+
     def _classify_and_apply(self, mission: Mission, reason: str) -> None:
         manifest = host = None
         if mission.checkpoint_id and self.checkpoint is not None:
@@ -993,8 +1096,12 @@ class Supervisor:
         if final == "verifying":
             self.verify_and_close(mission.id)
 
-    def _settle_without_session(self, mission_id: str, reason: str, result: AgentResult | None = None) -> None:
+    def _settle_without_session(self, mission_id: str, reason: str, result: AgentResult | None = None,
+                                _force: bool = False) -> None:
         mission = self.ms.get_mission(mission_id)
+        if (not _force and mission.tier == "repair" and mission.checkpoint_id
+                and (reason == "cancel" or mission.cancel_requested_at is not None)):
+            return self._settle_repair_cancel(mission)    # the host is judged before a Repair mission is closed as cancelled
         if reason == "cancel" or mission.cancel_requested_at is not None:
             target = "cancelled"
         elif reason == "result" and result is not None:
@@ -1003,8 +1110,10 @@ class Supervisor:
             target = "awaiting_decision"
         else:
             target = "needs_operator"
+        # A cancel is the requesting operator's act (and leaving needs_operator is reserved to an operator).
+        actor = mission.cancel_requested_by if target == "cancelled" and mission.cancel_requested_by else ACTOR
         try:
-            transition(self.store, mission_id, target, ACTOR)
+            transition(self.store, mission_id, target, actor)
         except IllegalTransition as exc:
             self._note(mission_id, {"transition_refused": target, "why": str(exc)[:200]})
 
@@ -1105,6 +1214,8 @@ class Supervisor:
                 self._start_failed(mission.id, exc)
         if self.mutating_ready:
             self._start_approved_repairs(ready)
+            with contextlib.suppress(Exception):
+                self._finish_pending_repair_cancels()
         with contextlib.suppress(Exception):
             self.sweep_uids()
         try:
