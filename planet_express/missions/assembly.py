@@ -150,7 +150,7 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         problems = validate_grant(grant, inventory=inventory(), protected=protected, known_checks={c.id for c in plan.checks},
                                   known_tools=known_tools, limits=limits, stacks_root=stacks_root, verification_plan=plan)
         if grant.sudo.mode == "scoped":              # broad sudo is a separate, elevated approval and is never generated
-            problems += outside_ceiling(cfg.worker_sudo_rules, grant.sudo.rules)
+            problems += outside_ceiling(cfg.worker_sudo_rules if cfg.worker_sudo_all_sessions else [], grant.sudo.rules)
         return problems
 
     def backup_status(grant: Grant) -> Mapping[str, Any]:
@@ -178,7 +178,8 @@ def managed_sudoers(cfg: Any, core_user: str) -> dict[str, bytes]:
     from .launcher.setup_steps import LauncherSudoers, Paths, WorkerSudoers
     paths = Paths(core_uid=0, core_gid=0, workspace_root="", core_user=core_user, uid_min=cfg.session_uid_min,
                   uid_max=cfg.session_uid_max,
-                  worker_sudo_rules=tuple((r.unit, tuple(r.actions)) for r in cfg.worker_sudo_rules))
+                  worker_sudo_rules=tuple((r.unit, tuple(r.actions)) for r in cfg.worker_sudo_rules),
+                  worker_sudo_all_sessions=cfg.worker_sudo_all_sessions)
     managed: dict[str, bytes] = {}
     launcher = LauncherSudoers(paths)
     if not launcher.unsafe():

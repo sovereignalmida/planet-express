@@ -362,7 +362,7 @@ def test_an_unreadable_answer_from_a_redacted_route_is_never_passed_through(prox
     class Raw(FakeDaemon):
         pass
     # point the inspect route at garbage by pointing the upstream at a daemon that returns non-JSON for /containers/json
-    proxy.daemon._route = lambda conn, rec: FakeDaemon._send(conn, 200, raw=b"not json at all")
+    proxy.daemon._route = lambda conn, rec: proxy.daemon._send(conn, 200, raw=b"not json at all")
     status, _, body = proxy.req("GET", "/containers/json")
     assert status == 502 and b"not json" not in body
 
@@ -655,57 +655,146 @@ def test_a_container_the_operator_created_is_not_held_to_the_grants_paths_when_r
     assert proxy.req("POST", "/containers/qbittorrent/restart")[0] == 204
 
 
-# ── the client shim: stock Docker clients cannot add the session token ────────────────────────────────────────
+# ── API version negotiation ────────────────────────────────────────────────────────────────────────
 
-def test_the_shim_puts_the_session_token_on_requests_from_a_client_that_cannot(proxy):
-    from planet_express.missions.dockerproxy.shim import TokenShim
-    shim_path = os.path.join(proxy.dir, "shim.sock")
-    shim = TokenShim(shim_path, proxy.path, "good" * 8)
-    proxy.gate.authenticate = lambda peer, token: proxy.gate.session if token == "good" * 8 else None
-    shim.start()
+@pytest.mark.parametrize("daemon, top, refused", [("1.52", 48, "v1.49"), ("1.45", 45, "v1.46"), ("1.48", 48, "v1.49")])
+def test_the_proxy_serves_up_to_the_lower_of_the_daemons_version_and_its_own_and_says_so_in_ping(env, daemon, top, refused):
+    env.daemon.api_version = f"{daemon}"
+    path = os.path.join(env.dir, "ro.sock")
+    ro = build_read_only(path, upstream=env.upstream)
+    ro.start()
     try:
-        assert os.lstat(shim_path).st_mode & 0o777 == 0o600
-        status, _, body = talk(shim_path, b"GET /v1.43/containers/json HTTP/1.1\r\nHost: d\r\n\r\n")        # no header from the client
-        assert status == 200 and b"qbittorrent" in body
-        status, _, _ = talk(shim_path, b"GET /v1.43/containers/json HTTP/1.1\r\nHost: d\r\nX-PE-Session: other\r\n\r\n")
-        assert status == 200                                                         # a client-supplied header is replaced, not duplicated
-        status, _, _ = talk(shim_path, b"POST /v1.43/containers/qbittorrent/restart HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n")
-        assert status == 204 and proxy.daemon.writes()
-        assert talk(proxy.path, b"GET /v1.43/containers/json HTTP/1.1\r\nHost: d\r\n\r\n")[0] == 401      # the proxy itself still wants it
+        status, headers, _ = request(path, "GET", "/_ping", token=None, version=None)
+        assert status == 200 and headers["api-version"] == f"1.{top}"                 # clients negotiate down to this
+        assert request(path, "GET", f"/v1.{top}/containers/json", token=None, version=None, raw_target=True)[0] == 200
+        assert request(path, "GET", f"/{refused}/containers/json", token=None, version=None, raw_target=True)[0] == 403
+        assert request(path, "GET", "/v1.41/containers/json", token=None, version=None, raw_target=True)[0] == 200
     finally:
-        shim.stop()
-    assert not os.path.exists(shim_path)
+        ro.stop()
 
 
-def test_the_shim_relays_a_hijacked_exec_in_both_directions(proxy):
-    from planet_express.missions.dockerproxy.shim import TokenShim
-    shim_path = os.path.join(proxy.dir, "shim.sock")
-    shim = TokenShim(shim_path, proxy.path, "good" * 8)
-    proxy.gate.authenticate = lambda peer, token: proxy.gate.session if token == "good" * 8 else None
-    shim.start()
+def test_the_daemons_api_version_is_read_from_its_ping_and_an_unreadable_one_is_none(env):
+    env.daemon.api_version = "1.52"
+    assert env.upstream.api_version() == 52
+    env.daemon.api_version = "garbage"
+    assert env.upstream.api_version() is None
+    assert Upstream("/nonexistent/docker.sock").api_version() is None
+
+
+def test_the_proxys_own_questions_to_the_daemon_are_unversioned(proxy):
+    assert proxy.req("POST", "/containers/qbittorrent/restart")[0] == 204
+    asked = [r["target"] for r in proxy.daemon.requests if r["method"] == "GET"]
+    assert asked and all(not t.startswith("/v1.") for t in asked)                   # no pinned version in inspection
+
+
+# ── lists are scoped like inspect ─────────────────────────────────────────────────────────────────────
+
+def test_the_volume_list_drops_out_of_scope_volumes_and_strips_host_paths_and_options(proxy):
+    status, _, body = proxy.req("GET", "/volumes")
+    doc = json.loads(body)
+    names = sorted(v["Name"] for v in doc["Volumes"])
+    assert status == 200 and names == ["bindvol", "fancy", "media_cfg"]                # other_vol (another stack) is gone
+    assert all("Mountpoint" not in v and "Options" not in v for v in doc["Volumes"])
+    status, _, body = proxy.req("GET", "/volumes/media_cfg")
+    assert status == 200 and b"Mountpoint" in body                                     # (inspect of an in-scope volume is unchanged)
+    assert proxy.req("GET", "/volumes/other_vol")[0] == 403
+
+
+def test_the_network_list_strips_options_and_drops_protected_networks(env):
+    from planet_express.missions.dockerproxy import policy as policy_mod
+    env.make()
+    status, _, body = env.req("GET", "/networks")
+    assert status == 200 and all("Options" not in n for n in json.loads(body)) and len(json.loads(body)) == 4
+    env.server.stop()
+    original = env.server.policy
+    scope = make_scope(env.dir, protected=("host:local/stack:other",))
+    env.make()
+    env.server.policy.scope = scope
+    names = [n["Name"] for n in json.loads(env.req("GET", "/networks")[2])]
+    assert "other_default" not in names and "media_default" in names and original is not None and policy_mod
+
+
+def test_the_read_only_variant_lists_volumes_without_host_paths(env):
+    path = os.path.join(env.dir, "ro.sock")
+    ro = build_read_only(path, upstream=env.upstream)
+    ro.start()
     try:
-        eid = json.loads(request(shim_path, "POST", "/containers/qbittorrent/exec", body={"Cmd": ["sh"]}, token=None)[2])["Id"]
-        sock, head, got = hijack(shim_path, f"/v1.43/exec/{eid}/start", {}, upgrade=True, token="ignored-and-replaced")
-        assert head.startswith(b"HTTP/1.1 101") and b"HELLO" in got and b"echo:ping" in got
-        sock.close()
+        doc = json.loads(request(path, "GET", "/volumes", token=None)[2])
+        assert len(doc["Volumes"]) == 4 and all("Mountpoint" not in v for v in doc["Volumes"])
     finally:
-        shim.stop()
+        ro.stop()
 
 
-def test_the_shim_refuses_a_token_that_is_not_one_and_an_oversized_head(proxy):
-    from planet_express.missions.dockerproxy.shim import TokenShim
-    for bad in ("", "short", "has space in it 123456", "x" * 300, "bad\nnewline-token-12345"):
-        with pytest.raises(ValueError):
-            TokenShim("/tmp/x", "/tmp/y", bad)
-    shim_path = os.path.join(proxy.dir, "shim.sock")
-    shim = TokenShim(shim_path, proxy.path, "good" * 8)
-    shim.start()
-    try:
-        sock = socket.socket(socket.AF_UNIX)
-        sock.connect(shim_path)
-        sock.sendall(b"GET / HTTP/1.1\r\nX: " + b"a" * 20000)
-        sock.settimeout(3)
-        assert sock.recv(100) == b""                                                  # closed, nothing forwarded
-        assert proxy.daemon.requests == []
-    finally:
-        shim.stop()
+# ── archive: the path stat, chunked uploads ─────────────────────────────────────────────────────────
+
+def test_an_archive_download_forwards_the_path_stat_header_docker_cp_needs(proxy):
+    status, headers, body = proxy.req("GET", "/containers/qbittorrent/archive?path=/config")
+    assert status == 200 and body == b"TARDATA"
+    assert headers.get("x-docker-container-path-stat") == "eyJuYW1lIjoiY29uZmlnIn0="
+
+
+def chunked(path, target, pieces, *, extra="", tail=b"0\r\n\r\n", token="good", method="PUT"):
+    body = b"".join(f"{len(p):x}\r\n".encode() + p + b"\r\n" for p in pieces) + tail
+    head = (f"{method} {target} HTTP/1.1\r\nHost: d\r\nX-PE-Session: {token}\r\nTransfer-Encoding: chunked\r\n"
+            f"Content-Type: application/x-tar\r\n{extra}\r\n").encode()
+    return talk(path, head + body)
+
+
+def test_a_chunked_archive_upload_is_decoded_bounded_and_forwarded(proxy):
+    pieces = [b"A" * 3000, b"B" * 10, b"C" * 70000]
+    status, _, _ = chunked(proxy.path, "/v1.43/containers/qbittorrent/archive?path=/config", pieces)
+    assert status in (200, 204)
+    sent = proxy.daemon.writes()[-1]
+    assert sent["body"] == b"".join(pieces) and sent["target"].startswith(f"/v1.43/containers/{ID_A}/archive?")
+    assert any(e["route"] == "container.archive.put" and e["bytes"] == "chunked" for e in proxy.gate.writes())
+
+
+def test_a_chunked_upload_over_the_cap_is_refused(env):
+    env.make()
+    env.server.policy.archive_cap = 1000
+    status, _, _ = chunked(env.path, "/v1.43/containers/qbittorrent/archive?path=/config", [b"A" * 600, b"B" * 600])
+    assert status in (413, 502, 0)
+    assert env.daemon.writes() == []
+
+
+@pytest.mark.parametrize("name, kwargs", [
+    ("bad size", {"pieces": [b"x"], "tail": b"0\r\n\r\n", "mangle": (b"1\r\n", b"zz\r\n")}),
+    ("extension", {"pieces": [b"x"], "tail": b"0\r\n\r\n", "mangle": (b"1\r\n", b"1;ext=1\r\n")}),
+    ("trailers", {"pieces": [b"x"], "tail": b"0\r\nX-Evil: 1\r\n\r\n"}),
+    ("bytes after last chunk", {"pieces": [b"x"], "tail": b"0\r\n\r\nGET /v1.43/containers/json HTTP/1.1\r\n\r\n"}),
+    ("missing chunk CRLF", {"pieces": [b"x"], "tail": b"0\r\n\r\n", "mangle": (b"x\r\n", b"xYY")}),
+    ("size too long", {"pieces": [b"x"], "tail": b"0\r\n\r\n", "mangle": (b"1\r\n", b"0000000000000001\r\n")}),
+    ("negative size", {"pieces": [b"x"], "tail": b"0\r\n\r\n", "mangle": (b"1\r\n", b"-1\r\n")}),
+])
+def test_bad_chunk_framing_never_yields_a_forwarded_write(proxy, name, kwargs):
+    pieces, tail, mangle = kwargs["pieces"], kwargs["tail"], kwargs.get("mangle")
+    body = b"".join(f"{len(p):x}\r\n".encode() + p + b"\r\n" for p in pieces) + tail
+    if mangle:
+        body = body.replace(*mangle, 1)
+    head = (b"PUT /v1.43/containers/qbittorrent/archive?path=/config HTTP/1.1\r\nHost: d\r\nX-PE-Session: good\r\n"
+            b"Transfer-Encoding: chunked\r\nContent-Type: application/x-tar\r\n\r\n")
+    status, _, _ = talk(proxy.path, head + body)
+    assert status != 204 and status != 200, name
+    assert [w for w in proxy.daemon.writes() if "archive" in w["target"]] == [], name
+
+
+@pytest.mark.parametrize("extra", ["Content-Length: 5\r\n", "Content-Length: 0\r\n"])
+def test_content_length_together_with_transfer_encoding_is_refused(proxy, extra):
+    head = (f"PUT /v1.43/containers/qbittorrent/archive?path=/config HTTP/1.1\r\nHost: d\r\nX-PE-Session: good\r\n"
+            f"Transfer-Encoding: chunked\r\n{extra}\r\n5\r\nhello\r\n0\r\n\r\n").encode()
+    assert talk(proxy.path, head)[0] == 400 and proxy.daemon.writes() == []
+
+
+@pytest.mark.parametrize("value", ["gzip, chunked", "chunked, gzip", "identity", "Chunked2", "chunked\t;x"])
+def test_only_a_plain_chunked_transfer_encoding_is_accepted(proxy, value):
+    head = (f"PUT /v1.43/containers/qbittorrent/archive?path=/config HTTP/1.1\r\nHost: d\r\nX-PE-Session: good\r\n"
+            f"Transfer-Encoding: {value}\r\n\r\n1\r\nx\r\n0\r\n\r\n").encode()
+    assert talk(proxy.path, head)[0] == 400 and proxy.daemon.writes() == []
+
+
+def test_chunked_bodies_are_refused_on_every_endpoint_but_the_archive_upload(proxy):
+    for method, target in (("POST", "/v1.43/containers/create"), ("POST", "/v1.43/containers/qbittorrent/restart"),
+                           ("POST", "/v1.43/containers/qbittorrent/exec"), ("GET", "/v1.43/containers/json")):
+        status, _, _ = chunked(proxy.path, target, [b"{}"], method=method)
+        assert status == 400, target
+    assert proxy.daemon.writes() == []

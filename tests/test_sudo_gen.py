@@ -152,6 +152,7 @@ def test_normalise_accepts_dicts_pairs_and_objects():
 # ── the setup step ──────────────────────────────────────────────────────────────────────────────────
 
 def paths_with_rules(tmp_path, rules=RULES, **over):
+    over.setdefault("worker_sudo_all_sessions", True)
     return step_paths(tmp_path, worker_sudoers=str(tmp_path / "etc" / "sudoers.d" / "pe-worker"), worker_sudo_rules=tuple(rules),
                       uid_min=61000, uid_max=61040, **over)
 
@@ -328,3 +329,17 @@ def test_uninstall_removes_an_older_generated_file_even_if_the_config_names_othe
     step.remove(journal)
     assert not Path(old.worker_sudoers).exists()
     assert step.restore(journal.evidence(step.name)).startswith(old.worker_sudoers) and Path(old.worker_sudoers).read_text() == SNAPSHOT
+
+
+def test_without_the_operators_acknowledgement_the_file_is_never_generated_or_installed(tmp_path):
+    """The file names every session uid, Observe/Propose and rules-less Repair sessions included: fail closed by default."""
+    p = paths_with_rules(tmp_path, worker_sudo_all_sessions=False)
+    step = WorkerSudoers(p)
+    assert "EVERY session uid" in step.unsafe() and step.probe().blocked
+    with pytest.raises(StepError, match="EVERY session uid"):
+        step.repair(MemoryJournal())
+    assert not Path(p.worker_sudoers).exists() and step.owned_file() is None
+    from planet_express.missions.assembly import managed_sudoers
+    from config_schema import MissionsConfig
+    cfg = MissionsConfig(worker_sudo_rules=[{"unit": "a.service", "actions": ["start"]}])
+    assert cfg.worker_sudo_all_sessions is False and "/etc/sudoers.d/planetexpress-worker" not in managed_sudoers(cfg, "pe")

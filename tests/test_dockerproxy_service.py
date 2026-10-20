@@ -63,8 +63,14 @@ class Claimed:
         self.cgroup, self.uid = None, None
         self.inner = WorkerAuthenticator(store, read_cgroup=lambda pid: self.cgroup, core_uid=-1)
 
+    def _peer(self, peer):
+        return PeerCred(peer.pid, self.uid if self.uid is not None else peer.uid, peer.gid)
+
     def __call__(self, peer, req):
-        return self.inner(PeerCred(peer.pid, self.uid if self.uid is not None else peer.uid, peer.gid), req)
+        return self.inner(self._peer(peer), req)
+
+    def by_id(self, peer, session_id):
+        return self.inner.by_id(self._peer(peer), session_id)
 
 
 class Stack:
@@ -124,7 +130,7 @@ def test_a_repair_session_gets_its_own_proxy_socket_and_its_environment_names_on
     st = stack()
     mid, sid, token, path, spawn = go(st)
     assert os.path.exists(path) and os.path.exists(os.path.join(st.dir, sid, "worker.sock"))
-    assert spawn["env"]["PE_DOCKER_SOCKET"] == path and "DOCKER_HOST" not in spawn["env"]      # stock clients cannot send the token
+    assert spawn["env"]["PE_DOCKER_SOCKET"] == path and spawn["env"]["DOCKER_HOST"] == f"unix://{path}"
     assert spawn["sock_dir"] is True and token not in json.dumps(spawn["env"])
     assert restart(path, token)[0] == 204
 
@@ -137,7 +143,7 @@ def test_an_observe_session_gets_no_proxy_and_no_docker_environment(tmp_path):
         rig.sup.socket_provider = SessionSockets(d, rig.sup, None, build=lambda path, *a, **k: StubWorker(path), proxy=svc)
         rig.sup.start(rig.mid)
         sid = rig.session_ids()[0]
-        assert not svc.wants(sid) and not os.path.exists(os.path.join(d, sid, "proxy.sock"))
+        assert not os.path.exists(os.path.join(d, sid, "proxy.sock"))
         assert "DOCKER_HOST" not in rig.cont.spawns(sid)[0]["env"] and os.path.exists(os.path.join(d, sid, "worker.sock"))
     finally:
         shutil.rmtree(d, ignore_errors=True)
@@ -204,12 +210,23 @@ def test_another_sessions_token_is_refused_on_this_sessions_socket(stack):
     assert st.daemon.writes() == []
 
 
-def test_the_token_is_required_even_with_the_right_peer(stack):
+def test_the_peers_identity_is_the_credential_and_the_token_is_optional_defence_in_depth(stack):
+    """Decision: the per-session socket is 0600 and owned by the session's unique uid, so uid + cgroup bind the caller; a
+    stock Docker client cannot send a header. A token that IS sent must still be this session's."""
     st = stack()
     mid, sid, token, path, _ = go(st)
-    assert request(path, "POST", "/containers/qbittorrent/restart", token=None)[0] == 401
-    assert request(path, "GET", "/containers/json", token="x" * 64)[0] == 401
-    assert st.daemon.requests == []
+    assert request(path, "POST", "/containers/qbittorrent/restart", token=None)[0] == 204         # right peer, no token
+    assert request(path, "POST", "/containers/qbittorrent/restart", token=token)[0] == 204        # right peer, right token
+    n = len(st.daemon.requests)
+    assert request(path, "GET", "/containers/json", token="x" * 64)[0] == 401                     # a wrong token is refused
+    st.auth.cgroup = "/fake-cgroup/another-session"
+    assert request(path, "GET", "/containers/json", token=None)[0] == 401                         # right uid, wrong cgroup
+    st.auth.cgroup, st.auth.uid = st.cont.cgroup_path(sid), st.auth.uid + 1
+    assert request(path, "GET", "/containers/json", token=None)[0] == 401                         # right cgroup, wrong uid
+    st.auth.uid = st.cont.spawns(sid)[0]["uid"]
+    st.ms.revoke_session(sid)
+    assert request(path, "GET", "/containers/json", token=None)[0] == 401                         # revoked: gone either way
+    assert len(st.daemon.requests) == n
 
 
 # ── what a write must prove ─────────────────────────────────────────────────────────────────────────
@@ -355,7 +372,9 @@ def test_the_assembly_marks_exactly_the_generators_output_as_managed_and_a_grant
     from config_schema import MissionsConfig
     from planet_express.missions.assembly import managed_sudoers
     from planet_express.missions.sudo_gen import render
-    cfg = MissionsConfig(worker_sudo_rules=[{"unit": "plex.service", "actions": ["restart", "start"]}])
+    cfg = MissionsConfig(worker_sudo_rules=[{"unit": "plex.service", "actions": ["restart", "start"]}], worker_sudo_all_sessions=True)
+    assert "/etc/sudoers.d/planetexpress-worker" not in managed_sudoers(
+        MissionsConfig(worker_sudo_rules=[{"unit": "plex.service", "actions": ["restart"]}]), "planetexpress")   # not acknowledged
     managed = managed_sudoers(cfg, "planetexpress")
     assert managed["/etc/sudoers.d/planetexpress-worker"] == render([("plex.service", ("restart", "start"))], uid_min=61000, uid_max=61999)
     assert b"planetexpress ALL=(root) NOPASSWD:" in managed["/etc/sudoers.d/planetexpress-launch"]
@@ -367,12 +386,22 @@ def test_a_valid_session_that_is_not_this_sockets_session_is_refused_by_the_gate
 
     from planet_express.missions.dockerproxy.service import StoreGate
     st = stack()
+    class Auth:
+        def __init__(self, row):
+            self.row = row
+
+        def __call__(self, peer, req):
+            return self.row
+
+        def by_id(self, peer, session_id):
+            return self.row
     theirs = SimpleNamespace(id="S-someone-else", fences={})
-    gate = StoreGate(st.svc, "S-mine", "M-1", "0" * 64, lambda peer, req: theirs)       # authenticates, but as another session
-    assert gate.authenticate(PeerCred(1, 2, 3), "t" * 40) is None
+    gate = StoreGate(st.svc, "S-mine", "M-1", "0" * 64, Auth(theirs))                   # authenticates, but as another session
+    assert gate.authenticate(PeerCred(1, 2, 3), "t" * 40) is None and gate.authenticate(PeerCred(1, 2, 3), None) is None
     mine = SimpleNamespace(id="S-mine", fences={})
-    assert StoreGate(st.svc, "S-mine", "M-1", "0" * 64, lambda peer, req: mine).authenticate(PeerCred(1, 2, 3), "t" * 40) is mine
-    assert gate.authenticate(PeerCred(1, 2, 3), None) is None and gate.authenticate(PeerCred(1, 2, 3), 5) is None
+    ok = StoreGate(st.svc, "S-mine", "M-1", "0" * 64, Auth(mine))
+    assert ok.authenticate(PeerCred(1, 2, 3), "t" * 40) is mine and ok.authenticate(PeerCred(1, 2, 3), None) is mine
+    assert ok.authenticate(PeerCred(1, 2, 3), 5) is None
 
 
 def test_the_daemon_wiring_builds_the_proxy_before_the_controls_so_a_tripwire_pause_reaches_it(tmp_path, monkeypatch):
@@ -396,3 +425,58 @@ def test_the_daemon_wiring_builds_the_proxy_before_the_controls_so_a_tripwire_pa
     runner = build_mission_runner(store, cfg, stacks_root=str(stacks), repair_wiring=object())
     assert isinstance(seen["proxy"], DockerProxyService)
     assert runner.supervisor.docker_proxy is seen["proxy"] and runner.supervisor.socket_provider.proxy is seen["proxy"]
+
+
+# ── pause: every path closes the proxy, and a pause racing the launch survives it ─────────────────────────────
+
+def test_a_pause_that_arrives_while_the_session_is_launching_is_not_cleared_by_the_start(stack, monkeypatch):
+    from planet_express.missions.dockerproxy import service as service_mod
+    st = stack()
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    real_start = service_mod.ProxyServer.start
+
+    def racing_start(self):
+        real_start(self)
+        st.svc.pause(mid)                                    # the tripwire fires between the bind and the end of the launch
+    monkeypatch.setattr(service_mod.ProxyServer, "start", racing_start)
+    st.sup.tick()
+    sid = st.runtimes[0].context.session.session_id
+    assert st.svc.is_paused(mid)
+    spawn = st.cont.spawns(sid)[0]
+    st.auth.cgroup, st.auth.uid = st.cont.cgroup_path(sid), spawn["uid"]
+    assert restart(os.path.join(st.dir, sid, "proxy.sock"), spawn["token"])[0] == 503 and st.daemon.writes() == []
+
+
+def test_a_pause_left_over_from_an_earlier_session_does_not_close_a_fresh_one(stack):
+    st = stack()
+    mid = st.propose()["mission_id"]
+    st.svc.pause(mid)                                        # an old pause, before this session starts
+    st.approve_all(mid)
+    st.sup.tick()
+    assert not st.svc.is_paused(mid)
+
+
+def test_a_failed_resume_and_a_tool_abuse_freeze_both_close_the_proxy(stack):
+    from types import SimpleNamespace
+    st = stack()
+    mid, sid, token, path, _ = go(st)
+    run = st.sup._runs[mid]
+    assert not st.svc.is_paused(mid)
+    st.sup._pause_again(mid, run, "operator:alice", "boom")
+    assert st.svc.is_paused(mid) and restart(path, token)[0] == 503
+    st.svc._paused.clear()                                   # (the mission itself stays paused_tripwire: writes would be refused anyway)
+    assert not st.svc.is_paused(mid)
+    st.sup.freeze_for_tool_abuse(SimpleNamespace(mission_id=mid, id=sid))
+    assert st.svc.is_paused(mid) and restart(path, token)[0] == 503
+
+
+def test_stopping_the_runner_shuts_the_proxy_service_down(tmp_path):
+    from types import SimpleNamespace
+
+    from planet_express.missions.runner import MissionRunner
+    calls = []
+    proxy = SimpleNamespace(shutdown=lambda: calls.append("shutdown"))
+    runner = MissionRunner(SimpleNamespace(docker_proxy=proxy, shutdown=lambda: calls.append("supervisor")))
+    runner.stop()
+    assert calls == ["supervisor", "shutdown"]

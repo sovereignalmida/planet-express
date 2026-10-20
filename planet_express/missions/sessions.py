@@ -55,9 +55,22 @@ def resolve_session(store: Store, token_hash: str, peer_cgroup: str | None = Non
     """The live session this token belongs to, or None. A token alone is never enough: the caller's
     cgroup (or uid, for the per-uid fallback) must equal the one the session is bound to. Revoked and
     expired sessions never resolve."""
-    now = int(store._clock())
     with store._connect() as conn:
         row = conn.execute("SELECT * FROM mission_sessions WHERE token_hash=?", (token_hash,)).fetchone()
+    return _bound(store, row, peer_cgroup, peer_uid)
+
+
+def resolve_session_by_id(store: Store, session_id: str, peer_cgroup: str | None = None,
+                          peer_uid: int | None = None) -> SessionRow | None:
+    """The live session with this id if the caller's cgroup AND uid are the ones it is bound to. For a socket that is the
+    session's own (0600, owned by its unique uid) the identity is the credential; no token is needed (contract 6.1, 22.1)."""
+    with store._connect() as conn:
+        row = conn.execute("SELECT * FROM mission_sessions WHERE id=?", (session_id,)).fetchone()
+    return _bound(store, row, peer_cgroup, peer_uid)
+
+
+def _bound(store: Store, row, peer_cgroup: str | None, peer_uid: int | None) -> SessionRow | None:
+    now = int(store._clock())
     if row is None or row["revoked_at"] is not None or row["expires_at"] <= now:
         return None
     # `launching` rows authenticate like live ones: the cgroup and the uid they are bound to only exist once the
@@ -80,4 +93,5 @@ def revoke_session(ms: MissionStore, session_id: str, actor: str = "core") -> No
     ms.revoke_session(session_id, actor)
 
 
-__all__ = ["SessionRow", "issue_session", "new_token", "resolve_session", "revoke_session", "set_leader_pid"]
+__all__ = ["SessionRow", "issue_session", "new_token", "resolve_session", "resolve_session_by_id", "revoke_session",
+           "set_leader_pid"]

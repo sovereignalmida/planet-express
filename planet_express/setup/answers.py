@@ -107,6 +107,7 @@ class MissionsAnswers(_Strict):
     cgroup_root: AbsPath = _MISSIONS_DEFAULTS.cgroup_root
     workspace_root: AbsPath | None = None      # unset: `mission-workspaces` in the state directory, as Core defaults it
     worker_sudo_rules: list[WorkerSudoRuleConfig] = []   # the worker tier's sudo ceiling; empty: no worker sudoers file
+    worker_sudo_all_sessions: bool = False               # required to generate it: every session uid gets the ceiling
 
     @model_validator(mode="after")
     def _as_the_config_would_accept_it(self):

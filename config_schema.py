@@ -499,6 +499,10 @@ class MissionsConfig(BaseModel):
     # The host-wide ceiling of the generated worker sudoers file (contract 15): units and actions, exact argv, never a
     # wildcard. A grant's own `sudo.rules` must sit inside it. Empty: no worker sudoers file exists.
     worker_sudo_rules: list[WorkerSudoRuleConfig] = []
+    # The generated file names every session uid, not only sessions whose grant names sudo rules (the launcher cannot yet add a
+    # per-grant group), so it grants the ceiling to Observe/Propose and rules-less Repair sessions too. Fail closed: the file is
+    # not generated, planned or treated as managed unless the operator acknowledges that here.
+    worker_sudo_all_sessions: bool = False
     # Brokered tools: tool name -> {name: base url}, and secret ref -> the NAME of a Core environment variable that
     # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
     tool_sites: dict[str, dict[str, str]] = {}
