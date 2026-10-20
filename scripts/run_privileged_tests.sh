@@ -35,7 +35,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-TESTS="tests/test_launcher_privileged.py tests/test_missions_containment_cgroup.py tests/test_launcher_helper.py tests/test_checkpoint_privileged.py tests/test_tripwire_privileged.py"
+TESTS="tests/test_launcher_privileged.py tests/test_missions_containment_cgroup.py tests/test_launcher_helper.py tests/test_checkpoint_privileged.py tests/test_tripwire_privileged.py tests/test_dockerproxy_privileged.py"
 
 case "$MODE" in
   docker)

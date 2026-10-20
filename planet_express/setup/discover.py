@@ -264,6 +264,7 @@ KNOWN_SYSTEM_PATHS = (
     # Mission control's launcher (planet_express/missions/launcher/config.py and setup_steps.py): a mission setup plan
     # records what is at each of these so it replaces nothing it did not see.
     "/etc/planetexpress-launch/launch.conf", "/usr/libexec/planetexpress/pe-launch", "/etc/sudoers.d/planetexpress-launch",
+    "/etc/sudoers.d/planetexpress-worker",
     "/etc/systemd/system/casa-planetexpress.service.d/launcher.conf",
 )
 # Beside a candidate install location. Every file `plan` may write has to be probed here or above: `plan`

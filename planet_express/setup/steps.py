@@ -246,13 +246,18 @@ class BootHookRemove(_Params):
     marker: Name = "planetexpress"
 
 
+class _WorkerSudoRule(_Params):
+    unit: Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.(service|socket|timer|mount|path|target)$")]
+    actions: Annotated[tuple[Literal["start", "stop", "restart"], ...], Field(min_length=1, max_length=3)]
+
+
 class _LauncherParams(_Params):
     """One of the session launcher's host steps (contract 22.5 of docs/designs/v4-slice-0-contracts.md). `name` picks
     which; the rest is the shared configuration every one of them reads, so no step can disagree with another about
     the uid range or the paths. What each does is fixed in `planet_express/missions/launcher/setup_steps.py`: there
     is no free-form content here, and the helper, sudoers and launch.conf text is generated from these values."""
-    name: Literal["session-uid-range", "launcher-helper", "helper-store", "launcher-sudoers", "cgroup-tree", "workspace-root",
-                  "socket-root"]
+    name: Literal["session-uid-range", "launcher-helper", "helper-store", "launcher-sudoers", "worker-sudoers",
+                  "cgroup-tree", "workspace-root", "socket-root"]
     core_user: Name
     flavour: Literal["systemd", "mos"]
     uid_min: int = Field(gt=0, lt=2**31)
@@ -263,6 +268,8 @@ class _LauncherParams(_Params):
     boot_script: AbsPath | None = None      # MOS only: the script that recreates the cgroup tree at every boot
     helper_store: AbsPath | None = None     # MOS only: the persistent helper copy installed at every boot
     conf: AbsPath | None = None             # MOS only: where launch.conf lives (under the data pool; Ubuntu has a fixed path)
+    worker_sudo_rules: tuple[_WorkerSudoRule, ...] = ()   # the worker-sudoers ceiling (generated text, shown in the plan)
+    worker_sudoers_reconcile: bool = False  # no rules, but an earlier setup's generated file is on the host: remove it
 
     @model_validator(mode="after")
     def _coherent(self):
@@ -278,6 +285,9 @@ class _LauncherParams(_Params):
             raise ValueError("the helper-store step needs the path of the persistent helper copy")
         if self.name == "launcher-sudoers" and self.flavour != "systemd":
             raise ValueError("there is no sudo on MOS, so no launcher sudoers")
+        if self.name == "worker-sudoers" and (self.flavour != "systemd"
+                                              or not (self.worker_sudo_rules or self.worker_sudoers_reconcile)):
+            raise ValueError("the worker sudoers needs sudo (not MOS) and either a rule or an earlier file to take away")
         return self
 
 
