@@ -187,3 +187,9 @@ def test_revoke_and_a_bad_id(web):
     assert r.status_code == 302 and r.headers["Location"].endswith("notice=standing_revoked")
     assert core.calls[-1] == ("standing.revoke", {"operator": "alice", "standing_id": "SG-1-v1"})
     assert client.post("/missions/standing/nope/revoke", data={"csrf_token": token(client)}).status_code == 404
+
+
+def test_the_missions_board_links_to_the_standing_grants_page():
+    import pathlib
+    html = pathlib.Path("templates/missions.html").read_text()
+    assert "url_for('standing_page')" in html

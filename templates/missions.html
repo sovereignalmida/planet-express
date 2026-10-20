@@ -4,7 +4,8 @@
 <section class="panel" aria-label="Missions">
   <div class="panel-head-row">
     <h3>MISSIONS</h3>
-    <span class="panel-head-note">{{ active.total }} open · {{ closed.total }} closed · Observe and Propose only; nothing here changes the host</span>
+    <a class="status-chip" href="{{ url_for('standing_page') }}">STANDING GRANTS</a>
+    <span class="panel-head-note">{{ active.total }} open · {{ closed.total }} closed · Repair missions run only after you approve their grant</span>
   </div>
   {% if not missions %}
   <p class="muted-body">No missions yet. Press INVESTIGATE on an incident to open one.</p>
