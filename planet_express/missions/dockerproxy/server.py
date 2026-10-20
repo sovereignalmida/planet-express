@@ -67,22 +67,11 @@ class Gate(Protocol):
 
 
 class ExecTable:
-    """The exec ids this session's proxy created (and the container each belongs to) and the container ids it created. Bounded;
-    oldest forgotten first."""
+    """The exec ids this session's proxy created, and the container each belongs to. Bounded; oldest forgotten first (an
+    exec that was forgotten can no longer be started: that fails closed)."""
 
     def __init__(self, cap: int = 512):
         self._cap, self._items, self._lock = cap, OrderedDict(), threading.Lock()
-        self._created: OrderedDict[str, None] = OrderedDict()
-
-    def note_created(self, container_id: str) -> None:
-        with self._lock:
-            self._created[container_id] = None
-            while len(self._created) > self._cap:
-                self._created.popitem(last=False)
-
-    def is_created(self, container_id: str) -> bool:
-        with self._lock:
-            return container_id in self._created
 
     def add(self, exec_id: str, container_id: str) -> None:
         with self._lock:
@@ -338,12 +327,7 @@ class ProxyServer:
             if isinstance(exec_id, str) and plan.exec_container:
                 self.execs.add(exec_id, plan.exec_container)
             return data
-        if route.name == "container.create":
-            made = doc.get("Id") if isinstance(doc, dict) else None
-            if isinstance(made, str) and len(made) == 64:
-                self.execs.note_created(made)
-            return data
-        if route.name == "container.update":
+        if route.name in ("container.create", "container.update"):
             return data
         if route.name == "containers.list" and isinstance(doc, list):
             doc = [item for item in doc if not self._protected_listing(item)]

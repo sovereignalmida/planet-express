@@ -21,6 +21,7 @@ from .httpwire import BadRequest, Head, Refusal, strict_json
 API_VERSIONS = frozenset(f"v1.{n}" for n in range(41, 49))
 JSON_CAP = 256 * 1024
 ARCHIVE_CAP = 32 * 1024 * 1024
+CREATED_LABEL = "io.planetexpress.created-by-proxy"      # put on every container a worker creates; its mounts are re-checked at start
 PROJECT_LABEL, SERVICE_LABEL = "com.docker.compose.project", "com.docker.compose.service"
 
 CAP_ALLOW = frozenset({"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "NET_BIND_SERVICE"})
@@ -300,14 +301,12 @@ class Policy:
 
     def __init__(self, scope: Scope | None, inspector: Inspector, *, read_only: bool = False,
                  exec_owner: Callable[[str], str | None] = lambda exec_id: None,
-                 created: Callable[[str], bool] = lambda container_id: False,
                  json_cap: int = JSON_CAP, archive_cap: int = ARCHIVE_CAP,
                  versions: frozenset[str] = API_VERSIONS, is_socket: Callable[[str], bool] | None = None):
         if not read_only and scope is None:
             raise ValueError("a scoped policy needs a scope")
         self.scope, self.inspector, self.read_only = scope, inspector, read_only
         self.exec_owner, self.json_cap, self.archive_cap, self.versions = exec_owner, json_cap, archive_cap, versions
-        self.created = created
         self._is_socket = is_socket or _is_unix_socket
 
     # -- matching -------------------------------------------------------------------------------
@@ -370,7 +369,7 @@ class Policy:
             plan.summary = {"container": info.name or info.id[:12]}
             if route.name == "exec.create":
                 plan.exec_container = info.id
-            if route.name in ("container.start", "container.restart") and self.created(info.id):
+            if route.name in ("container.start", "container.restart") and info.labels.get(CREATED_LABEL):
                 self._revalidate_mounts(info)
         elif route.target == "network":
             net = self._network(ident, route.need)
@@ -520,7 +519,8 @@ class Policy:
             raise Refusal("the bind source is outside the grant's paths and mounts")
 
     def _revalidate_mounts(self, info: ContainerInfo) -> None:
-        """A container this session created is checked again when it is started: its bind sources were validated as paths at
+        """A container a worker created through the proxy (it carries CREATED_LABEL, which only the proxy sets and which docker
+        cannot change afterwards) is checked again when it is started: its bind sources were validated as paths at
         create time, and a worker-writable path can be swapped for a symlink (to the Docker socket, say) in between. This
         narrows the window from "whenever the worker likes" to the instant between this check and the daemon's mount; a
         no-follow bind in the daemon is what would close it, and the proxy cannot add that (accepted residual, reported)."""
@@ -588,7 +588,7 @@ class Policy:
         if verdict != "in_scope":
             raise Refusal("the new container's service is protected" if verdict == "protected"
                           else "the new container's service is outside this mission's scope")
-        out["Labels"] = labels
+        out["Labels"] = {**labels, CREATED_LABEL: "1"}          # ours, not the worker's: set (or overwritten) here
         plan.targets = [service]
         if body.get("ExposedPorts") is not None:
             ports = body["ExposedPorts"]

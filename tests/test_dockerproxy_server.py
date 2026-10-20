@@ -60,7 +60,7 @@ def env():
 
     def make(limits=Limits(head_s=2, body_s=3, stream_s=3, hijack_s=5), **kw):
         execs = ExecTable()
-        policy = Policy(make_scope(e.dir), DaemonInspector(e.upstream), exec_owner=execs.owner, created=execs.is_created, **kw)
+        policy = Policy(make_scope(e.dir), DaemonInspector(e.upstream), exec_owner=execs.owner, **kw)
         server = ProxyServer(e.path, policy=policy, upstream=e.upstream, gate=e.gate, execs=execs, limits=limits)
         server.start()
         e.servers.append(server)
@@ -624,6 +624,29 @@ def test_a_container_this_session_created_is_checked_again_at_start_against_a_sw
     source.unlink()
     source.mkdir()
     assert proxy.req("POST", f"/containers/{made}/restart")[0] == 204
+
+
+def test_the_proxy_marks_every_container_it_creates_and_the_worker_cannot_supply_or_remove_the_mark(proxy):
+    from planet_express.missions.dockerproxy.policy import CREATED_LABEL
+    body = create_body()
+    body["Labels"][CREATED_LABEL] = "0"
+    assert proxy.req("POST", "/containers/create?name=qb3", body=body)[0] == 201
+    sent = json.loads(proxy.daemon.writes()[-1]["body"])
+    assert sent["Labels"][CREATED_LABEL] == "1"
+
+
+def test_the_recheck_survives_many_creates_and_a_proxy_restart_because_it_rides_on_the_label_not_on_memory(proxy):
+    """Review finding: bounded in-memory tracking could be evicted; the mark lives on the container itself."""
+    source = Path(proxy.root) / "stacks" / "media" / "config"
+    status, _, answer = proxy.req("POST", "/containers/create?name=first", body=create_body(HostConfig={"Binds": [f"{source}:/c"]}))
+    first = json.loads(answer)["Id"]
+    for n in range(40):
+        assert proxy.req("POST", f"/containers/create?name=more{n}", body=create_body())[0] == 201
+    proxy.server.stop()
+    proxy.make()                                                                     # a new proxy, no memory of anything
+    source.rmdir()
+    source.symlink_to("/var/run/docker.sock")
+    assert proxy.req("POST", f"/containers/{first}/start")[0] == 403
 
 
 def test_a_container_the_operator_created_is_not_held_to_the_grants_paths_when_restarted(proxy, monkeypatch):

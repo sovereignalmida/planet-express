@@ -153,7 +153,7 @@ class DockerProxyService:
         scope = Scope.from_grant(grant, protected=tuple(self.protected()), stacks_root=self.stacks_root,
                                  protected_gids=self.protected_gids)
         execs = ExecTable(self.limits.execs)
-        policy = Policy(scope, DaemonInspector(self.upstream), exec_owner=execs.owner, created=execs.is_created)
+        policy = Policy(scope, DaemonInspector(self.upstream), exec_owner=execs.owner)
         gate: Gate = StoreGate(self, cs.session_id, mission.id, mission.grant_hash, self.authenticator)
         server = ProxyServer(self.path(cs.session_id), policy=policy, upstream=self.upstream, gate=gate, execs=execs,
                              limits=self.limits, name=f"dockerproxy-{cs.session_id[:8]}")
