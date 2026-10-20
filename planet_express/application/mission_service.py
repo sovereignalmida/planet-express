@@ -410,7 +410,7 @@ class MissionService:
         actor = _actor(operator)
         now = int(self.store._clock())
         with self.store._write() as conn:
-            row = conn.execute("SELECT status, cancel_requested_at FROM missions WHERE id=?",
+            row = conn.execute("SELECT status, cancel_requested_at, tier, checkpoint_id FROM missions WHERE id=?",
                                (mission_id,)).fetchone()
             if row is None:
                 raise MissionError("Mission not found", "not_found")
@@ -418,7 +418,12 @@ class MissionService:
                 raise MissionError(f"Mission is already {row['status']}", "conflict")
             live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL",
                                 (mission_id,)).fetchone()
-            if live is None:
+            # A Repair mission that has a checkpoint may have changed the host: only the supervisor, which reads the host against
+            # the checkpoint, closes it as cancelled (or holds it for the operator). Here the request is just recorded.
+            may_have_changed = (row["tier"] not in ("observe", "propose") and row["checkpoint_id"] is not None
+                                and row["status"] in ("executing", "paused_tripwire", "verifying", "needs_operator",
+                                                      "recovery_required", "rollback_pending"))
+            if live is None and not may_have_changed:
                 try:
                     transition_in_txn(conn, mission_id, "cancelled", actor, now)
                 except IllegalTransition as exc:
@@ -568,14 +573,14 @@ class MissionService:
         return self._flowed(lambda f: f.take_over(_actor(operator), mission_id))
 
     def standing_create(self, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
-                        elevated: bool = False) -> dict:
+                        elevated: bool = False, ceilings: dict | None = None) -> dict:
         return self._flowed(lambda f: f.standing_create(_actor(operator), scope=scope, ttl_s=ttl_s, window_spec=window,
-                                                        elevated=elevated))
+                                                        elevated=elevated, ceilings=ceilings))
 
     def standing_supersede(self, grant_id: str, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
-                           elevated: bool = False) -> dict:
+                           elevated: bool = False, ceilings: dict | None = None) -> dict:
         return self._flowed(lambda f: f.standing_supersede(_actor(operator), grant_id, scope=scope, ttl_s=ttl_s,
-                                                           window_spec=window, elevated=elevated))
+                                                           window_spec=window, elevated=elevated, ceilings=ceilings))
 
     def standing_revoke(self, grant_id: str, *, operator: str) -> dict:
         return self._flowed(lambda f: f.standing_revoke(_actor(operator), grant_id))
@@ -692,14 +697,15 @@ class MissionService:
             return self.takeover_mission(v["mission_id"], operator=v["operator"])
 
         def standing_create(p):
-            v = _params(p, {**op, **scope_t}, {"window": _dict, **elev})
+            v = _params(p, {**op, **scope_t}, {"window": _dict, "ceilings": _dict, **elev})
             return self.standing_create(operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
-                                        window=v.get("window"), elevated=v.get("elevated", False))
+                                        window=v.get("window"), elevated=v.get("elevated", False), ceilings=v.get("ceilings"))
 
         def standing_supersede(p):
-            v = _params(p, {**op, **standing_id, **scope_t}, {"window": _dict, **elev})
+            v = _params(p, {**op, **standing_id, **scope_t}, {"window": _dict, "ceilings": _dict, **elev})
             return self.standing_supersede(v["standing_id"], operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
-                                           window=v.get("window"), elevated=v.get("elevated", False))
+                                           window=v.get("window"), elevated=v.get("elevated", False),
+                                           ceilings=v.get("ceilings"))
 
         def standing_revoke(p):
             v = _params(p, {**op, **standing_id})

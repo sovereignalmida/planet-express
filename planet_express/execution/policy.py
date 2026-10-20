@@ -112,14 +112,15 @@ def allows_direct_request(risk: str, origin: str, *,
 
 def decide_runbook(
     runbook: runbooks.Runbook, origin: str, *, autonomy: AutonomyConfig | None = None,
-    mission_approved: bool = False,
+    mission_approved: bool = False, guarded_touch_approved: bool = False,
 ) -> RunbookDecision:
     """Apply the existing risk policy to a fully validated multi-step runbook.
 
     `mission_approved` is only ever read for origin `mission`, and only the missions package may compute it
     (`missions.approvals.mission_step_approved`): True means a `mission_approvals` row exists for the mission's CURRENT grant
     hash. A mission's mutating typed step without it is refused outright (it never becomes an unrelated v3 approval card);
-    with it, the mission approval is the approval, so the step is allowed without a second card. It is never automatic."""
+    with it, the mission approval is the approval (a step on a network-guarded service also needs `guarded_touch_approved`, the
+    explicit protected-touch approval from `missions.approvals.guarded_touch_approved`), so the step is allowed without a second card. It is never automatic."""
     autonomy = config.AUTONOMY if autonomy is None else autonomy
     if origin not in RUNBOOK_ORIGINS:
         return RunbookDecision(False, False, False, None, f"unknown origin {origin!r}", [])
@@ -143,6 +144,13 @@ def decide_runbook(
             f"runbook is {computed_risk}: never allowed", pairs,
         )
     if origin == "mission":
+        if not guarded_touch_approved and any(
+                actions.is_network_guarded(str(step.params.get("stack", "")), str(step.params.get("service", "")))
+                for step in runbook.steps):
+            # The network guard applies to a mission as it does to the weekly pass: a guarded stack or service (DNS, ingress,
+            # VPN) is reached only through an explicit protected-touch approval, never through the mission's ordinary approval.
+            return RunbookDecision(False, False, False, computed_risk,
+                                   "network-guarded services need an explicit protected-touch approval", pairs)
         if computed_risk != "R0" and not mission_approved:
             return RunbookDecision(
                 False, False, False, computed_risk,

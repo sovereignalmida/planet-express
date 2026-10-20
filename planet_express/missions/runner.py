@@ -242,8 +242,9 @@ def build_mission_runner(
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
         repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
         hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json(),
-        hook_install=((lambda workspace: install_claude_code(workspace, cfg.hooks.command))
-                      if cfg.hooks.install_claude_code else None))
+        hook_install=((lambda hook_dir: install_claude_code(hook_dir, cfg.hooks.command))
+                      if cfg.hooks.install_claude_code else None),
+        hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None)
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
         supervisor.socket_provider = socket_provider or SessionSockets(

@@ -16,8 +16,11 @@ from planet_express.missions.hooks import HOOK_LOG_NAME, HookPolicy
 POLICY = HookPolicy(live_trees=("/srv/live",), protected_paths=("/mnt/data",), blocked_failure="open")
 
 
+BIG = {"tool_calls": 100000, "output_bytes": 10**9}
+
+
 def started(tmp_path, n=6):
-    rig = Rig(tmp_path, behaviours=[{"script": [update()] * n}])
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * n}], budgets=BIG)
     rig.sup.hook_policy = lambda mission: POLICY.to_json()
     rig.sup.start(rig.mid)
     sid = rig.session_ids()[0]
@@ -56,32 +59,102 @@ def test_the_claude_code_settings_run_this_module_before_and_after_every_tool_ca
     env = install_claude_code(tmp_path, command)
     assert json.loads((tmp_path / "settings.json").read_text()) == settings
     assert env == {"CLAUDE_CONFIG_DIR": str(tmp_path)}
-    # the privileged launcher hands over regular files directly in the workspace and rejects directories: this is a flat file
-    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"] and not any(p.is_dir() for p in tmp_path.iterdir())
+    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
 
 
-def test_the_supervisor_installs_the_hooks_into_each_session_workspace_before_launch_and_a_failed_install_stops_the_start(tmp_path):
+COMMAND = ["/opt/pe/python", "-m", "planet_express.missions.hooks"]
+
+
+def with_install(rig, root):
     from planet_express.missions.hooks import install_claude_code
-    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 3}])
-    seen, launched_before = [], []
+    rig.sup.hook_root = root
+    rig.sup.hook_install = lambda hook_dir: install_claude_code(hook_dir, COMMAND)
 
-    def install(workspace):
-        seen.append(workspace)
-        launched_before.append(bool(rig.session_ids() and rig.cont.spawns(rig.session_ids()[0])))
-        return install_claude_code(workspace, ["/opt/pe/python", "-m", "planet_express.missions.hooks"])
-    rig.sup.hook_install = install
+
+def test_the_hook_settings_live_in_a_core_owned_directory_outside_the_workspace_and_the_session_cannot_write_them(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 5}])
+    root = tmp_path / "hooks"
+    root.mkdir()
+    with_install(rig, root)
     rig.sup.start(rig.mid)
-    assert (seen[0] / "settings.json").exists() and rig.status() == "investigating"
-    assert rig.cont.spawns(rig.session_ids()[0])[0]["env"]["CLAUDE_CONFIG_DIR"] == str(seen[0])    # the runtime is pointed at it
-    assert launched_before == [False]                                                       # written before the session launched
+    sid = rig.session_ids()[0]
+    settings = root / sid / "settings.json"
+    env = rig.cont.spawns(sid)[0]["env"]
+    assert settings.exists() and env["CLAUDE_CONFIG_DIR"] == str(root / sid)
+    assert not (rig.sup.workspace_dir / sid / "settings.json").exists()                 # nothing of it is in the session's workspace
+    assert not str(settings).startswith(str(rig.sup.workspace_dir))
+    # the modes a session uid (neither the owner nor in the group) sees: it can read, it cannot write or delete
+    assert oct(settings.stat().st_mode & 0o777) == "0o644" and oct(settings.parent.stat().st_mode & 0o777) == "0o755"
+    assert not (settings.stat().st_mode & 0o022) and not (settings.parent.stat().st_mode & 0o022)
+    assert settings.stat().st_uid == os.getuid()                                          # Core's, not a session's
 
+
+def test_changed_or_missing_settings_are_a_session_fault_that_ends_the_session(tmp_path):
+    for tamper in ("edit", "delete", "replace-by-symlink"):
+        rig = Rig(tmp_path / tamper, behaviours=[{"script": [update()] * 9}])
+        root = tmp_path / tamper / "hooks"
+        root.mkdir(parents=True)
+        with_install(rig, root)
+        rig.sup.start(rig.mid)
+        sid = rig.session_ids()[0]
+        settings = root / sid / "settings.json"
+        rig.sup.poll(rig.mid)
+        assert rig.status() == "investigating"                                            # intact: nothing happens
+        if tamper == "edit":
+            settings.write_text('{"hooks": {}}\n')
+        elif tamper == "delete":
+            settings.unlink()
+        else:
+            real = settings.with_name("real.json")
+            real.write_text(settings.read_text())
+            settings.unlink()
+            settings.symlink_to(real)
+        rig.sup.poll(rig.mid)
+        events = [json.loads(e.body_json) for e in rig.ms.events(rig.mid)]
+        assert any(b.get("hook_settings") == "changed or missing" for b in events), tamper
+        assert any(b.get("kill") == "hook_tamper" for b in events)
+        assert not rig.cont.exists(sid) and rig.ms.live_session(rig.mid) is None         # the session was killed and reaped
+        assert not (root / sid).exists()                                                  # and its settings directory removed
+
+
+def test_a_repair_session_that_edits_its_hooks_is_classified_from_the_host_not_trusted(tmp_path):
+    from repair_fakes import build
+    st = build(tmp_path, behaviours=[{"script": [update()] * 9}])
+    try:
+        root = tmp_path / "hooks"
+        root.mkdir()
+        from planet_express.missions.hooks import install_claude_code
+        st.sup.hook_root = root
+        st.sup.hook_install = lambda hook_dir: install_claude_code(hook_dir, COMMAND)
+        mid = st.propose()["mission_id"]
+        st.approve_all(mid)
+        st.sup.tick()
+        sid = st.runtimes[0].context.session.session_id
+        (root / sid / "settings.json").write_text("{}")
+        st.sup.tick()
+        assert st.status(mid) == "needs_operator"
+        assert any(json.loads(e.body_json).get("event") == "recovery.classified" for e in st.ms.events(mid))
+    finally:
+        st.close()
+
+
+def test_a_start_with_hooks_configured_but_no_core_owned_root_is_refused(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 3}])
+    rig.sup.hook_install = lambda hook_dir: {}
+    rig.sup.start(rig.mid)
+    assert rig.status() == "needs_operator" and rig.cont.spawns(rig.session_ids()[0]) == []
+
+
+def test_a_failed_install_stops_the_start_and_leaves_nothing_launched(tmp_path):
     broken = Rig(tmp_path / "b", behaviours=[{"script": [update()] * 3}])
-    broken.sup.hook_install = lambda workspace: (_ for _ in ()).throw(OSError("cannot write"))
+    (tmp_path / "b" / "hooks").mkdir(parents=True)
+    broken.sup.hook_root = tmp_path / "b" / "hooks"
+    broken.sup.hook_install = lambda hook_dir: (_ for _ in ()).throw(OSError("cannot write"))
     broken.sup.start(broken.mid)
-    assert broken.status() == "needs_operator" and broken.cont.spawns(broken.session_ids()[0]) == []   # nothing was launched
+    assert broken.status() == "needs_operator" and broken.cont.spawns(broken.session_ids()[0]) == []
 
 
-def test_the_config_requires_a_command_to_install_and_the_runner_installs_only_when_asked(tmp_path):
+def test_the_config_requires_a_command_and_a_root_to_install_and_the_runner_installs_only_when_asked(tmp_path):
     import pytest
     from config_schema import MissionsConfig
     from missions_helpers import make_store
@@ -90,16 +163,21 @@ def test_the_config_requires_a_command_to_install_and_the_runner_installs_only_w
     with pytest.raises(ValueError):
         MissionsConfig(enabled=True, hooks={"install_claude_code": True})
     with pytest.raises(ValueError):
-        MissionsConfig(enabled=True, hooks={"command": ["python", "-m", "x"]})            # not absolute
+        MissionsConfig(enabled=True, hooks={"install_claude_code": True, "command": COMMAND})       # no root: the session could edit it
+    with pytest.raises(ValueError):
+        MissionsConfig(enabled=True, hooks={"command": ["python", "-m", "x"]})                      # not absolute
+    with pytest.raises(ValueError):
+        MissionsConfig(enabled=True, hooks={"root": "relative/dir"})
     store, _ = make_store(tmp_path)
     plain = build_mission_runner(store, MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/a"]}), containment=FakeContainment())
-    assert plain.supervisor.hook_install is None and plain.supervisor.hook_policy is not None
+    assert plain.supervisor.hook_install is None and plain.supervisor.hook_policy is not None and plain.supervisor.hook_root is None
     cfg = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/a"]},
-                         hooks={"install_claude_code": True, "command": ["/opt/pe/python", "-m", "planet_express.missions.hooks"]})
+                         hooks={"install_claude_code": True, "command": COMMAND, "root": str(tmp_path / "hr")})
     installed = build_mission_runner(store, cfg, containment=FakeContainment())
-    assert installed.supervisor.hook_install is not None
-    assert installed.supervisor.hook_install(tmp_path) == {"CLAUDE_CONFIG_DIR": str(tmp_path)}
-    assert (tmp_path / "settings.json").exists()
+    assert installed.supervisor.hook_root == tmp_path / "hr"
+    (tmp_path / "hr").mkdir()
+    assert installed.supervisor.hook_install(tmp_path / "hr") == {"CLAUDE_CONFIG_DIR": str(tmp_path / "hr")}
+    assert (tmp_path / "hr" / "settings.json").exists()
 
 
 def test_hook_lines_become_events_exactly_once_and_count_against_the_budgets(tmp_path):
@@ -163,9 +241,62 @@ def test_a_symlinked_or_non_regular_log_is_never_read(tmp_path):
     assert hook_events(rig) == []
 
 
-def test_a_flood_is_cut_at_the_per_poll_limits(tmp_path):
+def test_a_long_log_is_processed_in_full_across_polls_with_nothing_skipped_or_repeated(tmp_path):
+    rig, log = started(tmp_path, n=60)
+    line = json.dumps({"kind": "tool", "data": {"hook": "pre", "tool": "Bash", "verdict": "allow"}}) + "\n"
+    total = 3000
+    log.write_text(line * total)
+    for _ in range(40):
+        rig.sup.poll(rig.mid)
+        if len(hook_events(rig)) >= total:
+            break
+    assert len(hook_events(rig)) == total                                   # more than the old 200 per poll, none dropped
+    assert rig.sup._runs[rig.mid].tool_calls == total                      # every pre-hook line counts as a tool call
+    rig.sup.poll(rig.mid)
+    assert len(hook_events(rig)) == total                                   # and none twice
+
+
+def test_a_poll_never_loses_the_lines_past_one_chunk(tmp_path, monkeypatch):
+    monkeypatch.setattr(sup_mod, "MAX_HOOK_READ", 2048)
+    rig, log = started(tmp_path, n=60)
+    line = json.dumps({"kind": "note", "data": {"hook": "post", "tool": "T" * 60}}) + "\n"
+    log.write_text(line * 100)
+    for _ in range(60):
+        rig.sup.poll(rig.mid)
+    assert len(hook_events(rig)) == 100
+
+
+def test_the_final_drain_runs_after_the_session_is_dead_and_before_it_is_settled(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}], budgets=BIG)
+    rig.sup.hook_policy = lambda mission: POLICY.to_json()
+    rig.sup.start(rig.mid)
+    sid = rig.session_ids()[0]
+    log = rig.sup.workspace_dir / sid / HOOK_LOG_NAME
+    line = json.dumps({"kind": "tool", "data": {"hook": "pre", "tool": "Bash", "verdict": "ask", "input": "last words"}}) + "\n"
+    log.write_text(line * 2000)                                               # written right before the result: more than one poll's worth
+    order = []
+    original = rig.sup._settle
+    rig.sup._settle = lambda run: (order.append(len(hook_events(rig))), original(run))[1]
+    rig.sup.poll(rig.mid)                                                     # result, kill, final drain, settle - in one poll
+    assert order == [2000]                                                    # everything was read before settle ran
+    assert len(hook_events(rig)) == 2000 and rig.status() == "awaiting_decision"
+
+
+def test_a_log_that_shrinks_or_disappears_is_reported_as_a_session_fault_once(tmp_path):
     rig, log = started(tmp_path)
     line = json.dumps({"kind": "note", "data": {"hook": "post", "tool": "Bash"}}) + "\n"
-    log.write_text(line * (sup_mod.MAX_HOOK_LINES + 50))
+    log.write_text(line * 5)
     rig.sup.poll(rig.mid)
-    assert len(hook_events(rig)) == sup_mod.MAX_HOOK_LINES
+    assert len(hook_events(rig)) == 5
+    log.write_text(line)                                                      # truncated behind Core's offset
+    rig.sup.poll(rig.mid)
+    rig.sup.poll(rig.mid)
+    faults = [json.loads(e.body_json) for e in rig.ms.events(rig.mid) if "hook_log_fault" in e.body_json]
+    assert len(faults) == 1 and "shorter" in faults[0]["hook_log_fault"] and e_actor(rig) == "supervisor"
+    log.unlink()
+    rig.sup.poll(rig.mid)
+    assert len([1 for e in rig.ms.events(rig.mid) if "hook_log_fault" in e.body_json]) == 1      # reported once per session
+
+
+def e_actor(rig):
+    return next(e.actor for e in rig.ms.events(rig.mid) if "hook_log_fault" in e.body_json)

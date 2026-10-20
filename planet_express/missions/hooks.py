@@ -40,7 +40,8 @@ from typing import Any, Literal, NamedTuple
 
 Verdict = Literal["allow", "ask", "block"]
 BLOCKED_CLASSES = ("secret", "vcs", "publish", "wipe", "docker", "config")
-MAX_COMMAND_CHARS = 8192
+MAX_COMMAND_CHARS = 65536
+MAX_INPUT_BYTES = 1 << 20          # the most of a hook's stdin that is read and parsed (a large Write or heredoc is legitimate)
 MAX_TOKENS = 512
 EVENT_TEXT = 400
 
@@ -88,10 +89,21 @@ _SECRET_SAFE = re.compile(r"^\.env\.(example|sample|template|dist)$", re.IGNOREC
 _SECRET_PATHS = ("/etc/shadow", "/etc/gshadow", "/etc/planetexpress", "/etc/ssh/ssh_host", "/root/.ssh", "/run/secrets",
                  "/var/run/secrets", "/proc/self/environ", "/run/planetexpress", "/etc/ssl/private")
 _SECRET_DIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker/config.json", ".config/gcloud", ".config/gh")
-_ENV_DUMPERS = {"printenv", "env", "export", "declare", "typeset", "set"}
 _READERS_HARMLESS = {"ls", "stat", "test", "[", "file", "wc", "find"}      # name the file, never its contents
 _SUDOERS = ("/etc/sudoers", "/etc/sudoers.d")
 _DAEMON_JSON = "/etc/docker/daemon.json"
+
+
+def _dumps_environment(low: str, toks: Sequence[str]) -> bool:
+    """`printenv` (it prints a named variable's value too), a bare `env`/`set`, and `export`/`declare`/`typeset` with no names
+    (their listing forms: no arguments, `-p`, `-x`). An assignment such as `export FOO=1` is not a dump."""
+    if low == "printenv":
+        return True
+    if low in ("env", "set"):
+        return len(toks) == 1
+    if low in ("export", "declare", "typeset"):
+        return all(t.startswith("-") for t in toks[1:])
+    return False
 
 
 def _is_secret_path(path: str) -> bool:
@@ -120,31 +132,197 @@ def _within(path: str, root: str) -> bool:
 
 # ── a command line, tokenised ─────────────────────────────────────────────────────────────────────────
 
-_SEGMENT_SPLIT = re.compile(r"(?:&&|\|\||;|\||\n|`|\$\()")
+_SUBSTITUTION = re.compile(r"\$\(([^()]*)\)|`([^`]*)`|[<>]\(([^()]*)\)")
 
 
-def _segments(command: str) -> list[list[str]]:
-    """Each simple command as a token list. Quoting is honoured; a command that cannot be tokenised is returned as a single
-    segment of its whitespace-split words (still screened, never skipped)."""
+def _split_top(command: str) -> list[str]:
+    """Split a command line at `&&`, `||`, `;`, `|`, newline and a lone `&`, but only OUTSIDE quotes (so a quoted script stays in
+    one piece for the nested-shell reader). `&` that belongs to `2>&1`, `&>` or `>&` is not a separator."""
+    parts, buf, quote, i, n = [], [], "", 0, len(command)
+    while i < n:
+        c = command[i]
+        if quote:
+            buf.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 1
+            elif c == quote:
+                quote = ""
+        elif c in "'\"":
+            quote = c
+            buf.append(c)
+        elif c == "\\" and i + 1 < n:
+            buf.append(c + command[i + 1])
+            i += 1
+        elif c in ";\n|" or (c == "&" and (command[i - 1:i] not in ("<", ">", "&", "|") or i == 0)
+                              and command[i + 1:i + 2] not in (">",)):
+            if c in "|&" and command[i + 1:i + 2] == c:
+                i += 1                                  # && and ||
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(c)
+        i += 1
+    parts.append("".join(buf))
+    return parts
+_KEYWORDS = frozenset({"then", "do", "else", "elif", "if", "while", "until", "!", "{", "}", "fi", "done", "esac", "case", "for",
+                       "select", "in", "function"})
+_SHELLS = frozenset({"bash", "sh", "dash", "zsh", "ksh", "ash", "fish", "busybox", "su", "runuser"})
+_INLINE_INTERPRETERS = frozenset({"python", "python2", "python3", "perl", "ruby", "node", "nodejs", "php", "lua", "awk", "gawk"})
+MAX_SEGMENTS = 20000
+MAX_DEPTH = 3
+_ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
+
+
+_KNOWN_BOOL_LONG = frozenset({"--preserve-env", "--set-home", "--non-interactive", "--login", "--shell", "--stdin", "--background",
+                              "--reset-timestamp", "--remove-timestamp", "--foreground", "--preserve-status", "--verbose",
+                              "--null", "--no-run-if-empty", "--ignore-environment", "--portability", "--append", "--quiet"})
+
+
+class _Wrapper(NamedTuple):
+    valued_short: str = ""
+    valued_long: frozenset = frozenset()
+    bool_short: str = ""
+    positional: int = 0
+    assigns: bool = False
+
+
+# What each command that merely runs another command takes before it. An option not listed here makes the segment "unsure".
+_WRAPPERS: dict[str, _Wrapper] = {
+    "sudo": _Wrapper("CDghprRtTUu", frozenset({"--user", "--group", "--host", "--prompt", "--chdir", "--chroot", "--role", "--type",
+                                               "--close-from", "--other-user", "--command-timeout"}), "AbEeHiKklnPSsVvB"),
+    "doas": _Wrapper("Cu", frozenset(), "nsL"),
+    "nice": _Wrapper("n", frozenset({"--adjustment"}), ""),
+    "ionice": _Wrapper("cnpPu", frozenset(), "t"),
+    "time": _Wrapper("fo", frozenset({"--format", "--output"}), "pavVl"),
+    "timeout": _Wrapper("sk", frozenset({"--signal", "--kill-after"}), "v", 1),
+    "nohup": _Wrapper(),
+    "setsid": _Wrapper("", frozenset(), "cfw"),
+    "stdbuf": _Wrapper("ioe", frozenset(), ""),
+    "xargs": _Wrapper("ILnPsEdaJ", frozenset({"--max-args", "--max-procs", "--delimiter", "--arg-file", "--replace"}), "0rtpxoO"),
+    "env": _Wrapper("uCS", frozenset({"--unset", "--chdir", "--split-string"}), "i0v", 0, True),
+    "command": _Wrapper("", frozenset(), "pvV"),
+    "exec": _Wrapper("a", frozenset(), "cl"),
+    "builtin": _Wrapper(),
+}
+
+
+def _skip_options(toks: Sequence[str], i: int, spec: _Wrapper) -> tuple[int, bool]:
+    """Index of the wrapped command and whether every option on the way was understood."""
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            return i + 1, True
+        if spec.assigns and _ASSIGN.fullmatch(t):
+            i += 1
+            continue
+        if not t.startswith("-") or t == "-":
+            return i, True
+        if t.startswith("--"):
+            if "=" in t:
+                i += 1
+            elif t in spec.valued_long:
+                i += 2
+            elif t in _KNOWN_BOOL_LONG:
+                i += 1
+            else:
+                return i + 1, False                       # an option this hook does not know may take a value: unsure
+            continue
+        if re.fullmatch(r"-\d+", t):
+            i += 1
+            continue
+        chars, consumed_next = t[1:], False
+        for k, ch in enumerate(chars):
+            if ch in spec.valued_short:
+                consumed_next = k == len(chars) - 1
+                break
+            if ch not in spec.bool_short:
+                return i + 1, False
+        i += 2 if consumed_next else 1
+    return i, True
+
+
+def _strip_wrappers(toks: list[str]) -> tuple[list[str], bool]:
+    """The command a segment really runs, with the wrappers (sudo, nice, env, timeout, ...), assignments and shell keywords
+    taken off. The bool is True when something on the way could not be understood."""
+    unsure = False
+    for _ in range(24):
+        while toks and toks[0] in _KEYWORDS:
+            toks = toks[1:]
+        if toks:
+            toks = [toks[0].lstrip("({")] + toks[1:] if toks[0][:1] in "({" and len(toks[0]) > 1 else toks
+            if toks[0] in ("(", "{", ""):
+                toks = toks[1:]
+        if not toks:
+            break
+        if _ASSIGN.fullmatch(toks[0]):
+            toks = toks[1:]
+            continue
+        head = posixpath.basename(toks[0])
+        spec = _WRAPPERS.get(head)
+        if spec is None:
+            break
+        if head == "command" and any(t in ("-v", "-V") for t in toks[1:3]):
+            return [], unsure                         # a lookup, not an execution
+        i, ok = _skip_options(toks, 1, spec)
+        unsure = unsure or not ok
+        rest = toks[i + spec.positional:]
+        if head == "env" and not rest:
+            return ["env"], unsure                    # `env` / `env -i` / `env -u X` print the environment
+        toks = rest
+    return toks, unsure
+
+
+def _script_of(toks: Sequence[str]) -> str | None:
+    """The script a shell is asked to run with -c (also in clusters such as -lc or -ec), or eval's arguments."""
+    head = posixpath.basename(toks[0])
+    if head == "eval":
+        return " ".join(toks[1:])
+    for k, t in enumerate(toks[1:], 1):
+        if t.startswith("-") and not t.startswith("--") and "c" in t[1:]:
+            return toks[k + 1] if k + 1 < len(toks) else ""
+        if not t.startswith("-") and head not in ("su", "runuser"):
+            break
+    return None
+
+
+def _segments(command: str, depth: int = 0) -> tuple[list[list[str]], bool]:
+    """Each simple command as a token list, and whether any part of the line could not be understood with confidence. Quoting
+    is honoured within a segment; the split ignores quotes, which can only make MORE segments (never hide one). `sh -c '...'`,
+    `bash -lc`, `su -c` and `eval` are read through, to a bounded depth."""
     out: list[list[str]] = []
-    for part in _SEGMENT_SPLIT.split(command):
+    unsure = depth > MAX_DEPTH
+    if unsure:
+        return out, True
+    parts = _split_top(command)
+    for match in _SUBSTITUTION.finditer(command):          # $(...), `...`, <(...): run too, wherever they are written
+        parts.append(next(g for g in match.groups() if g is not None))
+    if len(parts) > MAX_SEGMENTS:
+        parts, unsure = parts[:MAX_SEGMENTS], True
+    for part in parts:
         part = part.strip().rstrip(")")
         if not part:
             continue
         try:
             toks = shlex.split(part, comments=False, posix=True)
         except ValueError:
-            toks = part.split()
-        toks = [t for t in toks if t != "(" and t != ")"]
-        # leading VAR=value assignments, sudo/command/exec/nohup/time wrappers
-        while toks and (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0]) or toks[0] in ("sudo", "command", "exec", "nohup", "time", "nice", "ionice", "builtin", "xargs", "env") and len(toks) > 1):
-            if toks[0] == "env" and len(toks) > 1 and toks[1].startswith("-"):
-                toks = toks[2:]
-            else:
-                toks = toks[1:]
-        if toks:
-            out.append(toks[:MAX_TOKENS])
-    return out
+            toks, unsure = part.split(), True
+        toks, bad = _strip_wrappers(toks)
+        unsure = unsure or bad
+        if not toks:
+            continue
+        head = posixpath.basename(toks[0])
+        if head in _SHELLS or head == "eval":
+            script = _script_of(toks)
+            if script is not None:
+                inner, inner_unsure = _segments(script, depth + 1)
+                out += inner
+                unsure = unsure or inner_unsure
+                continue
+        elif head in _INLINE_INTERPRETERS and any(t in ("-c", "-e", "-E", "-r") or re.fullmatch(r"-[a-zA-Z]*[ce]", t) for t in toks[1:3]):
+            unsure = True                             # code in a language this hook does not read
+        out.append(toks[:MAX_TOKENS])
+    return out, unsure
 
 
 def _redirect_targets(command: str) -> list[str]:
@@ -195,13 +373,74 @@ def _git_args(tokens: Sequence[str]) -> tuple[str | None, list[str], str | None]
         a = rest[i]
         if a == "-C" and i + 1 < len(rest):
             workdir, i = rest[i + 1], i + 2
-        elif a in ("-c", "--git-dir", "--work-tree", "--namespace", "--exec-path") and i + 1 < len(rest):
+        elif a in ("-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env") and i + 1 < len(rest):
+            if a == "--work-tree":
+                workdir = rest[i + 1]
+            elif a == "--git-dir" and workdir is None:
+                workdir = posixpath.dirname(rest[i + 1].rstrip("/")) if rest[i + 1].rstrip("/").endswith(".git") else rest[i + 1]
             i += 2
+        elif a.startswith("--work-tree="):
+            workdir, i = a.split("=", 1)[1], i + 1
+        elif a.startswith("--git-dir=") and workdir is None:
+            gd = a.split("=", 1)[1].rstrip("/")
+            workdir, i = (posixpath.dirname(gd) if gd.endswith(".git") else gd), i + 1
+        elif a.startswith("-C") and len(a) > 2:
+            workdir, i = a[2:], i + 1
         elif a.startswith("-"):
             i += 1
         else:
             return a, rest[i + 1:], workdir
     return None, [], workdir
+
+
+_PUBLISH_VERBS = {"npm": {"publish"}, "yarn": {"publish"}, "pnpm": {"publish"}, "cargo": {"publish"}, "gem": {"push"},
+                  "twine": {"upload"}, "helm": {"push"}, "hg": {"push"}, "svn": {"commit", "ci"}, "flutter": {"publish"}}
+_DOCKER_VALUED = frozenset({"--context", "-c", "--config", "-H", "--host", "-l", "--log-level", "--tlscacert", "--tlscert",
+                            "--tlskey", "--project-name", "-p", "--file", "-f", "--profile", "--project-directory", "--env-file"})
+_GH_VALUED = frozenset({"-R", "--repo", "--hostname"})
+
+
+def _words(tokens: Sequence[str], valued: frozenset) -> list[str]:
+    """The non-option words of a command line, with the values of the options that take one skipped."""
+    out, i = [], 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "--":
+            out += list(tokens[i + 1:])
+            break
+        if t in valued:
+            i += 2
+        elif t.startswith("-"):
+            i += 1
+        else:
+            out.append(t)
+            i += 1
+    return out
+
+
+def _publishes(low: str, toks: Sequence[str]) -> str | None:
+    """What this command publishes, if it does, reading each tool's own option grammar."""
+    if low == "git":
+        sub, _args, _wd = _git_args(toks)
+        return "git push" if sub == "push" else None
+    if low in ("docker", "podman", "docker-compose"):
+        words = _words(toks[1:], _DOCKER_VALUED)
+        if "push" in words[:3] or any(t == "--push" or t.startswith("--push=") for t in toks[1:]):
+            return f"{low} push"
+        return None
+    if low == "gh":
+        words = _words(toks[1:], _GH_VALUED)
+        verbs = {"release": {"create", "upload", "edit", "delete", "delete-asset"},
+                 "pr": {"create", "merge", "edit", "close", "reopen", "comment", "review", "ready"}}
+        if len(words) > 1 and words[1] in verbs.get(words[0], ()):
+            return f"gh {words[0]} {words[1]}"
+        return None
+    verbs = _PUBLISH_VERBS.get(low)
+    if verbs and any(t in verbs for t in toks[1:]):
+        return f"{low} {sorted(verbs)[0]}"
+    if low in ("curl", "wget") and any(m in toks for m in ("-T", "--upload-file")):
+        return f"{low} upload"
+    return None
 
 
 def _vcs_destructive(sub: str, args: Sequence[str]) -> bool:
@@ -253,7 +492,9 @@ def classify(tool: str, args: Mapping[str, Any], policy: HookPolicy, cwd: str = 
         command = args.get("command") if isinstance(args.get("command"), str) else args.get("cmd")
         if not isinstance(command, str):
             raise ValueError("a shell tool call without a command string")
-        return _classify_command(command[:MAX_COMMAND_CHARS], policy, str(args.get("cwd") or cwd or ""))
+        if len(command) > MAX_COMMAND_CHARS:
+            raise ValueError("a command too long to classify")        # the failure mode decides; the head is never judged alone
+        return _classify_command(command, policy, str(args.get("cwd") or cwd or ""))
     paths = [str(v) for k, v in args.items() if k in ("file_path", "path", "filepath", "notebook_path", "target", "destination")
              and isinstance(v, str)]
     pattern = args.get("pattern") if isinstance(args.get("pattern"), str) else ""
@@ -276,7 +517,7 @@ def classify(tool: str, args: Mapping[str, Any], policy: HookPolicy, cwd: str = 
 
 
 def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
-    segments = _segments(command)
+    segments, unsure = _segments(command)
     targets = _redirect_targets(command)
     ask: Decision | None = None
     for target in targets:
@@ -289,7 +530,7 @@ def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
         prog = posixpath.basename(toks[0])
         low = prog.lower()
         # ── secret ────────────────────────────────────────────────────────────
-        if low in _ENV_DUMPERS and (len(toks) == 1 or low in ("printenv", "export", "declare", "typeset") or toks[1:2] in (["-p"], ["-x"])):
+        if _dumps_environment(low, toks):
             return Decision("block", "secret", f"{prog}: dumping the environment")
         if low not in _READERS_HARMLESS:
             for t in _paths_in(toks[1:]):
@@ -304,9 +545,9 @@ def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
             if low in writers or len(toks) > 1:
                 return Decision("block", "config", f"{prog}: touches sudoers or daemon.json")
         # ── publish ───────────────────────────────────────────────────────────
-        sub = next((t for t in toks[1:] if not t.startswith("-")), "")
-        if (low, sub) in _PUBLISH or (low in ("curl", "wget") and any(m in toks for m in ("-T", "--upload-file"))):
-            return Decision("block", "publish", f"{prog} {sub}: publishing is not allowed")
+        published = _publishes(low, toks)
+        if published:
+            return Decision("block", "publish", f"{published}: publishing is not allowed")
         # ── docker ────────────────────────────────────────────────────────────
         if low in ("docker", "podman", "docker-compose"):
             words = [t for t in toks[1:]]
@@ -358,6 +599,8 @@ def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
                 ask = Decision("ask", "protected", "a redirection into a protected resource")
     if ask is None and re.search(r"(^|[^>])>\s*[^\s>&|]", command) and "/dev/null" not in command and "2>&1" not in command:
         ask = Decision("ask", "irreversible", "a redirection that may truncate a file")
+    if ask is None and unsure and _MARKERS.search(command):
+        ask = Decision("ask", "irreversible", "a command this hook could not fully parse names a blocked-class word")
     return ask or ALLOW
 
 
@@ -413,15 +656,17 @@ class HookRunner:
     def _failed(self, raw: Any, exc: Exception) -> Decision:
         text = raw if isinstance(raw, str) else (raw.decode("utf-8", "replace") if isinstance(raw, bytes) else _dump(raw))
         blocked_like = (not isinstance(raw, (dict, str, bytes))) or _MARKERS.search(text or "") is not None or not text
-        if isinstance(raw, dict):
-            # A shell tool whose command could not be read might be anything, and so might a call with no tool name.
-            tool = raw.get("tool_name") or raw.get("tool")
-            blocked_like = blocked_like or not isinstance(tool, str) or tool.lower() in SHELL_TOOLS
-        if isinstance(raw, (str, bytes)) and not blocked_like:
+        data = raw
+        if isinstance(raw, (str, bytes)):
             try:
-                json.loads(raw)
+                data = json.loads(raw)
             except ValueError:
                 blocked_like = True                        # cannot even be read: it might be anything
+                data = None
+        if isinstance(data, dict):
+            # A shell tool whose command could not be read might be anything, and so might a call with no tool name.
+            tool = data.get("tool_name") or data.get("tool")
+            blocked_like = blocked_like or not isinstance(tool, str) or tool.lower() in SHELL_TOOLS
         mode = self.policy.blocked_failure if blocked_like else self.policy.other_failure
         why = f"the hook could not decide ({type(exc).__name__}: {str(exc)[:80]})"
         if mode == "closed":
@@ -487,9 +732,10 @@ MAX_LOG_LINE = 4096
 def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Mapping[str, str] | None = None) -> int:
     """`python -m planet_express.missions.hooks pre|post`: reads the runtime's hook JSON on stdin. Exit 0 allows (printing a
     JSON permission decision for `ask`), exit 2 blocks with the reason on stderr. The policy is the JSON in PE_HOOK_POLICY,
-    which Core put in the environment the runtime was started with (a hook is run by the runtime, not by a tool command, so
-    nothing a model types can change it); nothing in the input can switch the hook off, and a missing or unreadable policy
-    falls back to the default one, which fails closed for blocked classes. The session token never reaches a hook: calls are
+    which Core put in the environment the runtime was started with, and the hook command itself is installed by settings.json
+    in a Core-owned directory the session cannot write (its hash is checked at every poll, and a changed or missing file
+    kills the session). Nothing in the input can switch the hook off, and a missing or unreadable policy falls back to the
+    default one, which fails closed for blocked classes. A hook is still only a speed bump: a session can simply not call it. The session token never reaches a hook: calls are
     recorded to PE_HOOK_LOG, which Core reads (bounded, as untrusted data) and appends to the mission's events."""
     argv = list(sys.argv[1:] if argv is None else argv)
     stdin = sys.stdin if stdin is None else stdin
@@ -507,7 +753,9 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
     except (KeyError, ValueError):
         policy = HookPolicy()                              # the default policy fails closed for blocked classes
     runner = HookRunner(policy, post=_log_poster(environ))
-    raw = stdin.read(MAX_COMMAND_CHARS * 4)
+    raw = stdin.read(MAX_INPUT_BYTES + 1)
+    if len(raw) > MAX_INPUT_BYTES:
+        raw = None                                         # too large to judge: not an object, so the failure mode decides
     if which == "post":
         runner.post_hook(raw)
         return 0
@@ -535,15 +783,16 @@ def claude_code_settings(command: Sequence[str]) -> dict:
     return {"hooks": {"PreToolUse": entry("pre"), "PostToolUse": entry("post")}}
 
 
-def install_claude_code(workspace: Path, command: Sequence[str]) -> dict[str, str]:
-    """Write the hook settings into a session workspace before the session launches, and return the environment that makes
-    the runtime read them. The privileged launcher hands over only regular files directly inside the workspace (no
-    directories), so the settings are a flat `settings.json` and Claude Code is pointed at the workspace as its config
-    directory with CLAUDE_CONFIG_DIR. A failure raises: a mission configured to run under hooks does not start without them."""
-    target = Path(workspace) / "settings.json"
+def install_claude_code(hook_dir: Path, command: Sequence[str]) -> dict[str, str]:
+    """Write the hook settings into `hook_dir` before the session launches, and return the environment that makes the runtime
+    read them (CLAUDE_CONFIG_DIR). `hook_dir` is a per-session directory that CORE owns, outside the session's workspace:
+    the session can read settings.json (0644 in a 0755 directory) and can neither edit nor delete it, and the Supervisor
+    checks its hash at every poll. Only the append-only hook log stays in the workspace, as untrusted data. A failure raises:
+    a mission configured to run under hooks does not start without them."""
+    target = Path(hook_dir) / "settings.json"
     target.write_text(json.dumps(claude_code_settings(command), indent=2) + "\n", encoding="utf-8")
     target.chmod(0o644)
-    return {"CLAUDE_CONFIG_DIR": str(workspace)}
+    return {"CLAUDE_CONFIG_DIR": str(hook_dir)}
 
 
 def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:

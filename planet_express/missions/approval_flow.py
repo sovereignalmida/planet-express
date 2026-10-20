@@ -23,7 +23,7 @@ from .approvals import ApprovalConflict, phase_demands_elevation, record_approva
 from .canonical import CanonicalError, loads_strict
 from .events import insert_event
 from .grants import with_site_protected
-from .models import Budgets, Grant, GrantScope, Mission, VerificationPlan
+from .models import Budgets, Grant, GrantScope, Mission, StandingCeilings, VerificationPlan
 from .state import IllegalTransition, MissionNotFound, transition, transition_in_txn
 from .store import MissionStore, StandingGrantInactive
 from .verify.plan import PlanInvalid, validate_plan
@@ -413,12 +413,22 @@ class ApprovalFlow:
             raise FlowError("A standing grant needs a non-empty scope")
         return scope_model.model_dump(mode="json"), self._window(window_raw), int(self.store._clock()) + ttl_s
 
+    @staticmethod
+    def _ceilings(raw: dict | None) -> dict | None:
+        if raw is None:
+            return None
+        try:
+            return StandingCeilings.model_validate(raw).model_dump(mode="json")
+        except ValidationError:
+            raise FlowError("Invalid ceilings") from None
+
     def standing_create(self, actor: str, *, scope: dict, ttl_s: int, window_spec: dict | None = None,
-                        tier: str = "repair", elevated: bool = False) -> dict[str, Any]:
+                        tier: str = "repair", elevated: bool = False, ceilings: dict | None = None) -> dict[str, Any]:
         actor = require_actor(actor)
         if elevated is not True:
             raise FlowError("Creating a standing grant needs an elevated dashboard session", "elevation_required")
         scope_d, win, expires = self._check_standing(scope, tier, ttl_s, window_spec)
+        ceilings = self._ceilings(ceilings)
         for _attempt in range(8):
             with self.store._connect() as conn:
                 n = conn.execute("SELECT COUNT(*) FROM standing_grants").fetchone()[0] + 1
@@ -427,7 +437,7 @@ class ApprovalFlow:
             grant_id = f"SG-{n}-v1"
             try:
                 self.ms.create_standing_grant(grant_id=grant_id, scope=scope_d, tier=tier, created_by=actor,
-                                              expires_at=expires, window=win, version=1)
+                                              expires_at=expires, window=win, version=1, ceilings=ceilings)
                 break
             except sqlite3.IntegrityError:               # a concurrent create took this number between the read and the insert
                 continue
@@ -437,7 +447,7 @@ class ApprovalFlow:
         return self._standing_row(grant_id)
 
     def standing_supersede(self, actor: str, grant_id: str, *, scope: dict, ttl_s: int, window_spec: dict | None = None,
-                           elevated: bool = False) -> dict[str, Any]:
+                           elevated: bool = False, ceilings: dict | None = None) -> dict[str, Any]:
         """A changed standing grant is a NEW version: the old one is revoked in the same step, so a mission can never start
         under a version nobody currently stands behind."""
         actor = require_actor(actor)
@@ -450,11 +460,12 @@ class ApprovalFlow:
         if old["revoked_at"] is not None:
             raise FlowError("That standing grant version is already revoked", "conflict")
         scope_d, win, expires = self._check_standing(scope, old["tier"], ttl_s, window_spec)
+        ceilings = self._ceilings(ceilings)
         base = grant_id.rsplit("-v", 1)[0]
         new_id = f"{base}-v{old['version'] + 1}"
         try:
             self.ms.supersede_standing_grant(old_id=grant_id, grant_id=new_id, scope=scope_d, tier=old["tier"], created_by=actor,
-                                             expires_at=expires, window=win, version=old["version"] + 1)
+                                             expires_at=expires, window=win, version=old["version"] + 1, ceilings=ceilings)
         except sqlite3.IntegrityError:
             raise FlowError("That version already exists", "conflict") from None
         except StandingGrantInactive:
@@ -475,9 +486,11 @@ class ApprovalFlow:
         with self.store._connect() as conn:
             row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (grant_id,)).fetchone()
         now = int(self.store._clock())
+        scope = loads_strict(row["scope_json"])
+        ceilings = scope.pop("ceilings", None)
         state = "revoked" if row["revoked_at"] is not None else ("expired" if row["expires_at"] <= now else "active")
         return {"id": row["id"], "version": row["version"], "tier": row["tier"], "state": state,
-                "scope": loads_strict(row["scope_json"]), "window": loads_strict(row["window_json"]) if row["window_json"] else None,
+                "scope": scope, "ceilings": ceilings, "window": loads_strict(row["window_json"]) if row["window_json"] else None,
                 "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],
                 "revoked_at": row["revoked_at"]}
 

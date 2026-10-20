@@ -418,6 +418,9 @@ class MissionHooksConfig(BaseModel):
     # `planet_express.missions.hooks`, readable by the session uid). Off by default; on without a command is refused.
     command: list[str] = []
     install_claude_code: bool = False
+    # A directory Core owns and a session can read but never write (root:root or Core's user, 0755), outside every session
+    # workspace: each session gets `<root>/<session id>/settings.json` there, and its hash is checked at every poll.
+    root: str | None = None
 
     @model_validator(mode="after")
     def _install_needs_a_command(self) -> "MissionHooksConfig":
@@ -425,6 +428,11 @@ class MissionHooksConfig(BaseModel):
             raise ValueError("missions.hooks.command must start with an absolute program path and have no empty or NUL items")
         if self.install_claude_code and not self.command:
             raise ValueError("missions.hooks.install_claude_code needs missions.hooks.command")
+        if self.root is not None and (not self.root.startswith("/") or "\0" in self.root or posixpath.normpath(self.root) != self.root
+                                      or self.root == "/"):
+            raise ValueError("missions.hooks.root must be a normalised absolute path")
+        if self.install_claude_code and self.root is None:
+            raise ValueError("missions.hooks.install_claude_code needs missions.hooks.root: the settings must live where the session cannot edit them")
         return self
 
 

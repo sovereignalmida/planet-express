@@ -1,6 +1,8 @@
 """Contract 5: the `mission` origin. Accepted for typed steps only under an approval row for the mission's current grant
 hash; never unattended; never limit-exempt; every other origin unchanged."""
 import os
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -68,6 +70,55 @@ def test_forbidden_risk_still_refuses_a_mission_even_when_approved():
     decision = policy.decide_runbook(runbook(), "mission", mission_approved=True,
                                      autonomy=AutonomyConfig(forbidden_risks=["R1", "R4"], direct_request_risks=[]))
     assert not decision.allowed
+
+
+def guarded_runbook(step_type="service.restart", stack="network", service="adguardhome"):
+    step = {"type": step_type, "params": {"stack": stack, "service": service},
+            "binding": {"compose_path": f"/stacks/{stack}/docker-compose.yml", "compose_sha256": "a" * 64, "project": stack,
+                        "service": service, "container": service, "container_id": "0123456789ab"}}
+    return Runbook.model_validate({"title": "t", "steps": [step], "artifacts": {}})
+
+
+@pytest.mark.parametrize("stack, service", [("network", "adguardhome"), ("edge", "traefik"), ("proxy", "my-traefik-2")])
+def test_a_mission_step_on_a_network_guarded_service_is_refused_even_when_the_mission_is_approved(stack, service):
+    for approved in (False, True):
+        decision = policy.decide_runbook(guarded_runbook(stack=stack, service=service), "mission", mission_approved=approved)
+        assert not decision.allowed and "protected-touch" in decision.reason and not decision.automatic
+
+
+def test_an_explicit_protected_touch_approval_lets_the_guarded_step_through_the_mission_path_but_never_automatically():
+    decision = policy.decide_runbook(guarded_runbook(), "mission", mission_approved=True, guarded_touch_approved=True)
+    assert decision.allowed and not decision.needs_approval and not decision.automatic
+    # the touch approval alone is not the mission's own approval
+    assert not policy.decide_runbook(guarded_runbook(), "mission", guarded_touch_approved=True).allowed
+    # the flag changes nothing for another origin: the AdGuard exception tests' paths are untouched
+    assert policy.decide_runbook(guarded_runbook(), "telegram").needs_approval
+    assert not policy.decide_runbook(guarded_runbook("service.restart"), "zoidberg").automatic
+
+
+def test_an_ordinary_service_is_unaffected_by_the_guard():
+    assert policy.decide_runbook(runbook(), "mission", mission_approved=True).allowed
+
+
+def test_only_a_critical_mission_with_a_protected_touch_carries_the_explicit_approval(tmp_path):
+    from missions_helpers import advance_to
+    from planet_express.missions.models import Grant
+    from planet_express.missions.approvals import guarded_touch_approved
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    repair = new_mission(ms)
+    record_approval(store, repair.id, "grant", repair.grant_hash, "approve", "operator:me")
+    assert mission_step_approved(store, repair.id) and not guarded_touch_approved(store, repair.id)   # a Repair mission never does
+    crit = new_mission(ms, Grant.model_validate({"tier": "critical", "scope": {"stacks": ["network"]}}))
+    advance_to(ms, crit.id, "queued", "investigating", "awaiting_decision")
+    assert not guarded_touch_approved(store, crit.id) and not guarded_touch_approved(store, "M-404")
+    plan = {"protected_touches": ["host:local/service:network/adguardhome"], "steps": []}
+    crit = ms.set_plan(crit.id, plan)
+    record_approval(store, crit.id, "grant", crit.grant_hash, "approve", "operator:me", elevated=True)
+    record_approval(store, crit.id, "plan", crit.plan_hash, "approve", "operator:me")
+    assert not guarded_touch_approved(store, crit.id)                                              # the touch row is still missing
+    record_approval(store, crit.id, "critical:0", crit.plan_hash, "approve", "operator:me", elevated=True)
+    assert guarded_touch_approved(store, crit.id)
 
 
 def test_the_approval_flag_comes_from_the_current_grant_hash_row(tmp_path):

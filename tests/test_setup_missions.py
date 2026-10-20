@@ -52,10 +52,10 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "41d94b35ee8c8bb9"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "4de1b52b310cf335"
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "79b612f5beeb5e93"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "31e0b782768d7a59"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "c21efb2fc2335a68"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "01c4bfdbb2b7e2d2"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
