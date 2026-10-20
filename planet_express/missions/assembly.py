@@ -29,6 +29,7 @@ from .checkpoint.backup import BackupSource
 from .grants import Inventory, SiteLimits, validate_grant
 from .models import Budgets, Grant, VerificationPlan
 from .store import MissionStore
+from .sudo_gen import outside_ceiling
 from .tools import default_registry
 from .tripwire.build import build_tripwire
 from .verify.baseline import normalize
@@ -133,7 +134,7 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
 
     from .launcher.side_doors import SideDoorPaths, repair_gate_report, side_door_steps
     paths = SideDoorPaths(core_user=wiring.core_user, uid_min=cfg.session_uid_min, uid_max=cfg.session_uid_max,
-                          proxy_ports=tuple(cfg.docker_proxy_ports))
+                          proxy_ports=tuple(cfg.docker_proxy_ports), managed=managed_sudoers(cfg, wiring.core_user))
     steps = side_door_steps(paths)
 
     def gate() -> Any:
@@ -146,8 +147,11 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         return discover_inventory(stacks_root)
 
     def validator(grant: Grant, plan: VerificationPlan) -> list[str]:
-        return validate_grant(grant, inventory=inventory(), protected=protected, known_checks={c.id for c in plan.checks},
-                              known_tools=known_tools, limits=limits, stacks_root=stacks_root, verification_plan=plan)
+        problems = validate_grant(grant, inventory=inventory(), protected=protected, known_checks={c.id for c in plan.checks},
+                                  known_tools=known_tools, limits=limits, stacks_root=stacks_root, verification_plan=plan)
+        if grant.sudo.mode == "scoped":              # broad sudo is a separate, elevated approval and is never generated
+            problems += outside_ceiling(cfg.worker_sudo_rules, grant.sudo.rules)
+        return problems
 
     def backup_status(grant: Grant) -> Mapping[str, Any]:
         """The backup floor's view of the grant's scope, for the approval card and the grant's `covered` flag."""
@@ -167,6 +171,24 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
                           backup_status=backup_status, validator=validator, inventory=inventory)
 
 
+def managed_sudoers(cfg: Any, core_user: str) -> dict[str, bytes]:
+    """Sudoers path -> the exact bytes setup's generators write there: the side-door check treats these, and only these, as
+    managed (a byte of difference is an unmanaged rule). The launcher rule is Core's own; the worker file is the generated
+    ceiling (absent when no rules are configured)."""
+    from .launcher.setup_steps import LauncherSudoers, Paths, WorkerSudoers
+    paths = Paths(core_uid=0, core_gid=0, workspace_root="", core_user=core_user, uid_min=cfg.session_uid_min,
+                  uid_max=cfg.session_uid_max,
+                  worker_sudo_rules=tuple((r.unit, tuple(r.actions)) for r in cfg.worker_sudo_rules))
+    managed: dict[str, bytes] = {}
+    launcher = LauncherSudoers(paths)
+    if not launcher.unsafe():
+        managed[paths.sudoers] = launcher.wanted()
+    worker = WorkerSudoers(paths)
+    if worker.applies() and not worker.unsafe():
+        managed[paths.worker_sudoers] = worker.wanted()
+    return managed
+
+
 def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairControls | None, *,
                         runtime: str = "command") -> ApprovalFlow | None:
     """The approval flow over a built runner. None without Repair controls: nothing could validate or run a Repair mission, so
@@ -182,4 +204,4 @@ def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairCon
 
 
 __all__ = ["RepairControls", "RepairWiring", "build_approval_flow", "build_repair_controls", "discover_inventory",
-           "mission_write_gate"]
+           "managed_sudoers", "mission_write_gate"]

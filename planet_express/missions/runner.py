@@ -14,6 +14,7 @@ is proposal-only and starts no session. `stop()` stops the thread first, then ki
 Missions interrupted by a stop stay `investigating`; `recover()` at the next start deals with them.
 """
 
+import contextlib
 import logging
 import os
 import threading
@@ -128,6 +129,17 @@ def _cgroup_mount(root: str) -> str:
         return CGROUP_MOUNT
 
 
+def _protected_gids() -> tuple[int, ...]:
+    """The gids a session may never join: root's and the docker group's (a member reaches the daemon without the proxy)."""
+    import grp
+    gids = [0]
+    try:
+        gids.append(grp.getgrnam("docker").gr_gid)
+    except KeyError:
+        pass
+    return tuple(gids)
+
+
 def choose_strategy(mode: str, euid: int) -> str:
     """`auto` is direct for a root Core and sudo otherwise. An explicit choice is returned as is, never downgraded."""
     if mode == "auto":
@@ -145,10 +157,13 @@ def build_containment(cfg, *, euid: int | None = None) -> CgroupContainment:
 class SessionSockets(SocketProvider):
     """One worker RpcServer per session, bound in `<sock_root>/<session_id>/`, which Core makes (it owns sock_root).
     The launcher then hands the socket to the session's uid and the directory to the session's private group (0750),
-    so only that session can reach it. The server is built with no group: Core cannot chgrp to a uid it is not."""
+    so only that session can reach it. The server is built with no group: Core cannot chgrp to a uid it is not.
+    With a Docker proxy service, a Repair session whose grant says `docker: proxy` also gets `proxy.sock` in the same
+    directory: bound by Core (0600), handed over by the helper like the worker socket, never chown'd or widened by Core."""
 
-    def __init__(self, sock_root: str, backend, authenticator, build=build_worker_server):
+    def __init__(self, sock_root: str, backend, authenticator, build=build_worker_server, proxy=None):
         self.sock_root, self.backend, self.authenticator, self._build = sock_root, backend, authenticator, build
+        self.proxy = proxy
 
     def path(self, session_id: str) -> str:
         return f"{self.sock_root}/{session_id}/worker.sock"
@@ -162,7 +177,27 @@ class SessionSockets(SocketProvider):
         except BaseException:
             os.rmdir(directory)
             raise
-        return server.stop
+        if self.proxy is None:
+            return server.stop
+        try:
+            stop_proxy = self.proxy.start(cs)
+        except BaseException:
+            server.stop()
+            with contextlib.suppress(OSError):
+                os.rmdir(directory)
+            raise
+        if stop_proxy is None:
+            return server.stop
+
+        def stop() -> None:
+            try:
+                stop_proxy()
+            finally:
+                server.stop()
+        return stop
+
+    def env(self, cs) -> dict[str, str]:
+        return self.proxy.env(cs) if self.proxy is not None else {}
 
 
 def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None) -> Callable[[], PreflightReport]:
@@ -234,6 +269,13 @@ def build_mission_runner(
             if tool_broker is not None and tool_broker.write_gate is None:
                 from planet_express.missions.assembly import mission_write_gate
                 tool_broker.write_gate = mission_write_gate(store)
+    authenticator = WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)) if real else None
+    if docker_proxy is None and real and repair_wiring is not None and stacks_root is not None:
+        from planet_express.missions.dockerproxy.service import DockerProxyService
+        docker_proxy = DockerProxyService(
+            store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
+            stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
+            protected_gids=_protected_gids())
     runtime = CommandRuntime(
         containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
         env_policy=env_policy)
@@ -248,7 +290,7 @@ def build_mission_runner(
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
         supervisor.socket_provider = socket_provider or SessionSockets(
-            cfg.sock_root, supervisor, WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)))
+            cfg.sock_root, supervisor, authenticator, proxy=docker_proxy if hasattr(docker_proxy, "start") else None)
     else:
         supervisor.preflight_fn = preflight
         supervisor.socket_provider = socket_provider

@@ -368,6 +368,14 @@ class ProtectedOverrideConfig(BaseModel):
     at: int = Field(ge=0)
 
 
+class WorkerSudoRuleConfig(BaseModel):
+    """One unit the generated worker sudoers file lets a Repair session start, stop or restart (exact argv, no wildcard)."""
+    model_config = ConfigDict(extra="forbid")
+
+    unit: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.(service|socket|timer|mount|path|target)$")
+    actions: list[Literal["start", "stop", "restart"]] = Field(min_length=1, max_length=3)
+
+
 class CrossHostSystemConfig(BaseModel):
     """A cross-host system the operator names as protected (NAS exports, edge proxy, router, DNS provider). `path` is a
     readable copy of its configuration, when there is one; without it the tripwire cannot watch it and says so."""
@@ -486,6 +494,11 @@ class MissionsConfig(BaseModel):
     cross_host: list[CrossHostSystemConfig] = []
     package_paths: list[str] = []         # extra package-manager state (on MOS, its package paths)
     docker_proxy_ports: list[int] = []    # ports of an allowlisting Docker socket proxy the operator vouches for
+    # The real Docker daemon's socket, which Core's per-session proxy forwards to (a Repair worker never sees it).
+    docker_socket: str = "/var/run/docker.sock"
+    # The host-wide ceiling of the generated worker sudoers file (contract 15): units and actions, exact argv, never a
+    # wildcard. A grant's own `sudo.rules` must sit inside it. Empty: no worker sudoers file exists.
+    worker_sudo_rules: list[WorkerSudoRuleConfig] = []
     # Brokered tools: tool name -> {name: base url}, and secret ref -> the NAME of a Core environment variable that
     # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
     tool_sites: dict[str, dict[str, str]] = {}

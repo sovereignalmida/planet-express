@@ -1675,6 +1675,7 @@ class _LauncherHandler:
         if account is None:
             raise StepFailure(f"no such user: {p['core_user']}")
         extra = {k: p[k] for k in ("boot_script", "conf", "helper_store") if p.get(k)}
+        extra["worker_sudo_rules"] = tuple((r["unit"], tuple(r["actions"])) for r in (p.get("worker_sudo_rules") or ()))
         return Paths(core_uid=account[0], core_gid=account[1], core_user=p["core_user"], flavour=p["flavour"],
                      uid_min=p["uid_min"], uid_max=p["uid_max"], sock_root=p["sock_root"], cgroup_root=p["cgroup_root"],
                      workspace_root=p["workspace_root"], **extra)

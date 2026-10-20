@@ -4,6 +4,7 @@
     launcher-helper     the root-owned pe-launch under a root-owned, non-symlink chain
     helper-store        (MOS) its persistent copy under the data pool, installed at every boot by the boot script
     launcher-sudoers    Ubuntu only: `Core ALL=(root) NOPASSWD: pe-launch ""`, checked with visudo
+    worker-sudoers      Ubuntu only, when missions.worker_sudo_rules names any: the generated worker-tier sudo ceiling
     cgroup-tree         systemd: a Delegate=yes drop-in; MOS: a boot script on the data pool
     workspace-root      where each session's own directory is made (Core owned, traversable)
     socket-root         the per-session socket directories' parent (Core owned, 0711)
@@ -83,6 +84,8 @@ class Paths:
     conf: str = CONF_PATH
     helper_store: str = ""                        # MOS only: the persistent copy the boot script installs from
     sudoers: str = SUDOERS_PATH
+    worker_sudoers: str = "/etc/sudoers.d/planetexpress-worker"
+    worker_sudo_rules: tuple = ()                 # ((unit, (action, ...)), ...): the host-wide ceiling; empty means no file
     unit_dropin: str = UNIT_DROPIN
     boot_script: str = "/mnt/data/pe/launcher-boot.sh"
     interpreter: str = "/usr/bin/python3"
@@ -101,8 +104,9 @@ class Paths:
     @classmethod
     def from_missions(cls, missions, *, state_dir: str, **kw) -> "Paths":
         """Build from the `missions` section of Core's config so the two sides share one set of values."""
+        rules = tuple((r.unit, tuple(r.actions)) for r in getattr(missions, "worker_sudo_rules", ()))
         return cls(uid_min=missions.session_uid_min, uid_max=missions.session_uid_max, cgroup_root=missions.cgroup_root,
-                   sock_root=missions.sock_root,
+                   sock_root=missions.sock_root, worker_sudo_rules=rules,
                    workspace_root=missions.workspace_root or os.path.join(state_dir, "mission-workspaces"), **kw)
 
     def launch_conf(self) -> LaunchConf:
@@ -556,6 +560,10 @@ class LauncherSudoers(Step):
     name = "launcher-sudoers"
     ubuntu_only = True            # MOS has no sudo; and this step is never skipped because a legacy sudoers file exists
 
+    @property
+    def target(self) -> str:
+        return self.p.sudoers
+
     def wanted(self) -> bytes:
         helper, user = self.p.helper, self.p.core_user
         return (f"# Managed by Planet Express (session launcher). Do not edit.\n"
@@ -580,33 +588,33 @@ class LauncherSudoers(Step):
         return None
 
     def owned_file(self):
-        return None if self.unsafe() else (self.p.sudoers, self.wanted(), 0o440)
+        return None if self.unsafe() else (self.target, self.wanted(), 0o440)
 
     def probe(self) -> Probe:
         problem = self.unsafe()
         if problem:
             return Probe(False, problem, blocked=True)
         try:
-            current = read_regular(self.p.sudoers)
+            current = read_regular(self.target)
         except StepError as exc:
             return Probe(False, str(exc), blocked=True)
         if current is None:
-            return Probe(False, f"{self.p.sudoers} is absent")
+            return Probe(False, f"{self.target} is absent")
         if current != self.wanted():
-            return Probe(False, f"{self.p.sudoers} differs from the launcher rule")
-        info = os.lstat(self.p.sudoers)
+            return Probe(False, f"{self.target} differs from the launcher rule")
+        info = os.lstat(self.target)
         if info.st_uid != self.p.owner_uid or stat.S_IMODE(info.st_mode) != 0o440:
-            return Probe(False, f"{self.p.sudoers} must be owned by root with mode 0440")
-        if not self._visudo_ok(self.p.sudoers):
+            return Probe(False, f"{self.target} must be owned by root with mode 0440")
+        if not self._visudo_ok(self.target):
             return Probe(False, "visudo -c rejects the sudoers fragment", blocked=True)
-        return Probe(True, self.p.sudoers)
+        return Probe(True, self.target)
 
     def repair(self, journal) -> dict:
         state = self.probe()
         if state.blocked:
             raise StepError(state.detail)
-        wanted, previous = self.wanted(), read_regular(self.p.sudoers)
-        staging = os.path.join(os.path.dirname(self.p.sudoers), f".{os.path.basename(self.p.sudoers)}.check")
+        wanted, previous = self.wanted(), read_regular(self.target)
+        staging = os.path.join(os.path.dirname(self.target), f".{os.path.basename(self.target)}.check")
         write_atomic(staging, wanted, 0o440, self.p.owner_uid, self.p.owner_gid)
         try:
             if not self._visudo_ok(staging):
@@ -619,18 +627,45 @@ class LauncherSudoers(Step):
         journal.append("evidence", step=self.name, data={"previous_sha256": None if previous is None else sha256(previous),
                                                          "previous": _text(previous),
                                                          "sha256": sha256(wanted), "created_dirs": []})
-        write_atomic(self.p.sudoers, wanted, 0o440, self.p.owner_uid, self.p.owner_gid)
+        write_atomic(self.target, wanted, 0o440, self.p.owner_uid, self.p.owner_gid)
         if not self.probe().ok:
             raise StepError("the sudoers fragment was installed but does not read back as intended")
         return {"sha256": sha256(wanted), "created_dirs": [],
                 "previous": None if previous is None else previous.decode("utf-8", errors="replace")}
 
     def undo(self, journal, evidence: dict) -> str:
-        detail = self._undo_file(self.p.sudoers, evidence)
+        detail = self._undo_file(self.target, evidence)
         previous = evidence.get("previous")
-        if previous is not None and not os.path.exists(self.p.sudoers):
-            write_atomic(self.p.sudoers, previous.encode(), 0o440, self.p.owner_uid, self.p.owner_gid)
+        if previous is not None and not os.path.exists(self.target):
+            write_atomic(self.target, previous.encode(), 0o440, self.p.owner_uid, self.p.owner_gid)
         return detail
+
+
+class WorkerSudoers(LauncherSudoers):
+    """The generated sudoers file for the worker tier (`planet_express/missions/sudo_gen.py`): the host-wide ceiling of what a
+    Repair session may do as root, exact `systemctl <action> <unit>` argv and nothing else. Same discipline as the launcher's
+    rule (visudo -c on a staging file, root 0440, read-back, journaled previous content, undo and uninstall remove exactly
+    this text). It applies only when the config names rules; with none, no file exists."""
+    name = "worker-sudoers"
+
+    @property
+    def target(self) -> str:
+        return self.p.worker_sudoers
+
+    def applies(self) -> bool:
+        return super().applies() and bool(self.p.worker_sudo_rules)
+
+    def wanted(self) -> bytes:
+        from planet_express.missions.sudo_gen import render
+        return render(self.p.worker_sudo_rules, uid_min=self.p.uid_min, uid_max=self.p.uid_max, systemctl=self.p.systemctl) or b""
+
+    def unsafe(self) -> str | None:
+        from planet_express.missions.sudo_gen import SudoGenError, render
+        try:
+            render(self.p.worker_sudo_rules, uid_min=self.p.uid_min, uid_max=self.p.uid_max, systemctl=self.p.systemctl)
+        except SudoGenError as exc:
+            return f"the worker sudo rules cannot be generated: {exc}"
+        return None
 
 
 # ── 4. the cgroup tree ─────────────────────────────────────────────────────────────────────────────
@@ -889,7 +924,7 @@ class SocketRoot(_CoreDir):
 
 def launcher_steps(paths: Paths) -> list[Step]:
     """The steps in dependency order, minus those that do not apply on this host's flavour."""
-    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), CgroupTree(paths),
+    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), WorkerSudoers(paths), CgroupTree(paths),
              WorkspaceRoot(paths), SocketRoot(paths)]
     return [s for s in steps if s.applies()]
 

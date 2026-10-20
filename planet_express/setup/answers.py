@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from config_schema import MissionsConfig
+from config_schema import MissionsConfig, WorkerSudoRuleConfig
 from planet_express.setup.steps import AbsPath, Name
 
 _MISSIONS_DEFAULTS = MissionsConfig()      # the one source of the defaults, so config, Core and setup cannot drift
@@ -106,6 +106,7 @@ class MissionsAnswers(_Strict):
     sock_root: AbsPath = _MISSIONS_DEFAULTS.sock_root
     cgroup_root: AbsPath = _MISSIONS_DEFAULTS.cgroup_root
     workspace_root: AbsPath | None = None      # unset: `mission-workspaces` in the state directory, as Core defaults it
+    worker_sudo_rules: list[WorkerSudoRuleConfig] = []   # the worker tier's sudo ceiling; empty: no worker sudoers file
 
     @model_validator(mode="after")
     def _as_the_config_would_accept_it(self):

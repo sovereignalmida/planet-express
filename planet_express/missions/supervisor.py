@@ -212,6 +212,10 @@ class SocketProvider:
     def start(self, cs: ContainedSession) -> Callable[[], None]:
         raise NotImplementedError
 
+    def env(self, cs: ContainedSession) -> dict[str, str]:
+        """Extra environment for the session once its sockets are bound (e.g. `DOCKER_HOST` for its own proxy socket)."""
+        return {}
+
 
 class Supervisor:
     def __init__(self, store: Store, containment: SessionContainment,
@@ -467,6 +471,7 @@ class Supervisor:
                 # Bound BEFORE the launch (so the agent's first connect cannot find nothing); the launcher then hands
                 # the directory and sockets to the session. Registered first so a failed launch stops it again.
                 run.stop_socket = self.socket_provider.start(cs)
+                full_env.update(self.socket_provider.env(cs))
             spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), env=full_env,
                               token=token, sock_dir=self.socket_provider is not None)
             launched = self.containment.launch(cs.session_id, spec)

@@ -9,8 +9,8 @@ Never imports `config`: setup runs before any config exists.
 from __future__ import annotations
 
 import hashlib
-import os
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -492,7 +492,9 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
             "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
             "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
             **({"boot_script": f"{p['home']}/launcher-boot.sh", "conf": mos_conf_path(p["home"]),
-                                "helper_store": mos_helper_store_path(p["home"])} if mos else {})}
+                                "helper_store": mos_helper_store_path(p["home"])} if mos else {}),
+            **({"worker_sudo_rules": [{"unit": r.unit, "actions": list(r.actions)} for r in m.worker_sudo_rules]}
+               if m.worker_sudo_rules and not mos else {})}
 
 
 def _launcher_paths(params: dict):
@@ -500,6 +502,7 @@ def _launcher_paths(params: dict):
     from the host when a step runs, so nothing shown here depends on them."""
     from planet_express.missions.launcher.setup_steps import Paths
     extra = {k: params[k] for k in ("boot_script", "conf", "helper_store") if k in params}
+    extra["worker_sudo_rules"] = tuple((r["unit"], tuple(r["actions"])) for r in params.get("worker_sudo_rules", ()))
     return Paths(core_uid=0, core_gid=0, core_user=params["core_user"], flavour=params["flavour"],
                  uid_min=params["uid_min"], uid_max=params["uid_max"], sock_root=params["sock_root"],
                  cgroup_root=params["cgroup_root"], workspace_root=params["workspace_root"], **extra)
@@ -540,9 +543,10 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
     mos = paths.flavour == "mos"
     steps = {s.name: s for s in _launcher_step_objects(params)}
     conf_path = paths.conf
-    if "launcher-sudoers" in steps and steps["launcher-sudoers"].unsafe():
-        b.blocked.append(f"Mission control cannot be set up: {steps['launcher-sudoers'].unsafe()}.")
-        return
+    for sudo_step in ("launcher-sudoers", "worker-sudoers"):
+        if sudo_step in steps and steps[sudo_step].unsafe():
+            b.blocked.append(f"Mission control cannot be set up: {steps[sudo_step].unsafe()}.")
+            return
     # The helper trusts launch.conf and itself only under root-owned directories nobody else can write. launch.conf has
     # a directory of its own (/etc/planetexpress-launch; on MOS under the data pool), so a fresh install no longer
     # collides with the service-owned config directory. This stays as the guard for a plan that nevertheless makes a
@@ -576,6 +580,9 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         "launcher-sudoers": ("Let Core start sessions through the launcher", SUDOERS_PATH, "R3", {
             "type": "file", "path": SUDOERS_PATH, "mode": "0440", "owner": "root:root", "if_exists": "replace",
             "content": LauncherSudoers(paths).wanted().decode()}),
+        "worker-sudoers": ("Give Repair sessions their sudo ceiling", paths.worker_sudoers, "R3", {
+            "type": "file", "path": paths.worker_sudoers, "mode": "0440", "owner": "root:root", "if_exists": "replace",
+            "content": steps["worker-sudoers"].wanted().decode() if "worker-sudoers" in steps else ""}),
         "cgroup-tree": ("Delegate a cgroup to Core" if not mos else "Recreate the sessions cgroup at every boot",
                         cgroup_path, "R3" if mos else "R2", {
             "type": "file", "path": cgroup_path, "mode": "0700" if mos else "0644", "owner": "root:root",
@@ -672,8 +679,12 @@ def _will_not_touch(b: _Builder, p: dict) -> None:
             b.not_touched.append("No sudoers grant is written: Planet Express gets no privileged commands.")
 
     if _missions_on(a):
-        b.not_touched.append("Mission control gets exactly one sudo rule, for the launcher program and nothing else; no other "
-                             "sudoers file is touched." if systemd else
+        extra_sudo = bool(a.missions.worker_sudo_rules) and systemd
+        b.not_touched.append(("Mission control gets exactly two sudoers files: the launcher rule (the launcher program and nothing "
+                              "else) and the generated worker ceiling (exact `systemctl start|stop|restart <unit>` lines, shown in "
+                              "full above); no other sudoers file is touched." if extra_sudo else
+                              "Mission control gets exactly one sudo rule, for the launcher program and nothing else; no other "
+                              "sudoers file is touched.") if systemd else
                              "No sudoers file is created for mission control: MOS has no sudo.")
     for path in (p["env"], p["dash_env"]):
         if b.present(path):
