@@ -60,7 +60,7 @@ def env():
 
     def make(limits=Limits(head_s=2, body_s=3, stream_s=3, hijack_s=5), **kw):
         execs = ExecTable()
-        policy = Policy(make_scope(e.dir), DaemonInspector(e.upstream), exec_owner=execs.owner, **kw)
+        policy = Policy(make_scope(e.dir), DaemonInspector(e.upstream), exec_owner=execs.owner, created=execs.is_created, **kw)
         server = ProxyServer(e.path, policy=policy, upstream=e.upstream, gate=e.gate, execs=execs, limits=limits)
         server.start()
         e.servers.append(server)
@@ -604,3 +604,29 @@ def test_the_events_stream_is_redacted_and_drops_protected_containers(env):
     got = [json.loads(line) for line in body.splitlines() if line]
     assert status == 200 and [g["Type"] for g in got] == ["container", "network"] and b"vault" not in body
     assert b"abcdef123456" not in body and b"garbage" not in body
+
+
+def test_a_container_this_session_created_is_checked_again_at_start_against_a_swapped_bind_source(proxy):
+    """Review finding: a worker-writable bind path can be swapped for a symlink to the Docker socket after create."""
+    source = Path(proxy.root) / "stacks" / "media" / "config"
+    body = create_body(HostConfig={"Binds": [f"{source}:/config"]})
+    status, _, answer = proxy.req("POST", "/containers/create?name=qb2", body=body)
+    assert status == 201
+    made = json.loads(answer)["Id"]
+    assert proxy.req("POST", f"/containers/{made}/start")[0] == 204                  # unchanged: starts
+    writes = len(proxy.daemon.writes())
+    source.rmdir()
+    source.symlink_to("/var/run/docker.sock")                                         # swapped after the create-time check
+    for op in ("start", "restart"):
+        status, _, text = proxy.req("POST", f"/containers/{made}/{op}")
+        assert status == 403 and (b"symlink" in text or b"socket" in text)
+    assert len(proxy.daemon.writes()) == writes
+    source.unlink()
+    source.mkdir()
+    assert proxy.req("POST", f"/containers/{made}/restart")[0] == 204
+
+
+def test_a_container_the_operator_created_is_not_held_to_the_grants_paths_when_restarted(proxy, monkeypatch):
+    from dockerproxy_fakes import CONTAINERS
+    monkeypatch.setitem(CONTAINERS["qbittorrent"], "host_config", {"Binds": ["/mnt/data:/data"]})
+    assert proxy.req("POST", "/containers/qbittorrent/restart")[0] == 204

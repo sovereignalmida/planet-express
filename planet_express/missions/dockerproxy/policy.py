@@ -61,6 +61,7 @@ class ContainerInfo:
     id: str
     name: str
     labels: Mapping[str, str]
+    host_config: Mapping = field(default_factory=dict, compare=False, hash=False)    # from inspect: Binds and Mounts
 
 
 @dataclass(frozen=True)
@@ -299,12 +300,14 @@ class Policy:
 
     def __init__(self, scope: Scope | None, inspector: Inspector, *, read_only: bool = False,
                  exec_owner: Callable[[str], str | None] = lambda exec_id: None,
+                 created: Callable[[str], bool] = lambda container_id: False,
                  json_cap: int = JSON_CAP, archive_cap: int = ARCHIVE_CAP,
                  versions: frozenset[str] = API_VERSIONS, is_socket: Callable[[str], bool] | None = None):
         if not read_only and scope is None:
             raise ValueError("a scoped policy needs a scope")
         self.scope, self.inspector, self.read_only = scope, inspector, read_only
         self.exec_owner, self.json_cap, self.archive_cap, self.versions = exec_owner, json_cap, archive_cap, versions
+        self.created = created
         self._is_socket = is_socket or _is_unix_socket
 
     # -- matching -------------------------------------------------------------------------------
@@ -367,6 +370,8 @@ class Policy:
             plan.summary = {"container": info.name or info.id[:12]}
             if route.name == "exec.create":
                 plan.exec_container = info.id
+            if route.name in ("container.start", "container.restart") and self.created(info.id):
+                self._revalidate_mounts(info)
         elif route.target == "network":
             net = self._network(ident, route.need)
             plan.upstream_path = f"/networks/{net.id}" + ("/" + route.name.split(".")[1] if route.write else "")
@@ -513,6 +518,26 @@ class Policy:
             raise Refusal("the bind source touches a protected resource")
         if verdict != "in_scope":
             raise Refusal("the bind source is outside the grant's paths and mounts")
+
+    def _revalidate_mounts(self, info: ContainerInfo) -> None:
+        """A container this session created is checked again when it is started: its bind sources were validated as paths at
+        create time, and a worker-writable path can be swapped for a symlink (to the Docker socket, say) in between. This
+        narrows the window from "whenever the worker likes" to the instant between this check and the daemon's mount; a
+        no-follow bind in the daemon is what would close it, and the proxy cannot add that (accepted residual, reported)."""
+        host = info.host_config if isinstance(info.host_config, Mapping) else {}
+        for entry in host.get("Binds") or []:
+            if not isinstance(entry, str):
+                raise Refusal("the container's mounts cannot be checked")
+            self._bind(entry, [])
+        for mount in host.get("Mounts") or []:
+            if not isinstance(mount, dict) or not isinstance(mount.get("Source"), str):
+                raise Refusal("the container's mounts cannot be checked")
+            if mount.get("Type") == "bind":
+                self._scoped_bind(mount["Source"])
+            elif mount.get("Type") == "volume":
+                self._scoped_volume(mount["Source"])
+            else:
+                raise Refusal("the container has a mount type that is not served")
 
     def _mount_target(self, target: str) -> str:
         if (not isinstance(target, str) or not target.startswith("/") or "\x00" in target or len(target) > 4096

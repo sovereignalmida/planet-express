@@ -86,6 +86,7 @@ class Paths:
     sudoers: str = SUDOERS_PATH
     worker_sudoers: str = "/etc/sudoers.d/planetexpress-worker"
     worker_sudo_rules: tuple = ()                 # ((unit, (action, ...)), ...): the host-wide ceiling; empty means no file
+    reconcile_worker_sudoers: bool = False        # no rules, but an earlier setup's generated file is on the host: take it away
     unit_dropin: str = UNIT_DROPIN
     boot_script: str = "/mnt/data/pe/launcher-boot.sh"
     interpreter: str = "/usr/bin/python3"
@@ -645,7 +646,9 @@ class WorkerSudoers(LauncherSudoers):
     """The generated sudoers file for the worker tier (`planet_express/missions/sudo_gen.py`): the host-wide ceiling of what a
     Repair session may do as root, exact `systemctl <action> <unit>` argv and nothing else. Same discipline as the launcher's
     rule (visudo -c on a staging file, root 0440, read-back, journaled previous content, undo and uninstall remove exactly
-    this text). It applies only when the config names rules; with none, no file exists."""
+    the generator's output). It applies when the config names rules, and also, to take it away again, when it names none
+    but the host still holds a file an earlier setup generated (`reconcile_worker_sudoers`, set by the plan from its scan):
+    clearing the rules must not leave the old grants in force."""
     name = "worker-sudoers"
 
     @property
@@ -653,7 +656,7 @@ class WorkerSudoers(LauncherSudoers):
         return self.p.worker_sudoers
 
     def applies(self) -> bool:
-        return super().applies() and bool(self.p.worker_sudo_rules)
+        return super().applies() and (bool(self.p.worker_sudo_rules) or self.p.reconcile_worker_sudoers)
 
     def wanted(self) -> bytes:
         from planet_express.missions.sudo_gen import render
@@ -666,6 +669,65 @@ class WorkerSudoers(LauncherSudoers):
         except SudoGenError as exc:
             return f"the worker sudo rules cannot be generated: {exc}"
         return None
+
+    def _generated(self) -> bytes | None:
+        """The file's bytes if it exists and is exactly generator output, else None."""
+        from planet_express.missions.sudo_gen import is_generated
+        current = read_regular(self.target)
+        return current if current is not None and is_generated(current, self.p.systemctl) else None
+
+    def probe(self) -> Probe:
+        if self.p.worker_sudo_rules:
+            return super().probe()
+        try:
+            stale = self._generated()
+        except StepError as exc:
+            return Probe(False, str(exc), blocked=True)
+        if stale is not None:
+            return Probe(False, f"{self.target} holds sudo rules the configuration no longer names")
+        return Probe(True, "no generated worker sudoers on the host")
+
+    def repair(self, journal) -> dict:
+        if self.p.worker_sudo_rules:
+            return super().repair(journal)
+        path, _why = self.removal()
+        if path is None:
+            return {}
+        previous = read_regular(path)
+        evidence = {"removed": True, "previous": _text(previous), "previous_sha256": sha256(previous), "sha256": None,
+                    "created_dirs": []}
+        journal.append("evidence", step=self.name, data=evidence)
+        os.unlink(path)
+        if not self.probe().ok:
+            raise StepError("the stale worker sudoers was removed but the host still holds one")
+        return evidence
+
+    def undo(self, journal, evidence: dict) -> str:
+        if not evidence.get("removed"):
+            return super().undo(journal, evidence)
+        if os.path.lexists(self.target):
+            raise StepRefused(f"{self.target} exists again since setup removed it; nothing was restored")
+        write_atomic(self.target, evidence["previous"].encode(), 0o440, self.p.owner_uid, self.p.owner_gid)
+        return f"{self.target}: restored"
+
+    def removal(self) -> tuple[str | None, str]:
+        """The generator's own output is removable whatever rules it held; anything else stays."""
+        current = read_regular(self.target)
+        if current is None:
+            return None, f"{self.target}: already absent"
+        if self._generated() is None:
+            return None, f"{self.target}: left in place, it is not what setup writes"
+        return self.target, ""
+
+    def remove(self, journal) -> str:
+        path, why = self.removal()
+        if path is None:
+            return why
+        previous = read_regular(path)
+        journal.append("evidence", step=self.name, data={"removed": {"kind": "file", "path": path, "mode": 0o440,
+                                                                      "content": previous.decode("utf-8")}})
+        os.unlink(path)
+        return f"{path}: removed"
 
 
 # ── 4. the cgroup tree ─────────────────────────────────────────────────────────────────────────────

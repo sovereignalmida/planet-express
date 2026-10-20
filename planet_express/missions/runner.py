@@ -252,6 +252,15 @@ def build_mission_runner(
             env_policy = make_env_policy(
                 protected=protected, stacks_root=stacks_root, known_tools=default_registry().names(),
                 secret_values=lambda: [v for v in (os.environ.get(var) for var in refs.values()) if v])
+    authenticator = WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)) if real else None
+    if docker_proxy is None and real and repair_wiring is not None and stacks_root is not None:
+        # Built BEFORE the controls: the tripwire's pause closes the proxy through the callback `build_repair_controls` captures,
+        # so the service has to exist when that is assembled (a pause that never reached the proxy would leave it open).
+        from planet_express.missions.dockerproxy.service import DockerProxyService
+        docker_proxy = DockerProxyService(
+            store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
+            stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
+            protected_gids=_protected_gids())
     controls = None
     if repair_wiring is not None and protected is not None:
         # Slice 7a: the checkpoint service, tripwire monitor, verifier and side-door gate, all or none. A failure to build any of
@@ -269,13 +278,6 @@ def build_mission_runner(
             if tool_broker is not None and tool_broker.write_gate is None:
                 from planet_express.missions.assembly import mission_write_gate
                 tool_broker.write_gate = mission_write_gate(store)
-    authenticator = WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)) if real else None
-    if docker_proxy is None and real and repair_wiring is not None and stacks_root is not None:
-        from planet_express.missions.dockerproxy.service import DockerProxyService
-        docker_proxy = DockerProxyService(
-            store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
-            stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
-            protected_gids=_protected_gids())
     runtime = CommandRuntime(
         containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
         env_policy=env_policy)

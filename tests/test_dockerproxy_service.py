@@ -373,3 +373,26 @@ def test_a_valid_session_that_is_not_this_sockets_session_is_refused_by_the_gate
     mine = SimpleNamespace(id="S-mine", fences={})
     assert StoreGate(st.svc, "S-mine", "M-1", "0" * 64, lambda peer, req: mine).authenticate(PeerCred(1, 2, 3), "t" * 40) is mine
     assert gate.authenticate(PeerCred(1, 2, 3), None) is None and gate.authenticate(PeerCred(1, 2, 3), 5) is None
+
+
+def test_the_daemon_wiring_builds_the_proxy_before_the_controls_so_a_tripwire_pause_reaches_it(tmp_path, monkeypatch):
+    """Review finding: the service must exist when `build_repair_controls` captures the revoke callback."""
+    from config_schema import MissionsConfig
+
+    from planet_express.core.store import Store
+    from planet_express.missions import assembly
+    from planet_express.missions.runner import build_mission_runner
+    seen = {}
+
+    def spy(store, cfg, wiring, **kw):
+        seen["proxy"] = kw.get("proxy")
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(assembly, "build_repair_controls", spy)
+    stacks = tmp_path / "stacks"
+    stacks.mkdir()
+    store = Store(str(tmp_path / "s.db"))
+    cfg = MissionsConfig(enabled=True, runtime={"argv": ["/bin/true"]}, sock_root=str(tmp_path / "socks"),
+                         workspace_root=str(tmp_path / "ws"))
+    runner = build_mission_runner(store, cfg, stacks_root=str(stacks), repair_wiring=object())
+    assert isinstance(seen["proxy"], DockerProxyService)
+    assert runner.supervisor.docker_proxy is seen["proxy"] and runner.supervisor.socket_provider.proxy is seen["proxy"]

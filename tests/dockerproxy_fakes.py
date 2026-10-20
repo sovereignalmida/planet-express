@@ -114,6 +114,7 @@ class FakeDaemon:
     def __init__(self, path, stream_bytes=0):
         self.path, self.requests, self.stream_bytes = path, [], stream_bytes
         self.exec_ids = []
+        self.made = {}                          # containers created through this daemon: id -> {name, labels, host_config}
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(path)
         self._sock.listen(16)
@@ -194,22 +195,31 @@ class FakeDaemon:
             return self._send(conn, 200, [
                 {"Id": c["id"], "Names": ["/" + n], "Labels": c["labels"], "Image": "x"} for n, c in CONTAINERS.items()])
         if tail == "containers/create":
-            return self._send(conn, 201, {"Id": "f" * 64, "Warnings": []})
+            body = json.loads(rec["body"] or b"{}")
+            cid = os.urandom(32).hex()
+            self.made[cid] = {"name": "made-" + cid[:6], "labels": body.get("Labels", {}), "host_config": body.get("HostConfig", {})}
+            return self._send(conn, 201, {"Id": cid, "Warnings": []})
         if parts[1] == "containers" and len(parts) >= 3:
             ref = parts[2]
             found = next((n for n, c in CONTAINERS.items() if ref in (n, c["id"], c["id"][:12])), None)
+            made = self.made.get(ref)
+            if made is not None:
+                found = made["name"]
+                CONTAINERS_VIEW = {found: {"id": ref, "labels": made["labels"], "env": [], "host_config": made["host_config"]}}
+            else:
+                CONTAINERS_VIEW = CONTAINERS
             op = parts[3] if len(parts) > 3 else ""
             if found is None and op != "":
                 return self._send(conn, 404, {"message": "no such container"})
             if found is None and method == "GET" and op == "":
                 return self._send(conn, 404, {"message": "no such container"})
-            c = CONTAINERS.get(found)
+            c = CONTAINERS_VIEW.get(found)
             if op == "json":
                 if c is None:
                     return self._send(conn, 404, {"message": "no such container"})
                 return self._send(conn, 200, {"Id": c["id"], "Name": "/" + found, "Config": {"Labels": c["labels"], "Env": c["env"],
                                                                                               "Cmd": ["run", "--password=hunter2hunter2"]},
-                                              "HostConfig": {}})
+                                              "HostConfig": c.get("host_config", {})})
             if op == "logs" or op == "stats":
                 payload = b"x" * self.stream_bytes
                 conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n" + payload)

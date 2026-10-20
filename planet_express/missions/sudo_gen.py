@@ -94,6 +94,38 @@ def render(rules: Iterable, *, uid_min: int, uid_max: int, systemctl: str = SYST
     return ("\n".join(lines) + "\n").encode("ascii")
 
 
+def reparse(data: bytes, systemctl: str = SYSTEMCTL) -> tuple[list[Rule], int, int] | None:
+    """(rules, uid_min, uid_max) if `data` is EXACTLY something `render` produces, else None. This is how a file left by an
+    earlier setup (whose rules have since left the config) is recognised as the generator's own, and so removable."""
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    body = text.replace("\\\n", "")
+    found = re.search(r"^Cmnd_Alias PE_WORKER_CMDS = (.*)$", body, re.MULTILINE)
+    uids = [int(n) for n in re.findall(r"#(\d{1,10})\b", body)]
+    if not found or not uids:
+        return None
+    rules: dict[str, set[str]] = {}
+    pattern = re.compile(re.escape(systemctl) + r" (start|stop|restart) (\S+)")
+    for command in found.group(1).split(", "):
+        parsed = pattern.fullmatch(command.strip())
+        if not parsed:
+            return None
+        rules.setdefault(parsed.group(2), set()).add(parsed.group(1))
+    low, high = min(uids), max(uids) + 1
+    try:
+        clean = normalise([(unit, tuple(acts)) for unit, acts in rules.items()])
+        again = render(clean, uid_min=low, uid_max=high, systemctl=systemctl)
+    except SudoGenError:
+        return None
+    return (clean, low, high) if again == data else None
+
+
+def is_generated(data: bytes, systemctl: str = SYSTEMCTL) -> bool:
+    return reparse(data, systemctl) is not None
+
+
 def digest(text: bytes) -> str:
     return hashlib.sha256(text).hexdigest()
 
@@ -122,7 +154,9 @@ __all__ = [
     "SudoGenError",
     "commands",
     "digest",
+    "is_generated",
     "normalise",
     "outside_ceiling",
     "render",
+    "reparse",
 ]

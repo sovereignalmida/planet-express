@@ -276,3 +276,55 @@ def test_the_generated_rules_would_be_flagged_if_they_were_not_declared_managed(
     target, p = side_doors(tmp_path)
     p.managed = {}
     assert not SudoersManaged(p).probe().ok
+
+
+# ── clearing the rules must not leave the old grants in force (review finding) ──────────────────────────────
+
+def test_reparse_recognises_exactly_generator_output_whatever_rules_it_held():
+    from planet_express.missions.sudo_gen import is_generated, reparse
+    text = render(RULES, uid_min=61000, uid_max=61999)
+    rules, low, high = reparse(text)
+    assert [(r.unit, r.actions) for r in rules] == [("a@b.timer", ("stop",)), ("plex.service", ("start", "restart"))]
+    assert (low, high) == (61000, 61999) and is_generated(text)
+    assert not is_generated(text + b"# edited\n") and not is_generated(b"") and not is_generated(b"root ALL=(ALL) ALL\n")
+    assert not is_generated(text.replace(b"restart plex.service", b"restart plex.service, /bin/sh"))
+    assert not is_generated(text.replace(b"/usr/bin/systemctl stop", b"/usr/bin/systemctl stop *"))
+
+
+def test_a_stale_generated_file_is_removed_when_the_rules_are_cleared_and_undo_puts_it_back(tmp_path):
+    p = paths_with_rules(tmp_path)
+    repair_all(launcher_steps(p), MemoryJournal())
+    assert Path(p.worker_sudoers).exists()
+    cleared = step_paths(tmp_path, worker_sudoers=p.worker_sudoers, worker_sudo_rules=(), reconcile_worker_sudoers=True,
+                         uid_min=61000, uid_max=61040)
+    steps = [s for s in launcher_steps(cleared) if s.name == "worker-sudoers"]
+    assert len(steps) == 1 and not steps[0].probe().ok and "no longer names" in steps[0].probe().detail
+    journal = MemoryJournal()
+    assert repair_all(steps, journal)["worker-sudoers"] == "repaired" and not Path(p.worker_sudoers).exists()
+    assert steps[0].probe().ok
+    undo_all(steps, journal)
+    assert Path(p.worker_sudoers).read_text() == SNAPSHOT
+
+
+def test_without_the_reconcile_flag_a_cleared_config_has_no_worker_step_and_a_foreign_file_is_never_touched(tmp_path):
+    cleared = step_paths(tmp_path, worker_sudoers=str(tmp_path / "etc" / "sudoers.d" / "pe-worker"), worker_sudo_rules=())
+    assert "worker-sudoers" not in [s.name for s in launcher_steps(cleared)]
+    Path(cleared.worker_sudoers).write_text("# an operator's own file\n")
+    flagged = step_paths(tmp_path, worker_sudoers=cleared.worker_sudoers, worker_sudo_rules=(), reconcile_worker_sudoers=True)
+    step = [s for s in launcher_steps(flagged) if s.name == "worker-sudoers"][0]
+    assert step.probe().ok and step.removal()[0] is None and "not what setup writes" in step.removal()[1]
+    step.repair(MemoryJournal())
+    assert Path(cleared.worker_sudoers).read_text() == "# an operator's own file\n"
+
+
+def test_uninstall_removes_an_older_generated_file_even_if_the_config_names_other_rules_now(tmp_path):
+    old = paths_with_rules(tmp_path)
+    repair_all(launcher_steps(old), MemoryJournal())
+    now = paths_with_rules(tmp_path, rules=[("other.service", ("start",))])
+    step = [s for s in launcher_steps(now) if s.name == "worker-sudoers"][0]
+    path, why = step.removal()
+    assert path == old.worker_sudoers and why == ""
+    journal = MemoryJournal()
+    step.remove(journal)
+    assert not Path(old.worker_sudoers).exists()
+    assert step.restore(journal.evidence(step.name)).startswith(old.worker_sudoers) and Path(old.worker_sudoers).read_text() == SNAPSHOT
