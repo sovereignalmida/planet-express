@@ -668,7 +668,9 @@ class Store:
             return [self._incident_row(conn.execute("SELECT * FROM incidents WHERE id=?", (item,)).fetchone())
                     for item in changed]
 
-    def dismiss_incident(self, incident_id: str, scan_id: str, operator: str) -> bool:
+    def dismiss_incident(
+        self, incident_id: str, scan_id: str, operator: str, *, timeout: float = 5
+    ) -> bool:
         """Resolve an open incident that the latest reconciled scan did not observe at all.
 
         reconcile_incidents() only resolves an incident when a scan reports its resource
@@ -677,7 +679,7 @@ class Store:
         the latest reconciliation and did not touch this incident, checked in the same
         transaction as the write. If the resource fails again, the next scan reopens it."""
         now = self._clock()
-        with self._write() as conn:
+        with self._write(timeout=timeout) as conn:
             latest = conn.execute(
                 "SELECT scan_id FROM incident_reconciliations ORDER BY rowid DESC LIMIT 1"
             ).fetchone()

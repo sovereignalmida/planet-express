@@ -645,8 +645,10 @@ class CommandService:
                 return ProposeResult(False, None, False,
                                      "The latest scan still sees this; it can't be dismissed.")
             try:
-                dismissed = self._store.dismiss_incident(incident_id, current, operator)
-            except sqlite3.OperationalError:
+                dismissed = self._store.dismiss_incident(
+                    incident_id, current, operator, timeout=self._remaining(deadline)
+                )
+            except (actions.TargetTimeout, sqlite3.OperationalError):
                 return ProposeResult(False, None, False, "host slow, retry")
             if not dismissed:
                 return ProposeResult(False, None, False, "A newer scan landed; check the incident again.")
