@@ -826,6 +826,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             "incident_id": incident_id, "operator": g.operator,
         }))
 
+    @app.post("/api/incidents/<incident_id>/dismiss")
+    def incident_dismiss(incident_id):
+        if re.fullmatch(r"[0-9a-f]{12}", incident_id) is None:
+            raise RpcError("Invalid incident ID", "bad_request")
+        return jsonify(core("incident.dismiss", {
+            "incident_id": incident_id, "operator": g.operator,
+        }))
+
     @app.post("/api/scan")
     def scan_start():
         """Run the same full pipeline Telegram's /check runs.

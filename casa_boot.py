@@ -32,7 +32,10 @@ import config
 from planet_express.execution import boot_order, dependency_dryrun
 
 log_prefix = "[casa_boot]"
-BOOT_TIMEOUT_SECONDS = 270
+# A cold boot of the 14 reference stacks used 268s of the old 270s budget (2026-10-15), and
+# recreating them after the Borg backup's `compose down` ran out before vikunja (2026-10-11).
+# Must stay under casa-stacks.service's TimeoutStartSec (900).
+BOOT_TIMEOUT_SECONDS = 870
 DOCKER_QUERY_TIMEOUT_SECONDS = 20
 
 # Keep this deliberately narrow: a namespace mode using a container *name* is
@@ -352,4 +355,7 @@ def bring_up_all_stacks() -> int:
 
 
 if __name__ == "__main__":
+    # Under systemd stdout is a pipe, so without this every line reaches the journal at exit
+    # with one timestamp and there is no telling which stack ate the budget.
+    sys.stdout.reconfigure(line_buffering=True)
     sys.exit(bring_up_all_stacks())

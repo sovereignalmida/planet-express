@@ -283,3 +283,65 @@ def test_incident_hints_batch_one_lookup_and_keep_unsupported_informational(tmp_
     hints = {row["kind"]: row["hint"]["state"] for row in rows}
     assert hints == {"container_health": "proposal_available", "disk_usage": "no_typed_remediation"}
     assert len(env.identity_calls) == 1 and env.identity_calls[0][0] == ["CASA_WEB"]
+
+
+def _later_scan_without_the_incident(env, timestamp="2026-09-18T18:00:00Z"):
+    data = snapshot(timestamp)
+    env.monitor.write_text(json.dumps(data))
+    later = scan_id(data)
+    env.store.reconcile_incidents(later, timestamp, [])
+    return later
+
+
+def test_an_incident_the_latest_scan_did_not_see_can_be_dismissed(tmp_path):
+    env = IncidentEnv(tmp_path)
+    later = _later_scan_without_the_incident(env)
+    listed = env.service.list_incidents(status="open", limit=20, timeout=4)
+    assert listed[0]["hint"]["state"] == "not_observed"
+
+    result = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
+    assert result.ok
+    row = env.store.get_incident(env.incident["id"])
+    assert row["status"] == "resolved" and row["resolved_at"] is not None
+    event = env.store.list_incident_events(env.incident["id"])[-1]
+    assert (event["kind"], event["scan_id"], event["payload"]) == (
+        "resolved", later, {"dismissed_by": "alice"})
+
+    # The resource failing again reopens the same incident.
+    env.store.reconcile_incidents("f" * 64, "2026-09-19T00:00:00Z", [observation()])
+    assert env.store.get_incident(env.incident["id"])["status"] == "open"
+
+
+def test_an_incident_the_latest_scan_still_sees_cannot_be_dismissed(tmp_path):
+    env = IncidentEnv(tmp_path)
+    result = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
+    assert not result.ok and "still sees" in result.reason
+    assert env.store.get_incident(env.incident["id"])["status"] == "open"
+
+
+def test_dismissal_needs_a_current_full_scan(tmp_path):
+    env = IncidentEnv(tmp_path)
+    _later_scan_without_the_incident(env)
+    env.monitor.write_text(json.dumps(snapshot("2026-09-18T19:00:00Z")))  # not reconciled yet
+    result = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
+    assert not result.ok and "full scan" in result.reason
+    assert env.service.list_incidents(status="open", limit=20, timeout=4)[0]["hint"]["state"] == (
+        "fresh_scan_required")
+
+
+def test_store_refuses_a_dismissal_against_a_superseded_scan(tmp_path):
+    env = IncidentEnv(tmp_path)
+    stale = _later_scan_without_the_incident(env)
+    env.store.reconcile_incidents("e" * 64, "2026-09-18T20:00:00Z", [])
+    assert env.store.dismiss_incident(env.incident["id"], stale, "alice") is False
+    assert env.store.get_incident(env.incident["id"])["status"] == "open"
+
+
+def test_dismissing_an_unknown_or_resolved_incident_is_refused(tmp_path):
+    env = IncidentEnv(tmp_path)
+    _later_scan_without_the_incident(env)
+    assert env.service.dismiss_incident("0" * 12, operator="alice", timeout=4).reason == (
+        "incident not found")
+    assert env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4).ok
+    again = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
+    assert not again.ok and "already resolved" in again.reason
