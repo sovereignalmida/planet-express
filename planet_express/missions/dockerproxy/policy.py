@@ -515,14 +515,28 @@ class Policy:
             raise Refusal("exec and attach are refused on a container holding a capability that reaches the kernel")
         sources = [m.get("Source") for m in info.mounts if isinstance(m, dict) and m.get("Type") in (None, "bind")]
         sources += [str(entry).split(":", 1)[0] for entry in (host.get("Binds") or []) if isinstance(entry, str)]
+        for mount in info.mounts:
+            # A named volume can be bind-backed (`type=none,o=bind,device=/var/run`): docker reports it as Type volume.
+            if isinstance(mount, dict) and mount.get("Type") == "volume":
+                sources += self._volume_devices(mount.get("Name"))
         for source in sources:
-            if not isinstance(source, str) or not source.startswith("/"):
-                continue
-            real = os.path.realpath(source)
-            reaches = any(sock == path or sock.startswith(path.rstrip("/") + "/")
-                          for path in (source, real) for sock in DOCKER_SOCKET_PATHS)
-            if reaches or os.path.basename(real) in DOCKER_SOCKET_NAMES or self._is_socket(real):
+            if isinstance(source, str) and source.startswith("/") and self._reaches_docker(source):
                 raise Refusal("exec and attach are refused on a container that has the Docker socket mounted")
+
+    def _volume_devices(self, name) -> list[str]:
+        if not isinstance(name, str) or not _NAME.match(name):
+            return []
+        vol = self.inspector.volume(name)
+        options = vol.get("Options") if isinstance(vol, dict) else None
+        device = options.get("device") if isinstance(options, dict) else None
+        return [device] if isinstance(device, str) else []
+
+    def _reaches_docker(self, source: str) -> bool:
+        """Is this host path the Docker socket, a directory holding it, or a socket under another name?"""
+        real = os.path.realpath(source)
+        reaches = any(sock == path or sock.startswith(path.rstrip("/") + "/")
+                      for path in (source, real) for sock in DOCKER_SOCKET_PATHS)
+        return reaches or os.path.basename(real) in DOCKER_SOCKET_NAMES or self._is_socket(real)
 
     def _scoped_volume(self, name: str) -> None:
         if not _NAME.match(name):

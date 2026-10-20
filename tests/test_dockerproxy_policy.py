@@ -456,3 +456,15 @@ def test_volume_inspect_needs_the_volume_to_be_in_scope_but_the_read_only_proxy_
         with pytest.raises(Refusal):
             plan_for(policy, "volume.inspect", name)
     assert plan_for(Policy(None, FakeInspector(), read_only=True), "volume.inspect", "other_vol")
+
+
+def test_exec_is_refused_on_a_container_whose_named_volume_is_bind_backed_by_the_docker_socket_or_its_directory(root):
+    for device in ("/var/run/docker.sock", "/var/run", "/run", "/"):
+        class Volumes(Hazard):
+            def volume(self, name):
+                return {"Driver": "local", "Options": {"type": "none", "o": "bind", "device": device}, "Labels": labels("media")}
+        p = Policy(make_scope(str(root)), Volumes({}, ({"Type": "volume", "Name": "dockervol", "Source": "/var/lib/docker/v/_data"},)))
+        with pytest.raises(Refusal, match="Docker socket"):
+            plan_for(p, "exec.create", "plex", body={"Cmd": ["id"]})
+    harmless = Hazard({}, ({"Type": "volume", "Name": "media_cfg", "Source": "/var/lib/docker/volumes/media_cfg/_data"},))
+    assert plan_for(Policy(make_scope(str(root)), harmless), "exec.create", "plex", body={"Cmd": ["id"]})
