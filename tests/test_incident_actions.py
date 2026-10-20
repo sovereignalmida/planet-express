@@ -300,7 +300,7 @@ def test_an_incident_the_latest_scan_did_not_see_can_be_dismissed(tmp_path):
     assert listed[0]["hint"]["state"] == "not_observed"
 
     result = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
-    assert result.ok
+    assert result.ok and env.state.mutation_owner is None
     row = env.store.get_incident(env.incident["id"])
     assert row["status"] == "resolved" and row["resolved_at"] is not None
     event = env.store.list_incident_events(env.incident["id"])[-1]
@@ -345,3 +345,12 @@ def test_dismissing_an_unknown_or_resolved_incident_is_refused(tmp_path):
     assert env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4).ok
     again = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
     assert not again.ok and "already resolved" in again.reason
+
+
+def test_dismissal_is_busy_during_scan_and_releases_the_lock(tmp_path):
+    env = IncidentEnv(tmp_path)
+    _later_scan_without_the_incident(env)
+    assert env.state.try_start_run()
+    result = env.service.dismiss_incident(env.incident["id"], operator="alice", timeout=4)
+    assert not result.ok and "Busy" in result.reason
+    assert env.store.get_incident(env.incident["id"])["status"] == "open"
