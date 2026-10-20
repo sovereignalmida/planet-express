@@ -398,3 +398,61 @@ def test_read_only_policy_serves_reads_and_nothing_else(root):
 def test_a_bind_source_that_is_a_file_name_trick_is_refused_by_normalisation_not_by_existence(policy, root):
     assert os.path.exists(root / "stacks" / "media" / "config")
     refused(policy, host(Binds=[f"{root}/stacks/media/config/../config:/x"]), "normalised")
+
+
+# ── exec and attach are root on the host when the container is (review finding) ─────────────────────────────────
+
+class Hazard(FakeInspector):
+    """A FakeInspector whose `plex` carries the given inspect HostConfig and Mounts."""
+
+    def __init__(self, host_config=None, mounts=()):
+        super().__init__()
+        self.host_config, self.mounts = host_config or {}, tuple(mounts)
+
+    def container(self, ref):
+        info = super().container(ref)
+        if info is None or info.name != "plex":
+            return info
+        from planet_express.missions.dockerproxy.policy import ContainerInfo
+        return ContainerInfo(info.id, info.name, info.labels, self.host_config, self.mounts)
+
+
+@pytest.mark.parametrize("host_config, mounts, why", [
+    ({"Privileged": True}, (), "privileged"),
+    ({"PidMode": "host"}, (), "PidMode"),
+    ({"UsernsMode": "host"}, (), "UsernsMode"),
+    ({"CapAdd": ["SYS_ADMIN"]}, (), "capability"),
+    ({"CapAdd": ["cap_sys_ptrace"]}, (), "capability"),
+    ({"CapAdd": ["ALL"]}, (), "capability"),
+    ({"Binds": ["/var/run/docker.sock:/var/run/docker.sock"]}, (), "Docker socket"),
+    ({"Binds": ["/run/docker.sock:/d.sock:ro"]}, (), "Docker socket"),
+    ({}, ({"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/d.sock"},), "Docker socket"),
+    ({}, ({"Type": "bind", "Source": "/var/run", "Destination": "/r"},), "Docker socket"),
+    ({}, ({"Type": "bind", "Source": "/run", "Destination": "/r"},), "Docker socket"),
+    ({}, ({"Type": "bind", "Source": "/", "Destination": "/host"},), "Docker socket"),
+    ({}, ({"Source": "/srv/anything/docker.sock", "Destination": "/d"},), "Docker socket"),
+])
+def test_exec_and_attach_are_refused_on_a_root_equivalent_container(root, host_config, mounts, why):
+    p = Policy(make_scope(str(root)), Hazard(host_config, mounts), exec_owner={"1" * 64: ID_B}.get)
+    for name, body in (("exec.create", {"Cmd": ["id"]}), ("container.attach", None)):
+        with pytest.raises(Refusal, match=why):
+            plan_for(p, name, "plex", body=body)
+    with pytest.raises(Refusal, match=why):
+        plan_for(p, "exec.start", "1" * 64, body={})
+    assert plan_for(p, "container.inspect", "plex") and plan_for(p, "container.logs", "plex")      # still readable
+    assert plan_for(p, "container.restart", "plex")                                                    # and restartable
+
+
+def test_an_ordinary_mount_of_data_does_not_stop_an_exec(root):
+    mounts = ({"Type": "bind", "Source": str(root / "data"), "Destination": "/data"}, {"Type": "volume", "Name": "x"})
+    p = Policy(make_scope(str(root)), Hazard({"CapAdd": ["NET_ADMIN"], "Binds": [f"{root}/data:/data"]}, mounts))
+    assert plan_for(p, "exec.create", "plex", body={"Cmd": ["id"]})
+
+
+def test_volume_inspect_needs_the_volume_to_be_in_scope_but_the_read_only_proxy_reads_any(policy):
+    assert plan_for(policy, "volume.inspect", "media_cfg").upstream_path == "/volumes/media_cfg"
+    assert plan_for(policy, "volume.inspect", "fancy")                                  # in scope, even if its driver is not plain
+    for name in ("other_vol", "nonesuch"):
+        with pytest.raises(Refusal):
+            plan_for(policy, "volume.inspect", name)
+    assert plan_for(Policy(None, FakeInspector(), read_only=True), "volume.inspect", "other_vol")

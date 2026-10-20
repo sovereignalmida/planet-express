@@ -124,7 +124,7 @@ def test_a_repair_session_gets_its_own_proxy_socket_and_its_environment_names_on
     st = stack()
     mid, sid, token, path, spawn = go(st)
     assert os.path.exists(path) and os.path.exists(os.path.join(st.dir, sid, "worker.sock"))
-    assert spawn["env"]["DOCKER_HOST"] == f"unix://{path}" and spawn["env"]["PE_DOCKER_SOCKET"] == path
+    assert spawn["env"]["PE_DOCKER_SOCKET"] == path and "DOCKER_HOST" not in spawn["env"]      # stock clients cannot send the token
     assert spawn["sock_dir"] is True and token not in json.dumps(spawn["env"])
     assert restart(path, token)[0] == 204
 

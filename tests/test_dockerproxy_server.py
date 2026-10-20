@@ -653,3 +653,59 @@ def test_a_container_the_operator_created_is_not_held_to_the_grants_paths_when_r
     from dockerproxy_fakes import CONTAINERS
     monkeypatch.setitem(CONTAINERS["qbittorrent"], "host_config", {"Binds": ["/mnt/data:/data"]})
     assert proxy.req("POST", "/containers/qbittorrent/restart")[0] == 204
+
+
+# ── the client shim: stock Docker clients cannot add the session token ────────────────────────────────────────
+
+def test_the_shim_puts_the_session_token_on_requests_from_a_client_that_cannot(proxy):
+    from planet_express.missions.dockerproxy.shim import TokenShim
+    shim_path = os.path.join(proxy.dir, "shim.sock")
+    shim = TokenShim(shim_path, proxy.path, "good" * 8)
+    proxy.gate.authenticate = lambda peer, token: proxy.gate.session if token == "good" * 8 else None
+    shim.start()
+    try:
+        assert os.lstat(shim_path).st_mode & 0o777 == 0o600
+        status, _, body = talk(shim_path, b"GET /v1.43/containers/json HTTP/1.1\r\nHost: d\r\n\r\n")        # no header from the client
+        assert status == 200 and b"qbittorrent" in body
+        status, _, _ = talk(shim_path, b"GET /v1.43/containers/json HTTP/1.1\r\nHost: d\r\nX-PE-Session: other\r\n\r\n")
+        assert status == 200                                                         # a client-supplied header is replaced, not duplicated
+        status, _, _ = talk(shim_path, b"POST /v1.43/containers/qbittorrent/restart HTTP/1.1\r\nHost: d\r\nContent-Length: 0\r\n\r\n")
+        assert status == 204 and proxy.daemon.writes()
+        assert talk(proxy.path, b"GET /v1.43/containers/json HTTP/1.1\r\nHost: d\r\n\r\n")[0] == 401      # the proxy itself still wants it
+    finally:
+        shim.stop()
+    assert not os.path.exists(shim_path)
+
+
+def test_the_shim_relays_a_hijacked_exec_in_both_directions(proxy):
+    from planet_express.missions.dockerproxy.shim import TokenShim
+    shim_path = os.path.join(proxy.dir, "shim.sock")
+    shim = TokenShim(shim_path, proxy.path, "good" * 8)
+    proxy.gate.authenticate = lambda peer, token: proxy.gate.session if token == "good" * 8 else None
+    shim.start()
+    try:
+        eid = json.loads(request(shim_path, "POST", "/containers/qbittorrent/exec", body={"Cmd": ["sh"]}, token=None)[2])["Id"]
+        sock, head, got = hijack(shim_path, f"/v1.43/exec/{eid}/start", {}, upgrade=True, token="ignored-and-replaced")
+        assert head.startswith(b"HTTP/1.1 101") and b"HELLO" in got and b"echo:ping" in got
+        sock.close()
+    finally:
+        shim.stop()
+
+
+def test_the_shim_refuses_a_token_that_is_not_one_and_an_oversized_head(proxy):
+    from planet_express.missions.dockerproxy.shim import TokenShim
+    for bad in ("", "short", "has space in it 123456", "x" * 300, "bad\nnewline-token-12345"):
+        with pytest.raises(ValueError):
+            TokenShim("/tmp/x", "/tmp/y", bad)
+    shim_path = os.path.join(proxy.dir, "shim.sock")
+    shim = TokenShim(shim_path, proxy.path, "good" * 8)
+    shim.start()
+    try:
+        sock = socket.socket(socket.AF_UNIX)
+        sock.connect(shim_path)
+        sock.sendall(b"GET / HTTP/1.1\r\nX: " + b"a" * 20000)
+        sock.settimeout(3)
+        assert sock.recv(100) == b""                                                  # closed, nothing forwarded
+        assert proxy.daemon.requests == []
+    finally:
+        shim.stop()

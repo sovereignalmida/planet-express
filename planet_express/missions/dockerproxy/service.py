@@ -172,7 +172,10 @@ class DockerProxyService:
     def env(self, cs) -> dict[str, str]:
         with self._lock:
             bound = cs.session_id in self._servers
-        return {"PE_DOCKER_SOCKET": self.path(cs.session_id), "DOCKER_HOST": f"unix://{self.path(cs.session_id)}"} if bound else {}
+        # Only the path, not DOCKER_HOST: a stock Docker client cannot add the session token this socket requires, so
+        # advertising it as the default daemon would only produce 401s. The runtime that holds the token runs the shim
+        # (`shim.py`), which injects the header, and points its clients at the shim's socket.
+        return {"PE_DOCKER_SOCKET": self.path(cs.session_id)} if bound else {}
 
     def shutdown(self) -> None:
         with self._lock:

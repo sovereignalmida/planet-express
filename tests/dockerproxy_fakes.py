@@ -219,7 +219,7 @@ class FakeDaemon:
                     return self._send(conn, 404, {"message": "no such container"})
                 return self._send(conn, 200, {"Id": c["id"], "Name": "/" + found, "Config": {"Labels": c["labels"], "Env": c["env"],
                                                                                               "Cmd": ["run", "--password=hunter2hunter2"]},
-                                              "HostConfig": c.get("host_config", {})})
+                                              "HostConfig": c.get("host_config", {}), "Mounts": c.get("mounts", [])})
             if op == "logs" or op == "stats":
                 payload = b"x" * self.stream_bytes
                 conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n" + payload)

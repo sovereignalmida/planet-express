@@ -24,6 +24,9 @@ ARCHIVE_CAP = 32 * 1024 * 1024
 CREATED_LABEL = "io.planetexpress.created-by-proxy"      # put on every container a worker creates; its mounts are re-checked at start
 PROJECT_LABEL, SERVICE_LABEL = "com.docker.compose.project", "com.docker.compose.service"
 
+DANGEROUS_CAPS = frozenset({"ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "DAC_READ_SEARCH",
+                           "MAC_ADMIN", "BPF", "PERFMON"})
+DOCKER_SOCKET_PATHS = ("/var/run/docker.sock", "/run/docker.sock")
 CAP_ALLOW = frozenset({"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "NET_BIND_SERVICE"})
 SECURITY_OPT_ALLOW = frozenset({"no-new-privileges", "no-new-privileges:true"})
 BUILTIN_NETWORKS = frozenset({"bridge", "none", "default"})
@@ -62,7 +65,8 @@ class ContainerInfo:
     id: str
     name: str
     labels: Mapping[str, str]
-    host_config: Mapping = field(default_factory=dict, compare=False, hash=False)    # from inspect: Binds and Mounts
+    host_config: Mapping = field(default_factory=dict, compare=False, hash=False)    # from inspect: Binds, Privileged, ...
+    mounts: tuple = field(default=(), compare=False, hash=False)                      # from inspect: the container's mounts
 
 
 @dataclass(frozen=True)
@@ -369,6 +373,8 @@ class Policy:
             plan.summary = {"container": info.name or info.id[:12]}
             if route.name == "exec.create":
                 plan.exec_container = info.id
+            if route.name in ("exec.create", "container.attach"):
+                self._refuse_if_root_equivalent(info)
             if route.name in ("container.start", "container.restart") and info.labels.get(CREATED_LABEL):
                 self._revalidate_mounts(info)
         elif route.target == "network":
@@ -376,8 +382,11 @@ class Policy:
             plan.upstream_path = f"/networks/{net.id}" + ("/" + route.name.split(".")[1] if route.write else "")
             plan.summary = {"network": net.name}
         elif route.target == "volume":
-            if self.inspector.volume(ident) is None:
+            vol = self.inspector.volume(ident)
+            if vol is None:
                 raise Refusal("no such volume", 404)
+            if not self.read_only and not self._volume_in_scope(vol):
+                raise Refusal("the volume is outside this mission's scope")      # its metadata includes host paths
             plan.upstream_path = f"/volumes/{ident}"
         elif route.target == "image":
             plan.upstream_path = f"/images/{ident}/json"
@@ -386,6 +395,8 @@ class Policy:
             if owner is None or not _HEX64.match(ident or ""):
                 raise Refusal("not an exec this session created")
             info = self._container(owner, "scope")
+            if route.name == "exec.start":
+                self._refuse_if_root_equivalent(info)
             plan.upstream_path = f"/exec/{ident}/" + ("start" if route.name == "exec.start" else "json")
             plan.targets = [self._service_id(info)] if self._service_id(info) else []
             plan.summary = {"exec": ident[:12], "container": info.name or info.id[:12]}
@@ -482,6 +493,36 @@ class Policy:
         if name == "host" or name.startswith("container:"):
             raise Refusal("host and container network modes are not served")
         self._network(name, "scope")
+
+    def _volume_in_scope(self, vol: Mapping) -> bool:
+        labels = vol.get("Labels") or {}
+        stack = compose_id("stack", labels if isinstance(labels, dict) else {}, self.scope.host)
+        return stack is not None and self.scope.classify(stack, parent_of_protected=False) == "in_scope"
+
+    def _refuse_if_root_equivalent(self, info: ContainerInfo) -> None:
+        """Running a command in a container is root on the host when the container is privileged, shares the host's pid or
+        user namespace, holds a capability that reaches the kernel, or has the Docker daemon's socket (or a directory holding
+        it) mounted: the proxy's whole point is that the worker never reaches the daemon any other way. Such a container is
+        refused for exec and attach; it can still be restarted and read."""
+        host = info.host_config if isinstance(info.host_config, Mapping) else {}
+        if host.get("Privileged"):
+            raise Refusal("exec and attach are refused on a privileged container")
+        for key in ("PidMode", "UsernsMode", "IpcMode", "UTSMode", "CgroupnsMode"):
+            if host.get(key) == "host":
+                raise Refusal(f"exec and attach are refused on a container with {key} host")
+        caps = {str(c).upper().removeprefix("CAP_") for c in (host.get("CapAdd") or []) if isinstance(c, str)}
+        if caps & DANGEROUS_CAPS:
+            raise Refusal("exec and attach are refused on a container holding a capability that reaches the kernel")
+        sources = [m.get("Source") for m in info.mounts if isinstance(m, dict) and m.get("Type") in (None, "bind")]
+        sources += [str(entry).split(":", 1)[0] for entry in (host.get("Binds") or []) if isinstance(entry, str)]
+        for source in sources:
+            if not isinstance(source, str) or not source.startswith("/"):
+                continue
+            real = os.path.realpath(source)
+            reaches = any(sock == path or sock.startswith(path.rstrip("/") + "/")
+                          for path in (source, real) for sock in DOCKER_SOCKET_PATHS)
+            if reaches or os.path.basename(real) in DOCKER_SOCKET_NAMES or self._is_socket(real):
+                raise Refusal("exec and attach are refused on a container that has the Docker socket mounted")
 
     def _scoped_volume(self, name: str) -> None:
         if not _NAME.match(name):

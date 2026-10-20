@@ -151,9 +151,9 @@ class DaemonInspector:
         cid = doc.get("Id")
         if not isinstance(cid, str) or len(cid) != 64:
             raise UpstreamError("inspect returned no container id")
-        host = doc.get("HostConfig")
+        host, mounts = doc.get("HostConfig"), doc.get("Mounts")
         return ContainerInfo(cid, str(doc.get("Name", "")).lstrip("/"), self._labels((doc.get("Config") or {}).get("Labels")),
-                             host if isinstance(host, dict) else {})
+                             host if isinstance(host, dict) else {}, tuple(mounts) if isinstance(mounts, list) else ())
 
     def network(self, ref: str) -> NetworkInfo | None:
         doc = self._get(f"/networks/{quote(ref, safe='')}")

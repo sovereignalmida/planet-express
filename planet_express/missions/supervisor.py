@@ -213,7 +213,7 @@ class SocketProvider:
         raise NotImplementedError
 
     def env(self, cs: ContainedSession) -> dict[str, str]:
-        """Extra environment for the session once its sockets are bound (e.g. `DOCKER_HOST` for its own proxy socket)."""
+        """Extra environment for the session once its sockets are bound (e.g. `PE_DOCKER_SOCKET`, its own proxy socket)."""
         return {}
 
 
