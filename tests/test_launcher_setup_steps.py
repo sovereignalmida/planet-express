@@ -587,3 +587,12 @@ def test_the_boot_script_text_really_runs_and_installs_refuses_a_changed_copy_an
     os.unlink(p.helper_store)
     os.symlink(real, p.helper_store)
     assert run_boot(tmp_path, p).returncode == 1 and not os.path.exists(p.helper)
+
+
+def test_a_step_probe_over_a_chain_the_helper_refuses_names_the_directory_and_the_exact_fix(tmp_path):
+    p = mos_paths(tmp_path)
+    repair_all(launcher_steps(p), MemoryJournal())
+    data = tmp_path / "data" / "pe"
+    os.chmod(data, 0o775)                                    # group-writable: the breach
+    state = by_name(launcher_steps(p))["helper-store"].probe()
+    assert state.blocked and f"chown root:root {data} && chmod 755 {data}" in state.detail
