@@ -59,6 +59,7 @@ class RepairControls:
     backup_status: Callable[[Grant], Mapping[str, Any]]
     validator: Callable[[Grant, VerificationPlan], list[str]]
     inventory: Callable[[], Inventory]
+    host_root_view: Callable[[Grant], list[dict[str, Any]]] | None = None
 
 
 def mission_write_gate(store: Store) -> Callable[[str, str, dict], bool]:
@@ -167,8 +168,10 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         return {"covered": bool(states) and all(x["state"] == "ok" for x in states), "state": worst,
                 "acknowledged_no_backup": grant.backup.acknowledged_no_backup, "paths": states[:16]}
 
-    return RepairControls(checkpoint=checkpoint, tripwire=tripwire, verifier=verifier, repair_gate=gate, protected=protected,
-                          backup_status=backup_status, validator=validator, inventory=inventory)
+    controls = RepairControls(checkpoint=checkpoint, tripwire=tripwire, verifier=verifier, repair_gate=gate, protected=protected,
+                              backup_status=backup_status, validator=validator, inventory=inventory)
+    controls.host_root_view = host_root_view(cfg, controls, stacks_root)
+    return controls
 
 
 def managed_sudoers(cfg: Any, core_user: str) -> dict[str, bytes]:
@@ -190,6 +193,24 @@ def managed_sudoers(cfg: Any, core_user: str) -> dict[str, bytes]:
     return managed
 
 
+def host_root_view(cfg: Any, controls: "RepairControls", stacks_root: str) -> Callable[[Grant], list[dict[str, Any]]]:
+    """For the approval card: the in-scope containers the proxy would refuse to act on, and why."""
+    from .dockerproxy.policy import Policy, Scope, compose_id
+    from .dockerproxy.upstream import DaemonInspector, Upstream
+    inspector = DaemonInspector(Upstream(cfg.docker_socket, timeout=10))
+
+    def view(grant: Grant) -> list[dict[str, Any]]:
+        scope = Scope.from_grant(grant, protected=tuple(controls.protected.resources), stacks_root=stacks_root)
+        policy = Policy(scope, inspector)
+        def in_scope(labels: Mapping[str, str]) -> bool:
+            sid = compose_id("service", labels, scope.host)
+            return sid is not None and scope.classify(sid) == "in_scope"
+        found = inspector.in_scope_containers(in_scope)
+        return [{"container": info.name or info.id[:12], "reasons": reasons}
+                for info in found if (reasons := policy.hazards(info))]
+    return view
+
+
 def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairControls | None, *,
                         runtime: str = "command") -> ApprovalFlow | None:
     """The approval flow over a built runner. None without Repair controls: nothing could validate or run a Repair mission, so
@@ -201,7 +222,8 @@ def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairCon
         protected=lambda: controls.protected,
         budgets=lambda: Budgets(wall_s=min(cfg.budgets.wall_seconds, 86400 * 7), tool_calls=min(cfg.budgets.tool_calls, 100000),
                                 output_bytes=min(cfg.budgets.output_bytes, 2**40), retries=min(cfg.budgets.retries, 100)),
-        named_windows=lambda: dict(cfg.windows), runtime=runtime)
+        named_windows=lambda: dict(cfg.windows), runtime=runtime,
+        host_root_view=getattr(controls, "host_root_view", None))
 
 
 __all__ = ["RepairControls", "RepairWiring", "build_approval_flow", "build_repair_controls", "discover_inventory",

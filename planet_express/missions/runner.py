@@ -263,7 +263,7 @@ def build_mission_runner(
         docker_proxy = DockerProxyService(
             store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
             stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
-            protected_gids=_protected_gids())
+            protected_gids=_protected_gids(), label_allow=cfg.docker_label_allow)
     controls = None
     if repair_wiring is not None and protected is not None:
         # Slice 7a: the checkpoint service, tripwire monitor, verifier and side-door gate, all or none. A failure to build any of

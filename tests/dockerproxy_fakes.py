@@ -48,6 +48,11 @@ class FakeInspector:
     def __init__(self):
         self.calls = []
 
+    def service_labels(self, project, service):
+        self.calls.append(("service_labels", project, service))
+        return [dict(c["labels"]) for c in CONTAINERS.values()
+                if c["labels"].get("com.docker.compose.project") == project and c["labels"].get("com.docker.compose.service") == service]
+
     def container(self, ref):
         self.calls.append(("container", ref))
         for name, item in CONTAINERS.items():

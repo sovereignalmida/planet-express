@@ -8,14 +8,20 @@ import os
 import posixpath
 import re
 import stat
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from planet_express.core.redact import REDACTED
 from planet_express.missions.events import _is_secret_key, redact_value
 from planet_express.missions.models import Grant
-from planet_express.missions.resources import BadResource, canon, classify
+from planet_express.missions.resources import (
+    BadResource,
+    canon,
+    classify,
+    contains,
+    split,
+)
 from planet_express.missions.store import grant_resources
 
 from .httpwire import BadRequest, Head, Refusal, strict_json
@@ -39,6 +45,8 @@ PROJECT_LABEL, SERVICE_LABEL = "com.docker.compose.project", "com.docker.compose
 DANGEROUS_CAPS = frozenset({"ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_RAWIO", "SYS_BOOT", "DAC_READ_SEARCH",
                            "MAC_ADMIN", "BPF", "PERFMON"})
 DOCKER_SOCKET_PATHS = ("/var/run/docker.sock", "/run/docker.sock")
+SYSTEM_DIRS = ("/etc", "/root", "/home", "/var/lib/docker", "/var/lib/containerd", "/proc", "/sys", "/boot", "/dev", "/usr",
+               "/bin", "/sbin", "/lib", "/lib64", "/var/run", "/run", "/var/spool", "/var/lib/dpkg")
 CAP_ALLOW = frozenset({"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "NET_BIND_SERVICE"})
 SECURITY_OPT_ALLOW = frozenset({"no-new-privileges", "no-new-privileges:true"})
 BUILTIN_NETWORKS = frozenset({"bridge", "none", "default"})
@@ -319,12 +327,14 @@ class Policy:
     def __init__(self, scope: Scope | None, inspector: Inspector, *, read_only: bool = False,
                  exec_owner: Callable[[str], str | None] = lambda exec_id: None,
                  json_cap: int = JSON_CAP, archive_cap: int = ARCHIVE_CAP,
-                 versions: frozenset[str] = API_VERSIONS, is_socket: Callable[[str], bool] | None = None):
+                 versions: frozenset[str] = API_VERSIONS, is_socket: Callable[[str], bool] | None = None,
+                 label_allow: Iterable[str] = ()):
         if not read_only and scope is None:
             raise ValueError("a scoped policy needs a scope")
         self.scope, self.inspector, self.read_only = scope, inspector, read_only
         self.exec_owner, self.json_cap, self.archive_cap, self.versions = exec_owner, json_cap, archive_cap, versions
         self._is_socket = is_socket or _is_unix_socket
+        self.label_allow = tuple(label_allow)
 
     # -- matching -------------------------------------------------------------------------------
 
@@ -548,6 +558,14 @@ class Policy:
         stack = compose_id("stack", labels if isinstance(labels, dict) else {}, self.scope.host)
         return stack is not None and self.scope.classify(stack, parent_of_protected=False) == "in_scope"
 
+    def hazards(self, info: ContainerInfo, *, protected_mounts: bool = False) -> list[str]:
+        """Every reason this container may not be acted on through the proxy (empty: it may). The approval card lists these."""
+        try:
+            self._refuse_if_root_equivalent(info, protected_mounts=protected_mounts)
+        except Refusal as refusal:
+            return [refusal.reason]
+        return []
+
     def _refuse_if_root_equivalent(self, info: ContainerInfo, *, protected_mounts: bool = False) -> None:
         """Acting on a container (exec, attach, archive upload, start, restart; or inheriting its volumes) is root on the host
         when the container is privileged, shares the host's pid or user namespace, holds a capability that reaches the kernel,
@@ -563,6 +581,10 @@ class Policy:
         caps = {str(c).upper().removeprefix("CAP_") for c in (host.get("CapAdd") or []) if isinstance(c, str)}
         if caps & DANGEROUS_CAPS:
             raise Refusal("a container holding a capability that reaches the kernel may not be acted on through the proxy")
+        if host.get("Devices"):
+            raise Refusal("a container with host devices may not be acted on through the proxy")
+        if any(isinstance(o, str) and "unconfined" in o.lower() for o in (host.get("SecurityOpt") or [])):
+            raise Refusal("a container with an unconfined seccomp or apparmor profile may not be acted on through the proxy")
         sources = [m.get("Source") for m in info.mounts if isinstance(m, dict) and m.get("Type") in (None, "bind")]
         sources += [str(entry).split(":", 1)[0] for entry in (host.get("Binds") or []) if isinstance(entry, str)]
         for mount in info.mounts:
@@ -578,6 +600,37 @@ class Policy:
                 rid = _try_canon(f"path:{posixpath.normpath(source)}", self.scope.host)
                 if rid is not None and self.scope.classify(rid) == "protected":
                     raise Refusal("the container mounts a protected path, so its volumes may not be inherited")
+        self._refuse_writable_system_mounts(info, host)
+
+    def _writable_binds(self, info: ContainerInfo, host: Mapping) -> list[str]:
+        """Host paths this container has bound read-write (inspect's Mounts, and HostConfig.Binds when Mounts is silent)."""
+        out = [m.get("Source") for m in info.mounts
+               if isinstance(m, dict) and m.get("Type") in (None, "bind") and m.get("RW", True) is not False]
+        for entry in host.get("Binds") or []:
+            parts = str(entry).split(":")
+            if len(parts) < 3 or "ro" not in parts[2].split(","):
+                out.append(parts[0])
+        return [s for s in out if isinstance(s, str) and s.startswith("/")]
+
+    def _refuse_writable_system_mounts(self, info: ContainerInfo, host: Mapping) -> None:
+        """A read-write bind of a host path outside the grant is host write access once someone can run code in the container.
+        Data volumes outside the grant stay allowed (the accepted residual, watched by tripwires), but not the system's own
+        places (/etc, /root, home directories, /var/lib/docker, /proc, /sys, ...), nor any protected non-data path."""
+        scope = self.scope
+        if scope is None:
+            return
+        for source in self._writable_binds(info, host):
+            norm = posixpath.normpath(source)
+            rid = _try_canon(f"path:{norm}", scope.host)
+            if rid is not None and scope.classify_path(rid) == "in_scope":
+                continue                                        # inside the grant's own paths and mounts
+            system = any(norm == d or norm.startswith(d.rstrip("/") + "/") or d.startswith(norm.rstrip("/") + "/")
+                         for d in SYSTEM_DIRS)
+            protected_path = rid is not None and any(
+                split(p)[1] == "path" and contains(p, rid) or split(p)[1] == "path" and contains(rid, p) for p in scope.protected)
+            if norm == "/" or system or protected_path:
+                raise Refusal(f"a container with {norm[:80]} mounted read-write may not be acted on through the proxy: "
+                              "that is host write access outside the grant")
 
     def _volume_devices(self, name) -> list[str]:
         if not isinstance(name, str) or not _NAME.match(name):
@@ -703,6 +756,7 @@ class Policy:
         if verdict != "in_scope":
             raise Refusal("the new container's service is protected" if verdict == "protected"
                           else "the new container's service is outside this mission's scope")
+        self._check_labels(labels, service)
         out["Labels"] = {**labels, CREATED_LABEL: "1"}          # ours, not the worker's: set (or overwritten) here
         plan.targets = [service]
         if body.get("ExposedPorts") is not None:
@@ -721,6 +775,25 @@ class Policy:
                         "mounts": mount_summary, "cap_add": host.get("CapAdd", []),
                         "cmd_argc": len(out.get("Cmd", [])), "env_names": sorted(e.split("=", 1)[0] for e in out.get("Env", []))[:64]}
         return json.dumps(out, separators=(",", ":"), sort_keys=True).encode()
+
+    def _check_labels(self, labels: Mapping[str, str], service: str) -> None:
+        """Labels drive other components (a reverse proxy routes by `traefik.*`, an updater acts on `com.centurylinklabs.*`, a
+        healer on `autoheal*`, a dashboard on `homepage.*`), so a worker may not invent them. Allowed: the compose labels, the
+        proxy's own, a label the in-scope service ALREADY carries with the same value (a recreate keeps what it had), and
+        whatever the operator listed in `missions.docker_label_allow`."""
+        project, svc = service.rsplit(":", 1)[1].split("/", 1)
+        try:
+            existing = list(getattr(self.inspector, "service_labels", lambda p, s: [])(project, svc))
+        except Exception:                                    # noqa: BLE001 - cannot tell what it had: nothing is carried over
+            existing = []
+        for key, value in labels.items():
+            if key.startswith("com.docker.compose.") or key == CREATED_LABEL:
+                continue
+            if any(key == a or (a.endswith(".") and key.startswith(a)) for a in self.label_allow):
+                continue
+            if any(old.get(key) == value for old in existing):
+                continue
+            raise Refusal(f"label {key[:60]!r} is not allowed: it is not carried over from the service and not in docker_label_allow")
 
     def _healthcheck(self, value) -> dict:
         if not isinstance(value, dict) or set(value) - {"Test", "Interval", "Timeout", "Retries", "StartPeriod", "StartInterval"}:

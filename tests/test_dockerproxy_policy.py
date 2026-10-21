@@ -486,7 +486,7 @@ def test_volumes_from_a_container_with_the_docker_socket_or_that_is_root_equival
 
 
 def test_volumes_from_a_container_that_mounts_a_protected_path_is_refused_but_exec_on_it_is_not(root):
-    protected = (f"host:local/path:{root}/data",)
+    protected = (f"host:local/mount:{root}/data",)
     mounts = ({"Type": "bind", "Source": str(root / "data"), "Destination": "/data"},)
     p = Policy(make_scope(str(root), protected=protected), Hazard({}, mounts))
     with pytest.raises(Refusal, match="protected path"):
@@ -519,3 +519,123 @@ def test_the_served_versions_are_the_floor_up_to_the_lower_of_the_daemon_and_the
     assert max(served_versions(45)) == "v1.45" and "v1.46" not in served_versions(45) and "v1.41" in served_versions(45)
     assert served_versions(30) == frozenset()                                    # an ancient daemon: nothing is served
     assert Policy(make_scope("/x"), FakeInspector(), versions=served_versions(45)).max_minor == 45
+
+
+# ── labels drive other components: a worker may not invent them (audit M1) ───────────────────────────────────
+
+class WithLabels(FakeInspector):
+    """An inspector whose `qbittorrent` service already carries extra labels (as a compose service with traefik labels does)."""
+
+    def __init__(self, existing):
+        super().__init__()
+        self.existing = existing
+
+    def service_labels(self, project, service):
+        return [{**labels(project, service), **self.existing}] if (project, service) == ("media", "qbittorrent") else []
+
+
+def with_labels(extra, **kw):
+    return create_body(Labels={**labels("media", "qbittorrent"), **extra}), kw
+
+
+@pytest.mark.parametrize("key", ["traefik.enable", "traefik.http.routers.x.rule", "traefik.http.routers.x.priority",
+                                 "com.centurylinklabs.watchtower.enable", "com.centurylinklabs.watchtower.monitor-only",
+                                 "autoheal", "autoheal.stop.timeout", "homepage.name", "homepage.href", "dockflow.deploy",
+                                 "caddy", "caddy.reverse_proxy", "io.portainer.accesscontrol.users", "random.thing", "x"])
+def test_a_label_that_is_not_compose_carried_over_or_allowlisted_is_refused(policy, key):
+    body, _ = with_labels({key: "true"})
+    with pytest.raises(Refusal, match="not allowed"):
+        create(policy, body)
+
+
+def test_the_compose_labels_and_the_proxys_own_are_always_fine(policy):
+    body, _ = with_labels({"com.docker.compose.config-hash": "abc", "com.docker.compose.container-number": "1",
+                           "com.docker.compose.project.working_dir": "/x"})
+    assert create(policy, body)
+
+
+def test_a_recreate_keeps_the_labels_the_service_already_has_with_the_same_values(root):
+    existing = {"traefik.enable": "true", "traefik.http.routers.q.rule": "Host(`q.example`)", "homepage.name": "qBit"}
+    p = Policy(make_scope(str(root)), WithLabels(existing))
+    body, _ = with_labels(existing)
+    sent = json.loads(create(p, body).body)["Labels"]
+    assert sent["traefik.enable"] == "true" and sent["homepage.name"] == "qBit"
+    for changed in ({"traefik.http.routers.q.rule": "Host(`evil.example`)"}, {"traefik.http.routers.q.priority": "9999"},
+                    {"traefik.enable": "false"}):
+        bad, _ = with_labels({**existing, **changed})
+        with pytest.raises(Refusal, match="not allowed"):
+            create(p, bad)
+    other = create_body(Labels={**labels("media", "plex"), "traefik.enable": "true"})      # plex has no such labels: not carried over
+    with pytest.raises(Refusal, match="not allowed"):
+        create(Policy(make_scope(str(root)), WithLabels(existing)), other)
+
+
+def test_the_operators_allowlist_admits_exact_keys_and_dotted_prefixes_only(root):
+    p = Policy(make_scope(str(root)), FakeInspector(), label_allow=("org.example.owner", "app.meta."))
+    body, _ = with_labels({"org.example.owner": "me", "app.meta.team": "ops", "app.meta.x.y": "1"})
+    assert create(p, body)
+    for key in ("org.example.owner2", "app.metadata", "org.example", "traefik.enable"):
+        bad, _ = with_labels({key: "1"})
+        with pytest.raises(Refusal, match="not allowed"):
+            create(p, bad)
+
+
+def test_an_inspector_that_cannot_say_what_the_service_had_carries_nothing_over(root):
+    class Broken(FakeInspector):
+        def service_labels(self, project, service):
+            raise OSError("daemon down")
+    bad, _ = with_labels({"traefik.enable": "true"})
+    with pytest.raises(Refusal, match="not allowed"):
+        create(Policy(make_scope(str(root)), Broken()), bad)
+
+
+# ── more root-equivalent containers (audit M2) ─────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("source", ["/etc", "/etc/traefik", "/root", "/root/.ssh", "/home/chris", "/var/lib/docker", "/var/lib/docker/volumes",
+                                    "/proc", "/sys", "/boot", "/", "/var", "/usr/local", "/dev"])
+def test_exec_restart_and_archive_put_are_refused_on_a_container_with_a_system_path_mounted_read_write(root, source):
+    mounts = ({"Type": "bind", "Source": source, "Destination": "/h", "RW": True},)
+    p = Policy(make_scope(str(root)), Hazard({}, mounts))
+    for name, body, query in (("exec.create", {"Cmd": ["id"]}, {}), ("container.attach", None, {}), ("container.restart", None, {}),
+                              ("container.start", None, {}), ("container.archive.put", None, {"path": "/x"})):
+        with pytest.raises(Refusal, match="host write access|Docker socket"):          # "/" and "/var" hold the socket too
+            plan_for(p, name, "plex", body=body, query=query, raw_length=3 if "archive" in name else 0)
+
+
+def test_a_read_only_system_mount_and_a_mount_inside_the_grant_are_fine(root):
+    ro = ({"Type": "bind", "Source": "/etc", "Destination": "/h", "RW": False},)
+    assert plan_for(Policy(make_scope(str(root)), Hazard({}, ro)), "exec.create", "plex", body={"Cmd": ["id"]})
+    assert plan_for(Policy(make_scope(str(root)), Hazard({"Binds": ["/etc/hostname:/h:ro"]}, ())), "exec.create", "plex",
+                    body={"Cmd": ["id"]})
+    inside = ({"Type": "bind", "Source": str(root / "stacks" / "media" / "config"), "Destination": "/c", "RW": True},
+              {"Type": "bind", "Source": str(root / "data"), "Destination": "/d", "RW": True})
+    assert plan_for(Policy(make_scope(str(root)), Hazard({}, inside)), "exec.create", "plex", body={"Cmd": ["id"]})
+    rw_etc = Hazard({"Binds": ["/etc/hostname:/h"]}, ())
+    with pytest.raises(Refusal, match="host write access"):
+        plan_for(Policy(make_scope(str(root)), rw_etc), "exec.create", "plex", body={"Cmd": ["id"]})
+
+
+def test_a_protected_path_mounted_read_write_outside_the_grant_is_refused_but_a_data_mount_is_not(root):
+    protected = (f"host:local/path:{root}/elsewhere/secrets",)
+    scope = make_scope(str(root), protected=protected)
+    bad = ({"Type": "bind", "Source": f"{root}/elsewhere/secrets", "Destination": "/s", "RW": True},)
+    with pytest.raises(Refusal, match="host write access"):
+        plan_for(Policy(scope, Hazard({}, bad)), "exec.create", "plex", body={"Cmd": ["id"]})
+    data = ({"Type": "bind", "Source": f"{root}/elsewhere/media-data", "Destination": "/m", "RW": True},)
+    assert plan_for(Policy(scope, Hazard({}, data)), "exec.create", "plex", body={"Cmd": ["id"]})
+
+
+@pytest.mark.parametrize("host_config, why", [
+    ({"Devices": [{"PathOnHost": "/dev/sda", "PathInContainer": "/dev/sda", "CgroupPermissions": "rwm"}]}, "host devices"),
+    ({"Devices": [{"PathOnHost": "/dev/dri"}]}, "host devices"),
+    ({"SecurityOpt": ["seccomp=unconfined"]}, "unconfined"),
+    ({"SecurityOpt": ["apparmor=unconfined"]}, "unconfined"),
+    ({"SecurityOpt": ["no-new-privileges", "label=type:unconfined_t"]}, "unconfined"),
+    ({"SecurityOpt": ["seccomp:unconfined"]}, "unconfined"),
+])
+def test_devices_and_unconfined_profiles_make_a_container_unactionable(root, host_config, why):
+    p = Policy(make_scope(str(root)), Hazard(host_config, ()))
+    with pytest.raises(Refusal, match=why):
+        plan_for(p, "exec.create", "plex", body={"Cmd": ["id"]})
+    assert Policy(make_scope(str(root)), Hazard(host_config, ())).hazards(Hazard(host_config, ()).container("plex"))
+    assert Policy(make_scope(str(root)), FakeInspector()).hazards(FakeInspector().container("plex")) == []

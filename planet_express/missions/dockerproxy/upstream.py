@@ -179,6 +179,40 @@ class DaemonInspector:
     def volume(self, name: str) -> dict | None:
         return self._get(f"/volumes/{quote(name, safe='')}")
 
+    def service_labels(self, project: str, service: str) -> list[dict[str, str]]:
+        """The labels of every existing container of this compose service (running or not). Matched here, not trusted to the
+        daemon's filter."""
+        status, _, data = self.up.call("GET", "/containers/json?all=1")
+        if status != 200:
+            raise UpstreamError(f"list status {status}")
+        try:
+            items = json.loads(data.decode("utf-8"))
+        except ValueError:
+            raise UpstreamError("list returned malformed JSON") from None
+        out = []
+        for item in items if isinstance(items, list) else []:
+            labels = self._labels(item.get("Labels")) if isinstance(item, dict) else {}
+            if labels.get("com.docker.compose.project") == project and labels.get("com.docker.compose.service") == service:
+                out.append(labels)
+        return out
+
+    def in_scope_containers(self, keep) -> list[ContainerInfo]:
+        """Every container for which `keep(labels)` holds, inspected (bounded): what an approval card is shown."""
+        status, _, data = self.up.call("GET", "/containers/json?all=1")
+        if status != 200:
+            raise UpstreamError(f"list status {status}")
+        try:
+            items = json.loads(data.decode("utf-8"))
+        except ValueError:
+            raise UpstreamError("list returned malformed JSON") from None
+        out = []
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and keep(self._labels(item.get("Labels"))) and isinstance(item.get("Id"), str) and len(out) < 64:
+                info = self.container(item["Id"])
+                if info is not None:
+                    out.append(info)
+        return out
+
     def image_exists(self, ref: str) -> bool:
         return self._get(f"/images/{quote(ref, safe='/:@')}/json") is not None
 

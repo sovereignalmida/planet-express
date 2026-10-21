@@ -496,6 +496,10 @@ class MissionsConfig(BaseModel):
     docker_proxy_ports: list[int] = []    # ports of an allowlisting Docker socket proxy the operator vouches for
     # The real Docker daemon's socket, which Core's per-session proxy forwards to (a Repair worker never sees it).
     docker_socket: str = "/var/run/docker.sock"
+    # Labels a worker may put on a container it creates, besides the compose labels, the proxy's own and those the in-scope
+    # service already carries (carried over unchanged). An entry is an exact key, or a prefix when it ends in `.`. Empty by
+    # default: labels such as `traefik.*`, `com.centurylinklabs.*`, `autoheal*` or `homepage.*` drive other, protected components.
+    docker_label_allow: list[str] = []
     # The host-wide ceiling of the generated worker sudoers file (contract 15): units and actions, exact argv, never a
     # wildcard. A grant's own `sudo.rules` must sit inside it. Empty: no worker sudoers file exists.
     worker_sudo_rules: list[WorkerSudoRuleConfig] = []
