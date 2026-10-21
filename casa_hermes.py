@@ -56,6 +56,10 @@ SEVERITY RULES (apply all that match):
 - Disk used_pct >= 90: CRITICAL
 - Disk used_pct 80-89: HIGH
 - Missing SMB mount (missing list non-empty): HIGH — media services will be broken
+- mounts.unarmed_automounts non-empty: MEDIUM, category "mount". The path still works, but
+  its automount is not armed, so a stale handle will not heal itself. The fix needs a human:
+  `sudo systemctl stop <name>.mount` then `sudo systemctl start <name>.automount`. Check
+  first that no container bind-mounts the path, since stopping the mount would break it.
 - Backup job result != "success" or last_run is empty/n/a: HIGH. IMPORTANT: backup jobs run as
   systemd oneshot units triggered by a timer — "state": "inactive" is their NORMAL resting state
   between scheduled runs, not a failure signal. A failed run shows up as "state": "failed" or

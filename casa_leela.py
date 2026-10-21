@@ -480,6 +480,7 @@ def check_mounts() -> dict:
     return {
         "active_count": len(results) - len(missing),
         "missing": missing,
+        "unarmed_automounts": stackctl.unarmed_automounts(),
     }
 
 

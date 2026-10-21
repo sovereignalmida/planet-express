@@ -59,3 +59,41 @@ def test_backup_reports_only_enabled_jobs(monkeypatch, capsys):
     assert {call.args[0] for call in show.call_args_list} == {
         'weekly-borg-backup.service', 'weekly-borg-backup.timer',
     }
+
+
+def _systemd(monkeypatch):
+    provider = Mock()
+    provider.__class__.__name__ = "SystemdHostControlProvider"
+    monkeypatch.setattr(config, 'get_host_control', lambda: provider)
+
+
+def test_unarmed_automounts_lists_only_inactive_automount_units(monkeypatch):
+    _systemd(monkeypatch)
+    monkeypatch.setattr(config, 'MOUNT_UNITS', {
+        'scratch.mount': '/scratch', 'casabu.automount': '/mnt/casabu', 'nfs.automount': '/nfs',
+    })
+    states = {'casabu.automount': 'inactive', 'nfs.automount': 'active'}
+    queried = []
+
+    def show(unit, *props):
+        queried.append(unit)
+        return {'ActiveState': states[unit]}
+
+    monkeypatch.setattr(casa_stackctl, '_systemctl_show', show)
+    assert casa_stackctl.unarmed_automounts() == ['casabu.automount']
+    assert 'scratch.mount' not in queried
+
+
+def test_unarmed_automounts_counts_an_unreadable_state_as_unarmed(monkeypatch):
+    _systemd(monkeypatch)
+    monkeypatch.setattr(config, 'MOUNT_UNITS', {'casabu.automount': '/mnt/casabu'})
+    monkeypatch.setattr(casa_stackctl, '_systemctl_show', lambda unit, *props: {})
+    assert casa_stackctl.unarmed_automounts() == ['casabu.automount']
+
+
+def test_unarmed_automounts_is_empty_off_systemd(monkeypatch):
+    provider = Mock()
+    provider.__class__.__name__ = "MosHostControlProvider"
+    monkeypatch.setattr(config, 'get_host_control', lambda: provider)
+    monkeypatch.setattr(config, 'MOUNT_UNITS', {'casabu.automount': '/mnt/casabu'})
+    assert casa_stackctl.unarmed_automounts() == []
