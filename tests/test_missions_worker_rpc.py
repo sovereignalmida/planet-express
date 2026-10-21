@@ -291,3 +291,15 @@ def test_handlers_without_authenticator_keep_the_one_argument_shape():
 def test_rpcerror_is_still_the_transport_error():
     with pytest.raises(RpcError):
         call("/nonexistent/sock", "x")
+
+
+def test_deeply_nested_params_are_a_bad_request_not_an_internal_error():
+    from planet_express.integrations.rpc import RpcError
+    from planet_express.missions.worker_rpc import _Empty, _parse, _PostEvent
+    nested = "x"
+    for _ in range(100000):
+        nested = [nested]
+    for model, params in ((_PostEvent, {"kind": "note", "data": {"a": nested}}), (_Empty, nested)):
+        with pytest.raises(RpcError) as caught:
+            _parse(model, params)
+        assert caught.value.code == "bad_params"

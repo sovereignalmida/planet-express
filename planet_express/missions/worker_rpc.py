@@ -193,7 +193,7 @@ class _Tool(BaseModel):
 def _parse(model, params):
     try:
         return model.model_validate(params)
-    except (ValidationError, ValueError, TypeError):
+    except (ValidationError, ValueError, TypeError, RecursionError):       # deeply nested input is a bad request, not a crash
         raise RpcError("Invalid params", "bad_params") from None
 
 

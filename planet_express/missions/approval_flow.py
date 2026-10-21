@@ -23,7 +23,14 @@ from .approvals import ApprovalConflict, phase_demands_elevation, record_approva
 from .canonical import CanonicalError, loads_strict
 from .events import insert_event
 from .grants import with_site_protected
-from .models import Budgets, Grant, GrantScope, Mission, StandingCeilings, VerificationPlan
+from .models import (
+    Budgets,
+    Grant,
+    GrantScope,
+    Mission,
+    StandingCeilings,
+    VerificationPlan,
+)
 from .state import IllegalTransition, MissionNotFound, transition, transition_in_txn
 from .store import MissionStore, StandingGrantInactive
 from .verify.plan import PlanInvalid, validate_plan
@@ -138,7 +145,8 @@ class ApprovalFlow:
     def __init__(self, store: Store, *, supervisor: Any = None, validator: GrantValidator | None = None,
                  backup_status: Callable[[Grant], Mapping[str, Any]] | None = None,
                  protected: Callable[[], Any] | None = None, budgets: Callable[[], Budgets] | None = None,
-                 named_windows: Callable[[], Mapping[str, Any]] | None = None, runtime: str = "command"):
+                 named_windows: Callable[[], Mapping[str, Any]] | None = None, runtime: str = "command",
+                 host_root_view: Callable[[Grant], list[dict[str, Any]]] | None = None):
         self.store = store
         self.ms = MissionStore(store)
         self.supervisor = supervisor
@@ -148,6 +156,7 @@ class ApprovalFlow:
         self.budgets = budgets
         self.named_windows = named_windows or dict
         self.runtime = runtime
+        self.host_root_view = host_root_view        # Grant -> in-scope containers that are host-root-equivalent, with why
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _mission(self, mission_id: str) -> Mission:
@@ -176,12 +185,29 @@ class ApprovalFlow:
         if mission.tier in ("observe", "propose"):
             raise FlowError("only a mission that can execute has an approval card", "conflict")
         out = build_card(self.store, mission, backup=self._backup_view(mission.grant()))
+        out["warnings"] = self._host_root_warnings(mission.grant()) + out["warnings"]       # the first thing an operator reads
         try:
             from .tripwire.monitor import pause_card
             out["tripwire"] = pause_card(self.ms, mission_id) if mission.status == "paused_tripwire" else None
         except Exception:                           # noqa: BLE001
             out["tripwire"] = None
         return out
+
+    def _host_root_warnings(self, grant: Grant) -> list[dict[str, str]]:
+        """A Repair worker with Docker access can run code in an in-scope container; if that container is itself host-root
+        (privileged, the Docker socket, a read-write system mount, devices, ...) the grant is host root in practice. The proxy
+        refuses to act on such containers, and the card says which they are so the operator knows what the grant cannot do (or
+        should not scope). A view that cannot be built is itself shown: silence must not read as 'none'."""
+        if self.host_root_view is None or grant.docker != "proxy":
+            return []
+        try:
+            found = self.host_root_view(grant)
+        except Exception as exc:                        # noqa: BLE001
+            return [{"kind": "host_root_unchecked", "text": f"HOST-ROOT CHECK FAILED ({type(exc).__name__}): in-scope containers "
+                                                           "could not be inspected; do not assume there are none."}]
+        return [{"kind": "host_root_equivalent",
+                 "text": _clip(f"HOST-ROOT-EQUIVALENT in-scope container {item['container']}: " + "; ".join(item["reasons"]), 400)}
+                for item in found[:16]]
 
     # ── proposing ───────────────────────────────────────────────────────────
     def propose_repair(self, actor: str, *, title: str, goal: str, scope: dict, checks: list[dict],

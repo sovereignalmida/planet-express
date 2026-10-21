@@ -480,3 +480,49 @@ def test_stopping_the_runner_shuts_the_proxy_service_down(tmp_path):
     runner = MissionRunner(SimpleNamespace(docker_proxy=proxy, shutdown=lambda: calls.append("supervisor")))
     runner.stop()
     assert calls == ["supervisor", "shutdown"]
+
+
+# ── the approval card names host-root-equivalent in-scope containers first (audit M2) ──────────────────────────
+
+def test_the_card_leads_with_a_warning_for_every_host_root_equivalent_in_scope_container(stack):
+    st = stack()
+    st.flow.host_root_view = lambda grant: [{"container": "portainer", "reasons": ["the Docker socket is mounted"]},
+                                            {"container": "agent", "reasons": ["/etc mounted read-write"]}]
+    mid = st.propose()["mission_id"]
+    card = st.flow.card(mid)
+    lead = card["warnings"][:2]
+    assert [w["kind"] for w in lead] == ["host_root_equivalent"] * 2
+    assert "portainer" in lead[0]["text"] and "Docker socket" in lead[0]["text"] and "/etc mounted read-write" in lead[1]["text"]
+
+
+def test_a_card_whose_container_check_failed_says_so_instead_of_staying_silent(stack):
+    st = stack()
+
+    def boom(grant):
+        raise OSError("daemon down")
+    st.flow.host_root_view = boom
+    card = st.flow.card(st.propose()["mission_id"])
+    assert card["warnings"][0]["kind"] == "host_root_unchecked" and "OSError" in card["warnings"][0]["text"]
+
+
+def test_the_assembled_view_inspects_the_daemon_and_reports_what_the_proxy_would_refuse(tmp_path, monkeypatch):
+    from dockerproxy_fakes import CONTAINERS
+    from planet_express.missions.assembly import host_root_view
+    from planet_express.missions.protected import ProtectedSet
+    from types import SimpleNamespace
+    d = tempfile.mkdtemp(prefix="dpv")
+    daemon = FakeDaemon(os.path.join(d, "d.sock"))
+    try:
+        monkeypatch.setitem(CONTAINERS["plex"], "host_config", {"Privileged": True})
+        monkeypatch.setitem(CONTAINERS["qbittorrent"], "mounts", [{"Type": "bind", "Source": "/etc", "Destination": "/e", "RW": True}])
+        cfg = SimpleNamespace(docker_socket=daemon.path)
+        view = host_root_view(cfg, SimpleNamespace(protected=SimpleNamespace(resources=[])), str(tmp_path))
+        from planet_express.missions.models import Grant
+        grant = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]}})
+        found = {item["container"]: item["reasons"] for item in view(grant)}
+        assert set(found) == {"plex", "qbittorrent"}
+        assert "privileged" in found["plex"][0] and "host write access" in found["qbittorrent"][0]
+        assert "traefik" not in found and "stray" not in found                   # out of scope: not this grant's business
+    finally:
+        daemon.close()
+        shutil.rmtree(d, ignore_errors=True)

@@ -93,11 +93,12 @@ class StoreGate:
 class DockerProxyService:
     def __init__(self, store, *, authenticator, docker_socket: str = DEFAULT_DOCKER_SOCKET, sock_root: str,
                  stacks_root: str | None = None, protected: Callable[[], Iterable[str]] = lambda: (),
-                 protected_gids: Iterable[int] = (), limits: Limits = DEFAULT_LIMITS, upstream: Upstream | None = None):
+                 protected_gids: Iterable[int] = (), limits: Limits = DEFAULT_LIMITS, upstream: Upstream | None = None,
+                 label_allow: Iterable[str] = ()):
         self.store, self.ms = store, MissionStore(store)
         self.authenticator, self.sock_root = authenticator, sock_root
         self.docker_socket, self.stacks_root, self.protected = docker_socket, stacks_root, protected
-        self.protected_gids, self.limits = tuple(protected_gids), limits
+        self.protected_gids, self.limits, self.label_allow = tuple(protected_gids), limits, tuple(label_allow)
         self.upstream = upstream or Upstream(docker_socket)
         self._paused: dict[str, float] = {}         # mission id -> when it was paused (monotonic)
         self._servers: dict[str, tuple[str, ProxyServer]] = {}
@@ -150,7 +151,7 @@ class DockerProxyService:
                                  protected_gids=self.protected_gids)
         execs = ExecTable(self.limits.execs)
         policy = Policy(scope, DaemonInspector(self.upstream), exec_owner=execs.owner,
-                        versions=served_versions(self.upstream.api_version()))
+                        versions=served_versions(self.upstream.api_version()), label_allow=self.label_allow)
         gate: Gate = StoreGate(self, cs.session_id, mission.id, mission.grant_hash, self.authenticator)
         server = ProxyServer(self.path(cs.session_id), policy=policy, upstream=self.upstream, gate=gate, execs=execs,
                              limits=self.limits, name=f"dockerproxy-{cs.session_id[:8]}")
