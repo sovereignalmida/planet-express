@@ -121,12 +121,12 @@ def test_the_server_sees_the_real_peer_credentials_and_cgroup(host):
     assert cgroup is None or cgroup.startswith("/")                                    # readable where the host exposes cgroup v2
 
 
-def test_a_connection_without_the_session_token_is_refused_whoever_connects(host):
+def test_a_connection_the_gate_does_not_recognise_is_refused_whoever_connects(host):
     from dockerproxy_fakes import request
     base, session, server, gate = host
     path = os.path.join(session, "proxy.sock")
     hand_over(session, SESSION_UID)
-    assert request(path, "GET", "/containers/json", token=None)[0] == 401
+    assert request(path, "GET", "/containers/json", token="not-the-token")[0] == 401
     assert gate.seen and gate.seen[-1][0].uid == 0
 
 
@@ -157,4 +157,50 @@ def test_the_read_only_proxy_in_front_of_a_real_daemon_lists_and_refuses_writes(
         finally:
             ro.stop()
     finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def local_image():
+    try:
+        status, _, body = Upstream(DOCKER_SOCKET, timeout=5).call("GET", "/images/json")
+        tags = [t for img in json.loads(body) for t in (img.get("RepoTags") or []) if not t.startswith("<")]
+        return tags[0] if status == 200 and tags else None
+    except Exception:                                                                   # noqa: BLE001
+        return None
+
+
+@pytest.mark.skipif(not real_daemon_up() or local_image() is None, reason="no Docker daemon with a local image here")
+def test_a_real_create_start_stop_and_remove_through_the_proxy_and_the_refusals_in_front_of_a_real_daemon():
+    from dockerproxy_fakes import FakeGate, request
+    base = tempfile.mkdtemp(prefix="dpc")
+    os.chmod(base, 0o755)
+    up = Upstream(DOCKER_SOCKET, timeout=30)
+    gate = FakeGate()
+    path = os.path.join(base, "p.sock")
+    scope = make_scope(base, resources=("host:local/stack:pe7btest",), paths=(), protected=(), protected_gids=frozenset({0}))
+    server = ProxyServer(path, policy=Policy(scope, DaemonInspector(up)), upstream=up, gate=gate, limits=Limits(head_s=5, body_s=30))
+    server.start()
+    made = None
+    labels = {"com.docker.compose.project": "pe7btest", "com.docker.compose.service": "probe"}
+    try:
+        image = local_image()
+        body = {"Image": image, "Cmd": ["sleep", "30"], "Labels": labels, "HostConfig": {"RestartPolicy": {"Name": "no"}}}
+        status, _, answer = request(path, "POST", "/containers/create?name=pe7b-probe", body=body)
+        assert status == 201, answer
+        made = json.loads(answer)["Id"]
+        assert request(path, "POST", f"/containers/{made}/start")[0] == 204
+        status, _, text = request(path, "GET", f"/containers/{made}/json")
+        assert status == 200 and json.loads(text)["State"]["Running"] is True
+        assert request(path, "POST", f"/containers/{made}/exec", body={"Cmd": ["id"]})[0] == 201          # an ordinary one is fine
+        assert request(path, "POST", f"/containers/{made}/stop?t=1")[0] == 204
+        bad = {**body, "HostConfig": {"Privileged": True}}
+        assert request(path, "POST", "/containers/create?name=pe7b-priv", body=bad)[0] == 403
+        assert request(path, "DELETE", f"/containers/{made}?force=1")[0] == 204
+        made = None
+        events = [e for e in gate.events if e.get("event") == "docker.write"]
+        assert [e["route"] for e in events][:3] == ["container.create", "container.start", "container.stop"]
+    finally:
+        if made:
+            up.call("DELETE", f"/containers/{made}?force=1")
+        server.stop()
         shutil.rmtree(base, ignore_errors=True)

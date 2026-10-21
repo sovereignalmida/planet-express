@@ -801,6 +801,9 @@ class Supervisor:
             if revoke is not None:
                 revoke(mission_id)
         with contextlib.suppress(Exception):
+            if self.docker_proxy is not None:
+                self.docker_proxy.pause(mission_id)
+        with contextlib.suppress(Exception):
             if run.cs is not None:
                 self.containment.freeze(run.cs)
         try:
@@ -1462,6 +1465,8 @@ class Supervisor:
         revoke = getattr(self.tool_broker, "revoke", None)
         if revoke is not None:
             revoke(session.mission_id)
+        if self.docker_proxy is not None:
+            self.docker_proxy.pause(session.mission_id)
 
     @_per_session
     def tool_invoke(self, session: SessionRow, name: str, params: dict) -> dict:

@@ -7,6 +7,7 @@ revoked or paused. Any parse doubt, any daemon surprise, any exception: the clie
 import json
 import logging
 import os
+import re
 import select
 import socket
 import struct
@@ -19,24 +20,27 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from planet_express.integrations.rpc import PeerCred
+from planet_express.missions.events import _is_secret_key, redact_value
 
 from .httpwire import (
     BadRequest,
     Head,
     Refusal,
     content_length,
+    iter_chunked,
     read_exact_body,
     read_head,
     refuse,
     respond,
     strict_json,
 )
-from .policy import Plan, Policy, Route, redact_inspect
+from .policy import ContainerInfo, Plan, Policy, Route, redact_inspect
 from .upstream import Upstream, UpstreamError, request_target, status_of
 
 log = logging.getLogger(__name__)
 PASS_HEADERS = ("api-version", "docker-experimental", "ostype", "builder-version", "x-docker-container-path-stat")
 SESSION_HEADER = "x-pe-session"
+_SAFE_VALUE = re.compile(r"^[A-Za-z0-9+/=_.:, -]{0,4096}$")
 
 
 @dataclass(frozen=True)
@@ -216,6 +220,9 @@ class ProxyServer:
             refuse(conn, 502, "the Docker daemon could not be asked")
 
     def _read_body(self, conn: socket.socket, head: Head, route: Route) -> tuple[dict | None, int]:
+        """(parsed JSON or None, length of a raw body; -1 means a chunked raw body, decoded while forwarding)."""
+        if head.chunked and route.body != "raw":
+            raise BadRequest("a chunked body is not accepted on this endpoint")
         if route.body == "json":
             length = content_length(head, cap=self.policy.json_cap, allowed=True)
             ctype = head.headers.get("content-type", "application/json").split(";")[0].strip().lower()
@@ -223,6 +230,8 @@ class ProxyServer:
                 raise BadRequest("the body must be application/json")
             return strict_json(read_exact_body(conn, head, length, timeout=self.limits.body_s), cap=self.policy.json_cap), length
         if route.body == "raw":
+            if head.chunked:
+                return None, -1
             length = content_length(head, cap=self.policy.archive_cap, allowed=True)
             if len(head.leftover) > length:
                 raise BadRequest("bytes after the request body")
@@ -268,7 +277,12 @@ class ProxyServer:
         body: Any = plan.body
         length = None
         ctype = "application/json" if plan.body is not None else None
-        if route.body == "raw":
+        if route.body == "raw" and plan.raw_length < 0:
+            # Decoded and validated IN FULL (bounded by the archive cap) before anything reaches the daemon: a malformed
+            # terminal chunk must not leave a half-applied upload behind.
+            body = b"".join(iter_chunked(conn, head.leftover, cap=self.policy.archive_cap, timeout=self.limits.body_s))
+            length, ctype = len(body), "application/x-tar"
+        elif route.body == "raw":
             body, length, ctype = self._client_body(conn, head, plan.raw_length), plan.raw_length, "application/x-tar"
         cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype)
         try:
@@ -278,6 +292,8 @@ class ProxyServer:
             status = resp.status
             ctype_up = resp.getheader("Content-Type") or "application/json"
             passed = {k.title(): resp.getheader(k) for k in PASS_HEADERS if resp.getheader(k)}
+            if route.name == "ping":
+                passed["Api-Version"] = self._clamped_api(passed.get("Api-Version"))
             length_up = resp.getheader("Content-Length")
         except Refusal:
             raise
@@ -297,6 +313,12 @@ class ProxyServer:
                 self.gate.record(session, {"event": "docker.result", "route": route.name, "status": status})
             except Exception:                                    # noqa: BLE001
                 log.warning("docker proxy: result event not recorded")
+
+    def _clamped_api(self, daemon_says: str | None) -> str:
+        """Clients negotiate down to what /_ping says: never advertise a version newer than the proxy serves."""
+        top = self.policy.max_minor
+        found = re.fullmatch(r"1\.(\d{1,3})", daemon_says or "")
+        return f"1.{min(int(found.group(1)), top) if found else top}"
 
     def _client_body(self, conn: socket.socket, head: Head, length: int) -> Iterator[bytes]:
         sent = len(head.leftover)
@@ -329,6 +351,8 @@ class ProxyServer:
             return data
         if route.name in ("container.create", "container.update"):
             return data
+        if route.name in ("volumes.list", "networks.list"):
+            return json.dumps(redact_inspect(self.policy.filter_list(route.name, doc)), separators=(",", ":")).encode()
         if route.name == "containers.list" and isinstance(doc, list):
             doc = [item for item in doc if not self._protected_listing(item)]
         return json.dumps(redact_inspect(doc), separators=(",", ":")).encode()
@@ -336,27 +360,26 @@ class ProxyServer:
     def _protected_listing(self, item: Any) -> bool:
         if self.policy.scope is None or not isinstance(item, dict):
             return False
-        from .policy import ContainerInfo
         labels = item.get("Labels") if isinstance(item.get("Labels"), dict) else {}
         names = item.get("Names") if isinstance(item.get("Names"), list) else []
         info = ContainerInfo(str(item.get("Id", "")), str(names[0]).lstrip("/") if names else "", {str(k): str(v) for k, v in labels.items()})
-        return self.policy._verdict_container(info) == "protected"
+        return self.policy.container_verdict(info) == "protected"
 
     def _alive(self, session) -> bool:
         return self.gate is None or self.gate.alive(session)
 
-    def _send_head(self, conn: socket.socket, status: int, ctype: str) -> None:
+    def _send_head(self, conn: socket.socket, status: int, ctype: str, extra: dict[str, str] | None = None) -> None:
         conn.settimeout(10)
+        more = "".join(f"{k}: {v}\r\n" for k, v in (extra or {}).items())
         if status == 101:
-            head = f"HTTP/1.1 101 UPGRADED\r\nContent-Type: {ctype}\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n"
+            head = f"HTTP/1.1 101 UPGRADED\r\nContent-Type: {ctype}\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n{more}\r\n"
         else:
-            head = f"HTTP/1.1 {status} OK\r\nContent-Type: {ctype}\r\nConnection: close\r\n\r\n"
+            head = f"HTTP/1.1 {status} OK\r\nContent-Type: {ctype}\r\n{more}Connection: close\r\n\r\n"
         conn.sendall(head.encode("latin-1"))
 
     def _event_line(self, line: bytes) -> bytes:
         """One line of the events stream: redacted, and dropped if it concerns a protected container. Anything that is not a
         JSON object is dropped (fail closed)."""
-        from planet_express.missions.events import _is_secret_key, redact_value
         try:
             doc = json.loads(line.decode("utf-8"))
         except ValueError:
@@ -366,9 +389,8 @@ class ProxyServer:
         actor = doc.get("Actor") if isinstance(doc.get("Actor"), dict) else {}
         attrs = actor.get("Attributes") if isinstance(actor.get("Attributes"), dict) else {}
         if doc.get("Type") == "container" and self.policy.scope is not None:
-            from .policy import ContainerInfo
             info = ContainerInfo(str(actor.get("ID", "")), str(attrs.get("name", "")), {str(k): str(v) for k, v in attrs.items()})
-            if self.policy._verdict_container(info) == "protected":
+            if self.policy.container_verdict(info) == "protected":
                 return b""
         if attrs:
             actor["Attributes"] = {k: ("[REDACTED]" if _is_secret_key(str(k)) else redact_value(v)) for k, v in attrs.items()}
@@ -383,7 +405,8 @@ class ProxyServer:
                 data = rest + self._drain(sock, 65536)
                 respond(conn, status, data[:65536], content_type=ctype)
                 return
-            self._send_head(conn, 200, ctype)
+            extra = {k.title(): headers[k] for k in PASS_HEADERS if k in headers and _SAFE_VALUE.fullmatch(headers[k])}
+            self._send_head(conn, 200, ctype, extra)
             self._pump(conn, sock, rest, self.limits.stream_bytes, self.limits.stream_s, session, one_way=True,
                        transform=transform)
         finally:

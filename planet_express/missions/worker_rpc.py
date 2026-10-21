@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from planet_express.integrations.rpc import PeerCred, RpcError, RpcServer
 from planet_express.missions.runtime import AgentResult
-from planet_express.missions.sessions import resolve_session
+from planet_express.missions.sessions import resolve_session, resolve_session_by_id
 
 WORKER_METHODS = (
     "mission.get_context",
@@ -80,6 +80,7 @@ class WorkerAuthenticator:
         if store is None and resolve is None:
             raise ValueError("a store (or a resolver) is required")
         self._resolve = resolve or (lambda token_hash, **kw: resolve_session(store, token_hash, **kw))
+        self._resolve_id = (lambda session_id, **kw: resolve_session_by_id(store, session_id, **kw)) if store is not None else None
         self._read_cgroup = read_cgroup or (lambda pid: _proc_cgroup(pid, mount))
 
     def _core(self) -> int:
@@ -92,6 +93,17 @@ class WorkerAuthenticator:
         cgroup = self._read_cgroup(peer.pid)
         row = self._resolve(hashlib.sha256(token.encode()).hexdigest(),
                             peer_cgroup=cgroup, peer_uid=peer.uid)
+        return self._checked(row, peer, cgroup)
+
+    def by_id(self, peer: PeerCred, session_id: str):
+        """Authenticate by identity alone: the peer's cgroup AND uid must be the ones session `session_id` is bound to. For the
+        proxy socket, which only that session's unique uid can open; the token is not required there."""
+        if self._resolve_id is None:
+            return None
+        cgroup = self._read_cgroup(peer.pid)
+        return self._checked(self._resolve_id(session_id, peer_cgroup=cgroup, peer_uid=peer.uid), peer, cgroup)
+
+    def _checked(self, row, peer: PeerCred, cgroup):
         if row is None or getattr(row, "revoked_at", None) is not None:
             return None
         # Re-check identity here as well: S3b does not rely on the resolver alone for the

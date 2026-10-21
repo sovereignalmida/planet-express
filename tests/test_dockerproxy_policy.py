@@ -440,7 +440,9 @@ def test_exec_and_attach_are_refused_on_a_root_equivalent_container(root, host_c
     with pytest.raises(Refusal, match=why):
         plan_for(p, "exec.start", "1" * 64, body={})
     assert plan_for(p, "container.inspect", "plex") and plan_for(p, "container.logs", "plex")      # still readable
-    assert plan_for(p, "container.restart", "plex")                                                    # and restartable
+    for name, query in (("container.start", {}), ("container.restart", {}), ("container.archive.put", {"path": "/x"})):
+        with pytest.raises(Refusal, match=why):                                                     # but never acted on
+            plan_for(p, name, "plex", query=query, raw_length=5 if "archive" in name else 0)
 
 
 def test_an_ordinary_mount_of_data_does_not_stop_an_exec(root):
@@ -468,3 +470,52 @@ def test_exec_is_refused_on_a_container_whose_named_volume_is_bind_backed_by_the
             plan_for(p, "exec.create", "plex", body={"Cmd": ["id"]})
     harmless = Hazard({}, ({"Type": "volume", "Name": "media_cfg", "Source": "/var/lib/docker/volumes/media_cfg/_data"},))
     assert plan_for(Policy(make_scope(str(root)), harmless), "exec.create", "plex", body={"Cmd": ["id"]})
+
+
+# ── VolumesFrom inherits the source's mounts, so the source is held to the same rules ────────────────────────
+
+@pytest.mark.parametrize("host_config, mounts, why", [
+    ({"Privileged": True}, (), "privileged"),
+    ({}, ({"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/d"},), "Docker socket"),
+    ({"Binds": ["/run:/r"]}, (), "Docker socket"),
+])
+def test_volumes_from_a_container_with_the_docker_socket_or_that_is_root_equivalent_is_refused(root, host_config, mounts, why):
+    p = Policy(make_scope(str(root)), Hazard(host_config, mounts))
+    with pytest.raises(Refusal, match=why):
+        create(p, host(VolumesFrom=["plex"]))
+
+
+def test_volumes_from_a_container_that_mounts_a_protected_path_is_refused_but_exec_on_it_is_not(root):
+    protected = (f"host:local/path:{root}/data",)
+    mounts = ({"Type": "bind", "Source": str(root / "data"), "Destination": "/data"},)
+    p = Policy(make_scope(str(root), protected=protected), Hazard({}, mounts))
+    with pytest.raises(Refusal, match="protected path"):
+        create(p, host(VolumesFrom=["plex:ro"]))
+    assert plan_for(p, "exec.create", "plex", body={"Cmd": ["id"]})            # the accepted residual: data volumes via exec
+
+
+def test_inherited_mounts_are_re_checked_when_a_created_container_starts(root):
+    from planet_express.missions.dockerproxy.policy import CREATED_LABEL, ContainerInfo
+    mounts = ({"Type": "bind", "Source": "/var/run/docker.sock", "Destination": "/d"},)
+
+    class Inspector(Hazard):
+        def container(self, ref):
+            if ref == "fresh":
+                return ContainerInfo("f" * 64, "fresh", {**labels("media", "qbittorrent"), CREATED_LABEL: "1"},
+                                     {"VolumesFrom": ["plex"]}, ())
+            return super().container(ref)
+    p = Policy(make_scope(str(root)), Inspector({}, mounts))
+    with pytest.raises(Refusal, match="Docker socket"):
+        plan_for(p, "container.start", "fresh")
+    clean = Policy(make_scope(str(root)), Inspector({}, ()))
+    assert plan_for(clean, "container.start", "fresh")
+
+
+# ── API versions follow the daemon ──────────────────────────────────────────────────────────────────
+
+def test_the_served_versions_are_the_floor_up_to_the_lower_of_the_daemon_and_the_proxy():
+    from planet_express.missions.dockerproxy.policy import API_FLOOR, API_MAX, served_versions
+    assert served_versions(52) == served_versions(None) == frozenset(f"v1.{n}" for n in range(API_FLOOR, API_MAX + 1))
+    assert max(served_versions(45)) == "v1.45" and "v1.46" not in served_versions(45) and "v1.41" in served_versions(45)
+    assert served_versions(30) == frozenset()                                    # an ancient daemon: nothing is served
+    assert Policy(make_scope("/x"), FakeInspector(), versions=served_versions(45)).max_minor == 45

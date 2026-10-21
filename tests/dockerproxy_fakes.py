@@ -114,6 +114,7 @@ class FakeDaemon:
     def __init__(self, path, stream_bytes=0):
         self.path, self.requests, self.stream_bytes = path, [], stream_bytes
         self.exec_ids = []
+        self.api_version = "1.43"               # what this daemon says in its Api-Version header
         self.made = {}                          # containers created through this daemon: id -> {name, labels, host_config}
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(path)
@@ -162,6 +163,8 @@ class FakeDaemon:
             headers = {k.lower(): v.strip() for k, _, v in (line.partition(":") for line in lines[1:])}
             length = int(headers.get("content-length", "0") or 0)
             body = rest
+            if headers.get("transfer-encoding", "").lower() == "chunked":
+                body = self._dechunk(conn, rest)
             while len(body) < length:
                 chunk = conn.recv(65536)
                 if not chunk:
@@ -176,11 +179,24 @@ class FakeDaemon:
             conn.close()
 
     @staticmethod
-    def _send(conn, status, doc=None, raw=None, ctype="application/json"):
+    def _dechunk(conn, rest):
+        buf, out = rest, b""
+        while True:
+            while b"\r\n" not in buf:
+                buf += conn.recv(65536)
+            line, _, buf = buf.partition(b"\r\n")
+            size = int(line, 16)
+            if size == 0:
+                return out
+            while len(buf) < size + 2:
+                buf += conn.recv(65536)
+            out, buf = out + buf[:size], buf[size + 2:]
+
+    def _send(self, conn, status, doc=None, raw=None, ctype="application/json"):
         body = raw if raw is not None else (json.dumps(doc).encode() if doc is not None else b"")
         reason = {200: "OK", 201: "Created", 204: "No Content", 404: "Not Found"}.get(status, "X")
         conn.sendall((f"HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len(body)}\r\n"
-                      "Api-Version: 1.43\r\nConnection: close\r\n\r\n").encode() + body)
+                      f"Api-Version: {self.api_version}\r\nConnection: close\r\n\r\n").encode() + body)
 
     def _route(self, conn, rec):
         method, target = rec["method"], rec["target"]
@@ -233,7 +249,10 @@ class FakeDaemon:
             if op == "attach":
                 return self._hijack(conn, rec)
             if op == "archive":
-                return self._send(conn, 200, raw=b"TARDATA", ctype="application/x-tar")
+                body = b"TARDATA"
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\nX-Docker-Container-Path-Stat: eyJuYW1lIjoiY29uZmlnIn0=\r\n"
+                             + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+                return None
             return self._send(conn, 204)
         if parts[1] == "exec" and len(parts) >= 4 and parts[3] == "start":
             return self._hijack(conn, rec)
@@ -246,13 +265,13 @@ class FakeDaemon:
         if parts[1] == "networks" and len(parts) == 4:
             return self._send(conn, 204)
         if tail == "networks":
-            return self._send(conn, 200, [{"Name": n, "Labels": lab} for n, lab in NETWORKS.items()])
+            return self._send(conn, 200, [{"Name": n, "Id": "i" * 60 + n[:4].ljust(4, "x"), "Labels": lab, "Options": {"x": "y"}} for n, lab in NETWORKS.items()])
         if parts[1] == "volumes" and len(parts) == 3:
             if parts[2] not in VOLUMES:
                 return self._send(conn, 404, {"message": "no such volume"})
-            return self._send(conn, 200, {"Name": parts[2], **VOLUMES[parts[2]]})
+            return self._send(conn, 200, {"Name": parts[2], "Mountpoint": f"/var/lib/docker/volumes/{parts[2]}/_data", **VOLUMES[parts[2]]})
         if tail == "volumes":
-            return self._send(conn, 200, {"Volumes": [{"Name": n, **v} for n, v in VOLUMES.items()]})
+            return self._send(conn, 200, {"Volumes": [{"Name": n, "Mountpoint": f"/var/lib/docker/volumes/{n}/_data", **v} for n, v in VOLUMES.items()]})
         if parts[1] == "images" and len(parts) >= 4 and parts[-1] == "json":
             ref = "/".join(parts[2:-1])
             if ref not in IMAGES:

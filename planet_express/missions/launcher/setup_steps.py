@@ -88,6 +88,7 @@ class Paths:
     sudoers: str = SUDOERS_PATH
     worker_sudoers: str = "/etc/sudoers.d/planetexpress-worker"
     worker_sudo_rules: tuple = ()                 # ((unit, (action, ...)), ...): the host-wide ceiling; empty means no file
+    worker_sudo_all_sessions: bool = False        # acknowledged: the file names every session uid (fail closed without it)
     reconcile_worker_sudoers: bool = False        # no rules, but an earlier setup's generated file is on the host: take it away
     unit_dropin: str = UNIT_DROPIN
     boot_script: str = "/mnt/data/pe/launcher-boot.sh"
@@ -110,6 +111,7 @@ class Paths:
         rules = tuple((r.unit, tuple(r.actions)) for r in getattr(missions, "worker_sudo_rules", ()))
         return cls(uid_min=missions.session_uid_min, uid_max=missions.session_uid_max, cgroup_root=missions.cgroup_root,
                    sock_root=missions.sock_root, worker_sudo_rules=rules,
+                   worker_sudo_all_sessions=bool(getattr(missions, "worker_sudo_all_sessions", False)),
                    workspace_root=missions.workspace_root or os.path.join(state_dir, "mission-workspaces"), **kw)
 
     def launch_conf(self) -> LaunchConf:
@@ -690,6 +692,10 @@ class WorkerSudoers(LauncherSudoers):
 
     def unsafe(self) -> str | None:
         from planet_express.missions.sudo_gen import SudoGenError, render
+        if self.p.worker_sudo_rules and not self.p.worker_sudo_all_sessions:
+            return ("the worker sudoers would grant its rules to EVERY session uid (Observe, Propose and rules-less Repair "
+                    "sessions included, because the launcher cannot yet add a per-grant group); set "
+                    "missions.worker_sudo_all_sessions: true to accept that, or clear missions.worker_sudo_rules")
         try:
             render(self.p.worker_sudo_rules, uid_min=self.p.uid_min, uid_max=self.p.uid_max, systemctl=self.p.systemctl)
         except SudoGenError as exc:

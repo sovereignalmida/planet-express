@@ -118,6 +118,9 @@ class MissionRunner:
             self._thread.join(timeout=30)
         self._stop_server()
         self.supervisor.shutdown()
+        shutdown = getattr(getattr(self.supervisor, "docker_proxy", None), "shutdown", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def _cgroup_mount(root: str) -> str:

@@ -269,6 +269,23 @@ subtle edits, so the grant must not scope such a service unless the operator acc
 Proxy rules are a reviewed capability, and the discovery/Unraid consumer uses a separate read-only
 proxy (brief §14.1 item 9).
 
+**Slice 7b amendments (deliberate, operator-approved).**
+- *Proxy authentication.* A caller is authenticated by `SO_PEERCRED` uid == the session's unique uid AND its cgroup binding;
+  the per-session socket is 0600 and owned by that uid (§22.1, §22.8), so identity is the credential. `X-PE-Session` is
+  optional defence in depth: absent is accepted, present must be the session's valid token. (A stock Docker client cannot
+  send a header, and the token is delivered on fd 3 only.) The worker environment carries `DOCKER_HOST=unix://<proxy.sock>`.
+  The worker socket's RPC still requires the token.
+- *API versions.* The proxy serves `v1.41` up to the lower of the daemon's own version (read from its `/_ping`) and the
+  highest it was written against (`v1.48`); `/_ping` replies never advertise more. Unversioned paths other than `_ping` are refused.
+- *Root-equivalent containers.* exec, attach, archive upload, start and restart are refused on a container that is
+  privileged, shares host pid/user namespaces, holds a kernel-reaching capability, or has the Docker socket (or a directory
+  holding it, also through a bind-backed named volume) mounted; `VolumesFrom` applies the same rules plus protected mounts.
+  Containers created through the proxy carry a proxy-set label and have their mounts re-checked at start.
+- *Worker sudoers.* The generated file names every session uid (the launcher cannot yet add a per-grant group), so it would
+  grant its rules to Observe/Propose and rules-less Repair sessions too. It is therefore **disabled by default**
+  (`missions.worker_sudo_all_sessions: false`): with rules configured and no acknowledgement the setup plan is blocked, no file
+  is written and none is treated as managed. A per-grant group added by the launcher is the way to lift this.
+
 ### 6.2 Change missions: how new resources get created (design intent; normative in slice 10)
 Change missions are Phase 3, owned by **slice 10** (plan in `v4-plan.md`), whose own G1 makes this
 section normative. Phase 2 (Repair) uses none of it. The intent, fixed now so Repair does not

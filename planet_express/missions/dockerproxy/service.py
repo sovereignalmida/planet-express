@@ -8,6 +8,7 @@ re-proved the approval; a revoked session is refused at authentication."""
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable, Iterable
 
 from planet_express.integrations.rpc import PeerCred
@@ -16,7 +17,7 @@ from planet_express.missions.grants import REPAIR_UP
 from planet_express.missions.store import MissionStore
 
 from .httpwire import Refusal
-from .policy import Policy, Scope
+from .policy import Policy, Scope, served_versions
 from .server import DEFAULT_LIMITS, ExecTable, Gate, Limits, ProxyServer
 from .upstream import DaemonInspector, Upstream
 
@@ -38,9 +39,14 @@ class StoreGate:
         self.ms = service.ms
 
     def authenticate(self, peer: PeerCred, token: str | None):
-        if not isinstance(token, str):
+        """The peer's uid and cgroup must be this session's (the socket is also 0600 and owned by its unique uid). The
+        session token is optional defence in depth: absent is fine, present must be this session's valid token."""
+        if token is None:
+            row = self.authenticator.by_id(peer, self.session_id)
+        elif isinstance(token, str):
+            row = self.authenticator(peer, {"session_token": token})
+        else:
             return None
-        row = self.authenticator(peer, {"session_token": token})
         return row if row is not None and getattr(row, "id", None) == self.session_id else None
 
     def check_live(self, session) -> None:
@@ -93,7 +99,7 @@ class DockerProxyService:
         self.docker_socket, self.stacks_root, self.protected = docker_socket, stacks_root, protected
         self.protected_gids, self.limits = tuple(protected_gids), limits
         self.upstream = upstream or Upstream(docker_socket)
-        self._paused: set[str] = set()
+        self._paused: dict[str, float] = {}         # mission id -> when it was paused (monotonic)
         self._servers: dict[str, tuple[str, ProxyServer]] = {}
         self._lock = threading.Lock()
 
@@ -101,7 +107,7 @@ class DockerProxyService:
 
     def pause(self, mission_id: str) -> None:
         with self._lock:
-            self._paused.add(mission_id)
+            self._paused[mission_id] = time.monotonic()
 
     def is_paused(self, mission_id: str) -> bool:
         with self._lock:
@@ -122,27 +128,17 @@ class DockerProxyService:
         if not verdict.ok:
             raise ResumeRefused("the approval no longer covers this grant")
         with self._lock:
-            self._paused.discard(mission_id)
-
-    def usable(self, mission_id: str, grant_hash: str) -> bool:
-        return not self.is_paused(mission_id)
+            self._paused.pop(mission_id, None)
 
     # ── sockets ─────────────────────────────────────────────────────────────────────────────────
 
     def path(self, session_id: str) -> str:
         return f"{self.sock_root}/{session_id}/proxy.sock"
 
-    def wants(self, session_id: str) -> bool:
-        """Only a Repair-or-above session whose grant says `docker: proxy` gets a proxy socket."""
-        row = self.ms.get_session(session_id)
-        if row is None:
-            return False
-        mission = self.ms.get_mission(row["mission_id"])
-        return mission.tier in REPAIR_UP and mission.grant().docker == "proxy"
-
     def start(self, cs) -> Callable[[], None] | None:
         """Bind this session's proxy socket (the directory exists; the launcher hands the socket to the session). None if the
         session does not get one. The returned callable stops it."""
+        began = time.monotonic()
         row = self.ms.get_session(cs.session_id)
         if row is None:
             raise RuntimeError("no such session")
@@ -153,15 +149,18 @@ class DockerProxyService:
         scope = Scope.from_grant(grant, protected=tuple(self.protected()), stacks_root=self.stacks_root,
                                  protected_gids=self.protected_gids)
         execs = ExecTable(self.limits.execs)
-        policy = Policy(scope, DaemonInspector(self.upstream), exec_owner=execs.owner)
+        policy = Policy(scope, DaemonInspector(self.upstream), exec_owner=execs.owner,
+                        versions=served_versions(self.upstream.api_version()))
         gate: Gate = StoreGate(self, cs.session_id, mission.id, mission.grant_hash, self.authenticator)
         server = ProxyServer(self.path(cs.session_id), policy=policy, upstream=self.upstream, gate=gate, execs=execs,
                              limits=self.limits, name=f"dockerproxy-{cs.session_id[:8]}")
-        with self._lock:
-            self._paused.discard(mission.id)          # a fresh session starts open: starting it needed a live approval
         server.start()
         with self._lock:
             self._servers[cs.session_id] = (mission.id, server)
+            # A pause left over from an earlier session is cleared (starting this one needed a live approval); a pause that
+            # arrived while this one was launching (the tripwire racing the start) is NOT: it is newer than `began`.
+            if self._paused.get(mission.id, began) < began:
+                del self._paused[mission.id]
 
         def stop() -> None:
             with self._lock:
@@ -172,10 +171,8 @@ class DockerProxyService:
     def env(self, cs) -> dict[str, str]:
         with self._lock:
             bound = cs.session_id in self._servers
-        # Only the path, not DOCKER_HOST: a stock Docker client cannot add the session token this socket requires, so
-        # advertising it as the default daemon would only produce 401s. The runtime that holds the token runs the shim
-        # (`shim.py`), which injects the header, and points its clients at the shim's socket.
-        return {"PE_DOCKER_SOCKET": self.path(cs.session_id)} if bound else {}
+        path = self.path(cs.session_id)
+        return {"PE_DOCKER_SOCKET": path, "DOCKER_HOST": f"unix://{path}"} if bound else {}
 
     def shutdown(self) -> None:
         with self._lock:
@@ -192,7 +189,7 @@ def build_read_only(socket_path: str, *, docker_socket: str = DEFAULT_DOCKER_SOC
     session; the socket is 0600 and only the given uids (default: this process's own) may connect."""
     up = upstream or Upstream(docker_socket)
     scope = Scope((), (), tuple(protected)) if protected else None
-    policy = Policy(scope, DaemonInspector(up), read_only=True)
+    policy = Policy(scope, DaemonInspector(up), read_only=True, versions=served_versions(up.api_version()))
     return ProxyServer(socket_path, policy=policy, upstream=up, gate=None, allowed_uids=allowed_uids or {os.geteuid()},
                        limits=limits, name="dockerproxy-ro")
 

@@ -52,11 +52,11 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged. Re-pinned again in slice 7b: the config file setup renders now carries
-    # the two new missions.* defaults (docker_socket, worker_sudo_rules); no step changed.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "1f6905364ae6337d"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "55e6c5ebade7dfa2"
+    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions); no step changed.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "2f5eef0be267c87c"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "17452e046455efaf"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "788d4505fffbe09c"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "75c38a63606090ff"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
@@ -724,7 +724,8 @@ def test_the_cli_derives_the_mos_paths_from_pe_home_with_the_plans_function_and_
 
 # -- the worker sudoers: clearing the rules takes the old file away (review finding) ------------------------------
 WORKER = "/etc/sudoers.d/planetexpress-worker"
-RULE_ON = {"enabled": True, "worker_sudo_rules": [{"unit": "plex.service", "actions": ["restart"]}]}
+RULE_ON = {"enabled": True, "worker_sudo_all_sessions": True,
+           "worker_sudo_rules": [{"unit": "plex.service", "actions": ["restart"]}]}
 
 
 def test_with_rules_the_plan_shows_the_exact_generated_file():
@@ -756,10 +757,11 @@ def test_apply_installs_the_worker_sudoers_and_a_cleared_config_removes_it_again
     import hashlib
     rule = [{"unit": "plex.service", "actions": ["restart"]}]
     target = str(tree / "etc" / "sudoers.d" / "pe-worker")
-    p = paths(tree, worker_sudoers=target, worker_sudo_rules=(("plex.service", ("restart",)),))
+    p = paths(tree, worker_sudoers=target, worker_sudo_rules=(("plex.service", ("restart",)),), worker_sudo_all_sessions=True)
     names = ["session-uid-range", "launcher-helper", "launcher-sudoers", "worker-sudoers", "cgroup-tree", "workspace-root",
              "socket-root"]
-    first = make_plan([step(i, "launcher.step", n, name=n, **params_for(p), worker_sudo_rules=rule) for i, n in enumerate(names, 1)])
+    first = make_plan([step(i, "launcher.step", n, name=n, **params_for(p), worker_sudo_rules=rule, worker_sudo_all_sessions=True)
+                       for i, n in enumerate(names, 1)])
     assert run("apply", first, p, tmp_path).status == "done"
     written = Path(target).read_bytes()
     assert b"PE_WORKER_CMDS = /usr/bin/systemctl restart plex.service" in written and oct(os.lstat(target).st_mode & 0o777) == "0o440"
@@ -773,3 +775,8 @@ def test_apply_installs_the_worker_sudoers_and_a_cleared_config_removes_it_again
     gone = make_plan([step(1, "launcher.remove", "worker-sudoers", name="worker-sudoers", **params_for(cleared),
                            worker_sudoers_reconcile=True)])
     assert run("apply", gone, cleared, tmp_path, name="j3").status == "done" and not Path(target).exists()
+
+
+def test_rules_without_the_acknowledgement_block_the_plan_with_the_reason():
+    p = plan(mreport(), answers(missions={"enabled": True, "worker_sudo_rules": [{"unit": "plex.service", "actions": ["restart"]}]}))
+    assert not p.applicable and any("EVERY session uid" in b for b in p.blocked)

@@ -269,6 +269,7 @@ class _LauncherParams(_Params):
     helper_store: AbsPath | None = None     # MOS only: the persistent helper copy installed at every boot
     conf: AbsPath | None = None             # MOS only: where launch.conf lives (under the data pool; Ubuntu has a fixed path)
     worker_sudo_rules: tuple[_WorkerSudoRule, ...] = ()   # the worker-sudoers ceiling (generated text, shown in the plan)
+    worker_sudo_all_sessions: bool = False  # the operator's acknowledgement that every session uid gets the ceiling
     worker_sudoers_reconcile: bool = False  # no rules, but an earlier setup's generated file is on the host: remove it
 
     @model_validator(mode="after")

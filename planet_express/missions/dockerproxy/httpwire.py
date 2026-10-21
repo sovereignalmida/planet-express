@@ -42,6 +42,7 @@ class Head:
     headers: dict[str, str]         # lower-cased names
     version: str | None             # "v1.43" or None for an unversioned path
     leftover: bytes                 # body bytes that arrived with the head
+    chunked: bool = False           # `Transfer-Encoding: chunked` and nothing else (never together with Content-Length)
 
 
 def _deadline_recv(conn: socket.socket, n: int, deadline: float) -> bytes:
@@ -93,12 +94,15 @@ def read_head(conn: socket.socket, *, timeout: float) -> Head:
         if key in headers:
             raise BadRequest("duplicate header")           # includes a second Content-Length
         headers[key] = value.strip()
+    chunked = False
     if "transfer-encoding" in headers:
-        raise BadRequest("Transfer-Encoding is not accepted")
+        if headers["transfer-encoding"].lower() != "chunked" or "content-length" in headers:
+            raise BadRequest("Transfer-Encoding is not accepted")       # includes Content-Length with Transfer-Encoding
+        chunked = True
     if "expect" in headers:
         raise BadRequest("Expect is not accepted")
     path, segments, query, version = normalise_target(request[1])
-    return Head(request[0], path, segments, query, headers, version, leftover)
+    return Head(request[0], path, segments, query, headers, version, leftover, chunked)
 
 
 def normalise_target(target: str) -> tuple[str, tuple[str, ...], dict[str, str], str | None]:
@@ -162,6 +166,57 @@ def read_exact_body(conn: socket.socket, head: Head, length: int, *, timeout: fl
             raise BadRequest("body ended early")
         body += chunk
     return body
+
+
+_CHUNK_SIZE = re.compile(rb"[0-9a-fA-F]{1,8}")
+
+
+def iter_chunked(conn: socket.socket, leftover: bytes, *, cap: int, timeout: float):
+    """The decoded pieces of a chunked request body, as they arrive. Strict: a hex size and nothing else on the size line (no
+    extensions), exactly CRLF after each chunk's data, a last chunk of size 0 followed directly by the final CRLF (no
+    trailers), and nothing after it (that would be a pipelined request). Over `cap` decoded bytes is refused."""
+    deadline = time.monotonic() + timeout
+    buf = bytearray(leftover)
+    total = 0
+
+    def fill() -> None:
+        chunk = _deadline_recv(conn, 65536, deadline)
+        if not chunk:
+            raise BadRequest("body ended early")
+        buf.extend(chunk)
+
+    while True:
+        while b"\r\n" not in buf:
+            if len(buf) > 16:
+                raise BadRequest("bad chunk framing")
+            fill()
+        line, _, _ = bytes(buf).partition(b"\r\n")
+        if not _CHUNK_SIZE.fullmatch(line):
+            raise BadRequest("bad chunk framing")
+        size = int(line, 16)
+        del buf[:len(line) + 2]
+        if size == 0:
+            while len(buf) < 2:
+                fill()
+            if bytes(buf) != b"\r\n":
+                raise BadRequest("trailers or bytes after the last chunk")
+            return
+        total += size
+        if total > cap:
+            raise Refusal("request body too large", 413)
+        remaining = size
+        while remaining:
+            if not buf:
+                fill()
+            take = min(len(buf), remaining)
+            yield bytes(buf[:take])
+            del buf[:take]
+            remaining -= take
+        while len(buf) < 2:
+            fill()
+        if bytes(buf[:2]) != b"\r\n":
+            raise BadRequest("bad chunk framing")
+        del buf[:2]
 
 
 def strict_json(data: bytes, *, cap: int) -> dict:

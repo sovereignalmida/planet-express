@@ -492,7 +492,8 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
             "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
             "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
             **(mos_launcher_paths(p["home"]) if mos else {}),
-            **({"worker_sudo_rules": [{"unit": r.unit, "actions": list(r.actions)} for r in m.worker_sudo_rules]}
+            **({"worker_sudo_rules": [{"unit": r.unit, "actions": list(r.actions)} for r in m.worker_sudo_rules],
+                "worker_sudo_all_sessions": m.worker_sudo_all_sessions}
                if m.worker_sudo_rules and not mos else {}),
             # No rules named but an earlier setup left its generated file: the plan takes it away (clearing the rules must
             # not leave the old grants in force). The scan decides; nothing is removed that the scan did not see.
@@ -507,6 +508,7 @@ def _launcher_paths(params: dict):
     extra = {k: params[k] for k in ("boot_script", "conf", "helper_store") if k in params}
     extra["worker_sudo_rules"] = tuple((r["unit"], tuple(r["actions"])) for r in params.get("worker_sudo_rules", ()))
     extra["reconcile_worker_sudoers"] = bool(params.get("worker_sudoers_reconcile"))
+    extra["worker_sudo_all_sessions"] = bool(params.get("worker_sudo_all_sessions"))
     return Paths(core_uid=0, core_gid=0, core_user=params["core_user"], flavour=params["flavour"],
                  uid_min=params["uid_min"], uid_max=params["uid_max"], sock_root=params["sock_root"],
                  cgroup_root=params["cgroup_root"], workspace_root=params["workspace_root"], **extra)

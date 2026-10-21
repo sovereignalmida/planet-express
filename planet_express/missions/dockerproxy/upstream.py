@@ -3,13 +3,13 @@ it. Every call has a timeout and a size cap; any surprise is `UpstreamError`, wh
 
 import http.client
 import json
+import re
 import socket
 from collections.abc import Iterable
 from urllib.parse import quote, urlencode
 
 from .policy import ContainerInfo, NetworkInfo
 
-INSPECT_VERSION = "v1.41"
 MAX_INSPECT = 4 * 1024 * 1024
 
 
@@ -56,6 +56,18 @@ class Upstream:
         except (OSError, http.client.HTTPException) as exc:
             conn.close()
             raise UpstreamError(type(exc).__name__) from None
+        except BaseException:                      # a refusal raised while the request body is being read
+            conn.close()
+            raise
+
+    def api_version(self) -> int | None:
+        """The daemon's own API minor version (`1.<minor>`) from its ping, or None if it cannot be read."""
+        try:
+            _, headers, _ = self.call("GET", "/_ping", cap=4096)
+        except UpstreamError:
+            return None
+        found = re.fullmatch(r"1\.(\d{1,3})", headers.get("api-version", ""))
+        return int(found.group(1)) if found else None
 
     def call(self, method: str, target: str, *, body: bytes | None = None, content_type: str | None = None,
              cap: int = MAX_INSPECT) -> tuple[int, dict[str, str], bytes]:
@@ -123,11 +135,11 @@ def status_of(head: bytes) -> tuple[int, dict[str, str]]:
 class DaemonInspector:
     """The policy's questions, answered by the daemon. A 404 is None; any other failure is UpstreamError (fail closed)."""
 
-    def __init__(self, upstream: Upstream, version: str = INSPECT_VERSION):
-        self.up, self.version = upstream, version
+    def __init__(self, upstream: Upstream):
+        self.up = upstream                      # unversioned paths: the daemon answers in its own current version
 
     def _get(self, path: str) -> dict | None:
-        status, _, data = self.up.call("GET", f"/{self.version}{path}")
+        status, _, data = self.up.call("GET", path)
         if status == 404:
             return None
         if status != 200:

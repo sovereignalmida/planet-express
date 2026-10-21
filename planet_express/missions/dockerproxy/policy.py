@@ -12,13 +12,25 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from planet_express.core.redact import REDACTED
+from planet_express.missions.events import _is_secret_key, redact_value
 from planet_express.missions.models import Grant
 from planet_express.missions.resources import BadResource, canon, classify
 from planet_express.missions.store import grant_resources
 
 from .httpwire import BadRequest, Head, Refusal, strict_json
 
-API_VERSIONS = frozenset(f"v1.{n}" for n in range(41, 49))
+API_FLOOR, API_MAX = 41, 48              # the API minors this proxy has been written against (inclusive)
+
+
+def served_versions(daemon_minor: int | None = None) -> frozenset[str]:
+    """`v1.<floor>` .. `v1.<min(daemon, proxy max)>`: never newer than the daemon speaks or than this proxy understands. A daemon
+    whose version could not be read is served up to the proxy's own maximum."""
+    top = API_MAX if daemon_minor is None else min(daemon_minor, API_MAX)
+    return frozenset(f"v1.{n}" for n in range(API_FLOOR, top + 1))
+
+
+API_VERSIONS = served_versions()
 JSON_CAP = 256 * 1024
 ARCHIVE_CAP = 32 * 1024 * 1024
 CREATED_LABEL = "io.planetexpress.created-by-proxy"      # put on every container a worker creates; its mounts are re-checked at start
@@ -38,6 +50,7 @@ FILTER_KEYS = frozenset({"status", "name", "label", "id", "ancestor", "network",
                          "since", "expose", "publish", "dangling", "reference", "driver", "scope", "type", "event",
                          "container", "image", "until"})
 
+_NEEDS_NO_ROOT_EQUIVALENT = ("exec.create", "container.attach", "container.archive.put", "container.start", "container.restart")
 _ID = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
 _IMG = r"[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,254}"
 _NAME = re.compile(rf"^{_ID}$")
@@ -316,6 +329,8 @@ class Policy:
     # -- matching -------------------------------------------------------------------------------
 
     def match(self, head: Head) -> tuple[Route, dict[str, str]]:
+        if not self.versions:
+            raise Refusal("the daemon's API version is older than this proxy supports")
         if head.version is not None and head.version not in self.versions:
             raise Refusal("unknown API version")
         wrong_method = False
@@ -373,7 +388,7 @@ class Policy:
             plan.summary = {"container": info.name or info.id[:12]}
             if route.name == "exec.create":
                 plan.exec_container = info.id
-            if route.name in ("exec.create", "container.attach"):
+            if route.name in _NEEDS_NO_ROOT_EQUIVALENT:
                 self._refuse_if_root_equivalent(info)
             if route.name in ("container.start", "container.restart") and info.labels.get(CREATED_LABEL):
                 self._revalidate_mounts(info)
@@ -409,7 +424,7 @@ class Policy:
             plan.body = handler(plan, body, query)
         elif route.body == "raw":
             plan.raw_length = raw_length
-            plan.summary["bytes"] = raw_length
+            plan.summary["bytes"] = raw_length if raw_length >= 0 else "chunked"
         if route.name in ("container.stop", "container.restart", "container.kill"):
             plan.summary.update({k: v for k, v in query.items() if k in ("t", "signal")})
         if route.name == "container.rename":
@@ -440,7 +455,11 @@ class Policy:
     def _service_id(self, info: ContainerInfo) -> str | None:
         return compose_id("service", info.labels, self.scope.host if self.scope else "local")
 
-    def _verdict_container(self, info: ContainerInfo) -> str:
+    @property
+    def max_minor(self) -> int:
+        return max((int(v[3:]) for v in self.versions), default=0)
+
+    def container_verdict(self, info: ContainerInfo) -> str:
         scope = self.scope
         if scope is None:
             return "in_scope"
@@ -456,7 +475,7 @@ class Policy:
         info = self.inspector.container(ref)
         if info is None:
             raise Refusal("no such container", 404)
-        verdict = self._verdict_container(info)
+        verdict = self.container_verdict(info)
         if verdict == "protected":
             raise Refusal("the container is a protected resource")
         if need == "scope" and verdict != "in_scope":
@@ -494,25 +513,56 @@ class Policy:
             raise Refusal("host and container network modes are not served")
         self._network(name, "scope")
 
+    def filter_list(self, route_name: str, doc: Any) -> Any:
+        """The volumes/networks list as the worker may see it: protected entries dropped; volumes also dropped unless in scope;
+        host paths and driver options stripped from what remains (the same rules as inspect)."""
+        def clean(item: dict) -> dict:
+            return {k: v for k, v in item.items() if k not in ("Mountpoint", "Options")}
+        host = self.scope.host if self.scope else "local"
+        if route_name == "volumes.list" and isinstance(doc, dict):
+            kept = []
+            for vol in doc.get("Volumes") or []:
+                if not isinstance(vol, dict):
+                    continue
+                stack = compose_id("stack", vol.get("Labels") if isinstance(vol.get("Labels"), dict) else {}, host)
+                if self.scope is not None and (stack is None and not self.read_only or stack is not None and (
+                        self.scope.classify(stack, parent_of_protected=False) == "protected"
+                        or (not self.read_only and self.scope.classify(stack, parent_of_protected=False) != "in_scope"))):
+                    continue
+                kept.append(clean(vol))
+            return {**doc, "Volumes": kept}
+        if route_name == "networks.list" and isinstance(doc, list):
+            out = []
+            for net in doc:
+                if not isinstance(net, dict):
+                    continue
+                labels = net.get("Labels") if isinstance(net.get("Labels"), dict) else {}
+                info = NetworkInfo(str(net.get("Id", "")), str(net.get("Name", "")), {str(k): str(v) for k, v in labels.items()})
+                if self._network_verdict(info) != "protected":
+                    out.append(clean(net))
+            return out
+        return doc
+
     def _volume_in_scope(self, vol: Mapping) -> bool:
         labels = vol.get("Labels") or {}
         stack = compose_id("stack", labels if isinstance(labels, dict) else {}, self.scope.host)
         return stack is not None and self.scope.classify(stack, parent_of_protected=False) == "in_scope"
 
-    def _refuse_if_root_equivalent(self, info: ContainerInfo) -> None:
-        """Running a command in a container is root on the host when the container is privileged, shares the host's pid or
-        user namespace, holds a capability that reaches the kernel, or has the Docker daemon's socket (or a directory holding
-        it) mounted: the proxy's whole point is that the worker never reaches the daemon any other way. Such a container is
-        refused for exec and attach; it can still be restarted and read."""
+    def _refuse_if_root_equivalent(self, info: ContainerInfo, *, protected_mounts: bool = False) -> None:
+        """Acting on a container (exec, attach, archive upload, start, restart; or inheriting its volumes) is root on the host
+        when the container is privileged, shares the host's pid or user namespace, holds a capability that reaches the kernel,
+        or has the Docker daemon's socket (or a directory holding it) mounted: the proxy's whole point is that the worker never
+        reaches the daemon any other way. With `protected_mounts` (VolumesFrom) a mount of a protected path counts too. Such a
+        container can still be read."""
         host = info.host_config if isinstance(info.host_config, Mapping) else {}
         if host.get("Privileged"):
-            raise Refusal("exec and attach are refused on a privileged container")
+            raise Refusal("a privileged container may not be acted on through the proxy")
         for key in ("PidMode", "UsernsMode", "IpcMode", "UTSMode", "CgroupnsMode"):
             if host.get(key) == "host":
-                raise Refusal(f"exec and attach are refused on a container with {key} host")
+                raise Refusal(f"a container with {key} host may not be acted on through the proxy")
         caps = {str(c).upper().removeprefix("CAP_") for c in (host.get("CapAdd") or []) if isinstance(c, str)}
         if caps & DANGEROUS_CAPS:
-            raise Refusal("exec and attach are refused on a container holding a capability that reaches the kernel")
+            raise Refusal("a container holding a capability that reaches the kernel may not be acted on through the proxy")
         sources = [m.get("Source") for m in info.mounts if isinstance(m, dict) and m.get("Type") in (None, "bind")]
         sources += [str(entry).split(":", 1)[0] for entry in (host.get("Binds") or []) if isinstance(entry, str)]
         for mount in info.mounts:
@@ -520,8 +570,14 @@ class Policy:
             if isinstance(mount, dict) and mount.get("Type") == "volume":
                 sources += self._volume_devices(mount.get("Name"))
         for source in sources:
-            if isinstance(source, str) and source.startswith("/") and self._reaches_docker(source):
-                raise Refusal("exec and attach are refused on a container that has the Docker socket mounted")
+            if not isinstance(source, str) or not source.startswith("/"):
+                continue
+            if self._reaches_docker(source):
+                raise Refusal("a container that has the Docker socket mounted may not be acted on through the proxy")
+            if protected_mounts and self.scope is not None:
+                rid = _try_canon(f"path:{posixpath.normpath(source)}", self.scope.host)
+                if rid is not None and self.scope.classify(rid) == "protected":
+                    raise Refusal("the container mounts a protected path, so its volumes may not be inherited")
 
     def _volume_devices(self, name) -> list[str]:
         if not isinstance(name, str) or not _NAME.match(name):
@@ -584,6 +640,10 @@ class Policy:
             if not isinstance(entry, str):
                 raise Refusal("the container's mounts cannot be checked")
             self._bind(entry, [])
+        for entry in host.get("VolumesFrom") or []:           # inherited mounts are re-checked too
+            if not isinstance(entry, str):
+                raise Refusal("the container's mounts cannot be checked")
+            self._refuse_if_root_equivalent(self._container(entry.partition(":")[0], "scope"), protected_mounts=True)
         for mount in host.get("Mounts") or []:
             if not isinstance(mount, dict) or not isinstance(mount.get("Source"), str):
                 raise Refusal("the container's mounts cannot be checked")
@@ -744,7 +804,7 @@ class Policy:
                 ref, _, mode = entry.partition(":")
                 if mode not in ("", "ro", "rw"):
                     raise BadRequest("bad VolumesFrom mode")
-                self._container(ref, "scope")
+                self._refuse_if_root_equivalent(self._container(ref, "scope"), protected_mounts=True)
             out["VolumesFrom"] = entries
         network = host.get("NetworkMode")
         if network is not None:
@@ -965,9 +1025,6 @@ def _is_unix_socket(path: str) -> bool:
 
 def redact_inspect(doc: Any) -> Any:
     """Environment values are never shown (names stay), secret-looking labels and any secret-shaped string are masked."""
-    from planet_express.core.redact import REDACTED
-    from planet_express.missions.events import _is_secret_key, redact_value
-
     def walk(value):
         if isinstance(value, dict):
             out = {}
