@@ -602,8 +602,8 @@ def test_a_hostile_core_environment_never_reaches_the_session_either(host, monke
         environ = []
         for _ in range(50):  # the pid is listed before the exec lands; /proc/<pid>/environ is empty until then
             environ = Path(f"/proc/{got['pids'][0]}/environ").read_bytes().split(b"\0")
-            if any(environ):
-                break
+            if sorted(e for e in environ if e) == [b"ONLY_THIS=yes", b"PATH=/usr/bin:/bin"]:
+                break                       # until the exec lands the pid may still carry the pre-exec environment
             time.sleep(0.1)
         assert sorted(e for e in environ if e) == [b"ONLY_THIS=yes", b"PATH=/usr/bin:/bin"]
     finally:
