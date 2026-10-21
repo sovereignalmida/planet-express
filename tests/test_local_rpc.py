@@ -311,7 +311,7 @@ def test_core_handlers():
     assert set(handlers) == {"logs.tail", "approval.get", "approval.list_recent", "action.request", "query.container", "proposal.create", "proposal.list_pending", "approval.decide", "execution.get_status", "execution.abort", "execution.rollback",
                              "auth.status", "auth.record_failure", "auth.record_success",
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
-                             "incident.list", "incident.get", "incident.propose",
+                             "incident.list", "incident.get", "incident.propose", "incident.dismiss",
                              "canary.candidates", "canary.settle", "scan.start", "containers.routers",
                              "config.enforced", "query.widget_target"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
@@ -403,6 +403,8 @@ def test_incident_handlers_validate_and_route_operator():
     ("incident.list", {"status": "open", "limit": 101}),
     ("incident.get", {"incident_id": "BAD"}),
     ("incident.propose", {"incident_id": "a" * 12, "operator": "?"}),
+    ("incident.dismiss", {"incident_id": "a" * 12, "operator": "?"}),
+    ("incident.dismiss", {"incident_id": "BAD", "operator": "alice"}),
 ])
 def test_incident_handlers_reject_bad_params(method, params):
     commands, store = Mock(), Mock()
@@ -1635,3 +1637,16 @@ def test_a_keyed_widget_never_crosses_a_shared_network_namespace(monkeypatch):
 def test_an_empty_label_is_no_label(monkeypatch, label):
     handler = _widget_target_handler(monkeypatch, _found(label=label))
     assert handler({"stack": "media", "service": "sonarr"})["widget"] == "sonarr"
+
+
+def test_incident_dismiss_routes_operator_and_maps_not_found():
+    commands, store = Mock(), Mock()
+    incident_id = "a" * 12
+    commands.dismiss_incident.return_value = ProposeResult(True, None, False, "Incident dismissed.")
+    handler = build_core_handlers(commands, store)["incident.dismiss"]
+    assert handler({"incident_id": incident_id, "operator": "alice"})["ok"]
+    commands.dismiss_incident.assert_called_once_with(incident_id, operator="alice", timeout=4)
+    commands.dismiss_incident.return_value = ProposeResult(False, None, False, "incident not found")
+    with pytest.raises(RpcError) as error:
+        handler({"incident_id": incident_id, "operator": "alice"})
+    assert error.value.code == "not_found"

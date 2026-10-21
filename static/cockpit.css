@@ -1853,7 +1853,7 @@ footer p {
 .incident-facts dt { color: var(--pe-ink-faint); font-family: var(--pe-font-mono); font-size: 9px; letter-spacing: .07em; }
 .incident-facts dd { margin: 0; color: var(--pe-ink-body); overflow-wrap: anywhere; }
 .incident-hint { padding: 10px 12px; border-left: 3px solid var(--pe-accent); background: var(--pe-well); color: var(--pe-ink-body); }
-.incident-hint.fresh_scan_required, .incident-hint.target_unavailable { border-left-color: var(--pe-warn); }
+.incident-hint.fresh_scan_required, .incident-hint.target_unavailable, .incident-hint.not_observed { border-left-color: var(--pe-warn); }
 .incident-hint.resolved { border-left-color: var(--pe-ok); }
 .approval-dock { position: relative; z-index: 2; }
 .approval-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 16px; margin-top: 14px; }

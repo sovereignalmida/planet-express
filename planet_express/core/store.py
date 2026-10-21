@@ -668,6 +668,34 @@ class Store:
             return [self._incident_row(conn.execute("SELECT * FROM incidents WHERE id=?", (item,)).fetchone())
                     for item in changed]
 
+    def dismiss_incident(
+        self, incident_id: str, scan_id: str, operator: str, *, timeout: float = 5
+    ) -> bool:
+        """Resolve an open incident that the latest reconciled scan did not observe at all.
+
+        reconcile_incidents() only resolves an incident when a scan reports its resource
+        healthy. A retired resource (a removed stack, a service moved behind a profile) is never
+        reported again, so its incident stays open for good. Refused unless `scan_id` is still
+        the latest reconciliation and did not touch this incident, checked in the same
+        transaction as the write. If the resource fails again, the next scan reopens it."""
+        now = self._clock()
+        with self._write(timeout=timeout) as conn:
+            latest = conn.execute(
+                "SELECT scan_id FROM incident_reconciliations ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            row = conn.execute("SELECT * FROM incidents WHERE id=?", (incident_id,)).fetchone()
+            if (latest is None or latest["scan_id"] != scan_id or row is None
+                    or row["status"] != "open" or row["last_observed_scan_id"] == scan_id):
+                return False
+            conn.execute("UPDATE incidents SET status='resolved', resolved_at=? WHERE id=?",
+                         (now, incident_id))
+            conn.execute(
+                "INSERT INTO incident_events (incident_id, scan_id, ts, kind, payload) "
+                "VALUES (?, ?, ?, 'resolved', ?)",
+                (incident_id, scan_id, now, json.dumps({"dismissed_by": operator}, sort_keys=True)),
+            )
+            return True
+
     def latest_incident_reconciliation(self, *, timeout: float = 5) -> dict | None:
         with self._connect(timeout=timeout) as conn:
             row = conn.execute(
@@ -694,8 +722,11 @@ class Store:
                     "SELECT * FROM incidents ORDER BY last_seen DESC, id DESC LIMIT ?", (limit,)
                 ).fetchall()
             else:
+                # Resolved rows by when they were resolved: a dismissed incident keeps the
+                # last_seen of its final observation, which can be weeks old.
+                order = "resolved_at" if status == "resolved" else "last_seen"
                 rows = conn.execute(
-                    "SELECT * FROM incidents WHERE status=? ORDER BY last_seen DESC, id DESC LIMIT ?",
+                    f"SELECT * FROM incidents WHERE status=? ORDER BY {order} DESC, id DESC LIMIT ?",
                     (status, limit),
                 ).fetchall()
         return [self._incident_row(row) for row in rows]

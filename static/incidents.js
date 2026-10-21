@@ -38,7 +38,7 @@
     return typeof value === "number" ? new Date(value * 1000).toLocaleString() : "unknown";
   }
 
-  async function propose(item, button) {
+  async function propose(item, button, action = "propose") {
     if (state.submitting.has(item.id)) return;
     state.revision += 1;
     state.submitting.add(item.id);
@@ -46,10 +46,10 @@
     button.disabled = true;
     message.textContent = "Checking incident evidence and policy…";
     try {
-      const result = await request(root.dataset.api + "/" + encodeURIComponent(item.id) + "/propose", {
+      const result = await request(root.dataset.api + "/" + encodeURIComponent(item.id) + "/" + action, {
         method: "POST", body: new URLSearchParams({ csrf_token: csrf() }),
       });
-      const resultMessage = result.reason || (result.ok ? "Proposal created." : "Proposal refused.");
+      const resultMessage = result.reason || (result.ok ? "Done." : "Refused.");
       state.notice = resultMessage;
       window.dispatchEvent(new CustomEvent("planetexpress:approvals-refresh"));
       state.submitting.delete(item.id);
@@ -112,6 +112,13 @@
       // Without this the click bubbles to the row and collapses the detail the operator is
       // reading, right as the proposal lands.
       button.addEventListener("click", event => { event.stopPropagation(); propose(item, button); });
+      detail.append(button);
+    }
+    if (hint.state === "not_observed") {
+      const button = node("button", "pe-btn", "DISMISS");
+      button.type = "button";
+      button.disabled = state.submitting.has(item.id);
+      button.addEventListener("click", event => { event.stopPropagation(); propose(item, button, "dismiss"); });
       detail.append(button);
     }
 
