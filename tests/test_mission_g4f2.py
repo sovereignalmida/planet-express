@@ -329,6 +329,27 @@ def test_every_consumer_gets_protection_from_the_one_helper():
         assert "grant.protected.resources" not in src and "grant.exclusions" not in src, module.__name__
 
 
+def test_a_start_in_flight_when_shutdown_begins_launches_nothing_and_leaves_no_session(tmp_path):
+    from repair_fakes import build
+
+    from planet_express.missions.supervisor import RepairNotReady
+    st = build(tmp_path)
+    try:
+        mid = st.propose()["mission_id"]
+        st.approve_all(mid)
+        real = st.sup.require_repair_preconditions
+
+        def slow_check():                                    # the start has passed its first look at the flag...
+            real()
+            st.sup.begin_shutdown()                          # ...and shutdown begins before the session is registered
+        st.sup.require_repair_preconditions = slow_check
+        with pytest.raises(RepairNotReady):
+            st.sup.start(mid)
+        assert st.runtimes == [] and mid not in st.sup._runs
+    finally:
+        st.close()
+
+
 # ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
 
 def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):

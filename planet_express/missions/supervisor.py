@@ -415,6 +415,11 @@ class Supervisor:
             raise
         run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
         self._runs[mission.id] = run
+        if self._shutting_down:
+            # Shutdown began while this start was in flight (its snapshot of `_runs` may predate this run): the run is
+            # registered FIRST and the flag read AFTER, so either shutdown() sees it or this does. Nothing is launched.
+            self._shutdown_one(run)
+            raise RepairNotReady("the supervisor is shutting down")
         if self.ms.get_mission(mission.id).cancel_requested_at is not None:
             return self._kill_and_advance(run, "cancel")     # a cancel raced the launch: nothing is launched
         # The launcher hands the token to the child on fd 3 (the helper's token pipe); it never touches argv, env,
@@ -1312,17 +1317,20 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     future.result(max(0.0, deadline - time.monotonic()))
         for run in list(self._runs.values()):
-            try:
-                with self._lock_for(run.mission_id):
-                    self._begin_kill(run, "shutdown")
-                    if run.cs is None or self.containment.is_empty(run.cs):
-                        self._revoke(run)
-                        if run.cs is not None:
-                            self.containment.cleanup(run.cs)
-                        self._runs.pop(run.mission_id, None)
-                        self._reap_session(run)
-            except Exception:
-                log.exception("could not stop mission %s cleanly", run.mission_id)
+            self._shutdown_one(run)
+
+    def _shutdown_one(self, run: _Run) -> None:
+        try:
+            with self._lock_for(run.mission_id):
+                self._begin_kill(run, "shutdown")
+                if run.cs is None or self.containment.is_empty(run.cs):
+                    self._revoke(run)
+                    if run.cs is not None:
+                        self.containment.cleanup(run.cs)
+                    self._runs.pop(run.mission_id, None)
+                    self._reap_session(run)
+        except Exception:
+            log.exception("could not stop mission %s cleanly", run.mission_id)
 
     # ── restart recovery ────────────────────────────────────────────────────
     def recover(self) -> list[str]:

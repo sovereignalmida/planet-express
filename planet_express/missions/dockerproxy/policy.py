@@ -121,6 +121,11 @@ class Scope:
         return classify(resource, self.resources, self.protected, stacks_root=self.stacks_root,
                         parent_of_protected=parent_of_protected, excluded=self.excluded)
 
+    def holds_excluded(self, resource: str) -> bool:
+        """Does this path or mount CONTAIN (or equal) one of the grant's excluded resources? A bind of such a parent would
+        hand the container the excluded subtree, so it is refused (the carve-out is for the child, not a hole in the parent)."""
+        return any(contains(resource, e, stacks_root=self.stacks_root) for e in self.excluded)
+
     def classify_path(self, resource: str) -> str:
         return classify(resource, self.paths, self.protected, stacks_root=self.stacks_root, excluded=self.excluded)
 
@@ -623,7 +628,7 @@ class Policy:
         for source in self._writable_binds(info, host):
             norm = posixpath.normpath(source)
             rid = _try_canon(f"path:{norm}", scope.host)
-            if rid is not None and scope.classify_path(rid) == "in_scope":
+            if rid is not None and scope.classify_path(rid) == "in_scope" and not scope.holds_excluded(rid):
                 continue                                        # inside the grant's own paths and mounts
             system = any(norm == d or norm.startswith(d.rstrip("/") + "/") or d.startswith(norm.rstrip("/") + "/")
                          for d in SYSTEM_DIRS)
@@ -679,8 +684,8 @@ class Policy:
         except BadResource:
             raise Refusal("bad bind source") from None
         verdict = scope.classify_path(rid)
-        if verdict == "protected":
-            raise Refusal("the bind source touches a protected resource")
+        if verdict == "protected" or scope.holds_excluded(rid):
+            raise Refusal("the bind source touches a protected or excluded resource")
         if verdict != "in_scope":
             raise Refusal("the bind source is outside the grant's paths and mounts")
 
