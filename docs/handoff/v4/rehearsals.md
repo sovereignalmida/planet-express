@@ -36,8 +36,9 @@ sudo python3 -m planet_express.missions.launcher.setup_steps probe  --core-user 
 sudo -u planetexpress python3 scripts/mission_containment_rehearsal.py \
     --workspace-root /var/lib/planetexpress/mission-workspaces         # exit 0 only if everything passed
 
-# 4. repair rehearsal (item 7). PE_REHEARSAL_SKIP_GATE=1 only if the VM has not been through the launcher setup
-PE_PYTHON=/opt/pe/venv/bin/python scripts/run_rehearsal.sh --vm HOST > repair-record.json
+# 4. repair rehearsal (item 7). --core-user is the account Core runs as: the side-door gate checks sudoers rules that
+#    reach it. PE_REHEARSAL_SKIP_GATE=1 only if the VM has not been through the launcher setup (the record says so)
+PE_PYTHON=/opt/pe/venv/bin/python scripts/run_rehearsal.sh --vm HOST -- --core-user planetexpress > repair-record.json
 echo $?        # 0 pass, 1 a step failed, 2 refused (nothing touched)
 ```
 

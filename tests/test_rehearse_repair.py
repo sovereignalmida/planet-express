@@ -128,6 +128,17 @@ def test_a_failed_step_or_a_crash_exits_1(mod):
     assert "rehearsal-crashed" in out.getvalue()
 
 
+def test_the_core_user_is_configurable_and_defaults_to_the_documented_account(mod):
+    assert mod.parse_args([]).core_user == "planetexpress"
+    assert mod.parse_args(["--core-user", "root"]).core_user == "root"
+
+
+def test_a_failed_teardown_is_a_failed_step_in_the_record(mod):
+    rec = mod.Recorder()
+    rec.step("teardown", False, "the rehearsal project was not fully removed", remaining=["abc"])
+    assert not rec.document(scenario="all")["ok"]
+
+
 def test_bad_arguments_are_a_usage_error(mod):
     with pytest.raises(SystemExit) as exc:
         mod.parse_args(["--timeout-s", "5"])

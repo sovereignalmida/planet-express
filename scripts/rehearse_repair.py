@@ -80,6 +80,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--scenario", choices=("all", *SCENARIOS), default="all")
     parser.add_argument("--workdir", default=None, help="state, stacks and workspaces (default: a new temp directory)")
     parser.add_argument("--image", default=DEFAULT_IMAGE)
+    parser.add_argument("--core-user", default="planetexpress",
+                        help="the account Core runs as on this host: the side-door gate checks sudoers rules that reach it")
     parser.add_argument("--timeout-s", type=int, default=300)
     parser.add_argument("--keep", action="store_true", help="leave the compose project and the workdir in place")
     parser.add_argument("--allow-foreign-containers", action="store_true")
@@ -323,8 +325,11 @@ def rehearse_real(args: argparse.Namespace, rec: Recorder) -> None:
         if rig is not None:
             rig.close()
         if not args.keep:
-            real_run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "down", "-v",
-                      "--remove-orphans", "-t", "2"], 120)
+            down = real_run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "down", "-v",
+                             "--remove-orphans", "-t", "2"], 120)
+            left = container_ids()
+            rec.step("teardown", down[0] == 0 and not left, "the rehearsal project was not fully removed",
+                     remaining=sorted(left))
 
 
 def container_ids(project: str = PROJECT) -> dict[str, str]:
@@ -367,7 +372,7 @@ class Rig:
                                   runtime={"argv": [sys.executable, "-I", str(SELF)]})
         self.containment = ProcessContainment()
         provider = SystemdCheckpointProvider(SimpleNamespace(stacks_root=stacks))
-        wiring = RepairWiring(provider=provider, scan=lambda: project_scan(PROJECT), core_user="root")
+        wiring = RepairWiring(provider=provider, scan=lambda: project_scan(PROJECT), core_user=args.core_user)
         protected = build_protected_set(self.cfg, stacks_root=self.stacks)
         self.controls = build_repair_controls(self.store, self.cfg, wiring, containment=self.containment, broker=None,
                                               protected=protected, stacks_root=self.stacks, enabled=lambda: True)
