@@ -833,3 +833,46 @@ def test_a_created_container_id_is_recorded_before_the_answer_so_the_tripwire_ca
     assert [e["created_id"] for e in created] == made
     assert proxy.gate.events.index(created[0]) < proxy.gate.events.index(
         next(e for e in proxy.gate.events if e["event"] == "docker.result"))
+
+
+_CREATE = (b'{"Image":"alpine:3","Labels":{"com.docker.compose.project":"media",'
+           b'"com.docker.compose.service":"qbittorrent"},"Cmd":["a"]}')
+
+
+def test_a_create_is_announced_before_the_daemon_sees_it(proxy):
+    order = []
+    original = proxy.gate.record
+    proxy.gate.record = lambda s, b: (order.append(("record", b["event"])), original(s, b))[1]
+    proxy.daemon.requests.clear()
+    status, _, _ = proxy.req("POST", "/containers/create", body=_CREATE)
+    assert status == 201
+    begin = next(e for e in proxy.gate.events if e["event"] == "docker.create_begin")
+    created = next(e for e in proxy.gate.events if e["event"] == "docker.created")
+    assert begin["nonce"] == created["nonce"] and order[0] == ("record", "docker.write")
+    assert ("record", "docker.create_begin") in order
+
+
+def test_if_the_intent_cannot_be_recorded_nothing_is_created(proxy):
+    original = proxy.gate.record
+
+    def selective(session, body):
+        if body["event"] == "docker.create_begin":
+            raise RuntimeError("disk full")
+        return original(session, body)
+    proxy.gate.record = selective
+    status, _, _ = proxy.req("POST", "/containers/create", body=_CREATE)
+    assert status == 500 and proxy.daemon.made == {}
+
+
+def test_a_created_id_that_cannot_be_recorded_fails_the_create_closed_and_removes_the_container(proxy):
+    original = proxy.gate.record
+
+    def selective(session, body):
+        if body["event"] == "docker.created":
+            raise RuntimeError("disk full")
+        return original(session, body)
+    proxy.gate.record = selective
+    status, _, _ = proxy.req("POST", "/containers/create", body=_CREATE)
+    assert status == 500
+    assert any(r["method"] == "DELETE" for r in proxy.daemon.requests)
+    assert any(e["event"] == "docker.create_end" for e in proxy.gate.events)

@@ -284,7 +284,12 @@ class ProxyServer:
             length, ctype = len(body), "application/x-tar"
         elif route.body == "raw":
             body, length, ctype = self._client_body(conn, head, plan.raw_length), plan.raw_length, "application/x-tar"
-        cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype)
+        nonce = self._create_begin(session) if route.name == "container.create" and self.gate is not None else None
+        try:
+            cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype)
+        except BaseException:
+            self._create_end(session, nonce)
+            raise
         try:
             data = resp.read(self.limits.json_response + 1)
             if len(data) > self.limits.json_response:
@@ -296,13 +301,18 @@ class ProxyServer:
                 passed["Api-Version"] = self._clamped_api(passed.get("Api-Version"))
             length_up = resp.getheader("Content-Length")
         except Refusal:
+            self._create_end(session, nonce)
             raise
         except Exception as exc:                                 # noqa: BLE001
+            self._create_end(session, nonce)
             raise UpstreamError(type(exc).__name__) from None
         finally:
             cconn.close()
-        if route.name == "container.create" and status == 201 and self.gate is not None:
-            self._record_created(session, data)           # BEFORE the answer: a scan racing the create must find it recorded
+        if nonce is not None:
+            if status == 201:
+                self._record_created(session, data, nonce)    # BEFORE the answer: a scan racing the create must find it
+            else:
+                self._create_end(session, nonce)
         if status in (200, 201) and route.json_response:
             data = self._postprocess(plan, data, session)
         if plan.method == "HEAD":
@@ -316,15 +326,43 @@ class ProxyServer:
             except Exception:                                    # noqa: BLE001
                 log.warning("docker proxy: result event not recorded")
 
-    def _record_created(self, session, data: bytes) -> None:
-        """Remember the id of a container THIS session created, so the tripwire can tell it from one that merely carries an
-        in-scope compose label (a label is the container's own claim, not evidence)."""
+    def _create_begin(self, session) -> str:
+        """Announce a container create BEFORE the daemon sees it, so a tripwire scan that finds the new container while the
+        create is in flight waits for the record instead of calling it unknown. If the intent cannot be recorded, nothing is
+        created."""
+        nonce = os.urandom(8).hex()
+        try:
+            self.gate.record(session, {"event": "docker.create_begin", "nonce": nonce})
+        except Exception:                                        # noqa: BLE001 - no record, no create
+            raise Refusal("the container create could not be recorded", 500) from None
+        return nonce
+
+    def _create_end(self, session, nonce: str | None) -> None:
+        if nonce is None:
+            return
+        try:
+            self.gate.record(session, {"event": "docker.create_end", "nonce": nonce})
+        except Exception:                                        # noqa: BLE001 - the intent just ages out
+            log.warning("docker proxy: create end not recorded")
+
+    def _record_created(self, session, data: bytes, nonce: str) -> None:
+        """Record the id of a container THIS session created, so the tripwire can tell it from one that merely carries an
+        in-scope compose label (a label is the container's own claim, not evidence). A write that fails is not swallowed: the
+        container is removed again and the create fails closed."""
+        ident = ""
         try:
             ident = json.loads(data.decode("utf-8")).get("Id", "")
-            if isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{64}", ident):
-                self.gate.record(session, {"event": "docker.created", "created_id": ident})
-        except Exception:                                    # noqa: BLE001 - unrecorded means the tripwire pauses: fails safe
-            log.warning("docker proxy: created container not recorded")
+            if not (isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{64}", ident)):
+                raise ValueError("no container id in the daemon's answer")
+            self.gate.record(session, {"event": "docker.created", "created_id": ident, "nonce": nonce})
+        except Exception:                                        # noqa: BLE001
+            if re.fullmatch(r"[0-9a-f]{64}", ident if isinstance(ident, str) else ""):
+                try:
+                    self.upstream.call("DELETE", f"/containers/{ident}?force=1&v=1")
+                except Exception:                                # noqa: BLE001 - the tripwire pauses on an unrecorded container
+                    log.warning("docker proxy: could not remove an unrecorded container")
+            self._create_end(session, nonce)
+            raise Refusal("the created container could not be recorded; it was removed", 500) from None
 
     def _clamped_api(self, daemon_says: str | None) -> str:
         """Clients negotiate down to what /_ping says: never advertise a version newer than the proxy serves."""

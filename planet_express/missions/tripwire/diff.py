@@ -65,6 +65,7 @@ class DiffContext:
     host: str = "local"
     excluded: tuple[str, ...] = ()             # the grant's enforced exclusions: protected-like, but only themselves and below
     created: frozenset[str] = frozenset()      # ids of containers the Docker proxy recorded as created by this mission
+    creates_in_flight: int = 0                 # proxy creates announced but not yet recorded: a new container may be one of them
 
     def cls(self, resource: str) -> str:
         return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root, excluded=self.excluded)
@@ -137,8 +138,11 @@ def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
                 # labels are its own claim, not evidence of scope. Judge it by its name (protected still wins by its
                 # labels) and treat it as outside the grant, so it pauses.
                 own = ctx.rid(f"container:{name}")
+                named_protected = ctx.cls(res) == "protected" or (own is not None and ctx.cls(own) == "protected")
+                if ctx.creates_in_flight and not named_protected:
+                    continue            # the proxy announced a create that is not recorded yet: judge it on the next scan
                 out.append(Change("containers", own or res, "container_added",
-                                  "protected" if ctx.cls(res) == "protected" else "out_of_scope",
+                                  "protected" if named_protected else "out_of_scope",
                                   f"{label}: not created through the proxy"))
             else:
                 out.append(Change("containers", res, "container_added" if b is None else "container_removed",

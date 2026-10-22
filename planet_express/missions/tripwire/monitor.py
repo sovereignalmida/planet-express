@@ -47,6 +47,7 @@ from .signals import Scanner, ScanResult, blind_resources
 log = logging.getLogger(__name__)
 
 ACTOR = "tripwire"
+CREATE_GRACE_S = 120      # a container create the proxy announced but has not finished counts as in flight this long
 STATE_V = 1
 MAX_CHANGES = 30
 MAX_STATE_BYTES = 8 * 1024 * 1024
@@ -138,6 +139,7 @@ class TripwireMonitor:
         self.checkpoint = checkpoint
         self.scanner = scanner
         self.state = TripwireStore(state_dir)
+        self._proxy_seen: dict[str, tuple] = {}
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self.stacks_root = stacks_root
         self.interval_s = interval_s
@@ -233,15 +235,37 @@ class TripwireMonitor:
                 out[mission.id] = "monitor_error"
         return out
 
+    def _proxy_state(self, mission_id: str) -> tuple[frozenset[str], int]:
+        """(ids the proxy recorded creating for this mission, how many creates are in flight). Read incrementally from the
+        last seq seen (never the whole log per scan); an intent with no end after CREATE_GRACE_S stops counting."""
+        seq, created, begun, ended = self._proxy_seen.get(mission_id, (0, set(), {}, set()))
+        for ev_seq, at, body in self.ms.proxy_create_events(mission_id, seq):
+            seq = max(seq, ev_seq)
+            kind, nonce = body.get("event"), body.get("nonce")
+            if kind == "docker.create_begin" and isinstance(nonce, str):
+                begun[nonce] = at
+            else:
+                if kind == "docker.created" and isinstance(body.get("created_id"), str):
+                    created.add(body["created_id"])
+                if isinstance(nonce, str):
+                    ended.add(nonce)
+        now = int(self.ms.store._clock())
+        for nonce in [n for n in begun if n in ended]:
+            del begun[nonce]
+        ended.intersection_update(begun)
+        self._proxy_seen[mission_id] = (seq, created, begun, ended)
+        pending = sum(1 for at in begun.values() if now - at <= CREATE_GRACE_S)
+        return frozenset(created), pending
+
     def _ctx(self, grant: Grant, mission_id: str | None = None) -> DiffContext:
         scope = tuple(canon(r) for r in grant_resources(grant))
         try:
             prot = grant.effective_protection()
         except BadResource:
             raise ValueError("grant.protected holds a malformed resource") from None
-        created = self.ms.proxy_created_containers(mission_id) if mission_id else frozenset()
+        created, pending = self._proxy_state(mission_id) if mission_id else (frozenset(), 0)
         return DiffContext(scope=scope, protected=prot.protected, excluded=prot.excluded, stacks_root=self.stacks_root,
-                           created=created)
+                           created=created, creates_in_flight=pending)
 
     def _judge(self, mission: Mission, result: ScanResult) -> str:
         if not result.ok:

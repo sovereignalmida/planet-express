@@ -239,13 +239,72 @@ def test_a_container_the_proxy_recorded_as_created_by_this_mission_is_allowed(tm
     assert status(rig) == "executing" and not frozen(rig)
 
 
+def _proxy_event(rig, body, actor="docker-proxy"):
+    rig.env.ms.append_event(rig.mission.id, "tool", actor, body)
+
+
+def test_a_container_seen_while_a_proxy_create_is_in_flight_waits_for_its_record(tmp_path):
+    from tripwire_fakes import doc, frozen, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1"})
+    made = doc("media-new-1", project="media", service="new")
+    rig.host.containers["media-new-1"] = made
+    assert rig.monitor.scan_once()[rig.mission.id] == "ok"             # the record has not landed yet: no verdict, no freeze
+    assert status(rig) == "executing" and not frozen(rig)
+    _proxy_event(rig, {"event": "docker.created", "created_id": made["Id"], "nonce": "n1"})
+    assert rig.monitor.scan_once()[rig.mission.id] == "ok" and status(rig) == "executing"
+
+
+def test_an_intent_that_never_finishes_stops_protecting_an_unknown_container(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1"})
+    rig.host.containers["media-evil-1"] = doc("media-evil-1", project="media", service="evil")
+    rig.env.clock.t += 500
+    rig.monitor.scan_once()
+    assert status(rig) == "paused_tripwire"
+
+
+def test_only_the_proxys_own_records_vouch_for_a_container(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    made = doc("media-evil-1", project="media", service="evil")
+    rig.host.containers["media-evil-1"] = made
+    _proxy_event(rig, {"event": "docker.created", "created_id": made["Id"]}, actor="session")
+    rig.monitor.scan_once()
+    assert status(rig) == "paused_tripwire"
+
+
+def test_the_proxy_log_is_read_incrementally(tmp_path):
+    from tripwire_fakes import go_executing, make_rig
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    _proxy_event(rig, {"event": "docker.created", "created_id": "a" * 64, "nonce": "n"})
+    first = rig.monitor._proxy_state(rig.mission.id)
+    seen = rig.monitor._proxy_seen[rig.mission.id][0]
+    assert first[0] == frozenset({"a" * 64}) and seen > 0
+    assert rig.env.ms.proxy_create_events(rig.mission.id, seen) == []
+
+
+def test_a_container_named_like_an_excluded_one_with_spoofed_labels_is_reported_protected(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, paused_event
+    rig = make_rig(tmp_path, grant_over={"exclusions": ["container:media-vault-1"]})
+    go_executing(rig)
+    rig.host.containers["media-vault-1"] = doc("media-vault-1", project="media", service="innocent")
+    rig.monitor.scan_once()
+    assert paused_event(rig)["cause"] == "protected"
+
+
 def test_another_missions_creation_does_not_vouch_for_this_one(tmp_path):
     from tripwire_fakes import doc, go_executing, make_rig, status
     rig = make_rig(tmp_path)
     go_executing(rig)
     made = doc("media-new-1", project="media", service="new")
     rig.host.containers["media-new-1"] = made
-    assert made["Id"] not in rig.env.ms.proxy_created_containers(rig.mission.id)
+    assert made["Id"] not in rig.monitor._proxy_state(rig.mission.id)[0]
     rig.monitor.scan_once()
     assert status(rig) == "paused_tripwire"
 

@@ -1,6 +1,7 @@
 """Mission CRUD, the redacting event append, and the one-transaction session start (contract §2)."""
 
 import hashlib
+import json
 import re
 import secrets
 import sqlite3
@@ -15,6 +16,8 @@ from .canonical import canonical_json, sha256_hex
 from .events import insert_event
 from .models import Grant, Mission, MissionEvent, Origin, SessionKind
 from .state import MissionNotFound, transition_in_txn
+
+PROXY_ACTOR = "docker-proxy"          # the only actor whose records may vouch for a container
 
 
 class GrantLocked(RuntimeError):
@@ -224,14 +227,24 @@ class MissionStore:
                                 (mission_id, after_seq)).fetchall()
         return [MissionEvent(**dict(r)) for r in rows]
 
-    def proxy_created_containers(self, mission_id: str) -> frozenset[str]:
-        """Full ids of the containers the Docker proxy recorded as created for this mission."""
+    def proxy_create_events(self, mission_id: str, after_seq: int = 0) -> list[tuple[int, int, dict[str, Any]]]:
+        """(seq, at, body) of the Docker proxy's container-create records for this mission after `after_seq`. Pinned to the
+        proxy's own actor (nothing else may vouch for a container) and read from the (mission, seq) index forward, so a
+        caller that remembers the last seq never rescans the log."""
         with self.store._connect() as conn:
             rows = conn.execute(
-                "SELECT json_extract(body_json, '$.created_id') AS cid FROM mission_events "
-                "WHERE mission_id=? AND kind='tool' AND json_extract(body_json, '$.event')='docker.created'",
-                (mission_id,)).fetchall()
-        return frozenset(r["cid"] for r in rows if isinstance(r["cid"], str))
+                "SELECT seq, at, body_json FROM mission_events WHERE mission_id=? AND seq>? AND kind='tool' AND actor=? "
+                "AND json_extract(body_json, '$.event') IN ('docker.create_begin','docker.created','docker.create_end') "
+                "ORDER BY seq", (mission_id, after_seq, PROXY_ACTOR)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                body = json.loads(r["body_json"])
+            except ValueError:
+                continue
+            if isinstance(body, dict):
+                out.append((r["seq"], r["at"], body))
+        return out
 
     # ── sessions ────────────────────────────────────────────────────────────
     def start_session(self, mission_id: str, *, kind: SessionKind, token_hash: str, session_ttl_s: int,
