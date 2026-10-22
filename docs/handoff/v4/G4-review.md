@@ -48,3 +48,10 @@ static/setup.js:91 Telegram token cleared on failed find-chat; casa_farnsworth.p
 setup/server.py:354 /api/undo lacks the exposed() check; casa_zoidberg.py:428 digest truncation can split HTML; setup/discover.py:237
 any global IPv6 = "public", blocks setup; command_service.py:1173 duplicate @staticmethod; farnsworth.py:1952 double target
 resolution; scripts/mos-boot/post-start.sh:8 leaks vars and blocks 130 s.
+
+## F2 second review (2026-10-22)
+Codex `--base v4-next` on the F2 branch: no findings. Claude /code-review: 13 findings (proxy create race => spurious freeze; uid-range
+check gating/boot failure; old-range orphan detection; actor pin + O(events) scan; exclusion host canonicalisation; exclusion
+child blocks parent; shutdown vs tripwire and start-while-shutting-down; card guard gaps; socket drop-in symlink + dangling link;
+TLS flag completeness; expiry drift via _step path; name-derived classification; single effective_protected helper). All sent to
+the F2 worker as a follow-up round, none declined at dispatch; dispositions to be recorded when it reports.
