@@ -40,23 +40,40 @@ _TRUE = frozenset({"1", "t", "true"})
 _FALSE = frozenset({"0", "f", "false"})
 
 
+def _readable_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path) and os.access(path, os.R_OK)
+    except OSError:
+        return False
+
+
 def _exec_tls_verified(exec_start: str) -> bool:
     """Whether a dockerd command line demands client-verified TLS: `--tlsverify` true (bare, or `=true`/`=1`; the last one
-    wins, a false or unreadable value is not verification) AND a non-empty `--tlscacert` to verify clients against."""
+    wins, a false or unreadable value is not verification), a `--tlscert` and a `--tlskey`, and a `--tlscacert` that names a
+    readable file to verify clients against. A CA that is not there is no verification: the exposure is reported."""
     try:
         words = shlex.split(exec_start)
     except ValueError:
         return False
-    verify, cacert = False, False
+    verify, cacert, cert, key = False, "", False, False
     for i, word in enumerate(words):
         flag, eq, value = word.partition("=")
-        if flag in ("--tlsverify", "-tlsverify"):
+        flag = flag.lstrip("-")
+        if flag not in ("tlsverify", "tlscacert", "tlscert", "tlskey") or not word.startswith("-"):
+            continue
+        if flag == "tlsverify":
             verify = (not eq) or value.strip().lower() in _TRUE
-        elif flag in ("--tlscacert", "-tlscacert"):
-            if not eq and i + 1 < len(words):
-                value = words[i + 1]
-            cacert = bool(value.strip())
-    return verify and cacert
+            continue
+        if not eq and i + 1 < len(words):
+            value = words[i + 1]
+        value = value.strip()
+        if flag == "tlscacert":
+            cacert = value
+        elif flag == "tlscert":
+            cert = bool(value)
+        else:
+            key = bool(value)
+    return verify and cert and key and bool(cacert) and _readable_file(cacert)
 
 
 _TCP_HOST = re.compile(r"""(?:-H|--host)[ =]*["']?(tcp://[^\s"']*)""", re.IGNORECASE)
@@ -224,7 +241,9 @@ class DockerTcpExposure(Step):
         hosts = doc.get("hosts", [])
         if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
             raise StepError(f"{self.p.daemon_json}: hosts is not a list of strings")
-        tls = doc.get("tlsverify") is True and bool(doc.get("tlscacert"))
+        ca = doc.get("tlscacert")
+        tls = (doc.get("tlsverify") is True and isinstance(ca, str) and _readable_file(ca)
+               and bool(doc.get("tlscert")) and bool(doc.get("tlskey")))
         return [f"{h} (hosts in {self.p.daemon_json}, no client-verified TLS)" for h in hosts
                 if h.strip().lower().startswith("tcp://") and not tls]
 
@@ -249,6 +268,7 @@ class DockerTcpExposure(Step):
         found = []
         seen: set[str] = set()
         for listed in self._unit_files():
+            socket_unit = ".socket" in listed          # judged by the NAME it is listed under, not where a link points
             # A stock install links `sockets.target.wants/docker.socket` to the real unit: judge the target, once. /dev/null
             # is a masked unit. The target itself must still be a plain readable file, or the gate fails closed.
             path = os.path.realpath(listed)
@@ -257,19 +277,21 @@ class DockerTcpExposure(Step):
             seen.add(path)
             data = read_regular(path)
             if data is None:
+                if os.path.islink(listed):
+                    raise StepError(f"{listed} is a link to {path}, which does not exist (cannot judge it)")
                 continue
             body = data[:MAX_FILE].decode("utf-8", errors="replace").replace("\\\n", " ")
-            socket_unit = ".socket" in path
             for line in body.splitlines():
                 stripped = line.strip()
                 if stripped.startswith(("#", ";")):
                     continue
                 if stripped.startswith("ExecStart"):
+                    only_exec_start = stripped.split("=", 1)[0].strip() == "ExecStart"
                     value = stripped.split("=", 1)[1] if "=" in stripped else ""
                     if "dockerd" in value and "$" in value:
                         raise StepError(f"cannot tell what {path} passes to dockerd (it expands a variable)")
-                    if _exec_tls_verified(value):
-                        continue
+                    if only_exec_start and _exec_tls_verified(value):
+                        continue                         # ExecStartPre/Post never carry the daemon's own flags
                     for host in _TCP_HOST.findall(value):
                         found.append(f"{host} (ExecStart in {path}, no client-verified TLS)")
                 elif stripped.startswith("ListenStream") and socket_unit:

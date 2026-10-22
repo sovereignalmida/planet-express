@@ -157,10 +157,20 @@ def test_docker_tcp_loopback_is_still_reachable_by_a_local_worker(host):
     assert not DockerTcpExposure(host.paths()).probe().ok
 
 
+def _tls_files(host):
+    for name in ("ca.pem", "c.pem", "k.pem"):
+        (host.tmp / name).write_text("x")
+    return host.tmp / "ca.pem"
+
+
 def test_docker_tcp_with_verified_tls_is_authenticated(host):
+    ca = _tls_files(host)
     (host.etc / "docker" / "daemon.json").write_text(
-        '{"hosts": ["tcp://0.0.0.0:2376"], "tlsverify": true, "tlscacert": "/ca.pem", "tlscert": "/c.pem", "tlskey": "/k.pem"}\n')
+        '{"hosts": ["tcp://0.0.0.0:2376"], "tlsverify": true, "tlscacert": "%s", "tlscert": "/c.pem", "tlskey": "/k.pem"}\n' % ca)
     assert DockerTcpExposure(host.paths()).probe().ok
+    (host.etc / "docker" / "daemon.json").write_text(
+        '{"hosts": ["tcp://0.0.0.0:2376"], "tlsverify": true, "tlscacert": "/nonexistent-ca.pem", "tlscert": "/c.pem", "tlskey": "/k.pem"}\n')
+    assert not DockerTcpExposure(host.paths()).probe().ok          # a CA that is not there verifies nobody
     (host.etc / "docker" / "daemon.json").write_text('{"hosts": ["tcp://0.0.0.0:2376"], "tls": true}\n')
     assert not DockerTcpExposure(host.paths()).probe().ok          # encryption without client verification is not auth
 
@@ -226,7 +236,8 @@ def test_docker_tcp_exec_start_forms(host, exec_start):
 
 
 def test_docker_tcp_continued_exec_start_with_verified_tls_passes(host):
-    _unit(host, "docker.service", "[Service]\nExecStart=/usr/bin/dockerd \\\n  -H tcp://0.0.0.0:2376 \\\n  --tlsverify --tlscacert=/ca.pem\n")
+    ca = _tls_files(host)
+    _unit(host, "docker.service", f"[Service]\nExecStart=/usr/bin/dockerd \\\n  -H tcp://0.0.0.0:2376 \\\n  --tlsverify --tlscacert={ca} --tlscert=/c.pem --tlskey=/k.pem\n")
     assert DockerTcpExposure(host.paths()).probe().ok
 
 
@@ -544,21 +555,51 @@ def test_the_gate_fails_with_no_steps(host):
 
 
 @pytest.mark.parametrize("flags,safe", [
-    ("--tlsverify --tlscacert=/ca.pem", True),
-    ("--tlsverify=true --tlscacert /ca.pem", True),
-    ("--tlsverify=1 --tlscacert=/ca.pem", True),
-    ("--tlsverify=false --tlscacert=/ca.pem", False),
-    ("--tlsverify=0 --tlscacert=/ca.pem", False),
+    ("--tlsverify --tlscacert=CA --tlscert=/c --tlskey=/k", True),
+    ("--tlsverify=true --tlscacert CA --tlscert /c --tlskey /k", True),
+    ("--tlsverify=1 --tlscacert=CA --tlscert=/c --tlskey=/k", True),
+    ("--tlsverify=false --tlscacert=CA --tlscert=/c --tlskey=/k", False),
+    ("--tlsverify=0 --tlscacert=CA --tlscert=/c --tlskey=/k", False),
     ("--tlsverify", False),                                          # no CA to verify clients against
     ("--tlsverify --tlscacert=", False),
-    ("--tlscacert=/ca.pem", False),                                  # a CA but no verification
-    ("--tlsverify=false --tlsverify --tlscacert=/ca.pem", True),     # the last one wins
-    ("--tlsverify --tlsverify=false --tlscacert=/ca.pem", False),
-    ("--tlsverify=banana --tlscacert=/ca.pem", False),
+    ("--tlsverify --tlscacert=CA", False),                           # no server cert or key
+    ("--tlsverify --tlscacert=CA --tlscert=/c", False),
+    ("--tlsverify --tlscacert=/nonexistent/ca.pem --tlscert=/c --tlskey=/k", False),     # a CA that is not there
+    ("--tlscacert=CA --tlscert=/c --tlskey=/k", False),             # a CA but no verification
+    ("--tlsverify=false --tlsverify --tlscacert=CA --tlscert=/c --tlskey=/k", True),     # the last one wins
+    ("--tlsverify --tlsverify=false --tlscacert=CA --tlscert=/c --tlskey=/k", False),
+    ("--tlsverify=banana --tlscacert=CA --tlscert=/c --tlskey=/k", False),
 ])
 def test_docker_tcp_exec_start_tlsverify_is_parsed_not_substring_matched(host, flags, safe):
-    _unit(host, "docker.service", f"[Service]\nExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2376 {flags}\n")
+    ca = _tls_files(host)
+    _unit(host, "docker.service", f"[Service]\nExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2376 {flags.replace('CA', str(ca))}\n")
     assert DockerTcpExposure(host.paths()).probe().ok is safe, flags
+
+
+def test_tls_flags_on_exec_start_pre_do_not_vouch_for_a_tcp_exec_start(host):
+    ca = _tls_files(host)
+    _unit(host, "docker.service", "[Service]\nExecStartPre=/bin/true --tlsverify --tlscacert=%s --tlscert=/c --tlskey=/k\n"
+          "ExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2376\n" % ca)
+    assert not DockerTcpExposure(host.paths()).probe().ok
+
+
+def test_a_symlinked_socket_drop_in_is_scanned_as_a_socket_unit(host):
+    real = host.tmp / "elsewhere"
+    real.mkdir()
+    (real / "override.conf").write_text("[Socket]\nListenStream=0.0.0.0:2375\n")
+    d = host.tmp / "systemd" / "docker.socket.d"
+    d.mkdir(parents=True)
+    (d / "override.conf").symlink_to(real / "override.conf")
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and "ListenStream" in probe.detail
+
+
+def test_a_dangling_unit_symlink_fails_closed(host):
+    wants = host.tmp / "systemd" / "sockets.target.wants"
+    wants.mkdir(parents=True)
+    (wants / "docker.socket").symlink_to(host.tmp / "gone" / "docker.socket")
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and probe.blocked
 
 
 def test_a_stock_wants_symlink_to_the_real_unit_is_followed_once_and_judged(host):
