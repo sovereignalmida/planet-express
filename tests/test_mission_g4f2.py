@@ -398,7 +398,7 @@ def test_the_proxy_log_is_read_incrementally(tmp_path):
     first = rig.monitor._proxy_state(rig.mission.id)
     seen = rig.monitor._proxy_seen[rig.mission.id][0]
     assert first[0] == frozenset({"a" * 64}) and seen > 0
-    assert rig.env.ms.proxy_create_events(rig.mission.id, seen) == []
+    assert rig.env.ms.proxy_creates_since(rig.mission.id, seen) == []
 
 
 def test_a_container_named_like_an_excluded_one_with_spoofed_labels_is_reported_protected(tmp_path):

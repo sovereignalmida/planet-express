@@ -227,7 +227,7 @@ class MissionStore:
                                 (mission_id, after_seq)).fetchall()
         return [MissionEvent(**dict(r)) for r in rows]
 
-    def proxy_create_events(self, mission_id: str, after_seq: int = 0) -> list[tuple[int, int, dict[str, Any]]]:
+    def proxy_creates_since(self, mission_id: str, after_seq: int = 0) -> list[tuple[int, int, dict[str, Any]]]:
         """(seq, at, body) of the Docker proxy's container-create records for this mission after `after_seq`. Pinned to the
         proxy's own actor (nothing else may vouch for a container) and read from the (mission, seq) index forward, so a
         caller that remembers the last seq never rescans the log."""

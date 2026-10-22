@@ -245,7 +245,7 @@ class TripwireMonitor:
         """(ids the proxy recorded creating for this mission, how many creates are in flight). Read incrementally from the
         last seq seen (never the whole log per scan); an intent with no end after CREATE_GRACE_S stops counting."""
         seq, created, begun, ended = self._proxy_seen.get(mission_id, (0, set(), {}, set()))
-        for ev_seq, at, body in self.ms.proxy_create_events(mission_id, seq):
+        for ev_seq, at, body in self.ms.proxy_creates_since(mission_id, seq):
             seq = max(seq, ev_seq)
             kind, nonce = body.get("event"), body.get("nonce")
             if kind == "docker.create_begin" and isinstance(nonce, str):
