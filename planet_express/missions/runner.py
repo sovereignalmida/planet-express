@@ -21,12 +21,18 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
+from planet_express.core.redact import redact
 from planet_express.core.store import Store
 from planet_express.missions.adapters.command import CommandRuntime
 from planet_express.missions.containment import SessionContainment
 from planet_express.missions.containment_cgroup import (
     CgroupContainment,
     cgroup2_mountpoint,
+)
+from planet_express.missions.discovery import (
+    ACKNOWLEDGEABLE,
+    DiscoveredInputs,
+    discover_protected_inputs,
 )
 from planet_express.missions.hooks import install_claude_code, policy_for
 from planet_express.missions.launcher.cgroup_tree import ensure_tree
@@ -220,7 +226,7 @@ def build_mission_runner(
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
     stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None, verifier=None,
-    repair_wiring=None, docker_proxy=None, checkpoint=None,
+    repair_wiring=None, docker_proxy=None, checkpoint=None, discovery=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
@@ -235,6 +241,7 @@ def build_mission_runner(
     if real:
         containment = build_containment(cfg)
     protected = None
+    found = DiscoveredInputs()
     if stacks_root is not None and (tool_broker is None or env_policy is None or repair_wiring is not None):
         # Slice 6 controls that need only the store and the config: the brokered tools (keys stay in Core's environment)
         # and the grant-to-environment policy. The tripwire monitor and the side-door gate need the checkpoint service
@@ -246,7 +253,12 @@ def build_mission_runner(
             build_protected_set,
             protected_override_recorder,
         )
-        protected = build_protected_set(cfg, stacks_root=stacks_root, record=protected_override_recorder(store))
+        try:
+            found = (discovery or discover_protected_inputs)(cfg, stacks_root=stacks_root)
+        except Exception as exc:       # discovery must not take mission control down; it does withhold Repair
+            found = DiscoveredInputs(failures={d: f"discovery raised {type(exc).__name__}" for d in ACKNOWLEDGEABLE})
+        protected = build_protected_set(cfg, stacks_root=stacks_root, record=protected_override_recorder(store),
+                                        **found.kwargs())
         if tool_broker is None:
             tool_broker = broker_from_config(cfg, missions=MissionStore(store), stacks_root=stacks_root,
                                              protected=protected.resources)
@@ -265,7 +277,17 @@ def build_mission_runner(
             stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
             protected_gids=_protected_gids(), label_allow=cfg.docker_label_allow)
     controls = None
-    if repair_wiring is not None and protected is not None:
+    if repair_wiring is not None and protected is not None and found.failures:
+        # G4-F1: a required protected domain could not be established, so the tripwire and the proxy would be partly blind.
+        # Observe and Propose still run; Repair needs the whole safety net.
+        reasons = "; ".join(f"{d}: {w}" for d, w in sorted(found.failures.items()))
+        log.warning("Repair missions are not available: protected-set discovery incomplete (%s)", reasons)
+        try:
+            store.record_event("mission.protected_discovery_incomplete", domains=sorted(found.failures),
+                               reason=redact(reasons)[:1024])
+        except Exception as exc:
+            log.warning("could not record the discovery failure: %s", exc)
+    elif repair_wiring is not None and protected is not None:
         # Slice 7a: the checkpoint service, tripwire monitor, verifier and side-door gate, all or none. A failure to build any of
         # them leaves the host without Repair capability (observe/propose still run); it never yields a partial safety net.
         from planet_express.missions.assembly import build_repair_controls
