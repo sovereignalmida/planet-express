@@ -398,10 +398,17 @@ def rehearse_real(args: argparse.Namespace, rec: Recorder) -> None:
             return
         rig = Rig(work, stacks, args)
         rec.step("controls-built", True, repair_gate="skipped" if rig.gate_skipped else "real")
-        if args.scenario in ("all", "namespace") and prepare_scenario(rec, "namespace", stack_dir, args.image):
-            scenario_namespace(rig, rec, stack_dir)
-        if args.scenario in ("all", "canary") and prepare_scenario(rec, "canary", stack_dir, args.image):
-            scenario_canary(rig, rec, stack_dir)
+        for name, run_scenario in (("namespace", scenario_namespace), ("canary", scenario_canary)):
+            if args.scenario not in ("all", name):
+                continue
+            if not prepare_scenario(rec, name, stack_dir, args.image):
+                continue
+            try:
+                run_scenario(rig, rec, stack_dir)
+            except Exception as exc:                                # noqa: BLE001 - still release below, then the record says so
+                rec.step(f"{name}:crashed", False, f"{type(exc).__name__}: {str(exc)[:200]}")
+            finally:
+                rig.release(rec, name)                              # BEFORE the next scenario's prepare
     finally:
         if rig is not None:
             rig.close()
@@ -410,23 +417,66 @@ def rehearse_real(args: argparse.Namespace, rec: Recorder) -> None:
             down = real_run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "down", "-v",
                              "--remove-orphans", "-t", "2"], 120)
             left, nets = container_ids(), networks_left()
-            rec.step("teardown", down[0] == 0 and not left and not nets, "the rehearsal project was not fully removed",
+            clean = down[0] == 0 and not left and not nets
+            rec.step("teardown", clean, "" if clean else "the rehearsal project was not fully removed",
                      remaining=sorted(left), networks=nets, leftovers_removed=removed)
 
 
-def prepare_scenario(rec: Recorder, scenario: str, stack_dir: Path, image: str) -> bool:
+def prepare_scenario(rec: Recorder, scenario: str, stack_dir: Path, image: str,
+                     run: Callable[..., tuple[int, str]] | None = None) -> bool:
     """Start every scenario from the same place: renamed leftovers of an earlier (failed) scenario removed, the compose file
-    as shipped, and the whole project up. Runs as the harness on the host socket, never as the agent."""
-    removed = remove_leftovers()
+    as shipped, and the whole project up. Runs as the harness on the host socket, never as the agent. A baseline that is not
+    reached is a failed step that says what is missing, and the scenario does not run."""
+    run = run or real_run
+    removed = remove_leftovers(run)
     (stack_dir / "docker-compose.yml").write_text(compose_text(image))
-    up = real_run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "up", "-d"], 300)
-    present = container_ids()
-    return rec.step(f"{scenario}:prepared", up[0] == 0 and {"gateway", "app1", "app2", "web"} <= set(present),
-                    "the project could not be brought to its baseline", leftovers_removed=removed)
+    up = run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "up", "-d"], 300)
+    missing = sorted({"gateway", "app1", "app2", "web"} - set(container_ids(run=run)))
+    why = ("docker compose up failed" if up[0] != 0
+           else f"baseline not reached: missing {', '.join(missing)}" if missing else "")
+    return rec.step(f"{scenario}:prepared", not why, why, leftovers_removed=removed)
 
 
-def container_ids(project: str = PROJECT) -> dict[str, str]:
-    _, out = real_run(["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={project}", "--format",
+def release_missions(rec: Recorder, label: str, mids: Sequence[str], *, status_of: Callable[[str], str],
+                     cancel: Callable[[str, str], None], tick: Callable[[], None], sleep: Callable[[float], None] = time.sleep,
+                     terminal: Sequence[str] = ("completed", "failed", "rolled_back", "cancelled"), timeout_s: float = 30) -> bool:
+    """End a scenario cleanly: any of its missions that is not terminal is cancelled through the supervisor's real cancel path
+    (session killed, leases and proxy socket released, tripwire stopped). Recorded as `<label>:released` with every final
+    status. Never raises: a mission that cannot be ended is a failed step, and the next scenario must not start on top of it."""
+    errors: list[str] = []
+    for mid in mids:
+        try:
+            if status_of(mid) not in terminal:
+                cancel(mid, OPERATOR)
+        except Exception as exc:                                    # noqa: BLE001 - the record says what broke
+            errors.append(f"{mid}: cancel failed: {type(exc).__name__}: {str(exc)[:120]}")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline and any(status_of(m) not in terminal for m in mids):
+        try:
+            tick()
+        except Exception as exc:                                    # noqa: BLE001
+            errors.append(f"tick failed: {type(exc).__name__}: {str(exc)[:120]}")
+            break
+        sleep(0.5)
+    final = {m: status_of(m) for m in mids}
+    stuck = {m: s for m, s in final.items() if s not in terminal}
+    if stuck:
+        errors.append("still holding its session and leases: " + ", ".join(f"{m} is {s}" for m, s in stuck.items()))
+    return rec.step(f"{label}:released", not errors, "; ".join(errors), final=final)
+
+
+def through_proxy_detail(summary: Mapping) -> str:
+    """The one-line cause when the proxy saw no container create: the first refused calls, if there were any."""
+    base = "the proxy recorded no container create: the agent did not reach Docker through it"
+    refused = list(summary.get("refused") or [])[:3]
+    if not refused:
+        return f"{base} (no refused calls recorded)"
+    calls = "; ".join(f"{r.get('method')} {r.get('path')}: {r.get('reason')}" for r in refused)
+    return f"{base}; first refused: {calls}"
+
+
+def container_ids(project: str = PROJECT, run: Callable[..., tuple[int, str]] | None = None) -> dict[str, str]:
+    _, out = (run or real_run)(["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={project}", "--format",
                        '{{.ID}} {{.Label "com.docker.compose.service"}}'])
     return {svc: cid for cid, svc in (line.split(" ", 1) for line in out.splitlines() if " " in line)}
 
@@ -493,6 +543,7 @@ class Rig:
         else:
             gate = real_gate
         self.scenario_of: dict[str, str] = {}
+        self.started: list[str] = []                 # missions of the scenario in progress (see release)
         self.next_scenario = "namespace"
 
         def factory(mission):
@@ -520,6 +571,11 @@ class Rig:
             finally:
                 self.proxy.shutdown()
 
+    def release(self, rec: Recorder, label: str) -> bool:
+        """End the scenario: cancel any mission of it that is not terminal so nothing carries leases into the next one."""
+        mids, self.started = self.started, []
+        return release_missions(rec, label, mids, status_of=self.status, cancel=self.sup.cancel, tick=self.sup.tick)
+
     def status(self, mission_id: str) -> str:
         return self.ms.get_mission(mission_id).status
 
@@ -543,6 +599,7 @@ class Rig:
             return None
         mid = made["mission_id"]
         self.scenario_of[mid] = scenario
+        self.started.append(mid)
         rec.step(f"{scenario}:proposed", made["status"] == "awaiting_decision", mission=mid)
         card = self.flow.card(mid)
         for item in card["required"]:
@@ -555,8 +612,8 @@ class Rig:
         rec.step(f"{scenario}:ended", status in until, status=status, verify=results[-1:] or None)
         summary = proxy_summary(self.ms.events(mid))
         rec.extra.setdefault("proxy", {})[scenario] = summary
-        rec.step(f"{scenario}:through-proxy", went_through_proxy(summary),
-                 "the proxy recorded no container create: the agent did not reach Docker through it",
+        seen = went_through_proxy(summary)
+        rec.step(f"{scenario}:through-proxy", seen, "" if seen else through_proxy_detail(summary),
                  writes=summary["writes"], created=summary["created"], refused=len(summary["refused"]))
         return mid
 
