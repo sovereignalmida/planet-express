@@ -161,6 +161,30 @@ def test_an_excluded_container_is_not_a_network_target(root):
     assert create(p, host(NetworkMode="container:qbittorrent"))
 
 
+def test_a_target_on_the_host_network_or_chained_to_one_is_refused(root):
+    from planet_express.missions.dockerproxy.policy import ContainerInfo
+
+    def policy_with(modes):
+        class Inspector(FakeInspector):
+            def container(self, ref):
+                info = super().container(ref)
+                if info is not None and info.name in modes:
+                    return ContainerInfo(info.id, info.name, info.labels, {"NetworkMode": modes[info.name]})
+                return info
+        return Policy(make_scope(str(root)), Inspector())
+    with pytest.raises(Refusal, match="host network"):
+        create(policy_with({"qbittorrent": "host"}), host(NetworkMode="container:qbittorrent"))
+    with pytest.raises(Refusal, match="host network"):                       # a chain: plex -> qbittorrent -> host
+        create(policy_with({"plex": "container:qbittorrent", "qbittorrent": "host"}), host(NetworkMode="container:plex"))
+    with pytest.raises(Refusal, match="outside this mission's scope"):       # a chain that leaves scope
+        create(policy_with({"plex": "container:traefik"}), host(NetworkMode="container:plex"))
+    with pytest.raises(Refusal, match="cannot be checked"):
+        create(policy_with({"plex": ["host"]}), host(NetworkMode="container:plex"))
+    with pytest.raises(Refusal, match="too deeply"):
+        create(policy_with({"plex": "container:qbittorrent", "qbittorrent": "container:plex"}), host(NetworkMode="container:plex"))
+    assert create(policy_with({"plex": "container:qbittorrent", "qbittorrent": "bridge"}), host(NetworkMode="container:plex"))
+
+
 def test_a_container_of_another_mission_or_stack_is_not_a_network_target(root):
     inspector = _with_extra_containers({"othermission": ("f" * 64, labels("other", "gluetun"))})
     p = Policy(make_scope(str(root)), inspector)

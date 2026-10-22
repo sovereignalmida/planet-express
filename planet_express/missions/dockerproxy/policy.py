@@ -530,7 +530,7 @@ class Policy:
             raise Refusal("host and container network modes are not served")
         self._network(name, "scope")
 
-    def _scoped_network_mode(self, mode: str) -> None:
+    def _scoped_network_mode(self, mode: str, _depth: int = 0) -> None:
         """HostConfig.NetworkMode: everything `_scoped_network_name` serves, plus `container:<ref>` where <ref> resolves (by the
         daemon, not by anything the body says) to exactly one container that is in this mission's scope and not protected.
         `host` is never served."""
@@ -551,6 +551,18 @@ class Policy:
             raise Refusal("the container network target is a protected resource")
         if verdict != "in_scope":
             raise Refusal("the container network target is outside this mission's scope")
+        # Joining the target joins whatever namespace IT is in: a target on the host network (or in a chain that reaches one,
+        # or one too deep or unreadable to follow) would hand the new container the host's network.
+        target = info.host_config if isinstance(info.host_config, Mapping) else {}
+        inner = target.get("NetworkMode")
+        if inner is not None and not isinstance(inner, str):
+            raise Refusal("the container network target's network mode cannot be checked")
+        if inner == "host":
+            raise Refusal("the container network target is on the host network")
+        if isinstance(inner, str) and inner.startswith("container:"):
+            if _depth >= 2:
+                raise Refusal("the container network target is nested too deeply")
+            self._scoped_network_mode(inner, _depth + 1)
 
     def filter_list(self, route_name: str, doc: Any) -> Any:
         """The volumes/networks list as the worker may see it: protected entries dropped; volumes also dropped unless in scope;
