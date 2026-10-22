@@ -75,7 +75,7 @@ def test_load_refuses_a_symlink_and_a_group_writable_file(tmp_path):
 
 def test_launcher_settings_have_safe_defaults():
     cfg = MissionsConfig()
-    assert (cfg.launcher, cfg.session_uid_min, cfg.session_uid_max) == ("auto", 61000, 61999)
+    assert (cfg.launcher, cfg.session_uid_min, cfg.session_uid_max) == ("auto", 200000, 200999)
     assert cfg.sock_root == "/run/planetexpress-sessions" and cfg.enabled is False
 
 
@@ -112,12 +112,12 @@ def test_setup_defaults_are_the_missions_defaults_so_core_and_the_helper_agree()
 
 def test_setup_paths_can_be_built_straight_from_a_missions_config():
     from planet_express.missions.launcher.setup_steps import Paths
-    cfg = MissionsConfig(cgroup_root="/sys/fs/cgroup/x/sessions", sock_root="/run/s", session_uid_min=62000,
-                         session_uid_max=62100)
+    cfg = MissionsConfig(cgroup_root="/sys/fs/cgroup/x/sessions", sock_root="/run/s", session_uid_min=300000,
+                         session_uid_max=300100)
     paths = Paths.from_missions(cfg, state_dir="/var/lib/pe/state", core_uid=1000, core_gid=1000)
     conf = paths.launch_conf()
     assert (conf.cgroup_root, conf.sock_root, conf.uid_min, conf.uid_max) == ("/sys/fs/cgroup/x/sessions", "/run/s",
-                                                                              62000, 62100)
+                                                                              300000, 300100)
     assert conf.workspace_root == "/var/lib/pe/state/mission-workspaces"
     explicit = Paths.from_missions(MissionsConfig(workspace_root="/srv/ws"), state_dir="/x", core_uid=1000,
                                    core_gid=1000)
