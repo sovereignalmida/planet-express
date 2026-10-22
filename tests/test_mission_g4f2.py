@@ -78,3 +78,50 @@ def test_a_non_elevated_grant_row_does_not_satisfy_a_critical_mission(stack):
     verdict = approvals.execution_predicate(st.store, m.id)
     assert not verdict.ok
     assert any("elevated" in r and "grant" in r for r in verdict.reasons)
+
+
+# ── #3 exclusions that name a resource are enforced like protected, at every layer ───────────────────
+
+EXCLUDED = "service:media/qbit"
+
+
+def test_a_resource_exclusion_is_enforced_and_a_tag_is_advisory():
+    g = Grant.model_validate({"tier": "repair", "exclusions": [EXCLUDED, "network"]})
+    assert g.enforced_exclusions() == ("host:local/service:media/qbit",)
+    assert g.advisory_exclusions() == ("network",)
+
+
+def test_the_card_says_which_exclusions_are_hard(stack):
+    st = stack()
+    mid = st.propose(exclusions=[EXCLUDED, "network"])["mission_id"]
+    prot = st.flow.card(mid)["protected"]
+    assert prot["exclusions_enforced"] == ["host:local/service:media/qbit"] and prot["exclusions_advisory"] == ["network"]
+
+
+def test_tripwire_classifies_an_excluded_resource_as_protected(tmp_path):
+    from tripwire_fakes import make_rig
+    rig = make_rig(tmp_path, grant_over={"exclusions": [EXCLUDED]})
+    ctx = rig.monitor._ctx(rig.mission.grant())
+    assert ctx.cls("host:local/service:media/qbit") == "protected"
+    assert ctx.cls("host:local/service:media/other") == "in_scope"
+
+
+def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
+    from planet_express.missions.dockerproxy.policy import Scope
+    g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"]}, "exclusions": [EXCLUDED]})
+    scope = Scope.from_grant(g, stacks_root="/srv/stacks")
+    assert scope.classify("host:local/service:media/qbit") == "protected"
+    assert scope.classify("host:local/service:media/other") == "in_scope"
+
+
+def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
+    from test_mission_tools import setup
+
+    from planet_express.integrations.rpc import RpcError
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    _, _, broker, sess, *_ = setup(tmp_path / "a", creds=("tool:app.health_get",))
+    assert broker.invoke(sess, "app.health_get", {"service": "media/qbit"})["ok"]          # allowed without the exclusion
+    ms, m, broker, sess, http, runner = setup(tmp_path / "b", creds=("tool:app.health_get",), exclusions=[EXCLUDED])
+    with pytest.raises(RpcError):
+        broker.invoke(sess, "app.health_get", {"service": "media/qbit"})

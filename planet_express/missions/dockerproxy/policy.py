@@ -112,7 +112,8 @@ class Scope:
                    protected_gids=()) -> "Scope":
         resources = tuple(canon(r) for r in grant_resources(grant))
         paths = tuple(r for r in resources if r.split("/", 1)[1].startswith(("path:", "mount:")))
-        prot = tuple(dict.fromkeys(canon(r) for r in (*protected, *grant.protected.resources)))
+        prot = tuple(dict.fromkeys((*(canon(r) for r in (*protected, *grant.protected.resources)),
+                                    *grant.enforced_exclusions())))
         return cls(resources, paths, prot, grant.scope.hosts[0] if grant.scope.hosts else "local", stacks_root,
                    frozenset({0, *protected_gids}))
 

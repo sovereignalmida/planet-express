@@ -14,6 +14,7 @@ from pydantic import (
 )
 
 from .canonical import canonical_json, sha256_hex
+from .resources import BadResource, canon
 
 Tier = Literal["observe", "propose", "repair", "change", "critical"]
 Status = Literal[
@@ -131,6 +132,30 @@ class Grant(_Strict):
 
     def hash(self) -> str:
         return sha256_hex(self.model_dump(mode="json"))
+
+    def enforced_exclusions(self) -> tuple[str, ...]:
+        """The exclusions that name a concrete resource (`service:media/db`, `path:/srv/x`), canonical. These are enforced:
+        every layer treats them as protected (an excluded resource is outside scope even inside the grant's scope). Any
+        other exclusion is a free-form tag for the operator and the agent's brief; nothing can enforce it."""
+        out: list[str] = []
+        for item in self.exclusions:
+            try:
+                out.append(canon(item))
+            except BadResource:
+                continue
+        return tuple(dict.fromkeys(out))
+
+    def advisory_exclusions(self) -> tuple[str, ...]:
+        enforced = set(self.enforced_exclusions())
+        out = []
+        for item in self.exclusions:
+            try:
+                if canon(item) in enforced:
+                    continue
+            except BadResource:
+                pass
+            out.append(item)
+        return tuple(out)
 
 
 CheckName = Literal[

@@ -154,7 +154,11 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
         "scope": grant.scope.model_dump(mode="json"),
         "protected": {"resources": [_clip(r, 200) for r in grant.protected.resources[:64]],
                       "count": len(grant.protected.resources),
-                      "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]]},
+                      "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]],
+                      # a resource-id exclusion is a hard carve-out (tripwire, tools and the Docker proxy treat it as
+                      # protected); any other exclusion is a note to the agent that nothing can enforce
+                      "exclusions_enforced": [_clip(x, 160) for x in grant.enforced_exclusions()[:32]],
+                      "exclusions_advisory": [_clip(x, 120) for x in grant.advisory_exclusions()[:32]]},
         "budgets": grant.budgets.model_dump(mode="json"),
         "verification": {"plan_sha256": grant.verification.plan_sha256, "checks": plan_checks, "truncated": truncated,
                          "on_verify_fail": grant.on_verify_fail},

@@ -345,7 +345,7 @@ class ToolBroker:
         try:
             scope = [canon(r) for r in grant_resources(grant)]
             protected = [*self.protected, *grant.protected.resources]
-            protected = [canon(p) for p in protected]
+            protected = [canon(p) for p in protected] + list(grant.enforced_exclusions())
         except BadResource:
             raise ToolRefused("malformed grant resources") from None
         for field_name, kind in tool.scope.items():

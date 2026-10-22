@@ -241,6 +241,7 @@ class TripwireMonitor:
                 protected.append(canon(resource))
             except BadResource:
                 raise ValueError("grant.protected holds a malformed resource") from None
+        protected.extend(grant.enforced_exclusions())          # an excluded resource is protected-like
         return DiffContext(scope=scope, protected=tuple(protected), stacks_root=self.stacks_root)
 
     def _judge(self, mission: Mission, result: ScanResult) -> str:
