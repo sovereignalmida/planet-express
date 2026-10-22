@@ -53,7 +53,7 @@ from planet_express.application.chat_service import (
 )
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
-from planet_express.application.mission_service import MissionService
+from planet_express.application.mission_service import MISSION_ID_RE, MissionService
 from planet_express.application.multi_host import pin_error, provider_for
 from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
@@ -1611,7 +1611,7 @@ def handle_message(
             target=run_pipeline, args=(notifier, state, "updates"), daemon=True
         ).start()
 
-    elif cmd == "/rollback":
+    elif cmd == "/rollback" and not _is_mission_rollback(text, missions):
         parts = text.split()
         target_id = parts[1] if len(parts) == 2 else None
         if not target_id or not re.fullmatch(r"[0-9a-f]{12}", target_id):
@@ -1874,7 +1874,7 @@ def handle_message(
             "/status — Quick health snapshot\n"
             "/updates — Image staleness check\n"
             "/patchnow — Run a canary auto-update pass now (normally weekly)\n"
-            "/rollback `<execution_id>` — Undo what a finished run applied\n"
+            "/rollback `<execution_id>` — Undo what a finished run applied (`/rollback M-<n>` is a mission, below)\n"
             "/state — Current pipeline state\n"
             "/stacks — List stacks\n"
             "/mounts — Verify NAS mounts are reachable\n"
@@ -1896,7 +1896,7 @@ def handle_message(
                 "/mission_card `<id>` — A repair mission's approval card\n"
                 "/approve `<id>` `<hash8>` — Approve the next step of a card (never an elevated one)\n"
                 "/deny `<id>` `<hash8>` — Deny and close a repair mission\n"
-                "/resume `<id>`, /rollback `<id>`, /takeover `<id>` — Act on a tripwire pause"
+                "/resume `M-<n>`, /rollback `M-<n>`, /takeover `M-<n>` — Act on a tripwire pause (or roll back a mission)"
             )
         notifier.notify(help_text)
 
@@ -2020,6 +2020,14 @@ def _repair_wiring():
     provider_cls = MosCheckpointProvider if config.HOST_CONTROL_PROVIDER == "mos" else SystemdCheckpointProvider
     return RepairWiring(provider=provider_cls(config.get_stack_orchestrator()), scan=leela.run_full,
                         core_user=pwd.getpwuid(os.geteuid()).pw_name)
+
+
+def _is_mission_rollback(text: str, missions: MissionService | None) -> bool:
+    """`/rollback M-<n>` belongs to MissionService (a tripwire pause or a finished repair mission), never to the v3
+    `/rollback <execution_id>` handler: the two id shapes cannot be confused (an execution id is 12 hex digits)."""
+    parts = text.split()
+    return (missions is not None and missions.enabled() and len(parts) == 2
+            and MISSION_ID_RE.fullmatch(parts[1]) is not None)
 
 
 def _mission_operator(msg: dict) -> str:

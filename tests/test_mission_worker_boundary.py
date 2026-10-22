@@ -115,13 +115,13 @@ def test_request_decision_creates_a_card_and_cannot_approve(tmp_path):
         assert out == {"recorded": True}
         cards = [(e.actor, json.loads(e.body_json)) for e in st.ms.events(mid)
                  if json.loads(e.body_json).get("event") == "decision.requested"]
-        assert len(cards) == 1 and cards[0][0] == "worker" and cards[0][1]["options"] == ["yes", "no"]
+        assert len(cards) == 1 and cards[0][0] == "worker:decision" and cards[0][1]["options"] == ["yes", "no"]
         # the card changed nothing: same grant, same state, no approval row, the predicate untouched
         assert (st.ms.get_mission(mid).grant_hash, st.ms.get_mission(mid).status) == before
         with sqlite3.connect(st.store.path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM mission_approvals").fetchone()[0] == rows_before
-        # a worker card is a note by `worker`: it is not a `decision` event and is not one Core reads for anything
-        assert all(e.kind != "decision" or e.actor != "worker" for e in st.ms.events(mid))
+        # a worker card is a note by `worker:decision`: it is not a `decision` event and is not one Core reads for anything
+        assert all(e.kind != "decision" or not e.actor.startswith("worker") for e in st.ms.events(mid))
         assert approvals.execution_predicate(st.store, mid).ok                      # still exactly what the operator approved
     finally:
         st.close()

@@ -258,7 +258,8 @@ def test_accounting_does_not_parse_the_event_log(tmp_path):
     broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})
     ms.events = lambda *a, **k: (_ for _ in ()).throw(AssertionError("the broker read the whole event log"))
     assert broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 2})["ok"]
-    assert broker._calls_used(m.id) == 2 and broker._output_used(m.id) > 0
+    usage = broker._usage(m.id)
+    assert usage["invoke"] == 2 and usage["bytes"] > 0
 
 
 def test_refusals_are_capped_per_session_then_the_session_is_stopped_and_events_stop_growing(tmp_path):

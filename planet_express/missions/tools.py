@@ -42,6 +42,7 @@ MAX_OUTPUT_BYTES = 32 * 1024
 MAX_HTTP_BYTES = 1 << 20
 HTTP_TIMEOUT_S = 5
 MAX_PARAM_EVENT_BYTES = 2048
+MAX_CACHED_MISSIONS = 256            # per-mission tallies kept in memory
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 COMPOSE_NAMES = ("compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml")
 LIVE_STATES = ("investigating", "executing")
@@ -227,6 +228,8 @@ class ToolBroker:
         self.on_refusal_cap = on_refusal_cap
         self._revoked: set[str] = set()
         self._lock = threading.Lock()
+        self._mission_locks: dict[str, threading.Lock] = {}
+        self._usage_cache: dict[str, dict[str, Any]] = {}      # mission id -> what this broker has recorded (see `_usage`)
 
     # ── endpoint switch (the tripwire pause closes it; resume opens it) ─────
     def revoke(self, mission_id: str) -> None:
@@ -240,20 +243,27 @@ class ToolBroker:
     # ── the call ────────────────────────────────────────────────────────────
     def invoke(self, session: Any, name: str, params: dict) -> dict:
         mission_id, sid = session.mission_id, str(getattr(session, "id", ""))
-        if self._count(mission_id, "tool.refusal_cap", sid)[0]:
-            raise RpcError("Refused", "unauthorized")      # a session that hit the cap gets nothing, and nothing is written
-        try:
-            return self._invoke(session, name, params)
-        except ToolRefused as exc:
-            self._refused(mission_id, sid, name, params, str(exc)[:200])
-            raise RpcError("Refused", "unauthorized") from None
-        except _BadParams as exc:
-            self._refused(mission_id, sid, name, params, f"bad params: {exc}"[:200])
-            raise RpcError("Invalid params", "bad_params") from None
+        # One call per mission at a time, from the budget check to the record of its outcome: two calls cannot both pass
+        # the check at one call short of the budget, and the tallies below are only ever changed by the holder.
+        with self._mission_lock(mission_id):
+            if sid in self._usage(mission_id)["capped"]:
+                raise RpcError("Refused", "unauthorized")      # a session that hit the cap gets nothing, and nothing is written
+            try:
+                return self._invoke(session, name, params)
+            except ToolRefused as exc:
+                self._refused(mission_id, sid, name, params, str(exc)[:200])
+                raise RpcError("Refused", "unauthorized") from None
+            except _BadParams as exc:
+                self._refused(mission_id, sid, name, params, f"bad params: {exc}"[:200])
+                raise RpcError("Invalid params", "bad_params") from None
+
+    def _mission_lock(self, mission_id: str) -> threading.Lock:
+        with self._lock:
+            return self._mission_locks.setdefault(mission_id, threading.Lock())
 
     def core_read(self, mission_id: str, name: str, params: dict) -> dict:
         """A READ-ONLY tool call made by Core itself for a verification `query` check (slice 8). It is not a session
-        call: no session token and no use of the session's call budget (events are `tool.verify`, which `_count` does not
+        call: no session token and no use of the session's call budget (events are `tool.verify`, which the tally does not
         add up). Everything else is the SAME gate a session call passes (`_gate`): the grant must name `tool:<name>`, the
         endpoint switch must be open (a tripwire pause closes it), the scope fields must be inside the grant and clear of
         protected resources. On top of that the mission must be `verifying` and the tool must be `risk == "read"`. Any
@@ -268,7 +278,7 @@ class ToolBroker:
     def _refused(self, mission_id: str, sid: str, name: str, params: dict, reason: str) -> None:
         """Record a refusal, up to `refusal_cap` per session. The call that reaches the cap records one more event and
         fires `on_refusal_cap` (the supervisor freezes the session); from then on the session is refused outright."""
-        used = self._count(mission_id, "tool.refused", sid)[0]
+        used = self._usage(mission_id)["refused"].get(sid, 0)
         if used >= self.refusal_cap:
             return
         self._record(mission_id, "tool.refused", name, params, reason=reason, session=sid)
@@ -327,10 +337,10 @@ class ToolBroker:
 
     def _invoke(self, session: Any, name: str, params: dict) -> dict:
         mission, tool, grant, parsed = self._gate(session.mission_id, name, params, states=LIVE_STATES, read_only=False)
-        used = self._calls_used(mission.id)
-        if used >= grant.budgets.tool_calls:
+        usage = self._usage(mission.id)
+        if usage["invoke"] >= grant.budgets.tool_calls:
             raise ToolRefused("tool-call budget exhausted")
-        if self._output_used(mission.id) >= grant.budgets.output_bytes:
+        if usage["bytes"] >= grant.budgets.output_bytes:
             raise ToolRefused("output budget exhausted")
         status, text, truncated = self._call(tool, parsed, name)
         ok = 200 <= status < 300
@@ -369,26 +379,45 @@ class ToolBroker:
         try:
             self.ms.append_event(mission_id, "tool", ACTOR, body)
         except (LookupError, sqlite3.IntegrityError):   # the mission does not exist: nothing to attach it to
-            pass
+            return
+        self._tally(mission_id, event, body)
 
-    def _count(self, mission_id: str, event: str, session: str | None = None) -> tuple[int, int]:
-        """(rows, sum of `bytes`) of this broker's `tool` events with this `event` name, by SQL: the log is never read
-        into memory, however long the mission has run."""
-        sql = ("SELECT COUNT(*), COALESCE(SUM(json_extract(body_json, '$.bytes')), 0) FROM mission_events "
-               "WHERE mission_id=? AND kind='tool' AND actor=? AND json_extract(body_json, '$.event')=?")
-        args: list[Any] = [mission_id, ACTOR, event]
-        if session is not None:
-            sql += " AND json_extract(body_json, '$.session')=?"
-            args.append(session)
-        with self.ms.store._connect() as conn:
-            row = conn.execute(sql, args).fetchone()
-        return int(row[0]), int(row[1])
+    # The budgets and the refusal cap are read from what THIS broker has recorded (actor pinned, so nothing a session can
+    # write counts). The log is summed by SQL once per mission, after which every record updates the tally, so a call does
+    # not rescan the mission's events. Callers hold the mission's lock.
+    def _usage(self, mission_id: str) -> dict[str, Any]:
+        usage = self._usage_cache.get(mission_id)
+        if usage is None:
+            usage = {"invoke": 0, "bytes": 0, "refused": {}, "capped": set()}
+            with self.ms.store._connect() as conn:
+                rows = conn.execute(
+                    "SELECT json_extract(body_json, '$.event'), json_extract(body_json, '$.session'), COUNT(*), "
+                    "COALESCE(SUM(json_extract(body_json, '$.bytes')), 0) FROM mission_events "
+                    "WHERE mission_id=? AND kind='tool' AND actor=? GROUP BY 1, 2", (mission_id, ACTOR)).fetchall()
+            for event, session, count, nbytes in rows:
+                if event == "tool.invoke":
+                    usage["invoke"] += int(count)
+                    usage["bytes"] += int(nbytes)
+                elif event == "tool.refused" and session is not None:
+                    usage["refused"][str(session)] = int(count)
+                elif event == "tool.refusal_cap" and session is not None:
+                    usage["capped"].add(str(session))
+            if len(self._usage_cache) >= MAX_CACHED_MISSIONS:
+                self._usage_cache.pop(next(iter(self._usage_cache)))
+            self._usage_cache[mission_id] = usage
+        return usage
 
-    def _calls_used(self, mission_id: str) -> int:
-        return self._count(mission_id, "tool.invoke")[0]
-
-    def _output_used(self, mission_id: str) -> int:
-        return self._count(mission_id, "tool.invoke")[1]
+    def _tally(self, mission_id: str, event: str, body: dict[str, Any]) -> None:
+        usage = self._usage_cache.get(mission_id)
+        if usage is None:
+            return                                     # not loaded yet: the load will read this record from the log
+        if event == "tool.invoke":
+            usage["invoke"] += 1
+            usage["bytes"] += int(body.get("bytes", 0) or 0)
+        elif event == "tool.refused" and body.get("session") is not None:
+            usage["refused"][body["session"]] = usage["refused"].get(body["session"], 0) + 1
+        elif event == "tool.refusal_cap" and body.get("session") is not None:
+            usage["capped"].add(body["session"])
 
 
 @dataclass(frozen=True)

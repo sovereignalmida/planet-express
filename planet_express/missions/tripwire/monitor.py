@@ -20,6 +20,7 @@ Nothing here interprets host text: log lines, labels and file contents only ever
 """
 
 import fnmatch
+import contextlib
 import json
 import logging
 import os
@@ -344,14 +345,39 @@ class TripwireMonitor:
         return {"new": new, "over": over}
 
     # ── baseline ────────────────────────────────────────────────────────────
-    def begin(self, mission_id: str) -> dict[str, Any]:
+    def begin(self, mission_id: str, *, keep_previous: bool = False) -> dict[str, Any]:
         """Capture the live baseline at executing start. The caller (the supervisor, before the session is launched)
-        must see this succeed: a failed capture means the mission must not run."""
+        must see this succeed: a failed capture means the mission must not run. `keep_previous` (a resume) first sets the
+        baseline that tripped aside, so a resume that then fails can put it back (`restore_previous_baseline`) and the
+        trip evidence is not lost; `drop_previous_baseline` forgets it once the resume has held."""
         mission = self.ms.get_mission(mission_id)
         result = self.scanner.scan(self._excluded_files([mission]))
         if not result.ok:
             raise RuntimeError(f"cannot capture the tripwire baseline: {sorted(result.errors)}")
+        if keep_previous:
+            try:
+                previous = self.state.read(mission_id, "baseline.json")
+            except (ValueError, OSError):
+                previous = None
+            if previous is not None:
+                self.state.write(mission_id, "baseline.prev.json", previous)
         return self._capture_baseline(mission, result)
+
+    def restore_previous_baseline(self, mission_id: str) -> bool:
+        """Put the baseline that was set aside by `begin(keep_previous=True)` back. False when there was none."""
+        try:
+            previous = self.state.read(mission_id, "baseline.prev.json")
+        except (ValueError, OSError):
+            return False
+        if previous is None:
+            return False
+        self.state.write(mission_id, "baseline.json", previous)
+        self.state.remove(mission_id, "baseline.prev.json")
+        return True
+
+    def drop_previous_baseline(self, mission_id: str) -> None:
+        with contextlib.suppress(Exception):
+            self.state.remove(mission_id, "baseline.prev.json")
 
     def _capture_baseline(self, mission: Mission, result: ScanResult) -> dict[str, Any]:
         drift = self._manifest_drift(mission, result.snapshot)

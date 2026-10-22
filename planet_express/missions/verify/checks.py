@@ -53,7 +53,6 @@ HTTP_MAX_BODY = 64 * 1024
 FILE_MAX_BYTES = 8 * 1024 * 1024
 REGEX_MAX_PATTERN = 128
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-SHELLS = frozenset({"sh", "bash", "dash", "ash", "zsh", "ksh", "csh", "tcsh", "fish", "busybox", "env"})
 
 BoundedRun = Callable[[list[str], int, int], tuple[int, str, str, bool]]
 

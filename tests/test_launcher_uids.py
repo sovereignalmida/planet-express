@@ -12,6 +12,7 @@ from planet_express.missions.models import Grant
 from planet_express.missions.schema import DDL_V6
 from planet_express.missions.sessions import issue_session
 from planet_express.missions.store import MissionStore, NoFreeUid
+from planet_express.missions.supervisor import StartDeferred
 
 
 def missions(tmp_path, count, uid_range=(61000, 61002)):
@@ -188,14 +189,14 @@ def test_recovery_kills_a_launched_but_never_live_session_before_freeing_its_uid
     assert rig.ms.get_session("S-half")["uid_released_at"] is not None
 
 
-def test_an_exhausted_range_is_a_start_failure_that_leaves_the_mission_queued_until_retries_run_out(tmp_path):
+def test_an_exhausted_range_is_a_wait_that_leaves_the_mission_queued(tmp_path):
     rig = Rig(tmp_path)
     rig.cont.uid_range = (60000, 60000)
     other = rig.ms.create_mission(title="t2", origin="operator", grant=rig.mission.grant(), goal="g2",
                                   success_criteria="s", runtime="fake")
     advance_to(rig.ms, other.id, "queued")
     rig.sup.start(rig.mid)                                               # takes the only uid
-    with pytest.raises(NoFreeUid):
+    with pytest.raises(StartDeferred, match="NoFreeUid"):             # transient: not a failed start (G4-F3 #11)
         rig.sup.start(other.id)
     assert rig.ms.get_mission(other.id).status == "queued"
 

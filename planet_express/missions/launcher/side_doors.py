@@ -37,7 +37,6 @@ from planet_express.missions.launcher.setup_steps import (
 DOCKER_TCP_PORTS = (2375, 2376)
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 _TRUE = frozenset({"1", "t", "true"})
-_FALSE = frozenset({"0", "f", "false"})
 
 
 def _readable_file(path: str) -> bool:

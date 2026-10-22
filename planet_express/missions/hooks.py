@@ -348,9 +348,6 @@ def _abs(path: str, cwd: str) -> str:
 
 # ── the classifier ────────────────────────────────────────────────────────────────────────────────────
 
-_PUBLISH = (("git", "push"), ("npm", "publish"), ("yarn", "publish"), ("pnpm", "publish"), ("cargo", "publish"),
-            ("gem", "push"), ("twine", "upload"), ("docker", "push"), ("podman", "push"), ("helm", "push"),
-            ("gh", "release"), ("gh", "pr"), ("hg", "push"), ("svn", "commit"), ("flutter", "pub"))
 _DESTRUCTIVE_GIT = ({"reset": ("--hard", "--merge", "--keep"), "clean": ("-f", "-d", "-x", "--force"),
                      "checkout": ("--", ".", "-f", "--force"), "restore": ("--staged", ".", "--source"),
                      "branch": ("-D", "--delete", "-d", "-M"), "rebase": (), "filter-branch": (), "filter-repo": (),
