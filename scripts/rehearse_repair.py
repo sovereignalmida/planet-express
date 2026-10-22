@@ -19,16 +19,21 @@ application probe and a compose-project completeness check.
 Scenario "canary" (release proof 7b): a failed canary (a bad config change recreating `web`) is rolled back by the operator
 (checkpoint restore), then a second mission, approved with a bounded scope, corrects the config and recreates ONLY `web`.
 
-The agent is a deterministic command (this same file, subcommand `agent`): no LLM, no network. What it exercises: the
-checkpoint service (real compose provider), the tripwire monitor (real Docker/ss/file scans), the verifier (real checks),
-the approval flow and the supervisor. What it does NOT exercise, and says so in the record under "not_exercised": the cgroup
-launcher and session uids (scripts/mission_containment_rehearsal.py) and the per-session Docker proxy socket
-(tests/test_dockerproxy_privileged.py); the agent here runs as root with the host Docker socket.
+The agent is a deterministic command (this same file, subcommand `agent`): no LLM, no network. It reaches Docker ONLY through
+a real per-mission `DockerProxyService` (real Upstream to the host socket, real Policy/Scope from the mission's grant, real
+recording of creates into the store, which is what the tripwire reads); its DOCKER_HOST is that proxy socket, and the agent
+refuses to run against anything else. What it exercises: the checkpoint service (real compose provider), the tripwire monitor
+(real Docker/ss/file scans), the verifier (real checks), the approval flow, the supervisor and the proxy. Every call the proxy
+refuses is listed in the record under "proxy" (a finding, never something to work around). What it does NOT exercise, and says
+so in the record under "not_exercised": the cgroup launcher and session uids (scripts/mission_containment_rehearsal.py); the
+agent here runs as root in a process group, and the proxy's gate recognises it by that group.
 """
 
 import argparse
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -42,8 +47,14 @@ DEFAULT_IMAGE = "busybox:1.36"
 SCENARIOS = ("namespace", "canary")
 OPERATOR = "operator:rehearsal"
 MARKER = ".pe-rehearsal-stack"
-NOT_EXERCISED = ["cgroup launcher and session uids (scripts/mission_containment_rehearsal.py)",
-                 "per-session Docker proxy socket (tests/test_dockerproxy_privileged.py)"]
+NOT_EXERCISED = [
+    ("cgroup launcher and session uids (scripts/mission_containment_rehearsal.py): the agent runs as root in a process "
+     "group, and the proxy recognises it by that group rather than by cgroup and a unique uid"),
+    "socket ownership handed to a session uid by the launcher helper (tests/test_dockerproxy_privileged.py)",
+]
+AGENT_ENV_ALLOW = ["PATH", "HOME"]           # DOCKER_HOST is set by the session's proxy socket and nowhere else
+SOCKET_PATH_MAX = 100                        # sun_path is 108 bytes; leave room
+LEFTOVER = re.compile(r"^[0-9a-f]{12}_" + re.escape(PROJECT) + r"-")
 
 COMPOSE = """\
 name: {project}
@@ -174,6 +185,72 @@ def verification_checks(scenario: str, project: str = PROJECT) -> list[dict]:
     ]
 
 
+def proxy_docker_host(env: Mapping[str, str]) -> str | None:
+    """DOCKER_HOST if (and only if) it names a session proxy socket: an absolute unix path ending in /proxy.sock."""
+    value = env.get("DOCKER_HOST", "")
+    if not value.startswith("unix:///"):
+        return None
+    path = value[len("unix://"):]
+    if ".." in path.split("/") or os.path.basename(path) != "proxy.sock":
+        return None
+    return value
+
+
+def leftover_ids(rows: Sequence[str]) -> list[str]:
+    """Container ids from `<id> <name>` rows whose name is a compose-renamed leftover (`<12 hex>_pe-rehearsal-...`)."""
+    out = []
+    for row in rows:
+        parts = row.split(" ", 1)
+        if len(parts) == 2 and LEFTOVER.match(parts[1].strip()):
+            out.append(parts[0])
+    return out
+
+
+def remove_leftovers(run: Callable[..., tuple[int, str]] | None = None) -> list[str]:
+    """Remove the rehearsal project's renamed half-recreated containers (what a failed recreate leaves behind), by id."""
+    run = run or real_run
+    _, out = run(["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={PROJECT}", "--format",
+                  "{{.ID}} {{.Names}}"])
+    ids = leftover_ids(out.splitlines())
+    for ident in ids:
+        run(["docker", "rm", "-f", ident])
+    return ids
+
+
+def networks_left(run: Callable[..., tuple[int, str]] | None = None) -> list[str]:
+    run = run or real_run
+    _, out = run(["docker", "network", "ls", "-q", "--filter", f"label=com.docker.compose.project={PROJECT}"])
+    return sorted(out.split())
+
+
+def proxy_summary(events: Sequence) -> dict:
+    """What the Docker proxy recorded for a mission: write count, creates it vouched for, and every refused call."""
+    writes = created = 0
+    refused: list[dict] = []
+    more = False
+    for e in events:
+        try:
+            body = json.loads(e.body_json)
+        except (TypeError, ValueError):
+            continue
+        kind = body.get("event") if isinstance(body, dict) else None
+        if kind == "docker.write":
+            writes += 1
+        elif kind == "docker.created":
+            created += 1
+        elif kind == "docker.refused":
+            if body.get("further_refusals_not_recorded"):
+                more = True
+            else:
+                refused.append({k: body.get(k) for k in ("reason", "route", "method", "path")})
+    return {"writes": writes, "created": created, "refused": refused, "further_refusals_not_recorded": more}
+
+
+def went_through_proxy(summary: Mapping) -> bool:
+    """A scenario that recreates containers must have been seen doing so by the proxy, or the agent bypassed it."""
+    return bool(summary.get("writes")) and bool(summary.get("created"))
+
+
 class Recorder:
     """The JSON record: ordered steps with timings, check results, and the overall verdict."""
 
@@ -240,6 +317,10 @@ def agent_main(ns: argparse.Namespace) -> int:
     compose_file = stack / "docker-compose.yml"
     if ns.project != PROJECT or not (stack / MARKER).is_file():
         print("refusing: not a rehearsal stack directory", file=sys.stderr)
+        return 2
+    if proxy_docker_host(os.environ) is None:
+        print("refusing: DOCKER_HOST is not a session proxy socket (the agent never talks to the host Docker socket)",
+              file=sys.stderr)
         return 2
     steps: list[str] = []
 
@@ -317,19 +398,31 @@ def rehearse_real(args: argparse.Namespace, rec: Recorder) -> None:
             return
         rig = Rig(work, stacks, args)
         rec.step("controls-built", True, repair_gate="skipped" if rig.gate_skipped else "real")
-        if args.scenario in ("all", "namespace"):
+        if args.scenario in ("all", "namespace") and prepare_scenario(rec, "namespace", stack_dir, args.image):
             scenario_namespace(rig, rec, stack_dir)
-        if args.scenario in ("all", "canary"):
+        if args.scenario in ("all", "canary") and prepare_scenario(rec, "canary", stack_dir, args.image):
             scenario_canary(rig, rec, stack_dir)
     finally:
         if rig is not None:
             rig.close()
         if not args.keep:
+            removed = remove_leftovers()
             down = real_run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "down", "-v",
                              "--remove-orphans", "-t", "2"], 120)
-            left = container_ids()
-            rec.step("teardown", down[0] == 0 and not left, "the rehearsal project was not fully removed",
-                     remaining=sorted(left))
+            left, nets = container_ids(), networks_left()
+            rec.step("teardown", down[0] == 0 and not left and not nets, "the rehearsal project was not fully removed",
+                     remaining=sorted(left), networks=nets, leftovers_removed=removed)
+
+
+def prepare_scenario(rec: Recorder, scenario: str, stack_dir: Path, image: str) -> bool:
+    """Start every scenario from the same place: renamed leftovers of an earlier (failed) scenario removed, the compose file
+    as shipped, and the whole project up. Runs as the harness on the host socket, never as the agent."""
+    removed = remove_leftovers()
+    (stack_dir / "docker-compose.yml").write_text(compose_text(image))
+    up = real_run(["docker", "compose", "-f", str(stack_dir / "docker-compose.yml"), "-p", PROJECT, "up", "-d"], 300)
+    present = container_ids()
+    return rec.step(f"{scenario}:prepared", up[0] == 0 and {"gateway", "app1", "app2", "web"} <= set(present),
+                    "the project could not be brought to its baseline", leftovers_removed=removed)
 
 
 def container_ids(project: str = PROJECT) -> dict[str, str]:
@@ -355,6 +448,10 @@ class Rig:
         from planet_express.missions.approval_flow import ApprovalFlow
         from planet_express.missions.assembly import RepairWiring, build_repair_controls
         from planet_express.missions.checkpoint import SystemdCheckpointProvider
+        from planet_express.missions.dockerproxy.service import (
+            DEFAULT_DOCKER_SOCKET,
+            DockerProxyService,
+        )
         from planet_express.missions.launcher.preflight import Check, PreflightReport
         from planet_express.missions.store import MissionStore
         from planet_express.missions.supervisor import Supervisor
@@ -374,8 +471,17 @@ class Rig:
         provider = SystemdCheckpointProvider(SimpleNamespace(stacks_root=stacks))
         wiring = RepairWiring(provider=provider, scan=lambda: project_scan(PROJECT), core_user=args.core_user)
         protected = build_protected_set(self.cfg, stacks_root=self.stacks)
+        # The agent's only road to Docker: the daemon's own per-session proxy (real Upstream to the host socket, real Policy and
+        # Scope from the mission's grant, real recording of creates). Built BEFORE the controls so the tripwire's pause reaches it.
+        sock_root = work / "sock"
+        sock_root.mkdir(parents=True, exist_ok=True)
+        self.proxy = DockerProxyService(self.store, authenticator=RehearsalAuthenticator(self.store, self.containment),
+                                        docker_socket=DEFAULT_DOCKER_SOCKET, sock_root=str(sock_root), stacks_root=self.stacks,
+                                        protected=lambda: protected.resources, protected_gids=(),
+                                        label_allow=self.cfg.docker_label_allow)
         self.controls = build_repair_controls(self.store, self.cfg, wiring, containment=self.containment, broker=None,
-                                              protected=protected, stacks_root=self.stacks, enabled=lambda: True)
+                                              protected=protected, stacks_root=self.stacks, enabled=lambda: True,
+                                              proxy=self.proxy)
         real_gate = self.controls.repair_gate
         # The side-door gate is a property of the HOST (sudoers, docker group, TCP socket). On a throwaway VM that has not been
         # through the launcher setup it fails for reasons unrelated to this rehearsal; the operator may skip it knowingly.
@@ -392,10 +498,11 @@ class Rig:
         def factory(mission):
             argv = agent_argv(self.scenario_of.get(mission.id, "namespace"), str(stacks / PROJECT))
             return CommandRuntime(self.containment, argv=argv, worker_socket=str(work / "unused.sock"),
-                                  env_allow=["PATH", "HOME", "DOCKER_HOST"])
+                                  env_allow=list(AGENT_ENV_ALLOW))
         self.sup = Supervisor(self.store, self.containment, factory, enabled=lambda: True, artifact_dir=work / "artifacts",
                               workspace_dir=work / "ws", repair_gate=gate, verifier=self.controls.verifier,
-                              checkpoint=self.controls.checkpoint, tripwire=self.controls.tripwire)
+                              checkpoint=self.controls.checkpoint, tripwire=self.controls.tripwire, docker_proxy=self.proxy,
+                              socket_provider=ProxySockets(str(sock_root), self.proxy))
         self.flow = ApprovalFlow(self.store, supervisor=self.sup, validator=self.controls.validator,
                                  backup_status=self.controls.backup_status, protected=lambda: self.controls.protected,
                                  runtime="command")
@@ -408,7 +515,10 @@ class Rig:
         try:
             self.controls.tripwire.stop()
         finally:
-            self.sup.shutdown()
+            try:
+                self.sup.shutdown()
+            finally:
+                self.proxy.shutdown()
 
     def status(self, mission_id: str) -> str:
         return self.ms.get_mission(mission_id).status
@@ -443,6 +553,11 @@ class Rig:
         results = [json.loads(e.body_json) for e in self.ms.events(mid)
                    if json.loads(e.body_json).get("event") == "verify.result"]
         rec.step(f"{scenario}:ended", status in until, status=status, verify=results[-1:] or None)
+        summary = proxy_summary(self.ms.events(mid))
+        rec.extra.setdefault("proxy", {})[scenario] = summary
+        rec.step(f"{scenario}:through-proxy", went_through_proxy(summary),
+                 "the proxy recorded no container create: the agent did not reach Docker through it",
+                 writes=summary["writes"], created=summary["created"], refused=len(summary["refused"]))
         return mid
 
 
@@ -513,6 +628,63 @@ def project_scan(project: str) -> dict:
             "vpn_port_forwarding": {}, "system": {}, "backups": {}, "services": {}, "image_candidates": [], "certs": []}
 
 
+class RehearsalAuthenticator:
+    """The proxy gate's authenticator for the rehearsal. The real one binds a session to its cgroup AND unique uid and refuses
+    root; the rehearsal agent is root in a process group, so identity here is: the connecting pid is in the session's process
+    group, and the session row (live, unexpired, bound as the supervisor recorded it) is then resolved by the same
+    `resolve_session_by_id` the daemon uses. Tokens are not accepted (the docker CLI sends none)."""
+
+    def __init__(self, store, containment: "ProcessContainment"):
+        self.store, self.containment = store, containment
+
+    def by_id(self, peer, session_id: str):
+        from planet_express.missions.sessions import resolve_session_by_id
+        from planet_express.missions.store import MissionStore
+        if not self.containment.contains(session_id, peer.pid):
+            return None
+        row = MissionStore(self.store).get_session(session_id)
+        if row is None:
+            return None
+        return resolve_session_by_id(self.store, session_id, peer_cgroup=row["cgroup_path"], peer_uid=row["session_uid"])
+
+    def __call__(self, peer, request) -> None:
+        return None
+
+
+class ProxySockets:
+    """The supervisor's socket provider for the rehearsal: a 0700 directory per session holding the real proxy's `proxy.sock`.
+    There is no worker socket here. A session that would get no proxy socket fails to launch; it never falls back to the host."""
+
+    def __init__(self, sock_root: str, proxy):
+        self.sock_root, self.proxy = sock_root, proxy
+
+    def path(self, session_id: str) -> str:
+        return f"{self.sock_root}/{session_id}/worker.sock"
+
+    def start(self, cs):
+        directory = f"{self.sock_root}/{cs.session_id}"
+        if len(directory) + len("/proxy.sock") > SOCKET_PATH_MAX:
+            raise RuntimeError("the proxy socket path is too long for a unix socket: use a shorter --workdir")
+        os.mkdir(directory, 0o700)
+        try:
+            stop = self.proxy.start(cs)
+            if stop is None:
+                raise RuntimeError("no Docker proxy socket for this session (its grant does not ask for the proxy)")
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+
+        def stopper() -> None:
+            try:
+                stop()
+            finally:
+                shutil.rmtree(directory, ignore_errors=True)
+        return stopper
+
+    def env(self, cs) -> dict[str, str]:
+        return self.proxy.env(cs)
+
+
 class ProcessContainment:
     """A minimal session containment over process groups, for the rehearsal only. It implements the same protocol as the real
     cgroup launcher (launch/freeze/thaw/kill/is_empty/cleanup) well enough for one agent command per session. It does NOT
@@ -533,6 +705,16 @@ class ProcessContainment:
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, close_fds=True)
         self._procs[session_id] = proc
         return ContainedSession(session_id, "local_cgroup", self.cgroup_path(session_id), spec.uid)
+
+    def contains(self, session_id: str, pid: int, getpgid: Callable[[int], int] = os.getpgid) -> bool:
+        """Is `pid` in this session's process group (every child of the agent, `docker compose` plugin included)?"""
+        proc = self._procs.get(session_id)
+        if proc is None:
+            return False
+        try:
+            return getpgid(pid) == proc.pid
+        except (ProcessLookupError, PermissionError):
+            return False
 
     def uid_in_use(self, uid: int) -> bool:
         return False
