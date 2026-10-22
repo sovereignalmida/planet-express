@@ -268,6 +268,7 @@ class Supervisor:
         self._verifying: dict[str, Any] = {}
         self._verify_guard = threading.Lock()
         self._shutting_down = False
+        self._lifecycle = threading.RLock()
         self._locks: dict[str, threading.RLock] = {}      # one per mission: its start/poll/cancel never interleave
         self._locks_guard = threading.Lock()
 
@@ -316,10 +317,18 @@ class Supervisor:
     # ── start ───────────────────────────────────────────────────────────────
     def begin_shutdown(self) -> None:
         """No new session starts from here on (the runner calls this first; `shutdown()` then kills what is running)."""
-        self._shutting_down = True
+        with self._lifecycle:                 # waits for a start that is already inside its launch, so none outlives this
+            self._shutting_down = True
 
     @_per_mission
     def start(self, mission_id: str) -> None:
+        # The whole start (checkpoint, baseline, session, launch) runs under the lifecycle lock, and `begin_shutdown` takes
+        # it to set the flag: a start either finishes (its run is registered, so shutdown() kills it while the tripwire is
+        # still watching) or sees the flag and launches nothing. There is no window in between.
+        with self._lifecycle:
+            return self._start_locked(mission_id)
+
+    def _start_locked(self, mission_id: str) -> None:
         self._require_enabled()
         if self._shutting_down:
             raise RepairNotReady("the supervisor is shutting down")

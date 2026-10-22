@@ -350,6 +350,37 @@ def test_a_start_in_flight_when_shutdown_begins_launches_nothing_and_leaves_no_s
         st.close()
 
 
+def test_begin_shutdown_waits_for_a_start_that_is_already_launching(tmp_path):
+    import threading
+
+    from repair_fakes import build
+    st = build(tmp_path)
+    try:
+        mid = st.propose()["mission_id"]
+        st.approve_all(mid)
+        inside, release = threading.Event(), threading.Event()
+        real = st.sup.require_repair_preconditions
+
+        def slow_check():
+            real()
+            inside.set()
+            assert release.wait(10)
+        st.sup.require_repair_preconditions = slow_check
+        starter = threading.Thread(target=st.sup.start, args=(mid,))
+        starter.start()
+        assert inside.wait(10)
+        done = threading.Event()
+        stopper = threading.Thread(target=lambda: (st.sup.begin_shutdown(), done.set()))
+        stopper.start()
+        assert not done.wait(0.5)                    # the quiesce/kill sequence cannot begin under a start in flight
+        release.set()
+        starter.join(10)
+        assert done.wait(10) and mid in st.sup._runs  # the run is registered, so shutdown() will kill it while watched
+        stopper.join(10)
+    finally:
+        st.close()
+
+
 # ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
 
 def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):
