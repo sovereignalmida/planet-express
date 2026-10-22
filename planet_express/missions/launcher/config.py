@@ -13,7 +13,8 @@ from dataclasses import asdict, dataclass
 CONF_PATH = "/etc/planetexpress-launch/launch.conf"   # a root-owned directory of its own (0755); pe_launch.py duplicates it
 HELPER_PATH = "/usr/libexec/planetexpress/pe-launch"
 SUDOERS_PATH = "/etc/sudoers.d/planetexpress-launch"
-DEFAULT_UID_RANGE = (200000, 200999)   # clear of systemd's DynamicUser range (61184-65519) and of normal accounts
+SYSTEMD_DYNAMIC_UIDS = (61184, 65519)  # systemd DynamicUser= allocates here; a session uid in it could be another service's
+DEFAULT_UID_RANGE = (200000, 200999)   # clear of systemd's DynamicUser range and of normal accounts: the ONE default
 DEFAULT_PIDS_MAX = 512
 
 
@@ -115,4 +116,4 @@ def load(path: str = CONF_PATH) -> LaunchConf:
         os.close(fd)
 
 
-__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "mos_launcher_paths", "ancestor_problem", "ConfError", "LaunchConf", "load"]
+__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "SYSTEMD_DYNAMIC_UIDS", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "mos_launcher_paths", "ancestor_problem", "ConfError", "LaunchConf", "load"]

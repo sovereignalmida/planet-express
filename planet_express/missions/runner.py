@@ -117,16 +117,29 @@ class MissionRunner:
                 log.exception("worker socket did not stop cleanly")
 
     def stop(self) -> None:
+        """Order matters: stop accepting starts, kill the sessions and prove them gone, and only THEN stop the tripwire. A
+        session that is still running while nothing watches the host is exactly the window the tripwire exists to close."""
+        self._stop.set()                                  # no new starts: the loop is the only thing that starts sessions
+        getattr(self.supervisor, "begin_shutdown", lambda: None)()
         if self.tripwire is not None:
-            self.tripwire.stop()
-        self._stop.set()
+            getattr(self.tripwire, "quiesce", lambda: None)()      # no pause/freeze of a session that is being killed
         if self._thread is not None:
             self._thread.join(timeout=30)
-        self._stop_server()
-        self.supervisor.shutdown()
-        shutdown = getattr(getattr(self.supervisor, "docker_proxy", None), "shutdown", None)
-        if shutdown is not None:
-            shutdown()
+        try:
+            self._stop_server()
+            self.supervisor.shutdown()                    # sessions killed and proven gone (or kept tracked, never dropped)
+            shutdown = getattr(getattr(self.supervisor, "docker_proxy", None), "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+        finally:
+            if self.tripwire is not None:
+                if getattr(self.supervisor, "tracked_sessions", 0):
+                    # A session could not be killed or proven empty: it is still on the host. Keep watching (and pausing)
+                    # rather than stop the one thing that would notice what it does.
+                    log.error("%d session(s) not proven gone at shutdown: the tripwire stays on", self.supervisor.tracked_sessions)
+                    getattr(self.tripwire, "unquiesce", lambda: None)()
+                else:
+                    self.tripwire.stop()
 
 
 def _cgroup_mount(root: str) -> str:
@@ -209,7 +222,14 @@ class SessionSockets(SocketProvider):
         return self.proxy.env(cs) if self.proxy is not None else {}
 
 
-def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None) -> Callable[[], PreflightReport]:
+def held_session_uids(store: Store) -> list[int]:
+    """Uids that sessions still hold (not yet released by the reaper)."""
+    with store._connect() as conn:
+        return [r[0] for r in conn.execute("SELECT session_uid FROM mission_sessions "
+                                           "WHERE session_uid IS NOT NULL AND uid_released_at IS NULL")]
+
+
+def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None, held_uids=None) -> Callable[[], PreflightReport]:
     strategy = choose_strategy(cfg.launcher, os.geteuid() if euid is None else euid)
     low, high = cfg.session_uid_min, cfg.session_uid_max
 
@@ -217,7 +237,7 @@ def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: 
         return run_preflight(
             containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
             probe_uid=high, helper=HELPER_PATH, conf=cfg.launch_conf, uid_range=(low, high), sudo=strategy == "sudo",
-            check_reach=True)
+            check_reach=True, held_uids=held_uids)
     return run
 
 
@@ -315,7 +335,8 @@ def build_mission_runner(
                       if cfg.hooks.install_claude_code else None),
         hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None)
     if real:
-        supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
+        supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir,
+                                                       held_uids=lambda: held_session_uids(store))
         supervisor.socket_provider = socket_provider or SessionSockets(
             cfg.sock_root, supervisor, authenticator, proxy=docker_proxy if hasattr(docker_proxy, "start") else None)
     else:

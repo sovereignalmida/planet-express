@@ -15,7 +15,7 @@ import hashlib
 import ipaddress
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from planet_express.core.redact import redact
@@ -63,9 +63,16 @@ class DiffContext:
     protected: tuple[str, ...]
     stacks_root: str | None = None
     host: str = "local"
+    excluded: tuple[str, ...] = ()             # the grant's enforced exclusions: protected-like, but only themselves and below
+    created: frozenset[str] = frozenset()      # ids of containers the Docker proxy recorded as created by this mission
+    creates_in_flight: tuple[tuple[str, tuple[str, ...]], ...] = ()   # (name, targets) of proxy creates announced, not yet recorded
+
+    def announced(self, name: str, resource: str) -> bool:
+        """Is this container one a proxy create announced? By the name it asked for, or (no name asked) by its service."""
+        return any((n == name) if n else (resource in targets) for n, targets in self.creates_in_flight)
 
     def cls(self, resource: str) -> str:
-        return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root)
+        return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root, excluded=self.excluded)
 
     def verdict(self, resource: str, inside: Verdict = "allowed") -> Verdict:
         got = self.cls(resource)
@@ -125,51 +132,75 @@ def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
     out: list[Change] = []
     routes_res = ctx.rid("detector:ingress_routes")
     for name in sorted(set(base) | set(cur)):
-        b, c = base.get(name), cur.get(name)
-        res = (c or b)["resource"]
-        label = clean(name, 80)
-        added_container = b is None and c is not None
-        if b is None or c is None:
+        changes = _container_changes(name, base.get(name), cur.get(name), ctx, routes_res)
+        own = ctx.rid(f"container:{name}")
+        if own is not None and ctx.cls(own) == "protected":
+            # A grant's excluded (or the site's protected) container NAME: every change to it is protected, whatever service
+            # its labels claim.
+            changes = [replace(ch, verdict="protected") for ch in changes]
+        out += changes
+    return out
+
+
+def _container_changes(name: str, b: dict | None, c: dict | None, ctx: DiffContext, routes_res: str | None) -> list[Change]:
+    out: list[Change] = []
+    res = (c or b)["resource"]
+    label = clean(name, 80)
+    added_container = b is None and c is not None
+    replaced = (b is not None and c is not None and bool(b.get("id")) and bool(c.get("id")) and b["id"] != c["id"])
+    if b is None or c is None or replaced:
+        if (added_container or replaced) and c.get("id") not in ctx.created:
+            # A container that appeared during the session (or replaced one under the same name) and that the proxy did
+            # not record creating: its compose labels are its own claim, not evidence of scope. Judge it by its name
+            # (protected still wins by its labels) and treat it as outside the grant, so it pauses.
+            own = ctx.rid(f"container:{name}")
+            named_protected = ctx.cls(res) == "protected" or (own is not None and ctx.cls(own) == "protected")
+            if ctx.announced(name, res) and not named_protected:
+                return out          # THIS container's create was announced and is not recorded yet: judge it next scan
+            out.append(Change("containers", own or res, "container_added" if added_container else "container_replaced",
+                              "protected" if named_protected else "out_of_scope",
+                              f"{label}: not created through the proxy"))
+        elif b is None or c is None:
             out.append(Change("containers", res, "container_added" if b is None else "container_removed",
                               ctx.verdict(res), label))
-            if b is None:
-                b = {"image": c["image"], "mounts": [], "networks": [], "labels_hash": "", "routes": []}
-            else:
-                continue
-        inside = ctx.cls(res) == "in_scope"
-        if b["image"] != c["image"]:
-            out.append(Change("containers", res, "image_changed", ctx.verdict(res), label))
-        added_routes = sorted(set(c["routes"]) - set(b["routes"]))
-        if added_routes and routes_res:
-            out.append(Change("containers", routes_res, "ingress_route_added", "protected",
-                              f"{label}: {clean(added_routes[0], 120)}"))
-        elif b["labels_hash"] != c["labels_hash"] and b["labels_hash"]:
-            out.append(Change("containers", res, "labels_changed", ctx.verdict(res), label))
-        for net in sorted(set(c["networks"]) - set(b["networks"])):
-            nres = ctx.rid(f"network:{net}")
-            v: Verdict = ctx.verdict(nres) if nres and ctx.cls(nres) == "protected" else ctx.verdict(res)
-            if added_container and v not in ("protected", "unexpected_in_scope"):
-                continue
-            out.append(Change("containers", nres if v == "protected" and nres else res, "network_added", v,
-                              f"{label}: {clean(net, 80)}"))
-        old = {tuple(m[:4]) for m in b["mounts"]}
-        for m in sorted(c["mounts"]):
-            if tuple(m[:4]) in old:
-                continue
-            src = ctx.rid(f"path:{m[1]}") if m[1].startswith("/") else None
-            where = ctx.cls(src) if src else "out_of_scope"
-            if where == "protected":
-                v = "protected"
-            elif where == "in_scope":
-                v = ctx.verdict(res)
-            else:
-                v = "unexpected_in_scope" if inside else ctx.verdict(res)
-            if added_container and v not in ("protected", "unexpected_in_scope"):
-                continue
-            out.append(Change("containers", src or res, "mount_added", v, f"{label}: {clean(m[1], 120)}"))
-        for m in sorted(b["mounts"]):
-            if tuple(m[:4]) not in {tuple(x[:4]) for x in c["mounts"]}:
-                out.append(Change("containers", res, "mount_removed", ctx.verdict(res), f"{label}: {clean(m[1], 120)}"))
+        if b is None:
+            b = {"image": c["image"], "mounts": [], "networks": [], "labels_hash": "", "routes": []}
+        elif c is None:
+            return out
+    inside = ctx.cls(res) == "in_scope"
+    if b["image"] != c["image"]:
+        out.append(Change("containers", res, "image_changed", ctx.verdict(res), label))
+    added_routes = sorted(set(c["routes"]) - set(b["routes"]))
+    if added_routes and routes_res:
+        out.append(Change("containers", routes_res, "ingress_route_added", "protected",
+                          f"{label}: {clean(added_routes[0], 120)}"))
+    elif b["labels_hash"] != c["labels_hash"] and b["labels_hash"]:
+        out.append(Change("containers", res, "labels_changed", ctx.verdict(res), label))
+    for net in sorted(set(c["networks"]) - set(b["networks"])):
+        nres = ctx.rid(f"network:{net}")
+        v: Verdict = ctx.verdict(nres) if nres and ctx.cls(nres) == "protected" else ctx.verdict(res)
+        if added_container and v not in ("protected", "unexpected_in_scope"):
+            continue
+        out.append(Change("containers", nres if v == "protected" and nres else res, "network_added", v,
+                          f"{label}: {clean(net, 80)}"))
+    old = {tuple(m[:4]) for m in b["mounts"]}
+    for m in sorted(c["mounts"]):
+        if tuple(m[:4]) in old:
+            continue
+        src = ctx.rid(f"path:{m[1]}") if m[1].startswith("/") else None
+        where = ctx.cls(src) if src else "out_of_scope"
+        if where == "protected":
+            v = "protected"
+        elif where == "in_scope":
+            v = ctx.verdict(res)
+        else:
+            v = "unexpected_in_scope" if inside else ctx.verdict(res)
+        if added_container and v not in ("protected", "unexpected_in_scope"):
+            continue
+        out.append(Change("containers", src or res, "mount_added", v, f"{label}: {clean(m[1], 120)}"))
+    for m in sorted(b["mounts"]):
+        if tuple(m[:4]) not in {tuple(x[:4]) for x in c["mounts"]}:
+            out.append(Change("containers", res, "mount_removed", ctx.verdict(res), f"{label}: {clean(m[1], 120)}"))
     return out
 
 
@@ -212,6 +243,8 @@ def _mounts(base: Sequence[str], cur: Sequence[str], ctx: DiffContext) -> list[C
 def _files(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
     out = []
     for res in sorted(set(base) | set(cur)):
+        if res not in base:
+            continue            # the baseline defines what is watched for THIS mission (another's excluded path is not ours)
         b, c = base.get(res), cur.get(res)
         if b == c:
             continue

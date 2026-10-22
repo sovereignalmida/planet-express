@@ -92,19 +92,6 @@ def _decisions(store: Store, mission: Mission) -> dict[str, str]:
     return {r["phase"]: r["decision"] for r in rows if r["bound_hash"] in current}
 
 
-def _plan_view(mission: Mission) -> list[dict[str, Any]]:
-    try:
-        raw = loads_strict(mission.verification_plan_json) if mission.verification_plan_json else {}
-    except CanonicalError:
-        return []
-    out = []
-    for check in (raw.get("checks", []) if isinstance(raw, dict) else [])[:64]:
-        if isinstance(check, dict):
-            out.append({"id": _clip(check.get("id", ""), 128), "check": _clip(check.get("check", ""), 32),
-                        "params": {_clip(k, 64): _clip(v, 200) for k, v in list((check.get("params") or {}).items())[:16]}})
-    return out
-
-
 def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """The approval card an operator reads before deciding. Elevated risks come FIRST (`warnings`), then what the mission may
     touch and how it will be judged. Everything is redacted and bounded; nothing here is a secret."""
@@ -122,6 +109,7 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
                    "acknowledged_no_backup": grant.backup.acknowledged_no_backup}       # the grant, not a status source, says this
     decisions = _decisions(store, mission)
     required = [{**r, "state": decisions.get(r["phase"], "pending")} for r in required_phases(mission)]
+    plan_checks, truncated = approvals.plan_view(mission.verification_plan_json)
     return {
         "mission_id": mission.id, "title": _clip(mission.title, 256), "goal": _clip(mission.goal),
         "status": mission.status, "tier": grant.tier, "grant_hash": mission.grant_hash,
@@ -130,14 +118,18 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
         "scope": grant.scope.model_dump(mode="json"),
         "protected": {"resources": [_clip(r, 200) for r in grant.protected.resources[:64]],
                       "count": len(grant.protected.resources),
-                      "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]]},
+                      "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]],
+                      # a resource-id exclusion is a hard carve-out (tripwire, tools and the Docker proxy treat it as
+                      # protected); any other exclusion is a note to the agent that nothing can enforce
+                      "exclusions_enforced": [_clip(x, 160) for x in grant.enforced_exclusions()[:32]],
+                      "exclusions_advisory": [_clip(x, 120) for x in grant.advisory_exclusions()[:32]]},
         "budgets": grant.budgets.model_dump(mode="json"),
-        "verification": {"plan_sha256": grant.verification.plan_sha256, "checks": _plan_view(mission),
+        "verification": {"plan_sha256": grant.verification.plan_sha256, "checks": plan_checks, "truncated": truncated,
                          "on_verify_fail": grant.on_verify_fail},
         "sudo": grant.sudo.model_dump(mode="json"), "docker": grant.docker,
         "credentials": [_clip(c, 120) for c in grant.credentials[:32]],
         "window": grant.window.model_dump(mode="json"),
-        "required": required, "ready": bool(approvals.execution_predicate(store, mission.id)),
+        "required": required, "ready": bool(approvals.execution_predicate(store, mission.id)) and not truncated,
     }
 
 
@@ -332,6 +324,8 @@ class ApprovalFlow:
             raise FlowError("this mission never executes: nothing to approve", "conflict")
         if mission.status != "awaiting_decision":
             raise FlowError(f"Mission is {mission.status}; it can be approved only while awaiting a decision", "conflict")
+        if approvals.plan_view(mission.verification_plan_json)[1]:
+            raise FlowError("The verification plan is too large to show in full, so it cannot be approved", "invalid_grant")
         phases = {r["phase"]: r for r in required_phases(mission)}
         if phase not in phases:
             raise FlowError(f"This mission does not need a {phase!r} approval")

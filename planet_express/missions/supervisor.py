@@ -154,6 +154,7 @@ class _Run:
     brief: str = ""
     submitted: AgentResult | None = None      # a result the worker handed in over the socket
     paused_at: float | None = None            # a tripwire pause is not session time: the wall budget does not run meanwhile
+    pause_extended_to: float | None = None    # how far the session's expiry has been moved to cover that pause
     hook_offset: int = 0                      # how much of the session's hook log has been read
     hook_log_fault: bool = False              # a shrunk or vanished log has been reported once
     hook_dir: Path | None = None              # the Core-owned directory holding this session's hook settings
@@ -267,6 +268,7 @@ class Supervisor:
         self._verifying: dict[str, Any] = {}
         self._verify_guard = threading.Lock()
         self._shutting_down = False
+        self._lifecycle = threading.RLock()
         self._locks: dict[str, threading.RLock] = {}      # one per mission: its start/poll/cancel never interleave
         self._locks_guard = threading.Lock()
 
@@ -313,9 +315,28 @@ class Supervisor:
             return conn.execute("SELECT COUNT(*) FROM mission_sessions WHERE mission_id=?", (mission_id,)).fetchone()[0]
 
     # ── start ───────────────────────────────────────────────────────────────
+    @property
+    def tracked_sessions(self) -> int:
+        """Sessions Core still supervises: after `shutdown()`, any left were not proven gone."""
+        return len(self._runs)
+
+    def begin_shutdown(self) -> None:
+        """No new session starts from here on (the runner calls this first; `shutdown()` then kills what is running)."""
+        with self._lifecycle:                 # waits for a start that is already inside its launch, so none outlives this
+            self._shutting_down = True
+
     @_per_mission
     def start(self, mission_id: str) -> None:
+        # The whole start (checkpoint, baseline, session, launch) runs under the lifecycle lock, and `begin_shutdown` takes
+        # it to set the flag: a start either finishes (its run is registered, so shutdown() kills it while the tripwire is
+        # still watching) or sees the flag and launches nothing. There is no window in between.
+        with self._lifecycle:
+            return self._start_locked(mission_id)
+
+    def _start_locked(self, mission_id: str) -> None:
         self._require_enabled()
+        if self._shutting_down:
+            raise RepairNotReady("the supervisor is shutting down")
         if not self.launcher_ready():
             raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         mission = self.ms.get_mission(mission_id)
@@ -408,6 +429,11 @@ class Supervisor:
             raise
         run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
         self._runs[mission.id] = run
+        if self._shutting_down:
+            # Shutdown began while this start was in flight (its snapshot of `_runs` may predate this run): the run is
+            # registered FIRST and the flag read AFTER, so either shutdown() sees it or this does. Nothing is launched.
+            self._shutdown_one(run)
+            raise RepairNotReady("the supervisor is shutting down")
         if self.ms.get_mission(mission.id).cancel_requested_at is not None:
             return self._kill_and_advance(run, "cancel")     # a cancel raced the launch: nothing is launched
         # The launcher hands the token to the child on fd 3 (the helper's token pipe); it never touches argv, env,
@@ -533,14 +559,16 @@ class Supervisor:
             # operator resumes, rolls back, takes over or cancels. The lease is kept alive so a resume is not fenced out.
             if run.paused_at is None:
                 run.paused_at = float(self.clock())
+            self._extend_session_for_pause(run)      # the pause is not session time, so the session must not expire in it
             with contextlib.suppress(leases.LeaseLost):
                 leases.heartbeat(self.store, run.mission_id, self.lease_ttl_s)
             return
         if mission.status != expected:
             return self._kill_and_advance(run, "state_changed")
         if run.paused_at is not None:
+            self._extend_session_for_pause(run)          # a pause that ends outside resume() still moves the expiry
             run.started_at += float(self.clock()) - run.paused_at
-            run.paused_at = None
+            run.paused_at = run.pause_extended_to = None
         if not self._hook_settings_intact(run):
             self._note(run.mission_id, {"hook_settings": "changed or missing", "session": run.session_id})
             return self._kill_and_advance(run, "hook_tamper")        # a session that edited its own hooks does not keep running
@@ -785,15 +813,28 @@ class Supervisor:
                 restore(mission_id)
             if self.docker_proxy is not None:
                 self.docker_proxy.resume(mission_id, mission.grant_hash)
+            self._extend_session_for_pause(run)       # the whole pause, including the part since the last poll
+            leases.heartbeat(self.store, mission_id, self.lease_ttl_s)      # a lost lease refuses the resume
             self.containment.thaw(run.cs)
         except Exception as exc:                          # noqa: BLE001 - back to paused, frozen and closed
             self._pause_again(mission_id, run, actor, type(exc).__name__)
             raise ResumeRefused(f"the session could not be resumed ({type(exc).__name__}); it stays paused") from None
         if run.paused_at is not None:
             run.started_at += float(self.clock()) - run.paused_at      # the pause was not session time
-            run.paused_at = None
+            run.paused_at = run.pause_extended_to = None
         self.ms.append_event(mission_id, "decision", actor, {"event": "mission.resumed", "grant_hash": mission.grant_hash})
         return "executing"
+
+    def _extend_session_for_pause(self, run: _Run) -> None:
+        """Move the session's `expires_at` by the time it has spent paused (once, whole seconds, remainder carried): the wall
+        budget is shifted by a pause, so the expiry must be too, or a resumed session is unauthenticated."""
+        if run.paused_at is None:
+            return
+        since = run.pause_extended_to if run.pause_extended_to is not None else run.paused_at
+        delta = int(float(self.clock()) - since)
+        if delta > 0:
+            self.ms.extend_session(run.session_id, delta)
+            run.pause_extended_to = since + delta
 
     def _pause_again(self, mission_id: str, run: _Run, actor: str, why: str) -> None:
         with contextlib.suppress(Exception):
@@ -1205,6 +1246,10 @@ class Supervisor:
         running session. One misbehaving mission never stops the others."""
         if not self.enabled:
             return
+        if self._shutting_down:
+            with contextlib.suppress(Exception):
+                self.poll_all()                  # sessions are still advanced (and killed) but nothing new starts
+            return
         ready = self.launcher_ready()            # proposal-only: queued missions wait, nothing is started or retried
         for mission in self.ms.list_missions("queued"):
             if mission.tier not in ("observe", "propose") or mission.id in self._runs:
@@ -1240,6 +1285,8 @@ class Supervisor:
         """Repair missions wait in `awaiting_decision` for approval. Each tick, those whose execution predicate holds are started.
         A start that cannot happen yet (the monitor or a side door not ready) just waits and is noted once per reason; any
         other refusal is a failed start and, after START_ATTEMPTS, hands the mission to the operator."""
+        if self._shutting_down:
+            return
         for mission in self.ms.list_missions("awaiting_decision"):
             if mission.tier != "repair" or mission.id in self._runs:
                 continue
@@ -1284,17 +1331,20 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     future.result(max(0.0, deadline - time.monotonic()))
         for run in list(self._runs.values()):
-            try:
-                with self._lock_for(run.mission_id):
-                    self._begin_kill(run, "shutdown")
-                    if run.cs is None or self.containment.is_empty(run.cs):
-                        self._revoke(run)
-                        if run.cs is not None:
-                            self.containment.cleanup(run.cs)
-                        self._runs.pop(run.mission_id, None)
-                        self._reap_session(run)
-            except Exception:
-                log.exception("could not stop mission %s cleanly", run.mission_id)
+            self._shutdown_one(run)
+
+    def _shutdown_one(self, run: _Run) -> None:
+        try:
+            with self._lock_for(run.mission_id):
+                self._begin_kill(run, "shutdown")
+                if run.cs is None or self.containment.is_empty(run.cs):
+                    self._revoke(run)
+                    if run.cs is not None:
+                        self.containment.cleanup(run.cs)
+                    self._runs.pop(run.mission_id, None)
+                    self._reap_session(run)
+        except Exception:
+            log.exception("could not stop mission %s cleanly", run.mission_id)
 
     # ── restart recovery ────────────────────────────────────────────────────
     def recover(self) -> list[str]:

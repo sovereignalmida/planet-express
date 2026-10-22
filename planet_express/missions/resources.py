@@ -95,12 +95,16 @@ def overlaps(a: str, b: str, *, stacks_root: str | None = None) -> bool:
 
 
 def classify(resource: str, scope: Iterable[str], protected: Iterable[str], *,
-             stacks_root: str | None = None, parent_of_protected: bool = True) -> Verdict:
+             stacks_root: str | None = None, parent_of_protected: bool = True,
+             excluded: Iterable[str] = ()) -> Verdict:
     """Protected wins. By default a resource overlapping a protected one in either direction is protected, because a
     change reported on a parent (a whole mount) may be a change to the protected child. A caller that names a resource
     it only READS (a brokered tool's scope field) passes `parent_of_protected=False`: a stack that merely contains a
     protected service is still readable, the protected service itself is not."""
     protected = list(protected)
+    # A grant's own exclusions carve out ONLY the excluded resource and what is inside it: the in-scope parent stays usable.
+    if any(contains(e, resource, stacks_root=stacks_root) for e in excluded):
+        return "protected"
     hit = (any(overlaps(p, resource, stacks_root=stacks_root) for p in protected) if parent_of_protected
            else any(contains(p, resource, stacks_root=stacks_root) for p in protected))
     if hit:

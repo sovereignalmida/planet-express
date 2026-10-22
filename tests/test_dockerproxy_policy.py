@@ -639,3 +639,14 @@ def test_devices_and_unconfined_profiles_make_a_container_unactionable(root, hos
         plan_for(p, "exec.create", "plex", body={"Cmd": ["id"]})
     assert Policy(make_scope(str(root)), Hazard(host_config, ())).hazards(Hazard(host_config, ()).container("plex"))
     assert Policy(make_scope(str(root)), FakeInspector()).hazards(FakeInspector().container("plex")) == []
+
+
+def test_a_bind_of_a_parent_of_an_excluded_path_is_refused_but_a_sibling_is_not(root):
+    (root / "stacks" / "media" / "other").mkdir()
+    scope = make_scope(str(root), excluded=(f"host:local/path:{root}/stacks/media/config",))
+    p = Policy(scope, FakeInspector())
+    with pytest.raises(Refusal, match="excluded"):
+        create(p, host(Binds=[f"{root}/stacks/media:/x"]))                # the parent would hand over the excluded child
+    with pytest.raises(Refusal, match="excluded"):
+        create(p, host(Binds=[f"{root}/stacks/media/config:/x"]))
+    assert create(p, host(Binds=[f"{root}/stacks/media/other:/x"]))        # a sibling is untouched

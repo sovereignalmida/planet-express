@@ -1,6 +1,7 @@
 """Mission CRUD, the redacting event append, and the one-transaction session start (contract §2)."""
 
 import hashlib
+import json
 import re
 import secrets
 import sqlite3
@@ -15,6 +16,8 @@ from .canonical import canonical_json, sha256_hex
 from .events import insert_event
 from .models import Grant, Mission, MissionEvent, Origin, SessionKind
 from .state import MissionNotFound, transition_in_txn
+
+PROXY_ACTOR = "docker-proxy"          # the only actor whose records may vouch for a container
 
 
 class GrantLocked(RuntimeError):
@@ -224,6 +227,29 @@ class MissionStore:
                                 (mission_id, after_seq)).fetchall()
         return [MissionEvent(**dict(r)) for r in rows]
 
+    def proxy_creates_since(self, mission_id: str, after_seq: int = 0) -> tuple[list[tuple[int, int, dict[str, Any]]], int]:
+        """(seq, at, body) of the Docker proxy's container-create records for this mission after `after_seq`. Pinned to the
+        proxy's own actor (nothing else may vouch for a container) and read from the (mission, seq) index forward, so a
+        caller that remembers the last seq never rescans the log."""
+        with self.store._connect() as conn:
+            # The high-water mark is read FIRST: rows landing after it are picked up next time, none are skipped, and a
+            # mission with no create records still advances its cursor instead of rescanning its whole log every scan.
+            high = conn.execute("SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?", (mission_id,)).fetchone()[0]
+            rows = conn.execute(
+                "SELECT seq, at, body_json FROM mission_events WHERE mission_id=? AND seq>? AND seq<=? AND kind='tool' "
+                "AND actor=? "
+                "AND json_extract(body_json, '$.event') IN ('docker.create_begin','docker.created','docker.create_end') "
+                "ORDER BY seq", (mission_id, after_seq, high, PROXY_ACTOR)).fetchall()
+        out = []
+        for r in rows:
+            try:
+                body = json.loads(r["body_json"])
+            except ValueError:
+                continue
+            if isinstance(body, dict):
+                out.append((r["seq"], r["at"], body))
+        return out, max(high, after_seq)
+
     # ── sessions ────────────────────────────────────────────────────────────
     def start_session(self, mission_id: str, *, kind: SessionKind, token_hash: str, session_ttl_s: int,
                       lease_ttl_s: int, resources: Sequence[str] | None = None,
@@ -288,6 +314,15 @@ class MissionStore:
                 raise SessionConflict(str(exc)) from exc
             insert_event(conn, mission_id, "note", actor, {"session_started": session_id, "kind": kind}, now)
         return session_id
+
+    def extend_session(self, session_id: str, seconds: int) -> bool:
+        """Move a live session's expiry later (a tripwire pause is not session time). Never earlier, never a revoked one."""
+        if seconds <= 0:
+            return False
+        with self.store._write() as conn:
+            cur = conn.execute("UPDATE mission_sessions SET expires_at=expires_at+? WHERE id=? AND revoked_at IS NULL",
+                               (int(seconds), session_id))
+            return cur.rowcount == 1
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self.store._connect() as conn:

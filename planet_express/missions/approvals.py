@@ -4,10 +4,12 @@ An approval is proven only by a `mission_approvals` row. Rows bind to a hash, so
 plan changes the hash and every old row stops matching. A denial row is a record, never a proof.
 """
 
+import json
 import sqlite3
 import uuid
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
+from planet_express.core.redact import redact
 from planet_express.core.store import Store
 
 from .canonical import CanonicalError, loads_strict, sha256_hex
@@ -17,6 +19,52 @@ from .window import allowed as window_allowed
 
 TIER_RANK = {"observe": 0, "propose": 1, "repair": 2, "change": 3, "critical": 4}
 ELEVATED_PHASES = ("broad_sudo", "no_backup")
+MAX_CARD_CHECKS = 64
+MAX_CARD_PARAMS = 16
+PARAM_CARD_MAX = 8192                  # above the schema maxima (url 512, argv 16x256, arguments_json 2048)
+
+
+def plan_view(plan_json: str | None) -> tuple[list[dict[str, Any]], bool]:
+    """The verification checks as an operator reads them, IN FULL: approval binds the hash of the whole plan, so a clipped
+    value is a tail approved unseen. Returns (checks, truncated). `truncated` is True when anything was cut, dropped,
+    malformed or unreadable (fail closed), measured AFTER redaction (what is shown is what is measured). A truncated view is
+    never approvable: `record_approval` and the execution predicate both refuse it, not just the card."""
+    try:
+        raw = loads_strict(plan_json) if plan_json else {}
+    except CanonicalError:
+        return [], True
+    if not isinstance(raw, dict):
+        return [], True
+    checks = raw.get("checks", [])
+    if not isinstance(checks, list):
+        return [], True
+    truncated = len(checks) > MAX_CARD_CHECKS
+    out = []
+    for check in checks[:MAX_CARD_CHECKS]:
+        if not isinstance(check, dict):
+            truncated = True
+            continue
+        params = check.get("params") or {}
+        if not isinstance(params, dict):
+            truncated = True
+            params = {}
+        if len(params) > MAX_CARD_PARAMS:
+            truncated = True
+        shown = {}
+        for k, v in list(params.items())[:MAX_CARD_PARAMS]:
+            text = redact(v if isinstance(v, str) else json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+            key = redact(str(k))
+            if len(text) > PARAM_CARD_MAX or len(key) > 64:
+                truncated = True
+            shown[key[:64]] = text[:PARAM_CARD_MAX]
+        fields = {}
+        for name, limit in (("id", 128), ("check", 32)):
+            value = redact(str(check.get(name, "")))
+            if len(value) > limit:
+                truncated = True
+            fields[name] = value[:limit]
+        out.append({**fields, "params": shown})
+    return out, truncated
 
 
 class ApprovalConflict(RuntimeError):
@@ -75,7 +123,10 @@ def verification_plan_problems(row: sqlite3.Row) -> list[str]:
                 if row["verification_plan_json"] else None)
     except (CanonicalError, ValueError):
         return ["the grant or the verification plan is unreadable"]
-    return binding_problems(grant, plan)
+    problems = binding_problems(grant, plan)
+    if plan is not None and plan_view(row["verification_plan_json"])[1]:
+        problems.append("the verification plan is too large to show an operator in full, so it cannot be approved")
+    return problems
 
 
 def _approved(conn: sqlite3.Connection, mission_id: str, phase: str, bound_hash: str,
@@ -178,8 +229,9 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
         reasons += _standing_reasons(conn, m, grant, now)
     else:
         # (a) the current-grant approval
-        if not _approved(conn, mission_id, "grant", grant_hash, False):
-            reasons.append("no approval for the current grant hash")
+        if not _approved(conn, mission_id, "grant", grant_hash, grant.tier == "critical"):
+            reasons.append("no approval for the current grant hash" if grant.tier != "critical"
+                           else "a critical grant needs an elevated grant approval")
         # (d) elevated rows where the grant demands them
         if ((grant.sudo.mode == "broad" or grant.docker == "raw")
                 and not _approved(conn, mission_id, "broad_sudo", grant_hash, True)):

@@ -47,6 +47,7 @@ from .signals import Scanner, ScanResult, blind_resources
 log = logging.getLogger(__name__)
 
 ACTOR = "tripwire"
+CREATE_GRACE_S = 120      # a container create the proxy announced but has not finished counts as in flight this long
 STATE_V = 1
 MAX_CHANGES = 30
 MAX_STATE_BYTES = 8 * 1024 * 1024
@@ -138,6 +139,7 @@ class TripwireMonitor:
         self.checkpoint = checkpoint
         self.scanner = scanner
         self.state = TripwireStore(state_dir)
+        self._proxy_seen: dict[str, tuple] = {}
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self.stacks_root = stacks_root
         self.interval_s = interval_s
@@ -147,6 +149,8 @@ class TripwireMonitor:
         self.crash_backoff_s = crash_backoff_s
         self.accept_blind = frozenset(accept_blind)       # resource ids the operator accepts being unable to read
         self._stop = threading.Event()
+        self._quiesced = False
+        self._pause_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self.last_scan_at: float | None = None
@@ -174,6 +178,15 @@ class TripwireMonitor:
         """The monitor thread is alive and not stopping. A Repair launch is refused unless this is True (slice 7a)."""
         thread = self._thread
         return bool(self.enabled and thread is not None and thread.is_alive() and not self._stop.is_set())
+
+    def quiesce(self) -> None:
+        """Shutdown has begun and sessions are being killed: stop pausing/freezing them (a frozen cgroup cannot be killed
+        cleanly). Scans continue; the monitor itself is stopped only after the sessions are proven gone."""
+        with self._pause_lock:               # waits out a pause that is already freezing, so none starts after this returns
+            self._quiesced = True
+
+    def unquiesce(self) -> None:
+        self._quiesced = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -215,12 +228,27 @@ class TripwireMonitor:
         return self.investigating_interval_s if self.ms.list_missions("investigating") else self.interval_s
 
     # ── a scan ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def _excluded_files(missions: list[Mission]) -> list[tuple[str, str]]:
+        """(resource id, path) of every local path or mount a watched grant excludes, so a change under it is SEEN (the
+        protected set alone does not name it). Hashed on top of the protected files; each mission's baseline holds its own."""
+        out: dict[str, str] = {}
+        for mission in missions:
+            try:
+                for rid in mission.grant().enforced_exclusions():
+                    host, kind, name = split(rid)
+                    if kind in ("path", "mount") and host == "local":
+                        out[rid] = name
+            except Exception:                      # noqa: BLE001 - an unreadable grant is judged (and paused) elsewhere
+                continue
+        return sorted(out.items())
+
     def scan_once(self, missions: list[Mission] | None = None) -> dict[str, str]:
         """Scan once and judge every executing mission. Returns {mission id: 'ok' | the pause cause}."""
         missions = self.ms.list_missions("executing") if missions is None else missions
         if not missions:
             return {}
-        result = self.scanner.scan()
+        result = self.scanner.scan(self._excluded_files(missions))
         self.last_scan_at = self.clock()
         self.scans += 1
         out: dict[str, str] = {}
@@ -233,15 +261,38 @@ class TripwireMonitor:
                 out[mission.id] = "monitor_error"
         return out
 
-    def _ctx(self, grant: Grant) -> DiffContext:
+    def _proxy_state(self, mission_id: str) -> tuple[frozenset[str], tuple[tuple[str, tuple[str, ...]], ...]]:
+        """(ids the proxy recorded creating for this mission, the (name, targets) of each create in flight). Read incrementally from the
+        last seq seen (never the whole log per scan); an intent with no end after CREATE_GRACE_S stops counting."""
+        seq, created, begun, ended = self._proxy_seen.get(mission_id, (0, set(), {}, set()))
+        events, seq = self.ms.proxy_creates_since(mission_id, seq)
+        for _ev_seq, at, body in events:
+            kind, nonce = body.get("event"), body.get("nonce")
+            if kind == "docker.create_begin" and isinstance(nonce, str):
+                targets = body.get("targets") if isinstance(body.get("targets"), list) else []
+                begun[nonce] = (at, str(body.get("name") or ""), tuple(str(t) for t in targets))
+            else:
+                if kind == "docker.created" and isinstance(body.get("created_id"), str):
+                    created.add(body["created_id"])
+                if isinstance(nonce, str):
+                    ended.add(nonce)
+        now = int(self.ms.store._clock())
+        for nonce in [n for n in begun if n in ended]:
+            del begun[nonce]
+        ended.intersection_update(begun)
+        self._proxy_seen[mission_id] = (seq, created, begun, ended)
+        pending = tuple((name, targets) for at, name, targets in begun.values() if now - at <= CREATE_GRACE_S)
+        return frozenset(created), pending
+
+    def _ctx(self, grant: Grant, mission_id: str | None = None) -> DiffContext:
         scope = tuple(canon(r) for r in grant_resources(grant))
-        protected = []
-        for resource in grant.protected.resources:
-            try:
-                protected.append(canon(resource))
-            except BadResource:
-                raise ValueError("grant.protected holds a malformed resource") from None
-        return DiffContext(scope=scope, protected=tuple(protected), stacks_root=self.stacks_root)
+        try:
+            prot = grant.effective_protection()
+        except BadResource:
+            raise ValueError("grant.protected holds a malformed resource") from None
+        created, pending = self._proxy_state(mission_id) if mission_id else (frozenset(), ())
+        return DiffContext(scope=scope, protected=prot.protected, excluded=prot.excluded, stacks_root=self.stacks_root,
+                           created=created, creates_in_flight=pending)
 
     def _judge(self, mission: Mission, result: ScanResult) -> str:
         if not result.ok:
@@ -256,7 +307,7 @@ class TripwireMonitor:
         if baseline["grant_hash"] != mission.grant_hash or mission.grant().hash() != mission.grant_hash:
             return self._pause(mission, "grant_changed", [], {}, result)
         grant = mission.grant()
-        changes = diff_snapshots(baseline["snapshot"], result.snapshot, self._ctx(grant))
+        changes = diff_snapshots(baseline["snapshot"], result.snapshot, self._ctx(grant, mission.id))
         immediate = [c for c in changes if c.verdict in ("protected", "out_of_scope")]
         counted = self._count(mission, grant, changes)
         if immediate:
@@ -297,7 +348,7 @@ class TripwireMonitor:
         """Capture the live baseline at executing start. The caller (the supervisor, before the session is launched)
         must see this succeed: a failed capture means the mission must not run."""
         mission = self.ms.get_mission(mission_id)
-        result = self.scanner.scan()
+        result = self.scanner.scan(self._excluded_files([mission]))
         if not result.ok:
             raise RuntimeError(f"cannot capture the tripwire baseline: {sorted(result.errors)}")
         return self._capture_baseline(mission, result)
@@ -385,6 +436,13 @@ class TripwireMonitor:
                         log.exception("could not kill the session of %s", mission.id)
 
     def _pause(self, mission: Mission, cause: str, changes: list[Change], extra: dict, result: ScanResult | None) -> str:
+        with self._pause_lock:
+            if self._quiesced:
+                log.warning("tripwire quiesced for shutdown: not pausing %s (%s)", mission.id, cause)
+                return cause
+            return self._pause_locked(mission, cause, changes, extra, result)
+
+    def _pause_locked(self, mission: Mission, cause: str, changes: list[Change], extra: dict, result: ScanResult | None) -> str:
         started = self.clock()
         try:
             self.state.write(mission.id, "intent.json", {"v": STATE_V, "cause": cause, "grant_hash": mission.grant_hash})

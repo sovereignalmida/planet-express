@@ -15,6 +15,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from planet_express.missions.launcher.config import DEFAULT_UID_RANGE as _DEFAULT_UID_RANGE
+from planet_express.missions.launcher.config import SYSTEMD_DYNAMIC_UIDS as _SYSTEMD_DYNAMIC_UIDS
+
 Risk = Literal["R0", "R1", "R2", "R3", "R4"]
 
 
@@ -444,6 +447,17 @@ class MissionHooksConfig(BaseModel):
         return self
 
 
+def uid_range_problem(low: int, high: int) -> str | None:
+    """Why a session uid range is unsafe, or None: it may not overlap systemd's DynamicUser range. Pure arithmetic, no host
+    reads: whether an account already uses the range is the launcher preflight's job (`check_range_free`, which also reads
+    the group database and reports an unreadable one as a failed check)."""
+    dlow, dhigh = _SYSTEMD_DYNAMIC_UIDS
+    if low <= dhigh and high >= dlow:
+        return (f"missions.session_uid_min..session_uid_max ({low}-{high}) overlaps systemd's DynamicUser range "
+                f"{dlow}-{dhigh}. Use a range outside it, e.g. {_DEFAULT_UID_RANGE[0]}-{_DEFAULT_UID_RANGE[1]} (the default)")
+    return None
+
+
 class MissionsConfig(BaseModel):
     """v4 mission control. Off by default: with `enabled` false nothing mission-related runs."""
     model_config = ConfigDict(extra="forbid")
@@ -457,8 +471,11 @@ class MissionsConfig(BaseModel):
     # proposal-only.
     launcher: Literal["auto", "sudo", "direct"] = "auto"
     # The uid (and same-numbered private gid) range reserved for sessions. The top uid is reserved for preflight.
-    session_uid_min: int = Field(default=61000, gt=0, lt=2**31)
-    session_uid_max: int = Field(default=61999, gt=0, lt=2**31)
+    # The default is launcher.config.DEFAULT_UID_RANGE (the one source of truth). It was 61000-61999 before, which overlapped
+    # systemd's DynamicUser range (61184-65519); a config that still says so is now REFUSED at load, never rewritten: see
+    # INSTALL.md "Moving an existing uid range".
+    session_uid_min: int = Field(default=_DEFAULT_UID_RANGE[0], gt=0, lt=2**31)
+    session_uid_max: int = Field(default=_DEFAULT_UID_RANGE[1], gt=0, lt=2**31)
     # Per-session socket directories live here (root/Core owned, mode 0711).
     sock_root: str = "/run/planetexpress-sessions"
     # The `sessions` cgroup inside the cgroup Core is delegated (one child cgroup per session). The default is the
@@ -572,6 +589,9 @@ class MissionsConfig(BaseModel):
         import os
         if self.session_uid_min <= os.geteuid() <= self.session_uid_max:
             raise ValueError("the session uid range must not contain the Core user's uid")
+        problem = uid_range_problem(self.session_uid_min, self.session_uid_max) if self.enabled else None
+        if problem:
+            raise ValueError(problem)       # only when missions are on: a config that never used them must still boot
         return self
 
     @field_validator("worker_socket")

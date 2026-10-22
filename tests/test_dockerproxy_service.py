@@ -376,7 +376,7 @@ def test_the_assembly_marks_exactly_the_generators_output_as_managed_and_a_grant
     assert "/etc/sudoers.d/planetexpress-worker" not in managed_sudoers(
         MissionsConfig(worker_sudo_rules=[{"unit": "plex.service", "actions": ["restart"]}]), "planetexpress")   # not acknowledged
     managed = managed_sudoers(cfg, "planetexpress")
-    assert managed["/etc/sudoers.d/planetexpress-worker"] == render([("plex.service", ("restart", "start"))], uid_min=61000, uid_max=61999)
+    assert managed["/etc/sudoers.d/planetexpress-worker"] == render([("plex.service", ("restart", "start"))], uid_min=200000, uid_max=200999)
     assert b"planetexpress ALL=(root) NOPASSWD:" in managed["/etc/sudoers.d/planetexpress-launch"]
     assert "/etc/sudoers.d/planetexpress-worker" not in managed_sudoers(MissionsConfig(), "planetexpress")
 

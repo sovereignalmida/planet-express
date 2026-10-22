@@ -52,11 +52,11 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged. Re-pinned again in slice 7b: the config file setup renders now carries
-    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "ca6d4bddf83c83ba"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "07e7686a7d3205b2"
+    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "34bdd36f40be2894"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "39462489f5ec10d4"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "ec455f5bed7cb032"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "4acf7562e82e72eb"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
@@ -188,7 +188,7 @@ def test_every_launcher_preview_says_what_will_be_written_and_where():
     for s in by.values():
         assert s.preview["type"] in ("file", "text") and s.preview["path"]
         assert s.preview.get("content") or s.preview["text"]
-    assert "61000-61999" in by["session-uid-range"].preview["text"]
+    assert "200000-200999" in by["session-uid-range"].preview["text"]
     assert by["session-uid-range"].preview["path"] == "/etc/planetexpress-launch/launch.conf"
     assert "Delegate=yes" in by["cgroup-tree"].preview["content"]
     assert by["workspace-root"].preview["type"] == "text" and "/opt/pe/state/mission-workspaces" in by["workspace-root"].preview["text"]
@@ -221,7 +221,7 @@ def test_the_mos_boot_script_follows_the_pool_home_not_an_assumed_path():
 def test_the_plan_says_the_config_must_match_and_that_the_service_needs_a_restart():
     p = plan(mreport(), answers(missions=ON))
     text = " ".join(p.warnings)
-    assert "missions.enabled" in text and "61000" in text and "restart" in text.lower()
+    assert "missions.enabled" in text and "200000" in text and "restart" in text.lower()
     assert any("sudo rule" in line for line in p.will_not_touch)
 
 
@@ -675,7 +675,7 @@ def test_a_helper_store_step_without_its_path_fails_validation():
     from pydantic import ValidationError
     from planet_express.setup.steps import LauncherStep
     with pytest.raises(ValidationError):
-        LauncherStep(name="helper-store", core_user="pe", flavour="mos", uid_min=61000, uid_max=61999,
+        LauncherStep(name="helper-store", core_user="pe", flavour="mos", uid_min=200000, uid_max=200999,
                      sock_root="/run/pe/s", cgroup_root="/sys/fs/cgroup/pe/sessions", workspace_root="/mnt/data/pe/ws",
                      boot_script="/mnt/data/pe/launcher-boot.sh")
 
@@ -734,7 +734,7 @@ def test_with_rules_the_plan_shows_the_exact_generated_file():
     assert p.applicable, p.blocked
     worker = [s for s in launcher(p) if s.target == "worker-sudoers"]
     assert len(worker) == 1 and worker[0].preview["path"] == WORKER and worker[0].risk == "R3"
-    assert worker[0].preview["content"].encode() == render([("plex.service", ("restart",))], uid_min=61000, uid_max=61999)
+    assert worker[0].preview["content"].encode() == render([("plex.service", ("restart",))], uid_min=200000, uid_max=200999)
     assert [s.target for s in launcher(p)].index("worker-sudoers") == NAMES.index("launcher-sudoers") + 1
 
 

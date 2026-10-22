@@ -344,8 +344,7 @@ class ToolBroker:
     def _check_scope(self, tool: Tool, parsed: BaseModel, grant: Grant) -> None:
         try:
             scope = [canon(r) for r in grant_resources(grant)]
-            protected = [*self.protected, *grant.protected.resources]
-            protected = [canon(p) for p in protected]
+            prot = grant.effective_protection(self.protected)
         except BadResource:
             raise ToolRefused("malformed grant resources") from None
         for field_name, kind in tool.scope.items():
@@ -354,8 +353,8 @@ class ToolBroker:
                 resource = canon(f"{kind}:{value}")
             except BadResource:
                 raise _BadParams(field_name) from None
-            if classify(resource, scope, protected, stacks_root=self.stacks_root,
-                        parent_of_protected=False) != "in_scope":
+            if classify(resource, scope, prot.protected, stacks_root=self.stacks_root, parent_of_protected=False,
+                        excluded=prot.excluded) != "in_scope":
                 raise ToolRefused(f"{field_name} is outside the grant's scope or protected")
 
     # ── records and budgets ─────────────────────────────────────────────────

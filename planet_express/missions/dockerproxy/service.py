@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterable
 from planet_express.integrations.rpc import PeerCred
 from planet_express.missions import approvals, leases
 from planet_express.missions.grants import REPAIR_UP
-from planet_express.missions.store import MissionStore
+from planet_express.missions.store import PROXY_ACTOR, MissionStore
 
 from .httpwire import Refusal
 from .policy import Policy, Scope, served_versions
@@ -23,7 +23,7 @@ from .upstream import DaemonInspector, Upstream
 
 log = logging.getLogger(__name__)
 DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock"
-ACTOR = "docker-proxy"
+ACTOR = PROXY_ACTOR
 
 
 class ResumeRefused(RuntimeError):
