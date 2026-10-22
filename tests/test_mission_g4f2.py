@@ -55,7 +55,7 @@ def test_long_exec_argv_appears_complete_on_the_card(stack):
 
 
 def test_a_card_that_would_clip_cannot_be_approved(stack, monkeypatch):
-    from planet_express.missions import approval_flow as af
+    from planet_express.missions import approvals as af
     st = stack()
     mid = st.propose()["mission_id"]
     monkeypatch.setattr(af, "PARAM_CARD_MAX", 5)                     # anything longer than 5 chars would be clipped
@@ -64,6 +64,39 @@ def test_a_card_that_would_clip_cannot_be_approved(stack, monkeypatch):
     with pytest.raises(FlowError):
         st.flow.approve("operator:alice", mid, "grant", st.ms.get_mission(mid).grant_hash)
     assert not rows(st, mid)
+
+
+def test_plan_view_fails_closed_and_shows_non_ascii_unescaped():
+    from planet_express.missions.approvals import plan_view
+    assert plan_view('["not", "a", "dict"]')[1] is True
+    assert plan_view('{"checks": "x"}')[1] is True
+    assert plan_view('{"checks": ["x"]}')[1] is True
+    assert plan_view('{"checks": [{"id": "a", "check": "http", "params": "x"}]}')[1] is True
+    checks, truncated = plan_view('{"checks": [{"id": "a", "check": "exec_probe", "params": {"argv": ["echo", "caf\\u00e9"]}}]}')
+    assert not truncated and "café" in checks[0]["params"]["argv"]
+
+
+def test_truncation_is_measured_after_redaction(monkeypatch):
+    from planet_express.missions import approvals
+    monkeypatch.setattr(approvals, "redact", lambda text: text + "-pad")      # redaction can lengthen what is shown
+    monkeypatch.setattr(approvals, "PARAM_CARD_MAX", 10)
+    plan = '{"checks": [{"id": "a", "check": "http", "params": {"url": "123456789"}}]}'
+    assert approvals.plan_view(plan)[1] is True
+
+
+def test_a_clipped_card_is_refused_by_record_approval_and_the_predicate_not_only_the_flow(stack, monkeypatch):
+    from planet_express.missions import approvals as ap
+    st = stack()
+    mid = st.propose()["mission_id"]
+    grant_hash = st.ms.get_mission(mid).grant_hash
+    ap.record_approval(st.store, mid, "grant", grant_hash, "approve", "operator:me")           # fine while nothing is clipped
+    assert ap.execution_predicate(st.store, mid).ok
+    monkeypatch.setattr(ap, "PARAM_CARD_MAX", 5)
+    verdict = ap.execution_predicate(st.store, mid)
+    assert not verdict.ok and any("show an operator in full" in r for r in verdict.reasons)
+    mid2 = st.propose(title="second")["mission_id"]
+    with pytest.raises(ValueError, match="in full"):
+        ap.record_approval(st.store, mid2, "grant", st.ms.get_mission(mid2).grant_hash, "approve", "operator:me")
 
 
 # ── #2 a critical mission's grant row must be elevated, in the predicate itself ───────────────────────
