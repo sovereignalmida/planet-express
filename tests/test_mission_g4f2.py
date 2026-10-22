@@ -144,6 +144,40 @@ def test_runner_stop_still_stops_the_tripwire_if_the_supervisor_shutdown_fails()
     assert calls == ["tripwire_stop"]
 
 
+# ── #7 a tripwire pause is not session time: the session's expiry moves with the wall budget ──────────
+
+def test_a_session_still_resolves_after_a_long_tripwire_pause_is_resumed(tmp_path):
+    from repair_fakes import build, update
+    from tripwire_fakes import touch
+    st = build(tmp_path, behaviours=[{"script": [update()] * 400}])
+    try:
+        mid = st.propose(budgets={"wall_s": 1800})["mission_id"]
+        st.approve_all(mid)
+        st.sup.tick()
+        session_id = st.runtimes[0].context.session.session_id
+        first = st.ms.get_session(session_id)["expires_at"]
+
+        def advance(seconds, step=20):
+            for _ in range(seconds // step):
+                st.clock.t += step
+                st.sup.tick()
+        advance(1500)                                                # most of the wall budget is used before the pause
+        touch(st.rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
+        st.monitor.scan_once()
+        assert st.status(mid) == "paused_tripwire"
+        advance(900)                                                 # 15 minutes paused: past wall_s + pad in real time
+        assert st.clock.t > first
+        st.flow.resume("operator:alice", mid)
+        assert st.status(mid) == "executing"
+        row = st.ms.get_session(session_id)
+        assert row["expires_at"] > st.clock.t and row["revoked_at"] is None
+        assert row["expires_at"] >= first + 850                      # extended by the paused duration
+        st.sup.tick()
+        assert st.status(mid) == "executing" and st.ms.live_session(mid) is not None
+    finally:
+        st.close()
+
+
 # ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
 
 def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):

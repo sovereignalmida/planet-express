@@ -298,6 +298,15 @@ class MissionStore:
             insert_event(conn, mission_id, "note", actor, {"session_started": session_id, "kind": kind}, now)
         return session_id
 
+    def extend_session(self, session_id: str, seconds: int) -> bool:
+        """Move a live session's expiry later (a tripwire pause is not session time). Never earlier, never a revoked one."""
+        if seconds <= 0:
+            return False
+        with self.store._write() as conn:
+            cur = conn.execute("UPDATE mission_sessions SET expires_at=expires_at+? WHERE id=? AND revoked_at IS NULL",
+                               (int(seconds), session_id))
+            return cur.rowcount == 1
+
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self.store._connect() as conn:
             row = conn.execute("SELECT * FROM mission_sessions WHERE id=?", (session_id,)).fetchone()
