@@ -447,21 +447,14 @@ class MissionHooksConfig(BaseModel):
         return self
 
 
-def uid_range_problem(low: int, high: int, getpwall=None) -> str | None:
-    """Why a session uid range is unsafe, or None: it may not overlap systemd's DynamicUser range, and it may not contain a uid
-    that already has a passwd entry on this host (a session must never run as an existing account)."""
+def uid_range_problem(low: int, high: int) -> str | None:
+    """Why a session uid range is unsafe, or None: it may not overlap systemd's DynamicUser range. Pure arithmetic, no host
+    reads: whether an account already uses the range is the launcher preflight's job (`check_range_free`, which also reads
+    the group database and reports an unreadable one as a failed check)."""
     dlow, dhigh = _SYSTEMD_DYNAMIC_UIDS
     if low <= dhigh and high >= dlow:
         return (f"missions.session_uid_min..session_uid_max ({low}-{high}) overlaps systemd's DynamicUser range "
                 f"{dlow}-{dhigh}. Use a range outside it, e.g. {_DEFAULT_UID_RANGE[0]}-{_DEFAULT_UID_RANGE[1]} (the default)")
-    import pwd
-    try:
-        taken = sorted(u.pw_uid for u in (getpwall or pwd.getpwall)() if low <= u.pw_uid <= high)
-    except Exception:                                    # noqa: BLE001 - an unreadable passwd is the preflight's finding, not a parse error
-        taken = []
-    if taken:
-        return (f"missions.session_uid_min..session_uid_max ({low}-{high}) contains uids that already have accounts on this "
-                f"host: {', '.join(str(u) for u in taken[:5])}")
     return None
 
 
@@ -596,9 +589,9 @@ class MissionsConfig(BaseModel):
         import os
         if self.session_uid_min <= os.geteuid() <= self.session_uid_max:
             raise ValueError("the session uid range must not contain the Core user's uid")
-        problem = uid_range_problem(self.session_uid_min, self.session_uid_max)
+        problem = uid_range_problem(self.session_uid_min, self.session_uid_max) if self.enabled else None
         if problem:
-            raise ValueError(problem)
+            raise ValueError(problem)       # only when missions are on: a config that never used them must still boot
         return self
 
     @field_validator("worker_socket")

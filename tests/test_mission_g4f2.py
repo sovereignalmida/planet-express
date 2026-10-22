@@ -333,22 +333,50 @@ def test_the_schema_default_is_the_launchers_one_default_range():
 
 
 @pytest.mark.parametrize("low,high", [(61000, 61999), (61184, 61300), (65000, 65600), (60000, 70000), (65519, 65530), (61100, 61184)])
-def test_a_range_overlapping_systemd_dynamic_users_is_refused(low, high):
+def test_an_enabled_config_with_a_range_overlapping_systemd_dynamic_users_is_refused(low, high):
     from config_schema import MissionsConfig
     with pytest.raises(ValueError, match="DynamicUser"):
-        MissionsConfig(session_uid_min=low, session_uid_max=high)
+        MissionsConfig(enabled=True, session_uid_min=low, session_uid_max=high)
+
+
+def test_a_config_with_missions_off_still_loads_with_an_old_explicit_range_and_never_reads_passwd(monkeypatch):
+    import pwd
+
+    from config_schema import MissionsConfig
+    monkeypatch.setattr(pwd, "getpwall", lambda: (_ for _ in ()).throw(AssertionError("passwd read at config load")))
+    assert MissionsConfig(session_uid_min=61000, session_uid_max=61999).session_uid_min == 61000
+    MissionsConfig()
 
 
 @pytest.mark.parametrize("low,high", [(61000, 61183), (65520, 65530), (200000, 200999)])
-def test_a_range_just_outside_it_is_accepted(low, high):
+def test_a_range_just_outside_it_is_accepted_when_enabled(low, high):
     from config_schema import MissionsConfig
-    assert MissionsConfig(session_uid_min=low, session_uid_max=high).session_uid_min == low
+    assert MissionsConfig(enabled=True, session_uid_min=low, session_uid_max=high).session_uid_min == low
 
 
-def test_a_range_containing_an_existing_account_is_refused():
+def test_preflight_catches_an_account_in_the_range_and_an_unreadable_passwd():
     from types import SimpleNamespace
 
-    from config_schema import uid_range_problem
-    users = lambda: [SimpleNamespace(pw_uid=1000), SimpleNamespace(pw_uid=200500)]      # noqa: E731
-    assert "200500" in uid_range_problem(200000, 200999, getpwall=users)
-    assert uid_range_problem(300000, 300999, getpwall=users) is None
+    from planet_express.missions.launcher.preflight import PreflightReport, check_range_free
+    users = lambda: [SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="a"),      # noqa: E731
+                     SimpleNamespace(pw_uid=200500, pw_gid=200500, pw_name="stray")]
+    report = PreflightReport("x")
+    assert not check_range_free(report, 200000, 200999, getpwall=users, getgrall=lambda: [])
+    assert check_range_free(PreflightReport("x"), 300000, 300999, getpwall=users, getgrall=lambda: [])
+
+
+def test_preflight_refuses_sessions_left_in_the_old_range():
+    from planet_express.missions.launcher.preflight import PreflightReport, check_no_stale_uids
+    report = PreflightReport("x")
+    assert not check_no_stale_uids(report, 200000, 200999, [61003, 200001])
+    assert "61003" in report.checks[-1].detail and "finish or cancel" in report.checks[-1].detail
+    assert check_no_stale_uids(PreflightReport("x"), 200000, 200999, [200001])
+    assert check_no_stale_uids(PreflightReport("x"), 200000, 200999, [])
+
+
+def test_the_runner_preflight_reads_the_uids_sessions_still_hold(tmp_path):
+    from missions_helpers import make_store
+
+    from planet_express.missions.runner import held_session_uids
+    store, _ = make_store(tmp_path)
+    assert held_session_uids(store) == []

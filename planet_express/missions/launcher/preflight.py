@@ -135,6 +135,17 @@ def check_range_free(report: PreflightReport, low: int, high: int, *, getpwall=N
                       ", ".join(taken[:3]) if taken else f"{low}-{high}")
 
 
+def check_no_stale_uids(report: PreflightReport, low: int, high: int, held: "list[int]") -> bool:
+    """No session still holds a uid OUTSIDE the configured range. After the range is moved (the default moved off
+    61000-61999 because it overlapped systemd's DynamicUser range) a live or unreleased session in the old range would be
+    orphaned: the launcher and the reaper only know the new range. Refuse, naming the uids, until they are gone."""
+    stale = sorted({u for u in held if not low <= u <= high})
+    return report.add("no session holds a uid outside the configured range", not stale,
+                      (f"uids {', '.join(str(u) for u in stale[:5])} are held by sessions that predate the range {low}-{high}: "
+                       "let those missions finish or cancel them, wait for the reaper to release the uids, then restart")
+                      if stale else f"{low}-{high}")
+
+
 def check_installation(report: PreflightReport, *, helper: str, conf: str, trusted_uid: int = 0,
                        below: str = "/") -> bool:
     """The helper and its config are root-owned, not group/world writable, with no symlink anywhere in their chains."""
@@ -335,7 +346,7 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
 def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root: str | None, probe_uid: int,
                   helper: str, conf: str, python: str = "/usr/bin/python3", trusted_uid: int = 0, below: str = "/",
                   uid_range: tuple[int, int] | None = None, sudo: bool = False, check_reach: bool = False,
-                  run=subprocess.run, getpwall=None, getgrall=None) -> PreflightReport:
+                  run=subprocess.run, getpwall=None, getgrall=None, held_uids=None) -> PreflightReport:
     report = PreflightReport(strategy)
     if uid_range is not None:
         low, high = uid_range
@@ -343,6 +354,8 @@ def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root:
                    and not low <= os.geteuid() <= high, f"{low}-{high}, probe uid {probe_uid}")
     if uid_range is not None:
         check_range_free(report, *uid_range, getpwall=getpwall, getgrall=getgrall)
+        if held_uids is not None:
+            check_no_stale_uids(report, *uid_range, list(held_uids()))
     if not check_installation(report, helper=helper, conf=conf, trusted_uid=trusted_uid, below=below):
         report.add("probe session", False, "skipped: the helper or its config is not installed safely")
         return report
@@ -362,6 +375,7 @@ __all__ = [
     "Check",
     "PreflightReport",
     "check_installation",
+    "check_no_stale_uids",
     "check_range_free",
     "check_sudoers",
     "failed_report",

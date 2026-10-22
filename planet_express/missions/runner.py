@@ -213,7 +213,14 @@ class SessionSockets(SocketProvider):
         return self.proxy.env(cs) if self.proxy is not None else {}
 
 
-def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None) -> Callable[[], PreflightReport]:
+def held_session_uids(store: Store) -> list[int]:
+    """Uids that sessions still hold (not yet released by the reaper)."""
+    with store._connect() as conn:
+        return [r[0] for r in conn.execute("SELECT session_uid FROM mission_sessions "
+                                           "WHERE session_uid IS NOT NULL AND uid_released_at IS NULL")]
+
+
+def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None, held_uids=None) -> Callable[[], PreflightReport]:
     strategy = choose_strategy(cfg.launcher, os.geteuid() if euid is None else euid)
     low, high = cfg.session_uid_min, cfg.session_uid_max
 
@@ -221,7 +228,7 @@ def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: 
         return run_preflight(
             containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
             probe_uid=high, helper=HELPER_PATH, conf=cfg.launch_conf, uid_range=(low, high), sudo=strategy == "sudo",
-            check_reach=True)
+            check_reach=True, held_uids=held_uids)
     return run
 
 
@@ -319,7 +326,8 @@ def build_mission_runner(
                       if cfg.hooks.install_claude_code else None),
         hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None)
     if real:
-        supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir)
+        supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir,
+                                                       held_uids=lambda: held_session_uids(store))
         supervisor.socket_provider = socket_provider or SessionSockets(
             cfg.sock_root, supervisor, authenticator, proxy=docker_proxy if hasattr(docker_proxy, "start") else None)
     else:
