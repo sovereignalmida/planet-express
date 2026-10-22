@@ -63,6 +63,7 @@ class ScanEnv:
     volume_paths: Sequence[tuple[str, str]] = ()          # (resource id, host path) of data volumes to watch
     clock: Callable[[], float] = time.monotonic
     deadline: float | None = None                          # absolute (clock) time the current read must finish by
+    extra_files: tuple[tuple[str, str], ...] = ()          # per-scan: the executing grants' excluded paths and mounts
     _files: list[tuple[str, str]] | None = field(default=None, repr=False)
 
     def real(self, path: str) -> str:
@@ -83,6 +84,8 @@ class ScanEnv:
                     out.append((rid, name))
             for system, path in sorted(self.protected.cross_host_paths.items()):
                 out.append((canon(f"system:{system}", self.protected.host), path))
+            known = {rid for rid, _ in out}
+            out += [(rid, path) for rid, path in self.extra_files if rid not in known]
             self._files = sorted(out)
         return self._files
 
@@ -515,11 +518,14 @@ class Scanner:
         self.deadline_s = deadline_s
         self.clock = clock or env.clock
 
-    def scan(self) -> ScanResult:
+    def scan(self, extra_files: Sequence[tuple[str, str]] = ()) -> ScanResult:
+        """One read of the host. `extra_files` are (resource id, path) pairs to hash on top of the protected set: the paths
+        and mounts that the grants being watched exclude."""
+        env = ScanEnv(**{**self.env.__dict__, "extra_files": tuple(extra_files), "_files": None})
         started = self.clock()
         wall_start = time.monotonic()
         deadline = min(self.signal_timeout_s, self.deadline_s)
-        self.env.watched_files()               # computed once, before the collectors share the environment
+        env.watched_files()               # computed once, before the collectors share the environment
         slots: dict[str, dict[str, Any]] = {}
         threads: dict[str, threading.Thread] = {}
         for name, fn in self.signals.items():
@@ -528,7 +534,7 @@ class Scanner:
 
             def run(fn=fn, slot=slot) -> None:
                 try:
-                    slot["value"] = fn(self._env_with_deadline())
+                    slot["value"] = fn(self._env_with_deadline(env))
                 except BaseException as exc:      # noqa: BLE001 - any failure is a failed signal, never a crash
                     slot["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
                 finally:
@@ -549,8 +555,8 @@ class Scanner:
                 snapshot[name] = slot["value"]
         return ScanResult(snapshot, errors, started, self.clock())
 
-    def _env_with_deadline(self) -> ScanEnv:
-        env = ScanEnv(**{**self.env.__dict__, "_files": self.env._files})
+    def _env_with_deadline(self, base: ScanEnv) -> ScanEnv:
+        env = ScanEnv(**{**base.__dict__, "_files": base._files})
         env.deadline = self.clock() + self.signal_timeout_s
         return env
 

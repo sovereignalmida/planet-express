@@ -634,7 +634,8 @@ class Policy:
                          for d in SYSTEM_DIRS)
             protected_path = rid is not None and any(
                 split(p)[1] == "path" and contains(p, rid) or split(p)[1] == "path" and contains(rid, p) for p in scope.protected) or rid is not None and any(
-                split(e)[1] == "path" and contains(e, rid) for e in scope.excluded)
+                split(e)[1] == "path" and contains(e, rid) for e in scope.excluded) or (
+                rid is not None and scope.holds_excluded(rid))
             if norm == "/" or system or protected_path:
                 raise Refusal(f"a container with {norm[:80]} mounted read-write may not be acted on through the proxy: "
                               "that is host write access outside the grant")

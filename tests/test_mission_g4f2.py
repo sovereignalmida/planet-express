@@ -442,6 +442,25 @@ def test_another_missions_creation_does_not_vouch_for_this_one(tmp_path):
     assert status(rig) == "paused_tripwire"
 
 
+def test_a_change_under_an_excluded_path_outside_the_protected_set_pauses(tmp_path):
+    from tripwire_fakes import go_executing, make_rig, paused_event, status, touch
+    rig = make_rig(tmp_path, grant_over={"exclusions": ["path:/srv/private"]})
+    touch(rig.fs / "srv" / "private", "secret v1\n")
+    go_executing(rig)
+    assert rig.monitor.scan_once()[rig.mission.id] == "ok"
+    touch(rig.fs / "srv" / "private", "secret v2\n")
+    rig.monitor.scan_once()
+    assert status(rig) == "paused_tripwire" and paused_event(rig)["cause"] == "protected"
+
+
+def test_another_grants_excluded_path_does_not_pause_this_mission(tmp_path):
+    from planet_express.missions.tripwire.diff import DiffContext, diff_snapshots
+    ctx = DiffContext(scope=("host:local/stack:media",), protected=())
+    base = {"files": {"host:local/path:/etc/hosts": "a"}}
+    cur = {"files": {"host:local/path:/etc/hosts": "a", "host:local/path:/srv/other": "x"}}
+    assert diff_snapshots(base, cur, ctx) == []
+
+
 def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
     from test_mission_tools import setup
 

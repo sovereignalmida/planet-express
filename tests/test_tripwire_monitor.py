@@ -484,8 +484,8 @@ def test_worst_case_pause_latency_with_a_fake_clock(tmp_path):
     clock = rig.env.clock
     real_scan = rig.scanner.scan
 
-    def slow_scan():
-        result = real_scan()
+    def slow_scan(*args):
+        result = real_scan(*args)
         clock.t += 10.0                                 # the scan takes its whole 10 s deadline
         return result
     rig.scanner.scan = slow_scan

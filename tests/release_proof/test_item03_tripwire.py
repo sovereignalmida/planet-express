@@ -50,8 +50,8 @@ def worst_case_rig(tmp_path):
     go_executing(rig)
     real_scan = rig.scanner.scan
 
-    def slow_scan():
-        result = real_scan()
+    def slow_scan(*args):
+        result = real_scan(*args)
         rig.env.clock.t += 10.0                      # every scan takes its whole 10 s deadline
         return result
     rig.scanner.scan = slow_scan

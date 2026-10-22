@@ -223,12 +223,27 @@ class TripwireMonitor:
         return self.investigating_interval_s if self.ms.list_missions("investigating") else self.interval_s
 
     # ── a scan ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def _excluded_files(missions: list[Mission]) -> list[tuple[str, str]]:
+        """(resource id, path) of every local path or mount a watched grant excludes, so a change under it is SEEN (the
+        protected set alone does not name it). Hashed on top of the protected files; each mission's baseline holds its own."""
+        out: dict[str, str] = {}
+        for mission in missions:
+            try:
+                for rid in mission.grant().enforced_exclusions():
+                    host, kind, name = split(rid)
+                    if kind in ("path", "mount") and host == "local":
+                        out[rid] = name
+            except Exception:                      # noqa: BLE001 - an unreadable grant is judged (and paused) elsewhere
+                continue
+        return sorted(out.items())
+
     def scan_once(self, missions: list[Mission] | None = None) -> dict[str, str]:
         """Scan once and judge every executing mission. Returns {mission id: 'ok' | the pause cause}."""
         missions = self.ms.list_missions("executing") if missions is None else missions
         if not missions:
             return {}
-        result = self.scanner.scan()
+        result = self.scanner.scan(self._excluded_files(missions))
         self.last_scan_at = self.clock()
         self.scans += 1
         out: dict[str, str] = {}
@@ -327,7 +342,7 @@ class TripwireMonitor:
         """Capture the live baseline at executing start. The caller (the supervisor, before the session is launched)
         must see this succeed: a failed capture means the mission must not run."""
         mission = self.ms.get_mission(mission_id)
-        result = self.scanner.scan()
+        result = self.scanner.scan(self._excluded_files([mission]))
         if not result.ok:
             raise RuntimeError(f"cannot capture the tripwire baseline: {sorted(result.errors)}")
         return self._capture_baseline(mission, result)

@@ -227,6 +227,8 @@ def _mounts(base: Sequence[str], cur: Sequence[str], ctx: DiffContext) -> list[C
 def _files(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
     out = []
     for res in sorted(set(base) | set(cur)):
+        if res not in base:
+            continue            # the baseline defines what is watched for THIS mission (another's excluded path is not ours)
         b, c = base.get(res), cur.get(res)
         if b == c:
             continue
