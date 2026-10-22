@@ -8,6 +8,7 @@ the hash and every earlier row stops matching. An unattended start is decided so
 `start_under_standing`, and recorded on the mission with `standing_grant_id`.
 """
 
+import json
 import logging
 import sqlite3
 from collections.abc import Callable, Mapping
@@ -40,6 +41,9 @@ log = logging.getLogger("planetexpress.missions.approval_flow")
 MAX_STANDING_TTL_S = 30 * 86400
 MAX_LIST = 100
 MAX_CARD_TEXT = 2000
+MAX_CARD_CHECKS = 64
+MAX_CARD_PARAMS = 16
+PARAM_CARD_MAX = 8192                  # above the schema maxima (url 512, argv 16x256, arguments_json 2048)
 STANDING_TIERS = ("repair",)
 OPERATOR_PREFIX = "operator:"
 GrantValidator = Callable[[Grant, VerificationPlan], list[str]]
@@ -92,17 +96,36 @@ def _decisions(store: Store, mission: Mission) -> dict[str, str]:
     return {r["phase"]: r["decision"] for r in rows if r["bound_hash"] in current}
 
 
-def _plan_view(mission: Mission) -> list[dict[str, Any]]:
+def _plan_view(mission: Mission) -> tuple[list[dict[str, Any]], bool]:
+    """The verification checks as the operator reads them, IN FULL (approval binds the hash of the whole plan, so a clipped
+    value is a tail the operator approves unseen). Returns (checks, truncated); `truncated` is True when anything had to be
+    dropped or cut, and a truncated card is never approvable."""
     try:
         raw = loads_strict(mission.verification_plan_json) if mission.verification_plan_json else {}
     except CanonicalError:
-        return []
+        return [], True
+    truncated = False
     out = []
-    for check in (raw.get("checks", []) if isinstance(raw, dict) else [])[:64]:
-        if isinstance(check, dict):
-            out.append({"id": _clip(check.get("id", ""), 128), "check": _clip(check.get("check", ""), 32),
-                        "params": {_clip(k, 64): _clip(v, 200) for k, v in list((check.get("params") or {}).items())[:16]}})
-    return out
+    checks = raw.get("checks", []) if isinstance(raw, dict) else []
+    if len(checks) > MAX_CARD_CHECKS:
+        truncated = True
+    for check in checks[:MAX_CARD_CHECKS]:
+        if not isinstance(check, dict):
+            continue
+        params = check.get("params") or {}
+        if len(params) > MAX_CARD_PARAMS:
+            truncated = True
+        shown = {}
+        for k, v in list(params.items())[:MAX_CARD_PARAMS]:
+            text = v if isinstance(v, str) else json.dumps(v, sort_keys=True, separators=(",", ":"))
+            if len(text) > PARAM_CARD_MAX or len(str(k)) > 64:
+                truncated = True
+            shown[_clip(k, 64)] = redact(text)[:PARAM_CARD_MAX]
+        for field, limit in (("id", 128), ("check", 32)):
+            if len(str(check.get(field, ""))) > limit:
+                truncated = True
+        out.append({"id": _clip(check.get("id", ""), 128), "check": _clip(check.get("check", ""), 32), "params": shown})
+    return out, truncated
 
 
 def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -122,6 +145,7 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
                    "acknowledged_no_backup": grant.backup.acknowledged_no_backup}       # the grant, not a status source, says this
     decisions = _decisions(store, mission)
     required = [{**r, "state": decisions.get(r["phase"], "pending")} for r in required_phases(mission)]
+    plan_checks, truncated = _plan_view(mission)
     return {
         "mission_id": mission.id, "title": _clip(mission.title, 256), "goal": _clip(mission.goal),
         "status": mission.status, "tier": grant.tier, "grant_hash": mission.grant_hash,
@@ -132,12 +156,12 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
                       "count": len(grant.protected.resources),
                       "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]]},
         "budgets": grant.budgets.model_dump(mode="json"),
-        "verification": {"plan_sha256": grant.verification.plan_sha256, "checks": _plan_view(mission),
+        "verification": {"plan_sha256": grant.verification.plan_sha256, "checks": plan_checks, "truncated": truncated,
                          "on_verify_fail": grant.on_verify_fail},
         "sudo": grant.sudo.model_dump(mode="json"), "docker": grant.docker,
         "credentials": [_clip(c, 120) for c in grant.credentials[:32]],
         "window": grant.window.model_dump(mode="json"),
-        "required": required, "ready": bool(approvals.execution_predicate(store, mission.id)),
+        "required": required, "ready": bool(approvals.execution_predicate(store, mission.id)) and not truncated,
     }
 
 
@@ -332,6 +356,8 @@ class ApprovalFlow:
             raise FlowError("this mission never executes: nothing to approve", "conflict")
         if mission.status != "awaiting_decision":
             raise FlowError(f"Mission is {mission.status}; it can be approved only while awaiting a decision", "conflict")
+        if _plan_view(mission)[1]:
+            raise FlowError("The verification plan is too large to show in full, so it cannot be approved", "invalid_grant")
         phases = {r["phase"]: r for r in required_phases(mission)}
         if phase not in phases:
             raise FlowError(f"This mission does not need a {phase!r} approval")

@@ -178,8 +178,9 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
         reasons += _standing_reasons(conn, m, grant, now)
     else:
         # (a) the current-grant approval
-        if not _approved(conn, mission_id, "grant", grant_hash, False):
-            reasons.append("no approval for the current grant hash")
+        if not _approved(conn, mission_id, "grant", grant_hash, grant.tier == "critical"):
+            reasons.append("no approval for the current grant hash" if grant.tier != "critical"
+                           else "a critical grant needs an elevated grant approval")
         # (d) elevated rows where the grant demands them
         if ((grant.sudo.mode == "broad" or grant.docker == "raw")
                 and not _approved(conn, mission_id, "broad_sudo", grant_hash, True)):
