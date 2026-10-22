@@ -249,11 +249,23 @@ Mission control lets a supervised agent session investigate (Observe, Propose) a
 needed for the v3 behaviour: with `missions.enabled` false (the default) no v4 code runs, no thread starts, no account,
 socket or sudoers rule exists, and every mission and memory call answers "disabled".
 
+### Moving an existing uid range
+
+Releases before this one defaulted to 61000-61999, which overlaps systemd's DynamicUser range (61184-65519): a session uid
+could collide with another service's. Core now **refuses to load** a config whose range overlaps it (or contains an uid that
+already has an account); it never rewrites a range for you. A config that spelled out 61000-61999 fails with a message naming
+the fix. A config that relied on the old default now resolves to 200000-200999, which no longer matches the `launch.conf` setup
+wrote: the launcher preflight sees the mismatch and missions refuse to start (fail closed). To move: stop any live mission
+(or let it finish), set the new `session_uid_min`/`session_uid_max`, re-run the setup launcher steps (`session-uid-range`,
+then `launcher-helper`) so the helper and Core agree, and confirm the preflight passes. Do not change the range while a
+session holds a uid in the old one.
+
 ### Enabling it
 
 1. **Setup answers.** In the wizard (or an answer file) say yes to mission control. The answers are
-   `missions.enabled`, `session_uid_min`/`session_uid_max` (default 61000-61999: one account-less uid and a private group
-   per session, never a shared worker account; the range must not contain Core's uid), `sock_root`
+   `missions.enabled`, `session_uid_min`/`session_uid_max` (default 200000-200999: one account-less uid and a private group
+   per session, never a shared worker account; the range must not contain Core's uid, an existing account, or systemd's
+   DynamicUser range 61184-65519), `sock_root`
    (`/run/planetexpress-sessions`), `cgroup_root`, `workspace_root` and, optionally, `worker_sudo_rules` with
    `worker_sudo_all_sessions`. The plan lists every step below and its risk; each is reversible.
 2. **Launcher steps** (root, in this order, journalled so undo and repair work): `session-uid-range`, `launcher-helper`

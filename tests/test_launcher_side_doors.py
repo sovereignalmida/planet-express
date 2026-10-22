@@ -559,3 +559,25 @@ def test_the_gate_fails_with_no_steps(host):
 def test_docker_tcp_exec_start_tlsverify_is_parsed_not_substring_matched(host, flags, safe):
     _unit(host, "docker.service", f"[Service]\nExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2376 {flags}\n")
     assert DockerTcpExposure(host.paths()).probe().ok is safe, flags
+
+
+def test_a_stock_wants_symlink_to_the_real_unit_is_followed_once_and_judged(host):
+    real = host.tmp / "usr-lib"
+    real.mkdir()
+    (real / "docker.socket").write_text("[Socket]\nListenStream=/run/docker.sock\n")
+    wants = host.tmp / "systemd" / "sockets.target.wants"
+    wants.mkdir(parents=True)
+    (wants / "docker.socket").symlink_to(real / "docker.socket")
+    assert DockerTcpExposure(host.paths()).probe().ok
+    (real / "docker.socket").write_text("[Socket]\nListenStream=0.0.0.0:2375\n")      # the link target is what is judged
+    assert not DockerTcpExposure(host.paths()).probe().ok
+
+
+def test_a_masked_unit_is_skipped_but_a_symlink_loop_or_a_link_to_a_directory_fails_closed(host):
+    wants = host.tmp / "systemd"
+    wants.mkdir(parents=True, exist_ok=True)
+    (wants / "docker.service").symlink_to("/dev/null")
+    assert DockerTcpExposure(host.paths()).probe().ok
+    (wants / "docker.socket").symlink_to(wants / "docker.socket")                    # loop
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and probe.blocked

@@ -222,3 +222,35 @@ def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
     ms, m, broker, sess, http, runner = setup(tmp_path / "b", creds=("tool:app.health_get",), exclusions=[EXCLUDED])
     with pytest.raises(RpcError):
         broker.invoke(sess, "app.health_get", {"service": "media/qbit"})
+
+
+# ── #8 the default session uid range is clear of systemd's DynamicUser range ─────────────────────────
+
+def test_the_schema_default_is_the_launchers_one_default_range():
+    from config_schema import MissionsConfig
+
+    from planet_express.missions.launcher.config import DEFAULT_UID_RANGE
+    cfg = MissionsConfig()
+    assert (cfg.session_uid_min, cfg.session_uid_max) == DEFAULT_UID_RANGE
+
+
+@pytest.mark.parametrize("low,high", [(61000, 61999), (61184, 61300), (65000, 65600), (60000, 70000), (65519, 65530), (61100, 61184)])
+def test_a_range_overlapping_systemd_dynamic_users_is_refused(low, high):
+    from config_schema import MissionsConfig
+    with pytest.raises(ValueError, match="DynamicUser"):
+        MissionsConfig(session_uid_min=low, session_uid_max=high)
+
+
+@pytest.mark.parametrize("low,high", [(61000, 61183), (65520, 65530), (200000, 200999)])
+def test_a_range_just_outside_it_is_accepted(low, high):
+    from config_schema import MissionsConfig
+    assert MissionsConfig(session_uid_min=low, session_uid_max=high).session_uid_min == low
+
+
+def test_a_range_containing_an_existing_account_is_refused():
+    from types import SimpleNamespace
+
+    from config_schema import uid_range_problem
+    users = lambda: [SimpleNamespace(pw_uid=1000), SimpleNamespace(pw_uid=200500)]      # noqa: E731
+    assert "200500" in uid_range_problem(200000, 200999, getpwall=users)
+    assert uid_range_problem(300000, 300999, getpwall=users) is None

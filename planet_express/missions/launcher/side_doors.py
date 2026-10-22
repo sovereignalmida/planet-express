@@ -247,7 +247,14 @@ class DockerTcpExposure(Step):
         """TCP exposure in docker's units and drop-ins: `-H`/`--host` with tcp:// (any spelling), and any TCP
         ListenStream in a docker socket unit. An ExecStart that expands variables cannot be judged: fail closed."""
         found = []
-        for path in self._unit_files():
+        seen: set[str] = set()
+        for listed in self._unit_files():
+            # A stock install links `sockets.target.wants/docker.socket` to the real unit: judge the target, once. /dev/null
+            # is a masked unit. The target itself must still be a plain readable file, or the gate fails closed.
+            path = os.path.realpath(listed)
+            if path == os.devnull or path in seen:
+                continue
+            seen.add(path)
             data = read_regular(path)
             if data is None:
                 continue
