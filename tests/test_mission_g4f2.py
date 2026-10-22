@@ -129,6 +129,44 @@ def test_runner_stop_halts_the_tripwire_only_after_the_sessions_are_gone():
     assert calls == ["no_new_starts", "sessions_gone", "tripwire_stop"]
 
 
+def test_runner_stop_quiesces_the_tripwire_and_closes_the_supervisor_to_starts_first():
+    from types import SimpleNamespace
+
+    from planet_express.missions.runner import MissionRunner
+    calls = []
+    sup = SimpleNamespace(docker_proxy=None, begin_shutdown=lambda: calls.append("no_starts"),
+                          shutdown=lambda: calls.append("sessions_gone"))
+    trip = SimpleNamespace(quiesce=lambda: calls.append("quiesce"), stop=lambda: calls.append("tripwire_stop"))
+    MissionRunner(sup, None, tripwire=trip).stop()
+    assert calls == ["no_starts", "quiesce", "sessions_gone", "tripwire_stop"]
+
+
+def test_a_quiesced_tripwire_does_not_freeze_a_session_that_is_being_killed(tmp_path):
+    from tripwire_fakes import frozen, go_executing, make_rig, status, touch
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    rig.monitor.quiesce()
+    touch(rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
+    rig.monitor.scan_once()
+    assert status(rig) == "executing" and not frozen(rig)
+
+
+def test_a_supervisor_that_is_shutting_down_refuses_every_start(tmp_path):
+    from repair_fakes import build
+    from planet_express.missions.supervisor import RepairNotReady
+    st = build(tmp_path)
+    try:
+        mid = st.propose()["mission_id"]
+        st.approve_all(mid)
+        st.sup.begin_shutdown()
+        with pytest.raises(RepairNotReady):
+            st.sup.start(mid)
+        st.sup.tick()
+        assert st.status(mid) == "awaiting_decision" and st.runtimes == []
+    finally:
+        st.close()
+
+
 def test_runner_stop_still_stops_the_tripwire_if_the_supervisor_shutdown_fails():
     from types import SimpleNamespace
 

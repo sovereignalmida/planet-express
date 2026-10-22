@@ -120,6 +120,9 @@ class MissionRunner:
         """Order matters: stop accepting starts, kill the sessions and prove them gone, and only THEN stop the tripwire. A
         session that is still running while nothing watches the host is exactly the window the tripwire exists to close."""
         self._stop.set()                                  # no new starts: the loop is the only thing that starts sessions
+        getattr(self.supervisor, "begin_shutdown", lambda: None)()
+        if self.tripwire is not None:
+            getattr(self.tripwire, "quiesce", lambda: None)()      # no pause/freeze of a session that is being killed
         if self._thread is not None:
             self._thread.join(timeout=30)
         try:

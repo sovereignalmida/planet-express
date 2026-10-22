@@ -314,9 +314,15 @@ class Supervisor:
             return conn.execute("SELECT COUNT(*) FROM mission_sessions WHERE mission_id=?", (mission_id,)).fetchone()[0]
 
     # ── start ───────────────────────────────────────────────────────────────
+    def begin_shutdown(self) -> None:
+        """No new session starts from here on (the runner calls this first; `shutdown()` then kills what is running)."""
+        self._shutting_down = True
+
     @_per_mission
     def start(self, mission_id: str) -> None:
         self._require_enabled()
+        if self._shutting_down:
+            raise RepairNotReady("the supervisor is shutting down")
         if not self.launcher_ready():
             raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         mission = self.ms.get_mission(mission_id)
@@ -1220,6 +1226,10 @@ class Supervisor:
         running session. One misbehaving mission never stops the others."""
         if not self.enabled:
             return
+        if self._shutting_down:
+            with contextlib.suppress(Exception):
+                self.poll_all()                  # sessions are still advanced (and killed) but nothing new starts
+            return
         ready = self.launcher_ready()            # proposal-only: queued missions wait, nothing is started or retried
         for mission in self.ms.list_missions("queued"):
             if mission.tier not in ("observe", "propose") or mission.id in self._runs:
@@ -1255,6 +1265,8 @@ class Supervisor:
         """Repair missions wait in `awaiting_decision` for approval. Each tick, those whose execution predicate holds are started.
         A start that cannot happen yet (the monitor or a side door not ready) just waits and is noted once per reason; any
         other refusal is a failed start and, after START_ATTEMPTS, hands the mission to the operator."""
+        if self._shutting_down:
+            return
         for mission in self.ms.list_missions("awaiting_decision"):
             if mission.tier != "repair" or mission.id in self._runs:
                 continue

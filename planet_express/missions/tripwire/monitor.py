@@ -149,6 +149,7 @@ class TripwireMonitor:
         self.crash_backoff_s = crash_backoff_s
         self.accept_blind = frozenset(accept_blind)       # resource ids the operator accepts being unable to read
         self._stop = threading.Event()
+        self._quiesced = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self.last_scan_at: float | None = None
@@ -176,6 +177,11 @@ class TripwireMonitor:
         """The monitor thread is alive and not stopping. A Repair launch is refused unless this is True (slice 7a)."""
         thread = self._thread
         return bool(self.enabled and thread is not None and thread.is_alive() and not self._stop.is_set())
+
+    def quiesce(self) -> None:
+        """Shutdown has begun and sessions are being killed: stop pausing/freezing them (a frozen cgroup cannot be killed
+        cleanly). Scans continue; the monitor itself is stopped only after the sessions are proven gone."""
+        self._quiesced = True
 
     def stop(self) -> None:
         self._stop.set()
@@ -409,6 +415,9 @@ class TripwireMonitor:
                         log.exception("could not kill the session of %s", mission.id)
 
     def _pause(self, mission: Mission, cause: str, changes: list[Change], extra: dict, result: ScanResult | None) -> str:
+        if self._quiesced:
+            log.warning("tripwire quiesced for shutdown: not pausing %s (%s)", mission.id, cause)
+            return cause
         started = self.clock()
         try:
             self.state.write(mission.id, "intent.json", {"v": STATE_V, "cause": cause, "grant_hash": mission.grant_hash})
