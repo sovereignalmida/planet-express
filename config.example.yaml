@@ -157,8 +157,27 @@ multi_host:
 #   local_system_id: n7n7ppta55karj9      # only if derivation cannot decide
 
 # v4 mission control (off by default). With it on, the dashboard gains Missions and Memory pages and
-# Telegram gains /missions, /mission <id> and /cancel_mission <id>. Observe and Propose only.
+# Telegram gains /missions, /mission <id> and /cancel_mission <id>. Observe and Propose missions investigate
+# and propose; Repair missions change the host only inside a grant you approve. Before turning it on read
+# INSTALL.md "Mission control": the host setup (launcher steps) must be applied first, and the values below
+# must match what setup wrote into launch.conf.
 # Core reads missions.enabled once, at startup: after changing it, restart core (the dashboard follows
 # config reloads on its own, so it can show the pages before core will answer them).
 # missions:
 #   enabled: true
+#   runtime:
+#     argv: ["/usr/local/bin/my-agent", "--mission"]   # an absolute command; no agent is bundled
+#   session_uid_min: 61000          # one uid and private group per session; must not contain Core's uid
+#   session_uid_max: 61999
+#   sock_root: /run/planetexpress-sessions
+#   cgroup_root: /sys/fs/cgroup/system.slice/casa-planetexpress.service/sessions   # MOS: the tree launcher-boot.sh makes
+#   workspace_root: /var/lib/planetexpress/mission-workspaces
+#   launch_conf: /etc/planetexpress-launch/launch.conf   # MOS: under PE_HOME on the data pool
+#   tripwire_interval_s: 15         # at most 15: the pause bound is interval + 10 s scan + freeze + write <= 30 s
+#   verify:
+#     exec_allowlist: []            # binaries a verification exec_probe may run inside a container; empty: unavailable
+#   checkpoint:
+#     backup_sources: []            # [{path: /mnt/data, marker: /mnt/data/.last-backup}]: the backup floor reads these
+#   protected: []                   # additions to the built-in protected set, e.g. ["service:media/traefik"]
+#   tool_sites: {}                  # brokered tools: {dns.rewrite: {primary: "http://adguard.lan:3000"}}
+#   tool_secret_env: {}             # secret ref -> the NAME of a Core environment variable holding the key

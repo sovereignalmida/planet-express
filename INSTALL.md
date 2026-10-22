@@ -242,6 +242,87 @@ container names with its own Docker socket to derive which system is local; aski
 declared answer would only create a configuration value that can be wrong. Use the one optional
 `local_system_id` pin only where that derivation cannot decide.
 
+## Mission control (v4, off by default)
+
+Mission control lets a supervised agent session investigate (Observe, Propose) and, with your approval, repair
+(Repair tier) inside a scope you approved, with Planet Express checking the result itself. Nothing in this section is
+needed for the v3 behaviour: with `missions.enabled` false (the default) no v4 code runs, no thread starts, no account,
+socket or sudoers rule exists, and every mission and memory call answers "disabled".
+
+### Enabling it
+
+1. **Setup answers.** In the wizard (or an answer file) say yes to mission control. The answers are
+   `missions.enabled`, `session_uid_min`/`session_uid_max` (default 61000-61999: one account-less uid and a private group
+   per session, never a shared worker account; the range must not contain Core's uid), `sock_root`
+   (`/run/planetexpress-sessions`), `cgroup_root`, `workspace_root` and, optionally, `worker_sudo_rules` with
+   `worker_sudo_all_sessions`. The plan lists every step below and its risk; each is reversible.
+2. **Launcher steps** (root, in this order, journalled so undo and repair work): `session-uid-range`, `launcher-helper`
+   (`/usr/libexec/planetexpress/pe-launch`, the only code that starts a session), `launcher-sudoers`
+   (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `cgroup-tree` (a `Delegate=yes` drop-in
+   for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root` and `socket-root`. With
+   `worker_sudo_rules` set, `worker-sudoers` also writes `/etc/sudoers.d/planetexpress-worker`: exact units and actions,
+   never a wildcard, shown to you first. They can be run by hand: `python3 -m planet_express.missions.launcher.setup_steps
+   probe|repair|undo --core-user USER --workspace-root DIR`.
+3. **Config.** Put the same values in `config.yaml` under `missions:` and set `enabled: true`, then restart
+   `casa-planetexpress` (Core reads the flag once, at startup; the `Delegate=yes` drop-in also takes effect only at a
+   restart). The agent is whatever command you configure under `missions.runtime.argv` (an absolute argv; there is no
+   bundled agent or required vendor). Other keys, all optional: `budgets`, `checkpoint` (`root`, `backup_sources`,
+   retention), `verify` (`exec_allowlist`: the binaries a verification `exec_probe` may run, empty by default),
+   `tripwire_interval_s` (at most 15), `protected` (additions to the built-in protected set), `live_trees`, `cross_host`,
+   `package_paths`, `windows`, `tool_sites` and `tool_secret_env` (brokered tools), `docker_socket`, `docker_label_allow`
+   and `hooks`. `config.example.yaml` shows the shape.
+4. **Check it.** Before the first Repair mission run the launcher preflight (Core runs it before it starts a session and a failure keeps the
+   mission waiting) and `scripts/mission_containment_rehearsal.py` as the Core user; both fail closed. A host that fails them stays
+   proposal-only: it never falls back to an unmanaged session. Rehearsals for a fresh host are in
+   `docs/handoff/v4/rehearsals.md`.
+
+**MOS.** Root is RAM, so PE lives under `PE_HOME` on the data pool and Core runs as root with the `direct` launcher
+strategy. `launch.conf`, the helper copy and `launcher-boot.sh` are under `PE_HOME`, and the helper refuses to trust a
+file whose parent directories are not root-owned and not group/world writable. **Required:** `chown root:root /mnt/data
+&& chmod 755 /mnt/data` (the plan and the preflight print this exact fix when it is needed). The boot hook
+(`/boot/optional/scripts/post-start.sh`, merged between markers, never replaced) runs `launcher-boot.sh` before Core
+starts: it recreates the sessions cgroup and puts the helper back at its real path from the persistent copy, only if
+the copy's checksum is the one recorded at setup. If it fails, missions stay proposal-only and say so. Set
+`missions.launch_conf` to the pool path.
+
+### What v4 adds to the host
+
+| Kind | What | Where | Removed by |
+| --- | --- | --- | --- |
+| Accounts | none shared; per-session uids and private groups in `session_uid_min..max` (allocated per session, released when the session is provably empty) | `/etc/passwd` is not edited; the range is reserved, not created | nothing to remove |
+| Root helper | `pe-launch` and its trust file `launch.conf` | `/usr/libexec/planetexpress/pe-launch`, `/etc/planetexpress-launch/launch.conf` (MOS: under `PE_HOME`) | uninstall / undo (only if it is exactly what setup wrote) |
+| Sudoers | `planetexpress-launch` (Core may run the helper), optional `planetexpress-worker` | `/etc/sudoers.d/` | uninstall / undo; the preflight fails closed on an unmanaged rule that reaches Core |
+| Cgroup | delegated `sessions` subtree | systemd drop-in, or MOS `launcher-boot.sh` | uninstall / undo |
+| Sockets | one directory per session with `worker.sock` (the worker's RPC; it can never reach approval or decision methods) and, for a Repair grant with `docker: proxy`, `proxy.sock` (the scope-enforcing Docker API proxy) | `missions.sock_root/<session id>/` (`sock_root` is owned by Core, mode 0711; each session directory is 0750 for that session's private group) | removed when the session ends |
+| State | mission, memory, approval, lease and checkpoint tables (schema 6); checkpoint store; tripwire state; per-mission artifacts and workspaces | the state database, `missions.checkpoint.root`, `missions.workspace_root` | state snapshot restore; uninstall keeps data |
+| Secrets | none in a session. Brokered tool keys live only in Core's environment, named by `tool_secret_env` (a secret ref to an environment variable NAME, never a value) | Core's environment / `/etc/planetexpress.env` | you |
+| Grants | a hash-bound grant per mission (scope, protected set, budgets, credentials, verification plan, backup floor); approvals bind to the grant's hash, so any change needs a new approval. Standing grants are off by default and never cover Change or Critical, broad sudo or a backup-floor override | the state database | cancel / expiry |
+| Boot | MOS `launcher-boot.sh` in the post-start hook; on systemd the unit drop-in only | see above | uninstall / undo |
+
+### Upgrading to v4
+
+Mission control changes the database schema (5 to 6). Take the snapshot first, exactly as for any upgrade (see
+"Upgrading and rolling back" below), stop both units, `git checkout` the v4 tag, run `deploy.sh` (or the wizard in
+"repair" mode), start the units. With `missions.enabled` false nothing else changes. Turn missions on only after the
+steps above and a passing preflight.
+
+### Downgrading from v4 to v3
+
+A v3 build refuses a v4 database ("database schema is newer"), so the downgrade is a **snapshot restore**, not a
+code-only checkout. Use the snapshot you took before upgrading: stop both units, run
+`scripts/state_snapshot.py restore <snapshot> --yes` (before checking out the old tag, as described below), check out
+the v3 tag, `pip install -r requirements.txt`, start the units. Anything recorded after the snapshot (missions,
+approvals, memory, events) is discarded. If you have missions on, first cancel or let finish any running mission, and run
+the launcher `undo` (or the wizard's uninstall for mission control) so the helper, sudoers files and cgroup drop-in are
+removed with a record; v3 ignores them but they are root-owned files you should not leave behind unmanaged.
+
+### Uninstalling mission control
+
+The wizard's uninstall (and `setup_steps undo`) removes, in reverse order, the sockets directory, workspace root,
+cgroup drop-in or boot script, sudoers files, helper and `launch.conf`, taking a snapshot first and leaving your
+configuration, secrets, state and data. A step removes a file only if it is exactly what setup wrote; anything you edited
+is left and reported. Set `missions.enabled: false` (and restart) to turn the feature off without removing anything.
+
 ## What this does not cover
 
 - **No authentication on the web dashboard.** It's read-only and meant for a LAN-trust

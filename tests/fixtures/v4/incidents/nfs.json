@@ -1,0 +1,18 @@
+{
+  "name": "NFS share went stale, media apps report missing files",
+  "scope_tags": ["mount:/mnt/media"],
+  "query": "stale file handle",
+  "evidence": [
+    {"source": "scan:mounts", "text": "/mnt/media: Stale file handle\nmount source nas.example:/export/media still listed as active"},
+    {"source": "logs:media-plex-1", "text": "ERROR cannot open /media/tv: Stale file handle"}
+  ],
+  "expect_cards": ["nfs-stale-handle-symptoms", "nfs-stale-recovery"],
+  "agent_result": {
+    "diagnosis": "The NFS mount at /mnt/media holds a stale handle; the server side likely restarted or the export changed.",
+    "evidence": ["/mnt/media reports Stale file handle", "plex cannot open /media/tv"],
+    "suggested_actions": ["Remount the share after confirming no backup job is running"],
+    "unknowns": ["Whether a backup is running right now", "Whether the NAS export was changed"],
+    "memory_candidates": [],
+    "confidence": "medium"
+  }
+}

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (v4 mission control, off by default)
+
+Missions are disabled unless `missions.enabled: true`; with it off nothing below runs and v3 behaves exactly as before.
+The database schema moves from 5 to 6, so **take a state snapshot before upgrading** (a v3 build refuses a v4 database;
+downgrading is a snapshot restore, see INSTALL.md).
+
+- **Missions.** A mission is a goal, a scope and a grant, run by a supervised agent session you configure
+  (`missions.runtime.argv`; no bundled agent or required vendor). Observe and Propose missions investigate and
+  propose; Repair missions change the host only after you approve the grant, inside the approved scope. A mission
+  completes only when Planet Express's own pre-agreed verification checks pass, never on the agent's word.
+- **Safety model.** Each session runs in its own cgroup under its own uid, started by a root helper; it reaches Core only
+  through a per-session worker socket with a method allowlist (never approval or decision methods) and Docker only through
+  a scope-enforcing proxy. A checkpoint is taken first and a Repair mission is refused without a recent backup unless you
+  record an explicit "no backup". A tripwire monitor pauses a session within 30 seconds if a protected domain (ingress,
+  DNS, firewall, credentials, data volumes, backup, packages, reboot) or anything outside the scope changes, and offers
+  rollback. Secrets are redacted before anything is stored; hostile log text is quoted data and cannot widen a grant.
+- **Crash handling.** A crash during investigation, execution or verification ends in an honest resumable or recovery state;
+  an execution is never replayed.
+- **Ship's Memory.** Operator-confirmed facts, procedures and constraints are retrieved into a mission's brief; anything an
+  agent proposes stays quarantined until you confirm it.
+- **Surfaces.** Dashboard Missions and Memory pages and Telegram `/missions`, `/mission <id>`, `/cancel_mission <id>`; approval
+  cards bound to the grant's hash; optional standing grants (off by default, never for Change or Critical).
+- **Setup and docs.** The wizard's mission-control answers and the launcher steps (journalled, repairable, undoable),
+  INSTALL.md "Mission control", and `docs/handoff/v4/` (rehearsals on Ubuntu/systemd and MOS, release proof map).
+- **Release proof.** `tests/release_proof/` (one module per item of the v4 design's 11.3), the real-Docker repair
+  rehearsal `scripts/rehearse_repair.py` (run with `scripts/run_rehearsal.sh --vm HOST` on a disposable host) and
+  `docs/handoff/v4/release-proof.md`, which marks what still needs a human or a host run as PENDING.
+
+
 ## [3.1.2] - 2026-10-12
 
 No config change and no new dependency. Pull and restart.
