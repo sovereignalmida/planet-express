@@ -52,11 +52,11 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged. Re-pinned again in slice 7b: the config file setup renders now carries
-    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "06b388e6599f2ced"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "49ec4395149981fe"
+    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "ca6d4bddf83c83ba"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "07e7686a7d3205b2"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "22c8728e9cb0f59a"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "ec455f5bed7cb032"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"

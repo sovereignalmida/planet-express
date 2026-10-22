@@ -490,6 +490,9 @@ class MissionsConfig(BaseModel):
     tripwire_accept_blind: list[str] = []
     protected: list[str] = []
     protected_overrides: list[ProtectedOverrideConfig] = []
+    # Domains this host genuinely lacks, or whose evidence Core cannot read. Discovery that cannot establish a required domain
+    # withholds Repair capability; naming the domain here acknowledges it (reported, never removes a built-in default).
+    protected_absent: list[Literal["ingress", "dns", "credentials", "backup", "data_volumes"]] = []
     live_trees: list[str] = []            # working trees watched for destructive VCS and pushes
     cross_host: list[CrossHostSystemConfig] = []
     package_paths: list[str] = []         # extra package-manager state (on MOS, its package paths)
