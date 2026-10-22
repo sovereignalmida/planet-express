@@ -114,6 +114,36 @@ def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
     assert scope.classify("host:local/service:media/other") == "in_scope"
 
 
+# ── #6 stopping the runner: no new starts, sessions proven gone, only then the tripwire ──────────────
+
+def test_runner_stop_halts_the_tripwire_only_after_the_sessions_are_gone():
+    from types import SimpleNamespace
+
+    from planet_express.missions.runner import MissionRunner
+    calls = []
+    sup = SimpleNamespace(docker_proxy=None, shutdown=lambda: calls.append("sessions_gone"))
+    trip = SimpleNamespace(stop=lambda: calls.append("tripwire_stop"))
+    runner = MissionRunner(sup, None, tripwire=trip)
+    runner._stop.set = lambda real=runner._stop.set: (calls.append("no_new_starts"), real())[1]
+    runner.stop()
+    assert calls == ["no_new_starts", "sessions_gone", "tripwire_stop"]
+
+
+def test_runner_stop_still_stops_the_tripwire_if_the_supervisor_shutdown_fails():
+    from types import SimpleNamespace
+
+    from planet_express.missions.runner import MissionRunner
+    calls = []
+
+    def boom():
+        raise RuntimeError("x")
+    runner = MissionRunner(SimpleNamespace(docker_proxy=None, shutdown=boom), None,
+                           tripwire=SimpleNamespace(stop=lambda: calls.append("tripwire_stop")))
+    with pytest.raises(RuntimeError):
+        runner.stop()
+    assert calls == ["tripwire_stop"]
+
+
 # ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
 
 def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):

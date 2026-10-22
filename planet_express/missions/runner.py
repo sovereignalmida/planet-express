@@ -117,16 +117,20 @@ class MissionRunner:
                 log.exception("worker socket did not stop cleanly")
 
     def stop(self) -> None:
-        if self.tripwire is not None:
-            self.tripwire.stop()
-        self._stop.set()
+        """Order matters: stop accepting starts, kill the sessions and prove them gone, and only THEN stop the tripwire. A
+        session that is still running while nothing watches the host is exactly the window the tripwire exists to close."""
+        self._stop.set()                                  # no new starts: the loop is the only thing that starts sessions
         if self._thread is not None:
             self._thread.join(timeout=30)
-        self._stop_server()
-        self.supervisor.shutdown()
-        shutdown = getattr(getattr(self.supervisor, "docker_proxy", None), "shutdown", None)
-        if shutdown is not None:
-            shutdown()
+        try:
+            self._stop_server()
+            self.supervisor.shutdown()                    # sessions killed and proven gone (or kept tracked, never dropped)
+            shutdown = getattr(getattr(self.supervisor, "docker_proxy", None), "shutdown", None)
+            if shutdown is not None:
+                shutdown()
+        finally:
+            if self.tripwire is not None:
+                self.tripwire.stop()
 
 
 def _cgroup_mount(root: str) -> str:
