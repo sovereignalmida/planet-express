@@ -195,7 +195,8 @@ def local_image():
 
 @pytest.mark.skipif(not real_daemon_up() or local_image() is None, reason="no Docker daemon with a local image here")
 def test_a_real_create_start_stop_and_remove_through_the_proxy_and_the_refusals_in_front_of_a_real_daemon():
-    from dockerproxy_fakes import FakeGate, request
+    from dockerproxy_fakes import FakeGate
+    request = versioned_request()
     base = tempfile.mkdtemp(prefix="dpc")
     os.chmod(base, 0o755)
     up = Upstream(DOCKER_SOCKET, timeout=30)
