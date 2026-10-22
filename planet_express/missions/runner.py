@@ -133,7 +133,13 @@ class MissionRunner:
                 shutdown()
         finally:
             if self.tripwire is not None:
-                self.tripwire.stop()
+                if getattr(self.supervisor, "tracked_sessions", 0):
+                    # A session could not be killed or proven empty: it is still on the host. Keep watching (and pausing)
+                    # rather than stop the one thing that would notice what it does.
+                    log.error("%d session(s) not proven gone at shutdown: the tripwire stays on", self.supervisor.tracked_sessions)
+                    getattr(self.tripwire, "unquiesce", lambda: None)()
+                else:
+                    self.tripwire.stop()
 
 
 def _cgroup_mount(root: str) -> str:

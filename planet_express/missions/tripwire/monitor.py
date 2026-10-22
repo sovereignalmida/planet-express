@@ -183,6 +183,9 @@ class TripwireMonitor:
         cleanly). Scans continue; the monitor itself is stopped only after the sessions are proven gone."""
         self._quiesced = True
 
+    def unquiesce(self) -> None:
+        self._quiesced = False
+
     def stop(self) -> None:
         self._stop.set()
         thread = self._thread

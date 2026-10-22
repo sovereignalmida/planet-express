@@ -241,6 +241,18 @@ def test_a_supervisor_that_is_shutting_down_refuses_every_start(tmp_path):
         st.close()
 
 
+def test_runner_stop_keeps_the_tripwire_on_if_a_session_was_not_proven_gone():
+    from types import SimpleNamespace
+
+    from planet_express.missions.runner import MissionRunner
+    calls = []
+    sup = SimpleNamespace(docker_proxy=None, shutdown=lambda: calls.append("shutdown"), tracked_sessions=1)
+    trip = SimpleNamespace(quiesce=lambda: calls.append("quiesce"), unquiesce=lambda: calls.append("unquiesce"),
+                           stop=lambda: calls.append("stop"))
+    MissionRunner(sup, None, tripwire=trip).stop()
+    assert calls == ["quiesce", "shutdown", "unquiesce"]
+
+
 def test_runner_stop_still_stops_the_tripwire_if_the_supervisor_shutdown_fails():
     from types import SimpleNamespace
 

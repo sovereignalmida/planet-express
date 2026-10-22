@@ -315,6 +315,11 @@ class Supervisor:
             return conn.execute("SELECT COUNT(*) FROM mission_sessions WHERE mission_id=?", (mission_id,)).fetchone()[0]
 
     # ── start ───────────────────────────────────────────────────────────────
+    @property
+    def tracked_sessions(self) -> int:
+        """Sessions Core still supervises: after `shutdown()`, any left were not proven gone."""
+        return len(self._runs)
+
     def begin_shutdown(self) -> None:
         """No new session starts from here on (the runner calls this first; `shutdown()` then kills what is running)."""
         with self._lifecycle:                 # waits for a start that is already inside its launch, so none outlives this
