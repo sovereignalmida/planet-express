@@ -547,6 +547,7 @@ class Supervisor:
         if mission.status != expected:
             return self._kill_and_advance(run, "state_changed")
         if run.paused_at is not None:
+            self._extend_session_for_pause(run)          # a pause that ends outside resume() still moves the expiry
             run.started_at += float(self.clock()) - run.paused_at
             run.paused_at = run.pause_extended_to = None
         if not self._hook_settings_intact(run):

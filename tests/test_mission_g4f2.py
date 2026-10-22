@@ -147,6 +147,47 @@ def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
     assert scope.classify("host:local/service:media/other") == "in_scope"
 
 
+def test_expiry_and_wall_budget_do_not_drift_over_repeated_pauses_and_a_pause_ended_outside_resume(tmp_path):
+    from repair_fakes import build, update
+    from tripwire_fakes import touch
+
+    from planet_express.missions.state import transition
+    st = build(tmp_path, behaviours=[{"script": [update()] * 400}])
+    try:
+        mid = st.propose(budgets={"wall_s": 1800})["mission_id"]
+        st.approve_all(mid)
+        st.sup.tick()
+        sid = st.runtimes[0].context.session.session_id
+        first = st.ms.get_session(sid)["expires_at"]
+        run = st.sup._runs[mid]
+        started = run.started_at
+
+        def advance(seconds, step=20):
+            for _ in range(seconds // step):
+                st.clock.t += step
+                st.sup.tick()
+        advance(100)
+        for n in range(2):
+            touch(st.rig.fs / "etc" / "hosts", f"10.0.0.{n} changed\n")
+            st.monitor.scan_once()
+            assert st.status(mid) == "paused_tripwire"
+            advance(200)
+            if n == 0:
+                st.flow.resume("operator:alice", mid)
+            else:                                            # the pause ends by a plain transition, not resume()
+                transition(st.store, mid, "executing", "operator:alice")
+                st.clock.t += 17
+                st.sup.tick()
+            assert st.status(mid) == "executing"
+            advance(100)
+        assert run.paused_at is None and run.pause_extended_to is None
+        shift = run.started_at - started
+        gained = st.ms.get_session(sid)["expires_at"] - first
+        assert 360 <= shift <= 440 and abs(gained - shift) <= 40       # both moved by (about) the two pauses
+    finally:
+        st.close()
+
+
 # ── #6 stopping the runner: no new starts, sessions proven gone, only then the tripwire ──────────────
 
 def test_runner_stop_halts_the_tripwire_only_after_the_sessions_are_gone():
