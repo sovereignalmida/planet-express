@@ -448,7 +448,7 @@ def release_missions(rec: Recorder, label: str, mids: Sequence[str], *, status_o
     errors: list[str] = []
     raw_status = status_of
 
-    def status_of(mid: str) -> str:                                 # noqa: F811 - an unreadable status is never "terminal"
+    def status_of(mid: str) -> str:
         try:
             return raw_status(mid)
         except Exception as exc:                                    # noqa: BLE001
