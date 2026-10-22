@@ -275,3 +275,16 @@ def test_an_oversized_mount_table_is_a_failure(tmp_path):
     got = discover_protected_inputs(MissionsConfig(), stacks_root=stacks(tmp_path), bounded=Host().bounded,
                                     mountinfo=str(big), exists=lambda p: False)
     assert "data_volumes" in got.failures
+
+
+def test_nested_secrets_are_found_and_a_scan_that_hits_its_bounds_is_a_failure(tmp_path):
+    from planet_express.missions.discovery import default_scan
+    root = Path(stacks(tmp_path, "media/config/deep"))
+    (root / "media" / "config" / "deep" / "production.env").write_text("X=1\n")
+    got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
+                                    read_text=lambda p: MOUNTINFO, exists=lambda p: False)
+    assert f"{root}/media/config/deep/production.env" in got.credentials
+    with pytest.raises(OSError):
+        default_scan(str(root), depth=2)
+    with pytest.raises(OSError):
+        default_scan(str(root), limit=2)

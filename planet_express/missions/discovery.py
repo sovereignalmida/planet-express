@@ -61,8 +61,13 @@ class DiscoveredInputs:
                 "dns": self.dns, "credentials": self.credentials, "backup": self.backup}
 
 
-def default_scan(root: str, depth: int = 2) -> list[tuple[str, bool]]:
-    """(path, is_dir) for entries under `root` down to `depth` levels. Raises OSError when `root` or any directory below it is unreadable."""
+MAX_SCAN_DEPTH = 8
+MAX_SCAN_ENTRIES = 50_000
+
+
+def default_scan(root: str, depth: int = MAX_SCAN_DEPTH, limit: int = MAX_SCAN_ENTRIES) -> list[tuple[str, bool]]:
+    """(path, is_dir) for every entry under `root` (symlinks not followed). Raises OSError when `root` or any directory below
+    it is unreadable, or when the tree is deeper or larger than the bounds: an incomplete scan is a failure, not a result."""
     out: list[tuple[str, bool]] = []
 
     def walk(directory: str, level: int) -> None:
@@ -70,8 +75,12 @@ def default_scan(root: str, depth: int = 2) -> list[tuple[str, bool]]:
             for entry in sorted(it, key=lambda e: e.name):
                 is_dir = entry.is_dir(follow_symlinks=False)
                 out.append((entry.path, is_dir))
-                if is_dir and level < depth:
-                    walk(entry.path, level + 1)      # an unreadable subtree is not "nothing found": it propagates
+                if len(out) > limit:
+                    raise OSError(f"{root} holds more than {limit} entries")
+                if is_dir:
+                    if level >= depth:
+                        raise OSError(f"{entry.path} is deeper than {depth} levels")
+                    walk(entry.path, level + 1)
 
     walk(root, 1)
     return out
