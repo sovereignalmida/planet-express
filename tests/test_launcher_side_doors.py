@@ -541,3 +541,21 @@ def test_a_step_that_crashes_is_a_failed_check(host):
 
 def test_the_gate_fails_with_no_steps(host):
     assert not repair_gate_report([]).ok
+
+
+@pytest.mark.parametrize("flags,safe", [
+    ("--tlsverify --tlscacert=/ca.pem", True),
+    ("--tlsverify=true --tlscacert /ca.pem", True),
+    ("--tlsverify=1 --tlscacert=/ca.pem", True),
+    ("--tlsverify=false --tlscacert=/ca.pem", False),
+    ("--tlsverify=0 --tlscacert=/ca.pem", False),
+    ("--tlsverify", False),                                          # no CA to verify clients against
+    ("--tlsverify --tlscacert=", False),
+    ("--tlscacert=/ca.pem", False),                                  # a CA but no verification
+    ("--tlsverify=false --tlsverify --tlscacert=/ca.pem", True),     # the last one wins
+    ("--tlsverify --tlsverify=false --tlscacert=/ca.pem", False),
+    ("--tlsverify=banana --tlscacert=/ca.pem", False),
+])
+def test_docker_tcp_exec_start_tlsverify_is_parsed_not_substring_matched(host, flags, safe):
+    _unit(host, "docker.service", f"[Service]\nExecStart=/usr/bin/dockerd -H tcp://0.0.0.0:2376 {flags}\n")
+    assert DockerTcpExposure(host.paths()).probe().ok is safe, flags

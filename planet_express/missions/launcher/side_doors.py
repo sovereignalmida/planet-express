@@ -17,6 +17,7 @@ Every probe FAILS CLOSED: a file it cannot read, parse or reason about is a fail
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -35,6 +36,29 @@ from planet_express.missions.launcher.setup_steps import (
 
 DOCKER_TCP_PORTS = (2375, 2376)
 _ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
+_TRUE = frozenset({"1", "t", "true"})
+_FALSE = frozenset({"0", "f", "false"})
+
+
+def _exec_tls_verified(exec_start: str) -> bool:
+    """Whether a dockerd command line demands client-verified TLS: `--tlsverify` true (bare, or `=true`/`=1`; the last one
+    wins, a false or unreadable value is not verification) AND a non-empty `--tlscacert` to verify clients against."""
+    try:
+        words = shlex.split(exec_start)
+    except ValueError:
+        return False
+    verify, cacert = False, False
+    for i, word in enumerate(words):
+        flag, eq, value = word.partition("=")
+        if flag in ("--tlsverify", "-tlsverify"):
+            verify = (not eq) or value.strip().lower() in _TRUE
+        elif flag in ("--tlscacert", "-tlscacert"):
+            if not eq and i + 1 < len(words):
+                value = words[i + 1]
+            cacert = bool(value.strip())
+    return verify and cacert
+
+
 _TCP_HOST = re.compile(r"""(?:-H|--host)[ =]*["']?(tcp://[^\s"']*)""", re.IGNORECASE)
 MAX_FILE = 1 << 20
 
@@ -237,7 +261,7 @@ class DockerTcpExposure(Step):
                     value = stripped.split("=", 1)[1] if "=" in stripped else ""
                     if "dockerd" in value and "$" in value:
                         raise StepError(f"cannot tell what {path} passes to dockerd (it expands a variable)")
-                    if "--tlsverify" in value:
+                    if _exec_tls_verified(value):
                         continue
                     for host in _TCP_HOST.findall(value):
                         found.append(f"{host} (ExecStart in {path}, no client-verified TLS)")
