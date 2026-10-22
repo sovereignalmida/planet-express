@@ -404,7 +404,7 @@ class MissionService:
 
     def cancel_mission(self, mission_id: str, *, operator: str) -> dict:
         """With a live session, set `cancel_requested`: the supervisor owns stopping it and confirming it
-        dead. With none (never started, or its session already revoked after being proven dead) there is
+        dead. With none (never started, or its session revoked and reaped, uid released) there is
         nothing to stop, so the mission is cancelled through the state machine at once."""
         self._require_enabled()
         actor = _actor(operator)
@@ -418,6 +418,12 @@ class MissionService:
                 raise MissionError(f"Mission is already {row['status']}", "conflict")
             live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL",
                                 (mission_id,)).fetchone()
+            if live is None:
+                # The supervisor revokes the token BEFORE it has proven the cgroup empty: a revoked session whose
+                # uid is still held may be running, so it is not "no session".
+                live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NOT NULL "
+                                    "AND session_uid IS NOT NULL AND uid_released_at IS NULL",
+                                    (mission_id,)).fetchone()
             # A Repair mission that has a checkpoint may have changed the host: only the supervisor, which reads the host against
             # the checkpoint, closes it as cancelled (or holds it for the operator). Here the request is just recorded.
             may_have_changed = (row["tier"] not in ("observe", "propose") and row["checkpoint_id"] is not None

@@ -261,11 +261,22 @@ def test_cancel_with_a_live_session_never_closes_directly(handlers, env, status)
     assert out["status"] == status and out["cancel_requested"] is True
 
 
-def test_a_revoked_session_does_not_count_as_live(handlers, env):
+def test_a_revoked_and_reaped_session_does_not_count_as_live(handlers, env):
+    svc, store, ms, _ = env
+    mid = _mission_in(env, "investigating", session=True)
+    live = ms.live_session(mid)
+    ms.revoke_session(live["id"])
+    ms.release_session_uid(live["id"])
+    assert call(handlers, "mission.cancel", mission_id=mid, operator="alice")["status"] == "cancelled"
+
+
+def test_a_revoked_session_whose_uid_is_still_held_is_not_proven_dead(handlers, env):
+    """Codex G4: the token is revoked before the cgroup is proven empty, so the supervisor still owns the stop."""
     svc, store, ms, _ = env
     mid = _mission_in(env, "investigating", session=True)
     ms.revoke_session(ms.live_session(mid)["id"])
-    assert call(handlers, "mission.cancel", mission_id=mid, operator="alice")["status"] == "cancelled"
+    out = call(handlers, "mission.cancel", mission_id=mid, operator="alice")
+    assert out["status"] == "investigating" and out["cancel_requested"] is True
 
 
 def test_cancel_refuses_closed_unknown_and_bad(handlers, env):

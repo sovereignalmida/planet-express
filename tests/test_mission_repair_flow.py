@@ -525,3 +525,19 @@ def test_a_worker_result_alone_is_never_completion(stack):
     st.sup.verifier = type("Never", (), {"run": lambda self, m: (_ for _ in ()).throw(RuntimeError("verifier down"))})()
     assert st.drive(mid) == "needs_operator"
     assert st.ms.get_mission(mid).status != "completed"
+
+
+def test_cancel_does_not_terminalize_a_revoked_session_that_is_not_yet_proven_dead(stack):
+    """Codex G4: the supervisor revokes the token before the cgroup is proven empty; cancel must not read that as 'no session'."""
+    from planet_express.application.mission_service import MissionService
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    live = st.ms.live_session(mid)
+    assert live is not None and live["session_uid"] is not None and live["uid_released_at"] is None
+    st.ms.revoke_session(live["id"])                                      # token gone, process possibly still running
+    with st.store._write() as conn:                                       # isolate the live-is-None path from the checkpoint hold
+        conn.execute("UPDATE missions SET checkpoint_id=NULL WHERE id=?", (mid,))
+    out = MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    assert out["status"] not in ("cancelled", "failed", "completed") and out["cancel_requested"] is True
