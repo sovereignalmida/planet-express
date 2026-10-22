@@ -49,7 +49,9 @@ on a disposable host), **PENDING** (needs a human or a host run that has not hap
    namespace; the scripted agent rebinds them in dependency order; Core checks an in-namespace probe on both and project
    completeness; (b) a failed canary is rolled back by the operator through the checkpoint, then a bounded correction
    recreates only `web`. It refuses unless `PE_REHEARSAL_OK=1`, `--i-know-this-is-disposable`, root, a working docker and
-   no foreign containers. It does not exercise the cgroup launcher or the Docker proxy socket (see `docs/handoff/v4/rehearsals.md`).
+   no foreign containers. The scripted agent reaches Docker only through a real per-mission Docker proxy (`DockerProxyService`: real
+   upstream, grant-derived policy, recorded creates), and every call the proxy refuses is listed in the record. It does not exercise
+   the cgroup launcher or session uids (see `docs/handoff/v4/rehearsals.md`).
 8. Three synthetic incident shapes (VPN-gateway namespace, stale NFS handle, disk pressure after a canary) run end to end
    under Observe and Propose with the real memory retrieval: the expected cards are in the brief, the stored result is a
    valid `AgentResult` with evidence and unknowns in separate disjoint lists, no `executing` state, no checkpoint, only the

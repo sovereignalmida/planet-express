@@ -12,9 +12,13 @@ What each rehearsal proves, and what it does not:
 | Containment | `scripts/mission_containment_rehearsal.py` | the REAL launcher: preflight, a throwaway session, freeze/thaw/kill of a process tree incl. a double-fork escaper, the cgroup emptying |
 | Repair (item 7) | `scripts/rehearse_repair.py` via `scripts/run_rehearsal.sh` | the real checkpoint service, tripwire monitor, verifier, approval flow and supervisor against real Docker with a synthetic compose project: (a) gateway recreate orphans dependents, the mission rebinds them in dependency order, an in-namespace probe and a project-completeness check pass; (b) a failed canary is rolled back, then an approved bounded correction recreates only `web` |
 
-The repair rehearsal's agent is a deterministic command (no LLM) running as root with the host Docker socket. It does
-not exercise the cgroup launcher or the per-session Docker proxy socket; those are covered by the first two rows. The
-JSON record lists this under `not_exercised`.
+The repair rehearsal's agent is a deterministic command (no LLM) running as root in a process group. Its `DOCKER_HOST` is a
+real per-mission Docker proxy socket (the daemon's `DockerProxyService`, real upstream to the host socket, policy derived from
+the mission's grant, creates recorded into the store for the tripwire); the agent refuses to run against any other socket.
+Calls the proxy refuses are not worked around: they appear under `proxy.<scenario>.refused` in the JSON record. Each scenario
+starts by removing renamed leftovers (`<hash>_pe-rehearsal-*`) and re-upping the project, and teardown must leave no container
+or network. The rehearsal does not exercise the cgroup launcher or session uids (the proxy recognises the agent by process
+group, not cgroup and unique uid); those are covered by the first two rows. The JSON record lists this under `not_exercised`.
 
 ## Ubuntu / systemd
 
