@@ -77,9 +77,9 @@ class Sudo(_Strict):
 
 
 class Budgets(_Strict):
-    wall_s: Annotated[Int, Field(ge=1, le=86400 * 7)] = 3600
+    wall_s: Annotated[Int, Field(ge=1, le=86400 * 7)] = 1800
     tool_calls: Annotated[Int, Field(ge=0, le=100000)] = 200
-    output_bytes: Annotated[Int, Field(ge=0, le=2**40)] = 5_000_000
+    output_bytes: Annotated[Int, Field(ge=0, le=2**40)] = 4 * 1024 * 1024
     retries: Annotated[Int, Field(ge=0, le=100)] = 2
 
 
