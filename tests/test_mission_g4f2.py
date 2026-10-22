@@ -481,7 +481,46 @@ def test_the_proxy_log_is_read_incrementally(tmp_path):
     first = rig.monitor._proxy_state(rig.mission.id)
     seen = rig.monitor._proxy_seen[rig.mission.id][0]
     assert first[0] == frozenset({"a" * 64}) and seen > 0
-    assert rig.env.ms.proxy_creates_since(rig.mission.id, seen) == []
+    assert rig.env.ms.proxy_creates_since(rig.mission.id, seen)[0] == []
+
+
+def test_the_cursor_advances_past_events_that_are_not_proxy_creates(tmp_path):
+    from tripwire_fakes import go_executing, make_rig
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    for i in range(5):
+        rig.env.ms.append_event(rig.mission.id, "note", "core", {"i": i})
+    rig.monitor._proxy_state(rig.mission.id)
+    seen = rig.monitor._proxy_seen[rig.mission.id][0]
+    events, high = rig.env.ms.proxy_creates_since(rig.mission.id, 0)
+    assert events == [] and seen == high and seen >= 5               # nothing is reread next scan
+
+
+def test_quiesce_waits_for_a_pause_that_is_already_freezing(tmp_path):
+    import threading
+
+    from tripwire_fakes import go_executing, make_rig
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    inside, release = threading.Event(), threading.Event()
+    real = rig.monitor._pause_locked
+
+    def slow(*a, **k):
+        inside.set()
+        assert release.wait(10)
+        return real(*a, **k)
+    rig.monitor._pause_locked = slow
+    pauser = threading.Thread(target=rig.monitor._pause, args=(rig.mission, "x", [], {}, None))
+    pauser.start()
+    assert inside.wait(10)
+    done = threading.Event()
+    quiescer = threading.Thread(target=lambda: (rig.monitor.quiesce(), done.set()))
+    quiescer.start()
+    assert not done.wait(0.4)                         # quiesce cannot return while a freeze is in progress
+    release.set()
+    pauser.join(10)
+    assert done.wait(10)
+    quiescer.join(10)
 
 
 def test_a_container_named_like_an_excluded_one_with_spoofed_labels_is_reported_protected(tmp_path):

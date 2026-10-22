@@ -150,6 +150,7 @@ class TripwireMonitor:
         self.accept_blind = frozenset(accept_blind)       # resource ids the operator accepts being unable to read
         self._stop = threading.Event()
         self._quiesced = False
+        self._pause_lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self.last_scan_at: float | None = None
@@ -181,7 +182,8 @@ class TripwireMonitor:
     def quiesce(self) -> None:
         """Shutdown has begun and sessions are being killed: stop pausing/freezing them (a frozen cgroup cannot be killed
         cleanly). Scans continue; the monitor itself is stopped only after the sessions are proven gone."""
-        self._quiesced = True
+        with self._pause_lock:               # waits out a pause that is already freezing, so none starts after this returns
+            self._quiesced = True
 
     def unquiesce(self) -> None:
         self._quiesced = False
@@ -263,8 +265,8 @@ class TripwireMonitor:
         """(ids the proxy recorded creating for this mission, the (name, targets) of each create in flight). Read incrementally from the
         last seq seen (never the whole log per scan); an intent with no end after CREATE_GRACE_S stops counting."""
         seq, created, begun, ended = self._proxy_seen.get(mission_id, (0, set(), {}, set()))
-        for ev_seq, at, body in self.ms.proxy_creates_since(mission_id, seq):
-            seq = max(seq, ev_seq)
+        events, seq = self.ms.proxy_creates_since(mission_id, seq)
+        for _ev_seq, at, body in events:
             kind, nonce = body.get("event"), body.get("nonce")
             if kind == "docker.create_begin" and isinstance(nonce, str):
                 targets = body.get("targets") if isinstance(body.get("targets"), list) else []
@@ -434,9 +436,13 @@ class TripwireMonitor:
                         log.exception("could not kill the session of %s", mission.id)
 
     def _pause(self, mission: Mission, cause: str, changes: list[Change], extra: dict, result: ScanResult | None) -> str:
-        if self._quiesced:
-            log.warning("tripwire quiesced for shutdown: not pausing %s (%s)", mission.id, cause)
-            return cause
+        with self._pause_lock:
+            if self._quiesced:
+                log.warning("tripwire quiesced for shutdown: not pausing %s (%s)", mission.id, cause)
+                return cause
+            return self._pause_locked(mission, cause, changes, extra, result)
+
+    def _pause_locked(self, mission: Mission, cause: str, changes: list[Change], extra: dict, result: ScanResult | None) -> str:
         started = self.clock()
         try:
             self.state.write(mission.id, "intent.json", {"v": STATE_V, "cause": cause, "grant_hash": mission.grant_hash})
