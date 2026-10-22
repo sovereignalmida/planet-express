@@ -33,6 +33,8 @@ MOUNTINFO = (
     "40 22 8:3 / /mnt/pool rw,relatime shared:1 - xfs /dev/sdb1 rw\n"
     "41 22 0:50 / /mnt/with\\040space rw - ext4 /dev/sdc rw\n"
     "42 22 0:51 / /proc rw - proc proc rw\n"
+    "43 22 0:52 / /opt/data rw - lustre srv:/data rw\n"
+    "44 22 0:53 / /run/user/1000 rw - tmpfs tmpfs rw\n"
 )
 
 
@@ -86,7 +88,7 @@ def test_mountinfo_parse_decodes_escapes_and_rejects_garbage():
 def test_a_clean_host_without_ingress_dns_or_backup_is_not_locked_out(tmp_path):
     got = run(tmp_path, Host())
     assert got.failures == {}
-    assert got.storage_mounts == ("/mnt/pool", "/mnt/with space")           # /, /boot, /proc are not data mounts
+    assert got.storage_mounts == ("/mnt/pool", "/mnt/with space", "/opt/data")   # unconventional paths and fs types count; /, /boot, tmpfs do not
     assert got.volumes == () and got.ingress == () and got.dns == () and got.backup == ()
 
 
@@ -222,3 +224,21 @@ def test_the_acknowledged_domain_lets_controls_build(tmp_path):
     runner = build_mission_runner(store, cfg(protected_absent=["backup"]), containment=FakeContainment(),
                                   stacks_root=root, repair_wiring=wiring(root), discovery=lambda c, **k: found)
     assert runner.controls is not None
+
+
+def test_an_unreadable_subtree_is_a_failure_not_a_partial_scan(tmp_path):
+    from planet_express.missions.discovery import default_scan
+    root = Path(stacks(tmp_path, "media/inner"))
+    locked = root / "media"
+    (locked / "inner" / ".env").write_text("X=1\n")
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK):
+            pytest.skip("running with privileges that ignore permissions")
+        with pytest.raises(OSError):
+            default_scan(str(root))
+        got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
+                                        read_text=lambda p: MOUNTINFO, exists=lambda p: False)
+        assert "credentials" in got.failures
+    finally:
+        locked.chmod(0o755)

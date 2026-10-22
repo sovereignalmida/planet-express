@@ -32,10 +32,14 @@ DNS_TOKENS = ("adguard", "pihole", "unbound", "dnsmasq", "coredns")
 BACKUP_TOKENS = ("borg", "restic", "duplicati", "kopia")
 BACKUP_CONFIG_PATHS = ("/etc/borgmatic", "/etc/borgmatic.d", "/root/.config/borg", "/root/.config/borgmatic",
                        "/etc/restic", "/root/.config/restic")
-DATA_MOUNT_ROOTS = ("/mnt", "/media", "/srv", "/data")
-DATA_FS = frozenset({"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "ntfs", "ntfs3", "fuseblk", "exfat",
-                     "vfat", "nfs", "nfs4", "cifs", "smb3", "fuse.mergerfs", "fuse.shfs", "fuse.sshfs", "9p"})
-NETWORK_FS = frozenset({"nfs", "nfs4", "cifs", "smb3", "fuse.sshfs"})
+# Every persistent mount is data unless it is a pseudo/virtual filesystem or boot/system plumbing. A mount that holds the
+# stacks root is carved out later by `build_protected`; anything else (including an unlisted fs type) is protected.
+PSEUDO_FS = frozenset({"proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "ramfs", "overlay", "squashfs", "securityfs",
+                       "debugfs", "tracefs", "configfs", "fusectl", "pstore", "bpf", "autofs", "mqueue", "hugetlbfs",
+                       "binfmt_misc", "efivarfs", "nsfs", "rpc_pipefs", "selinuxfs", "fuse.portal", "fuse.gvfsd-fuse",
+                       "fuse.lxcfs", "aufs"})
+SYSTEM_MOUNT_PREFIXES = ("/boot", "/efi", "/proc", "/sys", "/dev", "/run", "/snap", "/var/lib/docker/",
+                         "/var/lib/containerd", "/var/lib/kubelet")
 SECRET_DIRS = frozenset({"secrets", ".secrets"})
 MAX_OUTPUT = 1024 * 1024
 TIMEOUT = 20
@@ -58,7 +62,7 @@ class DiscoveredInputs:
 
 
 def default_scan(root: str, depth: int = 2) -> list[tuple[str, bool]]:
-    """(path, is_dir) for entries under `root` down to `depth` levels. Raises OSError when `root` is unreadable."""
+    """(path, is_dir) for entries under `root` down to `depth` levels. Raises OSError when `root` or any directory below it is unreadable."""
     out: list[tuple[str, bool]] = []
 
     def walk(directory: str, level: int) -> None:
@@ -67,10 +71,7 @@ def default_scan(root: str, depth: int = 2) -> list[tuple[str, bool]]:
                 is_dir = entry.is_dir(follow_symlinks=False)
                 out.append((entry.path, is_dir))
                 if is_dir and level < depth:
-                    try:
-                        walk(entry.path, level + 1)
-                    except OSError:
-                        continue          # an unreadable subdirectory does not blind the top level
+                    walk(entry.path, level + 1)      # an unreadable subtree is not "nothing found": it propagates
 
     walk(root, 1)
     return out
@@ -103,11 +104,11 @@ def parse_mountinfo(text: str) -> list[tuple[str, str]]:
 def _data_mounts(table: Sequence[tuple[str, str]]) -> list[str]:
     found = []
     for point, fstype in table:
-        if fstype not in DATA_FS or point == "/" or not point.startswith("/"):
+        if point == "/" or not point.startswith("/") or fstype in PSEUDO_FS or fstype.startswith("cgroup"):
             continue
-        under = any(point == r or point.startswith(r + "/") for r in DATA_MOUNT_ROOTS)
-        if under or fstype in NETWORK_FS:
-            found.append(point)
+        if any(point == p.rstrip("/") or point.startswith(p.rstrip("/") + "/") for p in SYSTEM_MOUNT_PREFIXES):
+            continue
+        found.append(point)
     return sorted(set(found))
 
 
