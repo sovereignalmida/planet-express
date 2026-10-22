@@ -79,7 +79,19 @@ def default_scan(root: str, depth: int = 2) -> list[tuple[str, bool]]:
 
 def _default_read(path: str) -> str:
     with open(path, encoding="utf-8", errors="replace") as handle:
-        return handle.read(MAX_OUTPUT)
+        text = handle.read(MAX_OUTPUT + 1)
+    if len(text) > MAX_OUTPUT:
+        raise OSError(f"{path} exceeds {MAX_OUTPUT} bytes")          # a prefix of the mount table is not the table
+    return text
+
+
+def _default_exists(path: str) -> bool:
+    """False only when the path is genuinely absent. A permission failure (an untraversable parent) is not absence."""
+    try:
+        os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
 
 
 def _unescape(text: str) -> str:
@@ -128,7 +140,7 @@ def discover_protected_inputs(
         bounded = default_bounded_runner
     read_text = read_text or _default_read
     scan = scan or default_scan
-    exists = exists or os.path.exists
+    exists = exists or _default_exists
     failures: dict[str, str] = {}
     mounts: list[str] = []
     volumes: list[str] = []

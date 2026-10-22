@@ -242,3 +242,36 @@ def test_an_unreadable_subtree_is_a_failure_not_a_partial_scan(tmp_path):
         assert "credentials" in got.failures
     finally:
         locked.chmod(0o755)
+
+
+def test_a_permission_failure_probing_backup_config_is_not_absence(tmp_path):
+    from planet_express.missions.discovery import _default_exists
+    closed = tmp_path / "closed"
+    (closed / "borg").mkdir(parents=True)
+    closed.chmod(0)
+    try:
+        if os.access(closed, os.X_OK):
+            pytest.skip("running with privileges that ignore permissions")
+        with pytest.raises(PermissionError):
+            _default_exists(str(closed / "borg"))
+        assert _default_exists(str(tmp_path / "nothing")) is False
+        got = run(tmp_path, Host(), exists=_default_exists_for(closed))
+        assert "backup" in got.failures
+    finally:
+        closed.chmod(0o755)
+
+
+def _default_exists_for(closed):
+    from planet_express.missions.discovery import _default_exists
+    return lambda p: _default_exists(str(closed / "borg")) if p == "/etc/borgmatic" else False
+
+
+def test_an_oversized_mount_table_is_a_failure(tmp_path):
+    from planet_express.missions import discovery
+    big = tmp_path / "mountinfo"
+    big.write_text("x" * (discovery.MAX_OUTPUT + 1))
+    with pytest.raises(OSError):
+        discovery._default_read(str(big))
+    got = discover_protected_inputs(MissionsConfig(), stacks_root=stacks(tmp_path), bounded=Host().bounded,
+                                    mountinfo=str(big), exists=lambda p: False)
+    assert "data_volumes" in got.failures
