@@ -224,6 +224,15 @@ class MissionStore:
                                 (mission_id, after_seq)).fetchall()
         return [MissionEvent(**dict(r)) for r in rows]
 
+    def proxy_created_containers(self, mission_id: str) -> frozenset[str]:
+        """Full ids of the containers the Docker proxy recorded as created for this mission."""
+        with self.store._connect() as conn:
+            rows = conn.execute(
+                "SELECT json_extract(body_json, '$.created_id') AS cid FROM mission_events "
+                "WHERE mission_id=? AND kind='tool' AND json_extract(body_json, '$.event')='docker.created'",
+                (mission_id,)).fetchall()
+        return frozenset(r["cid"] for r in rows if isinstance(r["cid"], str))
+
     # ── sessions ────────────────────────────────────────────────────────────
     def start_session(self, mission_id: str, *, kind: SessionKind, token_hash: str, session_ttl_s: int,
                       lease_ttl_s: int, resources: Sequence[str] | None = None,

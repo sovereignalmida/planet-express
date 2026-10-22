@@ -821,3 +821,15 @@ def test_a_daemon_older_than_the_floor_gets_a_controlled_refusal_not_a_500(env):
             assert status == 403 and b"older" in body
     finally:
         ro.stop()
+
+
+def test_a_created_container_id_is_recorded_before_the_answer_so_the_tripwire_can_trust_it(proxy):
+    body = (b'{"Image":"alpine:3","Labels":{"com.docker.compose.project":"media",'
+            b'"com.docker.compose.service":"qbittorrent"},"Cmd":["a"]}')
+    status, _, data = proxy.req("POST", "/containers/create", body=body)
+    assert status == 201
+    made = list(proxy.daemon.made)
+    created = [e for e in proxy.gate.events if e["event"] == "docker.created"]
+    assert [e["created_id"] for e in created] == made
+    assert proxy.gate.events.index(created[0]) < proxy.gate.events.index(
+        next(e for e in proxy.gate.events if e["event"] == "docker.result"))

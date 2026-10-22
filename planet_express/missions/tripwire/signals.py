@@ -225,7 +225,7 @@ def collect_containers(env: ScanEnv) -> dict[str, Any]:
             routes = sorted(f"{k[:150]}#{sha(v.encode())[:12]}" for k, v in labels.items()
                             if _ROUTE_LABEL.match(k))[:MAX_ROUTE_LABELS]
             result[name] = {
-                "resource": _container_resource(name, labels), "image": str(doc.get("Image", "")),
+                "id": str(doc.get("Id", "")), "resource": _container_resource(name, labels), "image": str(doc.get("Image", "")),
                 "mounts": mounts, "networks": [str(n) for n in nets],
                 "labels_hash": sha(json.dumps(sorted(labels.items())).encode()), "routes": routes,
             }

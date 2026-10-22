@@ -301,6 +301,8 @@ class ProxyServer:
             raise UpstreamError(type(exc).__name__) from None
         finally:
             cconn.close()
+        if route.name == "container.create" and status == 201 and self.gate is not None:
+            self._record_created(session, data)           # BEFORE the answer: a scan racing the create must find it recorded
         if status in (200, 201) and route.json_response:
             data = self._postprocess(plan, data, session)
         if plan.method == "HEAD":
@@ -313,6 +315,16 @@ class ProxyServer:
                 self.gate.record(session, {"event": "docker.result", "route": route.name, "status": status})
             except Exception:                                    # noqa: BLE001
                 log.warning("docker proxy: result event not recorded")
+
+    def _record_created(self, session, data: bytes) -> None:
+        """Remember the id of a container THIS session created, so the tripwire can tell it from one that merely carries an
+        in-scope compose label (a label is the container's own claim, not evidence)."""
+        try:
+            ident = json.loads(data.decode("utf-8")).get("Id", "")
+            if isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{64}", ident):
+                self.gate.record(session, {"event": "docker.created", "created_id": ident})
+        except Exception:                                    # noqa: BLE001 - unrecorded means the tripwire pauses: fails safe
+            log.warning("docker proxy: created container not recorded")
 
     def _clamped_api(self, daemon_says: str | None) -> str:
         """Clients negotiate down to what /_ping says: never advertise a version newer than the proxy serves."""

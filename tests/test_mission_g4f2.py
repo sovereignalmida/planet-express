@@ -114,6 +114,39 @@ def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
     assert scope.classify("host:local/service:media/other") == "in_scope"
 
 
+# ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
+
+def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    rig.host.containers["media-evil-1"] = doc("media-evil-1", project="media", service="evil")      # labelled in scope
+    assert rig.monitor.scan_once()[rig.mission.id] == "out_of_scope"
+    assert status(rig) == "paused_tripwire"
+
+
+def test_a_container_the_proxy_recorded_as_created_by_this_mission_is_allowed(tmp_path):
+    from tripwire_fakes import doc, frozen, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    made = doc("media-new-1", project="media", service="new")
+    rig.host.containers["media-new-1"] = made
+    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy", {"event": "docker.created", "created_id": made["Id"]})
+    assert rig.monitor.scan_once()[rig.mission.id] == "ok"
+    assert status(rig) == "executing" and not frozen(rig)
+
+
+def test_another_missions_creation_does_not_vouch_for_this_one(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    made = doc("media-new-1", project="media", service="new")
+    rig.host.containers["media-new-1"] = made
+    assert made["Id"] not in rig.env.ms.proxy_created_containers(rig.mission.id)
+    rig.monitor.scan_once()
+    assert status(rig) == "paused_tripwire"
+
+
 def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
     from test_mission_tools import setup
 

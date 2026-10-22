@@ -63,6 +63,7 @@ class DiffContext:
     protected: tuple[str, ...]
     stacks_root: str | None = None
     host: str = "local"
+    created: frozenset[str] = frozenset()      # ids of containers the Docker proxy recorded as created by this mission
 
     def cls(self, resource: str) -> str:
         return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root)
@@ -130,8 +131,17 @@ def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
         label = clean(name, 80)
         added_container = b is None and c is not None
         if b is None or c is None:
-            out.append(Change("containers", res, "container_added" if b is None else "container_removed",
-                              ctx.verdict(res), label))
+            if added_container and c.get("id") not in ctx.created:
+                # A container that appeared during the session and that the proxy did not record creating: its compose
+                # labels are its own claim, not evidence of scope. Judge it by its name (protected still wins by its
+                # labels) and treat it as outside the grant, so it pauses.
+                own = ctx.rid(f"container:{name}")
+                out.append(Change("containers", own or res, "container_added",
+                                  "protected" if ctx.cls(res) == "protected" else "out_of_scope",
+                                  f"{label}: not created through the proxy"))
+            else:
+                out.append(Change("containers", res, "container_added" if b is None else "container_removed",
+                                  ctx.verdict(res), label))
             if b is None:
                 b = {"image": c["image"], "mounts": [], "networks": [], "labels_hash": "", "routes": []}
             else:

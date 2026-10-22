@@ -233,7 +233,7 @@ class TripwireMonitor:
                 out[mission.id] = "monitor_error"
         return out
 
-    def _ctx(self, grant: Grant) -> DiffContext:
+    def _ctx(self, grant: Grant, mission_id: str | None = None) -> DiffContext:
         scope = tuple(canon(r) for r in grant_resources(grant))
         protected = []
         for resource in grant.protected.resources:
@@ -242,7 +242,8 @@ class TripwireMonitor:
             except BadResource:
                 raise ValueError("grant.protected holds a malformed resource") from None
         protected.extend(grant.enforced_exclusions())          # an excluded resource is protected-like
-        return DiffContext(scope=scope, protected=tuple(protected), stacks_root=self.stacks_root)
+        created = self.ms.proxy_created_containers(mission_id) if mission_id else frozenset()
+        return DiffContext(scope=scope, protected=tuple(protected), stacks_root=self.stacks_root, created=created)
 
     def _judge(self, mission: Mission, result: ScanResult) -> str:
         if not result.ok:
@@ -257,7 +258,7 @@ class TripwireMonitor:
         if baseline["grant_hash"] != mission.grant_hash or mission.grant().hash() != mission.grant_hash:
             return self._pause(mission, "grant_changed", [], {}, result)
         grant = mission.grant()
-        changes = diff_snapshots(baseline["snapshot"], result.snapshot, self._ctx(grant))
+        changes = diff_snapshots(baseline["snapshot"], result.snapshot, self._ctx(grant, mission.id))
         immediate = [c for c in changes if c.verdict in ("protected", "out_of_scope")]
         counted = self._count(mission, grant, changes)
         if immediate:
