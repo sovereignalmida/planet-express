@@ -72,6 +72,15 @@ def test_a_failed_cancel_is_recorded_not_raised(mod):
     assert not ok and "kill failed" in rec.steps[-1]["detail"]
 
 
+def test_an_unreadable_status_is_a_failed_release_not_a_crash(mod):
+    def unreadable(mid):
+        raise OSError("db gone")
+    rec = mod.Recorder()
+    ok = mod.release_missions(rec, "canary", ["m1"], status_of=unreadable, cancel=lambda m, b: None,
+                              tick=lambda: None, sleep=lambda s: None, timeout_s=0.05)
+    assert not ok and rec.steps[-1]["step"] == "canary:released" and "unreadable" in rec.steps[-1]["detail"]
+
+
 def test_no_missions_is_a_clean_release(mod):
     ok, rec = release(mod, FakeMissions({}), [])
     assert ok and rec.steps[-1]["ok"]

@@ -408,7 +408,9 @@ def rehearse_real(args: argparse.Namespace, rec: Recorder) -> None:
             except Exception as exc:                                # noqa: BLE001 - still release below, then the record says so
                 rec.step(f"{name}:crashed", False, f"{type(exc).__name__}: {str(exc)[:200]}")
             finally:
-                rig.release(rec, name)                              # BEFORE the next scenario's prepare
+                released = rig.release(rec, name)                   # BEFORE the next scenario's prepare
+            if not released:
+                break                                               # never run the next scenario on top of a held mission
     finally:
         if rig is not None:
             rig.close()
@@ -444,6 +446,13 @@ def release_missions(rec: Recorder, label: str, mids: Sequence[str], *, status_o
     (session killed, leases and proxy socket released, tripwire stopped). Recorded as `<label>:released` with every final
     status. Never raises: a mission that cannot be ended is a failed step, and the next scenario must not start on top of it."""
     errors: list[str] = []
+    raw_status = status_of
+
+    def status_of(mid: str) -> str:                                 # noqa: F811 - an unreadable status is never "terminal"
+        try:
+            return raw_status(mid)
+        except Exception as exc:                                    # noqa: BLE001
+            return f"unreadable ({type(exc).__name__})"
     for mid in mids:
         try:
             if status_of(mid) not in terminal:
