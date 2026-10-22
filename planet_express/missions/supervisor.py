@@ -1487,6 +1487,7 @@ class Supervisor:
             if mission.id in self._runs or mission.status in TERMINAL or mission.status in ("draft", "queued"):
                 continue
             if mission.tier == "repair":
+                self._release_prestart_leases(mission)
                 self._recover_repair(mission)
                 continue
             if mission.tier not in ("observe", "propose"):
@@ -1504,6 +1505,18 @@ class Supervisor:
         with contextlib.suppress(Exception):
             self.sweep_uids()                 # a crash between launch and release leaves held uids behind
         return acted
+
+    def _release_prestart_leases(self, mission: Mission) -> None:
+        """A start takes the grant's leases before its checkpoint (`_acquire_early`). If Core died in that window the mission
+        still waits for its start and holds leases that no session will ever heartbeat. With no session ever issued for it,
+        nothing could be running under them, so they are released (recorded as proven dead for that reason)."""
+        if mission.status not in ("awaiting_decision", "blocked") or mission.id in self._runs:
+            return
+        try:
+            if self._attempts(mission.id) == 0:
+                leases.release_after_proven_dead(self.store, mission.id, "no session was ever issued: the leases were a pre-start reservation")
+        except Exception:                                  # noqa: BLE001 - recovery of one mission never blocks the others
+            log.exception("could not release the pre-start leases of %s", mission.id)
 
     def _recover_repair(self, mission: Mission) -> None:
         """A Repair mission found in flight at startup. Nothing is replayed and nothing restarts by itself:

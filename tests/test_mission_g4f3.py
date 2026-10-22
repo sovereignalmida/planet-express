@@ -212,3 +212,17 @@ def test_every_repair_start_re_proves_the_launcher(stack):
     st.sup.tick()
     assert st.status(mid) == "awaiting_decision" and st.runtimes == []
     assert not [b for b in notes(st, mid) if "start_failed" in b]
+
+
+# ── Codex: a crash between the early lease and the session leaves no orphaned lease ──────────────────
+
+def test_a_pre_start_lease_left_by_a_crash_is_released_at_recovery(stack):
+    st = stack()
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup._acquire_early(st.ms.get_mission(mid))               # Core dies right here: no session row exists
+    assert lease_count(st) > 0
+    st.sup.recover()
+    assert lease_count(st) == 0
+    st.rig.monitor.start()
+    assert st.drive(mid) == "completed"                          # and the mission can start normally afterwards
