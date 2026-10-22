@@ -492,6 +492,26 @@ def test_another_grants_excluded_path_does_not_pause_this_mission(tmp_path):
     assert diff_snapshots(base, cur, ctx) == []
 
 
+def test_a_same_name_replacement_container_needs_a_proxy_record(tmp_path):
+    from tripwire_fakes import go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    rig.host.containers["media-qbit-1"]["Id"] = "e" * 64                # deleted and recreated outside the proxy, same labels
+    rig.monitor.scan_once()
+    assert status(rig) == "paused_tripwire"
+
+
+def test_changes_to_an_established_excluded_container_are_protected_whatever_its_labels_say(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, paused_event
+    rig = make_rig(tmp_path, grant_over={"exclusions": ["container:media-vault-1"]})
+    rig.host.containers["media-vault-1"] = doc("media-vault-1", project="media", service="innocent")
+    go_executing(rig)
+    rig.host.containers["media-vault-1"]["Image"] = "sha256:changed"
+    rig.monitor.scan_once()
+    ev = paused_event(rig)
+    assert ev["cause"] == "protected" and any(c["kind"] == "image_changed" and c["verdict"] == "protected" for c in ev["changes"])
+
+
 def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
     from test_mission_tools import setup
 

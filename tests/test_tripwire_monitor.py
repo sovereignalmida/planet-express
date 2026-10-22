@@ -326,7 +326,8 @@ def test_the_baseline_survives_a_restart_and_is_not_whatever_was_seen_last(tmp_p
 
 def test_in_scope_changes_do_not_pause(tmp_path):
     rig = run(tmp_path)
-    rig.host.containers["media-qbit-1"]["Id"] = "f" * 64              # recreated: new id, same config
+    rig.host.containers["media-qbit-1"]["Id"] = "f" * 64              # recreated THROUGH THE PROXY: new id, same config
+    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy", {"event": "docker.created", "created_id": "f" * 64})
     rig.host.containers["media-qbit-1"]["Image"] = "sha256:newer"     # a repair may change the image
     rig.host.containers["media-qbit-1"]["Config"]["Labels"]["note"] = "x"
     assert scan(rig)[rig.mission.id] == "ok"
