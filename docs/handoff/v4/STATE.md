@@ -21,7 +21,8 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 
 ## Next action
 (2026-10-22: continued on a second Claude account after account A hit its usage limit.)
-1. **G4 release review** (`v4-orchestration.md` row G4): `codex review --base v3-next` (started 2026-10-22; triage below), `/code-review high`, `/cso` on the v4 security surface. Record goes in `docs/handoff/v4/G4-review.md`. One G4 Codex fix already landed (78eed63, cancel vs revoked-but-unreaped session).
+1. **G4 release review**: record in `G4-review.md`. Codex C1 FIXED (discovery, merged 71cde47). code-review rows 1-8 = batch F2 (brief `G4-brief-F2.md`, worker running, plus 5b: side-door gate refuses symlinked docker.socket on stock systemd hosts, found by the real rehearsal); rows 11-21 = batch F3 (to launch after F2 merges: same files). Row 9 -> S10. Row 10 documented. /cso clean. Also fixed by orchestrator: default grant Budgets exceeded default site maxima (bare propose always refused).
+1b. S9 MERGED. Real-VM results 2026-10-22 on PE_UBUNTU_TEST (docker-compose-v2 installed there; launcher repair+probe done with core user `planetexpress`, workspace /srv/pe-workspaces): privileged suite 258 passed / 6 skipped. Repair rehearsal (item 7) NOT yet passing: harness works against real Docker, blocked by 5b above; rerun after F2 merges (`PE_PYTHON=/opt/pe-venv/bin/python scripts/run_rehearsal.sh --vm 192.168.122.142 -- --core-user planetexpress`). Never set PE_REHEARSAL_SKIP_GATE (the permission classifier blocks it, rightly).
 2. Open S7b items: token shim not started by the runtime (decision: relax proxy socket auth to SO_PEERCRED uid+cgroup binding, token as defence in depth, set DOCKER_HOST); read the S7b /code-review result.
 3. Confirm/execute S9, then S10 (see `S10-notes.md`).
 4. Operator-owned: live deploy of v3-production (PRs #14/#15 merged at 79648e6); push v4-next (3 commits ahead of origin on 2026-10-22).
