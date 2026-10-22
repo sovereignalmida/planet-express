@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import missions_helpers  # noqa: F401  (sets CASA_CONFIG for the config import)
 from dockerproxy_fakes import (
     ID_A,
+    HOST,
     ID_B,
     FakeInspector,
     create_body,
@@ -107,10 +108,125 @@ def test_every_host_namespace_mode_is_refused(policy, field):
         create(policy, host(**{field: "host"}))
 
 
-@pytest.mark.parametrize("mode", ["container:qbittorrent", "container:plex", "host", "other_default", "nonesuch"])
+@pytest.mark.parametrize("mode", ["host", "other_default", "nonesuch"])
 def test_network_modes_other_than_builtin_or_scoped_are_refused(policy, mode):
     with pytest.raises(Refusal):
         create(policy, host(NetworkMode=mode))
+
+
+# ── NetworkMode container:<ref> (G4-F4): served only for a target the daemon says is in scope ─────────────────
+def _with_extra_containers(extra):
+    from planet_express.missions.dockerproxy.policy import ContainerInfo
+
+    class Inspector(FakeInspector):
+        def container(self, ref):
+            for name, (cid, lab) in extra.items():
+                if ref in (name, cid, cid[:12]):
+                    return ContainerInfo(cid, name, lab)
+            return super().container(ref)
+    return Inspector()
+
+
+@pytest.mark.parametrize("ref", ["qbittorrent", ID_A, ID_A[:12]])
+def test_container_network_mode_of_an_in_scope_target_is_served_and_passed_through(policy, ref):
+    plan = create(policy, host(NetworkMode=f"container:{ref}"))
+    assert json.loads(plan.body)["HostConfig"]["NetworkMode"] == f"container:{ref}"
+
+
+@pytest.mark.parametrize("ref, why", [
+    ("traefik", "outside this mission's scope"),          # exists, other stack
+    ("stray", "outside this mission's scope"),            # no compose labels at all
+    ("vault", "protected"),                               # protected wins over in-scope stack
+    ("nonesuch", "does not exist"),
+    ("bad ref", "not a valid"),
+    ("../x", "not a valid"),
+    ("", "not a valid"),
+])
+def test_container_network_mode_of_anything_else_is_refused_with_a_specific_reason(policy, ref, why):
+    with pytest.raises(Refusal, match=why):
+        create(policy, host(NetworkMode=f"container:{ref}"))
+
+
+def test_host_network_mode_stays_refused_and_so_does_container_in_an_endpoint_config(policy):
+    refused(policy, host(NetworkMode="host"), "host network mode")
+    body = host(NetworkMode="container:qbittorrent")
+    body["NetworkingConfig"] = {"EndpointsConfig": {"container:qbittorrent": {}}}
+    refused(policy, body, "not served")
+
+
+def test_an_excluded_container_is_not_a_network_target(root):
+    p = Policy(make_scope(str(root), excluded=(f"{HOST}/service:media/plex",)), FakeInspector())
+    with pytest.raises(Refusal, match="outside this mission's scope|protected"):
+        create(p, host(NetworkMode="container:plex"))
+    assert create(p, host(NetworkMode="container:qbittorrent"))
+
+
+def test_a_container_of_another_mission_or_stack_is_not_a_network_target(root):
+    inspector = _with_extra_containers({"othermission": ("f" * 64, labels("other", "gluetun"))})
+    p = Policy(make_scope(str(root)), inspector)
+    for ref in ("othermission", "f" * 64, "f" * 12):
+        with pytest.raises(Refusal, match="outside this mission's scope"):
+            create(p, host(NetworkMode=f"container:{ref}"))
+
+
+def test_labels_in_the_body_cannot_put_the_target_in_scope_only_the_daemon_can(policy):
+    body = host(NetworkMode="container:traefik")
+    body["Labels"] = {**labels("media", "traefik")}           # the body claims; the daemon says traefik is stack ingress
+    with pytest.raises(Refusal, match="outside this mission's scope"):
+        create(policy, body)
+
+
+def test_an_ambiguous_reference_is_refused(root):
+    from planet_express.missions.dockerproxy.policy import ContainerInfo
+
+    class Ambiguous(FakeInspector):
+        def container(self, ref):
+            if ref == "aaa":                                  # a daemon that answered with some container the ref does not name
+                return ContainerInfo(ID_B, "plex", labels("media", "plex"))
+            return super().container(ref)
+    with pytest.raises(Refusal, match="ambiguous"):
+        create(Policy(make_scope(str(root)), Ambiguous()), host(NetworkMode="container:aaa"))
+
+
+def test_a_read_only_mission_still_cannot_create_at_all(root):
+    p = Policy(None, FakeInspector(), read_only=True)
+    with pytest.raises(Refusal, match="read-only"):
+        p.match(head("POST", "/v1.43/containers/create"))
+
+
+def _started(root, mode, target_labels=None):
+    """A container the proxy created (CREATED_LABEL) whose HostConfig.NetworkMode is `mode`, started later."""
+    from planet_express.missions.dockerproxy.policy import CREATED_LABEL, ContainerInfo
+
+    class Inspector(FakeInspector):
+        def container(self, ref):
+            if ref == "fresh":
+                return ContainerInfo("f" * 64, "fresh", {**labels("media", "dependent"), CREATED_LABEL: "1"},
+                                     {"NetworkMode": mode}, ())
+            if ref == "swapped" and target_labels is not None:
+                return ContainerInfo("9" * 64, "swapped", target_labels)
+            return super().container(ref)
+    return Policy(make_scope(str(root)), Inspector())
+
+
+def test_start_re_checks_the_container_network_target(root):
+    assert plan_for(_started(root, "container:qbittorrent"), "container.start", "fresh")
+    assert plan_for(_started(root, "bridge"), "container.start", "fresh")
+    for mode, why in (("container:traefik", "outside this mission's scope"), ("container:vault", "protected"),
+                      ("container:gone", "does not exist"), ("host", "host network mode")):
+        with pytest.raises(Refusal, match=why):
+            plan_for(_started(root, mode), "container.start", "fresh")
+    with pytest.raises(Refusal, match="outside this mission's scope"):      # the target was swapped for a different stack's
+        plan_for(_started(root, "container:swapped", labels("other", "gluetun")), "container.start", "fresh")
+    with pytest.raises(Refusal, match="cannot be checked"):
+        plan_for(_started(root, ["container:qbittorrent"]), "container.start", "fresh")
+
+
+def test_no_other_endpoint_accepts_a_network_mode(policy):
+    with pytest.raises(Refusal):                                 # container.update takes limits and restart policy only
+        plan_for(policy, "container.update", "qbittorrent", body={"NetworkMode": "container:qbittorrent"})
+    with pytest.raises(Refusal):                                 # network connect names a network, never a mode
+        plan_for(policy, "network.connect", "container:qbittorrent", body={"Container": "plex"})
 
 
 @pytest.mark.parametrize("key, value", [("Devices", [{"PathOnHost": "/dev/sda"}]), ("Sysctls", {"net.ipv4.ip_forward": "1"}),
@@ -250,7 +366,7 @@ def test_mount_option_blocks_are_refused(policy, root):
 @pytest.mark.parametrize("method, target", [
     ("POST", "/v1.43/build"), ("POST", "/v1.43/images/load"), ("POST", "/v1.43/images/create"), ("POST", "/v1.43/images/prune"),
     ("POST", "/v1.43/containers/prune"), ("POST", "/v1.43/networks/prune"), ("POST", "/v1.43/volumes/prune"),
-    ("POST", "/v1.43/system/prune"), ("GET", "/v1.43/info"), ("GET", "/v1.43/version"), ("GET", "/v1.43/swarm"),
+    ("POST", "/v1.43/system/prune"), ("GET", "/v1.43/info"), ("GET", "/v1.43/swarm"),
     ("GET", "/v1.43/secrets"), ("GET", "/v1.43/configs"), ("GET", "/v1.43/plugins"), ("POST", "/v1.43/plugins/pull"),
     ("POST", "/v1.43/swarm/init"), ("POST", "/v1.43/session"), ("POST", "/v1.43/auth"), ("GET", "/v1.43/system/df"),
     ("DELETE", "/v1.43/images/alpine:3"), ("POST", "/v1.43/images/alpine/tag"), ("POST", "/v1.43/images/alpine/push"),
@@ -271,6 +387,24 @@ def test_an_unknown_api_version_is_refused_and_so_is_an_unversioned_endpoint_oth
             policy.match(head("GET", target))
     policy.match(head("GET", "/v1.43/containers/json"))
     policy.match(head("GET", "/_ping"))
+    policy.match(head("GET", "/version"))                     # compose and the docker CLI negotiate with it
+
+
+def test_version_is_a_read_served_to_every_tier_in_both_forms_and_nothing_else(root):
+    for p in (Policy(make_scope(str(root)), FakeInspector()), Policy(None, FakeInspector(), read_only=True)):
+        for target in ("/version", "/v1.43/version", "/_ping", "/v1.43/_ping"):
+            r, _ = p.match(head("GET", target))
+            assert not r.write
+        assert p.match(head("HEAD", "/_ping"))[0].name == "ping"
+        for method in ("POST", "PUT", "DELETE", "HEAD"):
+            with pytest.raises(Refusal):
+                p.match(head(method, "/v1.43/version"))
+        r = p.match(head("GET", "/v1.43/version"))[0]
+        assert p.plan(r, "GET", {}, {}, None).upstream_path == "/version"
+        with pytest.raises(Refusal):
+            p.clean_query(r, {"remote": "x"})                  # no query parameter is accepted
+        with pytest.raises(Refusal):
+            p.match(head("GET", "/v1.99/version"))
 
 
 @pytest.mark.parametrize("query", [{"remote": "http://evil/x"}, {"fromSrc": "http://evil/x"}, {"fromImage": "alpine"}, {"link": "1"},

@@ -313,6 +313,8 @@ class ProxyServer:
                 self._record_created(session, data, nonce)    # BEFORE the answer: a scan racing the create must find it
             else:
                 self._create_end(session, nonce)
+        if route.name == "container.create" and status == 201 and self.gate is not None:
+            self._record_created(session, data)           # BEFORE the answer: a scan racing the create must find it recorded
         if status in (200, 201) and route.json_response:
             data = self._postprocess(plan, data, session)
         if plan.method == "HEAD":
@@ -365,6 +367,16 @@ class ProxyServer:
             self._create_end(session, nonce)
             raise Refusal("the created container could not be recorded; it was removed", 500) from None
 
+    def _record_created(self, session, data: bytes) -> None:
+        """Remember the id of a container THIS session created, so the tripwire can tell it from one that merely carries an
+        in-scope compose label (a label is the container's own claim, not evidence)."""
+        try:
+            ident = json.loads(data.decode("utf-8")).get("Id", "")
+            if isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{64}", ident):
+                self.gate.record(session, {"event": "docker.created", "created_id": ident})
+        except Exception:                                    # noqa: BLE001 - unrecorded means the tripwire pauses: fails safe
+            log.warning("docker proxy: created container not recorded")
+
     def _clamped_api(self, daemon_says: str | None) -> str:
         """Clients negotiate down to what /_ping says: never advertise a version newer than the proxy serves."""
         top = self.policy.max_minor
@@ -402,6 +414,14 @@ class ProxyServer:
             return data
         if route.name in ("container.create", "container.update"):
             return data
+        if route.name == "version":
+            # Versions, OS, kernel, arch, git commit, build time: nothing a worker cannot learn elsewhere. The one change: the
+            # advertised ApiVersion is clamped like /_ping's, so a client negotiating from it never picks an unserved version.
+            if isinstance(doc, dict):
+                if isinstance(doc.get("ApiVersion"), str):
+                    doc["ApiVersion"] = self._clamped_api(doc["ApiVersion"])
+                return json.dumps(doc, separators=(",", ":")).encode()
+            raise Refusal("the daemon's answer could not be read", 502)
         if route.name in ("volumes.list", "networks.list"):
             return json.dumps(redact_inspect(self.policy.filter_list(route.name, doc)), separators=(",", ":")).encode()
         if route.name == "containers.list" and isinstance(doc, list):
