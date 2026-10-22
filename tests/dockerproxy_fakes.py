@@ -212,6 +212,10 @@ class FakeDaemon:
         tail = "/".join(parts[1:])
         if tail == "_ping":
             return self._send(conn, 200, raw=b"OK", ctype="text/plain")
+        if tail == "version":
+            return self._send(conn, 200, {"Platform": {"Name": "Docker Engine"}, "Version": "27.0.1", "ApiVersion": self.api_version,
+                                          "MinAPIVersion": "1.24", "GitCommit": "abc", "Os": "linux", "Arch": "amd64",
+                                          "KernelVersion": "6.8.0", "BuildTime": "2024-01-01T00:00:00Z"})
         if tail == "containers/json":
             return self._send(conn, 200, [
                 {"Id": c["id"], "Names": ["/" + n], "Labels": c["labels"], "Image": "x"} for n, c in CONTAINERS.items()])

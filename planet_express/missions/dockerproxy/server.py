@@ -402,6 +402,14 @@ class ProxyServer:
             return data
         if route.name in ("container.create", "container.update"):
             return data
+        if route.name == "version":
+            # Versions, OS, kernel, arch, git commit, build time: nothing a worker cannot learn elsewhere. The one change: the
+            # advertised ApiVersion is clamped like /_ping's, so a client negotiating from it never picks an unserved version.
+            if isinstance(doc, dict):
+                if isinstance(doc.get("ApiVersion"), str):
+                    doc["ApiVersion"] = self._clamped_api(doc["ApiVersion"])
+                return json.dumps(doc, separators=(",", ":")).encode()
+            raise Refusal("the daemon's answer could not be read", 502)
         if route.name in ("volumes.list", "networks.list"):
             return json.dumps(redact_inspect(self.policy.filter_list(route.name, doc)), separators=(",", ":")).encode()
         if route.name == "containers.list" and isinstance(doc, list):

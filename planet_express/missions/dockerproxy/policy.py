@@ -231,6 +231,7 @@ def _q(*keys: str) -> dict[str, Callable[[str], str]]:
 
 ROUTES: tuple[Route, ...] = (
     Route("ping", ("GET", "HEAD"), _r("/_ping"), readonly_ok=True),
+    Route("version", ("GET",), _r("/version"), json_response=True, readonly_ok=True),
     Route("containers.list", ("GET",), _r("/containers/json"), query=_q("all", "limit", "size", "filters"),
           json_response=True, readonly_ok=True),
     Route("container.inspect", ("GET",), _r("/containers/{id}/json"), query=_q("size"), target="container", need="visible",
@@ -359,7 +360,7 @@ class Policy:
                 continue
             if self.read_only and not route.readonly_ok:
                 raise Refusal("this proxy is read-only: endpoint not served")
-            if head.version is None and route.name != "ping":
+            if head.version is None and route.name not in ("ping", "version"):
                 raise Refusal("an API version is required")
             return route, found.groupdict()
         raise Refusal("method not allowed on this endpoint" if wrong_method else "endpoint not served")
@@ -455,7 +456,7 @@ class Policy:
     def _fixed_path(route: Route) -> str:
         return {"ping": "/_ping", "containers.list": "/containers/json", "images.list": "/images/json",
                 "networks.list": "/networks", "volumes.list": "/volumes", "events": "/events",
-                "container.create": "/containers/create"}[route.name]
+                "container.create": "/containers/create", "version": "/version"}[route.name]
 
     @staticmethod
     def _with_suffix(route: Route, cid: str) -> str:
@@ -528,6 +529,40 @@ class Policy:
         if name == "host" or name.startswith("container:"):
             raise Refusal("host and container network modes are not served")
         self._network(name, "scope")
+
+    def _scoped_network_mode(self, mode: str, _depth: int = 0) -> None:
+        """HostConfig.NetworkMode: everything `_scoped_network_name` serves, plus `container:<ref>` where <ref> resolves (by the
+        daemon, not by anything the body says) to exactly one container that is in this mission's scope and not protected.
+        `host` is never served."""
+        if mode == "host":
+            raise Refusal("host network mode is not served")
+        if not mode.startswith("container:"):
+            return self._scoped_network_name(mode)
+        ref = mode[len("container:"):]
+        if not _NAME.match(ref):
+            raise Refusal("the container network target is not a valid container reference")
+        info = self.inspector.container(ref)
+        if info is None:
+            raise Refusal("the container network target does not exist", 404)
+        if not (info.id == ref or info.id.startswith(ref) or info.name.lstrip("/") == ref):
+            raise Refusal("the container network target is ambiguous")      # the daemon answered with something else
+        verdict = self.container_verdict(info)
+        if verdict == "protected":
+            raise Refusal("the container network target is a protected resource")
+        if verdict != "in_scope":
+            raise Refusal("the container network target is outside this mission's scope")
+        # Joining the target joins whatever namespace IT is in: a target on the host network (or in a chain that reaches one,
+        # or one too deep or unreadable to follow) would hand the new container the host's network.
+        target = info.host_config if isinstance(info.host_config, Mapping) else {}
+        inner = target.get("NetworkMode")
+        if inner is not None and not isinstance(inner, str):
+            raise Refusal("the container network target's network mode cannot be checked")
+        if inner == "host":
+            raise Refusal("the container network target is on the host network")
+        if isinstance(inner, str) and inner.startswith("container:"):
+            if _depth >= 2:
+                raise Refusal("the container network target is nested too deeply")
+            self._scoped_network_mode(inner, _depth + 1)
 
     def filter_list(self, route_name: str, doc: Any) -> Any:
         """The volumes/networks list as the worker may see it: protected entries dropped; volumes also dropped unless in scope;
@@ -697,6 +732,12 @@ class Policy:
         narrows the window from "whenever the worker likes" to the instant between this check and the daemon's mount; a
         no-follow bind in the daemon is what would close it, and the proxy cannot add that (accepted residual, reported)."""
         host = info.host_config if isinstance(info.host_config, Mapping) else {}
+        mode = host.get("NetworkMode")
+        if isinstance(mode, str):
+            if mode == "host" or mode.startswith("container:"):
+                self._scoped_network_mode(mode)         # the joined namespace's owner is checked again at start
+        elif mode is not None:
+            raise Refusal("the container's network mode cannot be checked")
         for entry in host.get("Binds") or []:
             if not isinstance(entry, str):
                 raise Refusal("the container's mounts cannot be checked")
@@ -889,7 +930,7 @@ class Policy:
             out["VolumesFrom"] = entries
         network = host.get("NetworkMode")
         if network is not None:
-            self._scoped_network_name(_str(network, 128))
+            self._scoped_network_mode(_str(network, 128))
             out["NetworkMode"] = network
         summary: list[dict] = []
         binds = _strlist(host.get("Binds"), 64, 8192)

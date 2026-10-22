@@ -351,6 +351,22 @@ def test_inspect_output_is_redacted_on_the_wire(proxy):
     assert proxy.req("GET", "/containers/vault/json")[0] == 403                 # protected: not even inspect
 
 
+def test_version_is_served_with_the_api_version_clamped_to_what_the_proxy_serves(env):
+    env.daemon.api_version = "1.52"
+    path = os.path.join(env.dir, "ro2.sock")
+    ro = build_read_only(path, upstream=env.upstream)
+    ro.start()
+    try:
+        for target in ("/version", "/v1.43/version"):
+            status, _, body = request(path, "GET", target, token=None, version=None, raw_target=True)
+            doc = json.loads(body)
+            assert status == 200 and doc["ApiVersion"] == "1.48" and doc["Os"] == "linux" and doc["KernelVersion"]
+        assert request(path, "POST", "/v1.43/version", token=None, version=None, raw_target=True)[0] in (403, 405)
+        assert request(path, "GET", "/v1.43/version?x=1", token=None, version=None, raw_target=True)[0] == 403
+    finally:
+        ro.stop()
+
+
 def test_a_read_of_a_missing_object_is_404_and_ping_works(proxy):
     assert proxy.req("GET", "/containers/nonesuch/json")[0] == 404
     status, _, body = proxy.req("GET", "/_ping", version=None)
