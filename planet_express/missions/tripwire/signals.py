@@ -196,24 +196,50 @@ def _container_resource(name: str, labels: dict[str, str]) -> str:
     return canon(f"container:c{sha(name.encode())[:12]}")
 
 
-def collect_containers(env: ScanEnv) -> dict[str, Any]:
+_NO_SUCH = re.compile(r"no such (object|container)", re.IGNORECASE)
+
+
+def _only_vanished(stderr: str) -> bool:
+    """True when everything `docker inspect` complained about is a container that no longer exists (it was removed between
+    the list and the inspect, which is a change to be seen on the next read, not a failure of this one)."""
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    return bool(lines) and all(_NO_SUCH.search(line) for line in lines)
+
+
+def _read_containers(env: ScanEnv) -> list[Any] | None:
+    """One list-then-inspect. None when a container vanished between the two in a way that left nothing readable."""
     rc, out, _err = env.runner(["docker", "ps", "-aq", "--no-trunc"], DOCKER_TIMEOUT_S)
     if rc != 0:
         raise SignalError("docker ps failed")
     ids = sorted({line.strip() for line in out.splitlines() if re.fullmatch(r"[0-9a-f]{12,64}", line.strip())})
     if not ids:
-        return {}
+        return []
     if len(ids) > MAX_CONTAINERS:
         raise SignalError(f"{len(ids)} containers: more than the {MAX_CONTAINERS} the tripwire reads")
-    rc, out, _err, truncated = env.bounded(["docker", "inspect", *ids], DOCKER_TIMEOUT_S, MAX_INSPECT_BYTES)
-    if rc != 0 or truncated:
+    rc, out, err, truncated = env.bounded(["docker", "inspect", *ids], DOCKER_TIMEOUT_S, MAX_INSPECT_BYTES)
+    if truncated:
+        raise SignalError("docker inspect failed or was too large")
+    if rc != 0 and not _only_vanished(err):
         raise SignalError("docker inspect failed or was too large")
     try:
         docs = json.loads(out)
     except ValueError:
+        if rc != 0:
+            return None                      # a vanished container and nothing readable: look again
         raise SignalError("docker inspect returned something unreadable") from None
     if not isinstance(docs, list):
         raise SignalError("docker inspect returned something unreadable")
+    return docs
+
+
+def collect_containers(env: ScanEnv) -> dict[str, Any]:
+    docs = _read_containers(env)
+    if docs is None:
+        docs = _read_containers(env)         # once more: the list is taken afresh, so the vanished one is not in it
+        if docs is None:
+            raise SignalError("docker inspect failed or was too large")
+    if not docs:
+        return {}
     result: dict[str, Any] = {}
     for doc in docs:
         try:
@@ -505,9 +531,12 @@ class ScanResult:
 
 
 class Scanner:
-    """Runs every collector on its own daemon thread with a per-signal timeout and a scan deadline. A collector that
-    does not answer in time is abandoned (its thread cannot be killed, but it is a daemon and its late answer is
-    ignored) and the scan reports the signal as failed."""
+    """Runs every collector on its own daemon thread. Two bounds apply and both are honoured: a signal gets
+    `signal_timeout_s` from the moment its own thread starts, and the whole scan gets `deadline_s`; a signal that raises,
+    times out or has not answered by whichever comes first makes the scan FAIL. A collector that does not answer in time is
+    abandoned (its thread cannot be killed, but it is a daemon and its late answer is ignored). While an abandoned collector
+    is still running, the next scan does NOT start another for that signal (threads would pile up behind a stuck `docker`
+    or a hung mount): that signal simply fails again as `timeout`, until the old read ends and a fresh one can start."""
 
     def __init__(self, env: ScanEnv, signals: dict[str, Callable[[ScanEnv], Any]] | None = None, *,
                  signal_timeout_s: float = SIGNAL_TIMEOUT_S, deadline_s: float = SCAN_DEADLINE_S,
@@ -517,6 +546,8 @@ class Scanner:
         self.signal_timeout_s = signal_timeout_s
         self.deadline_s = deadline_s
         self.clock = clock or env.clock
+        self._running: dict[str, dict[str, Any]] = {}       # signal name -> the slot of its still-running abandoned read
+        self._running_guard = threading.Lock()
 
     def scan(self, extra_files: Sequence[tuple[str, str]] = ()) -> ScanResult:
         """One read of the host. `extra_files` are (resource id, path) pairs to hash on top of the protected set: the paths
@@ -524,30 +555,39 @@ class Scanner:
         env = ScanEnv(**{**self.env.__dict__, "extra_files": tuple(extra_files), "_files": None})
         started = self.clock()
         wall_start = time.monotonic()
-        deadline = min(self.signal_timeout_s, self.deadline_s)
+        scan_end = wall_start + self.deadline_s
         env.watched_files()               # computed once, before the collectors share the environment
         slots: dict[str, dict[str, Any]] = {}
-        threads: dict[str, threading.Thread] = {}
+        errors: dict[str, str] = {}
         for name, fn in self.signals.items():
-            slot: dict[str, Any] = {"done": threading.Event()}
+            with self._running_guard:
+                busy = self._running.get(name)
+                if busy is not None and busy["done"].is_set():
+                    busy = self._running.pop(name)
+                    busy = None
+                if busy is not None:
+                    errors[name] = "timeout"         # the earlier read of this signal has not ended: no second one is started
+                    continue
+                slot: dict[str, Any] = {"done": threading.Event(), "begun": time.monotonic()}
+                self._running[name] = slot
             slots[name] = slot
 
-            def run(fn=fn, slot=slot) -> None:
+            def run(fn=fn, slot=slot, name=name) -> None:
                 try:
-                    slot["value"] = fn(self._env_with_deadline(env))
+                    slot["value"] = fn(self._env_with_deadline(env, started))
                 except BaseException as exc:      # noqa: BLE001 - any failure is a failed signal, never a crash
                     slot["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
                 finally:
                     slot["done"].set()
+                    with self._running_guard:
+                        if self._running.get(name) is slot:
+                            del self._running[name]
 
-            thread = threading.Thread(target=run, daemon=True, name=f"tripwire-{name}")
-            threads[name] = thread
-            thread.start()
+            threading.Thread(target=run, daemon=True, name=f"tripwire-{name}").start()
         snapshot: dict[str, Any] = {}
-        errors: dict[str, str] = {}
         for name, slot in slots.items():
-            remaining = deadline - (time.monotonic() - wall_start)
-            if not slot["done"].wait(max(0.0, remaining)):
+            limit = min(slot["begun"] + self.signal_timeout_s, scan_end)
+            if not slot["done"].wait(max(0.0, limit - time.monotonic())):
                 errors[name] = "timeout"
             elif "error" in slot:
                 errors[name] = slot["error"]
@@ -555,9 +595,9 @@ class Scanner:
                 snapshot[name] = slot["value"]
         return ScanResult(snapshot, errors, started, self.clock())
 
-    def _env_with_deadline(self, base: ScanEnv) -> ScanEnv:
+    def _env_with_deadline(self, base: ScanEnv, scan_started: float) -> ScanEnv:
         env = ScanEnv(**{**base.__dict__, "_files": base._files})
-        env.deadline = self.clock() + self.signal_timeout_s
+        env.deadline = min(self.clock() + self.signal_timeout_s, scan_started + self.deadline_s)
         return env
 
 

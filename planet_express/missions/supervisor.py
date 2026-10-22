@@ -39,6 +39,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
+from planet_express.core.redact import redact
 from planet_express.core.store import Store
 from planet_express.integrations.rpc import RpcError
 from planet_express.memory import store as memory_store
@@ -67,14 +68,18 @@ from .state import (
     transition,
     transition_in_txn,
 )
-from .store import MissionStore
+from .store import MissionStore, NoFreeUid, SessionConflict, grant_resources
 
 log = logging.getLogger(__name__)
 
 ACTOR = "supervisor"
+DECISION_ACTOR = "worker:decision"   # the actor of a card the worker raised (never `worker`, whose notes are free text)
 SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
 PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often (an operator may have repaired the host)
+PREFLIGHT_REPROVE_S = 600     # a passing preflight is proven again this often, and at the start of every Repair session
+START_DEFER_MAX_S = 1800      # a start waiting on a lease or a uid is handed to the operator after this long
+START_DEFER_RETRY_S = 10      # and is asked again no sooner than this
 VERIFY_WORKERS = 2            # verifications run on their own small pool, never on the poll thread
 VERIFY_SHUTDOWN_WAIT_S = 5.0  # shutdown waits at most this long for in-flight verifications
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
@@ -105,6 +110,11 @@ class RepairRefused(UnsupportedTier):
 class RepairNotReady(RepairRefused):
     """A Repair start that cannot happen yet for a reason that may clear by itself (no approval, the monitor is not running, the
     side doors are open): the mission waits and the poll loop asks again. Not counted as a failed start."""
+
+
+class StartDeferred(RepairNotReady):
+    """A start that must wait for a lease, a free uid or an earlier session to clear. Transient: never counted as a failed
+    start, noted once per reason, and handed to the operator only after START_DEFER_MAX_S."""
 
 
 class ResumeRefused(RuntimeError):
@@ -169,6 +179,33 @@ def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
             return list(retrieve(conn, tags, mission.goal).cards)
     except Exception:
         return []
+
+
+MAX_EVIDENCE_TEXT = 4000
+
+
+def default_incident_evidence(store: Store, mission: Mission) -> list[EvidenceItem]:
+    """The incident evidence `MissionService.investigate_incident` recorded for the mission, as brief evidence. Only an event
+    written by an operator actor counts (a session can append notes, and its words are never evidence about the incident). The
+    text is redacted and bounded again here; the brief quotes it as DATA and redacts the document once more."""
+    try:
+        with store._connect() as conn:
+            row = conn.execute("SELECT body_json FROM mission_events WHERE mission_id=? AND kind='note' "
+                               "AND actor LIKE 'operator:%' AND body_json LIKE '%\"incident_evidence\"%' "
+                               "ORDER BY seq LIMIT 1", (mission.id,)).fetchone()
+        body = json.loads(row[0]) if row else None
+    except Exception:                                   # noqa: BLE001 - evidence is an aid; a read failure is no evidence
+        return []
+    evidence = body.get("incident_evidence") if isinstance(body, dict) else None
+    if not isinstance(evidence, dict):
+        return []
+    facts = "\n".join(f"{k}: {evidence[k]}" for k in ("id", "kind", "resource", "severity", "status", "condition", "summary")
+                      if isinstance(evidence.get(k), (str, int, float)))
+    items = [EvidenceItem(f"incident:{mission.incident_id or 'unknown'}", redact(facts)[:MAX_EVIDENCE_TEXT])] if facts else []
+    events = evidence.get("events")
+    if isinstance(events, list) and events:
+        items.append(EvidenceItem("incident:events", redact("\n".join(str(e) for e in events[-10:]))[:MAX_EVIDENCE_TEXT]))
+    return items
 
 
 def _per_mission(fn):
@@ -256,10 +293,13 @@ class Supervisor:
         self._start_failures: dict[str, int] = {}
         self._cancel_held: set[str] = set()     # missions whose held cancel has been recorded
         self._waiting: dict[str, str] = {}               # mission id -> the last "cannot start yet" reason noted
+        self._deferred_since: dict[str, float] = {}      # mission id -> when its start first had to wait for a resource
+        self._deferred_retry: dict[str, float] = {}      # mission id -> do not ask again before this time
+        self.heartbeat_interval_s = max(1.0, lease_ttl_s / 3)    # live leases are refreshed this often during a slow start
         self.artifact_dir = Path(artifact_dir) if artifact_dir else store.path.parent / "mission-artifacts"
         self.workspace_dir = Path(workspace_dir) if workspace_dir else store.path.parent / "mission-workspaces"
         self.memory_provider = memory_provider or (lambda m: default_memory_cards(store, m))
-        self.evidence_provider = evidence_provider or (lambda m: [])
+        self.evidence_provider = evidence_provider or (lambda m: default_incident_evidence(store, m))
         self.worker_env = dict(worker_env or {})
         self.max_brief_bytes = max_brief_bytes
         self.lease_ttl_s = lease_ttl_s
@@ -286,14 +326,16 @@ class Supervisor:
         if not self.enabled:
             raise MissionsDisabled("missions are disabled (missions.enabled is false)")
 
-    def launcher_ready(self) -> bool:
+    def launcher_ready(self, *, reprove: bool = False) -> bool:
         """The launcher preflight gate (contract 22.4). True when no preflight is configured, or the last one passed.
-        While it fails the host is proposal-only: it is re-run at most every PREFLIGHT_RETRY_S."""
+        While it fails the host is proposal-only: it is re-run at most every PREFLIGHT_RETRY_S. A pass is not forever: it is
+        proven again every PREFLIGHT_REPROVE_S, and at once when `reprove` is set (every Repair start)."""
         if self.preflight_fn is None:
             return True
         now = float(self.clock())
         report = self.preflight_report
-        if report is None or (not report.ok and now - self._preflight_at >= PREFLIGHT_RETRY_S):
+        stale = report is not None and report.ok and (reprove or now - self._preflight_at >= PREFLIGHT_REPROVE_S)
+        if report is None or stale or (not report.ok and now - self._preflight_at >= PREFLIGHT_RETRY_S):
             try:
                 report = self.preflight_fn()
             except Exception as exc:       # a preflight that cannot run is a failed preflight
@@ -344,14 +386,40 @@ class Supervisor:
             self.require_repair_preconditions()
             if mission.tier != "repair" or not self.mutating_ready:
                 raise UnsupportedTier(f"{mission.tier} missions are not run by this supervisor")
-            return self._start_repair(mission)
+            if not self.launcher_ready(reprove=True):         # a mutating session re-proves the launcher every time
+                raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
+            with self._heartbeating(mission_id):
+                return self._start_repair(mission)
         if mission_id in self._runs:
             raise ValueError(f"{mission_id} already has a running session")
         if mission.status != "queued":
             raise IllegalTransition(f"{mission_id} is {mission.status}, not queued")
         if mission.cancel_requested_at is not None:
             raise IllegalTransition(f"{mission_id} has a cancel requested")
-        self._launch(mission)
+        with self._heartbeating(mission_id):
+            self._launch(mission)
+
+    @contextlib.contextmanager
+    def _heartbeating(self, mission_id: str):
+        """A start can spend a long time in the checkpoint, the baseline and the launch, all on the one poll thread. While it
+        does, a helper thread keeps refreshing the leases of every live session (and of the mission being started), so
+        a slow start cannot make another session lose its lease. It touches the store only, and takes no mission lock."""
+        stop = threading.Event()
+
+        def beat() -> None:
+            while not stop.wait(self.heartbeat_interval_s):
+                ids = {mid for mid, run in list(self._runs.items()) if run.phase == "running"} | {mission_id}
+                for mid in ids:
+                    with contextlib.suppress(Exception):          # a lost lease is the poll step's business
+                        leases.heartbeat(self.store, mid, self.lease_ttl_s)
+
+        thread = threading.Thread(target=beat, name="pe-start-heartbeat", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(5)
 
     @property
     def mutating_ready(self) -> bool:
@@ -374,22 +442,46 @@ class Supervisor:
             # A Repair session without a running monitor is a defect: nothing would pause it. The runner restarts the
             # monitor on its next loop; the start waits for that.
             raise RepairNotReady("the tripwire monitor is not running")
-        if mission.checkpoint_id is None:
-            from .checkpoint import CheckpointScope
-            grant = mission.grant()
-            scope = CheckpointScope.from_grant_scope(grant.scope, units=tuple(r.unit for r in grant.sudo.rules))
-            try:
-                created = self.checkpoint.create(mission.id, scope)
-            except Exception as exc:                  # noqa: BLE001 - no checkpoint, no mutation (S5: backup floor, baseline)
-                self._note(mission.id, {"checkpoint_refused": type(exc).__name__, "why": str(exc)[:200]})
-                raise RepairRefused(f"no checkpoint could be taken ({type(exc).__name__})") from None
-            self._note(mission.id, {"checkpoint_taken": str(created), "no_backup": bool(getattr(created, "no_backup", False))})
+        # The leases come FIRST: a mission that cannot have its resources waits cheaply, before a checkpoint is spent on it. The
+        # acquire is idempotent for the same mission, so `issue_session` takes the same leases (and fences) again.
+        held_early = self._acquire_early(mission)
         try:
-            self.tripwire.begin(mission.id)
-        except Exception as exc:                      # noqa: BLE001 - a baseline that cannot be captured means no session
-            self._note(mission.id, {"baseline_refused": type(exc).__name__, "why": str(exc)[:200]})
-            raise RepairRefused(f"the tripwire baseline could not be captured ({type(exc).__name__})") from None
-        self._launch(self.ms.get_mission(mission.id))
+            if mission.checkpoint_id is None:
+                from .checkpoint import CheckpointScope
+                grant = mission.grant()
+                scope = CheckpointScope.from_grant_scope(grant.scope, units=tuple(r.unit for r in grant.sudo.rules))
+                try:
+                    created = self.checkpoint.create(mission.id, scope)
+                except Exception as exc:              # noqa: BLE001 - no checkpoint, no mutation (S5: backup floor, baseline)
+                    self._note(mission.id, {"checkpoint_refused": type(exc).__name__, "why": str(exc)[:200]})
+                    raise RepairRefused(f"no checkpoint could be taken ({type(exc).__name__})") from None
+                self._note(mission.id, {"checkpoint_taken": str(created), "no_backup": bool(getattr(created, "no_backup", False))})
+            try:
+                self.tripwire.begin(mission.id)
+            except Exception as exc:                  # noqa: BLE001 - a baseline that cannot be captured means no session
+                self._note(mission.id, {"baseline_refused": type(exc).__name__, "why": str(exc)[:200]})
+                raise RepairRefused(f"the tripwire baseline could not be captured ({type(exc).__name__})") from None
+            self._launch(self.ms.get_mission(mission.id))
+        except BaseException:
+            if held_early and mission.id not in self._runs:
+                self._release_early(mission.id)        # nothing started: the leases do not stay held by a mission that is not running
+            raise
+
+    def _acquire_early(self, mission: Mission) -> bool:
+        """Take the grant's leases before the expensive start steps. A conflict is a wait (StartDeferred), not a failure."""
+        wanted = grant_resources(mission.grant())
+        if not wanted:
+            return False
+        try:
+            leases.acquire(self.store, wanted, mission.id, self.lease_ttl_s)
+        except leases.LeaseConflict as exc:
+            raise StartDeferred(f"waiting for {exc.resource}: leased by {exc.holder}") from None
+        return True
+
+    def _release_early(self, mission_id: str) -> None:
+        with contextlib.suppress(Exception):
+            if self.ms.get_mission(mission_id).status == "awaiting_decision":
+                leases.release(self.store, mission_id)
 
     def require_repair_preconditions(self) -> None:
         """Brief 6.8: a Repair-tier (or higher) worker starts only if every side door is closed. Asked afresh every time,
@@ -423,9 +515,12 @@ class Supervisor:
                 self.ms, mission.id, session_id, self.containment.cgroup_path(session_id),
                 session_ttl_s=grant.budgets.wall_s + SESSION_TTL_PAD_S, lease_ttl_s=self.lease_ttl_s,
                 uid_range=self.containment.uid_range, actor=ACTOR, expected_grant_hash=mission.grant_hash)
-        except BaseException:
+        except BaseException as exc:
             with contextlib.suppress(Exception):
                 recovery.journal_done(self.ms, mission.id, intent_id, "not_applied", actor=ACTOR)   # only OUR intent
+            # A grant that changed under the start is a refusal (the caller re-reads), not a wait.
+            if isinstance(exc, (leases.LeaseConflict, NoFreeUid, SessionConflict)) and "grant changed" not in str(exc):
+                raise StartDeferred(f"waiting: {type(exc).__name__}: {str(exc)[:200]}") from None
             raise
         run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
         self._runs[mission.id] = run
@@ -799,13 +894,16 @@ class Supervisor:
             raise ResumeRefused("the approval no longer covers this grant: " + "; ".join(verdict.reasons)[:200])
         if self.tripwire is None or not getattr(self.tripwire, "running", False):
             raise ResumeRefused("the tripwire monitor is not running")
+        # The reviewed state becomes the new baseline, but the baseline that tripped is kept until the resume has held: a resume
+        # that fails after this point puts it back, so the evidence of what tripped is not lost to a failed attempt.
         try:
-            self.tripwire.begin(mission_id)               # accept what the operator reviewed as the new baseline
+            self.tripwire.begin(mission_id, keep_previous=True)
         except Exception as exc:                          # noqa: BLE001
             raise ResumeRefused(f"the tripwire baseline could not be re-taken ({type(exc).__name__})") from None
         try:
             transition(self.store, mission_id, "executing", actor)
         except IllegalTransition as exc:
+            self._restore_tripped_baseline(mission_id)
             raise ResumeRefused(str(exc)[:200]) from None
         try:
             restore = getattr(self.tool_broker, "restore", None)
@@ -818,12 +916,19 @@ class Supervisor:
             self.containment.thaw(run.cs)
         except Exception as exc:                          # noqa: BLE001 - back to paused, frozen and closed
             self._pause_again(mission_id, run, actor, type(exc).__name__)
+            self._restore_tripped_baseline(mission_id)
             raise ResumeRefused(f"the session could not be resumed ({type(exc).__name__}); it stays paused") from None
+        with contextlib.suppress(Exception):
+            self.tripwire.drop_previous_baseline(mission_id)
         if run.paused_at is not None:
             run.started_at += float(self.clock()) - run.paused_at      # the pause was not session time
             run.paused_at = run.pause_extended_to = None
         self.ms.append_event(mission_id, "decision", actor, {"event": "mission.resumed", "grant_hash": mission.grant_hash})
         return "executing"
+
+    def _restore_tripped_baseline(self, mission_id: str) -> None:
+        with contextlib.suppress(Exception):
+            self.tripwire.restore_previous_baseline(mission_id)
 
     def _extend_session_for_pause(self, run: _Run) -> None:
         """Move the session's `expires_at` by the time it has spent paused (once, whole seconds, remainder carried): the wall
@@ -1258,11 +1363,14 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self._settle_without_session(mission.id, "cancel")
                 continue
-            if not ready:
+            if not ready or self._defer_pending(mission.id):
                 continue
             try:
                 self.start(mission.id)
                 self._start_failures.pop(mission.id, None)
+                self._clear_waiting(mission.id)
+            except (StartDeferred, ProposalOnly) as exc:
+                self._start_waits(mission.id, exc)
             except Exception as exc:
                 self._start_failed(mission.id, exc)
         if self.mutating_ready:
@@ -1294,16 +1402,38 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self._settle_without_session(mission.id, "cancel")
                 continue
-            if not ready or not approvals.execution_predicate(self.store, mission.id).ok:
+            if (not ready or self._defer_pending(mission.id)
+                    or not approvals.execution_predicate(self.store, mission.id).ok):
                 continue
             try:
                 self.start(mission.id)
                 self._start_failures.pop(mission.id, None)
-                self._waiting.pop(mission.id, None)
+                self._clear_waiting(mission.id)
+            except (StartDeferred, ProposalOnly) as exc:
+                self._start_waits(mission.id, exc)
             except RepairNotReady as exc:
                 self._wait_noted(mission.id, str(exc))
             except Exception as exc:                  # noqa: BLE001 - one mission's start never stops the others
                 self._start_failed(mission.id, exc)
+
+    def _clear_waiting(self, mission_id: str) -> None:
+        for table in (self._waiting, self._deferred_since, self._deferred_retry):
+            table.pop(mission_id, None)
+
+    def _defer_pending(self, mission_id: str) -> bool:
+        return float(self.clock()) < self._deferred_retry.get(mission_id, 0.0)
+
+    def _start_waits(self, mission_id: str, exc: Exception) -> None:
+        """A start that must wait (a lease, a uid, a live session, the launcher proof): not a failed start. The reason is
+        recorded once, the retry is paced, and a wait that outlasts START_DEFER_MAX_S is handed to the operator."""
+        now = float(self.clock())
+        since = self._deferred_since.setdefault(mission_id, now)
+        self._wait_noted(mission_id, str(exc))
+        self._deferred_retry[mission_id] = now + START_DEFER_RETRY_S
+        if now - since >= START_DEFER_MAX_S and mission_id not in self._runs:
+            self._note(mission_id, {"start_wait_expired": str(exc)[:200], "waited_s": int(now - since)})
+            self._clear_waiting(mission_id)
+            self._settle_without_session(mission_id, "start_failed")
 
     def _wait_noted(self, mission_id: str, why: str) -> None:
         if self._waiting.get(mission_id) != why:
@@ -1460,13 +1590,18 @@ class Supervisor:
         """`mission.request_decision`: the worker asks the operator something. It records a CARD (a note event the surfaces
         list) and does nothing else: no state changes, no approval row, no grant edit. A bounded number per session."""
         run = self._live_run(session)
-        asked = sum(1 for e in self.ms.events(run.mission_id)
-                    if e.actor == "worker" and '"decision.requested"' in e.body_json)
-        if asked >= MAX_DECISION_REQUESTS:
-            raise RpcError("Refused", "unauthorized")
         body = {"event": "decision.requested", "summary": summary[:MAX_DECISION_TEXT],
                 "options": [str(o)[:MAX_OPTION_TEXT] for o in options[:MAX_OPTIONS]], "session": session.id}
-        self.ms.append_event(run.mission_id, "note", "worker", body)
+        # The quota counts rows written under the card's own actor, which `post_event` can never write (a worker's own notes are
+        # actor `worker`): a note that merely says "decision.requested" cannot use the quota up. The count and the insert are
+        # one transaction, by SQL, with no pass over the mission's events.
+        now = int(self.store._clock())
+        with self.store._write() as conn:
+            asked = conn.execute("SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind='note' AND actor=?",
+                                 (run.mission_id, DECISION_ACTOR)).fetchone()[0]
+            if asked >= MAX_DECISION_REQUESTS:
+                raise RpcError("Refused", "unauthorized")
+            insert_event(conn, run.mission_id, "note", DECISION_ACTOR, body, now)
         run.output_bytes += len(json.dumps(body))
         return {"recorded": True}
 
@@ -1553,5 +1688,5 @@ def _candidate_card(mission_id: str, index: int, text: str, tags: list[str], now
 
 
 __all__ = ["ExternalRecord", "MissionsDisabled", "ProposalOnly", "RepairNotReady", "RepairRefused", "ResumeRefused",
-           "SocketProvider", "Supervisor",
-           "UnsupportedTier", "default_memory_cards"]
+           "SocketProvider", "StartDeferred", "Supervisor",
+           "UnsupportedTier", "default_incident_evidence", "default_memory_cards"]
