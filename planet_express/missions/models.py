@@ -1,7 +1,8 @@
 """Strict mission models (contract §2, §4, §10). Hashed models carry ints and strings only."""
 
 import re
-from typing import Annotated, Literal
+from collections.abc import Iterable
+from typing import Annotated, Literal, NamedTuple
 
 from pydantic import (
     BaseModel,
@@ -134,28 +135,42 @@ class Grant(_Strict):
         return sha256_hex(self.model_dump(mode="json"))
 
     def enforced_exclusions(self) -> tuple[str, ...]:
-        """The exclusions that name a concrete resource (`service:media/db`, `path:/srv/x`), canonical. These are enforced:
-        every layer treats them as protected (an excluded resource is outside scope even inside the grant's scope). Any
-        other exclusion is a free-form tag for the operator and the agent's brief; nothing can enforce it."""
+        """The exclusions that name a concrete resource (`service:media/db`, `path:/srv/x`), canonical, on EVERY host the
+        grant's scope covers (a bare id means that resource on each of them). These are enforced: every layer treats the
+        excluded resource and what is inside it as protected, even inside the grant's scope. Any other exclusion is a
+        free-form tag for the operator and the agent's brief; nothing can enforce it."""
         out: list[str] = []
         for item in self.exclusions:
             try:
-                out.append(canon(item))
+                if item.startswith("host:"):
+                    out.append(canon(item))
+                else:
+                    out += [canon(item, host) for host in (self.scope.hosts or ["local"])]
             except BadResource:
                 continue
         return tuple(dict.fromkeys(out))
 
     def advisory_exclusions(self) -> tuple[str, ...]:
-        enforced = set(self.enforced_exclusions())
         out = []
         for item in self.exclusions:
             try:
-                if canon(item) in enforced:
-                    continue
+                canon(item)
             except BadResource:
-                pass
-            out.append(item)
+                out.append(item)
         return tuple(out)
+
+    def effective_protection(self, protected: "Iterable[str]" = ()) -> "Protection":
+        """THE one place a consumer learns what is off limits for this grant: the site's protected set, the grant's own
+        protected resources (both canonical; a malformed one raises BadResource) and, separately, its enforced exclusions
+        (which carve out only the excluded resource and its descendants). Tripwire, tool broker and Docker proxy all call
+        this; none reads `protected.resources` or `exclusions` itself."""
+        prot = tuple(dict.fromkeys(canon(r) for r in (*protected, *self.protected.resources)))
+        return Protection(prot, self.enforced_exclusions())
+
+
+class Protection(NamedTuple):
+    protected: tuple[str, ...]
+    excluded: tuple[str, ...]
 
 
 CheckName = Literal[

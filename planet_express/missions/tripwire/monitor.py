@@ -235,15 +235,13 @@ class TripwireMonitor:
 
     def _ctx(self, grant: Grant, mission_id: str | None = None) -> DiffContext:
         scope = tuple(canon(r) for r in grant_resources(grant))
-        protected = []
-        for resource in grant.protected.resources:
-            try:
-                protected.append(canon(resource))
-            except BadResource:
-                raise ValueError("grant.protected holds a malformed resource") from None
-        protected.extend(grant.enforced_exclusions())          # an excluded resource is protected-like
+        try:
+            prot = grant.effective_protection()
+        except BadResource:
+            raise ValueError("grant.protected holds a malformed resource") from None
         created = self.ms.proxy_created_containers(mission_id) if mission_id else frozenset()
-        return DiffContext(scope=scope, protected=tuple(protected), stacks_root=self.stacks_root, created=created)
+        return DiffContext(scope=scope, protected=prot.protected, excluded=prot.excluded, stacks_root=self.stacks_root,
+                           created=created)
 
     def _judge(self, mission: Mission, result: ScanResult) -> str:
         if not result.ok:

@@ -178,6 +178,45 @@ def test_a_session_still_resolves_after_a_long_tripwire_pause_is_resumed(tmp_pat
         st.close()
 
 
+# ── review round: exclusions (#5 hosts, #6 carve-out only, #13 one helper) ──────────────────────────
+
+def test_a_bare_exclusion_is_enforced_on_every_host_in_scope():
+    g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["nas", "local"]},
+                              "exclusions": ["service:media/qbit"]})
+    assert g.enforced_exclusions() == ("host:nas/service:media/qbit", "host:local/service:media/qbit")
+
+
+def test_proxy_scope_on_a_non_local_host_enforces_a_bare_exclusion():
+    from planet_express.missions.dockerproxy.policy import Scope
+    g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["nas"]},
+                              "exclusions": ["service:media/qbit"]})
+    assert Scope.from_grant(g, stacks_root="/srv/stacks").classify("host:nas/service:media/qbit") == "protected"
+
+
+def test_an_excluded_child_does_not_block_its_in_scope_parent():
+    from planet_express.missions.dockerproxy.policy import Scope
+    g = Grant.model_validate({"tier": "repair", "scope": {"paths": ["/srv/media"]}, "exclusions": ["path:/srv/media/db"]})
+    scope = Scope.from_grant(g, stacks_root="/srv/stacks")
+    assert scope.classify("host:local/path:/srv/media") == "in_scope"
+    assert scope.classify("host:local/path:/srv/media/other") == "in_scope"
+    assert scope.classify("host:local/path:/srv/media/db") == "protected"
+    assert scope.classify("host:local/path:/srv/media/db/x") == "protected"
+    assert scope.classify_path("host:local/path:/srv/media/db/x") == "protected"
+
+
+def test_every_consumer_gets_protection_from_the_one_helper():
+    """The invariant is structural: the three consumers call Grant.effective_protection and none reads the raw fields."""
+    import inspect
+
+    from planet_express.missions import tools
+    from planet_express.missions.dockerproxy import policy
+    from planet_express.missions.tripwire import monitor
+    for module in (tools, policy, monitor):
+        src = inspect.getsource(module)
+        assert "effective_protection(" in src, module.__name__
+        assert "grant.protected.resources" not in src and "grant.exclusions" not in src, module.__name__
+
+
 # ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
 
 def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):

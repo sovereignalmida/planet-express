@@ -63,10 +63,11 @@ class DiffContext:
     protected: tuple[str, ...]
     stacks_root: str | None = None
     host: str = "local"
+    excluded: tuple[str, ...] = ()             # the grant's enforced exclusions: protected-like, but only themselves and below
     created: frozenset[str] = frozenset()      # ids of containers the Docker proxy recorded as created by this mission
 
     def cls(self, resource: str) -> str:
-        return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root)
+        return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root, excluded=self.excluded)
 
     def verdict(self, resource: str, inside: Verdict = "allowed") -> Verdict:
         got = self.cls(resource)

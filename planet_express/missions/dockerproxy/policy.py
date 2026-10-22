@@ -106,23 +106,23 @@ class Scope:
     host: str = "local"
     stacks_root: str | None = None
     protected_gids: frozenset[int] = frozenset({0})
+    excluded: tuple[str, ...] = ()        # the grant's enforced exclusions: the resource itself and below, never its parent
 
     @classmethod
     def from_grant(cls, grant: Grant, *, protected=(), stacks_root: str | None = None,
                    protected_gids=()) -> "Scope":
         resources = tuple(canon(r) for r in grant_resources(grant))
         paths = tuple(r for r in resources if r.split("/", 1)[1].startswith(("path:", "mount:")))
-        prot = tuple(dict.fromkeys((*(canon(r) for r in (*protected, *grant.protected.resources)),
-                                    *grant.enforced_exclusions())))
-        return cls(resources, paths, prot, grant.scope.hosts[0] if grant.scope.hosts else "local", stacks_root,
-                   frozenset({0, *protected_gids}))
+        prot = grant.effective_protection(protected)
+        return cls(resources, paths, prot.protected, grant.scope.hosts[0] if grant.scope.hosts else "local", stacks_root,
+                   frozenset({0, *protected_gids}), prot.excluded)
 
     def classify(self, resource: str, *, parent_of_protected: bool = True) -> str:
         return classify(resource, self.resources, self.protected, stacks_root=self.stacks_root,
-                        parent_of_protected=parent_of_protected)
+                        parent_of_protected=parent_of_protected, excluded=self.excluded)
 
     def classify_path(self, resource: str) -> str:
-        return classify(resource, self.paths, self.protected, stacks_root=self.stacks_root)
+        return classify(resource, self.paths, self.protected, stacks_root=self.stacks_root, excluded=self.excluded)
 
 
 def compose_id(kind: str, labels: Mapping[str, str], host: str) -> str | None:
@@ -628,7 +628,8 @@ class Policy:
             system = any(norm == d or norm.startswith(d.rstrip("/") + "/") or d.startswith(norm.rstrip("/") + "/")
                          for d in SYSTEM_DIRS)
             protected_path = rid is not None and any(
-                split(p)[1] == "path" and contains(p, rid) or split(p)[1] == "path" and contains(rid, p) for p in scope.protected)
+                split(p)[1] == "path" and contains(p, rid) or split(p)[1] == "path" and contains(rid, p) for p in scope.protected) or rid is not None and any(
+                split(e)[1] == "path" and contains(e, rid) for e in scope.excluded)
             if norm == "/" or system or protected_path:
                 raise Refusal(f"a container with {norm[:80]} mounted read-write may not be acted on through the proxy: "
                               "that is host write access outside the grant")
