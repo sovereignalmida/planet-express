@@ -1,0 +1,17 @@
+{
+  "name": "docker root filesystem filling after a canary update",
+  "scope_tags": ["host:disk", "volume:docker-root"],
+  "query": "prune rollback image disk full",
+  "evidence": [
+    {"source": "scan:disk", "text": "docker root filesystem 91 percent used\nreclaimable images 14 GB, previous image of the canary service held for rollback"}
+  ],
+  "expect_cards": ["disk-pressure-held-rollback", "disk-prune-order", "disk-never-prune-volumes"],
+  "agent_result": {
+    "diagnosis": "The docker root filesystem is over the alert threshold; most reclaimable space is images, one of which is the held rollback image.",
+    "evidence": ["docker root filesystem is 91 percent used", "14 GB of images are reclaimable"],
+    "suggested_actions": ["Prune dangling images first, keep the held rollback image until the canary window closes", "Do not prune volumes"],
+    "unknowns": ["When the canary window closes"],
+    "memory_candidates": [],
+    "confidence": "medium"
+  }
+}

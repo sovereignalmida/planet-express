@@ -1,0 +1,18 @@
+{
+  "name": "vpn gateway recreated, dependents lost their network",
+  "scope_tags": ["stack:downloads", "container:vpn-gateway"],
+  "query": "dependents lost network after gateway recreate",
+  "evidence": [
+    {"source": "scan:containers", "text": "downloads-qbit-1 healthy but cannot reach any address\ndownloads-sonarr-1 running, network mode container:vpn-gateway\nvpn-gateway recreated 14 minutes ago, container id changed"},
+    {"source": "logs:downloads-qbit-1", "text": "WARN tracker announce failed: network unreachable\nWARN tracker announce failed: network unreachable"}
+  ],
+  "expect_cards": ["netns-stale-after-recreate", "netns-recreate-dependents", "netns-never-recreate-gateway-alone"],
+  "agent_result": {
+    "diagnosis": "The dependents still point at the previous vpn-gateway network namespace; they were not recreated after the gateway.",
+    "evidence": ["vpn-gateway container id changed 14 minutes ago", "downloads-qbit-1 reports network unreachable while healthy"],
+    "suggested_actions": ["Recreate the dependents of vpn-gateway in dependency order, one service at a time", "Probe outbound connectivity from inside one dependent afterwards"],
+    "unknowns": ["Whether the gateway's port forwarding has re-established", "Why the gateway was recreated"],
+    "memory_candidates": [],
+    "confidence": "high"
+  }
+}
