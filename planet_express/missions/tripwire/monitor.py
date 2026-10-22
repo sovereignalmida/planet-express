@@ -256,15 +256,16 @@ class TripwireMonitor:
                 out[mission.id] = "monitor_error"
         return out
 
-    def _proxy_state(self, mission_id: str) -> tuple[frozenset[str], int]:
-        """(ids the proxy recorded creating for this mission, how many creates are in flight). Read incrementally from the
+    def _proxy_state(self, mission_id: str) -> tuple[frozenset[str], tuple[tuple[str, tuple[str, ...]], ...]]:
+        """(ids the proxy recorded creating for this mission, the (name, targets) of each create in flight). Read incrementally from the
         last seq seen (never the whole log per scan); an intent with no end after CREATE_GRACE_S stops counting."""
         seq, created, begun, ended = self._proxy_seen.get(mission_id, (0, set(), {}, set()))
         for ev_seq, at, body in self.ms.proxy_creates_since(mission_id, seq):
             seq = max(seq, ev_seq)
             kind, nonce = body.get("event"), body.get("nonce")
             if kind == "docker.create_begin" and isinstance(nonce, str):
-                begun[nonce] = at
+                targets = body.get("targets") if isinstance(body.get("targets"), list) else []
+                begun[nonce] = (at, str(body.get("name") or ""), tuple(str(t) for t in targets))
             else:
                 if kind == "docker.created" and isinstance(body.get("created_id"), str):
                     created.add(body["created_id"])
@@ -275,7 +276,7 @@ class TripwireMonitor:
             del begun[nonce]
         ended.intersection_update(begun)
         self._proxy_seen[mission_id] = (seq, created, begun, ended)
-        pending = sum(1 for at in begun.values() if now - at <= CREATE_GRACE_S)
+        pending = tuple((name, targets) for at, name, targets in begun.values() if now - at <= CREATE_GRACE_S)
         return frozenset(created), pending
 
     def _ctx(self, grant: Grant, mission_id: str | None = None) -> DiffContext:
@@ -284,7 +285,7 @@ class TripwireMonitor:
             prot = grant.effective_protection()
         except BadResource:
             raise ValueError("grant.protected holds a malformed resource") from None
-        created, pending = self._proxy_state(mission_id) if mission_id else (frozenset(), 0)
+        created, pending = self._proxy_state(mission_id) if mission_id else (frozenset(), ())
         return DiffContext(scope=scope, protected=prot.protected, excluded=prot.excluded, stacks_root=self.stacks_root,
                            created=created, creates_in_flight=pending)
 

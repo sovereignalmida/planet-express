@@ -65,7 +65,11 @@ class DiffContext:
     host: str = "local"
     excluded: tuple[str, ...] = ()             # the grant's enforced exclusions: protected-like, but only themselves and below
     created: frozenset[str] = frozenset()      # ids of containers the Docker proxy recorded as created by this mission
-    creates_in_flight: int = 0                 # proxy creates announced but not yet recorded: a new container may be one of them
+    creates_in_flight: tuple[tuple[str, tuple[str, ...]], ...] = ()   # (name, targets) of proxy creates announced, not yet recorded
+
+    def announced(self, name: str, resource: str) -> bool:
+        """Is this container one a proxy create announced? By the name it asked for, or (no name asked) by its service."""
+        return any((n == name) if n else (resource in targets) for n, targets in self.creates_in_flight)
 
     def cls(self, resource: str) -> str:
         return classify(resource, self.scope, self.protected, stacks_root=self.stacks_root, excluded=self.excluded)
@@ -151,8 +155,8 @@ def _container_changes(name: str, b: dict | None, c: dict | None, ctx: DiffConte
             # (protected still wins by its labels) and treat it as outside the grant, so it pauses.
             own = ctx.rid(f"container:{name}")
             named_protected = ctx.cls(res) == "protected" or (own is not None and ctx.cls(own) == "protected")
-            if ctx.creates_in_flight and not named_protected:
-                return out          # the proxy announced a create that is not recorded yet: judge it on the next scan
+            if ctx.announced(name, res) and not named_protected:
+                return out          # THIS container's create was announced and is not recorded yet: judge it next scan
             out.append(Change("containers", own or res, "container_added" if added_container else "container_replaced",
                               "protected" if named_protected else "out_of_scope",
                               f"{label}: not created through the proxy"))

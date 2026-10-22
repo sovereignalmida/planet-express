@@ -411,12 +411,31 @@ def test_a_container_seen_while_a_proxy_create_is_in_flight_waits_for_its_record
     from tripwire_fakes import doc, frozen, go_executing, make_rig, status
     rig = make_rig(tmp_path)
     go_executing(rig)
-    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1"})
+    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1", "name": "media-new-1", "targets": []})
     made = doc("media-new-1", project="media", service="new")
     rig.host.containers["media-new-1"] = made
     assert rig.monitor.scan_once()[rig.mission.id] == "ok"             # the record has not landed yet: no verdict, no freeze
     assert status(rig) == "executing" and not frozen(rig)
     _proxy_event(rig, {"event": "docker.created", "created_id": made["Id"], "nonce": "n1"})
+    assert rig.monitor.scan_once()[rig.mission.id] == "ok" and status(rig) == "executing"
+
+
+def test_a_create_in_flight_defers_only_the_announced_container_not_an_unrelated_one(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1", "name": "media-new-1", "targets": []})
+    rig.host.containers["media-evil-1"] = doc("media-evil-1", project="media", service="evil")      # not the one announced
+    rig.monitor.scan_once()
+    assert status(rig) == "paused_tripwire"
+
+
+def test_an_unnamed_create_is_matched_by_its_announced_service(tmp_path):
+    from tripwire_fakes import doc, go_executing, make_rig, status
+    rig = make_rig(tmp_path)
+    go_executing(rig)
+    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1", "name": "", "targets": ["host:local/service:media/new"]})
+    rig.host.containers["abc"] = doc("abc", project="media", service="new")
     assert rig.monitor.scan_once()[rig.mission.id] == "ok" and status(rig) == "executing"
 
 

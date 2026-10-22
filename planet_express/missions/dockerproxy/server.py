@@ -284,7 +284,7 @@ class ProxyServer:
             length, ctype = len(body), "application/x-tar"
         elif route.body == "raw":
             body, length, ctype = self._client_body(conn, head, plan.raw_length), plan.raw_length, "application/x-tar"
-        nonce = self._create_begin(session) if route.name == "container.create" and self.gate is not None else None
+        nonce = self._create_begin(session, plan) if route.name == "container.create" and self.gate is not None else None
         try:
             cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype)
         except BaseException:
@@ -326,13 +326,14 @@ class ProxyServer:
             except Exception:                                    # noqa: BLE001
                 log.warning("docker proxy: result event not recorded")
 
-    def _create_begin(self, session) -> str:
+    def _create_begin(self, session, plan: Plan) -> str:
         """Announce a container create BEFORE the daemon sees it, so a tripwire scan that finds the new container while the
         create is in flight waits for the record instead of calling it unknown. If the intent cannot be recorded, nothing is
         created."""
         nonce = os.urandom(8).hex()
         try:
-            self.gate.record(session, {"event": "docker.create_begin", "nonce": nonce})
+            self.gate.record(session, {"event": "docker.create_begin", "nonce": nonce,
+                                       "name": str(plan.summary.get("name", ""))[:128], "targets": list(plan.targets)[:8]})
         except Exception:                                        # noqa: BLE001 - no record, no create
             raise Refusal("the container create could not be recorded", 500) from None
         return nonce
