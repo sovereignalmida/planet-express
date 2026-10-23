@@ -881,3 +881,21 @@ def test_a_bind_of_a_parent_of_an_excluded_path_is_refused_but_a_sibling_is_not(
     with pytest.raises(Refusal, match="excluded"):
         create(p, host(Binds=[f"{root}/stacks/media/config:/x"]))
     assert create(p, host(Binds=[f"{root}/stacks/media/other:/x"]))        # a sibling is untouched
+
+
+def test_joining_a_target_attached_to_an_out_of_scope_network_is_refused(root):
+    from planet_express.missions.dockerproxy.policy import ContainerInfo
+
+    def policy_with(networks):
+        class Inspector(FakeInspector):
+            def container(self, ref):
+                info = super().container(ref)
+                if info is not None and info.name == "qbittorrent":
+                    return ContainerInfo(info.id, info.name, info.labels, {}, (), networks)
+                return info
+        return Policy(make_scope(str(root)), Inspector())
+    assert create(policy_with(("media_default", "bridge")), host(NetworkMode="container:qbittorrent"))
+    with pytest.raises(Refusal, match="outside this mission's scope"):
+        create(policy_with(("media_default", "other_default")), host(NetworkMode="container:qbittorrent"))
+    with pytest.raises(Refusal, match="cannot be checked"):
+        create(policy_with(None), host(NetworkMode="container:qbittorrent"))

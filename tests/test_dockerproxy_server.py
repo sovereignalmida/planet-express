@@ -364,6 +364,7 @@ def test_version_is_served_with_the_api_version_clamped_to_what_the_proxy_serves
             status, _, body = request(path, "GET", target, token=None, version=None, raw_target=True)
             doc = json.loads(body)
             assert status == 200 and doc["ApiVersion"] == "1.48" and doc["Os"] == "linux" and doc["KernelVersion"]
+            assert doc["Components"][0]["Details"]["ApiVersion"] == "1.48"
         assert request(path, "POST", "/v1.43/version", token=None, version=None, raw_target=True)[0] in (403, 405)
         assert request(path, "GET", "/v1.43/version?x=1", token=None, version=None, raw_target=True)[0] == 403
     finally:

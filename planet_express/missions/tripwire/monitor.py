@@ -389,6 +389,10 @@ class TripwireMonitor:
                 previous = None
             if previous is not None:
                 self.state.write(mission_id, "baseline.prev.json", previous)
+            else:
+                # Nothing readable to set aside: a copy left by an earlier crashed resume must not be restored over this one.
+                with contextlib.suppress(Exception):
+                    self.state.remove(mission_id, "baseline.prev.json")
         return self._capture_baseline(mission, result)
 
     def restore_previous_baseline(self, mission_id: str) -> bool:

@@ -548,10 +548,16 @@ class Scanner:
         self.clock = clock or env.clock
         self._running: dict[str, dict[str, Any]] = {}       # signal name -> the slot of its still-running abandoned read
         self._running_guard = threading.Lock()
+        self._scan_lock = threading.Lock()                  # the monitor thread and a baseline capture share this Scanner
 
     def scan(self, extra_files: Sequence[tuple[str, str]] = ()) -> ScanResult:
         """One read of the host. `extra_files` are (resource id, path) pairs to hash on top of the protected set: the paths
-        and mounts that the grants being watched exclude."""
+        and mounts that the grants being watched exclude. Scans are serialised: a second caller waits for the first, so a
+        healthy scan in progress is never mistaken for an abandoned read and reported as a timeout."""
+        with self._scan_lock:
+            return self._scan(extra_files)
+
+    def _scan(self, extra_files: Sequence[tuple[str, str]]) -> ScanResult:
         env = ScanEnv(**{**self.env.__dict__, "extra_files": tuple(extra_files), "_files": None})
         started = self.clock()
         wall_start = time.monotonic()

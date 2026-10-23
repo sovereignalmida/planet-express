@@ -164,8 +164,10 @@ class DaemonInspector:
         if not isinstance(cid, str) or len(cid) != 64:
             raise UpstreamError("inspect returned no container id")
         host, mounts = doc.get("HostConfig"), doc.get("Mounts")
+        attached = (doc.get("NetworkSettings") or {}).get("Networks") if isinstance(doc.get("NetworkSettings"), dict) else None
         return ContainerInfo(cid, str(doc.get("Name", "")).lstrip("/"), self._labels((doc.get("Config") or {}).get("Labels")),
-                             host if isinstance(host, dict) else {}, tuple(mounts) if isinstance(mounts, list) else ())
+                             host if isinstance(host, dict) else {}, tuple(mounts) if isinstance(mounts, list) else (),
+                             tuple(str(n) for n in attached) if isinstance(attached, dict) else None)
 
     def service_networks(self) -> dict[tuple[str, str], set[str]]:
         """Snapshot every existing Compose service's networks in one request, before Compose removes old containers."""

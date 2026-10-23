@@ -92,6 +92,7 @@ class ContainerInfo:
     labels: Mapping[str, str]
     host_config: Mapping = field(default_factory=dict, compare=False, hash=False)    # from inspect: Binds, Privileged, ...
     mounts: tuple = field(default=(), compare=False, hash=False)                      # from inspect: the container's mounts
+    networks: tuple[str, ...] | None = field(default=(), compare=False, hash=False)   # attached networks; None = unreadable
 
 
 @dataclass(frozen=True)
@@ -597,6 +598,11 @@ class Policy:
             raise Refusal("the container network target's network mode cannot be checked")
         if inner == "host":
             raise Refusal("the container network target is on the host network")
+        # Joining the target also joins every network it is attached to: each must be one this session could attach directly.
+        if info.networks is None:
+            raise Refusal("the container network target's networks cannot be checked")
+        for network in info.networks:
+            self._scoped_network_name(network, self._service_id(info))
         if isinstance(inner, str) and inner.startswith("container:"):
             if _depth >= 2:
                 raise Refusal("the container network target is nested too deeply")

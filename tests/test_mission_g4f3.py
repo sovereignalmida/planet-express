@@ -178,6 +178,19 @@ def test_a_failed_resume_keeps_the_original_baseline(stack):
     assert after != original and st.monitor.state.read(mid, "baseline.prev.json") is None
 
 
+def test_a_stale_set_aside_baseline_is_not_kept_when_there_is_nothing_to_set_aside(stack):
+    st = stack(behaviours=[{"script": [update()] * 6}], with_proxy=True)
+    st.rig.monitor.start()
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.monitor.state.write(mid, "baseline.prev.json", {"v": 1, "stale": True})
+    st.monitor.state.remove(mid, "baseline.json")                     # nothing readable to set aside
+    st.monitor.begin(mid, keep_previous=True)
+    assert st.monitor.state.read(mid, "baseline.prev.json") is None
+    assert st.monitor.restore_previous_baseline(mid) is False
+
+
 # ── #18 a passing preflight is not cached forever ────────────────────────────────────────────────────
 
 def _preflight(state):

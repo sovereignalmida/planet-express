@@ -422,6 +422,10 @@ class ProxyServer:
             if isinstance(doc, dict):
                 if isinstance(doc.get("ApiVersion"), str):
                     doc["ApiVersion"] = self._clamped_api(doc["ApiVersion"])
+                for component in doc.get("Components") if isinstance(doc.get("Components"), list) else ():
+                    details = component.get("Details") if isinstance(component, dict) else None
+                    if isinstance(details, dict) and isinstance(details.get("ApiVersion"), str):
+                        details["ApiVersion"] = self._clamped_api(details["ApiVersion"])
                 return json.dumps(doc, separators=(",", ":")).encode()
             raise Refusal("the daemon's answer could not be read", 502)
         if route.name in ("volumes.list", "networks.list"):

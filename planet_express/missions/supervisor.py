@@ -1252,6 +1252,7 @@ class Supervisor:
 
     def _settle_without_session(self, mission_id: str, reason: str, result: AgentResult | None = None,
                                 _force: bool = False) -> None:
+        self._clear_waiting(mission_id)                   # a settled mission keeps no wait state, so a later wait starts afresh
         mission = self.ms.get_mission(mission_id)
         if (not _force and mission.tier == "repair" and mission.checkpoint_id
                 and (reason == "cancel" or mission.cancel_requested_at is not None)):
@@ -1441,6 +1442,7 @@ class Supervisor:
             self._note(mission_id, {"start_waiting": why[:300]})
 
     def _start_failed(self, mission_id: str, exc: Exception) -> None:
+        self._deferred_since.pop(mission_id, None)         # a start that failed outright is not a continuing wait
         count = self._start_failures.get(mission_id, 0) + 1
         self._start_failures[mission_id] = count
         log.warning("mission %s did not start (%s), attempt %d", mission_id, type(exc).__name__, count)

@@ -109,3 +109,21 @@ def test_the_per_signal_timeout_bounds_a_signal_when_it_is_the_shorter_one(rig):
         assert time.monotonic() - began < 2
     finally:
         release.set()
+
+
+def test_concurrent_scans_do_not_report_each_other_as_timeouts(rig):
+    gate = threading.Event()
+
+    def slow(env):
+        gate.wait(2)
+        return {"ok": 1}
+    scanner = Scanner(rig.scan_env, {"slow": slow}, signal_timeout_s=5, deadline_s=5)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(scanner.scan())) for _ in range(2)]
+    for t in threads:
+        t.start()
+    time.sleep(0.2)
+    gate.set()
+    for t in threads:
+        t.join()
+    assert len(results) == 2 and all(r.ok and not r.errors for r in results)
