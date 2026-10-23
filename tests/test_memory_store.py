@@ -99,6 +99,30 @@ def test_confirm_requires_a_candidate(conn):
         store.confirm(conn, "missing", OPERATOR, now=NOW)
 
 
+def test_confirm_reads_the_card_under_the_write_lock(conn, monkeypatch):
+    """A status or type read made before the write lock can go stale: another writer could change the card
+    between the check and the update. Every precondition must be read inside the transaction."""
+    propose(conn, "c1", actor=RUNTIME, source="inferred")
+    real = store._require
+    seen = []
+
+    def spy(c, card_id):
+        seen.append(c.in_transaction)
+        return real(c, card_id)
+
+    monkeypatch.setattr(store, "_require", spy)
+    store.confirm(conn, "c1", OPERATOR, now=NOW)
+    assert seen == [True]
+
+
+def test_confirm_does_not_touch_a_card_that_stopped_being_a_candidate(conn):
+    propose(conn, "c1", actor=RUNTIME, source="inferred")
+    store.deprecate(conn, "c1", OPERATOR, reason="obsolete", now=NOW)
+    with pytest.raises(store.InvalidTransition):
+        store.confirm(conn, "c1", OPERATOR, now=NOW)
+    assert store.get_card(conn, "c1").status == "deprecated"
+
+
 def test_deprecated_cards_cannot_be_reconfirmed(conn):
     confirmed(conn, "c1")
     store.deprecate(conn, "c1", OPERATOR, reason="obsolete", now=NOW)

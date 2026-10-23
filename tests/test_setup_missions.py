@@ -80,6 +80,8 @@ def test_the_answers_default_is_off_and_takes_its_values_from_the_config_default
 @pytest.mark.parametrize("bad", [
     {"enabled": True, "session_uid_min": 61000, "session_uid_max": 61001},          # no room (top uid is reserved)
     {"enabled": True, "session_uid_min": 0, "session_uid_max": 100},
+    {"enabled": True, "session_uid_min": 61000, "session_uid_max": 61999},          # overlaps systemd's DynamicUser range: Core refuses it too
+    {"enabled": True, "session_uid_min": 65000, "session_uid_max": 65100},
     {"enabled": True, "sock_root": "relative/run"},
     {"enabled": True, "workspace_root": "/a/../b"},
     {"enabled": True, "cgroup_root": "/sys/fs/cgroup"},
@@ -89,6 +91,12 @@ def test_the_answers_default_is_off_and_takes_its_values_from_the_config_default
 def test_unsafe_mission_answers_are_rejected_before_a_plan_exists(bad):
     with pytest.raises(ValidationError):
         answers(missions=bad)
+
+
+def test_the_dynamic_user_overlap_is_refused_only_when_missions_are_on():
+    answers(missions={"enabled": False, "session_uid_min": 61000, "session_uid_max": 61999})     # off: nothing uses the range
+    with pytest.raises(ValidationError, match="DynamicUser"):
+        answers(missions={"enabled": True, "session_uid_min": 61000, "session_uid_max": 61999})
 
 
 # -- the plan --------------------------------------------------------------------------------------------------

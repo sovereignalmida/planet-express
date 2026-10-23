@@ -235,6 +235,72 @@ def test_symlink_inside_root_is_followed_and_recorded(tmp_path):
     assert entry["symlink"] is True and entry["path"] == os.path.realpath(real)
 
 
+def captured_through_a_symlink(tmp_path):
+    env = make_env(tmp_path)
+    real = env.stacks / "media" / "real.env"
+    real.write_text("A=1\n")
+    env.dotenv.unlink()
+    env.dotenv.symlink_to(real)
+    cid = env.svc.create(env.mission.id, env.scope)
+    return env, cid, real
+
+
+def test_a_retargeted_symlink_is_a_problem_not_a_clean_restore(tmp_path):
+    env, cid, real = captured_through_a_symlink(tmp_path)
+    other = env.stacks / "media" / "other.env"
+    other.write_text("A=EVIL\n")
+    env.dotenv.unlink()
+    env.dotenv.symlink_to(other)                               # the live .env now reads other bytes; real.env itself is untouched
+    env.svc.capture_post(cid)
+    post = env.svc.store.read_post(cid)
+    assert any(v["problem"] for v in post["files"].values())
+    report = env.svc.restore(cid, ack_drift=True, actor="operator:alice")     # even an acknowledged-drift restore must not call this done
+    assert report.status == "refused" and not report.ok
+    assert any("now leads to" in str(d.get("reason", "")) for d in report.drifted)
+    assert os.path.realpath(env.dotenv) == os.path.realpath(other) and real.read_text() == "A=1\n"      # nothing was written
+
+
+def test_a_symlink_replaced_by_a_regular_file_or_removed_is_not_a_clean_restore(tmp_path):
+    for how in ("file", "removed"):
+        env, cid, real = captured_through_a_symlink(tmp_path / how)
+        env.dotenv.unlink()
+        if how == "file":
+            env.dotenv.write_text("A=1\n")                    # same bytes as the target, but it is no longer the link
+        env.svc.capture_post(cid)
+        report = env.svc.restore(cid)
+        assert not (report.status == "done" and report.ok and not report.drifted), how
+
+
+def test_an_unchanged_symlink_restores_normally(tmp_path):
+    env, cid, real = captured_through_a_symlink(tmp_path)
+    real.write_text("A=changed by the agent\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert report.ok and real.read_text() == "A=1\n"
+
+
+def test_every_alias_of_a_captured_file_is_checked_not_just_the_first(tmp_path):
+    env = make_env(tmp_path)
+    real = env.stacks / "media" / "real.env"
+    real.write_text("A=1\n")
+    alias = env.stacks / "media" / "alias.env"
+    env.dotenv.unlink()
+    env.dotenv.symlink_to(real)
+    alias.symlink_to(real)
+    scope = CheckpointScope(stacks=("media",), files=(str(env.dotenv), str(alias)))
+    cid = env.svc.create(env.mission.id, scope)
+    entry = next(f for f in env.svc.manifest(cid)["files"] if f["path"].endswith("real.env"))
+    assert {entry["given_path"], *entry["aliases"]} == {str(env.dotenv), str(alias)}
+    other = env.stacks / "media" / "other.env"
+    other.write_text("A=EVIL\n")
+    alias.unlink()
+    alias.symlink_to(other)                                    # only the second name moves; real.env is untouched
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid, ack_drift=True, actor="operator:alice")
+    assert report.status == "refused" and not report.ok
+    assert any("alias.env" in str(d.get("reason", "")) for d in report.drifted)
+
+
 def test_toctou_symlink_swapped_after_validation(tmp_path):
     outside = tmp_path / "outside.txt"
     outside.write_text("secret")

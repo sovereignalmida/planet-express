@@ -171,6 +171,7 @@ class _Planned:
     kind: str
     meta: safefs.FileMeta
     base: str = ""       # directory its relative references resolve against
+    aliases: list[str] = field(default_factory=list)   # other in-scope paths that resolve to the same real file
 
 
 class _Hooks:
@@ -346,12 +347,16 @@ class CheckpointService:
         and `include:` are in scope too, under the same rules. Nothing is written."""
         planned: list[_Planned] = []
         seen: set[str] = set()
+        by_real: dict[str, _Planned] = {}
 
         def add(path: str, stack: str | None, kind: str, required: bool = True, depth: int = 0,
                 child_base: str | None = None) -> None:
             try:
                 real, symlink = safefs.resolve_in_root(self.stacks_root, path)
                 if real in seen:
+                    first = by_real[real]
+                    if path != first.path and path not in first.aliases:
+                        first.aliases.append(path)      # restore must check this name still leads here too
                     return
                 try:
                     fd, meta = safefs.open_regular(self.stacks_root, real, max_bytes=self.settings.max_file_bytes)
@@ -367,7 +372,9 @@ class CheckpointService:
                 raise ScopeRefused(str(exc)) from None
             seen.add(real)
             base = child_base or os.path.dirname(real)
-            planned.append(_Planned(path, real, symlink, stack, kind, meta, base))
+            item = _Planned(path, real, symlink, stack, kind, meta, base)
+            planned.append(item)
+            by_real[real] = item
             if kind in _PARSED:
                 if depth >= MAX_INCLUDE_DEPTH:
                     raise ScopeRefused(f"{real}: includes are nested more than {MAX_INCLUDE_DEPTH} deep")
@@ -441,6 +448,7 @@ class CheckpointService:
                 raise DiskGuardError(f"the checkpoint store would exceed {self.settings.max_store_bytes} bytes")
             self.store.write_payload(checkpoint_id, index, data)
             files.append({"idx": index, "path": item.real, "given_path": item.path, "symlink": item.symlink,
+                          "aliases": list(item.aliases),
                           "stack": item.stack, "kind": item.kind, "sha256": safefs.sha256_bytes(data),
                           "mode": meta.mode, "uid": meta.uid, "gid": meta.gid, "size": len(data), "acl": acl})
             if item.kind in _PARSED:
@@ -512,7 +520,23 @@ class CheckpointService:
         return data
 
     def _current(self, entry: dict[str, Any]) -> tuple[str | None, bytes | None, str | None, safefs.FileMeta | None]:
-        """(sha256, bytes, problem, meta). problem is set when the file is present but cannot be read safely."""
+        """(sha256, bytes, problem, meta). problem is set when the file is present but cannot be read safely.
+
+        A file that was captured THROUGH an in-root symlink is recorded by its resolved target, so reading the target alone cannot
+        tell that the link has since been retargeted: the live `.env` or include would then read different bytes while the target
+        still matches, and a restore would report success. The link's own path is therefore resolved again here, and a link that
+        no longer leads to the captured target is a problem (a restore refuses, even with drift acknowledged; the operator repairs
+        the link by hand)."""
+        names = ([entry["given_path"]] if entry.get("symlink") and entry.get("given_path") else [])
+        names += [a for a in entry.get("aliases") or [] if a not in names]      # every name captured for this file
+        for given in names:
+            try:
+                real, _through_link = safefs.resolve_in_root(self.stacks_root, given)
+            except safefs.UnsafePath as exc:
+                return None, None, f"{given}: the symlink can no longer be followed safely ({exc})", None
+            if real != entry["path"]:
+                return None, None, (f"{given}: the symlink now leads to {real}, not to {entry['path']} where it led when the "
+                                    "checkpoint was taken"), None
         try:
             sha, data, meta = safefs.file_state(self.stacks_root, entry["path"],
                                                 max_bytes=self.settings.max_file_bytes)

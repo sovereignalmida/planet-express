@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from config_schema import MissionsConfig, WorkerSudoRuleConfig
+from config_schema import MissionsConfig, WorkerSudoRuleConfig, uid_range_problem
 from planet_express.setup.steps import AbsPath, Name
 
 _MISSIONS_DEFAULTS = MissionsConfig()      # the one source of the defaults, so config, Core and setup cannot drift
@@ -116,6 +116,13 @@ class MissionsAnswers(_Strict):
                            sock_root=self.sock_root, cgroup_root=self.cgroup_root, workspace_root=self.workspace_root)
         except ValidationError as exc:
             raise ValueError(str(exc.errors()[0]["msg"]).removeprefix("Value error, ")) from None
+        if self.enabled:
+            # The config is built with `enabled=False` above so that host-dependent checks (cgroup access) do not run at answer time,
+            # but that also skips the pure range arithmetic Core applies to an ENABLED config. A range Core would refuse at startup
+            # must not be accepted here, or the wizard installs a launcher for a setup that cannot start.
+            problem = uid_range_problem(self.session_uid_min, self.session_uid_max)
+            if problem:
+                raise ValueError(problem)
         return self
 
 

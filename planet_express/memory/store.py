@@ -308,15 +308,16 @@ def _apply_supersession(conn, new_id, actor, now):
 def confirm(conn: sqlite3.Connection, card_id: str, operator: str, *, now: datetime | None = None) -> Card:
     kind, _ = parse_actor(operator)
     now = _now(now)
-    row = _require(conn, card_id)
-    allowed = kind == "operator" or (kind == "system" and row["type"] in ("fact", "decision"))
-    if not allowed:
-        raise ActorNotPermitted(f"a {kind} actor cannot confirm a {row['type']} card; an operator must")
-    if row["status"] != "candidate":
-        raise InvalidTransition(f"card {card_id!r} is {row['status']}, only a candidate can be confirmed")
     with _atomic(conn):
+        row = _require(conn, card_id)
+        allowed = kind == "operator" or (kind == "system" and row["type"] in ("fact", "decision"))
+        if not allowed:
+            raise ActorNotPermitted(f"a {kind} actor cannot confirm a {row['type']} card; an operator must")
+        if row["status"] != "candidate":
+            raise InvalidTransition(f"card {card_id!r} is {row['status']}, only a candidate can be confirmed")
         conn.execute(
-            "UPDATE memory_cards SET status = 'confirmed', confirmed_at = ?, last_verified_at = ? WHERE id = ?",
+            "UPDATE memory_cards SET status = 'confirmed', confirmed_at = ?, last_verified_at = ? WHERE id = ? "
+            "AND status = 'candidate'",
             (_iso(now), _iso(now), card_id))
         _history(conn, card_id, operator, "confirm", now, "candidate", "confirmed")
         _apply_supersession(conn, card_id, operator, now)
