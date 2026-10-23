@@ -46,7 +46,8 @@ REPAIR_INSTRUCTIONS = (
     + _DATA_RULES +
     "This mission may change the host, but only what the grant's scope names: stay inside the scope, never touch a protected "
     "or excluded resource, and never widen your own access. Core took a checkpoint before you started and keeps a rollback "
-    "available; do not try to hide, undo or work around a change. Whether you succeeded is decided by verification checks "
+    "of the scoped files (compose files and the files they reference) and container settings it recorded; other files, data and "
+    "host state are NOT covered by it. Do not try to hide, undo or work around a change. Whether you succeeded is decided by verification checks "
     "Core agreed beforehand and runs itself, not by your report: report what you changed and what you found, accurately, "
     "including anything you could not fix. If something unexpected happens, stop and say so. Finish by submitting one JSON "
     "result that matches the output schema."

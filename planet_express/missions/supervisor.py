@@ -50,7 +50,7 @@ from . import approvals, artifacts, leases, recovery
 from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
-from .hooks import HOOK_LOG_NAME
+from .hooks import HOOK_LOG_NAME, MAX_POLICY_FILE_BYTES
 from .launcher.spec import LaunchSpec
 from .models import Mission
 from .runtime import (
@@ -68,7 +68,7 @@ from .state import (
     transition,
     transition_in_txn,
 )
-from .store import MissionStore, NoFreeUid, SessionConflict, grant_resources
+from .store import MissionStore, NoFreeUid, SessionConflict, grant_resources, stack_lease_paths
 
 log = logging.getLogger(__name__)
 
@@ -87,6 +87,7 @@ MAX_MEMORY_HITS = 20
 MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll (the final drain reads on until it is empty)
 MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
+HOOK_POLICY_ENV_MAX = 3500    # above this the hook policy travels as a file (the launcher caps an environment value at 4096)
 MAX_HOOK_FIELD = 400
 MAX_DECISION_REQUESTS = 5       # worker-raised decision cards per mission; they never approve anything
 MAX_DECISION_TEXT = 1000
@@ -169,6 +170,7 @@ class _Run:
     hook_log_fault: bool = False              # a shrunk or vanished log has been reported once
     hook_dir: Path | None = None              # the Core-owned directory holding this session's hook settings
     hook_sha: str | None = None               # sha256 of settings.json at launch: it is checked at every poll
+    policy_sha: str | None = None             # sha256 of policy.json when the policy was too large for the environment
 
 
 def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
@@ -286,6 +288,9 @@ class Supervisor:
         self.preflight_report: Any = None
         self._preflight_at = 0.0
         self.ms = MissionStore(store)
+        # So a stack lease also leases the stack's directory: under the checkpoint's resolved root and the tripwire's configured one.
+        self.ms.stacks_roots = tuple(dict.fromkeys(str(r) for r in (getattr(checkpoint, "stacks_root", None),
+                                                                    getattr(tripwire, "stacks_root", None)) if r))
         self.containment = containment
         self.runtime_factory = runtime_factory
         self.clock = clock
@@ -446,6 +451,16 @@ class Supervisor:
         # acquire is idempotent for the same mission, so `issue_session` takes the same leases (and fences) again.
         held_early = self._acquire_early(mission)
         try:
+            retire = getattr(self.checkpoint, "retire_unused", None)
+            if mission.checkpoint_id is not None and retire is not None:
+                # An earlier start got as far as a checkpoint but never launched a session. That picture of the host may be
+                # stale by now; take a fresh one rather than reuse it. (A checkpoint a session ran under is never retired.)
+                try:
+                    if retire(mission.id):                 # the service records the retirement itself
+                        mission = self.ms.get_mission(mission.id)
+                except Exception as exc:                   # noqa: BLE001 - a stale checkpoint that cannot be retired must not be used
+                    self._note(mission.id, {"checkpoint_retire_failed": type(exc).__name__, "why": str(exc)[:200]})
+                    raise RepairNotReady("the unused checkpoint from an earlier start could not be retired; trying again later") from None
             if mission.checkpoint_id is None:
                 from .checkpoint import CheckpointScope
                 grant = mission.grant()
@@ -469,11 +484,16 @@ class Supervisor:
 
     def _acquire_early(self, mission: Mission) -> bool:
         """Take the grant's leases before the expensive start steps. A conflict is a wait (StartDeferred), not a failure."""
-        wanted = grant_resources(mission.grant())
+        grant = mission.grant()
+        wanted = grant_resources(grant)
         if not wanted:
             return False
         try:
-            leases.acquire(self.store, wanted, mission.id, self.lease_ttl_s)
+            declared = stack_lease_paths(grant, self.ms.stacks_roots)
+        except ValueError as exc:                    # a stacks root that is not absolute: stack directories cannot be leased safely
+            raise RepairNotReady(str(exc)) from None
+        try:
+            leases.acquire(self.store, wanted, mission.id, self.lease_ttl_s, declared)
         except leases.LeaseConflict as exc:
             raise StartDeferred(f"waiting for {exc.resource}: leased by {exc.holder}") from None
         return True
@@ -585,7 +605,23 @@ class Supervisor:
             if self.hook_policy is not None:
                 # The hook layer's inputs, set by Core and nowhere else: the policy it enforces and where it records. The
                 # runtime's hooks inherit them; the session token is never given to a hook (it is on fd 3 only).
-                full_env["PE_HOOK_POLICY"] = self.hook_policy(mission)
+                policy_text = self.hook_policy(mission)
+                if len(policy_text) <= HOOK_POLICY_ENV_MAX:
+                    full_env["PE_HOOK_POLICY"] = policy_text
+                else:
+                    # The launcher refuses any environment value over 4096 characters, and a host with many protected paths
+                    # can exceed that. The policy then goes in the Core-owned hook directory (the session can read it and
+                    # cannot change it) and its hash is checked at every poll, like settings.json.
+                    if run.hook_dir is None:
+                        raise ContainmentError("the hook policy is too large for the session environment and no Core-owned "
+                                               "hook directory is configured")
+                    if len(policy_text.encode("utf-8")) > MAX_POLICY_FILE_BYTES:
+                        raise ContainmentError("the hook policy is larger than the hook will read")
+                    policy_file = run.hook_dir / "policy.json"
+                    policy_file.write_text(policy_text, encoding="utf-8")
+                    policy_file.chmod(0o644)
+                    run.policy_sha = hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
+                    full_env["PE_HOOK_POLICY_FILE"] = str(policy_file)
                 full_env["PE_HOOK_LOG"] = str(workspace / HOOK_LOG_NAME)
             if self.socket_provider is not None:
                 full_env["PE_WORKER_SOCKET"] = self.socket_provider.path(cs.session_id)
@@ -706,20 +742,31 @@ class Supervisor:
         run.output_bytes += update.output_bytes
 
     def _hook_settings_intact(self, run: _Run) -> bool:
-        if run.hook_sha is None or run.hook_dir is None:
+        if run.hook_dir is None:
             return True
-        try:
-            fd = os.open(run.hook_dir / "settings.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except OSError:
-            return False
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
+        for name, want in (("settings.json", run.hook_sha), ("policy.json", run.policy_sha)):
+            if want is None:
+                continue
+            try:
+                fd = os.open(run.hook_dir / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except OSError:
                 return False
-            return hashlib.sha256(os.read(fd, 1 << 20)).hexdigest() == run.hook_sha
-        except OSError:
-            return False
-        finally:
-            os.close(fd)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    return False
+                digest, total = hashlib.sha256(), 0
+                while chunk := os.read(fd, 1 << 16):        # to EOF: a single read may legally return less than the file holds
+                    digest.update(chunk)
+                    total += len(chunk)
+                    if total > 2 * MAX_POLICY_FILE_BYTES:
+                        return False
+                if digest.hexdigest() != want:
+                    return False
+            except OSError:
+                return False
+            finally:
+                os.close(fd)
+        return True
 
     def _hook_log_fault(self, run: _Run, what: str) -> None:
         if not run.hook_log_fault:
@@ -981,16 +1028,36 @@ class Supervisor:
             report = self.tripwire.roll_back(mission_id, actor)
         else:
             self._stop_session_for_restore(mission_id)
-            self.checkpoint.capture_post(mission.checkpoint_id)
+            try:
+                self.checkpoint.capture_post(mission.checkpoint_id)
+            except Exception as exc:                  # noqa: BLE001 - nothing has changed yet: the operator can try again
+                log.warning("mission %s: the post-change capture failed", mission_id, exc_info=exc)
+                raise ResumeRefused(f"the post-change capture failed ({type(exc).__name__}); nothing was restored") from None
             if mission.status != "rollback_pending":
                 transition(self.store, mission_id, "rollback_pending", actor)
-            report = self.checkpoint.restore(mission.checkpoint_id, ack_drift=ack_drift, actor=actor)
+            try:
+                report = self.checkpoint.restore(mission.checkpoint_id, ack_drift=ack_drift, actor=actor)
+            except Exception as exc:                  # noqa: BLE001 - a purged or corrupt checkpoint: end in a defined state
+                return self._restore_raised(mission_id, exc)
             if report.ok:
                 transition(self.store, mission_id, "rolled_back", actor)
         if self.ms.get_mission(mission_id).status == "rolled_back":
             with contextlib.suppress(Exception):
                 recovery.close_open_intents(self.ms, mission_id, "rolled_back", actor=ACTOR)
         return report
+
+    def _restore_raised(self, mission_id: str, exc: Exception) -> Any:
+        """The restore itself raised (checkpoint not found or corrupt, say). The mission must not stay in `rollback_pending`, which
+        an operator cannot leave except by a restore that will fail the same way: hand it over, as the tripwire's rollback does."""
+        reason = (f"the checkpoint could not be restored ({type(exc).__name__}: {str(exc)[:120]}). The restore does not raise once it "
+                  "has started writing, so nothing was written; retrying will fail the same way")
+        log.warning("mission %s: %s", mission_id, reason, exc_info=exc)
+        if self.tripwire is not None:
+            return self.tripwire.hand_over_after_failed_rollback(mission_id, reason)
+        from .checkpoint import RestoreReport
+        transition(self.store, mission_id, "needs_operator", ACTOR)
+        self._note(mission_id, {"rollback_incomplete": reason})
+        return RestoreReport(status="failed", reason=reason)
 
     def _stop_session_for_restore(self, mission_id: str) -> None:
         run = self._runs.get(mission_id)
@@ -1217,7 +1284,7 @@ class Supervisor:
         self._cancel_held.add(mission.id)
         self.ms.set_outcome(mission.id, mission.outcome, "partially_applied", ACTOR)
         self.ms.append_event(mission.id, "decision", ACTOR, {
-            "event": "cancel.held", "reason": "the host differs from the checkpoint, so the mission is not closed as cancelled",
+            "event": "cancel.held", "reason": "the checkpointed files or services differ from the checkpoint, so the mission is not closed as cancelled",
             "offers": ["rollback", "take_over"], "cancel_requested_by": mission.cancel_requested_by})
         if mission.status not in ("needs_operator", "recovery_required", "rollback_pending"):
             try:

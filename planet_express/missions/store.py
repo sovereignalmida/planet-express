@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import posixpath
 import re
 import secrets
 import sqlite3
@@ -48,9 +50,56 @@ def grant_resources(grant: Grant) -> list[str]:
     return out
 
 
+def stack_lease_paths(grant: Grant, stacks_root: str | Sequence[str] | None) -> dict[str, list[str]]:
+    """Each leased stack, and each leased service's stack, mapped to its directory under the stacks root, for `leases.expand`.
+    Without this a stack lease and a path lease inside the same directory do not conflict (leases know nothing about where stacks
+    live), and neither do two service leases in one stack although they share one compose file: two missions could edit the same
+    files at once. Every root given, as written and as resolved, is used, so a symlinked root cannot hide an overlap."""
+    given = [stacks_root] if isinstance(stacks_root, str) else list(stacks_root or ())
+    if not given:
+        return {}
+    roots: list[str] = []
+    for root in given:
+        if not posixpath.isabs(root):
+            raise ValueError(f"the stacks root must be an absolute path, not {root[:80]!r}")
+        for form in (posixpath.normpath(root), os.path.realpath(root)):
+            if form not in roots:
+                roots.append(form)
+    def directories(stack: str, host: str) -> list[str]:
+        forms: list[str] = []
+        for root in roots:
+            joined = posixpath.join(root, stack)
+            for form in (joined, os.path.realpath(joined)):       # the stack directory may itself be a symlink inside the root
+                if form not in forms:
+                    forms.append(form)
+        return [f"host:{host}/path:{f}" for f in forms]
+
+    out: dict[str, list[str]] = {}
+    for host in grant.scope.hosts:
+        for stack in grant.scope.stacks:
+            out[f"host:{host}/stack:{stack}"] = directories(stack, host)
+        for service in grant.scope.services:
+            out[f"host:{host}/service:{service}"] = directories(service.split("/", 1)[0], host)
+        for kind, items in (("path", grant.scope.paths), ("mount", grant.scope.mounts)):
+            for item in items:
+                real = os.path.realpath(item)
+                if real != item and real != posixpath.normpath(item):         # a symlink alias: lease where it really points as well
+                    out[f"host:{host}/{kind}:{item}"] = [f"host:{host}/{kind}:{real}"]
+    return out
+
+
 class MissionStore:
     def __init__(self, store: Store):
         self.store = store
+        self.stacks_roots: tuple[str, ...] = ()   # set by the supervisor once it knows where stacks live (see stack_lease_paths)
+
+    @property
+    def stacks_root(self) -> str | None:
+        return self.stacks_roots[0] if self.stacks_roots else None
+
+    @stacks_root.setter
+    def stacks_root(self, value: str | None) -> None:
+        self.stacks_roots = (value,) if value else ()
 
     def _now(self) -> int:
         return int(self.store._clock())
@@ -253,7 +302,7 @@ class MissionStore:
             rows = conn.execute(
                 "SELECT seq, at, body_json FROM mission_events WHERE mission_id=? AND seq>? AND seq<=? AND kind='tool' "
                 "AND actor=? "
-                "AND json_extract(body_json, '$.event') IN ('docker.create_begin','docker.created','docker.create_end') "
+                "AND json_extract(body_json, '$.event') IN ('docker.create_begin','docker.created','docker.create_end','docker.write') "
                 "ORDER BY seq", (mission_id, after_seq, high, PROXY_ACTOR)).fetchall()
         out = []
         for r in rows:
@@ -340,10 +389,13 @@ class MissionStore:
             fences: dict[str, int] = {}
             if mutating:
                 # `resources` can only add to the grant's own lease set, never replace it.
-                wanted = grant_resources(Grant.model_validate_json(row["grant_json"]))
+                granted = Grant.model_validate_json(row["grant_json"])
+                wanted = grant_resources(granted)
                 wanted += [r for r in (resources or ()) if r not in wanted]
                 if not wanted:
                     raise ValueError(f"{mission_id}: a {row['tier']} grant with an empty scope has nothing to lease")
+                if declared is None:
+                    declared = stack_lease_paths(granted, self.stacks_roots)
                 fences = leases.acquire_in_txn(conn, wanted, mission_id, lease_ttl_s, now, declared)
             if uid_range is not None and session_uid is None:
                 held = {r[0] for r in conn.execute("SELECT session_uid FROM mission_sessions "

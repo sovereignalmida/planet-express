@@ -85,7 +85,7 @@ class Rig:
     pass
 
 
-def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_tree=False, enabled=True):
+def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_tree=False, enabled=True, site_extra=()):
     rig = Rig()
     rig.host = Host()
     fs = tmp_path / "root"
@@ -129,9 +129,10 @@ def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_t
     rig.env = env
     rig.host.stacks = str(env.stacks)
     discovery = Discovery(stacks_root=str(env.stacks), storage_mounts=["/mnt/data"],
+                          volumes=["/var/lib/docker/volumes/media_data/_data", "/var/lib/docker/volumes/vault_data/_data"],
                           live_trees=["/home/repo"] if with_tree else [],
                           cross_host=[("nas", "/etc/exports"), ("router", None)])
-    rig.protected = build_protected(site=["service:media/traefik"], discovery=discovery)
+    rig.protected = build_protected(site=["service:media/traefik", *site_extra], discovery=discovery)
     body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]},
             "verification": {"checks": ["http"]}, "backup": {"covered": True}}
     body.update(grant_over or {})

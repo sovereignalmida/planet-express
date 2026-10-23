@@ -71,6 +71,11 @@ class ProtectedSet:
     carved_out: tuple[str, ...] = ()             # discovered resources left out because they hold the stacks root
     live_trees: tuple[str, ...] = ()
     cross_host_paths: Mapping[str, str] = field(default_factory=dict)
+    explicit: tuple[str, ...] = ()               # the operator's own `missions.protected` entries (not found by discovery)
+
+    def discovery_only_volumes(self) -> frozenset[str]:
+        """Volume mountpoints protected ONLY because discovery lists every volume, not because an operator named them."""
+        return frozenset(self.domains.get("data_volumes", ())) - frozenset(self.explicit)
 
     def covers(self, resource: str) -> bool:
         return any(contains(p, resource) for p in self.resources)
@@ -142,7 +147,8 @@ def build_protected(*, site: Sequence[str], discovery: Discovery, overrides: Seq
             record({"override": target, "reason": ov.reason[:512], "operator": ov.operator, "at": ov.at})
     return ProtectedSet(host=host, resources=tuple(sorted(resources)),
                         domains={d: tuple(rs) for d, rs in domains.items()}, overrides=kept,
-                        carved_out=tuple(carved), live_trees=trees, cross_host_paths=cross)
+                        carved_out=tuple(carved), live_trees=trees, cross_host_paths=cross,
+                        explicit=tuple(sorted(set(extra) & resources)))
 
 
 __all__ = ["DEFAULT_PROTECTED", "REQUIRED_DOMAINS", "Discovery", "OverrideRefused", "ProtectedOverride",

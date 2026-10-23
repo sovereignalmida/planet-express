@@ -541,3 +541,115 @@ def test_cancel_does_not_terminalize_a_revoked_session_that_is_not_yet_proven_de
         conn.execute("UPDATE missions SET checkpoint_id=NULL WHERE id=?", (mid,))
     out = MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
     assert out["status"] not in ("cancelled", "failed", "completed") and out["cancel_requested"] is True
+
+
+def test_a_restore_that_raises_hands_the_mission_to_the_operator_instead_of_leaving_it_stuck(stack):
+    from planet_express.missions.checkpoint import CheckpointNotFound
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+
+    def purged(cid, **kw):
+        raise CheckpointNotFound(cid)
+    st.env.svc.restore = purged
+    st.flow.roll_back("operator:alice", mid)
+    assert st.status(mid) == "needs_operator"                                 # defined state, not rollback_pending forever
+    incomplete = [b for k, a, b in events(st, mid) if b.get("event") == "tripwire.rollback_incomplete"]
+    assert incomplete and "CheckpointNotFound" in incomplete[-1]["reason"]
+    assert st.ms.live_session(mid) is None
+
+
+def test_a_post_change_capture_failure_refuses_without_changing_the_mission(stack):
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+
+    def broken(cid):
+        raise OSError("disk gone")
+    st.env.svc.capture_post = broken
+    with pytest.raises(Exception, match="post-change capture failed"):
+        st.sup.roll_back(mid, "operator:alice")
+    assert st.status(mid) == "rollback_pending"                               # unchanged: the operator can try again
+
+
+def test_a_retried_start_takes_a_fresh_checkpoint_when_the_first_start_launched_no_session(stack):
+    import hashlib
+    st = stack()
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    real_begin = st.monitor.begin
+
+    def blind(mission_id, **kw):
+        raise RuntimeError("the baseline could not be captured")
+    st.monitor.begin = blind
+    st.sup.tick()                                                    # a checkpoint is taken, then the start fails: no session
+    first = st.ms.get_mission(mid).checkpoint_id
+    assert first and st.ms.live_session(mid) is None and not st.runtimes
+    edited = st.env.compose.read_text() + "# the operator edited this while the mission waited\n"
+    st.env.compose.write_text(edited)
+    st.monitor.begin = real_begin
+    st.sup.tick()
+    second = st.ms.get_mission(mid).checkpoint_id
+    assert second and second != first                                # the stale picture was retired, not reused
+    assert noted(st, mid, "checkpoint.retired")[0]["checkpoint"] == first
+    created = noted(st, mid, "checkpoint.created")
+    assert created[-1]["hashes"][str(st.env.compose)] == hashlib.sha256(edited.encode()).hexdigest()   # it describes the host NOW
+    assert not st.env.svc.store.exists(first) if hasattr(st.env.svc.store, "exists") else True
+
+
+def test_a_checkpoint_a_session_ran_under_is_never_retired(stack):
+    st = stack(behaviours=[{"script": [update(), update("finished")]}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    kept = st.ms.get_mission(mid).checkpoint_id
+    assert kept and st.ms.live_session(mid) is not None
+    assert st.env.svc.retire_unused(mid) is None                    # a session exists: the checkpoint is the record of the pre-change host
+    assert st.ms.get_mission(mid).checkpoint_id == kept
+
+
+def test_retiring_needs_a_checkpoint_and_a_live_mission(stack):
+    st = stack()
+    mid = st.propose()["mission_id"]
+    assert st.env.svc.retire_unused(mid) is None                    # nothing to retire yet
+
+
+def test_retire_unused_only_acts_on_a_mission_still_waiting_for_its_decision(stack):
+    st = stack(behaviours=[{"script": [update(), update("finished")]}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.monitor.begin = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("blind"))
+    st.sup.tick()                                                    # checkpoint taken, start failed, no session
+    first = st.ms.get_mission(mid).checkpoint_id
+    assert first and st.status(mid) == "awaiting_decision"
+    with st.env.svc.missions.store._write() as conn:                 # the mission is somewhere an operator could not retry from
+        conn.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (mid,))
+    assert st.env.svc.retire_unused(mid) is None and st.ms.get_mission(mid).checkpoint_id == first
+
+
+def test_a_stale_checkpoint_that_cannot_be_retired_defers_the_start_instead_of_being_used(stack):
+    st = stack(behaviours=[{"script": [update(), update("finished")]}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    real_begin = st.monitor.begin
+    st.monitor.begin = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("blind"))
+    st.sup.tick()
+    first = st.ms.get_mission(mid).checkpoint_id
+    st.monitor.begin = real_begin
+    st.env.compose.write_text(st.env.compose.read_text() + "# edited while the mission waited\n")
+    real_remove = st.env.svc.store.remove
+
+    def cannot_remove(cid):
+        raise OSError("device busy")
+    st.env.svc.store.remove = cannot_remove
+    st.sup.tick()
+    assert st.ms.live_session(mid) is None and st.status(mid) == "awaiting_decision"       # no launch under the stale picture
+    assert st.ms.get_mission(mid).checkpoint_id == first and not noted(st, mid, "checkpoint.retired")
+    assert any("checkpoint_retire_failed" in b for k, a, b in events(st, mid))                # and it says why it is waiting
+    st.env.svc.store.remove = real_remove
+    st.sup.tick()                                                                           # the disk recovers: retired, retaken, started
+    assert st.ms.get_mission(mid).checkpoint_id not in (None, first) and st.ms.live_session(mid) is not None

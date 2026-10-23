@@ -985,3 +985,107 @@ def test_an_nft_meter_flags_dynamic_does_not_change_the_fingerprint_but_a_static
     assert normalise_firewall(meter) != normalise_firewall(meter.replace("dport 22", "dport 2222"))
     static = "table inet f {\n set allow {\n type ipv4_addr\n elements = { 10.0.0.1 }\n }\n}"
     assert normalise_firewall(static) != normalise_firewall(static.replace("10.0.0.1", "0.0.0.0/0"))
+
+
+# ── a proxy-created container may mount a named volume the proxy vetted (G4 final review) ───────────────────────────
+
+VOLUME = {"Type": "volume", "Source": "/var/lib/docker/volumes/media_data/_data", "Destination": "/config", "RW": True}
+
+
+def recreate_through_the_proxy(rig, new_id="e" * 64):
+    rig.host.containers["media-qbit-1"]["Id"] = new_id
+    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy", {"event": "docker.created", "created_id": new_id})
+
+
+def proxy_vets_volume(rig, name="media_data"):
+    """What the real proxy records when it authorises a create that mounts a named volume (policy summary -> docker.write)."""
+    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy", {
+        "event": "docker.write", "route": "container.create", "write_id": "v-" + name,
+        "mounts": [{"type": "volume", "source": name, "target": "/config", "ro": False}]})
+
+
+def test_a_proxy_created_container_may_mount_a_named_volume_the_proxy_recorded_vetting(tmp_path):
+    rig = run(tmp_path)
+    assert any("volumes/media_data" in r for r in rig.protected.resources)       # discovery protects the mountpoint...
+    proxy_vets_volume(rig)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))
+    assert scan(rig)[rig.mission.id] == "ok"                                      # ...but exactly that vetted volume is not a trip
+    assert status(rig) == "executing" and not frozen(rig)
+
+
+def test_a_volume_the_proxy_never_recorded_still_pauses_even_on_a_proxy_created_container(tmp_path):
+    rig = run(tmp_path)
+    proxy_vets_volume(rig, "some_other_volume")                                   # a different volume was vetted
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))            # media_data was not
+    assert scan(rig)[rig.mission.id] == "protected"
+    rig2 = run(tmp_path / "second")
+    recreate_through_the_proxy(rig2)                                              # created through the proxy, but no mount record at all
+    rig2.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))
+    assert scan(rig2)[rig2.mission.id] == "protected"
+
+
+def test_a_vetted_volume_the_grant_excludes_still_pauses(tmp_path):
+    rig = run(tmp_path, grant_over={"exclusions": ["path:/var/lib/docker/volumes/media_data/_data"]})
+    proxy_vets_volume(rig)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))
+    assert scan(rig)[rig.mission.id] == "protected"                               # the grant's own exclusion always wins
+
+
+def test_a_volume_added_to_a_container_the_proxy_did_not_create_still_pauses(tmp_path):
+    rig = run(tmp_path)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))            # same id: nothing the proxy recorded
+    assert scan(rig)[rig.mission.id] == "protected"
+    assert status(rig) == "paused_tripwire"
+
+
+def test_a_bind_mount_of_a_protected_volume_path_still_pauses_even_on_a_proxy_created_container(tmp_path):
+    rig = run(tmp_path)
+    proxy_vets_volume(rig)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append({**VOLUME, "Type": "bind"})
+    assert scan(rig)[rig.mission.id] == "protected"
+
+
+def test_a_proxy_created_container_with_the_protected_services_volume_by_bind_still_pauses(tmp_path):
+    rig = run(tmp_path)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append({"Type": "bind", "Source": "/mnt/data", "Destination": "/data", "RW": True})
+    assert scan(rig)[rig.mission.id] == "protected"
+
+
+def test_a_vetted_volume_the_operator_protected_by_name_still_pauses(tmp_path):
+    # `missions.protected` names this volume's mountpoint: that is the operator's decision, not discovery's blanket listing
+    rig = run(tmp_path, site_extra=["path:/var/lib/docker/volumes/media_data/_data"])
+    assert "host:local/path:/var/lib/docker/volumes/media_data/_data" in rig.protected.explicit
+    assert "host:local/path:/var/lib/docker/volumes/media_data/_data" not in rig.protected.discovery_only_volumes()
+    proxy_vets_volume(rig)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))
+    assert scan(rig)[rig.mission.id] == "protected"
+
+
+def test_a_vetted_volume_under_a_protected_parent_path_still_pauses(tmp_path):
+    rig = run(tmp_path, site_extra=["path:/var/lib/docker"])                        # the operator protected the whole docker root
+    proxy_vets_volume(rig)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))
+    assert scan(rig)[rig.mission.id] == "protected"
+
+
+def test_without_discovery_information_nothing_is_exempted(tmp_path, monkeypatch):
+    rig = run(tmp_path)
+    monkeypatch.setattr(type(rig.monitor), "_discovery_volumes", lambda self: frozenset())
+    proxy_vets_volume(rig)
+    recreate_through_the_proxy(rig)
+    rig.host.containers["media-qbit-1"]["Mounts"].append(dict(VOLUME))
+    assert scan(rig)[rig.mission.id] == "protected"                                   # fail safe: the blanket entries stay in force
+
+
+def test_only_discovered_volumes_are_reported_as_discovery_only(tmp_path):
+    rig = run(tmp_path, site_extra=["path:/var/lib/docker/volumes/vault_data/_data"])
+    only = rig.protected.discovery_only_volumes()
+    assert "host:local/path:/var/lib/docker/volumes/media_data/_data" in only
+    assert "host:local/path:/var/lib/docker/volumes/vault_data/_data" not in only

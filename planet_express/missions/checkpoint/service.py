@@ -291,6 +291,44 @@ class CheckpointService:
             raise CheckpointExists(f"{mission_id} already has a checkpoint, or is no longer live")
         return CheckpointId(checkpoint_id, no_backup, tuple(manifest["facts_unavailable"]))
 
+    def retire_unused(self, mission_id: str) -> str | None:
+        """Forget a checkpoint no session ever ran under, so the next start takes a fresh one.
+
+        A start that fails after the checkpoint is taken but before any session row exists (the checkpoint itself, a blind
+        tripwire baseline) leaves the mission waiting in `awaiting_decision` with that checkpoint attached. Retried hours later,
+        after the operator has edited compose files, it would describe a host that no longer exists: a rollback would overwrite
+        the operator's edits and verification would compare against a stale scan. (A failure after the session row is inserted,
+        such as a launcher error, is not covered: the mission has had a session.)
+        Not eligible (returns None) unless the mission is in `awaiting_decision` and has NEVER had a session: from then on the
+        checkpoint is the only record of the host before the agent touched it, and must be kept. Eligible but impossible to remove
+        raises CheckpointError and changes nothing. Returns the retired checkpoint id."""
+        self._require_enabled()
+        mission = self.missions.get_mission(mission_id)
+        old = mission.checkpoint_id
+        if not old or mission.status != "awaiting_decision":
+            return None
+        now = self._now()
+        with self.missions.store._write() as conn:           # one write lock from the checks to the update: nothing can change between them
+            if conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=?", (mission_id,)).fetchone():
+                return None
+            row = conn.execute("SELECT status, checkpoint_id FROM missions WHERE id=?", (mission_id,)).fetchone()
+            if row is None or row["status"] != "awaiting_decision" or row["checkpoint_id"] != old:
+                return None
+            # The files go first. If they cannot be moved aside nothing has changed: the mission keeps its checkpoint (stale but
+            # safe) and the next start tries again. If they are moved but not fully deleted, the leftover is `.purging-<id>` and
+            # the startup scan finishes it. Only then is the reference cleared, in the same transaction.
+            try:
+                self.store.remove(old)
+            except OSError as exc:
+                # Eligible but not removable: raised, because quietly launching under a stale checkpoint is the exact failure
+                # this method exists to prevent. The transaction is abandoned, so nothing has changed and the caller can wait.
+                log.warning("could not remove checkpoint %s for mission %s", old, mission_id, exc_info=True)
+                raise CheckpointError(f"the unused checkpoint {old} could not be removed ({type(exc).__name__})") from None
+            conn.execute("UPDATE missions SET checkpoint_id=NULL, updated_at=? WHERE id=? AND checkpoint_id=?", (now, mission_id, old))
+            insert_event(conn, mission_id, "note", "core", {"event": "checkpoint.retired", "checkpoint": old,
+                                                             "why": "no session ever ran under it; a fresh one is taken at the next start"}, now)
+        return old
+
     def _take_baseline(self) -> tuple[str | None, str | None, int]:
         if self.baseline_provider is None:
             return None, None, 0

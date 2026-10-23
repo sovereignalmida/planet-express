@@ -231,7 +231,7 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
                               next_state="needs_operator", offers=("take_over", "cancel"), partially_applied=True,
                               refused_replays=unknown)
     if matches_checkpoint(host_state, checkpoint):
-        return Classification("needs_operator", "the host is as the checkpoint recorded it: nothing was applied", phase,
+        return Classification("needs_operator", "the checkpointed files and services are as the checkpoint recorded them: nothing they cover was changed (other files and data are not checked)", phase,
                               offers=("resume", "cancel"), refused_replays=unknown)
     if matches_expectation(host_state, end_expectation(mission)):
         if mission.status not in VERIFY_FROM:

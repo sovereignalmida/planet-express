@@ -142,6 +142,7 @@ class TripwireMonitor:
         self.checkpoint = checkpoint
         self.scanner = scanner
         self.state = TripwireStore(state_dir)
+        self._vetted_volumes: dict[str, set[str]] = {}
         self._proxy_seen: dict[str, tuple] = {}
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self.stacks_root = stacks_root
@@ -273,6 +274,14 @@ class TripwireMonitor:
         events, seq = self.ms.proxy_creates_since(mission_id, seq)
         for _ev_seq, at, body in events:
             kind, nonce = body.get("event"), body.get("nonce")
+            if kind == "docker.write":
+                # The proxy's own record of what it authorised for a create: the named volumes it vetted for this mission.
+                if body.get("route") == "container.create" and isinstance(body.get("mounts"), list):
+                    vetted = self._vetted_volumes.setdefault(mission_id, set())
+                    for mount in body["mounts"]:
+                        if isinstance(mount, dict) and mount.get("type") == "volume" and isinstance(mount.get("source"), str):
+                            vetted.add(mount["source"])
+                continue
             if kind == "docker.create_begin" and isinstance(nonce, str):
                 targets = body.get("targets") if isinstance(body.get("targets"), list) else []
                 begun[nonce] = (at, str(body.get("name") or ""), tuple(str(t) for t in targets))
@@ -289,6 +298,13 @@ class TripwireMonitor:
         pending = tuple((name, targets) for at, name, targets in begun.values() if now - at <= CREATE_GRACE_S)
         return frozenset(created), pending
 
+    def _discovery_volumes(self) -> frozenset[str]:
+        site = getattr(getattr(self.scanner, "env", None), "protected", None)
+        try:
+            return site.discovery_only_volumes() if site is not None else frozenset()
+        except AttributeError:
+            return frozenset()
+
     def _ctx(self, grant: Grant, mission_id: str | None = None) -> DiffContext:
         scope = tuple(canon(r) for r in grant_resources(grant))
         try:
@@ -297,7 +313,9 @@ class TripwireMonitor:
             raise ValueError("grant.protected holds a malformed resource") from None
         created, pending = self._proxy_state(mission_id) if mission_id else (frozenset(), ())
         return DiffContext(scope=scope, protected=prot.protected, excluded=prot.excluded, stacks_root=self.stacks_root,
-                           created=created, creates_in_flight=pending)
+                           created=created, creates_in_flight=pending,
+                           vetted_volumes=frozenset(self._vetted_volumes.get(mission_id, ())) if mission_id else frozenset(),
+                           discovery_volumes=self._discovery_volumes())
 
     def _judge(self, mission: Mission, result: ScanResult, *, proxy_write_overlapped: bool = False) -> str:
         if not result.ok:
@@ -665,6 +683,10 @@ class TripwireMonitor:
             return report
         self._rollback_failed(mission_id, report.reason or "the restore did not complete cleanly", report)
         return report
+
+    def hand_over_after_failed_rollback(self, mission_id: str, reason: str, report: Any = None) -> Any:
+        """For a rollback that was driven from outside the monitor (the supervisor's restore of a mission it already left)."""
+        return self._rollback_failed(mission_id, reason, report)
 
     def _rollback_failed(self, mission_id: str, reason: str, report: Any) -> Any:
         """Hand the mission to the operator with what happened. The event carries a bounded summary and a card."""

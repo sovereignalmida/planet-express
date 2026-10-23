@@ -720,9 +720,11 @@ def policy_for(cfg: Any, protected_resources: Sequence[str] = (), *, stacks_root
 # ── the CLI the runtime's hook configuration invokes ──────────────────────────────────────────────────
 
 POLICY_ENV = "PE_HOOK_POLICY"      # the policy, as JSON, put in the session's environment by Core at launch
+POLICY_FILE_ENV = "PE_HOOK_POLICY_FILE"   # a Core-owned file holding the policy, used when it is too large for the environment
 LOG_ENV = "PE_HOOK_LOG"            # where the hook records its calls; the Supervisor drains it into the mission's events
 HOOK_LOG_NAME = ".pe-hook.log"
 MAX_POLICY_BYTES = 16384
+MAX_POLICY_FILE_BYTES = 1 << 20
 MAX_LOG_LINE = 4096
 
 
@@ -742,13 +744,28 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
     if which not in ("pre", "post"):
         print("usage: hooks pre|post", file=stderr)
         return 2
-    try:
-        text = environ[POLICY_ENV]
-        if len(text) > MAX_POLICY_BYTES:
-            raise ValueError("policy too large")
-        policy = HookPolicy.from_json(text)
-    except (KeyError, ValueError):
-        policy = HookPolicy()                              # the default policy fails closed for blocked classes
+    if environ.get(POLICY_FILE_ENV):
+        # Core pointed this session at a policy file (it was too large for the environment). If that file cannot be read or
+        # parsed, falling back to the default policy would silently drop every protected path, so the call is blocked instead.
+        try:
+            with open(environ[POLICY_FILE_ENV], "rb") as handle:
+                raw_policy = handle.read(MAX_POLICY_FILE_BYTES + 1)
+            if len(raw_policy) > MAX_POLICY_FILE_BYTES:
+                raise ValueError("policy file too large")
+            policy = HookPolicy.from_json(raw_policy.decode("utf-8"))
+        except (ValueError, OSError):
+            if which == "pre":
+                print("pe-hook: blocked: the session's hook policy file could not be loaded", file=stderr)
+                return 2
+            policy = HookPolicy()                          # a post hook only records what happened; it does not use the policy
+    else:
+        try:
+            text = environ[POLICY_ENV]
+            if len(text) > MAX_POLICY_BYTES:
+                raise ValueError("policy too large")
+            policy = HookPolicy.from_json(text)
+        except (KeyError, ValueError):
+            policy = HookPolicy()                          # the default policy fails closed for blocked classes
     runner = HookRunner(policy, post=_log_poster(environ))
     raw = stdin.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:

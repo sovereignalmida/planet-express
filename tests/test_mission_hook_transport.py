@@ -156,8 +156,9 @@ def test_a_failed_install_stops_the_start_and_leaves_nothing_launched(tmp_path):
 
 def test_the_config_requires_a_command_and_a_root_to_install_and_the_runner_installs_only_when_asked(tmp_path):
     import pytest
-    from config_schema import MissionsConfig
     from missions_helpers import make_store
+
+    from config_schema import MissionsConfig
     from planet_express.missions.containment import FakeContainment
     from planet_express.missions.runner import build_mission_runner
     with pytest.raises(ValueError):
@@ -300,3 +301,110 @@ def test_a_log_that_shrinks_or_disappears_is_reported_as_a_session_fault_once(tm
 
 def e_actor(rig):
     return next(e.actor for e in rig.ms.events(rig.mid) if "hook_log_fault" in e.body_json)
+
+
+# ── a policy too large for the environment travels as a Core-owned file (G4 final review) ───────────────────────────
+
+def big_policy():
+    return HookPolicy(live_trees=("/srv/live",), protected_paths=tuple(f"/mnt/data/volumes/{n:064x}" for n in range(80)), blocked_failure="open")
+
+
+def test_a_policy_over_the_launcher_limit_goes_in_a_core_owned_file(tmp_path):
+    from planet_express.missions.hooks import POLICY_FILE_ENV
+    policy = big_policy()
+    assert len(policy.to_json()) > 4096                                    # the size the launcher would refuse in an environment value
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 5}], budgets=BIG)
+    root = tmp_path / "hooks"
+    root.mkdir()
+    with_install(rig, root)
+    rig.sup.hook_policy = lambda mission: policy.to_json()
+    rig.sup.start(rig.mid)
+    sid = rig.session_ids()[0]
+    env = rig.cont.spawns(sid)[0]["env"]
+    assert "PE_HOOK_POLICY" not in env and all(len(v) <= 4096 for v in env.values())
+    path = Path(env[POLICY_FILE_ENV])
+    assert path == root / sid / "policy.json" and HookPolicy.from_json(path.read_text()) == policy
+    assert oct(path.stat().st_mode & 0o777) == "0o644" and path.stat().st_uid == os.getuid()
+    assert not str(path).startswith(str(rig.sup.workspace_dir))
+
+
+def test_a_small_policy_still_travels_in_the_environment(tmp_path):
+    from planet_express.missions.hooks import POLICY_FILE_ENV
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 3}], budgets=BIG)
+    root = tmp_path / "hooks"
+    root.mkdir()
+    with_install(rig, root)
+    rig.sup.hook_policy = lambda mission: POLICY.to_json()
+    rig.sup.start(rig.mid)
+    env = rig.cont.spawns(rig.session_ids()[0])[0]["env"]
+    assert HookPolicy.from_json(env["PE_HOOK_POLICY"]) == POLICY and POLICY_FILE_ENV not in env
+
+
+def test_a_large_policy_with_no_core_owned_directory_fails_the_start_closed(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 3}], budgets=BIG)
+    policy = big_policy()
+    rig.sup.hook_policy = lambda mission: policy.to_json()
+    rig.sup.start(rig.mid)                                                  # no hook directory to put it in
+    events = [json.loads(e.body_json) for e in rig.ms.events(rig.mid)]
+    assert {"start_failed": "ContainmentError"} in events and rig.status() == "needs_operator"
+    assert rig.ms.live_session(rig.mid) is None and not rig.cont.exists(rig.session_ids()[0])      # nothing is left running
+
+
+def test_changing_the_policy_file_is_a_session_fault_like_changing_the_settings(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 9}], budgets=BIG)
+    root = tmp_path / "hooks"
+    root.mkdir()
+    with_install(rig, root)
+    policy = big_policy()
+    rig.sup.hook_policy = lambda mission: policy.to_json()
+    rig.sup.start(rig.mid)
+    sid = rig.session_ids()[0]
+    rig.sup.poll(rig.mid)
+    assert rig.status() == "investigating"
+    (root / sid / "policy.json").write_text(HookPolicy().to_json())          # weaken it to the default
+    rig.sup.poll(rig.mid)
+    events = [json.loads(e.body_json) for e in rig.ms.events(rig.mid)]
+    assert any(b.get("kill") == "hook_tamper" for b in events)
+
+
+def test_the_hook_cli_reads_the_policy_file_and_blocks_when_it_cannot(tmp_path):
+    import io
+
+    from planet_express.missions import hooks
+    path = tmp_path / "policy.json"
+    protected = f"/mnt/data/volumes/{3:064x}"
+    path.write_text(big_policy().to_json())
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": f"cat {protected}/x"}})
+
+    def run(environ, which="pre"):
+        err = io.StringIO()
+        return hooks.main([which], stdin=io.StringIO(payload), stderr=err, environ=environ), err.getvalue()
+    code, _ = run({"PE_HOOK_POLICY_FILE": str(path)})
+    assert code in (0, 2)                                                  # judged by the file's policy (which protects that path)
+    # A policy file that was NAMED but cannot be loaded must block: falling back to the empty default would drop every protected path.
+    for bad in ("not json", ""):
+        path.write_text(bad)
+        code, err = run({"PE_HOOK_POLICY_FILE": str(path)})
+        assert code == 2 and "could not be loaded" in err, bad
+    for environ in ({"PE_HOOK_POLICY_FILE": str(tmp_path / "missing.json")}, {"PE_HOOK_POLICY_FILE": str(tmp_path)}):
+        assert run(environ)[0] == 2
+    path.write_bytes(b"x" * (hooks.MAX_POLICY_FILE_BYTES + 1))
+    assert run({"PE_HOOK_POLICY_FILE": str(path)})[0] == 2                 # too large to read: blocked, not defaulted
+    log = tmp_path / "hook.log"
+    post_payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {"output": "x"}})
+    code = hooks.main(["post"], stdin=io.StringIO(post_payload), stderr=io.StringIO(),
+                      environ={"PE_HOOK_POLICY_FILE": str(path), "PE_HOOK_LOG": str(log)})
+    assert code == 0 and log.exists() and log.read_text().strip()          # the outcome is still recorded; the post hook never blocks
+    assert isinstance(run({})[0], int)                                     # no file named at all: the old default behaviour
+
+
+def test_a_policy_larger_than_the_hook_will_read_refuses_the_start(tmp_path):
+    from planet_express.missions import supervisor as sup
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 3}], budgets=BIG)
+    root = tmp_path / "hooks"
+    root.mkdir()
+    with_install(rig, root)
+    rig.sup.hook_policy = lambda mission: "x" * (sup.MAX_POLICY_FILE_BYTES + 1)
+    rig.sup.start(rig.mid)
+    events = [json.loads(e.body_json) for e in rig.ms.events(rig.mid)]
+    assert {"start_failed": "ContainmentError"} in events and rig.ms.live_session(rig.mid) is None

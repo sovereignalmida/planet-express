@@ -66,6 +66,15 @@ class DiffContext:
     excluded: tuple[str, ...] = ()             # the grant's enforced exclusions: protected-like, but only themselves and below
     created: frozenset[str] = frozenset()      # ids of containers the Docker proxy recorded as created by this mission
     creates_in_flight: tuple[tuple[str, tuple[str, ...]], ...] = ()   # (name, targets) of proxy creates announced, not yet recorded
+    vetted_volumes: frozenset[str] = frozenset()   # named volumes the proxy recorded authorising for this mission's creates
+    discovery_volumes: frozenset[str] = frozenset()   # volume mountpoints protected only by discovery's blanket listing
+
+    def protected_beyond_discovery(self, rid: str) -> bool:
+        """Is `rid` protected for any reason other than discovery listing every volume's mountpoint? The operator's own protected
+        entries, parents of them, and the grant's exclusions all count. With no discovery information the blanket entries are not
+        set aside, so nothing is exempted."""
+        rest = tuple(p for p in self.protected if p not in self.discovery_volumes)
+        return classify(rid, (), rest, stacks_root=self.stacks_root, excluded=self.excluded) == "protected"
 
     def announced(self, name: str, resource: str) -> bool:
         """Is this container one a proxy create announced? By the name it asked for, or (no name asked) by its service."""
@@ -142,6 +151,12 @@ def _containers(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
     return out
 
 
+def _volume_name(source: str) -> str | None:
+    """`<root>/volumes/<name>/_data` -> `<name>`."""
+    parts = source.rstrip("/").split("/")
+    return parts[-2] if len(parts) >= 3 and parts[-1] == "_data" else None
+
+
 def _container_changes(name: str, b: dict | None, c: dict | None, ctx: DiffContext, routes_res: str | None) -> list[Change]:
     out: list[Change] = []
     res = (c or b)["resource"]
@@ -187,8 +202,17 @@ def _container_changes(name: str, b: dict | None, c: dict | None, ctx: DiffConte
     for m in sorted(c["mounts"]):
         if tuple(m[:4]) in old:
             continue
+        # A named volume that THE PROXY RECORDED AUTHORISING for this mission, mounted on a container it recorded creating: its host
+        # mountpoint is "protected" only because discovery lists every volume's mountpoint that way, and judging it by that path
+        # would pause a repair for using a volume the mission was allowed to use. The exemption is exactly that volume (by name,
+        # from the proxy's own record) and never overrides anything else that protects the path (the operator's own protected entries, the grant's exclusions). A bind mount, any other volume, a volume on
+        # a container the proxy did not create, and an existing container that gained a volume are all judged by the path.
         src = ctx.rid(f"path:{m[1]}") if m[1].startswith("/") else None
-        where = ctx.cls(src) if src else "out_of_scope"
+        vetted_volume = (m[0] == "volume" and c.get("id") in ctx.created and _volume_name(m[1]) in ctx.vetted_volumes)
+        if vetted_volume:
+            where = "protected" if src and ctx.protected_beyond_discovery(src) else "in_scope"
+        else:
+            where = ctx.cls(src) if src else "out_of_scope"
         if where == "protected":
             v = "protected"
         elif where == "in_scope":
