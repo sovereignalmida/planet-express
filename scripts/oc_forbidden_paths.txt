@@ -1,0 +1,137 @@
+# Paths that are NEVER delegated to a low-cost OpenCode worker (scripts/oc_delegate.py).
+#
+# A task is refused if its allowed paths touch any of these, and a worker's finished diff is rejected if it changed one.
+# This file is read from the orchestrator's own checkout, never from a worker's worktree.
+#
+# Syntax: one pattern per line, matched against repo-relative paths. `*` matches within one path segment, `**` matches across
+# segments, `?` matches one character. A pattern with a leading `/` is root-level only; one starting with `**/` matches at any
+# depth; anything else is anchored at the repo root. Blank lines and `#` comments are ignored.
+#
+# Why: the safety surface in CLAUDE.md, execution and privilege code, secrets and private data, and the review gates themselves
+# must keep a high-capability author and the Codex + Claude second review. When in doubt, add a line here.
+
+# --- execution safety surface (CLAUDE.md "Second-review gate") ---
+casa_bender.py
+casa_farnsworth.py
+planet_express/execution/**
+planet_express/missions/**
+planet_express/core/**
+planet_express/application/**
+planet_express/integrations/**
+planet_express/setup/**
+planet_express/memory/**
+
+# --- code that Core or the operator's browser EXECUTES, which is as sensitive as the safety surface itself ---
+# Widgets are exec'd into Core's process by planet_express/widgets/registry.py. static/ and templates/ are served to the
+# authenticated operator and carry the approval and elevation UI.
+planet_express/widgets/**
+static/**
+templates/**
+
+# --- every top-level module (daemons, auth, notifier, dashboard backend, config loaders) ---
+/*.py
+
+# --- tests that define or exercise the safety surface (G2 test-first stays with the orchestrator) ---
+tests/test_mission*
+tests/test_missions*
+tests/test_dockerproxy*
+tests/test_launcher*
+tests/test_tripwire*
+tests/test_checkpoint*
+tests/test_sudo*
+tests/test_verify*
+tests/test_command_service*
+tests/test_casa_bender*
+tests/test_farnsworth*
+tests/test_policy*
+tests/test_runbook*
+tests/test_engine*
+tests/test_redact*
+tests/test_memory*
+tests/test_setup*
+tests/test_oc_*
+tests/release_proof/**
+tests/homelab/**
+tests/**/*privileged*
+tests/conftest.py
+tests/*fakes*.py
+
+# --- privileged, deployment, host and VM tooling ---
+scripts/**
+systemd/**
+deploy.sh
+setup.sh
+.github/**
+
+# --- dependencies and build configuration (supply chain) ---
+requirements*.txt
+requirements*.in
+**/pyproject.toml
+config.example.yaml
+
+# --- anything that changes how tests or linters run or what Python imports: a worker must not be able to forge its own acceptance ---
+**/conftest.py
+**/pytest.ini
+**/pytest.toml
+**/.pytest.toml
+**/.coveragerc
+**/tox.ini
+**/setup.cfg
+**/setup.py
+**/noxfile.py
+**/ruff.toml
+**/.ruff.toml
+**/.pre-commit-config.yaml
+**/sitecustomize.py
+**/usercustomize.py
+**/*.pth
+**/Makefile
+
+# --- secrets, credentials and private or runtime data ---
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/id_ed25519*
+**/*secret*
+**/*secret*/**
+**/*credential*
+**/*credential*/**
+**/*password*
+**/*password*/**
+**/.ssh/**
+**/.aws/**
+**/.gnupg/**
+config.yaml
+docs/private/**
+data/**
+state/**
+logs/**
+
+# --- orchestration, review gates and project instructions ---
+**/CLAUDE.md
+**/CLAUDE.local.md
+**/AGENTS.md
+docs/designs/v4-orchestration.md
+docs/designs/v4-mission-control*.md
+docs/designs/v4-slice-0-contracts.md
+docs/handoff/**
+
+# --- git attribute, ignore and module files change how git stores or hides what a worker wrote ---
+**/.gitattributes
+**/.gitmodules
+**/.gitignore
+
+# --- tool, VCS and environment directories ---
+.git/**
+**/.git
+**/.git/**
+.claude/**
+.gstack/**
+.venv/**
+.opencode/**
+opencode.json
+opencode.jsonc

@@ -35,6 +35,7 @@ Keep this table current as agents and models are added. Route by task, cheapest 
 | Explorer | Haiku/Explore subagent | Fan-out reading, "where is X" | Judgement calls |
 | Spec/diff reviewer | Codex CLI | G1, G3, G4 | Writing code in the same slice it reviews |
 | Security pass | `/cso` | v4 security surface, G4 | Routine slices |
+| Delegated worker (low cost) | OpenCode, `openrouter/deepseek/deepseek-v4-flash-0731`, run only through `scripts/oc_delegate.sh` (global subagent `opencode-worker`); cost class: cents per task, $2/day admission cap | Read-only investigations, doc edits, test scaffolding and mechanical changes with named files and a named acceptance check; output is a commit on branch `oc/<slug>` that only the orchestrator reviews and merges, then G3 as usual (`docs/designs/oc-delegation.md`) | Anything in `scripts/oc_forbidden_paths.txt` (safety surface, secrets, infrastructure, review gates), design or contract judgement, and reviewing |
 | Additional models | operator-added | Add a row: name, how invoked, cost class, strengths | — |
 
 Dispatch rules:
