@@ -238,3 +238,10 @@ def test_scan_flags_a_secret_in_the_env(tmp_path):
     object.__setattr__(se, "env", {**se.env, "X": SECRETS["ROUTER_TOKEN"]})
     assert any("env" in h for h in scan_session_env(se, list(SECRETS.values())))
     assert os.path.isdir(se.cwd)
+
+
+def test_a_scope_path_that_is_not_normalised_is_refused_before_approval():
+    # Leases refuse a non-normalised path, so such a grant would be approved and then never start.
+    for path in (f"{STACKS}/media/", f"{STACKS}//media", f"{STACKS}/./media"):
+        assert any("not normalised" in p for p in problems(grant(scope={"paths": [path], "hosts": ["local"]}))), path
+    assert not any("not normalised" in p for p in problems(grant(scope={"paths": [f"{STACKS}/media"], "hosts": ["local"]})))

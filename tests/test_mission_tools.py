@@ -322,3 +322,15 @@ def test_the_supervisor_freezes_a_session_that_hits_the_refusal_cap(tmp_path):
             rig.sup.tool_invoke(session, "nope", {})
     assert group.frozen is True
     assert any("tool_abuse" in e.body_json for e in rig.ms.events(rig.mid))
+
+
+def test_compose_dry_run_never_returns_composes_own_output(tmp_path):
+    ms, m, broker, sess, http, runner = setup(tmp_path, creds=("tool:compose.dry_run",))
+    runner.run = lambda argv, timeout: (1, "", "env file /etc/planetexpress/secrets.env not found")
+    broker.runner = runner.run
+    result = broker.invoke(sess, "compose.dry_run", {"stack": "media"})
+    assert result["ok"] is False and "secrets.env" not in json.dumps(result)
+    from planet_express.missions import tools as tools_module
+    ctx = tools_module.ToolContext(None, tools_module.ToolSite(), None, broker.runner, broker.stacks_root)
+    status, text = tools_module._compose_dry_run(tools_module.ComposeDryRunParams(stack="media"), ctx)
+    assert (status, text) == (422, "the compose file did not validate")

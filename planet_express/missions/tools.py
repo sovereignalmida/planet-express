@@ -173,10 +173,12 @@ def _compose_file(stacks_root: str, stack: str) -> str:
 
 def _compose_dry_run(p: ComposeDryRunParams, ctx: ToolContext) -> tuple[int, str]:
     """Validates the stack's compose file (`compose config --quiet`: nothing is created, nothing is resolved into the
-    output). Exit 0 is HTTP-like 200."""
+    output). Exit 0 is HTTP-like 200. Compose runs as Core on a file the agent can write, and its error text can quote files that
+    file references (`env_file`, `include`), so the answer is a fixed phrase and never Compose's own output. (Pass or fail is
+    still one bit about those files: accepted, and the reason this tool needs the grant to name it.)"""
     argv = ["docker", "compose", "-f", _compose_file(ctx.stacks_root, p.stack), "config", "--quiet"]
-    rc, out, err = ctx.runner(argv, 10)
-    return (200 if rc == 0 else 422), (out or err or "ok")
+    rc, _out, _err = ctx.runner(argv, 10)
+    return (200, "ok") if rc == 0 else (422, "the compose file did not validate")
 
 
 def _health_get(p: AppHealthParams, ctx: ToolContext) -> tuple[int, str]:

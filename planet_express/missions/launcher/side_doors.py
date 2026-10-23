@@ -75,7 +75,19 @@ def _exec_tls_verified(exec_start: str) -> bool:
     return verify and cert and key and bool(cacert) and _readable_file(cacert)
 
 
-_TCP_HOST = re.compile(r"""(?:-H|--host)[ =]*["']?(tcp://[^\s"']*)""", re.IGNORECASE)
+_HOST_FLAG = re.compile(r"""(?:-H|--host)[ =]*["']?([^\s"']+)""", re.IGNORECASE)
+_LOCAL_SCHEMES = ("unix://", "fd://", "npipe://")
+
+
+def _is_tcp_host(value: str) -> bool:
+    """Docker treats a host with no scheme (`0.0.0.0:4243`, `:2375`, `host:port`) as TCP, so TCP is everything that is not a
+    unix socket, a systemd-passed fd, a named pipe or a bare filesystem path."""
+    host = value.strip().strip("\"'").lower()
+    return bool(host) and not host.startswith(_LOCAL_SCHEMES) and not host.startswith("/")
+
+
+def _tcp_hosts(text: str) -> list[str]:
+    return [h for h in _HOST_FLAG.findall(text) if _is_tcp_host(h)]
 MAX_FILE = 1 << 20
 
 
@@ -244,7 +256,7 @@ class DockerTcpExposure(Step):
         tls = (doc.get("tlsverify") is True and isinstance(ca, str) and _readable_file(ca)
                and bool(doc.get("tlscert")) and bool(doc.get("tlskey")))
         return [f"{h} (hosts in {self.p.daemon_json}, no client-verified TLS)" for h in hosts
-                if h.strip().lower().startswith("tcp://") and not tls]
+                if _is_tcp_host(h) and not tls]
 
     def _unit_files(self) -> list[str]:
         out = []
@@ -262,7 +274,7 @@ class DockerTcpExposure(Step):
         return out
 
     def _units(self) -> list[str]:
-        """TCP exposure in docker's units and drop-ins: `-H`/`--host` with tcp:// (any spelling), and any TCP
+        """TCP exposure in docker's units and drop-ins: `-H`/`--host` with tcp:// or no scheme (docker treats `host:port` as TCP), and any TCP
         ListenStream in a docker socket unit. An ExecStart that expands variables cannot be judged: fail closed."""
         found = []
         seen: set[str] = set()
@@ -291,7 +303,7 @@ class DockerTcpExposure(Step):
                         raise StepError(f"cannot tell what {path} passes to dockerd (it expands a variable)")
                     if only_exec_start and _exec_tls_verified(value):
                         continue                         # ExecStartPre/Post never carry the daemon's own flags
-                    for host in _TCP_HOST.findall(value):
+                    for host in _tcp_hosts(value):
                         found.append(f"{host} (ExecStart in {path}, no client-verified TLS)")
                 elif stripped.startswith("ListenStream") and socket_unit:
                     listen = stripped.split("=", 1)[1].strip() if "=" in stripped else ""

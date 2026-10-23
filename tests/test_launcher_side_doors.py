@@ -622,3 +622,24 @@ def test_a_masked_unit_is_skipped_but_a_symlink_loop_or_a_link_to_a_directory_fa
     (wants / "docker.socket").symlink_to(wants / "docker.socket")                    # loop
     probe = DockerTcpExposure(host.paths()).probe()
     assert not probe.ok and probe.blocked
+
+
+@pytest.mark.parametrize("exec_start", [
+    "/usr/bin/dockerd -H unix:///var/run/docker.sock -H 0.0.0.0:4243",       # no scheme: docker treats it as TCP
+    "/usr/bin/dockerd -H :2375",
+    "/usr/bin/dockerd --host=myhost:2375",
+])
+def test_docker_tcp_exec_start_without_a_scheme_is_tcp(host, exec_start):
+    _unit(host, "docker.service", f"[Service]\nExecStart={exec_start}\n")
+    assert not DockerTcpExposure(host.paths()).probe().ok, exec_start
+
+
+def test_docker_tcp_daemon_json_without_a_scheme_is_tcp(host):
+    (host.etc / "docker" / "daemon.json").write_text('{"hosts": ["0.0.0.0:4243"]}\n')
+    probe = DockerTcpExposure(host.paths()).probe()
+    assert not probe.ok and "0.0.0.0:4243" in probe.detail
+
+
+def test_docker_local_hosts_are_not_tcp(host):
+    _unit(host, "docker.service", "[Service]\nExecStart=/usr/bin/dockerd -H fd:// -H unix:///run/docker.sock -H npipe:////./pipe/docker\n")
+    assert DockerTcpExposure(host.paths()).probe().ok

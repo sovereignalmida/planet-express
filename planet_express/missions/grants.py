@@ -88,6 +88,10 @@ def validate_grant(grant: Grant, *, inventory: Inventory, protected: ProtectedSe
     for path in scope.paths:
         if not path.startswith("/") or ".." in path.split("/") or not _under_root(os.path.normpath(path), inventory.path_roots):
             out.append(f"scope path {path[:80]!r} is not under a root in the discovered inventory")
+        elif os.path.normpath(path) != path and path != "/":
+            # Leases refuse a path that is not already normalised, so a grant that carried one would be approved and then
+            # never start. Say so now.
+            out.append(f"scope path {path[:80]!r} is not normalised (no trailing slash, '//' or '.' segments)")
     try:
         scope_ids = [canon(r) for r in grant_resources(grant)]
     except BadResource as exc:
