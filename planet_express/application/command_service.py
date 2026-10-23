@@ -918,6 +918,65 @@ class CommandService:
             self._store.record_event("automatic.refused", action="runbook", reason=reason,
                                      requested_via=origin, title=runbook.title)
             return AutomaticResult("refused", reason)
+        return self._run_decided(runbook, decision, origin=origin, target_key=target_key,
+                                 operator=operator, refused_event="automatic.refused")
+
+    def run_mission_runbook(
+        self, runbook: runbooks.Runbook, *, mission_id: str, session_id: str, gate,
+    ) -> AutomaticResult:
+        """Run a typed runbook for a mission, synchronously, under the mission's own approval (slice 10).
+
+        The host-mutation lock is taken first and the gate is asked while holding it, so the check happens right before the
+        step runs. `gate.authorize` (missions.typed_steps) enforces scope, protected resources, leases, mission and session
+        state, step type and budget, and records the check; the authorization it returns is only good for this mission and
+        this exact runbook. The approval is recomputed here from the store, not taken from the gate. `policy.decide_runbook`
+        then applies the same risk policy as everywhere else, with the mission's approval as the approval, and T24's attempt
+        limits still count the step. Between the runbook's steps the engine asks the gate again, so a cancel, a pause or a
+        revoked session stops what is left."""
+        from planet_express.missions import approvals
+        from planet_express.missions.typed_steps import MissionStepGate, StepRefused
+
+        def refuse(reason: str) -> AutomaticResult:
+            try:
+                self._store.record_event("mission.step_refused", action="runbook", reason=reason[:300],
+                                         requested_via="mission", title=runbook.title, mission_id=mission_id)
+            except Exception:                                    # noqa: BLE001 - the refusal still reaches the caller
+                log.warning("Could not record a refused mission step for %s", mission_id)
+            return AutomaticResult("refused", reason)
+
+        if not isinstance(gate, MissionStepGate):
+            return refuse("no mission step gate")
+        owner = f"mission:{mission_id}:{secrets.token_hex(4)}"
+        if not self._state.try_begin_mutation(owner):
+            return refuse(f"host busy ({self._state.busy_reason})")
+        try:
+            try:
+                auth = gate.authorize(mission_id, runbook, session_id=session_id)
+            except StepRefused as exc:
+                return refuse(str(exc))
+            if not auth.valid_for(runbook, mission_id):
+                return refuse("the authorization does not cover this runbook")
+            decision = policy.decide_runbook(
+                runbook, "mission", mission_approved=approvals.mission_step_approved(self._store, mission_id),
+                guarded_touch_approved=approvals.guarded_touch_approved(self._store, mission_id))
+            if not decision.allowed:
+                return refuse(decision.reason)
+            plan_sha = runbooks.plan_sha256(runbook)
+            result = self._run_decided(
+                runbook, decision, origin="mission", target_key=f"mission:{mission_id}:{plan_sha[:16]}",
+                operator=f"mission:{mission_id}", refused_event="mission.step_refused",
+                abort_check=lambda: not gate.still_current(mission_id, session_id))
+            gate.record_outcome(mission_id, auth, result.execution_id, result.outcome, result.reason or "")
+            return result
+        finally:
+            self._state.end_mutation(owner)
+
+    def _run_decided(
+        self, runbook: runbooks.Runbook, decision, *, origin: str, target_key: str, operator: str | None,
+        refused_event: str, abort_check: Callable[[], bool] | None = None,
+    ) -> AutomaticResult:
+        """Everything after the policy said yes, shared by the unattended runs and a mission's step: T24's limits, the
+        execution row, the engine, and settling the row whatever the engine did. `abort_check` is asked between steps."""
         now = self._clock()
         since = now - policy.limit_lookback_seconds()
         for pair, requested in Counter(decision.pairs).items():
@@ -927,7 +986,7 @@ class CommandService:
                 + self._legacy_attempts(step_type, pair_key, since), now, requested=requested)
             if limit is not None:
                 reason = f"{step_type} {pair_key}: {limit}"
-                self._store.record_event("automatic.refused", action="runbook", reason=reason,
+                self._store.record_event(refused_event, action="runbook", reason=reason,
                                          requested_via=origin, title=runbook.title)
                 return AutomaticResult("refused", reason)
         result = self._store.create_direct_runbook_execution(
@@ -941,7 +1000,7 @@ class CommandService:
             return AutomaticResult("refused", "host slow, retry")
         execution_id = result["execution"]["id"]
         try:
-            outcome = engine.RunbookEngine(self, on_failure=self._on_failure).run(
+            outcome = engine.RunbookEngine(self, on_failure=self._on_failure, is_abort_requested=abort_check).run(
                 execution_id, runbook, origin=origin)
             status, reason = outcome.status, outcome.reason
         except Exception as exc:

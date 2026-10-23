@@ -144,6 +144,14 @@ def decide_runbook(
             f"runbook is {computed_risk}: never allowed", pairs,
         )
     if origin == "mission":
+        # A mutating step must name a stack, which a scope check can be made against. (`missions.typed_steps` enforces the same rule;
+        # this copy is for any path that reaches the policy without it.) One with empty params
+        # (stack.up_all, prune.safe, ...) has no target at all: it would slip past both the network guard and the grant's scope.
+        untargeted = [step.type for step in runbook.steps
+                      if runbooks.STEP_TYPES[step.type].risk != "R0" and not step.params.get("stack")]
+        if untargeted:
+            return RunbookDecision(False, False, False, computed_risk,
+                                   f"{untargeted[0]} names no target a mission may touch", pairs)
         if not guarded_touch_approved and any(
                 actions.is_network_guarded(str(step.params.get("stack", "")), str(step.params.get("service", "")))
                 for step in runbook.steps):
