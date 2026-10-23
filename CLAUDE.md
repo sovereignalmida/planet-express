@@ -14,6 +14,11 @@ Run one of:
     codex review --base main        # everything on this branch since it diverged from main
     codex review --uncommitted      # staged/unstaged/untracked changes not yet committed
 
+**If Codex is unavailable** (usage limit, auth failure, outage), run Claude's `/code-review` and SKIP the Codex review for that
+work. The gate exists to make sure we do the second review when we can, not to block progress or leave work waiting. Don't queue
+a Codex re-review for later, and don't hold a commit or the next spec on it. Record in the commit message or `STATE.md` that
+Codex was skipped and why.
+
 Read every finding it reports and either fix it or tell the user explicitly why it's being left
 as-is — don't silently drop findings. Both reviews stay in the loop; they catch different things.
 

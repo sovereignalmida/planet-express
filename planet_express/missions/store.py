@@ -17,6 +17,7 @@ from .events import insert_event
 from .models import Grant, Mission, MissionEvent, Origin, SessionKind
 from .state import MissionNotFound, transition_in_txn
 
+RECENT_TAIL_ROWS = 2000              # how far back the tripwire looks for a recent proxy write
 PROXY_ACTOR = "docker-proxy"          # the only actor whose records may vouch for a container
 
 
@@ -227,6 +228,20 @@ class MissionStore:
                                 (mission_id, after_seq)).fetchall()
         return [MissionEvent(**dict(r)) for r in rows]
 
+    def latest_seq(self, mission_id: str) -> int:
+        with self.store._connect() as conn:
+            return int(conn.execute("SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?",
+                                    (mission_id,)).fetchone()[0])
+
+    def proxy_write_since(self, mission_id: str, after_seq: int) -> bool:
+        """Whether an accepted proxy write began after a scan cursor, even if its result is already recorded."""
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM mission_events WHERE mission_id=? AND seq>? AND kind='tool' AND actor=? "
+                "AND json_extract(body_json, '$.event')='docker.write' LIMIT 1",
+                (mission_id, after_seq, PROXY_ACTOR)).fetchone()
+        return row is not None
+
     def proxy_creates_since(self, mission_id: str, after_seq: int = 0) -> tuple[list[tuple[int, int, dict[str, Any]]], int]:
         """(seq, at, body) of the Docker proxy's container-create records for this mission after `after_seq`. Pinned to the
         proxy's own actor (nothing else may vouch for a container) and read from the (mission, seq) index forward, so a
@@ -249,6 +264,41 @@ class MissionStore:
             if isinstance(body, dict):
                 out.append((r["seq"], r["at"], body))
         return out, max(high, after_seq)
+
+    def proxy_write_active(self, mission_id: str, settle_s: float, max_in_flight_s: float) -> bool:
+        """Whether the Docker proxy is mid-write for this mission: a write with no result yet (counted only while it is younger
+        than ``max_in_flight_s``, so a result that never comes cannot hold this open) or any write or result in the last
+        ``settle_s`` seconds. Reads only the tail of the (mission, seq) index, so a long mission's history is not scanned on
+        every poll."""
+        now = self._now()
+        with self.store._connect() as conn:
+            floor = int(conn.execute("SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?",
+                                     (mission_id,)).fetchone()[0]) - RECENT_TAIL_ROWS
+            rows = conn.execute(
+                "SELECT at, body_json FROM mission_events WHERE mission_id=? AND seq>? AND at>=? AND kind='tool' AND actor=? "
+                "AND json_extract(body_json, '$.event') IN ('docker.write','docker.result') ORDER BY seq",
+                (mission_id, floor, now - max(settle_s, max_in_flight_s), PROXY_ACTOR)).fetchall()
+        pending: dict[str, int] = {}
+        legacy: list[int] = []
+        for row in rows:
+            try:
+                body = json.loads(row["body_json"])
+                event, write_id = body.get("event"), body.get("write_id")
+            except (AttributeError, ValueError):
+                continue
+            if row["at"] >= now - settle_s:
+                return True
+            keyed = isinstance(write_id, str) and bool(write_id)
+            if event == "docker.write":
+                if keyed:
+                    pending[write_id] = row["at"]
+                else:
+                    legacy.append(row["at"])
+            elif keyed:
+                pending.pop(write_id, None)
+            elif legacy:
+                legacy.pop(0)
+        return any(at >= now - max_in_flight_s for at in (*pending.values(), *legacy))
 
     # ── sessions ────────────────────────────────────────────────────────────
     def start_session(self, mission_id: str, *, kind: SessionKind, token_hash: str, session_ttl_s: int,

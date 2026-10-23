@@ -27,6 +27,22 @@ OVERRIDE_NAMES = ("compose.override.yaml", "compose.override.yml", "docker-compo
 COMPOSE_NAMES = (*BASE_NAMES, *OVERRIDE_NAMES, ".env")
 # The facts restore asserts after a recreate (contract §7 "Restorable"): compared exactly.
 RESTORABLE_FIELDS = ("image_id", "command", "env_hash", "mounts", "networks", "labels", "restart_policy", "health")
+# DockerProxyService adds this provenance marker to containers it creates, solely so the proxy re-checks their immutable
+# mount/network properties at start. A Core-owned checkpoint restore recreates directly and deliberately does not add it.
+# It is bookkeeping, not service configuration, so it must not make an otherwise exact restore look incomplete.
+PROXY_CREATED_LABEL = "io.planetexpress.created-by-proxy"
+# Compose rewrites these on every recreate. `config-hash` is among them: measured on Compose v2, a service with
+# `network_mode: service:<other>` gets a different hash after every recreate (the resolved container id is hashed), so it cannot
+# tell a faithful restore from an unfaithful one. Compose-level settings are covered by the compose files, which restore
+# byte-for-byte and are verified by hash. The identity labels (project, service, working_dir, ...) stay in the comparison.
+VOLATILE_COMPOSE_LABELS = frozenset({f"com.docker.compose.{n}" for n in
+                                     ("replace", "container-number", "depends_on", "image", "config-hash")})
+
+
+def comparable_labels(labels: Any) -> dict[str, str]:
+    """The labels a restore compares: everything but proxy bookkeeping and Compose's per-recreate metadata."""
+    return {str(k): str(v) for k, v in sorted((labels or {}).items())
+            if k != PROXY_CREATED_LABEL and k not in VOLATILE_COMPOSE_LABELS}
 DOCKER_TIMEOUT_S = 30
 # `compose config` prints every resolved value, secrets included: bounded, and only `name` is ever kept.
 CONFIG_MAX_BYTES = 2 * 1024 * 1024
@@ -82,7 +98,7 @@ class ContainerFacts:
             command=[*(config.get("Entrypoint") or []), *(config.get("Cmd") or [])],
             env_hash=hashlib.sha256("\0".join(env).encode()).hexdigest(),
             mounts=mounts, networks=networks,
-            labels={str(k): str(v) for k, v in sorted((config.get("Labels") or {}).items())},
+            labels=comparable_labels(config.get("Labels")),
             restart_policy={"name": policy.get("Name", ""), "max_retries": int(policy.get("MaximumRetryCount") or 0)},
             health=dict(health) if health else None)
 

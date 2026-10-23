@@ -154,6 +154,48 @@ def test_host_network_mode_stays_refused_and_so_does_container_in_an_endpoint_co
     refused(policy, body, "not served")
 
 
+def test_compose_endpoint_defaults_are_ignored_but_endpoint_configuration_is_refused(policy):
+    body = create_body(NetworkingConfig={"EndpointsConfig": {"media_default": {
+        "Aliases": ["qbittorrent"], "IPAMConfig": None, "Links": None, "DriverOpts": None, "GwPriority": 0,
+        "MacAddress": "", "DNSNames": ["qbittorrent", "abc123"], "NetworkID": "a" * 64,
+        "EndpointID": "b" * 64, "Gateway": "172.20.0.1", "IPAddress": "172.20.0.2", "IPPrefixLen": 16,
+        "IPv6Gateway": "", "GlobalIPv6Address": "", "GlobalIPv6PrefixLen": 0,
+    }}})
+    sent = json.loads(create(policy, body).body)["NetworkingConfig"]
+    assert sent == {"EndpointsConfig": {"media_default": {"Aliases": ["qbittorrent"]}}}
+    for key, value in (("IPAMConfig", {"IPv4Address": "10.0.0.2"}), ("Links", ["x:y"]),
+                       ("DriverOpts", {"x": "y"}), ("GwPriority", 1), ("MacAddress", "02:42:ac:11:00:02")):
+        bad = create_body(NetworkingConfig={"EndpointsConfig": {"media_default": {key: value}}})
+        with pytest.raises(Refusal, match=rf"endpoint {key} is not served"):
+            create(policy, bad)
+    inspect_only = create_body(NetworkingConfig={"EndpointsConfig": {"media_default": {"EndpointID": "x"}}})
+    assert json.loads(create(policy, inspect_only).body)["NetworkingConfig"] == {"EndpointsConfig": {"media_default": {}}}
+    unknown = create_body(NetworkingConfig={"EndpointsConfig": {"media_default": {"Spoofed": "x"}}})
+    with pytest.raises(Refusal, match="endpoint field not served: Spoofed"):
+        create(policy, unknown)
+
+
+def test_a_service_scoped_recreate_may_rejoin_only_its_existing_compose_project_network(root):
+    from planet_express.missions.dockerproxy.policy import NetworkInfo
+
+    class ProjectNetworks(FakeInspector):
+        def network(self, ref):
+            if ref == "media_backend":
+                return NetworkInfo("b" * 64, ref, labels("media"))
+            return super().network(ref)
+
+    paths = (f"{HOST}/path:{root}/stacks/media",)
+    scoped = Policy(make_scope(str(root), resources=(f"{HOST}/service:media/qbittorrent", *paths), paths=paths),
+                    ProjectNetworks())
+    body = create_body(NetworkingConfig={"EndpointsConfig": {"media_default": {}}},
+                       HostConfig={"NetworkMode": "media_default", "RestartPolicy": {"Name": "no"}})
+    assert create(scoped, body)
+    for network in ("media_backend", "other_default", "host"):
+        bad = create_body(NetworkingConfig={"EndpointsConfig": {network: {}}})
+        with pytest.raises(Refusal):
+            create(scoped, bad)
+
+
 def test_an_excluded_container_is_not_a_network_target(root):
     p = Policy(make_scope(str(root), excluded=(f"{HOST}/service:media/plex",)), FakeInspector())
     with pytest.raises(Refusal, match="outside this mission's scope|protected"):
@@ -283,11 +325,42 @@ def test_volumes_from_an_out_of_scope_container_is_refused(policy, ref):
 
 
 def test_an_unknown_top_level_or_host_config_field_is_refused(policy):
-    refused(policy, create_body(Volumes={"/x": {}}), "container field not served")
-    refused(policy, create_body(OnBuild=["x"]), "container field not served")
-    refused(policy, host(CgroupParent="/x"), "HostConfig field not served")
-    refused(policy, host(Runtime="nvidia"), "HostConfig field not served")
-    refused(policy, host(Links=["a:b"]), "HostConfig field not served")
+    refused(policy, create_body(Volumes={"/x": {}}), "Volumes is not served")
+    refused(policy, create_body(OnBuild=["x"]), "OnBuild is not served")
+    refused(policy, host(CgroupParent="/x"), "HostConfig CgroupParent is not served")
+    refused(policy, host(Runtime="nvidia"), "HostConfig Runtime is not served")
+    refused(policy, host(Links=["a:b"]), "HostConfig Links is not served")
+
+
+def test_an_empty_inspect_shaped_onbuild_placeholder_is_ignored_but_an_instruction_is_refused(policy):
+    sent = json.loads(create(policy, create_body(OnBuild=None)).body)
+    assert "OnBuild" not in sent
+    for key in ("OnBuild", "Volumes", "Shell"):
+        for value in (None, [], {}, "", False, 0):
+            assert key not in json.loads(create(policy, create_body(**{key: value})).body)
+        with pytest.raises(Refusal, match=rf"{key} is not served"):
+            create(policy, create_body(**{key: ["not inert"]}))
+
+
+def test_zero_value_inspect_host_config_fields_are_ignored_but_meaningful_values_are_refused(policy):
+    inert = {"BlkioDeviceReadBps": [], "Runtime": "", "CgroupParent": None, "CpuQuota": 0, "OomKillDisable": False,
+             "ConsoleSize": [0, 0]}
+    sent = json.loads(create(policy, host(**inert)).body)["HostConfig"]
+    assert not (set(sent) & set(inert))
+    for key, value in (("BlkioDeviceReadBps", [{"Path": "/dev/sda", "Rate": 1}]), ("Runtime", "nvidia"),
+                       ("CgroupParent", "/x"), ("CpuQuota", 1), ("OomKillDisable", True)):
+        with pytest.raises(Refusal, match=rf"HostConfig {key} is not served"):
+            create(policy, host(**{key: value}))
+    with pytest.raises(Refusal, match="HostConfig ConsoleSize is not served"):
+        create(policy, host(ConsoleSize=[80, 25]))
+
+
+def test_an_empty_inspect_log_driver_marker_is_ignored_but_an_unapproved_driver_is_refused(policy):
+    for config in (None, {}, []):
+        sent = json.loads(create(policy, host(LogConfig={"Type": "", "Config": config})).body)["HostConfig"]
+        assert "LogConfig" not in sent
+    with pytest.raises(Refusal, match="LogConfig not served"):
+        create(policy, host(LogConfig={"Type": "syslog", "Config": {}}))
 
 
 def test_the_new_container_must_carry_labels_that_put_it_in_scope(policy):

@@ -148,7 +148,10 @@ def test_an_accepted_write_is_recorded_before_it_is_forwarded(proxy):
     write = proxy.daemon.writes()[0]
     assert write["target"] == f"/v1.43/containers/{ID_A}/restart?t=5"
     assert proxy.gate.writes()[0]["route"] == "container.restart" and proxy.gate.writes()[0]["targets"] == ["host:local/service:media/qbittorrent"]
-    assert proxy.gate.events[-1] == {"event": "docker.result", "route": "container.restart", "status": 204}
+    result = proxy.gate.events[-1]
+    assert {k: result[k] for k in ("event", "route", "status")} == {
+        "event": "docker.result", "route": "container.restart", "status": 204}
+    assert result["write_id"] == proxy.gate.writes()[0]["write_id"]
 
 
 def test_if_the_event_cannot_be_written_nothing_is_forwarded(proxy):
@@ -892,3 +895,18 @@ def test_a_created_id_that_cannot_be_recorded_fails_the_create_closed_and_remove
     assert status == 500
     assert any(r["method"] == "DELETE" for r in proxy.daemon.requests)
     assert any(e["event"] == "docker.create_end" for e in proxy.gate.events)
+
+
+def test_a_write_that_fails_upstream_still_closes_its_record(proxy):
+    real = proxy.server.upstream.open
+
+    def broken(method, *args, **kwargs):
+        if method == "POST":
+            from planet_express.missions.dockerproxy.upstream import UpstreamError
+            raise UpstreamError("daemon went away")
+        return real(method, *args, **kwargs)
+    proxy.server.upstream.open = broken
+    status, _, _ = proxy.req("POST", "/containers/qbittorrent/restart")
+    assert status == 502
+    write, result = proxy.gate.writes()[0], proxy.gate.events[-1]
+    assert result["event"] == "docker.result" and result["status"] == 0 and result["write_id"] == write["write_id"]

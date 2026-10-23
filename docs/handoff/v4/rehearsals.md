@@ -87,7 +87,8 @@ checkpoint's MOS provider is conformance-tested but MOS parity is not claimed be
 | --- | --- | --- | --- |
 | 2026-10-20 | MOS test VM (direct strategy) | privileged tests, containment rehearsal | passed (see `STATE.md`; `/mnt/data` chowned `root:root 755`, operator-approved 2026-10-21) |
 | 2026-10-20 | Ubuntu test VM (sudo strategy) | privileged tests, containment rehearsal | passed (see `STATE.md`) |
-| PENDING | Ubuntu test VM | `run_rehearsal.sh --vm HOST` (item 7a and 7b) | not yet run: needs a human to start it on the VM |
+| 2026-10-23 | Ubuntu test VM (sudo strategy) | privileged test suite after item 7 fixes | 259 passed, 5 skipped |
+| 2026-10-23 | Ubuntu test VM | `run_rehearsal.sh --vm HOST` (item 7a and 7b) | passed in 102.349 s: namespace 15 writes/3 creates, failed canary 5/1 then rolled back, bounded correction 5/1; no refusals; all missions released; teardown empty (`/tmp/planet-express-rehearsal-20261023-final.json` on the operator host) |
 | PENDING | either VM | refusal case: an open side door keeps a Repair mission waiting (item 9) | not yet run |
 | PENDING | MOS test VM | repair rehearsal | not claimed (no compose plugin) |
 

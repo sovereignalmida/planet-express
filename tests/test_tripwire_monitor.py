@@ -336,6 +336,79 @@ def test_in_scope_changes_do_not_pause(tmp_path):
     assert scan(rig)[rig.mission.id] == "ok"
 
 
+def proxy_write(rig, write_id="w"):
+    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy",
+                            {"event": "docker.write", "route": "container.stop", "write_id": write_id})
+
+
+def test_a_firewall_change_is_excused_while_a_proxy_write_is_unresolved(tmp_path):
+    rig = run(tmp_path)
+    plant_firewall(rig)
+    proxy_write(rig)
+    rig.env.clock.t += 60                                             # a long container stop: older than the settle window
+    assert scan(rig)[rig.mission.id] == "ok"
+    assert status(rig) == "executing" and not frozen(rig)
+    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy",
+                            {"event": "docker.result", "route": "container.stop", "status": 204, "write_id": "w"})
+    rig.env.clock.t += 60
+    assert scan(rig)[rig.mission.id] == "protected"                   # finished and settled: judged
+    assert status(rig) == "paused_tripwire"
+
+
+def test_a_transient_firewall_change_during_proxy_writes_does_not_pause(tmp_path):
+    rig = run(tmp_path)
+    original = rig.host.firewall
+    plant_firewall(rig)
+    proxy_write(rig)
+    assert scan(rig)[rig.mission.id] == "ok"
+    rig.host.firewall = original                                      # Docker finished: the rules are back
+    assert scan(rig)[rig.mission.id] == "ok"
+    assert status(rig) == "executing" and not frozen(rig)
+
+
+def test_continuous_proxy_writes_cannot_hide_a_firewall_change_forever(tmp_path):
+    rig = run(tmp_path)
+    plant_firewall(rig)
+    for n in range(40):
+        proxy_write(rig, f"w{n}")                                     # one more write, never a result
+        rig.env.clock.t += 5
+        if scan(rig)[rig.mission.id] != "ok":
+            break
+    assert status(rig) == "paused_tripwire"
+    assert 100 <= n * 5 <= 140
+
+
+def test_a_write_whose_result_never_comes_cannot_excuse_a_firewall_change_forever(tmp_path):
+    rig = run(tmp_path)
+    plant_firewall(rig)
+    proxy_write(rig)
+    rig.env.clock.t += 121
+    assert scan(rig)[rig.mission.id] == "protected"
+
+
+def test_a_firewall_change_with_no_recent_proxy_write_pauses_at_once(tmp_path):
+    rig = run(tmp_path)
+    plant_firewall(rig)
+    assert scan(rig)[rig.mission.id] == "protected"
+
+
+def test_a_proxy_write_holds_back_only_the_firewall_change(tmp_path):
+    rig = run(tmp_path)
+    plant_firewall(rig)
+    rig.host.containers["media-traefik-1"]["Config"]["Labels"]["x"] = "touched"
+    proxy_write(rig)
+    assert scan(rig)[rig.mission.id] == "protected"
+    assert status(rig) == "paused_tripwire"
+    assert all(c["kind"] != "firewall_changed" for c in paused_event(rig)["changes"])
+
+
+def test_a_corrupt_firewall_excuse_file_does_not_pause_the_mission(tmp_path):
+    rig = run(tmp_path)
+    (tmp_path / "tripwire" / rig.mission.id / "firewall-excused.json").write_text("{not json")
+    assert scan(rig)[rig.mission.id] == "ok"
+    assert status(rig) == "executing"
+
+
 def test_protected_container_inside_the_stack_pauses_but_the_helper_does_not(tmp_path):
     rig = run(tmp_path)
     rig.host.containers["media-qbit-1"]["Image"] = "sha256:helper-v2"

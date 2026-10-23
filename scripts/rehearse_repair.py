@@ -645,7 +645,6 @@ def scenario_namespace(rig: "Rig", rec: Recorder, stack_dir: Path) -> None:
 def scenario_canary(rig: "Rig", rec: Recorder, stack_dir: Path) -> None:
     compose = stack_dir / "docker-compose.yml"
     original = compose.read_text()
-    before = container_ids()
     mid = rig.run_mission("canary-bad", rec, title="rehearsal: canary configuration change",
                           scope={"stacks": [PROJECT], "hosts": ["local"]}, on_verify_fail="rollback",
                           until=("rollback_pending", "completed", "needs_operator", "recovery_required", "failed",
@@ -661,12 +660,15 @@ def scenario_canary(rig: "Rig", rec: Recorder, stack_dir: Path) -> None:
     except Exception as exc:                                        # noqa: BLE001
         rec.step("canary:rolled-back", False, f"{type(exc).__name__}: {str(exc)[:200]}")
         return
+    # A checkpoint restore may recreate the whole affected Compose project. The bounded-correction assertion starts here:
+    # it proves what the second mission changes, rather than charging the preceding rollback's work to that mission.
+    before_correction = container_ids()
     mid2 = rig.run_mission("canary-fix", rec, title="rehearsal: bounded configuration correction",
                            scope={"services": [f"{PROJECT}/web"], "hosts": ["local"]}, on_verify_fail="needs_operator",
                            until=("completed", "needs_operator", "rollback_pending", "recovery_required", "failed",
                                   "paused_tripwire"))
     after = container_ids()
-    others = {s for s in ("gateway", "app1", "app2") if s in before and before[s] != after.get(s)}
+    others = {s for s in ("gateway", "app1", "app2") if s in before_correction and before_correction[s] != after.get(s)}
     rec.step("canary:only-web-recreated", mid2 is not None and rig.status(mid2) == "completed" and not others,
              unexpectedly_recreated=sorted(others))
 

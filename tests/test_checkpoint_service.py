@@ -29,7 +29,7 @@ from planet_express.missions.checkpoint import (
     ScopeRefused,
     SystemdCheckpointProvider,
 )
-from planet_express.missions.checkpoint.provider import ProviderError
+from planet_express.missions.checkpoint.provider import ContainerFacts, ProviderError
 from planet_express.missions.checkpoint.service import CheckpointSettings, _Hooks
 from planet_express.missions.checkpoint.store import CheckpointStore, StoreError
 
@@ -399,6 +399,23 @@ def test_restore_recreates_and_compares_service_facts(tmp_path):
     assert env.docker.recreated == ["media/web"]
 
 
+def test_restore_normalises_generated_labels_in_an_existing_v1_manifest(tmp_path):
+    env = make_env(tmp_path)
+    cid = env.svc.create(env.mission.id, env.scope)
+    env.svc.capture_post(cid)
+    path = env.root / cid / "manifest.json"
+    manifest = json.loads(path.read_text())
+    labels = manifest["facts"]["services"]["media/web"]["labels"]
+    labels["com.docker.compose.replace"] = "legacy-generated-value"
+    labels["io.planetexpress.created-by-proxy"] = "1"
+    path.write_text(json.dumps(manifest))
+
+    report = env.svc.restore(cid)
+
+    assert report.status == "done" and report.ok and report.unrestored == []
+    assert env.docker.recreated == []
+
+
 def test_deliberately_drifted_label_and_env_are_unrestored(tmp_path):
     env = make_env(tmp_path)
     cid = env.svc.create(env.mission.id, env.scope)
@@ -516,6 +533,14 @@ def test_provider_conformance(tmp_path, cls):
     with pytest.raises(ProviderError):
         p.discover_compose("../etc")
     assert all(isinstance(a, str) for call in env.docker.calls for a in call)     # argv lists only
+
+
+def test_checkpoint_facts_exclude_only_proxy_and_per_recreate_labels():
+    raw = {"Image": "sha256:x", "Config": {"Env": [], "Labels": {
+        "io.planetexpress.created-by-proxy": "1", "com.docker.compose.replace": "abc", "com.docker.compose.container-number": "1",
+        "com.docker.compose.config-hash": "changing", "com.docker.compose.project": "kept", "com.example.keep": "yes"}}, "HostConfig": {}, "Mounts": [],
+           "NetworkSettings": {"Networks": {}}}
+    assert ContainerFacts.from_inspect(raw).labels == {"com.docker.compose.project": "kept", "com.example.keep": "yes"}
 
 
 def test_providers_read_unit_files_from_their_own_dirs(tmp_path):

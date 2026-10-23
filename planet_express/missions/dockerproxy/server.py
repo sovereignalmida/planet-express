@@ -209,10 +209,11 @@ class ProxyServer:
             upgrade = self.policy.check_upgrade(route, head)
             body, length = self._read_body(conn, head, route)
             plan = self.policy.plan(route, head.method, groups, query, body, length)
+            write_id = None
             if route.write:
                 self.gate.check_write(session)
-                self._record(session, plan, head)
-            self._forward(conn, head, plan, upgrade, session)
+                write_id = self._record(session, plan, head)
+            self._forward(conn, head, plan, upgrade, session, write_id)
         except Refusal as refusal:
             self._note_refusal(session, head, route, refusal)
             refuse(conn, refusal.status, refusal.reason)
@@ -241,13 +242,15 @@ class ProxyServer:
             raise BadRequest("bytes after the request")
         return None, 0
 
-    def _record(self, session, plan: Plan, head: Head) -> None:
+    def _record(self, session, plan: Plan, head: Head) -> str:
+        write_id = os.urandom(8).hex()
         body = {"event": "docker.write", "route": plan.route.name, "method": plan.method, "targets": plan.targets,
-                **plan.summary}
+                "write_id": write_id, **plan.summary}
         try:
             self.gate.record(session, body)
         except Exception:                                        # noqa: BLE001 - no record, no forward
             raise Refusal("the request could not be recorded", 500) from None
+        return write_id
 
     def _note_refusal(self, session, head, route, refusal: Refusal) -> None:
         if session is None or self.gate is None or refusal.status in (401, 503):
@@ -267,11 +270,12 @@ class ProxyServer:
 
     # ── forwarding ────────────────────────────────────────────────────────────────────────────
 
-    def _forward(self, conn: socket.socket, head: Head, plan: Plan, upgrade: bool, session) -> None:
+    def _forward(self, conn: socket.socket, head: Head, plan: Plan, upgrade: bool, session,
+                 write_id: str | None = None) -> None:
         route = plan.route
         target = request_target(head.version, plan.upstream_path, plan.query)
         if route.hijack:
-            return self._hijack(conn, target, plan, upgrade, session)
+            return self._hijack(conn, target, plan, upgrade, session, write_id)
         if route.stream and plan.method == "GET":
             return self._stream(conn, target, session, self._event_line if route.name == "events" else None)
         body: Any = plan.body
@@ -289,6 +293,7 @@ class ProxyServer:
             cconn, resp = self.upstream.open(plan.method, target, body=body, length=length, content_type=ctype)
         except BaseException:
             self._create_end(session, nonce)
+            self._record_result(session, route, 0, write_id)
             raise
         try:
             data = resp.read(self.limits.json_response + 1)
@@ -302,9 +307,11 @@ class ProxyServer:
             length_up = resp.getheader("Content-Length")
         except Refusal:
             self._create_end(session, nonce)
+            self._record_result(session, route, 0, write_id)
             raise
         except Exception as exc:                                 # noqa: BLE001
             self._create_end(session, nonce)
+            self._record_result(session, route, 0, write_id)
             raise UpstreamError(type(exc).__name__) from None
         finally:
             cconn.close()
@@ -320,11 +327,18 @@ class ProxyServer:
                     length=int(length_up) if length_up and length_up.isdigit() else 0)
         else:
             respond(conn, status, data, content_type=ctype_up, headers=passed)
-        if route.write and self.gate is not None:
-            try:
-                self.gate.record(session, {"event": "docker.result", "route": route.name, "status": status})
-            except Exception:                                    # noqa: BLE001
-                log.warning("docker proxy: result event not recorded")
+        self._record_result(session, route, status, write_id)
+
+    def _record_result(self, session, route: Route, status: int, write_id: str | None) -> None:
+        """Close an accepted write's record. A write that failed upstream still closes (status 0): a result that never comes
+        would hold the tripwire's in-flight deferral open until it times out."""
+        if not route.write or self.gate is None:
+            return
+        try:
+            self.gate.record(session, {"event": "docker.result", "route": route.name, "status": status,
+                                       "write_id": write_id})
+        except Exception:                                        # noqa: BLE001
+            log.warning("docker proxy: result event not recorded")
 
     def _create_begin(self, session, plan: Plan) -> str:
         """Announce a container create BEFORE the daemon sees it, so a tripwire scan that finds the new container while the
@@ -485,8 +499,13 @@ class ProxyServer:
             pass
         return out
 
-    def _hijack(self, conn: socket.socket, target: str, plan: Plan, upgrade: bool, session) -> None:
-        sock, head_bytes, rest = self.upstream.hijack(target, plan.body or b"", upgrade=upgrade)
+    def _hijack(self, conn: socket.socket, target: str, plan: Plan, upgrade: bool, session,
+                write_id: str | None = None) -> None:
+        try:
+            sock, head_bytes, rest = self.upstream.hijack(target, plan.body or b"", upgrade=upgrade)
+        except BaseException:
+            self._record_result(session, plan.route, 0, write_id)
+            raise
         status = 0
         try:
             status, headers = status_of(head_bytes)
@@ -501,11 +520,7 @@ class ProxyServer:
             self._pump(conn, sock, rest, self.limits.hijack_bytes, self.limits.hijack_s, session, one_way=False)
         finally:
             sock.close()
-            if self.gate is not None:
-                try:
-                    self.gate.record(session, {"event": "docker.result", "route": plan.route.name, "status": status})
-                except Exception:                                # noqa: BLE001
-                    log.warning("docker proxy: result event not recorded")
+            self._record_result(session, plan.route, status, write_id)
 
     def _pump(self, client: socket.socket, up: socket.socket, first: bytes, cap: int, seconds: float, session, *,
               one_way: bool, transform=None) -> None:

@@ -167,6 +167,26 @@ class DaemonInspector:
         return ContainerInfo(cid, str(doc.get("Name", "")).lstrip("/"), self._labels((doc.get("Config") or {}).get("Labels")),
                              host if isinstance(host, dict) else {}, tuple(mounts) if isinstance(mounts, list) else ())
 
+    def service_networks(self) -> dict[tuple[str, str], set[str]]:
+        """Snapshot every existing Compose service's networks in one request, before Compose removes old containers."""
+        status, _, data = self.up.call("GET", "/containers/json?all=1")
+        if status != 200:
+            raise UpstreamError(f"list status {status}")
+        try:
+            items = json.loads(data.decode("utf-8"))
+        except ValueError:
+            raise UpstreamError("list returned malformed JSON") from None
+        networks: dict[tuple[str, str], set[str]] = {}
+        for item in items if isinstance(items, list) else []:
+            labels = self._labels(item.get("Labels")) if isinstance(item, dict) else {}
+            project, service = labels.get("com.docker.compose.project"), labels.get("com.docker.compose.service")
+            if not project or not service:
+                continue
+            attached = ((item.get("NetworkSettings") or {}).get("Networks") or {})
+            if isinstance(attached, dict):
+                networks.setdefault((project, service), set()).update(str(name) for name in attached)
+        return networks
+
     def network(self, ref: str) -> NetworkInfo | None:
         doc = self._get(f"/networks/{quote(ref, safe='')}")
         if doc is None:

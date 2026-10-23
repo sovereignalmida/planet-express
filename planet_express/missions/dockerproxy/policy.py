@@ -5,6 +5,7 @@ never the client's bytes. Pure apart from the `Inspector` it is given and the fi
 
 import json
 import os
+import logging
 import posixpath
 import re
 import stat
@@ -25,6 +26,8 @@ from planet_express.missions.resources import (
 from planet_express.missions.store import grant_resources
 
 from .httpwire import BadRequest, Head, Refusal, strict_json
+
+log = logging.getLogger("planetexpress.missions.dockerproxy")
 
 API_FLOOR, API_MAX = 41, 48              # the API minors this proxy has been written against (inclusive)
 
@@ -79,6 +82,7 @@ class Inspector(Protocol):
     def network(self, ref: str) -> "NetworkInfo | None": ...
     def volume(self, name: str) -> dict | None: ...
     def image_exists(self, ref: str) -> bool: ...
+    def service_networks(self) -> Mapping[tuple[str, str], Iterable[str]]: ...
 
 
 @dataclass(frozen=True)
@@ -342,6 +346,26 @@ class Policy:
         self.exec_owner, self.json_cap, self.archive_cap, self.versions = exec_owner, json_cap, archive_cap, versions
         self._is_socket = is_socket or _is_unix_socket
         self.label_allow = tuple(label_allow)
+        self._service_networks: dict[str, frozenset[str]] = {}
+        if scope is not None:
+            services = []
+            for resource in scope.resources:
+                try:
+                    _host, kind, name = split(resource)
+                    if kind != "service":
+                        continue
+                    project, service = name.split("/", 1)
+                    services.append((resource, project, service))
+                except (BadResource, ValueError):
+                    continue
+            try:
+                snapshot = inspector.service_networks() if services else {}
+            except Exception as exc:                          # noqa: BLE001 - unreadable membership grants no authority
+                log.warning("docker proxy: could not read service network membership (%s); project-network reattachment "
+                            "will be refused for this session", type(exc).__name__)
+                snapshot = {}
+            for resource, project, service in services:
+                self._service_networks[resource] = frozenset(str(n) for n in snapshot.get((project, service), ()))
 
     # -- matching -------------------------------------------------------------------------------
 
@@ -522,22 +546,36 @@ class Policy:
             raise Refusal("the network is outside this mission's scope")
         return info
 
-    def _scoped_network_name(self, name: str) -> None:
-        """A network named in a create body: a built-in bridge/none, or one that resolves in scope."""
+    def _scoped_network_name(self, name: str, service: str | None = None) -> None:
+        """A network named in a create body: a built-in, one in scope, or an existing non-protected Compose network owned
+        by the same project as the in-scope service being recreated."""
         if name in BUILTIN_NETWORKS:
             return
         if name == "host" or name.startswith("container:"):
             raise Refusal("host and container network modes are not served")
-        self._network(name, "scope")
+        info = self._network(name, "visible")
+        if self._network_verdict(info) == "in_scope":
+            return
+        if service is not None and self.scope.classify(service) == "in_scope":
+            try:
+                project = split(service)[2].split("/", 1)[0]
+            except (BadResource, ValueError):
+                project = ""
+            if (project and info.labels.get(PROJECT_LABEL) == project
+                    and info.name in self._service_networks.get(service, frozenset())):
+                return
+        project = info.labels.get(PROJECT_LABEL, "")[:80]
+        raise Refusal(f"the network is outside this mission's scope: {info.name[:80]} project={project or '-'} "
+                      f"service={(service or '-')[:120]}")
 
-    def _scoped_network_mode(self, mode: str, _depth: int = 0) -> None:
+    def _scoped_network_mode(self, mode: str, _depth: int = 0, service: str | None = None) -> None:
         """HostConfig.NetworkMode: everything `_scoped_network_name` serves, plus `container:<ref>` where <ref> resolves (by the
         daemon, not by anything the body says) to exactly one container that is in this mission's scope and not protected.
         `host` is never served."""
         if mode == "host":
             raise Refusal("host network mode is not served")
         if not mode.startswith("container:"):
-            return self._scoped_network_name(mode)
+            return self._scoped_network_name(mode, service)
         ref = mode[len("container:"):]
         if not _NAME.match(ref):
             raise Refusal("the container network target is not a valid container reference")
@@ -735,7 +773,7 @@ class Policy:
         mode = host.get("NetworkMode")
         if isinstance(mode, str):
             if mode == "host" or mode.startswith("container:"):
-                self._scoped_network_mode(mode)         # the joined namespace's owner is checked again at start
+                self._scoped_network_mode(mode, service=self._service_id(info))
         elif mode is not None:
             raise Refusal("the container's network mode cannot be checked")
         for entry in host.get("Binds") or []:
@@ -768,10 +806,15 @@ class Policy:
         top_ok = {"Image", "Cmd", "Entrypoint", "Env", "WorkingDir", "User", "Labels", "Hostname", "Domainname",
                   "ExposedPorts", "Tty", "OpenStdin", "StdinOnce", "AttachStdin", "AttachStdout", "AttachStderr",
                   "Healthcheck", "StopSignal", "StopTimeout", "HostConfig", "NetworkingConfig", "MacAddress",
-                  "NetworkDisabled", "ArgsEscaped"}
+                  "NetworkDisabled", "ArgsEscaped", "OnBuild", "Volumes", "Shell"}
         extra = set(body) - top_ok
         if extra:
             raise Refusal(f"container field not served: {min(extra)[:40]}")
+        # Compose serialises some daemon inspect-shaped Config placeholders when it recreates a service.  They are not
+        # features the proxy serves: accept only inert placeholders and omit them from the rebuilt body.
+        for key in ("OnBuild", "Volumes", "Shell"):
+            if key in body and not _empty(body[key]):
+                raise Refusal(f"{key} is not served")
         out: dict[str, Any] = {}
         image = _str(body.get("Image"), 255, _IMAGE)
         if not self.inspector.image_exists(image):
@@ -816,9 +859,9 @@ class Policy:
         if body.get("Healthcheck") is not None:
             out["Healthcheck"] = self._healthcheck(body["Healthcheck"])
         if body.get("NetworkingConfig") is not None:
-            out["NetworkingConfig"] = self._networking(body["NetworkingConfig"])
+            out["NetworkingConfig"] = self._networking(body["NetworkingConfig"], service)
         mounts: list[dict] = []
-        host, mount_summary = self._host_config(body.get("HostConfig") or {}, mounts)
+        host, mount_summary = self._host_config(body.get("HostConfig") or {}, mounts, service)
         out["HostConfig"] = host
         plan.summary = {"image": image, "service": service, "name": query.get("name", ""),
                         "mounts": mount_summary, "cap_add": host.get("CapAdd", []),
@@ -857,7 +900,7 @@ class Policy:
             out["Retries"] = _int(value["Retries"], 0, 1000)
         return out
 
-    def _networking(self, value) -> dict:
+    def _networking(self, value, service: str | None = None) -> dict:
         if not isinstance(value, dict) or set(value) - {"EndpointsConfig"}:
             raise Refusal("NetworkingConfig field not served")
         endpoints = value.get("EndpointsConfig") or {}
@@ -865,15 +908,36 @@ class Policy:
             raise BadRequest("bad EndpointsConfig")
         out = {}
         for name, config in endpoints.items():
-            self._scoped_network_name(_str(name, 128))
+            self._scoped_network_name(_str(name, 128), service)
             if config is None:
                 config = {}
-            if not isinstance(config, dict) or set(config) - {"Aliases"}:
-                raise Refusal("endpoint field not served")
+            # Compose serialises its endpoint from inspect data.  These fields are harmless only at their empty/default
+            # values; they are omitted from the rebuilt request, so the proxy still serves aliases and nothing else.
+            inert = {"IPAMConfig", "Links", "DriverOpts", "GwPriority", "MacAddress"}
+            read_only_strings = {"NetworkID", "EndpointID", "Gateway", "IPAddress", "IPv6Gateway",
+                                 "GlobalIPv6Address"}
+            read_only_ints = {"IPPrefixLen", "GlobalIPv6PrefixLen"}
+            if not isinstance(config, dict):
+                raise Refusal("endpoint configuration must be an object")
+            extra = set(config) - ({"Aliases", "DNSNames"} | inert | read_only_strings | read_only_ints)
+            if extra:
+                raise Refusal(f"endpoint field not served: {min(extra)[:40]}")
+            for key in inert:
+                if key in config and not _empty(config[key]):
+                    raise Refusal(f"endpoint {key} is not served")
+            # Docker populates these inspect-only endpoint fields. They cannot configure the new container and are dropped.
+            if "DNSNames" in config:
+                _strlist(config["DNSNames"], 32, 256)
+            for key in read_only_strings:
+                if key in config:
+                    _str(config[key], 256)
+            for key in read_only_ints:
+                if key in config:
+                    _int(config[key], 0, 128)
             out[name] = {"Aliases": _strlist(config.get("Aliases"), 16, 128)} if "Aliases" in config else {}
         return {"EndpointsConfig": out}
 
-    def _host_config(self, host: Any, mounts: list) -> tuple[dict, list]:
+    def _host_config(self, host: Any, mounts: list, service: str | None = None) -> tuple[dict, list]:
         if not isinstance(host, dict):
             raise BadRequest("HostConfig must be an object")
         allowed = {"Binds", "Mounts", "RestartPolicy", "NetworkMode", "PortBindings", "PublishAllPorts", "CapAdd", "CapDrop",
@@ -881,9 +945,22 @@ class Policy:
                    "CpusetCpus", "PidsLimit", "ReadonlyRootfs", "LogConfig", "Init", "ShmSize", "Ulimits", "VolumesFrom",
                    "GroupAdd", "Privileged", "PidMode", "IpcMode", "UsernsMode", "CgroupnsMode", "UTSMode", "SecurityOpt",
                    "Devices", "Sysctls", "Tmpfs", "DeviceCgroupRules", "DeviceRequests", "AutoRemove"}
-        extra = set(host) - allowed
+        # Compose may build a create request from the daemon's inspect-shaped HostConfig. These are its zero-value-only
+        # fields: they are never forwarded, and a meaningful value remains denied rather than becoming proxy authority.
+        inert = {"ContainerIDFile", "VolumeDriver", "ConsoleSize", "DnsOptions", "Cgroup", "Links", "OomScoreAdj",
+                 "StorageOpt", "Isolation", "BlkioWeight", "BlkioWeightDevice", "BlkioDeviceReadBps",
+                 "BlkioDeviceWriteBps", "BlkioDeviceReadIOps", "BlkioDeviceWriteIOps", "CpuPeriod", "CpuQuota",
+                 "CpuRealtimePeriod", "CpuRealtimeRuntime", "CpusetMems", "CgroupParent", "KernelMemory",
+                 "KernelMemoryTCP", "MemorySwappiness", "OomKillDisable", "CpuCount", "CpuPercent",
+                 "IOMaximumIOps", "IOMaximumBandwidth", "MaskedPaths", "ReadonlyPaths", "Runtime"}
+        extra = set(host) - (allowed | inert)
         if extra:
             raise Refusal(f"HostConfig field not served: {min(extra)[:40]}")
+        for key in inert:
+            if key == "ConsoleSize" and host.get(key) == [0, 0]:
+                continue
+            if key in host and not _empty(host[key]):
+                raise Refusal(f"HostConfig {key} is not served")
         if host.get("Privileged"):
             raise Refusal("privileged containers are refused")
         for key in ("Devices", "Sysctls", "Tmpfs", "DeviceCgroupRules", "DeviceRequests"):
@@ -930,7 +1007,7 @@ class Policy:
             out["VolumesFrom"] = entries
         network = host.get("NetworkMode")
         if network is not None:
-            self._scoped_network_mode(_str(network, 128))
+            self._scoped_network_mode(_str(network, 128), service=service)
             out["NetworkMode"] = network
         summary: list[dict] = []
         binds = _strlist(host.get("Binds"), 64, 8192)
@@ -959,7 +1036,9 @@ class Policy:
         if host.get("CpusetCpus") is not None:
             out["CpusetCpus"] = _str(host["CpusetCpus"], 64)
         if host.get("LogConfig") is not None:
-            out["LogConfig"] = self._logconfig(host["LogConfig"])
+            log_config = self._logconfig(host["LogConfig"])
+            if log_config is not None:
+                out["LogConfig"] = log_config
         if host.get("Ulimits") is not None:
             ul = host["Ulimits"]
             if not isinstance(ul, list) or len(ul) > 16 or not all(
@@ -1041,7 +1120,11 @@ class Policy:
         return out
 
     @staticmethod
-    def _logconfig(value: Any) -> dict:
+    def _logconfig(value: Any) -> dict | None:
+        # Docker inspect represents "use the daemon default" as an empty log-driver type. Compose copies it into recreates;
+        # omit it rather than choosing a driver on the caller's behalf.
+        if isinstance(value, dict) and set(value) <= {"Type", "Config"} and value.get("Type") == "" and _empty(value.get("Config")):
+            return None
         if not isinstance(value, dict) or set(value) - {"Type", "Config"} or value.get("Type") not in LOG_DRIVERS:
             raise Refusal("LogConfig not served")
         config = value.get("Config") or {}

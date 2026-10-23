@@ -47,6 +47,7 @@ from .provider import (
     CheckpointProvider,
     ContainerFacts,
     ProviderError,
+    comparable_labels,
 )
 from .store import CheckpointStore, StoreError
 
@@ -640,7 +641,10 @@ class CheckpointService:
             self.hooks.after_file_restored(len(report.written))
 
     def _recreate_and_compare(self, manifest: dict[str, Any], report: RestoreReport) -> None:
-        captured = manifest["facts"]["services"]
+        # Version-1 checkpoints created before generated labels were excluded contain Docker/Compose bookkeeping. Keep
+        # those manifests restorable by comparing the same service-owned projection on both sides.
+        captured = {service: _comparable_facts(before)
+                    for service, before in manifest["facts"]["services"].items()}
         affected = []
         for service, before in captured.items():
             if service.split("/", 1)[0] in report.written_stacks:
@@ -743,6 +747,16 @@ def _metadata_matches(entry: dict[str, Any], meta: safefs.FileMeta | None) -> bo
 
 def _facts_dict(facts: ContainerFacts | None) -> dict[str, Any] | None:
     return facts.to_dict() if facts is not None else None
+
+
+def _comparable_facts(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    facts = dict(raw)
+    labels = facts.get("labels")
+    if isinstance(labels, dict):
+        facts["labels"] = comparable_labels(labels)
+    return facts
 
 
 def _compose_services(documents: Sequence[bytes]) -> list[str] | None:

@@ -53,6 +53,8 @@ STATE_V = 1
 MAX_CHANGES = 30
 MAX_STATE_BYTES = 8 * 1024 * 1024
 PAUSE_SLA_S = 30
+WRITE_RECENT_SLACK_S = 5.0           # a proxy write this recent can still be settling Docker's firewall rules
+FIREWALL_EXCUSE_MAX_S = 120          # the longest proxy writes may excuse a firewall change, however many there are
 _MISSION_ID = re.compile(r"^M-\d{1,12}$")
 BASE_OPTIONS = ("resume", "roll_back", "take_over", "cancel")
 NO_ROLLBACK_OPTIONS = ("take_over", "cancel")
@@ -249,13 +251,15 @@ class TripwireMonitor:
         missions = self.ms.list_missions("executing") if missions is None else missions
         if not missions:
             return {}
+        proxy_cursors = {mission.id: self.ms.latest_seq(mission.id) for mission in missions}
         result = self.scanner.scan(self._excluded_files(missions))
         self.last_scan_at = self.clock()
         self.scans += 1
         out: dict[str, str] = {}
         for mission in missions:
             try:
-                out[mission.id] = self._judge(mission, result)
+                overlapped = self.ms.proxy_write_since(mission.id, proxy_cursors[mission.id])
+                out[mission.id] = self._judge(mission, result, proxy_write_overlapped=overlapped)
             except Exception as exc:         # noqa: BLE001 - one mission's failure pauses that mission only
                 log.warning("tripwire could not judge %s: %s", mission.id, type(exc).__name__)
                 self._pause(mission, "monitor_error", [], {"error": type(exc).__name__}, result)
@@ -295,7 +299,7 @@ class TripwireMonitor:
         return DiffContext(scope=scope, protected=prot.protected, excluded=prot.excluded, stacks_root=self.stacks_root,
                            created=created, creates_in_flight=pending)
 
-    def _judge(self, mission: Mission, result: ScanResult) -> str:
+    def _judge(self, mission: Mission, result: ScanResult, *, proxy_write_overlapped: bool = False) -> str:
         if not result.ok:
             return self._pause(mission, "scan_failed", [], result.errors, result)
         baseline = self._baseline_for(mission, result)
@@ -309,6 +313,9 @@ class TripwireMonitor:
             return self._pause(mission, "grant_changed", [], {}, result)
         grant = mission.grant()
         changes = diff_snapshots(baseline["snapshot"], result.snapshot, self._ctx(grant, mission.id))
+        firewall = [c for c in changes if c.kind == "firewall_changed"]
+        if self._firewall_excused(mission, proxy_write_overlapped, bool(firewall)):
+            changes = [c for c in changes if c.kind != "firewall_changed"]
         immediate = [c for c in changes if c.verdict in ("protected", "out_of_scope")]
         counted = self._count(mission, grant, changes)
         if immediate:
@@ -317,6 +324,27 @@ class TripwireMonitor:
         if counted["over"]:
             return self._pause(mission, counted["over"], counted["new"], {}, result)
         return "ok"
+
+    def _firewall_excused(self, mission: Mission, overlapped: bool, present: bool) -> bool:
+        """Whether a firewall change is excused on this scan. Docker rewrites its rules for as long as an already-authorised
+        proxy mutation runs (a container stop alone takes seconds), so a change that shows while a proxy write is unresolved
+        or has just finished waits for it. The wait is capped from its first scan: continuous writes cannot hide a firewall
+        change for longer than FIREWALL_EXCUSE_MAX_S. Every other change is judged on every scan."""
+        try:
+            held = self.state.read(mission.id, "firewall-excused.json")
+        except (ValueError, OSError):
+            held = None
+        now = self.ms._now()
+        if not present or not (overlapped or self.ms.proxy_write_active(
+                mission.id, self.interval_s + WRITE_RECENT_SLACK_S, FIREWALL_EXCUSE_MAX_S)):
+            if held is not None:
+                self.state.remove(mission.id, "firewall-excused.json")
+            return False
+        if held is not None and now - int(held.get("last_seen", 0)) > 2 * self.interval_s + WRITE_RECENT_SLACK_S:
+            held = None                                           # left over from before a pause or resume
+        since = int(held["since"]) if held is not None else now
+        self.state.write(mission.id, "firewall-excused.json", {"v": STATE_V, "since": since, "last_seen": now})
+        return now - since < FIREWALL_EXCUSE_MAX_S
 
     def _count(self, mission: Mission, grant: Grant, changes: list[Change]) -> dict[str, Any]:
         """Distinct changes against the budgets. The baseline never moves, so the same difference shows on every scan:
