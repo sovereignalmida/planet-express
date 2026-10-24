@@ -88,6 +88,15 @@ def test_undo_is_refused_while_setup_is_exposed(rig):
     assert {k for k in host.nodes if not k.startswith("/journal")} == applied
 
 
+def test_a_closed_session_starts_no_more_runs(rig):
+    app, cookie, csrf, session, host, *_ = rig
+    plan_id = review(app, cookie, csrf)
+    session.close()
+    refused = post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
+    assert refused.status_code == 409 and "closing" in refused.get_json()["error"]
+    assert host.mutations == 0
+
+
 def test_two_applies_are_one_run_and_a_second_is_a_conflict(rig):
     app, cookie, csrf, session, _host, *_ = rig
     plan_id = review(app, cookie, csrf)

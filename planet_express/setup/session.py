@@ -45,6 +45,7 @@ class SetupSession:
         self.outcome: dict | None = None          # the last apply or undo result, public fields only
         self.applied_plan = None                  # the plan object a run used (kept for retry and undo)
         self._thread: threading.Thread | None = None
+        self._closed = False
         if checks is None:
             from planet_express.setup import checks as real_checks
             checks = real_checks
@@ -145,7 +146,14 @@ class SetupSession:
         """A fresh plan from fresh discovery and the current answers: what `apply` compares ids against."""
         return self._plan(self._discover(), SetupAnswers.model_validate(self.answers), repo_root=self.repo_root)
 
+    def close(self) -> None:
+        """Refuse to start any further run (the listener is closing); a run already started is unaffected."""
+        with self._lock:
+            self._closed = True
+
     def _begin(self, phase: str, target) -> None:
+        if self._closed:
+            raise Conflict("setup is closing; nothing more can be started")
         self.phase, self.outcome = phase, None
         self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()

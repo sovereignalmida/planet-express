@@ -498,6 +498,8 @@ def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessio
         for server in servers:
             server.shutdown()
         shutil.rmtree(directory, ignore_errors=True)
+        if session is not None and hasattr(session, "close"):
+            session.close()                          # a request that was mid-flight can no longer start a run
         if session is not None and session.busy():
             out("Setup is closed; waiting for the run in progress to settle before exiting.")
             session.wait(_SETTLE_LIMIT)
