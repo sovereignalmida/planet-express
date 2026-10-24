@@ -298,6 +298,52 @@ starts: it recreates the sessions cgroup and puts the helper back at its real pa
 the copy's checksum is the one recorded at setup. If it fails, missions stay proposal-only and say so. Set
 `missions.launch_conf` to the pool path.
 
+### The model broker (an LLM agent without a key in the session)
+
+A session holds no secret, so an agent that calls a hosted model needs a way to do it that does not put the API key in the
+session. With `missions.model_broker.enabled`, Core holds the key (in its own environment, named by `key_env`) and each
+session gets its own loopback listener, a random per-session access code and `ANTHROPIC_BASE_URL` pointing at it. The agent
+talks to the listener as to the vendor's API (`ANTHROPIC_API_KEY` in the session is the access code, worth nothing anywhere
+else). The broker checks the code, relays only `POST /v1/messages` and `/v1/messages/count_tokens`, only for the models you
+list, swaps in the real key, streams the answer back and counts tokens from the vendor's own `usage` fields. Per session it
+refuses past `max_requests` and `max_tokens` (with a 403, so the CLI does not retry), and it refuses at once when the session
+is revoked or the mission is paused. It logs one `model.request` event per call (path, model, status, token counts, duration:
+never a request or response body). The listener closes when the session ends.
+
+What it does not do: protect the key from Core's own process (it is in Core's memory like every Core secret), cap spend in
+money (only requests and tokens), or stop the agent sending the model whatever it can read (the egress policy still applies).
+The broker only covers the vendor's `/v1/messages` API; an agent that needs another API is not served.
+
+To run the **Claude Code CLI** as the agent (verified against `claude` 2.1.310 with a scripted stand-in for the vendor's API: a plain request, and a
+tool call that writes `result.json`; a real mission with your key and the real model is the next thing to try):
+
+```yaml
+missions:
+  enabled: true
+  model_broker:
+    enabled: true
+    key_env: ANTHROPIC_API_KEY        # set it in /etc/planetexpress.env; Core reads it, no session does
+    models: ["claude-sonnet-4-5", "claude-haiku-4-5"]   # the CLI also asks the small model for some internal work
+  runtime:
+    argv: ["/usr/local/bin/claude", "-p",
+           "Read BRIEF.md in the current directory and carry out the mission it describes. Finish by writing result.json in the current directory in the format the brief specifies.",
+           "--model", "claude-sonnet-4-5", "--max-turns", "60",
+           "--allowedTools", "Bash,Read,Grep,Glob,Write,Edit",
+           "--disallowedTools", "WebFetch,WebSearch"]
+  hooks:
+    install_claude_code: true
+    command: ["/usr/local/bin/pe-python", "-m", "planet_express.missions.hooks"]
+    root: /var/lib/planetexpress/mission-hooks
+```
+
+Things to get right: sessions run as their own uids, so the `claude` binary (and the interpreter the hooks run with) must be
+executable by them: install them system-wide (`/usr/local/bin`, `/opt`), not under a home directory. `-p` mode denies any tool
+call that would need a prompt, so the tools it may use are named in `--allowedTools`: that is safe only because the boundary is
+the containment (identity, scoped sudo and Docker proxy, tripwire, checkpoint, verification), with the PE hooks as a speed
+bump on top. `WebFetch` is disallowed because its domain check talks to the vendor directly, around the broker. Telemetry,
+updates and feedback traffic are switched off by the environment the broker sets. Name every model the CLI may request in
+`models`; a request for any other is refused and logged.
+
 ### What v4 adds to the host
 
 | Kind | What | Where | Removed by |

@@ -56,6 +56,7 @@ What a second reviewer should attend to, v3 and v4 together:
   monitor), `missions/launcher/side_doors.py` (worker identity, Docker TCP, sudoers), and `missions/tools.py`. Brokered tools
   (`tool.invoke`, a reviewed capability, each addition gets the second review): `traefik.read`, `compose.dry_run`,
   `app.health_get`, `arr.queue_item` (read); `dns.rewrite` (write, gated until slice 7).
+- **Model broker:** `missions/model_broker.py` (the real model API key lives in Core only; a session holds a per-session access code and a loopback base URL; path, model, size, request and token limits; revocation; no body is logged), `missions.model_broker` in `config_schema.py` and its wiring in `missions/runner.py` (`SessionSockets`, the env policy's secret scan). The one place a credential is handled on behalf of a session: any change gets the second review.
 - **Independent verification:** a mission completes only when PE's own pre-agreed checks pass,
   never on an agent's assertion.
 

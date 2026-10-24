@@ -15,8 +15,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from planet_express.missions.launcher.config import DEFAULT_UID_RANGE as _DEFAULT_UID_RANGE
-from planet_express.missions.launcher.config import SYSTEMD_DYNAMIC_UIDS as _SYSTEMD_DYNAMIC_UIDS
+from planet_express.missions.launcher.config import (
+    DEFAULT_UID_RANGE as _DEFAULT_UID_RANGE,
+    SYSTEMD_DYNAMIC_UIDS as _SYSTEMD_DYNAMIC_UIDS,
+)
 
 Risk = Literal["R0", "R1", "R2", "R3", "R4"]
 
@@ -315,6 +317,50 @@ class MissionRuntimeConfig(BaseModel):
         return names
 
 
+class ModelBrokerConfig(BaseModel):
+    """The per-session model broker (missions/model_broker.py): Core holds the model API key, a session holds only a
+    per-session access code and a loopback base URL. Off by default; with it off a session has no model access of its own."""
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    upstream_host: str = "api.anthropic.com"        # the only host the broker relays to, over TLS
+    key_env: str = "ANTHROPIC_API_KEY"              # the NAME of the Core environment variable that holds the real key
+    models: list[str] = []                          # model ids a mission may request; empty is refused when enabled
+    max_requests: int = Field(default=300, gt=0, le=100_000)       # per session
+    max_tokens: int = Field(default=10_000_000, gt=0)              # per session: input + output, cache reads at a tenth
+    timeout_s: int = Field(default=300, gt=0, le=3600)
+
+    @field_validator("upstream_host")
+    @classmethod
+    def _host(cls, host: str) -> str:
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?(:\d{1,5})?", host):
+            raise ValueError("missions.model_broker.upstream_host is a bare host name (and optional port), no scheme or path")
+        if ":" in host and not 1 <= int(host.rpartition(":")[2]) <= 65535:
+            raise ValueError("missions.model_broker.upstream_host: the port must be 1-65535")
+        return host
+
+    @field_validator("key_env")
+    @classmethod
+    def _key_env(cls, name: str) -> str:
+        if not _ENV_NAME.fullmatch(name) or name.startswith("PE_"):
+            raise ValueError("missions.model_broker.key_env is the name of an environment variable, not a PE_ one")
+        return name
+
+    @field_validator("models")
+    @classmethod
+    def _models(cls, models: list[str]) -> list[str]:
+        for model in models:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", model):
+                raise ValueError(f"missions.model_broker.models: {model[:40]!r} is not a model id")
+        return models
+
+    @model_validator(mode="after")
+    def _needs_models(self):
+        if self.enabled and not self.models:
+            raise ValueError("missions.model_broker.enabled needs missions.model_broker.models: name the model ids a mission may use")
+        return self
+
+
 class MissionBudgetsConfig(BaseModel):
     """Default per-mission ceilings. A grant may only lower them."""
     model_config = ConfigDict(extra="forbid")
@@ -494,6 +540,7 @@ class MissionsConfig(BaseModel):
     checkpoint: CheckpointConfig = CheckpointConfig()
     verify: VerifyConfig = VerifyConfig()
     hooks: MissionHooksConfig = MissionHooksConfig()
+    model_broker: ModelBrokerConfig = ModelBrokerConfig()
     # Named time windows for standing grants (`window.deny: [backup]` resolves here when the grant is created). Each entry is
     # `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]` (see missions/window.py).
     windows: dict[str, list[str]] = {}
@@ -531,6 +578,13 @@ class MissionsConfig(BaseModel):
     # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
     tool_sites: dict[str, dict[str, str]] = {}
     tool_secret_env: dict[str, str] = {}
+
+    @model_validator(mode="after")
+    def _the_broker_key_stays_out_of_the_session(self):
+        if self.model_broker.enabled and self.model_broker.key_env in self.runtime.env_allow:
+            raise ValueError("missions.runtime.env_allow names missions.model_broker.key_env: the real model key must never reach "
+                             "a session (the broker hands the agent its own access code)")
+        return self
 
     @field_validator("windows")
     @classmethod

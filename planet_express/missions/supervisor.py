@@ -68,7 +68,13 @@ from .state import (
     transition,
     transition_in_txn,
 )
-from .store import MissionStore, NoFreeUid, SessionConflict, grant_resources, stack_lease_paths
+from .store import (
+    MissionStore,
+    NoFreeUid,
+    SessionConflict,
+    grant_resources,
+    stack_lease_paths,
+)
 
 log = logging.getLogger(__name__)
 
@@ -270,7 +276,8 @@ class Supervisor:
                  repair_gate: Callable[[], Any] | None = None, verifier: Any = None,
                  checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None,
                  hook_policy: Callable[[Mission], str] | None = None,
-                 hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None):
+                 hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None,
+                 model_broker: Any = None):
         self.store = store
         self.hook_install = hook_install              # Path -> writes the runtime's hook settings into that (Core-owned) directory
         self.hook_root = Path(hook_root) if hook_root else None    # Core-owned, session-readable, never session-writable
@@ -278,6 +285,7 @@ class Supervisor:
         self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
         self.tripwire = tripwire                      # `tripwire.TripwireMonitor`; None: no Repair mission can start
         self.docker_proxy = docker_proxy              # slice 7b: `.resume(mission_id, grant_hash)`; None: nothing to re-enable
+        self.model_broker = model_broker              # the per-session model broker: paused and resumed with the proxy
         self.verifier = verifier                      # `verify.runner.Verifier`; None: a verifying mission goes to the operator
         self.repair_gate = repair_gate                # side-door report (brief 6.8); None means a repair start is refused
         self.tool_broker = tool_broker                # `missions.tools.ToolBroker`; None: every tool call is refused
@@ -979,6 +987,8 @@ class Supervisor:
                 restore(mission_id)
             if self.docker_proxy is not None:
                 self.docker_proxy.resume(mission_id, mission.grant_hash)
+            if self.model_broker is not None:
+                self.model_broker.resume(mission_id, mission.grant_hash)
             self._extend_session_for_pause(run)       # the whole pause, including the part since the last poll
             leases.heartbeat(self.store, mission_id, self.lease_ttl_s)      # a lost lease refuses the resume
             self.containment.thaw(run.cs)
@@ -1017,6 +1027,9 @@ class Supervisor:
         with contextlib.suppress(Exception):
             if self.docker_proxy is not None:
                 self.docker_proxy.pause(mission_id)
+        with contextlib.suppress(Exception):
+            if self.model_broker is not None:
+                self.model_broker.pause(mission_id)
         with contextlib.suppress(Exception):
             if run.cs is not None:
                 self.containment.freeze(run.cs)
@@ -1755,6 +1768,8 @@ class Supervisor:
             revoke(session.mission_id)
         if self.docker_proxy is not None:
             self.docker_proxy.pause(session.mission_id)
+        if self.model_broker is not None:
+            self.model_broker.pause(session.mission_id)
 
     @_per_session
     def tool_invoke(self, session: SessionRow, name: str, params: dict) -> dict:

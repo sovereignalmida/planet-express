@@ -167,6 +167,10 @@ multi_host:
 #   enabled: true
 #   runtime:
 #     argv: ["/usr/local/bin/my-agent", "--mission"]   # an absolute command; no agent is bundled
+#   model_broker:                   # lets the agent reach the model without ever holding the API key (see INSTALL.md "The model broker")
+#     enabled: true
+#     key_env: ANTHROPIC_API_KEY    # the NAME of the variable in Core's environment (/etc/planetexpress.env) that holds the real key
+#     models: ["claude-sonnet-4-5"] # the only model ids a mission may request
 #   session_uid_min: 200000         # one uid and private group per session; not Core's uid, not systemd DynamicUser's 61184-65519, no existing account
 #   session_uid_max: 200999
 #   sock_root: /run/planetexpress-sessions

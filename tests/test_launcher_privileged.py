@@ -767,3 +767,35 @@ def test_preflight_failure_makes_the_supervisor_proposal_only_on_the_real_host(h
     with pytest.raises(ProposalOnly):
         rig.sup.start(rig.mid)
     assert rig.sessions() == [] and rig.runtimes == []
+
+
+# ── a real session uid reaches the model broker on loopback, holding no key of its own ─────────────
+
+def test_a_session_reaches_its_model_broker_over_loopback_with_only_its_access_code(host):
+    import http.client as hc
+
+    from test_model_broker import CS, MODEL, REAL, FakeStore, Upstream
+
+    from planet_express.missions.model_broker import BrokerLimits, ModelBroker
+    upstream, store = Upstream(), FakeStore()
+    broker = ModelBroker(upstream_host=f"127.0.0.1:{upstream.port}", key_env="K", models=[MODEL], limits=BrokerLimits(), store=store,
+                         environ={"K": REAL}, connect=lambda h, t: hc.HTTPConnection(h, timeout=t))
+    stop = broker.start(CS())
+    env = {"PATH": "/usr/bin:/bin", **broker.env(CS())}
+    code = ("import json,os,urllib.request\n"
+            "req=urllib.request.Request(os.environ['ANTHROPIC_BASE_URL']+'/v1/messages',"
+            "data=json.dumps({'model':%r,'messages':[]}).encode(),"
+            "headers={'x-api-key':os.environ['ANTHROPIC_API_KEY'],'content-type':'application/json'})\n"
+            "r=urllib.request.urlopen(req,timeout=20)\n"
+            "print(json.dumps({'status':r.status,'uid':os.getuid(),'env_has_real':%r in json.dumps(dict(os.environ))}),flush=True)\n"
+            "import time;time.sleep(300)" % (MODEL, REAL))
+    sid, _ = host.launch(py(code), env=env)
+    try:
+        seen = first_json(host, sid)
+        assert seen == {"status": 200, "uid": UIDS[0], "env_has_real": False}
+        assert upstream.seen[0]["headers"]["x-api-key"] == REAL
+        assert broker.usage("S-1")["requests"] == 1
+    finally:
+        host.finish(sid)
+        stop()
+        upstream.close()

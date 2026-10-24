@@ -108,7 +108,8 @@ def discover_inventory(stacks_root: str) -> Inventory:
 
 
 def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, containment: Any, broker: Any, protected: Any,
-                          stacks_root: str, enabled: Callable[[], bool], proxy: Any = None) -> RepairControls:
+                          stacks_root: str, enabled: Callable[[], bool], proxy: Any = None,
+                          model_broker: Any = None) -> RepairControls:
     ms = MissionStore(store)
     state_dir = Path(store.path).parent
     sources = [BackupSource(s.path, s.marker) for s in cfg.checkpoint.backup_sources]
@@ -124,6 +125,8 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
             broker.revoke(mission_id)
         if proxy is not None:
             proxy.pause(mission_id)
+        if model_broker is not None:
+            model_broker.pause(mission_id)
 
     tripwire = build_tripwire(cfg, missions=ms, containment=containment, checkpoint=checkpoint, provider=wiring.provider,
                               stacks_root=stacks_root, state_dir=str(state_dir / "tripwire"), protected=protected,
