@@ -517,3 +517,12 @@ def test_scheduled_scan_admission_waits_without_maintenance_notification(monkeyp
     fw.run_pipeline(notifier, s, scheduled=True)
     assert scans == [None]
     assert not any("Maintenance" in text for text in notifier.notifications)
+
+
+def test_scheduled_update_does_not_start_while_the_host_is_still_booting(monkeypatch):
+    s = _state()
+    order = []
+    monkeypatch.setattr(fw.boot_settle, "wait_until_settled", lambda **kw: order.append("settled"))
+    monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: order.append("ran"))
+    assert fw._run_scheduled_update_pass(None, s, sleep=lambda _s: None, commands=COMMANDS) == "ran"
+    assert order == ["settled", "ran"]

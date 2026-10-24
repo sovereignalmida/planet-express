@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Boot settle: after a reboot, the scheduled scan and the weekly update pass wait until the host has settled (the stacks unit has finished, plus a short delay, and no container is still in its health-check start-up), for at most 30 minutes of uptime, instead of scanning at +60 s and reporting things that are not wrong yet. A failed stacks bring-up is not waited out. A scan you ask for (`/check`, the dashboard) always runs. Probe failures count as settled. See `planet_express/core/boot_settle.py`.
 - `/prepare_reboot` (Telegram): proposes bringing every compose stack down before you reboot the host, behind the usual approval card. `/down all` (and so this) now stops stacks in the reverse of their boot order: a stack that others depend on (a VPN container whose network others share) goes down after its dependents, the ingress stack last, each service keeping its own `stop_grace_period`. With no cross-stack dependencies the order is unchanged. PE does not reboot the host.
 
 ### Added (v4 mission control, off by default)

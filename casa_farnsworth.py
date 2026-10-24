@@ -55,6 +55,7 @@ from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
 from planet_express.application.mission_service import MISSION_ID_RE, MissionService
 from planet_express.application.multi_host import pin_error, provider_for
+from planet_express.core import boot_settle
 from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
@@ -2638,6 +2639,7 @@ def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Sto
     time.sleep(60)  # brief delay on startup before first scheduled run
     while True:
         try:
+            boot_settle.wait_until_settled()      # after a reboot the stacks are still coming up: not a problem yet
             _wait_for_maintenance(state)
             log.info("Scheduled pipeline run starting")
             run_pipeline(
@@ -2705,6 +2707,7 @@ def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, 
     `sleep` is injectable so tests don't wait an hour."""
     owner = "zoidberg-weekly"
     waited = 0
+    boot_settle.wait_until_settled(sleep=sleep)           # never recreate containers while the host is still booting
     while not state.try_begin_mutation(owner, require_idle=True):
         busy = state.busy_reason
         if waited >= UPDATE_BUSY_MAX_WAIT_SECONDS:
