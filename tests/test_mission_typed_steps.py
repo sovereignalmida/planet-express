@@ -13,8 +13,7 @@ os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent 
 
 from missions_helpers import advance_to, make_store, new_mission, repair_grant, token
 
-from planet_express.execution import actions, policy
-from planet_express.execution import runbook as runbooks
+from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.missions import leases
 from planet_express.missions.approvals import record_approval
 from planet_express.missions.store import MissionStore
@@ -47,9 +46,11 @@ def book(*steps):
 
 
 class Rig:
-    def __init__(self, tmp_path, **grant_over):
+    def __init__(self, tmp_path, *, stack_leases=False, **grant_over):
         self.store, self.clock = make_store(tmp_path)
         self.ms = MissionStore(self.store)
+        if stack_leases:
+            self.ms.stacks_root = STACKS_ROOT          # as the supervisor does: a scoped service also leases its stack directory
         self.mission = new_mission(self.ms, repair_grant(**grant_over))
         advance_to(self.ms, self.mission.id, "queued", "investigating", "awaiting_decision")
         record_approval(self.store, self.mission.id, "grant", self.mission.grant_hash, "approve", "operator:me")
@@ -317,6 +318,41 @@ def test_the_call_budget_bounds_the_steps_a_mission_may_run(tmp_path):
     for _ in range(2):
         rig.gate.authorize(rig.mission.id, book(restart()), session_id=rig.session)
     refused(rig, book(restart()), "call budget")
+
+
+def test_every_step_of_a_runbook_is_charged_to_the_call_budget(tmp_path):
+    rig = Rig(tmp_path, budgets={"tool_calls": 2})
+    refused(rig, book(restart(service="a"), restart(service="b"), restart(service="c")), "call budget")
+    rig.gate.authorize(rig.mission.id, book(restart(service="a"), restart(service="b")), session_id=rig.session)
+    refused(rig, book(restart()), "call budget")                       # two steps in one runbook used both calls
+
+
+def test_a_service_only_grant_runs_its_own_service_and_nothing_beside_it(tmp_path):
+    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]})
+    check = {"type": "check.container", "params": {"expect": "running"}, "binding": binding("media", "sonarr")}
+    for runbook in (book(restart()), book(check)):
+        assert rig.gate.authorize(rig.mission.id, runbook, session_id=rig.session).resources
+    refused(rig, book(restart(service="radarr")), "outside the grant")        # its neighbour is not granted
+
+
+def test_a_service_only_grant_runs_a_restart_with_its_check_in_one_runbook(tmp_path):
+    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]})
+    check = {"type": "check.container", "params": {"expect": "running"}, "binding": binding("media", "sonarr")}
+    assert rig.gate.authorize(rig.mission.id, book(restart(), check), session_id=rig.session).resources
+
+
+def test_a_service_only_grant_does_not_accept_another_file_as_the_compose_file(tmp_path):
+    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]},
+              protected={"resources": [f"path:{actions.compose_file('media')}"]})
+    other = restart()
+    other["binding"] = {**other["binding"], "compose_path": str(actions.compose_file("media").parent / "other.yml")}
+    refused(rig, book(other), "outside the grant|protected")
+
+
+def test_a_service_only_grant_still_refuses_a_protected_compose_file(tmp_path):
+    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]},
+              protected={"resources": [f"path:{actions.compose_file('media')}"]})
+    refused(rig, book(restart()), "protected")
 
 
 def test_an_oversize_record_still_names_what_was_authorized(rig):

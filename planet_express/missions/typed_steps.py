@@ -28,10 +28,16 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from planet_express.core.redact import redact
-from planet_express.execution import runbook as runbooks
+from planet_express.execution import actions, runbook as runbooks
 from planet_express.missions import approvals, leases
 from planet_express.missions.events import redact_value
-from planet_express.missions.resources import BadResource, canon, classify, contains
+from planet_express.missions.resources import (
+    BadResource,
+    canon,
+    classify,
+    contains,
+    split,
+)
 from planet_express.missions.store import MissionStore, grant_resources
 
 log = logging.getLogger("planetexpress.missions.typed_steps")
@@ -95,7 +101,7 @@ class MissionStepGate:
             self._record(mission_id, "step.refused", {"reason": reason, "steps": steps, "session": session_id})
             raise StepRefused(reason) from None
         self._record(mission_id, "step.authorized", {
-            "plan_sha256": auth.plan_sha256, "session": session_id, "steps": steps, "resources": list(auth.resources),
+            "plan_sha256": auth.plan_sha256, "session": session_id, "steps": steps, "n_steps": len(steps), "resources": list(auth.resources),
             "grant_hash": self.ms.get_mission(mission_id).grant_hash})
         return auth
 
@@ -139,7 +145,7 @@ class MissionStepGate:
         if mutating and mission.tier != "repair":
             raise StepRefused(f"a {mission.tier}-tier mission may not run a mutating step")
         grant = mission.grant()
-        if self._authorized_count(mission_id) >= grant.budgets.tool_calls:
+        if self._authorized_count(mission_id) + len(runbook.steps) > grant.budgets.tool_calls:
             raise StepRefused("the mission's call budget is used up")
         approved = approvals.mission_step_approved(self.ms.store, mission_id)
         if mutating and not approved:
@@ -154,12 +160,21 @@ class MissionStepGate:
         for step in runbook.steps:
             spec = runbooks.STEP_TYPES[step.type]
             self._container_belongs(step)
-            for rid in self._targets(step, spec):
+            targets = self._targets(step, spec)
+            primary_ok = False
+            for index, rid in enumerate(targets):
                 verdict = classify(rid, scope, prot.protected, stacks_root=self.stacks_root,
                                    parent_of_protected=(spec.risk != "R0"), excluded=prot.excluded)
+                if verdict == "out_of_scope" and index > 0 and primary_ok and self._tied_to(step, rid):
+                    # The stack a service belongs to and its own compose file are named by the step's binding. When the
+                    # service itself is in scope they need no wider grant, but protected still wins for them.
+                    verdict = classify(rid, [rid], prot.protected, stacks_root=self.stacks_root,
+                                       parent_of_protected=(spec.risk != "R0"), excluded=prot.excluded)
+                if index == 0:
+                    primary_ok = verdict == "in_scope"
                 if verdict != "in_scope":
                     raise StepRefused(f"{rid[:160]} is {'protected' if verdict == 'protected' else 'outside the grant'}")
-                if mutating and not any(contains(held, rid, stacks_root=self.stacks_root) for held in fences):
+                if spec.risk != "R0" and not any(contains(held, rid, stacks_root=self.stacks_root) for held in fences):
                     raise StepRefused(f"{rid[:160]} is not leased by this mission")
                 resources.append(rid)
         return StepAuthorization(mission_id=mission_id, session_id=session_id, plan_sha256=runbooks.plan_sha256(runbook),
@@ -196,9 +211,9 @@ class MissionStepGate:
             elif spec.target == "stack":
                 out.append(canon(f"stack:{params['stack']}"))
             elif isinstance(binding.get("project"), str) and binding["project"]:        # a check names its target in its binding
-                out.append(canon(f"stack:{binding['project']}"))
                 if isinstance(binding.get("service"), str) and binding["service"]:
-                    out.append(canon(f"service:{binding['project']}/{binding['service']}"))
+                    out.append(canon(f"service:{binding['project']}/{binding['service']}"))     # the primary target first
+                out.append(canon(f"stack:{binding['project']}"))
             compose_path = binding.get("compose_path")
             if isinstance(compose_path, str) and out:
                 out.append(canon(f"path:{compose_path}"))                                # the file a step acts on is checked too
@@ -207,6 +222,24 @@ class MissionStepGate:
         if not out and spec.risk != "R0":
             raise StepRefused(f"{step.type} names no target a mission may touch")
         return out
+
+    def _tied_to(self, step: runbooks.Step, rid: str) -> bool:
+        """Is this derived resource the step's own stack, or a file directly inside that stack's directory?"""
+        stack = step.binding.get("project") or step.params.get("stack")
+        if not isinstance(stack, str):
+            return False
+        try:
+            _host, kind, name = split(rid)
+        except BadResource:
+            return False
+        if kind == "stack":
+            return name == stack
+        if kind == "path":
+            try:
+                return name == canon(f"path:{actions.compose_file(stack)}").partition("/path:")[2]
+            except (BadResource, ValueError, TypeError):
+                return False
+        return False
 
     def _container_belongs(self, step: runbooks.Step) -> None:
         """The engine acts on the binding's container. Nothing else ties it to the stack and service the step names, so the
@@ -228,8 +261,11 @@ class MissionStepGate:
 
     def _authorized_count(self, mission_id: str) -> int:
         with self.ms.store._connect() as conn:
+            # every step of an authorized runbook is one call; a record without a count is charged by its steps, or 1
             return int(conn.execute(
-                "SELECT COUNT(*) FROM mission_events WHERE mission_id=? AND kind='tool' AND actor=? "
+                "SELECT COALESCE(SUM(COALESCE(json_extract(body_json, '$.n_steps'), "
+                "json_array_length(body_json, '$.steps'), 1)), 0) FROM mission_events "
+                "WHERE mission_id=? AND kind='tool' AND actor=? "
                 "AND json_extract(body_json, '$.event')='step.authorized'", (mission_id, ACTOR)).fetchone()[0])
 
     # ── the record ──────────────────────────────────────────────────────────
@@ -238,7 +274,7 @@ class MissionStepGate:
         text = redact(json.dumps(shown, sort_keys=True, default=str))
         if len(text) > _MAX_EVENT_BYTES:
             # Keep what identifies the authorization; only the step detail is dropped.
-            shown = {"event": event, "truncated": True, "bytes": len(text), "session": body.get("session"),
+            shown = {"event": event, "truncated": True, "bytes": len(text), "n_steps": body.get("n_steps"), "session": body.get("session"),
                      "plan_sha256": body.get("plan_sha256"), "grant_hash": body.get("grant_hash"),
                      "reason": body.get("reason"), "outcome": body.get("outcome"), "execution": body.get("execution"),
                      "step_types": [s.get("type") for s in body.get("steps", []) if isinstance(s, dict)][:64],
