@@ -319,6 +319,15 @@ Mission control changes the database schema (5 to 6). Take the snapshot first, e
 "repair" mode), start the units. With `missions.enabled` false nothing else changes. Turn missions on only after the
 steps above and a passing preflight.
 
+**Take a second snapshot after the checkout.** The migration refuses to run without a snapshot marker younger than
+120 minutes (`data/pe-snapshot.marker`), and only the v4 `scripts/state_snapshot.py` writes it: the snapshot you took
+with the v3 script before the checkout does not. If you skip `deploy.sh` (it takes the snapshot itself), run
+`venv/bin/python scripts/state_snapshot.py create --label pre-v4-marker` from the v4 checkout, with the units stopped,
+before you start them. Otherwise core exits with `SnapshotRequiredError` and the database is left untouched. Keep the
+first snapshot: it is the one a downgrade restores. If you only need to upgrade the code and nothing in `systemd/`,
+`deploy.sh` or the init scripts changed, `git checkout`, `pip install -r requirements.txt`, the second snapshot and a
+restart are enough.
+
 ### Downgrading from v4 to v3
 
 A v3 build refuses a v4 database ("database schema is newer"), so the downgrade is a **snapshot restore**, not a
