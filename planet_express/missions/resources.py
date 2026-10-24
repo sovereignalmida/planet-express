@@ -15,7 +15,7 @@ from typing import Literal
 
 DEFAULT_HOST = "local"
 MAX_ID = 512
-_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$")
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}")
 _KINDS = ("stack", "service", "mount", "path", "unit", "container", "network", "system", "detector", "remote")
 Verdict = Literal["protected", "in_scope", "out_of_scope"]
 
@@ -41,7 +41,7 @@ def canon(resource: str, host: str = DEFAULT_HOST) -> str:
         raise BadResource("resource id contains NUL")
     if resource.startswith("host:"):
         head, sep, rest = resource[5:].partition("/")
-        if not sep or not _NAME.match(head):
+        if not sep or not _NAME.fullmatch(head):
             raise BadResource(f"bad host in {resource[:80]!r}")
         host, resource = head, rest
     kind, sep, name = resource.partition(":")
@@ -53,9 +53,9 @@ def canon(resource: str, host: str = DEFAULT_HOST) -> str:
             raise BadResource("the root is not a mount resource")
     elif kind == "service":
         stack, sep, svc = name.partition("/")
-        if not sep or not _NAME.match(stack) or not _NAME.match(svc):
+        if not sep or not _NAME.fullmatch(stack) or not _NAME.fullmatch(svc):
             raise BadResource(f"service ids are service:<stack>/<name>: {resource[:80]!r}")
-    elif "/" in name or not _NAME.match(name):
+    elif "/" in name or not _NAME.fullmatch(name):
         raise BadResource(f"bad name in {resource[:80]!r}")
     return f"host:{host}/{kind}:{name}"
 

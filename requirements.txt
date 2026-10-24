@@ -5,6 +5,8 @@ requests>=2.31.0
 # streamed decompression (CVE-2025-66471, CVE-2025-66418). The widget fetcher uses
 # http.client directly and does not depend on this.
 urllib3>=2.6
+# certifi is the CA bundle requests trusts; older bundles lack current roots and distrust removals.
+certifi>=2026.10.19
 pyyaml>=6.0
 pydantic>=2.0
 pytest>=8.0
