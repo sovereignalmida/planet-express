@@ -56,3 +56,22 @@ def test_the_conftest_isolation_really_stops_a_just_booted_host_from_waiting(mon
     assert "rebooted" in bs.settling_reason()
     monkeypatch.setattr(bs, "uptime_seconds", lambda: float("inf"))
     assert bs.settling_reason() is None and bs.wait_until_settled() is False
+
+
+def test_the_wait_is_bounded_at_fifteen_minutes_of_uptime():
+    assert bs.BOOT_WINDOW_SECONDS == 900
+    assert bs.settling_reason(uptime=lambda: 901.0, unit_state=lambda: {"ActiveState": "activating"}) is None
+    assert bs.settling_reason(uptime=lambda: 899.0, unit_state=lambda: {"ActiveState": "activating"}) is not None
+
+
+def test_the_dashboard_banner_shows_only_while_settling(monkeypatch):
+    import dashboard_data
+    monkeypatch.setattr(dashboard_data, "_SETTLING_TTL_SECONDS", 0)
+    monkeypatch.setattr(dashboard_data.boot_settle, "settling_reason", lambda: "the stacks are still starting")
+    assert dashboard_data.summarize_pipeline_status()["settling"] == "the stacks are still starting"
+    monkeypatch.setattr(dashboard_data.boot_settle, "settling_reason", lambda: None)
+    assert dashboard_data.summarize_pipeline_status()["settling"] is None
+    def boom():
+        raise OSError
+    monkeypatch.setattr(dashboard_data.boot_settle, "settling_reason", boom)
+    assert dashboard_data.summarize_pipeline_status()["settling"] is None

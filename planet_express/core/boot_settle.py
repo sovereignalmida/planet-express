@@ -18,7 +18,7 @@ from collections.abc import Callable
 log = logging.getLogger(__name__)
 
 STACKS_UNIT = "casa-stacks.service"
-BOOT_WINDOW_SECONDS = 1800      # past this uptime the host did not "just reboot", whatever the probes say
+BOOT_WINDOW_SECONDS = 900       # past this uptime the host did not "just reboot", whatever the probes say
 MIN_QUIET_SECONDS = 120         # always wait this long after boot: the units may not have been started yet
 SETTLE_DELAY_SECONDS = 180      # after the stacks unit finishes, let containers finish their own startup
 NEVER_RAN_GIVE_UP_SECONDS = 300  # the stacks unit never ran this boot (disabled, or absent): stop waiting for it

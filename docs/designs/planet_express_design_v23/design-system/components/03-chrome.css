@@ -229,3 +229,12 @@ body {
 .tab-panel { display: none; }
 .tab-panel.active { display: flex; flex-direction: column; gap: 12px; animation: bootin .3s ease both; }
 
+
+.settle-banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warn, #c9a227);
+  border-radius: 6px;
+  background: rgba(201, 162, 39, 0.12);
+  font-size: 0.9rem;
+}

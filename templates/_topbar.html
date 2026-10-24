@@ -42,3 +42,6 @@
       <button class="refresh-btn logout-btn" type="submit">LOG OUT</button>
     </form>
   </header>
+  {% if ctx.pipeline_status.settling %}
+  <div class="settle-banner" role="status">The host is still coming back up after a reboot ({{ ctx.pipeline_status.settling }}). Scheduled scans are on hold until it settles, so some services may show as down or stale for a few minutes. The SCAN button still works.</div>
+  {% endif %}

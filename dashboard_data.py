@@ -23,6 +23,7 @@ from pydantic import TypeAdapter, ValidationError
 
 import config
 from config_schema import LaunchLink
+from planet_express.core import boot_settle
 from planet_express.core.icons import monogram as icon_monogram
 from planet_express.execution.actions import is_ingress_stack
 from state_models import (
@@ -179,14 +180,33 @@ def summarize_findings() -> dict:
     }
 
 
+_SETTLING_TTL_SECONDS = 10
+_settling_cache: tuple[float, str | None] = (0.0, None)
+
+
+def settling_reason() -> str | None:
+    """Why the host is still coming back up after a reboot (so the agent is holding its scheduled scan), or None.
+    The dashboard is its own process, so it asks the same question the agent asks; cached because it runs `docker ps`."""
+    global _settling_cache
+    now = time.monotonic()
+    if now - _settling_cache[0] >= _SETTLING_TTL_SECONDS:
+        try:
+            _settling_cache = (now, boot_settle.settling_reason())
+        except Exception:
+            _settling_cache = (now, None)          # a broken probe never shows a banner
+    return _settling_cache[1]
+
+
 def summarize_pipeline_status() -> dict:
     status = load_status()
+    settling = settling_reason()
     if not status:
-        return {"state": "unknown", "pending_plan_id": None, "updated_at": None}
+        return {"state": "unknown", "pending_plan_id": None, "updated_at": None, "settling": settling}
     return {
         "state": status.state,
         "pending_plan_id": status.pending_plan_id,
         "updated_at": status.updated_at,
+        "settling": settling,
     }
 
 
