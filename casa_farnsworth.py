@@ -2111,7 +2111,11 @@ def _run_mounts_check(notifier: Notifier) -> None:
         for unit, path, ok in results
     ]
     header = "✅ All mounts reachable." if all(ok for _, _, ok in results) else "⚠️ Some mounts unreachable."
-    unarmed = stackctl.unarmed_automounts()
+    try:
+        unarmed = stackctl.unarmed_automounts()
+    except Exception:                                   # noqa: BLE001 -- the reachability report must still go out
+        log.exception("could not check whether the automounts are armed")
+        unarmed = []
     if unarmed:
         lines.append("⚠️ Not armed, will not self-heal: " + ", ".join(TelegramClient.s(u) for u in unarmed))
     notifier.notify(f"{header}\n" + "\n".join(lines))

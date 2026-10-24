@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any
@@ -87,23 +88,25 @@ class MissionStepGate:
         self.stacks_root = stacks_root
         self.protected = tuple(protected)
         self.identities = identities or _host_identities    # container name -> (compose project, service), from the daemon
+        self._lock = threading.Lock()                       # the budget is read, then the authorization recorded: one at a time
 
     def authorize(self, mission_id: str, runbook: runbooks.Runbook, *, session_id: str) -> StepAuthorization:
-        steps = [{"type": step.type, "params": step.params} for step in runbook.steps]
-        try:
-            auth = self._check(mission_id, runbook, session_id)
-        except StepRefused as exc:
-            self._record(mission_id, "step.refused", {"reason": str(exc)[:_MAX_REASON], "steps": steps, "session": session_id})
-            raise
-        except Exception as exc:                                   # noqa: BLE001 - a check that cannot be made is a refusal
-            log.warning("mission step check failed for %s: %s", mission_id, type(exc).__name__)
-            reason = f"the step could not be checked ({type(exc).__name__})"
-            self._record(mission_id, "step.refused", {"reason": reason, "steps": steps, "session": session_id})
-            raise StepRefused(reason) from None
-        self._record(mission_id, "step.authorized", {
-            "plan_sha256": auth.plan_sha256, "session": session_id, "steps": steps, "n_steps": len(steps), "resources": list(auth.resources),
-            "grant_hash": self.ms.get_mission(mission_id).grant_hash})
-        return auth
+        with self._lock:
+            steps = [{"type": step.type, "params": step.params} for step in runbook.steps]
+            try:
+                auth = self._check(mission_id, runbook, session_id)
+            except StepRefused as exc:
+                self._record(mission_id, "step.refused", {"reason": str(exc)[:_MAX_REASON], "steps": steps, "session": session_id})
+                raise
+            except Exception as exc:                                   # noqa: BLE001 - a check that cannot be made is a refusal
+                log.warning("mission step check failed for %s: %s", mission_id, type(exc).__name__)
+                reason = f"the step could not be checked ({type(exc).__name__})"
+                self._record(mission_id, "step.refused", {"reason": reason, "steps": steps, "session": session_id})
+                raise StepRefused(reason) from None
+            self._record(mission_id, "step.authorized", {
+                "plan_sha256": auth.plan_sha256, "session": session_id, "steps": steps, "n_steps": len(steps), "resources": list(auth.resources),
+                "grant_hash": self.ms.get_mission(mission_id).grant_hash})
+            return auth
 
     def still_current(self, mission_id: str, session_id: str) -> bool:
         """Whether the mission may still act (checked between the steps of a running runbook). False on any doubt."""

@@ -966,7 +966,8 @@ def _last_journal_completion(unit: str) -> tuple[str, str]:
         else:
             continue
         try:
-            dt = datetime.fromisoformat(line.split(" ", 1)[0])
+            stamp = re.sub(r"([+-]\d\d)(\d\d)$", r"\1:\2", line.split(" ", 1)[0])    # journalctl writes +0100; Python < 3.11 wants +01:00
+            dt = datetime.fromisoformat(stamp)
         except ValueError:
             continue
         last_dt, last_success = dt.astimezone(), success

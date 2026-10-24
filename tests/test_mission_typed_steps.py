@@ -413,3 +413,20 @@ def test_the_approval_is_recomputed_not_taken_from_the_gate(served):
         conn.execute("DELETE FROM mission_approvals WHERE mission_id=?", (env.mission.id,))
     result = env.service.run_mission_runbook(healthy_restart(env), mission_id=env.mission.id, session_id=env.session, gate=env.gate)
     assert result.outcome == "refused" and env.argv_calls == []
+
+
+def test_concurrent_authorizations_cannot_overrun_the_call_budget(tmp_path):
+    import threading
+    rig = Rig(tmp_path, budgets={"tool_calls": 2})
+    outcomes = []
+
+    def go():
+        try:
+            rig.gate.authorize(rig.mission.id, book(restart(service="a"), restart(service="b")), session_id=rig.session)
+            outcomes.append("ok")
+        except StepRefused:
+            outcomes.append("refused")
+    threads = [threading.Thread(target=go) for _ in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert outcomes.count("ok") == 1 and len(rig.events("step.authorized")) == 1

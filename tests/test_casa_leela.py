@@ -939,3 +939,10 @@ def test_the_last_container_in_the_restart_inspect_keeps_its_restart_count(monke
     assert by_name["CASA_CRASHY"]["restart_count"] == 7
     assert by_name["CASA_CRASHY"].get("crash_looping") is True
     assert by_name["CASA_OK"]["restart_count"] == 0
+
+
+def test_a_journalctl_offset_without_a_colon_is_read(monkeypatch):
+    # `journalctl -o short-iso` writes +0100; Python before 3.11 only parses +01:00
+    _mock_host_logs(monkeypatch, _journal_line("Finished casa-borg.service - borg.", "2026-10-04T02:41:10+0100"))
+    when, result = casa_leela._last_journal_completion("casa-borg.service")
+    assert result == "success" and when
