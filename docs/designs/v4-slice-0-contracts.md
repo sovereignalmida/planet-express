@@ -1,7 +1,7 @@
 # v4 Slice 0 — Contracts and threat model
 
 Status: rev 0.4 (2026-10-13), G1 FINAL CHECK done and dispositioned (§21). Two G1 (Codex) rounds folded in; see §19 and §20. MOS cgroup
-capability verified on the test VM (§20). Awaiting operator sign-off. Parent: `v4-mission-control.md` (v4.1) and
+capability verified on the test VM (§20). Operator signed off 2026-10-24. Parent: `v4-mission-control.md` (v4.1) and
 `v4-plan.md`. This slice produces no product code. Its output is the set of contracts below, which
 slices 1-9 build against, plus the threat model they must defend. Where this document and the
 brief disagree, fix the disagreement here before any slice starts.

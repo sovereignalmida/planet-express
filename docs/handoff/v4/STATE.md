@@ -6,7 +6,7 @@ operator go. Protocol: `docs/designs/v4-orchestration.md`.
 ## Slice status
 | # | Slice | Status |
 |---|---|---|
-| 0 | Contracts, threat model | DONE rev 0.4 (final G1 dispositioned); needs operator sign-off |
+| 0 | Contracts, threat model | DONE rev 0.4 (final G1 dispositioned); operator signed off 2026-10-24 |
 | 1 | Mission store | MERGED; Codex G3 + Claude review fixed |
 | 2 | Ship's Memory | MERGED; Codex G3 x2 fixed |
 | 3 | Supervisor, adapter, worker | MERGED (3a-3d); Codex ~9 rounds + Claude /code-review fixed. Privileged green docker + MOS + Ubuntu VM. Launcher steps wired into setup (missions answer, default off) |
@@ -39,7 +39,7 @@ Merged: S9 (release proof), S9b (rehearsal agent through the real Docker proxy, 
    f. Wording of the brief, the recovery classification and `cancel.held` now says what the checkpoint covers (scoped files and container settings), not "the host".
    **Left, with reasons:** (1) `capture_post` overwrites the post-change manifest on every `roll_back` retry from `needs_operator`/`rollback_pending`; that is the S5/S8 design and unchanged here, but it weakens drift detection on retries: worth a look in the next slice. (2) A `container.create` with enough long mounts can exceed the event body cap, so its vetted-volume record is truncated and the tripwire pauses on those volumes: a false pause, fail-safe, resume to continue. (3) A grant-level `protected.resources` entry that equals a discovered volume path cannot be told from the site's copy of it; use `missions.protected` or a grant exclusion to protect a volume against vetted creates. (4) A launcher failure after the session row exists is not covered by `retire_unused`.
    **Whole-branch Codex review (`codex review --base d861838`, 2026-10-23) FIXED, re-reviewed clean (`--uncommitted` x2; Claude review of the same diff by the author; full suite 6579 passed):** (1) checkpoint `_current` re-resolves a symlinked entry's given path and every other in-scope name that deduplicated to the same file (`aliases` in the manifest); a retargeted link is a problem and a restore refuses even with drift acknowledged. (2) Setup answers apply the Core UID-range rule (`uid_range_problem`, DynamicUser overlap) when missions are enabled. (3) `memory.store.confirm` reads the card and checks actor/type/status inside the write transaction, and the UPDATE is guarded on `status = 'candidate'`.
-6. Operator: slice 0 sign-off; v3 carry-overs in `G4-review.md` (the setup-server exit-mid-install one is worst); push and deploy are yours. MOS repair rehearsal not claimed (no compose plugin). Existing installs with an explicit uid range 61000-61999 must follow INSTALL.md "Moving an existing uid range".
+6. Operator: slice 0 signed off 2026-10-24. The two worst v3 carry-overs (`setup/server.py` serve loop exiting mid-install; `/api/undo` without `exposed()`) are fixed on branch `v3-hotfix-setup-server` (off `v3-next`, local, not pushed or merged); remaining v3 carry-overs in `G4-review.md` (the setup-server exit-mid-install one is worst); push and deploy are yours. MOS repair rehearsal not claimed (no compose plugin). Existing installs with an explicit uid range 61000-61999 must follow INSTALL.md "Moving an existing uid range".
 Shut the VM down when finished: `virsh shutdown PE_UBUNTU_TEST`. Estimate to ship: roughly 2-3 working days (S10 is the largest item).
 
 ## Decisions since the brief
