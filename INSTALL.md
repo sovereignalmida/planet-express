@@ -314,35 +314,56 @@ What it does not do: protect the key from Core's own process (it is in Core's me
 money (only requests and tokens), or stop the agent sending the model whatever it can read (the egress policy still applies).
 The broker only covers the vendor's `/v1/messages` API; an agent that needs another API is not served.
 
-To run the **Claude Code CLI** as the agent (verified against `claude` 2.1.310 with a scripted stand-in for the vendor's API: a plain request, and a
-tool call that writes `result.json`; a real mission with your key and the real model is the next thing to try):
+**Which credential.** The broker holds an **API key**: an Anthropic Console key, or a gateway key such as OpenRouter's. It must not
+be a Claude subscription (Pro/Max) login. Anthropic's terms do not allow a developer to "collect, store, or intermediate Claude.ai
+credentials or session tokens", and a broker that injects a subscription's OAuth token for a sandboxed CLI would be doing exactly
+that; the documented subscription route (`claude setup-token`) puts the token in the agent's own environment, which v4's
+no-secret-in-a-session rule forbids. Use an API key, ideally one with its own credit limit.
+
+To run the **Claude Code CLI** as the agent, through **OpenRouter** (the key has its own limit; verified with the real `claude`
+2.1.310 against a scripted stand-in for the upstream: a plain request, and a tool call that writes `result.json`; a real mission
+with the real model is the next thing to try):
 
 ```yaml
 missions:
   enabled: true
   model_broker:
     enabled: true
-    key_env: ANTHROPIC_API_KEY        # set it in /etc/planetexpress.env; Core reads it, no session does
-    models: ["claude-sonnet-4-5", "claude-haiku-4-5"]   # the CLI also asks the small model for some internal work
+    upstream_host: openrouter.ai
+    upstream_path_prefix: /api          # the Messages API is served at https://openrouter.ai/api/v1/messages
+    auth_scheme: bearer                 # OpenRouter takes the key as a Bearer token
+    key_env: OPENROUTER_API_KEY         # set it in /etc/planetexpress.env; Core reads it, no session does
+    models: ["~anthropic/claude-sonnet-latest", "~anthropic/claude-haiku-latest"]
+    session_env:                        # what the CLI should call its models, so it asks for ids the gateway knows
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "~anthropic/claude-sonnet-latest"
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "~anthropic/claude-haiku-latest"
+      ANTHROPIC_SMALL_FAST_MODEL: "~anthropic/claude-haiku-latest"
   runtime:
-    argv: ["/usr/local/bin/claude", "-p",
+    argv: ["/usr/bin/claude", "-p",
            "Read BRIEF.md in the current directory and carry out the mission it describes. Finish by writing result.json in the current directory in the format the brief specifies.",
-           "--model", "claude-sonnet-4-5", "--max-turns", "60",
+           "--model", "~anthropic/claude-sonnet-latest", "--max-turns", "60",
            "--allowedTools", "Bash,Read,Grep,Glob,Write,Edit",
            "--disallowedTools", "WebFetch,WebSearch"]
   hooks:
     install_claude_code: true
-    command: ["/usr/local/bin/pe-python", "-m", "planet_express.missions.hooks"]
+    command: ["/usr/bin/python3", "/usr/local/lib/planetexpress/pe_hook.py"]
     root: /var/lib/planetexpress/mission-hooks
 ```
 
-Things to get right: sessions run as their own uids, so the `claude` binary (and the interpreter the hooks run with) must be
-executable by them: install them system-wide (`/usr/local/bin`, `/opt`), not under a home directory. `-p` mode denies any tool
-call that would need a prompt, so the tools it may use are named in `--allowedTools`: that is safe only because the boundary is
-the containment (identity, scoped sudo and Docker proxy, tripwire, checkpoint, verification), with the PE hooks as a speed
-bump on top. `WebFetch` is disallowed because its domain check talks to the vendor directly, around the broker. Telemetry,
-updates and feedback traffic are switched off by the environment the broker sets. Name every model the CLI may request in
-`models`; a request for any other is refused and logged.
+For the vendor's own API instead, use `upstream_host: api.anthropic.com`, no prefix, `auth_scheme: x-api-key` (the default) and
+Anthropic model ids. `scripts/model_broker_smoke.py` runs the real CLI through a real broker to the real upstream with one short
+request and prints whether it worked and whether the key reached the session's environment: run it before a first mission.
+OpenRouter's own documentation says Claude Code "is only guaranteed to work with the Anthropic first-party provider": route to an
+Anthropic model.
+
+Things to get right: sessions run as their own uids, so the `claude` binary and the hook script must be executable by them (install
+the CLI with `sudo npm install -g @anthropic-ai/claude-code`, and copy `planet_express/missions/hooks.py`, which uses only the
+standard library, to `/usr/local/lib/planetexpress/pe_hook.py`), and `missions.workspace_root` must be outside any home directory
+(`/var/lib/planetexpress/mission-workspaces`). `-p` mode denies any tool call that would need a prompt, so the tools it may use are
+named in `--allowedTools`: that is safe only because the boundary is the containment (identity, scoped sudo and Docker proxy,
+tripwire, checkpoint, verification), with the PE hooks as a speed bump on top. `WebFetch` is disallowed because its domain check
+talks to the vendor directly, around the broker. Telemetry, updates and feedback traffic are switched off by the environment the
+broker sets. Name every model the CLI may request in `models`; a request for any other is refused and logged.
 
 ### What v4 adds to the host
 

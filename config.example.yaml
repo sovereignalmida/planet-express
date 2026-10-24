@@ -170,6 +170,8 @@ multi_host:
 #   model_broker:                   # lets the agent reach the model without ever holding the API key (see INSTALL.md "The model broker")
 #     enabled: true
 #     key_env: ANTHROPIC_API_KEY    # the NAME of the variable in Core's environment (/etc/planetexpress.env) that holds the real key
+#                                   # (an API key, never a subscription login). For OpenRouter also set upstream_host: openrouter.ai,
+#                                   # upstream_path_prefix: /api, auth_scheme: bearer and session_env (see INSTALL.md)
 #     models: ["claude-sonnet-4-5"] # the only model ids a mission may request
 #   session_uid_min: 200000         # one uid and private group per session; not Core's uid, not systemd DynamicUser's 61184-65519, no existing account
 #   session_uid_max: 200999

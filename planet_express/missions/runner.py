@@ -298,7 +298,9 @@ def build_mission_runner(
     if model_broker is None and real and mb.enabled:
         model_broker = ModelBroker(
             upstream_host=mb.upstream_host, key_env=mb.key_env, models=list(mb.models), store=MissionStore(store),
-            limits=BrokerLimits(max_requests=mb.max_requests, max_tokens=mb.max_tokens, timeout_s=float(mb.timeout_s)))
+            limits=BrokerLimits(max_requests=mb.max_requests, max_tokens=mb.max_tokens, timeout_s=float(mb.timeout_s)),
+            path_prefix=mb.upstream_path_prefix, auth_scheme=mb.auth_scheme, session_env=mb.session_env,
+            allow_body_keys=mb.allow_body_keys)
     if model_broker is not None and not model_broker.secret_values():
         log.error("missions.model_broker is enabled but %s is not set in Core's environment: no mission session can start until it is",
                   cfg.model_broker.key_env)

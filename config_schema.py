@@ -317,6 +317,10 @@ class MissionRuntimeConfig(BaseModel):
         return names
 
 
+# `claude-sonnet-4-5`, `anthropic/claude-sonnet-4.5`, `~anthropic/claude-sonnet-latest[1m]`: one to three segments, no `..`, no `//`.
+_MODEL_ID = re.compile(r"~?[A-Za-z0-9][A-Za-z0-9._:-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._:-]{0,63}){0,2}(\[[0-9a-z]{1,6}\])?")
+
+
 class ModelBrokerConfig(BaseModel):
     """The per-session model broker (missions/model_broker.py): Core holds the model API key, a session holds only a
     per-session access code and a loopback base URL. Off by default; with it off a session has no model access of its own."""
@@ -324,6 +328,13 @@ class ModelBrokerConfig(BaseModel):
 
     enabled: bool = False
     upstream_host: str = "api.anthropic.com"        # the only host the broker relays to, over TLS
+    upstream_path_prefix: str = ""                  # where the vendor's API is mounted on that host (OpenRouter: /api)
+    auth_scheme: Literal["x-api-key", "bearer"] = "x-api-key"    # how the real key is presented upstream (OpenRouter: bearer)
+    # Non-secret model settings put in the session's environment, e.g. ANTHROPIC_DEFAULT_SONNET_MODEL for a gateway whose model
+    # ids differ from the vendor's. Only these names, and values that look like model ids.
+    session_env: dict[str, str] = {}
+    # Request fields beyond the standard Messages ones that the operator has vetted (the broker refuses any other top-level field).
+    allow_body_keys: list[str] = []
     key_env: str = "ANTHROPIC_API_KEY"              # the NAME of the Core environment variable that holds the real key
     models: list[str] = []                          # model ids a mission may request; empty is refused when enabled
     max_requests: int = Field(default=300, gt=0, le=100_000)       # per session
@@ -339,6 +350,30 @@ class ModelBrokerConfig(BaseModel):
             raise ValueError("missions.model_broker.upstream_host: the port must be 1-65535")
         return host
 
+    @field_validator("upstream_path_prefix")
+    @classmethod
+    def _prefix(cls, prefix: str) -> str:
+        if prefix and (not re.fullmatch(r"(/[A-Za-z0-9._-]{1,32}){1,4}", prefix) or any(seg in (".", "..") for seg in prefix.split("/"))):
+            raise ValueError("missions.model_broker.upstream_path_prefix is a plain path like /api, without a trailing slash")
+        return prefix
+
+    @field_validator("allow_body_keys")
+    @classmethod
+    def _body_keys(cls, keys: list[str]) -> list[str]:
+        if any(not re.fullmatch(r"[a-z][a-z0-9_]{0,40}", k) for k in keys):
+            raise ValueError("missions.model_broker.allow_body_keys: lowercase field names")
+        return keys
+
+    @field_validator("session_env")
+    @classmethod
+    def _session_env(cls, env: dict[str, str]) -> dict[str, str]:
+        allowed = {"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                   "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"}
+        for name, value in env.items():
+            if name not in allowed or not _MODEL_ID.fullmatch(value):
+                raise ValueError(f"missions.model_broker.session_env: only {sorted(allowed)} with a model id as the value")
+        return env
+
     @field_validator("key_env")
     @classmethod
     def _key_env(cls, name: str) -> str:
@@ -350,7 +385,7 @@ class ModelBrokerConfig(BaseModel):
     @classmethod
     def _models(cls, models: list[str]) -> list[str]:
         for model in models:
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", model):
+            if not _MODEL_ID.fullmatch(model):
                 raise ValueError(f"missions.model_broker.models: {model[:40]!r} is not a model id")
         return models
 
@@ -358,6 +393,11 @@ class ModelBrokerConfig(BaseModel):
     def _needs_models(self):
         if self.enabled and not self.models:
             raise ValueError("missions.model_broker.enabled needs missions.model_broker.models: name the model ids a mission may use")
+        if self.enabled:
+            stray = [v for v in self.session_env.values() if v not in self.models]
+            if stray:
+                raise ValueError(f"missions.model_broker.session_env names {stray[0]!r}, which is not in missions.model_broker.models: "
+                                 "the CLI would ask for a model the broker then refuses")
         return self
 
 
@@ -581,6 +621,10 @@ class MissionsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _the_broker_key_stays_out_of_the_session(self):
+        # The launcher refuses an environment of more than 64 variables; the supervisor, the broker and the hooks add about 35.
+        if self.model_broker.enabled and len(self.runtime.env_allow) + len(self.model_broker.session_env) > 20:
+            raise ValueError("missions.runtime.env_allow and missions.model_broker.session_env together name more than 20 variables: "
+                             "the session launcher caps the whole environment at 64")
         if self.model_broker.enabled and self.model_broker.key_env in self.runtime.env_allow:
             raise ValueError("missions.runtime.env_allow names missions.model_broker.key_env: the real model key must never reach "
                              "a session (the broker hands the agent its own access code)")

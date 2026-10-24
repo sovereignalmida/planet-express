@@ -278,7 +278,7 @@ def test_a_model_off_the_list_a_non_json_body_and_an_oversize_body_are_refused(r
     assert ask(broker, body={"messages": []})[0].status == 400
     assert ask(broker, raw=b"not json")[0].status == 400
     assert ask(broker, raw=b"[1,2]")[0].status == 400
-    assert ask(broker, body={"model": MODEL, "pad": "x" * 5000})[0].status == 413
+    assert ask(broker, body={"model": MODEL, "system": "x" * 5000})[0].status == 413
     assert upstream.seen == []
 
 
@@ -739,12 +739,12 @@ def test_the_agents_own_tools_are_relayed(rig):
 def test_a_refusal_after_a_large_body_is_actually_delivered_not_lost_to_a_reset(rig):
     _upstream, _store, build = rig
     broker = started(build)
-    big = {"model": MODEL, "pad": "x" * 2_000_000}
+    big = {"model": MODEL, "system": "x" * 2_000_000}
     for _ in range(5):
         response, data = ask(broker, body=big, access="sk-ant-pe-wrong")
         assert response.status == 401 and json.loads(data)["error"]["type"] == "authentication_error"
     broker.pause("M-1")
-    response, data = ask(broker, body={"model": MODEL, "pad": "x" * 2_000_000})
+    response, data = ask(broker, body={"model": MODEL, "system": "x" * 2_000_000})
     assert response.status == 403 and "paused" in json.loads(data)["error"]["message"]
 
 
@@ -790,3 +790,106 @@ def test_a_request_that_reached_the_vendor_but_died_unexpectedly_is_charged_its_
     with broker._lock:
         session = broker._sessions["S-1"]
     assert session.reserved == 0                         # nothing is left promised, and no request is un-accounted
+
+
+def test_a_gateway_mounted_under_a_path_with_bearer_auth_is_reached_that_way(rig):
+    upstream, _store, build = rig
+    broker = ModelBroker(upstream_host=f"127.0.0.1:{upstream.port}", key_env="K", models=["~anthropic/claude-sonnet-latest"],
+                         limits=BrokerLimits(), store=FakeStore(), environ={"K": REAL}, path_prefix="/api", auth_scheme="bearer",
+                         connect=lambda h, t: http.client.HTTPConnection(h, timeout=t))
+    broker.start(CS())
+    try:
+        response, _ = ask(broker, path="/v1/messages?beta=true", body={"model": "~anthropic/claude-sonnet-latest", "messages": []})
+        assert response.status == 200
+    finally:
+        broker.shutdown()
+    (seen,) = upstream.seen
+    assert seen["path"] == "/api/v1/messages?beta=true"
+    assert seen["headers"]["authorization"] == f"Bearer {REAL}" and "x-api-key" not in seen["headers"]
+
+
+def test_session_env_adds_the_model_mapping_but_never_replaces_the_broker_settings(rig):
+    _upstream, _store, build = rig
+    broker = ModelBroker(upstream_host="127.0.0.1:1", key_env="K", models=[MODEL], limits=BrokerLimits(), store=FakeStore(),
+                         environ={"K": REAL}, session_env={"ANTHROPIC_DEFAULT_HAIKU_MODEL": "~anthropic/claude-haiku-latest",
+                                                           "ANTHROPIC_BASE_URL": "https://evil.example"})
+    broker.start(CS())
+    try:
+        env = broker.env(CS())
+        assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "~anthropic/claude-haiku-latest"
+        assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")          # the broker's own value always wins
+    finally:
+        broker.shutdown()
+
+
+@pytest.mark.parametrize("field", ["plugins", "models", "provider", "route", "transforms", "web_search_options", "user", "stop", "anything_new"])
+def test_a_field_outside_the_messages_api_is_refused_unless_the_operator_allowed_it(rig, field):
+    upstream, _store, build = rig
+    broker = started(build)
+    response, data = ask(broker, body={"model": MODEL, "max_tokens": 5, "messages": [], field: {"x": 1}})
+    assert response.status == 400 and field in json.loads(data)["error"]["message"] and upstream.seen == []
+    allowing = build(models=(MODEL,))
+    allowing.extra_body_keys = frozenset({field})                      # what `allow_body_keys` sets
+    allowing.start(type("Other", (), {"session_id": "S-9"}))
+    env = allowing.env(type("Other", (), {"session_id": "S-9"}))
+    conn = http.client.HTTPConnection(env["ANTHROPIC_BASE_URL"].removeprefix("http://"), timeout=10)
+    conn.request("POST", "/v1/messages", body=json.dumps({"model": MODEL, "max_tokens": 5, "messages": [], field: 1}).encode(),
+                 headers={"x-api-key": env["ANTHROPIC_API_KEY"], "content-type": "application/json"})
+    assert conn.getresponse().status == 200
+
+
+def test_every_field_the_real_cli_sends_is_allowed():
+    from planet_express.missions.model_broker import ALLOWED_BODY_KEYS
+    seen = {"context_management", "max_tokens", "messages", "metadata", "model", "output_config", "stream", "system", "thinking", "tools"}
+    assert seen <= ALLOWED_BODY_KEYS
+
+
+def test_the_prefix_is_applied_to_count_tokens_and_the_default_scheme_still_sends_x_api_key(rig):
+    upstream, _store, build = rig
+    broker = ModelBroker(upstream_host=f"127.0.0.1:{upstream.port}", key_env="K", models=[MODEL], limits=BrokerLimits(),
+                         store=FakeStore(), environ={"K": REAL}, path_prefix="/api",
+                         connect=lambda h, t: http.client.HTTPConnection(h, timeout=t))
+    broker.start(CS())
+    try:
+        upstream.mode = "count"
+        assert ask(broker, path="/v1/messages/count_tokens")[0].status == 200
+    finally:
+        broker.shutdown()
+    (seen,) = upstream.seen
+    assert seen["path"] == "/api/v1/messages/count_tokens" and seen["headers"]["x-api-key"] == REAL
+    assert "authorization" not in seen["headers"]
+
+
+def test_an_unknown_auth_scheme_is_refused_at_construction():
+    with pytest.raises(ValueError, match="auth_scheme"):
+        ModelBroker(upstream_host="h", key_env="K", models=[MODEL], limits=BrokerLimits(), store=FakeStore(), auth_scheme="Bearer")
+
+
+def test_an_upstream_that_echoes_the_key_has_its_response_cut(rig):
+    import socket
+    _upstream, store, build = rig
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def echoing_upstream():
+        conn, _ = server.accept()
+        conn.recv(65536)
+        payload = (b'{"error":"bad key ' + REAL.encode() + b'"}')
+        conn.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: "
+                     + str(len(payload)).encode() + b"\r\n\r\n" + payload)
+        conn.close()
+    threading.Thread(target=echoing_upstream, daemon=True).start()
+    broker = ModelBroker(upstream_host=f"127.0.0.1:{server.getsockname()[1]}", key_env="K", models=[MODEL], limits=BrokerLimits(),
+                         store=store, environ={"K": REAL}, connect=lambda h, t: http.client.HTTPConnection(h, timeout=t))
+    broker.start(CS())
+    try:
+        try:
+            _response, data = ask(broker)
+        except (http.client.IncompleteRead, http.client.HTTPException, OSError):
+            data = b""
+        assert REAL.encode() not in data
+    finally:
+        broker.shutdown()
+        server.close()
+    assert any(e[3].get("reason") == "the upstream echoed the key" for e in store.events)

@@ -28,7 +28,7 @@ import secrets
 import socket
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -146,8 +146,15 @@ class _Session:
 class ModelBroker:
     def __init__(self, *, upstream_host: str, key_env: str, models: list[str], limits: BrokerLimits, store: MissionStore,
                  environ: Mapping[str, str] | None = None,
-                 connect: Callable[[str, float], http.client.HTTPConnection] | None = None):
+                 connect: Callable[[str, float], http.client.HTTPConnection] | None = None,
+                 path_prefix: str = "", auth_scheme: str = "x-api-key", session_env: Mapping[str, str] | None = None,
+                 allow_body_keys: Sequence[str] = ()):
+        if auth_scheme not in ("x-api-key", "bearer"):
+            raise ValueError(f"unknown auth_scheme {auth_scheme!r}")
+        self.extra_body_keys = frozenset(allow_body_keys)
         self.upstream_host, self.key_env, self.models = upstream_host, key_env, frozenset(models)
+        self.path_prefix, self.auth_scheme = path_prefix, auth_scheme       # where the vendor's API is mounted; how the key is sent
+        self.session_env = dict(session_env or {})
         self.limits, self.ms = limits, store
         self.environ = environ
         self._connect = connect or (lambda host, timeout: http.client.HTTPSConnection(host, timeout=timeout))
@@ -187,7 +194,8 @@ class ModelBroker:
             session = self._sessions.get(cs.session_id)
         if session is None:
             return {}
-        return {"ANTHROPIC_BASE_URL": f"http://{LOOPBACK}:{session.port}", "ANTHROPIC_API_KEY": session.access, **HARDENING_ENV}
+        return {**self.session_env, "ANTHROPIC_BASE_URL": f"http://{LOOPBACK}:{session.port}", "ANTHROPIC_API_KEY": session.access,
+                **HARDENING_ENV}
 
     def shutdown(self) -> None:
         for session_id in list(self._sessions):
@@ -328,7 +336,7 @@ class ModelBroker:
                 model = parsed.get("model") if isinstance(parsed, dict) else None
                 if not isinstance(model, str) or model not in broker.models:
                     return self._refuse(400, "invalid_request_error", "that model is not allowed for missions")
-                forbidden = _vendor_side_reach(parsed)
+                forbidden = _vendor_side_reach(parsed, broker.extra_body_keys)
                 if forbidden:
                     return self._refuse(400, "invalid_request_error", f"{forbidden} is not allowed for missions")
                 why = broker._permitted(session)           # the last look before this request counts against the budget
@@ -359,7 +367,10 @@ class ModelBroker:
             def _relay(self, path: str, body: bytes, model: str, key: str, promise: int, state: dict) -> None:
                 started = time.monotonic()
                 headers = {name: value for name in FORWARD_REQUEST_HEADERS if (value := self.headers.get(name))}
-                headers["x-api-key"] = key
+                if broker.auth_scheme == "bearer":
+                    headers["authorization"] = f"Bearer {key}"
+                else:
+                    headers["x-api-key"] = key
                 headers["content-length"] = str(len(body))
                 query = "?beta=true" if "beta=true" in self.path.partition("?")[2].split("&") else ""
                 counter = _UsageCounter()
@@ -375,23 +386,30 @@ class ModelBroker:
                         again = broker._permitted(session)     # a pause during DNS or TLS had no connection to cut
                         if again:
                             raise OSError(f"model access closed: {again}")
-                        conn.request("POST", path + query, body=body, headers=headers)
+                        conn.request("POST", broker.path_prefix + path + query, body=body, headers=headers)
                         state["contacted"] = True
                         response = conn.getresponse()
                         status = response.status
                         self.send_response(status)
                         for name, value in response.getheaders():
                             lowered = name.lower()
-                            if value and (lowered in FORWARD_RESPONSE_HEADERS or lowered.startswith(FORWARD_RESPONSE_PREFIXES)):
+                            if (value and key not in value
+                                    and (lowered in FORWARD_RESPONSE_HEADERS or lowered.startswith(FORWARD_RESPONSE_PREFIXES))):
                                 self.send_header(name, value)
                         self.send_header("Connection", "close")
                         self.end_headers()
                         committed = True
                         checked = time.monotonic()
+                        key_bytes, tail = key.encode(), b""
                         while chunk := response.read1(_CHUNK):          # read1: hand on what has arrived, never wait to fill a buffer
                             sent += len(chunk)
                             if sent > broker.limits.max_response_bytes:
                                 break                                    # cut it off: the client sees a truncated stream
+                            if key_bytes in tail + chunk:                # an upstream that echoes the key: the stream ends here
+                                broker._record(session, "model.refused", {"status": 502, "reason": "the upstream echoed the key",
+                                                                          "path": path})
+                                break
+                            tail = (tail + chunk)[-(len(key_bytes) - 1):] if len(key_bytes) > 1 else b""
                             if time.monotonic() - checked >= broker.limits.recheck_s:        # a pause or a revoke ends a stream already running
                                 checked = time.monotonic()
                                 if broker._permitted(session):
@@ -424,13 +442,20 @@ class ModelBroker:
         return Handler
 
 
-def _vendor_side_reach(body: dict) -> str | None:
-    """What in a request would make the VENDOR reach out for the agent (fetch a URL, call an MCP server, run code), around the
-    session's own network containment, using Core's key. The agent's own tools are plain `custom` tools: they run in the session."""
-    if body.get("mcp_servers"):
-        return "mcp_servers"
-    if body.get("container"):
-        return "container"
+# The top-level fields of a Messages request that only shape the model's answer. Anything else is refused: a gateway in front of the
+# vendor has fields of its own (OpenRouter's `plugins`, `models`, `provider`, `route`, ...) that make IT search the web or fall back
+# to a model off the operator's list, with Core's key. `missions.model_broker.allow_body_keys` adds a field an operator has vetted.
+ALLOWED_BODY_KEYS = frozenset({"model", "messages", "max_tokens", "system", "stream", "temperature", "top_p", "top_k", "stop_sequences",
+                               "tools", "tool_choice", "thinking", "metadata", "service_tier", "output_config", "context_management"})
+
+
+def _vendor_side_reach(body: dict, extra_keys: frozenset[str] = frozenset()) -> str | None:
+    """What in a request would make the VENDOR (or a gateway) reach out for the agent (fetch a URL, call an MCP server, run code,
+    pick another model), around the session's own network containment, using Core's key. The agent's own tools are plain `custom`
+    tools: they run in the session."""
+    unknown = sorted(set(body) - ALLOWED_BODY_KEYS - extra_keys)
+    if unknown:
+        return f"the field {unknown[0][:40]!r}"
     tools = body.get("tools")
     if isinstance(tools, list):
         for tool in tools:
