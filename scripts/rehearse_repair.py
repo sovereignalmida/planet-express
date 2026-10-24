@@ -618,7 +618,11 @@ class Rig:
         status = self.drive(mid, until, self.args.timeout_s)
         results = [json.loads(e.body_json) for e in self.ms.events(mid)
                    if json.loads(e.body_json).get("event") == "verify.result"]
-        rec.step(f"{scenario}:ended", status in until, status=status, verify=results[-1:] or None)
+        tail = None
+        if status in ("needs_operator", "failed", "recovery_required"):      # say why: the mission's last events
+            tail = [{"kind": e.kind, "actor": e.actor, "body": e.body_json[:300]} for e in self.ms.events(mid)[-12:]]
+        rec.step(f"{scenario}:ended", status in until, status=status, verify=results[-1:] or None,
+                 **({"events_tail": tail} if tail else {}))
         summary = proxy_summary(self.ms.events(mid))
         rec.extra.setdefault("proxy", {})[scenario] = summary
         seen = went_through_proxy(summary)
