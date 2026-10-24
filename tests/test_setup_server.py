@@ -335,6 +335,8 @@ def test_past_hard_cap_needs_a_session_that_has_outlived_it(clock):
     assert not sessions.past_hard_cap()
     clock.now += 101
     assert sessions.past_hard_cap()
+    assert sessions.lookup(sessions._session.id) is None      # polling past the cap clears the session ...
+    assert sessions.past_hard_cap()                           # ... but the cap stays reached
 
 
 def test_the_hard_cap_closes_the_listener_while_a_run_is_in_progress_and_the_run_gets_a_bounded_wait():

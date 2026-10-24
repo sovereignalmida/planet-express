@@ -66,6 +66,7 @@ class Sessions:
         self._token_expires = 0.0
         self._session: Session | None = None
         self._session_hash: bytes | None = None
+        self._hard_deadline: float | None = None          # outlives the session object, which lookup() may clear
 
     @staticmethod
     def _digest(value: str) -> bytes:
@@ -88,6 +89,7 @@ class Sessions:
             now = self._clock()
             self._session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now, now + self._token_life)
             self._session_hash = self._digest(self._session.id)
+            self._hard_deadline = now + self._hard_cap
             return self._session
 
     def lookup(self, cookie: str | None) -> Session | None:
@@ -114,7 +116,7 @@ class Sessions:
 
     def past_hard_cap(self) -> bool:
         with self._lock:
-            return self._session is not None and self._clock() >= self._session.started + self._hard_cap
+            return self._hard_deadline is not None and self._clock() >= self._hard_deadline
 
     def finished(self) -> bool:
         """True once the token has been used up or has lapsed and no session remains: `serve` should stop."""
