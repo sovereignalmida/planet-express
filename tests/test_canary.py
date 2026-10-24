@@ -732,3 +732,13 @@ def test_a_failing_adguard_update_is_rolled_back_from_the_local_image(tmp_path):
     result = engine.RunbookEngine(svc).run(ex, adguard_plan(svc), origin="telegram")
     assert result.status != "passed" and svc.running == OLD
     assert not any(" pull " in f" {line} " for line in joined(svc)[joined(svc).index(next(l for l in joined(svc) if "up -d --pull never" in l)):])
+
+
+def test_a_long_digest_is_cut_at_a_line_so_no_html_tag_is_left_open():
+    import re
+    import casa_zoidberg as z
+    results = [{"stack": f"stack{i}", "service": "x" * 40, "status": "needs_attention", "reason": "r"} for i in range(40)]
+    text = z.summarize_pass(results, limit=600)
+    assert len(text) <= 600 and text.endswith("…")
+    for tag in ("b", "code"):
+        assert len(re.findall(rf"<{tag}>", text)) == len(re.findall(rf"</{tag}>", text))

@@ -66,6 +66,7 @@ class Sessions:
         self._token_expires = 0.0
         self._session: Session | None = None
         self._session_hash: bytes | None = None
+        self._hard_deadline: float | None = None          # outlives the session object, which lookup() may clear
 
     @staticmethod
     def _digest(value: str) -> bytes:
@@ -88,6 +89,7 @@ class Sessions:
             now = self._clock()
             self._session = Session(secrets.token_urlsafe(32), secrets.token_urlsafe(32), now, now + self._token_life)
             self._session_hash = self._digest(self._session.id)
+            self._hard_deadline = now + self._hard_cap
             return self._session
 
     def lookup(self, cookie: str | None) -> Session | None:
@@ -111,6 +113,10 @@ class Sessions:
             if session is None:
                 return max(0, int(self._token_expires - self._clock())) if self._token_hash else 0
             return max(0, int(min(session.expires, session.started + self._hard_cap) - self._clock()))
+
+    def past_hard_cap(self) -> bool:
+        with self._lock:
+            return self._hard_deadline is not None and self._clock() >= self._hard_deadline
 
     def finished(self) -> bool:
         """True once the token has been used up or has lapsed and no session remains: `serve` should stop."""
@@ -352,6 +358,8 @@ def _wizard_routes(app: Flask, sessions: Sessions, session, exposed) -> None:
 
     @app.post("/api/undo")
     def api_undo():
+        if exposed(fresh=True):
+            return jsonify({"error": "setup is reachable from outside your LAN, so nothing will be undone"}), 403
         try:
             session.undo()
         except Conflict as exc:
@@ -420,6 +428,9 @@ def _quiet_handler():
     return Handler
 
 
+_SETTLE_LIMIT = 3600.0      # seconds a run in progress may take to settle once the listener has closed
+
+
 def network_exposed() -> bool:
     """True if this host has a globally routable address on a real interface: setup is meant for the LAN only."""
     from planet_express.setup.discover import _network
@@ -474,7 +485,11 @@ def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessio
             f"  {certificate.fingerprint}")
         out("The link works once and expires in 15 minutes. Press Ctrl-C here to stop setup at any time.")
         try:
-            while not stop.is_set() and not sessions.finished():
+            # an install in progress runs as root on a daemon thread: ending the process would kill it mid-step, so
+            # the idle expiry waits for the run to settle. The hard cap still closes the listener; the run then
+            # gets a bounded time to settle in `finally` below.
+            while not stop.is_set() and not (sessions.finished() and (
+                    sessions.past_hard_cap() or not (session is not None and session.busy()))):
                 stop.wait(1.0)
         except KeyboardInterrupt:
             out("Stopping setup.")
@@ -483,3 +498,8 @@ def serve(*, addresses: list[str], port: int, names: list[str], sessions: Sessio
         for server in servers:
             server.shutdown()
         shutil.rmtree(directory, ignore_errors=True)
+        if session is not None and hasattr(session, "close"):
+            session.close()                          # a request that was mid-flight can no longer start a run
+        if session is not None and session.busy():
+            out("Setup is closed; waiting for the run in progress to settle before exiting.")
+            session.wait(_SETTLE_LIMIT)

@@ -88,7 +88,7 @@
       const b = r.body;
       say("tg-result", b.found ? "Found chat " + b.chat + (b.bot ? " with @" + b.bot : "") + ". Now send the test message." : b.message, !b.found);
       document.getElementById("tg-test").disabled = !b.found;
-      document.getElementById("tg-token").value = "";            // the server holds it now; it is not left in the page
+      if (b.found) document.getElementById("tg-token").value = "";   // the server holds it now; a failed lookup keeps it to retry
     });
   });
   on("tg-test", () => send("POST", "/api/telegram/test").then(r => {

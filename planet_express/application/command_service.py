@@ -1210,7 +1210,6 @@ class CommandService:
                 log.exception("Could not request a re-scan")
 
     @staticmethod
-    @staticmethod
     def _verified_plan(row: dict | None) -> runbooks.Runbook | None:
         if not row or not row.get("plan_json") or not row.get("plan_sha256"):
             return None

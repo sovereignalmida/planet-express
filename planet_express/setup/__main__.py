@@ -145,12 +145,19 @@ def _serve_command(args) -> int:
     addresses = args.bind or (discover()["network"]["lan_addresses"] + ["127.0.0.1"])
     holder: dict = {}
 
-    def journal_root() -> str:
-        return default_journal_root(discover(), holder["session"].answers["install_dir"])
+    def journal_root(freeze: bool = False) -> str:
+        # Fixed when a real apply starts: a later change to the install dir answer, or a re-discovery, must not
+        # move the journal that apply wrote and an undo has to read. A preview (dry run) only reads it.
+        if "journal_root" in holder:
+            return holder["journal_root"]
+        root = default_journal_root(discover(), holder["session"].answers["install_dir"])
+        if freeze:
+            holder["journal_root"] = root
+        return root
 
     def apply_fn(reviewed, replan):
         uids = _trusted_uids(reviewed, holder["session"].discovery)
-        return apply(reviewed, host=RealHost(uids), journal_root=journal_root(), replan=replan, trusted_uids=uids)
+        return apply(reviewed, host=RealHost(uids), journal_root=journal_root(freeze=True), replan=replan, trusted_uids=uids)
 
     def undo_fn(reviewed):
         uids = _trusted_uids(reviewed, holder["session"].discovery)
