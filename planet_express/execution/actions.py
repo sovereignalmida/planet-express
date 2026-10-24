@@ -412,7 +412,13 @@ def _ordered_stack_names(action: str) -> list[str]:
         paths = config.active_stack_dirs()
         return [path.name for path in sorted(paths, key=lambda path: (path.name != "network", path.name))]
     paths = [path.parent for path in sorted(Path(config.STACKS_ROOT).glob("*/docker-compose.yml"))]
-    return [path.name for path in sorted(paths, key=lambda path: (path.name == "network", path.name))]
+    baseline = sorted(paths, key=lambda path: (is_ingress_stack(path.name), path.name))   # every ingress stack last, not just "network"
+    # Shut down in the reverse of the order the stacks boot in: a stack other stacks depend on (a VPN container whose network
+    # others share, a database) goes down after its dependents. Boot order never raises and falls back to its input unchanged,
+    # so with no cross-stack dependencies this is the order above.
+    from planet_express.execution import boot_order
+    boot, _lines = boot_order.order_stacks(list(reversed(baseline)))
+    return [path.name for path in reversed(boot)]
 
 
 def resolve_stack_target(

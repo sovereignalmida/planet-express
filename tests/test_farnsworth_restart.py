@@ -137,7 +137,7 @@ def test_help_lists_restart(monkeypatch):
     assert any("/restart `<stack>` `<service>`" in m for m in n.notifications)
 
 
-@pytest.mark.parametrize("text", ["/up", "/up media extra", "/down", "/down media extra"])
+@pytest.mark.parametrize("text", ["/up", "/up media extra", "/down", "/down media extra", "/prepare_reboot now"])
 def test_stack_action_usage_errors(monkeypatch, text):
     commands = FakeCommands()
     n = _send(text, commands, monkeypatch)
@@ -151,6 +151,7 @@ def test_stack_action_usage_errors(monkeypatch, text):
     ("/down media", fw.actions.DOWN_STACK, "media"),
     ("/down network", fw.actions.DOWN_INGRESS, "network"),
     ("/down all", fw.actions.DOWN_ALL, "all"),
+    ("/prepare_reboot", fw.actions.DOWN_ALL, "all"),
 ])
 def test_stack_actions_route_to_typed_actions(monkeypatch, text, action, target):
     commands = FakeCommands()

@@ -1698,20 +1698,27 @@ def handle_message(
                 args=(commands, notifier, action, target, requested_by), daemon=True,
             ).start()
 
-    elif cmd == "/down":
+    elif cmd in ("/down", "/prepare_reboot"):
         parts = text.split()
-        target = parts[1].lower() if len(parts) == 2 else None
+        target = "all" if cmd == "/prepare_reboot" and len(parts) == 1 else (
+            parts[1].lower() if cmd == "/down" and len(parts) == 2 else None)
         if not target or commands is None:
             if commands is None and target:
                 notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
             else:
-                notifier.notify("Usage: `/down <stack>` or `/down all`")
+                notifier.notify("Usage: `/down <stack>` or `/down all`" if cmd == "/down" else "Usage: `/prepare_reboot`")
         else:
             sender = msg.get("from") or {}
             requested_by = (
                 f"@{sender['username']} ({sender.get('id')})" if sender.get("username")
                 else str(sender.get("id", "telegram"))
             )
+            if cmd == "/prepare_reboot":
+                notifier.notify(
+                    "🔌 <b>Preparing for a reboot.</b> I will propose bringing every compose stack down, dependents before "
+                    "what they depend on and the ingress stack last, each service getting its own stop grace period. Approve "
+                    "the card to go ahead. Containers that are not part of a compose stack are not touched, and I do not "
+                    "reboot the host: that is yours.")
             if target == "all":
                 action = actions.DOWN_ALL
             elif actions.is_ingress_stack(target):
@@ -1886,6 +1893,7 @@ def handle_message(
             "/backups — Enabled Borg backup job status\n"
             "/up `<stack>`|`all` — One stack runs immediately (R1); `all` needs approval (R2)\n"
             "/down `<stack>`|`all` — Needs approval (R2; ingress/all is R3)\n"
+            "/prepare_reboot — Propose bringing every stack down in dependency order before you reboot (needs approval)\n"
             "/restart `<stack>` `<service>` — Propose a verified restart (needs approval)\n"
             "/update `<stack>` `<service>` — Pull and update one service now, with a canary and automatic rollback (needs approval)\n"
             "/abort `<execution_id>` — Stop a running action before its next step\n"

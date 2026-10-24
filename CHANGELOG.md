@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `/prepare_reboot` (Telegram): proposes bringing every compose stack down before you reboot the host, behind the usual approval card. `/down all` (and so this) now stops stacks in the reverse of their boot order: a stack that others depend on (a VPN container whose network others share) goes down after its dependents, the ingress stack last, each service keeping its own `stop_grace_period`. With no cross-stack dependencies the order is unchanged. PE does not reboot the host.
+
 ### Added (v4 mission control, off by default)
 
 Missions are disabled unless `missions.enabled: true`; with it off nothing below runs and v3 behaves exactly as before.

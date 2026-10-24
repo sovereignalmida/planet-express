@@ -145,3 +145,27 @@ def test_down_verification_passes_and_times_out(monkeypatch):
         "media", timeout=2, poll_seconds=1, clock=clock, sleep=clock.sleep,
     )
     assert not ok and "still present" in reason
+
+
+def test_down_all_stops_dependents_before_the_stack_they_depend_on(tmp_path, monkeypatch):
+    root = _stacks(tmp_path, monkeypatch, "network", "media", "zeta")
+    (root / "network" / "docker-compose.yml").write_text("services:\n  gluetun:\n    container_name: CASA_GLUETON\n")
+    (root / "media" / "docker-compose.yml").write_text(
+        "services:\n  qbit:\n    container_name: CASA_QBIT\n    network_mode: container:CASA_GLUETON\n")
+    (root / "zeta" / "docker-compose.yml").write_text("services:\n  db:\n    image: postgres\n")
+    down = actions.resolve_stack_target(actions.DOWN_ALL, "all").as_dict()["stacks"]
+    assert down.index("media") < down.index("network")       # the VPN container goes last
+    assert sorted(down) == ["media", "network", "zeta"]
+
+
+def test_down_all_order_survives_an_unreadable_compose_file(tmp_path, monkeypatch):
+    root = _stacks(tmp_path, monkeypatch, "zeta", "network", "alpha")
+    (root / "alpha" / "docker-compose.yml").write_text(": not yaml : [")
+    down = actions.resolve_stack_target(actions.DOWN_ALL, "all").as_dict()["stacks"]
+    assert down == ["alpha", "zeta", "network"]                # the baseline, unchanged
+
+
+def test_down_all_keeps_every_recognised_ingress_stack_last(tmp_path, monkeypatch):
+    _stacks(tmp_path, monkeypatch, "my-traefik", "zeta", "alpha", "network")
+    down = actions.resolve_stack_target(actions.DOWN_ALL, "all").as_dict()["stacks"]
+    assert down[:2] == ["alpha", "zeta"] and set(down[2:]) == {"my-traefik", "network"}
