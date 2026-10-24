@@ -4,9 +4,27 @@ A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stack
 failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
 rollback, and talks to you over Telegram.
 
-**Status: the v3 line.** It started as a bespoke agent running on one person's home server and has
-been generalized into something anyone with a Docker Compose homelab can install. It is dogfooded on
-the author's own fleet, not developed in isolation. See [CHANGELOG.md](CHANGELOG.md) for the history.
+**Status: v4 release candidate (`v4.0.0-rc3`).** It started as a bespoke agent running on one person's
+home server and has been generalized into something anyone with a Docker Compose homelab can install. It
+is dogfooded on the author's own fleet, not developed in isolation. See [CHANGELOG.md](CHANGELOG.md) for
+the history.
+
+**What v4 adds:**
+
+- **Mission control, off by default.** An operator can hand a bounded job to a supervised agent session
+  (investigate, propose, or repair inside a grant you approve). The safety model for missions is
+  consequence control rather than a typed-step catalogue: a scoped Docker proxy, generated sudo, a
+  checkpoint and restore service, a tripwire monitor over protected domains, per-resource leases, and a
+  mission only completes when Planet Express's own pre-agreed checks pass, never on the agent's say-so. Typed
+  steps remain the fast path for known repairs. Nothing mission-related runs unless `missions.enabled` is
+  true; read [INSTALL.md](INSTALL.md) "Mission control" first. No agent is bundled.
+- **`/prepare_reboot`.** Proposes bringing every compose stack down before you reboot the host, behind the
+  usual approval card: dependents before what they depend on, ingress last, each service keeping its own
+  stop grace period. It never reboots the host.
+- **Boot settle.** After a reboot the scheduled scan and the weekly update pass wait until the stacks have
+  come up and settled, instead of reporting things that are not wrong yet. A scan you ask for always runs.
+- MOS is supported for the v3 feature set; the mission-control repair path is rehearsed on Ubuntu, and MOS
+  parity for it is not claimed yet.
 
 **What v3 added:**
 
@@ -19,8 +37,8 @@ the author's own fleet, not developed in isolation. See [CHANGELOG.md](CHANGELOG
   already run.
 
 **What 2.0 changed:** an LLM used to write shell commands, which a pattern-matching safety check
-tried to vet before running them through a shell. It no longer does. Every change to the host is
-now a **typed step** chosen from a fixed catalogue: its parameters are validated by a schema, its
+tried to vet before running them through a shell. It no longer does. Outside of missions, every change
+to the host is a **typed step** chosen from a fixed catalogue: its parameters are validated by a schema, its
 target is resolved when the plan is proposed and re-checked immediately before it acts, it runs as
 an argv list with no shell anywhere, and whether it worked is decided by reading the host — not by
 an exit code. A model picks *which* step to run; it never writes what runs.
@@ -165,7 +183,7 @@ rather than leaving a button that quietly does nothing.
 ## What's tested, what isn't
 
 CI (`.github/workflows/ci.yml`) runs `ruff check .` and the full pytest suite on every push and PR
-(about 3,200 tests). That suite is **pure-logic**: state schemas, policy and allowlist rules, the engine
+(about 6,600 tests). That suite is **pure-logic**: state schemas, policy and allowlist rules, the engine
 against a faked host, dashboard and template rendering, and the setup wizard against an in-memory fake
 host that can be made to crash at every single mutating operation. No real Docker daemon, sudo or systemd
 is involved anywhere in it.
@@ -175,6 +193,9 @@ container start/stop/restart behaviour, the sudo-scoped commands, compose writes
 a real registry, systemd and MOS service installation, and the Telegram bot's live message flow. Those are
 rehearsed on throwaway virtual machines before anything is deployed:
 
+- **mission control** has a privileged test suite and a scripted repair rehearsal that run as root on a
+  disposable Ubuntu VM (a real Docker daemon, the scoped proxy, checkpoint and restore, tripwires); the
+  rehearsal found and fixed several races no unit test reached. Neither runs in CI;
 - the **setup wizard** has been run end to end (install, repair, uninstall, undo, reboot) on a fresh
   Ubuntu 24.04 VM and a fresh MOS VM, which found bugs no unit test could (FAT renumbering inodes at every
   mount, MOS re-copying its init scripts at boot, a pool owned by an unexpected account);
@@ -221,8 +242,9 @@ This repo was built out in small, independent specs rather than one big rewrite.
 standing engineering process, including an independent second-review gate that every slice goes through,
 and [CHANGELOG.md](CHANGELOG.md) for the full history.
 
-Branches: `main` is the older v2.x line; `v3-production` is the stable v3 line (what runs on the author's
-own host); `v3-next` is where new work lands first and is promoted once it has been reviewed and soaked.
+Branches: `main` is the older v2.x line; `v4-next` is where development happens and where the
+`v4.0.0-rc*` tags are cut (the author's own host runs the latest candidate, with missions off);
+`v3-production` is the stable v3 line, kept for emergency fixes until v4 is released.
 `sudo ./setup.sh` is the way to install; `git clone` plus `bash deploy.sh` is the older scripted path and
 still works. See [INSTALL.md](INSTALL.md) for the walkthrough, including how to get a Telegram bot token.
 
