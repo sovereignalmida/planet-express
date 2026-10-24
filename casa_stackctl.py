@@ -179,6 +179,22 @@ def _systemctl_show(unit: str, *props: str) -> dict:
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
 
 
+def unarmed_automounts() -> list[str]:
+    """Configured `.automount` units that systemd is not currently holding armed.
+
+    check_mounts() cannot see this: if the plain `.mount` was started by hand, the path lists
+    fine while the automount refuses to start ("already a mount point"). Nothing then remounts
+    the path when its handle goes stale. On 2026-10-15 a manual recovery left every automount
+    in this state, and /mnt/casabu stayed stale until the weekly Borg run failed on it."""
+    if config.get_host_control().__class__.__name__ != "SystemdHostControlProvider":
+        return []
+    return [
+        unit for unit in config.MOUNT_UNITS
+        if unit.endswith(".automount")
+        and _systemctl_show(unit, "ActiveState").get("ActiveState") != "active"
+    ]
+
+
 def check_backups() -> list[dict]:
     """Last-run result + last/next trigger time for each Borg backup job.
 

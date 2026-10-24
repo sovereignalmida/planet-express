@@ -330,26 +330,33 @@ def test_check_backups_query_failure_does_not_trigger_journal_fallback(monkeypat
 
 # ── _last_journal_completion() ──────────────────────────────────────────────────────
 
-def _journal_line(message: str, realtime_us: int) -> str:
-    import json as _json
-    return _json.dumps({"MESSAGE": message, "__REALTIME_TIMESTAMP": str(realtime_us)})
+def _journal_line(message: str, iso_ts: str) -> str:
+    # The shape `journalctl -o short-iso` emits -- what the systemd provider returns.
+    return f"{iso_ts} casamediaserver systemd[1]: {message}"
+
+
+def _mock_host_logs(monkeypatch, *lines: str) -> None:
+    class MockProvider:
+        def get_host_logs(self, unit, lines=200):
+            return log_lines
+    log_lines = tuple(lines)
+    monkeypatch.setattr(config, "get_host_control", MockProvider)
+
+
+def _systemd_shape(iso_ts: str) -> str:
+    from datetime import datetime
+    return datetime.fromisoformat(iso_ts).astimezone().strftime("%a %Y-%m-%d %H:%M:%S %Z")
 
 
 def test_last_journal_completion_prefers_latest_success_over_older_ones(monkeypatch):
-    lines_str = "\n".join([
-        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 1_000_000_000_000),
-        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 2_000_000_000_000),
-    ])
-    # Mock the provider's get_host_logs to return normalized tuple of lines
-    log_lines = tuple(lines_str.splitlines())
-    def mock_provider():
-        class MockProvider:
-            def get_host_logs(self, unit, lines=200):
-                return log_lines
-        return MockProvider()
-    monkeypatch.setattr(config, "get_host_control", mock_provider)
+    _mock_host_logs(
+        monkeypatch,
+        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", "2026-10-04T02:41:10+01:00"),
+        _journal_line("weekly-borg-backup.service: Deactivated successfully.", "2026-10-04T02:41:10+01:00"),
+        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", "2026-10-11T02:47:24+01:00"),
+    )
     last_run, result = casa_leela._last_journal_completion("weekly-borg-backup.service")
-    assert last_run != ""
+    assert last_run == _systemd_shape("2026-10-11T02:47:24+01:00")
     assert result == "success"
 
 
@@ -358,33 +365,28 @@ def test_last_journal_completion_reports_a_later_failure_not_an_earlier_success(
     # daemon-reload/reboot after the *latest* run of this unit failed, the fallback must
     # not silently pick an older successful run instead -- that would misreport a broken
     # backup as healthy on the dashboard and to Hermes.
-    lines_str = "\n".join([
-        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", 1_000_000_000_000),
-        _journal_line("Failed to start weekly-borg-backup.service - Weekly Borg Backup.", 2_000_000_000_000),
-    ])
-    # Mock the provider's get_host_logs to return normalized tuple of lines
-    log_lines = tuple(lines_str.splitlines())
-    def mock_provider():
-        class MockProvider:
-            def get_host_logs(self, unit, lines=200):
-                return log_lines
-        return MockProvider()
-    monkeypatch.setattr(config, "get_host_control", mock_provider)
+    _mock_host_logs(
+        monkeypatch,
+        _journal_line("Finished weekly-borg-backup.service - Weekly Borg Backup.", "2026-10-04T02:41:10+01:00"),
+        _journal_line("Failed to start weekly-borg-backup.service - Weekly Borg Backup.", "2026-10-11T02:47:24+01:00"),
+    )
     last_run, result = casa_leela._last_journal_completion("weekly-borg-backup.service")
-    # The later (failed) entry's timestamp -- and its "failed" verdict -- win over the
-    # earlier success.
-    from datetime import datetime
-    expected = datetime.fromtimestamp(2_000_000_000_000 / 1_000_000).astimezone()
-    assert last_run == expected.strftime("%a %Y-%m-%d %H:%M:%S %Z")
+    assert last_run == _systemd_shape("2026-10-11T02:47:24+01:00")
     assert result == "failed"
 
 
 def test_last_journal_completion_ignores_unrelated_messages(monkeypatch):
-    lines = "\n".join([
-        _journal_line("Starting weekly-borg-backup.service - Weekly Borg Backup...", 1_000_000_000_000),
-        _journal_line("Some unrelated log line.", 3_000_000_000_000),
-    ])
-    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=30: (0, lines, ""))
+    _mock_host_logs(
+        monkeypatch,
+        _journal_line("Starting weekly-borg-backup.service - Weekly Borg Backup...", "2026-10-11T00:00:00+01:00"),
+        _journal_line("Some unrelated log line.", "2026-10-11T02:00:00+01:00"),
+    )
+    assert casa_leela._last_journal_completion("weekly-borg-backup.service") == ("", "")
+
+
+def test_last_journal_completion_skips_a_line_with_no_timestamp(monkeypatch):
+    # A MOS flat log line carries no parseable time; it can't vouch for when the job ran.
+    _mock_host_logs(monkeypatch, "Finished weekly-borg-backup.service - Weekly Borg Backup.")
     assert casa_leela._last_journal_completion("weekly-borg-backup.service") == ("", "")
 
 

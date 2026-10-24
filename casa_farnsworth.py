@@ -188,6 +188,11 @@ PLANNING RULES:
   passwordless grant and cannot type one interactively. Do NOT propose any such action.
   Make a diagnostic-only plan (or no plan) instead, and note in the title that it needs
   human action.
+- A mount path configured as `<name>.automount` is never fixed through its `.mount` unit.
+  Starting or restarting the `.mount` mounts the path without the automount, which then
+  refuses to arm, and a stale handle stays stale. Recovery is stopping the `.mount` and
+  starting the `.automount`, and Bender cannot start an `.automount`, so this needs human
+  action as above.
 - Read-only inspection commands (`systemctl status`, `systemctl is-active`, `journalctl`) never
   need `sudo` and must NEVER be given it — the sudo allowlist above only ever covers
   `start|stop|restart`, so a `sudo systemctl status ...` step is not a valid grant, gets blocked
@@ -2106,6 +2111,9 @@ def _run_mounts_check(notifier: Notifier) -> None:
         for unit, path, ok in results
     ]
     header = "✅ All mounts reachable." if all(ok for _, _, ok in results) else "⚠️ Some mounts unreachable."
+    unarmed = stackctl.unarmed_automounts()
+    if unarmed:
+        lines.append("⚠️ Not armed, will not self-heal: " + ", ".join(TelegramClient.s(u) for u in unarmed))
     notifier.notify(f"{header}\n" + "\n".join(lines))
 
 

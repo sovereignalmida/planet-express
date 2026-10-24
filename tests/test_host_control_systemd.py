@@ -248,14 +248,14 @@ def test_unreadable_before_state_refuses_without_running_the_command(monkeypatch
 
 def test_get_host_logs_success(monkeypatch, provider):
     monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
-        ("journalctl", "-u", "casa-stacks", "--no-pager", "-n", "5"): (0, "line1\nline2", ""),
+        ("journalctl", "-u", "casa-stacks", "--no-pager", "-o", "short-iso", "-n", "5"): (0, "line1\nline2", ""),
     }))
     assert provider.get_host_logs("casa-stacks", lines=5) == ("line1", "line2")
 
 
 def test_get_host_logs_failure_returns_the_error_as_a_line(monkeypatch, provider):
     monkeypatch.setattr(bender, "run_argv", FakeRunArgv({
-        ("journalctl", "-u", "ghost", "--no-pager", "-n", "5"): (1, "", "no such unit"),
+        ("journalctl", "-u", "ghost", "--no-pager", "-o", "short-iso", "-n", "5"): (1, "", "no such unit"),
     }))
     lines = provider.get_host_logs("ghost", lines=5)
     assert len(lines) == 1

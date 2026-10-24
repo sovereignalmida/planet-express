@@ -480,6 +480,7 @@ def check_mounts() -> dict:
     return {
         "active_count": len(results) - len(missing),
         "missing": missing,
+        "unarmed_automounts": stackctl.unarmed_automounts(),
     }
 
 
@@ -950,39 +951,28 @@ def _last_journal_completion(unit: str) -> tuple[str, str]:
     dashboard_data._parse_systemd_local_time() expects exactly that format regardless of
     source; result is "success" or "failed" (empty string for either if no matching journal
     entry was found at all)."""
-    # Use provider for logs (normalized to list[str] across systemd/MOS)
-    provider = config.get_host_control()
-    log_lines = provider.get_host_logs(unit, lines=200)
+    # The systemd provider emits `journalctl -o short-iso` text, so each line leads with an
+    # ISO-8601 timestamp. A line without one (e.g. a MOS flat log) can't say when it
+    # happened, so it's skipped rather than guessed at.
+    log_lines = config.get_host_control().get_host_logs(unit, lines=200)
 
-    last_ts = None
+    last_dt = None
     last_success = None
     for line in log_lines:
-        # Try to parse as JSON (systemd format) first, fall back to plain text search (MOS format)
+        if f"Finished {unit}" in line:
+            success = True
+        elif f"Failed to start {unit}" in line:
+            success = False
+        else:
+            continue
         try:
-            entry = json.loads(line)
-            message = entry.get("MESSAGE")
-            if not isinstance(message, str):
-                # journalctl -o json emits an explicit `"MESSAGE": null` for some entries
-                continue
-            if f"Finished {unit}" in message:
-                last_ts = entry.get("__REALTIME_TIMESTAMP")
-                last_success = True
-            elif f"Failed to start {unit}" in message:
-                last_ts = entry.get("__REALTIME_TIMESTAMP")
-                last_success = False
-        except (ValueError, AttributeError):
-            # Not JSON - try plain text search (MOS)
-            if f"Finished {unit}" in line:
-                last_success = True
-            elif f"Failed to start {unit}" in line:
-                last_success = False
-    if last_ts is None:
+            dt = datetime.fromisoformat(line.split(" ", 1)[0])
+        except ValueError:
+            continue
+        last_dt, last_success = dt.astimezone(), success
+    if last_dt is None:
         return "", ""
-    try:
-        dt = datetime.fromtimestamp(int(last_ts) / 1_000_000).astimezone()
-    except (ValueError, OSError):
-        return "", ""
-    return dt.strftime("%a %Y-%m-%d %H:%M:%S %Z"), ("success" if last_success else "failed")
+    return last_dt.strftime("%a %Y-%m-%d %H:%M:%S %Z"), ("success" if last_success else "failed")
 
 
 def check_backups() -> dict:

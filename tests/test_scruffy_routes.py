@@ -1021,6 +1021,18 @@ def test_incident_routes_validate_list_and_use_session_operator(chat_client):
     assert response.status_code == 200 and response.get_json() == payload
     assert rpc.calls == [("incident.propose", {"incident_id": incident_id, "operator": "alice"})]
 
+    rpc.calls.clear()
+    payload = {"ok": True, "approval_id": None, "created": False, "reason": "Incident dismissed."}
+    rpc.results["incident.dismiss"] = payload
+    assert client.post(f"/api/incidents/{incident_id}/dismiss").status_code == 400
+    assert not rpc.calls
+    response = client.post(
+        f"/api/incidents/{incident_id}/dismiss",
+        data={"csrf_token": data["csrf_token"], "operator": "bob"},
+    )
+    assert response.status_code == 200 and response.get_json() == payload
+    assert rpc.calls == [("incident.dismiss", {"incident_id": incident_id, "operator": "alice"})]
+
 
 @pytest.mark.parametrize("query", ["status=bad&limit=20", "status=open&limit=0", "status=open&limit=x"])
 def test_incident_list_rejects_invalid_query_without_rpc(chat_client, query):
@@ -1032,6 +1044,7 @@ def test_incident_list_rejects_invalid_query_without_rpc(chat_client, query):
 
 @pytest.mark.parametrize("method,path", [
     ("get", "/api/incidents/BAD"), ("post", "/api/incidents/short/propose"),
+    ("post", "/api/incidents/short/dismiss"),
 ])
 def test_incident_item_rejects_malformed_id_as_bad_request(chat_client, method, path):
     client, rpc, _, data = chat_client

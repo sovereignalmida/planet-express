@@ -425,7 +425,17 @@ def summarize_pass(results: list[dict], manual: list[str] | None = None, limit: 
         lines.append("🔒 <b>Kept manual on purpose:</b> " + ", ".join(esc(m) for m in manual[:12])
                      + " (AdGuard: <code>/update stack service</code>; Traefik is pinned, so change its tag by hand)")
     text = "\n".join(lines)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    if len(text) <= limit:
+        return text
+    # cut at a line boundary: each line carries its own tags, so a mid-line cut could leave one open
+    kept: list[str] = []
+    size = 1                                                      # the ellipsis
+    for line in lines:
+        if size + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        size += len(line) + 1
+    return "\n".join(kept) + "…"
 
 
 def run_update_pass(tg: TelegramClient | None = None, dry_run: bool = False,

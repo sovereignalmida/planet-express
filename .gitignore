@@ -14,6 +14,7 @@ logs/*.log
 # this host overrides via CASA_CONFIG to keep it under the app directory instead, so it
 # needs an explicit ignore here. config.example.yaml (generic placeholders) stays tracked.
 /config.yaml
+/config.yaml.bak-*
 
 # Never commit secrets — production config lives in /etc/planetexpress.env
 .env

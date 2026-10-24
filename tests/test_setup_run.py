@@ -76,6 +76,27 @@ def test_nothing_is_applied_while_setup_is_exposed(rig):
     assert host.mutations == 0
 
 
+def test_undo_is_refused_while_setup_is_exposed(rig):
+    app, cookie, csrf, session, host, _plans, exposed = rig
+    plan_id = review(app, cookie, csrf)
+    post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
+    session.wait()
+    applied = {k for k in host.nodes if not k.startswith("/journal")}
+    exposed["v"] = True
+    assert post(app, cookie, csrf, "/api/undo").status_code == 403
+    session.wait()
+    assert {k for k in host.nodes if not k.startswith("/journal")} == applied
+
+
+def test_a_closed_session_starts_no_more_runs(rig):
+    app, cookie, csrf, session, host, *_ = rig
+    plan_id = review(app, cookie, csrf)
+    session.close()
+    refused = post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
+    assert refused.status_code == 409 and "closing" in refused.get_json()["error"]
+    assert host.mutations == 0
+
+
 def test_two_applies_are_one_run_and_a_second_is_a_conflict(rig):
     app, cookie, csrf, session, _host, *_ = rig
     plan_id = review(app, cookie, csrf)
@@ -172,3 +193,4 @@ def test_a_journal_that_cannot_be_read_still_answers_the_poll_with_json(tmp_path
     session.wait()
     reply = call(app, "GET", "/api/events", cookie=cookie)
     assert reply.status_code == 200 and "journal cannot be read" in reply.get_json()["journal_error"]
+

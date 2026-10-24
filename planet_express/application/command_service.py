@@ -562,6 +562,10 @@ class CommandService:
             )
             if row["status"] == "resolved":
                 hint = {"agent": "Leela", "state": "resolved", "message": "This incident is resolved."}
+            elif not item["source_current"] and current_scan is not None:
+                hint = {"agent": "Leela", "state": "not_observed",
+                        "message": "The latest full scan did not see this. If the resource was "
+                                   "retired, dismiss it."}
             elif not item["source_current"]:
                 hint = {"agent": "Leela", "state": "fresh_scan_required",
                         "message": "Run a full scan before proposing remediation."}
@@ -616,6 +620,41 @@ class CommandService:
         except sqlite3.OperationalError:
             raise actions.TargetTimeout("host slow, retry") from None
         return item
+
+    def dismiss_incident(self, incident_id: str, *, operator: str, timeout: float) -> ProposeResult:
+        deadline = time.monotonic() + timeout
+        # Held across the evidence check and the write: a scan publishes its snapshot before it
+        # reconciles, so without the lock a dismissal could pass against the previous scan while
+        # the new one already sees the failure (Codex review).
+        owner = f"incident:{incident_id}"
+        if not self._state.try_begin_mutation(owner):
+            return ProposeResult(False, None, False, f"Busy right now ({self._state.busy_reason}).")
+        try:
+            try:
+                incident = self._store.get_incident(incident_id, timeout=self._remaining(deadline))
+                if incident is None:
+                    return ProposeResult(False, None, False, "incident not found")
+                current = self._current_incident_scan(deadline=deadline)
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
+            if current is None:
+                return ProposeResult(False, None, False, "Run a full scan first.")
+            if incident["status"] != "open":
+                return ProposeResult(False, None, False, "This incident is already resolved.")
+            if incident["last_observed_scan_id"] == current:
+                return ProposeResult(False, None, False,
+                                     "The latest scan still sees this; it can't be dismissed.")
+            try:
+                dismissed = self._store.dismiss_incident(
+                    incident_id, current, operator, timeout=self._remaining(deadline)
+                )
+            except (actions.TargetTimeout, sqlite3.OperationalError):
+                return ProposeResult(False, None, False, "host slow, retry")
+            if not dismissed:
+                return ProposeResult(False, None, False, "A newer scan landed; check the incident again.")
+            return ProposeResult(True, None, False, "Incident dismissed.")
+        finally:
+            self._state.end_mutation(owner)
 
     def propose_incident(
         self, incident_id: str, *, operator: str, timeout: float | None = None,
@@ -1229,7 +1268,6 @@ class CommandService:
             except Exception:
                 log.exception("Could not request a re-scan")
 
-    @staticmethod
     @staticmethod
     def _verified_plan(row: dict | None) -> runbooks.Runbook | None:
         if not row or not row.get("plan_json") or not row.get("plan_sha256"):

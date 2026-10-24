@@ -609,6 +609,16 @@ def build_core_handlers(
             raise RpcError("Incident not found", "not_found")
         return asdict(result)
 
+    def incident_dismiss(params):
+        incident_params(params, item=True, operator=True)
+        result = commands.dismiss_incident(
+            params["incident_id"], operator=params["operator"],
+            timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS,
+        )
+        if not result.ok and result.reason == "incident not found":
+            raise RpcError("Incident not found", "not_found")
+        return asdict(result)
+
     def auth_params(params, *, ip=False, step=False):
         expected = {"operator"} | ({"client_ip"} if ip else set()) | ({"step"} if step else set())
         if not isinstance(params, dict) or set(params) != expected:
@@ -949,6 +959,7 @@ def build_core_handlers(
             "execution.abort": execution_abort, "execution.rollback": execution_rollback,
             "incident.list": incident_list, "incident.get": incident_get,
             "incident.propose": incident_propose,
+        "incident.dismiss": incident_dismiss,
             "auth.status": auth_status, "auth.record_failure": auth_failure,
             "auth.record_success": auth_success, "auth.consume_totp_step": consume_step,
             "auth.device_epoch": device_epoch, "auth.notify_locked": notify_locked,
