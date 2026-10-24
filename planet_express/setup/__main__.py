@@ -146,7 +146,11 @@ def _serve_command(args) -> int:
     holder: dict = {}
 
     def journal_root() -> str:
-        return default_journal_root(discover(), holder["session"].answers["install_dir"])
+        # fixed at first use: a later change to the install dir answer, or a re-discovery, must not move the
+        # journal that an apply wrote and an undo has to read
+        if "journal_root" not in holder:
+            holder["journal_root"] = default_journal_root(discover(), holder["session"].answers["install_dir"])
+        return holder["journal_root"]
 
     def apply_fn(reviewed, replan):
         uids = _trusted_uids(reviewed, holder["session"].discovery)

@@ -193,3 +193,10 @@ def test_a_journal_that_cannot_be_read_still_answers_the_poll_with_json(tmp_path
     session.wait()
     reply = call(app, "GET", "/api/events", cookie=cookie)
     assert reply.status_code == 200 and "journal cannot be read" in reply.get_json()["journal_error"]
+
+
+def test_the_journal_root_is_fixed_at_first_use():
+    from planet_express.setup import __main__ as entry
+    import inspect
+    source = inspect.getsource(entry)
+    assert 'holder["journal_root"]' in source and "not in holder" in source
