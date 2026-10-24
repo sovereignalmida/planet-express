@@ -22,6 +22,11 @@ def ensure_tree(sessions_root: str, *, core_leaf: str = "core", pid: int | None 
         if not os.path.isdir(path):
             os.mkdir(path, 0o755)
             done.append(f"created {path}")
+    if os.stat(sessions).st_mode & 0o755 != 0o755:
+        # mkdir's mode went through Core's umask (the unit's UMask=0027 makes 0750): a session uid must be able to walk through
+        # `sessions` to its own cgroup and read cgroup.events. Only `sessions`; the core leaf stays as the umask made it.
+        os.chmod(sessions, 0o755)
+        done.append(f"made {sessions} traversable by the session uids")
     me = os.getpid() if pid is None else pid
     procs = os.path.join(leaf, "cgroup.procs")
     with open(procs, encoding="ascii") as handle:

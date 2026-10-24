@@ -182,6 +182,24 @@ def test_ensure_tree_makes_core_and_sessions_moves_core_then_enables_pids(tmp_pa
     assert (delegated / "cgroup.subtree_control").read_text() == "+pids"
 
 
+def test_ensure_tree_leaves_sessions_traversable_whatever_the_umask(tmp_path):
+    # the live unit has UMask=0027; the first live preflight failed "cgroup.events readable by the session" because of it
+    delegated = tmp_path / "svc"
+    delegated.mkdir()
+    (delegated / "cgroup.subtree_control").write_text("")
+    (delegated / "core").mkdir()
+    (delegated / "core" / "cgroup.procs").write_text("")
+    old = os.umask(0o027)
+    try:
+        ensure_tree(str(delegated / "sessions"), pid=1)
+        assert (delegated / "sessions").stat().st_mode & 0o777 == 0o755
+        (delegated / "sessions").chmod(0o750)          # a tree an earlier build left behind is repaired too
+        assert any("traversable" in line for line in ensure_tree(str(delegated / "sessions"), pid=1))
+        assert (delegated / "sessions").stat().st_mode & 0o777 == 0o755
+    finally:
+        os.umask(old)
+
+
 def test_ensure_tree_is_idempotent(tmp_path):
     delegated = tree(tmp_path)
     (delegated / "core").mkdir()
