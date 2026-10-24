@@ -206,6 +206,11 @@ class SetupSession:
                 self.phase = "undone" if status == "done" else "undo_stopped"
             self.outcome = detail
 
+    def busy(self) -> bool:
+        """True while an apply or undo is running."""
+        with self._lock:
+            return self.phase in ("applying", "undoing")
+
     def wait(self, timeout: float = 10.0) -> None:
         thread = self._thread
         if thread is not None:

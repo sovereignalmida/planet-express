@@ -297,3 +297,67 @@ def test_a_failed_second_bind_returns_instead_of_hanging():
         assert not thread.is_alive() and done == [2] and "cannot listen" in out[0]
     finally:
         busy.close()
+
+
+def test_serve_does_not_stop_on_idle_expiry_while_an_install_is_running():
+    """The install runs as root on a daemon thread; ending the process on expiry would kill it mid-step."""
+    import time
+
+    class Run:
+        running = True
+
+        def busy(self):
+            return self.running
+
+        def wait(self, _timeout):
+            pass
+    run, done = Run(), []
+    thread = threading.Thread(target=lambda: done.append(serve(
+        addresses=["127.0.0.1"], port=_free_port(), names=["t"], sessions=Sessions(token_life=0),
+        exposure=lambda: False, out=lambda _m: None, session=run)))
+    thread.start()
+    try:
+        time.sleep(2.5)                                    # the token is already lapsed; the loop polls every second
+        assert thread.is_alive() and done == []
+        run.running = False
+        thread.join(timeout=10)
+        assert not thread.is_alive() and done == [0]
+    finally:
+        run.running = False
+        thread.join(timeout=10)
+
+
+def test_past_hard_cap_needs_a_session_that_has_outlived_it(clock):
+    sessions = Sessions(clock=clock, hard_cap=100)
+    token = sessions.issue_token()
+    assert not sessions.past_hard_cap()
+    assert sessions.exchange(token) is not None
+    assert not sessions.past_hard_cap()
+    clock.now += 101
+    assert sessions.past_hard_cap()
+
+
+def test_the_hard_cap_closes_the_listener_while_a_run_is_in_progress_and_the_run_gets_a_bounded_wait():
+    class Capped(Sessions):
+        def finished(self):
+            return True
+
+        def past_hard_cap(self):
+            return True
+
+    class Run:
+        waited = []
+
+        def busy(self):
+            return True
+
+        def wait(self, timeout):
+            self.waited.append(timeout)
+    run, done, out = Run(), [], []
+    thread = threading.Thread(target=lambda: done.append(serve(
+        addresses=["127.0.0.1"], port=_free_port(), names=["t"], sessions=Capped(),
+        exposure=lambda: False, out=out.append, session=run)))
+    thread.start()
+    thread.join(timeout=10)
+    assert not thread.is_alive() and done == [0]
+    assert run.waited and any("waiting for the run" in m for m in out)

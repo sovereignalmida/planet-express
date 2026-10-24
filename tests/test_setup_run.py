@@ -76,6 +76,18 @@ def test_nothing_is_applied_while_setup_is_exposed(rig):
     assert host.mutations == 0
 
 
+def test_undo_is_refused_while_setup_is_exposed(rig):
+    app, cookie, csrf, session, host, _plans, exposed = rig
+    plan_id = review(app, cookie, csrf)
+    post(app, cookie, csrf, "/api/apply", json={"plan_id": plan_id})
+    session.wait()
+    applied = {k for k in host.nodes if not k.startswith("/journal")}
+    exposed["v"] = True
+    assert post(app, cookie, csrf, "/api/undo").status_code == 403
+    session.wait()
+    assert {k for k in host.nodes if not k.startswith("/journal")} == applied
+
+
 def test_two_applies_are_one_run_and_a_second_is_a_conflict(rig):
     app, cookie, csrf, session, _host, *_ = rig
     plan_id = review(app, cookie, csrf)
