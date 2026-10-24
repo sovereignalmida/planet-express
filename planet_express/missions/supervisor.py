@@ -713,19 +713,40 @@ class Supervisor:
         self._record(run, update)
         self._drain_hook_log(run)
         grant = mission.grant()
-        elapsed = float(self.clock()) - run.started_at
-        for name, over in (("wall", elapsed > grant.budgets.wall_s),
-                           ("tool_calls", run.tool_calls > grant.budgets.tool_calls),
-                           ("output_bytes", run.output_bytes > grant.budgets.output_bytes)):
-            if over:
-                return self._kill_and_advance(run, f"budget:{name}")
+
+        def over_budget() -> str | None:
+            elapsed = float(self.clock()) - run.started_at
+            for name, over in (("wall", elapsed > grant.budgets.wall_s),
+                               ("tool_calls", run.tool_calls > grant.budgets.tool_calls),
+                               ("output_bytes", run.output_bytes > grant.budgets.output_bytes)):
+                if over:
+                    return name
+            return None
+        if (name := over_budget()) is not None:
+            return self._kill_and_advance(run, f"budget:{name}")
         try:
             leases.heartbeat(self.store, run.mission_id, self.lease_ttl_s)
         except leases.LeaseLost:
             return self._kill_and_advance(run, "lease_lost")
         if update.state == "finished" or run.submitted is not None:
             return self._collect(run)
-        if update.state == "failed" or self.containment.is_empty(run.cs):
+        if update.state == "failed":
+            return self._kill_and_advance(run, "crash")
+        if self.containment.is_empty(run.cs):
+            # The session emptied after the status read above. A clean finish lands here as often as a crash does (the agent
+            # wrote its result and exited between the two reads), so ask the runtime once more before calling it a crash.
+            try:
+                raw = run.runtime.status(run.handle)
+                again = AgentUpdate.model_validate(raw.model_dump() if isinstance(raw, AgentUpdate) else raw)
+            except Exception:                                       # noqa: BLE001 -- unreadable is a crash, as above
+                again = None
+            if again is not None:
+                self._record(run, again)
+                self._drain_hook_log(run)
+                if (name := over_budget()) is not None:         # the last events count against the budgets too
+                    return self._kill_and_advance(run, f"budget:{name}")
+                if again.state == "finished":
+                    return self._collect(run)
             return self._kill_and_advance(run, "crash")
 
     def _record(self, run: _Run, update: AgentUpdate) -> None:

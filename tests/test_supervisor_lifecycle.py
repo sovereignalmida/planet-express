@@ -167,3 +167,63 @@ def test_a_grant_swapped_between_read_and_session_start_is_refused(tmp_path):
         rig.sup.start(rig.mid)
     assert rig.status() == "queued" and rig.ms.live_session(rig.mid) is None
     assert not rig.cont.exists(next(iter(rig.cont._groups), "none"))
+
+
+def test_an_agent_that_finishes_between_the_status_read_and_the_empty_check_is_not_a_crash(tmp_path):
+    """The agent writes its result and exits right after the supervisor read 'running': the next read says finished."""
+    from supervisor_fakes import FakeRuntime
+
+    class Finishes(FakeRuntime):
+        calls = 0
+
+        def status(self, handle):
+            Finishes.calls += 1
+            if Finishes.calls == 1:
+                self.containment.crash(handle.session_id)        # the session empties just after this read
+                return update()
+            return update("finished")
+    Finishes.calls = 0
+    rig = Rig(tmp_path)
+    rig.factory = lambda mission: rig.runtimes.append(Finishes(rig.cont)) or rig.runtimes[-1]
+    rig.sup = rig.new_supervisor()
+    rig.sup.start(rig.mid)
+    run_to_end(rig)
+    assert rig.status() == "awaiting_decision" and len(rig.runtimes) == 1
+    assert not any('"crash"' in body for body in rig.state_path())
+
+
+def test_a_session_that_empties_without_ever_finishing_is_still_a_crash(tmp_path):
+    from supervisor_fakes import FakeRuntime
+
+    class Dies(FakeRuntime):
+        def status(self, handle):
+            self.containment.crash(handle.session_id)
+            return update()                                      # never says finished, even on the second read
+    rig = Rig(tmp_path, budgets={"retries": 0})
+    rig.factory = lambda mission: rig.runtimes.append(Dies(rig.cont)) or rig.runtimes[-1]
+    rig.sup = rig.new_supervisor()
+    rig.sup.start(rig.mid)
+    run_to_end(rig)
+    assert rig.status() == "needs_operator"
+
+
+def test_events_arriving_with_the_second_status_read_still_count_against_the_budget(tmp_path):
+    from supervisor_fakes import FakeRuntime
+
+    class FinishesWithTooManyCalls(FakeRuntime):
+        calls = 0
+
+        def status(self, handle):
+            FinishesWithTooManyCalls.calls += 1
+            if FinishesWithTooManyCalls.calls == 1:
+                self.containment.crash(handle.session_id)
+                return update()
+            return update("finished", events=[tool_event()] * 5)      # five calls against a budget of one
+    FinishesWithTooManyCalls.calls = 0
+    rig = Rig(tmp_path, budgets={"tool_calls": 1, "retries": 0})
+    rig.factory = lambda mission: rig.runtimes.append(FinishesWithTooManyCalls(rig.cont)) or rig.runtimes[-1]
+    rig.sup = rig.new_supervisor()
+    rig.sup.start(rig.mid)
+    run_to_end(rig)
+    assert rig.status() == "needs_operator"
+    assert any("budget:tool_calls" in e.body_json for e in rig.ms.events(rig.mid))
