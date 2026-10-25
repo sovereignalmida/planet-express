@@ -26,7 +26,8 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "draft": frozenset({"queued"}),
     "queued": frozenset({"investigating"}),
     "investigating": frozenset({"awaiting_decision", "completed", "failed"}),
-    "awaiting_decision": frozenset({"executing", "completed", "failed"}),
+    # `investigating` is the operator's follow-up on a finished observe/propose mission (a Console turn): see transition_in_txn.
+    "awaiting_decision": frozenset({"executing", "completed", "failed", "investigating"}),
     "executing": frozenset({"verifying", "paused_tripwire", "rollback_pending", "failed"}),
     "verifying": frozenset({"completed", "failed", "rollback_pending"}),
     "paused_tripwire": frozenset({"executing", "rolled_back", "rollback_pending"}),
@@ -118,6 +119,13 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         raise IllegalTransition(f"{tier} missions never reach {to}")
     if frm == "needs_operator" and not actor.startswith("operator:"):
         raise IllegalTransition("only an operator may resume a needs_operator mission")
+    if frm == "awaiting_decision" and to == "investigating":
+        # Reopening a finished mission for more work is the operator's act, and only an observe/propose mission can be reopened:
+        # a mission that may mutate the host leaves `awaiting_decision` by approval, never by a follow-up.
+        if tier not in ("observe", "propose"):
+            raise IllegalTransition(f"a {tier} mission cannot be reopened for a follow-up")
+        if not actor.startswith("operator:"):
+            raise IllegalTransition("only an operator may reopen a finished mission")
     if to == "executing":
         verdict = evaluate(conn, mission_id, now)
         if not verdict.ok:

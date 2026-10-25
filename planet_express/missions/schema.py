@@ -108,6 +108,11 @@ CREATE TABLE IF NOT EXISTS mission_artifacts (
     sha256 TEXT NOT NULL,
     bytes INTEGER NOT NULL,
     path TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reserved_uids (
+    uid INTEGER PRIMARY KEY,
+    mission_id TEXT NOT NULL UNIQUE REFERENCES missions(id),
+    reserved_at INTEGER NOT NULL
 )
 """
 

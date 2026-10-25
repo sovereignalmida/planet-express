@@ -64,7 +64,12 @@ def test_every_edge_matches_table(tmp_path, frm, to):
     approve_all(store, m)
     force_status(store, m.id, frm)
     legal = is_legal(frm, to)
-    if legal and to == "completed":
+    if (frm, to) == ("awaiting_decision", "investigating"):
+        # In the table for the observe/propose follow-up, but a repair mission is never reopened by one.
+        with pytest.raises(IllegalTransition, match="cannot be reopened"):
+            transition(store, m.id, to, "operator:me")
+        assert ms.get_mission(m.id).status == frm
+    elif legal and to == "completed":
         # In the table, but a repair mission completes only on a passed verification result (slice 8): none here.
         with pytest.raises(IllegalTransition, match="completion refused"):
             transition(store, m.id, to, "operator:me")

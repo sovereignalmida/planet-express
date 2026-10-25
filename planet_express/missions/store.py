@@ -397,13 +397,26 @@ class MissionStore:
                 if declared is None:
                     declared = stack_lease_paths(granted, self.stacks_roots)
                 fences = leases.acquire_in_txn(conn, wanted, mission_id, lease_ttl_s, now, declared)
+            if session_uid is not None:
+                owner = conn.execute("SELECT mission_id FROM reserved_uids WHERE uid=?", (session_uid,)).fetchone()
+                if owner is not None and owner["mission_id"] != mission_id:
+                    raise SessionConflict(f"uid {session_uid} is reserved for another mission")
             if uid_range is not None and session_uid is None:
                 held = {r[0] for r in conn.execute("SELECT session_uid FROM mission_sessions "
                                                    "WHERE session_uid IS NOT NULL AND uid_released_at IS NULL")}
-                free = next((u for u in range(uid_range[0], uid_range[1] + 1) if u not in held), None)
-                if free is None:
-                    raise NoFreeUid(f"all session uids in {uid_range[0]}-{uid_range[1]} are held")
-                session_uid = free
+                mine = conn.execute("SELECT uid FROM reserved_uids WHERE mission_id=?", (mission_id,)).fetchone()
+                if mine is not None:
+                    # A mission with a reserved uid (a Console conversation: its state directory belongs to that one uid)
+                    # always gets exactly it, and never another; if the previous session still holds it the insert below refuses.
+                    if not uid_range[0] <= mine["uid"] <= uid_range[1]:
+                        raise SessionConflict(f"{mission_id}: its reserved uid {mine['uid']} is outside the session range")
+                    session_uid = mine["uid"]
+                else:
+                    reserved = {r[0] for r in conn.execute("SELECT uid FROM reserved_uids")}
+                    free = next((u for u in range(uid_range[0], uid_range[1] + 1) if u not in held and u not in reserved), None)
+                    if free is None:
+                        raise NoFreeUid(f"all session uids in {uid_range[0]}-{uid_range[1]} are held or reserved")
+                    session_uid = free
             try:
                 conn.execute(
                     "INSERT INTO mission_sessions (id, mission_id, token_hash, issued_at, expires_at, kind, "
@@ -416,6 +429,44 @@ class MissionStore:
                 raise SessionConflict(str(exc)) from exc
             insert_event(conn, mission_id, "note", actor, {"session_started": session_id, "kind": kind}, now)
         return session_id
+
+    def reserve_uid(self, mission_id: str, uid_range: tuple[int, int]) -> int:
+        """Set aside one uid for this mission for as long as the reservation lasts: no other mission is ever given it, and this
+        mission's own sessions always get it (`start_session`). Idempotent: a mission already holding one gets the same back.
+        The uid must be free of every unreleased session and of every other reservation. Released only by
+        `release_uid_reservation`, which the caller does after the mission's state directory is gone."""
+        with self.store._write() as conn:
+            if conn.execute("SELECT 1 FROM missions WHERE id=?", (mission_id,)).fetchone() is None:
+                raise MissionNotFound(mission_id)
+            mine = conn.execute("SELECT uid FROM reserved_uids WHERE mission_id=?", (mission_id,)).fetchone()
+            if mine is not None:
+                return int(mine["uid"])
+            held = {r[0] for r in conn.execute("SELECT session_uid FROM mission_sessions "
+                                               "WHERE session_uid IS NOT NULL AND uid_released_at IS NULL")}
+            held |= {r[0] for r in conn.execute("SELECT uid FROM reserved_uids")}
+            free = next((u for u in range(uid_range[0], uid_range[1] + 1) if u not in held), None)
+            if free is None:
+                raise NoFreeUid(f"all session uids in {uid_range[0]}-{uid_range[1]} are held or reserved")
+            conn.execute("INSERT INTO reserved_uids (uid, mission_id, reserved_at) VALUES (?, ?, ?)", (free, mission_id, self._now()))
+            insert_event(conn, mission_id, "note", "core", {"uid_reserved": free}, self._now())
+            return free
+
+    def reserved_uid(self, mission_id: str) -> int | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT uid FROM reserved_uids WHERE mission_id=?", (mission_id,)).fetchone()
+        return int(row["uid"]) if row else None
+
+    def release_uid_reservation(self, mission_id: str) -> bool:
+        """Give the uid back to the pool. Refused while any session of the mission still holds the uid."""
+        with self.store._write() as conn:
+            mine = conn.execute("SELECT uid FROM reserved_uids WHERE mission_id=?", (mission_id,)).fetchone()
+            if mine is None:
+                return False
+            if conn.execute("SELECT 1 FROM mission_sessions WHERE session_uid=? AND uid_released_at IS NULL", (mine["uid"],)).fetchone():
+                return False
+            conn.execute("DELETE FROM reserved_uids WHERE mission_id=?", (mission_id,))
+            insert_event(conn, mission_id, "note", "core", {"uid_reservation_released": mine["uid"]}, self._now())
+            return True
 
     def extend_session(self, session_id: str, seconds: int) -> bool:
         """Move a live session's expiry later (a tripwire pause is not session time). Never earlier, never a revoked one."""

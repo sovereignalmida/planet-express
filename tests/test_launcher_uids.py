@@ -236,3 +236,66 @@ def test_a_pre_3d_sessions_table_is_rebuilt_keeping_its_rows_and_making_uids_reu
 def test_fake_containment_range_and_cgroup_path_contract():
     cont = FakeContainment()
     assert cont.uid_range == (60000, 60999) and cont.cgroup_path("S-1") == "/fake-cgroup/S-1"
+
+
+# ── reserved uids (a Console conversation keeps one uid for its whole life) ─────────────────────
+
+def test_a_reserved_uid_is_never_given_to_another_mission_and_always_to_its_own(tmp_path):
+    _, ms, (a, b) = missions(tmp_path, 2)
+    reserved = ms.reserve_uid(a.id, (61000, 61002))
+    assert reserved == 61000 == ms.reserved_uid(a.id) and ms.reserve_uid(a.id, (61000, 61002)) == 61000     # idempotent
+    other = start(ms, b, "S-b")
+    assert other.session_uid == 61001                                         # the reserved uid was skipped
+    mine = start(ms, a, "S-a")
+    assert mine.session_uid == 61000                                          # and its own mission gets exactly it
+
+
+def test_a_reserved_uid_survives_the_missions_sessions_ending_and_is_reused_by_the_next_turn(tmp_path):
+    _, ms, (a,) = missions(tmp_path, 1)
+    ms.reserve_uid(a.id, (61000, 61002))
+    first = start(ms, a, "S-1")
+    ms.revoke_session("S-1")
+    ms.release_session_uid("S-1")
+    assert start(ms, a, "S-2").session_uid == first.session_uid == 61000
+
+
+def test_the_next_turn_cannot_start_while_the_previous_session_still_holds_the_reserved_uid(tmp_path):
+    from planet_express.missions.store import SessionConflict
+    _, ms, (a,) = missions(tmp_path, 1)
+    ms.reserve_uid(a.id, (61000, 61002))
+    start(ms, a, "S-1")
+    ms.revoke_session("S-1")                                                  # revoked but its uid is not released
+    with pytest.raises(SessionConflict):
+        start(ms, a, "S-2")
+
+
+def test_an_explicit_uid_reserved_for_another_mission_is_refused(tmp_path):
+    from planet_express.missions.store import SessionConflict
+    _, ms, (a, b) = missions(tmp_path, 2)
+    ms.reserve_uid(a.id, (61000, 61002))
+    with pytest.raises(SessionConflict, match="reserved for another"):
+        ms.start_session(b.id, kind="local_cgroup", token_hash="b" * 64, session_ttl_s=60, lease_ttl_s=60, session_uid=61000)
+
+
+def test_reservations_count_against_the_range_and_are_released_only_when_nothing_holds_the_uid(tmp_path):
+    _, ms, (a, b, c) = missions(tmp_path, 3)
+    ms.reserve_uid(a.id, (61000, 61001))
+    ms.reserve_uid(b.id, (61000, 61001))
+    with pytest.raises(NoFreeUid):
+        ms.reserve_uid(c.id, (61000, 61001))
+    with pytest.raises(NoFreeUid):
+        start(ms, c, "S-c", (61000, 61001))                                   # nothing is free for an ordinary mission either
+    start(ms, a, "S-a", (61000, 61001))
+    assert ms.release_uid_reservation(a.id) is False                          # a session of the mission still holds it
+    ms.revoke_session("S-a")
+    ms.release_session_uid("S-a")
+    assert ms.release_uid_reservation(a.id) is True and ms.reserved_uid(a.id) is None
+    assert start(ms, c, "S-c", (61000, 61001)).session_uid == 61000           # back in the pool
+
+
+def test_a_reserved_uid_outside_the_current_range_refuses_the_session(tmp_path):
+    from planet_express.missions.store import SessionConflict
+    _, ms, (a,) = missions(tmp_path, 1)
+    ms.reserve_uid(a.id, (61000, 61002))
+    with pytest.raises(SessionConflict, match="outside the session range"):
+        start(ms, a, "S-a", (62000, 62002))

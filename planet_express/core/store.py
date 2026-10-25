@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from planet_express.memory import schema as _memory_schema
+from planet_express.console import schema as _console_schema
 from planet_express.missions.schema import DDL_V6 as _MISSIONS_DDL_V6
 from planet_express.missions.schema import repair_sessions_table
 
@@ -54,6 +55,7 @@ def ddl_v6() -> str:
     Memory is optional: a Python whose sqlite3 lacks FTS5 must still open the store for everything
     else, so its tables are left out there rather than failing core's startup. Evaluated at call time."""
     ddl = _MISSIONS_DDL_V6.rstrip().rstrip(";") + ";\n"
+    ddl += _console_schema.DDL.rstrip().rstrip(";") + ";\n"
     if _memory_schema.fts5_available():
         ddl += _memory_schema.DDL
     return ddl
