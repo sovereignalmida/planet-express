@@ -99,3 +99,34 @@ Operator decision: the experience wanted is a PE-native conversation with an age
   directory creation and archive order, the planted-config test list, budget headroom fix. See the findings doc for the gates.
 - Housekeeping still open: shut down the VM when finished (`virsh shutdown PE_UBUNTU_TEST`); delete the spike key file (`rm -rf ~/.config/pe-spike`);
   M-1 still in `awaiting_decision` on the live host; Subwave password rotation; INSTALL.md claude path.
+
+### Console slice 2 (2026-10-25, night): the engine, no UI. On `v4-next`, NOT deployed, NOT tagged.
+Live host is on `v4.0.0-rc7` (slice 1). Slice 2 is code only; nothing about it runs until the operator deploys it AND sets `missions.console.enabled: true`.
+
+**What exists** (`planet_express/console/`, plus changes under `planet_express/missions/`):
+- A conversation is a mission of `runtime: console`, tier observe, kept open across turns. Every operator message is one contained session of that mission
+  (`Supervisor.start_followup`), run by `ConsoleRuntime` (`--session-id` then `--resume` of the id the stream confirmed; read-only tools; the message is the last
+  argument after `--`). The conversation's ONE uid is reserved for its whole life (`reserved_uids`, `MissionStore.reserve_uid`; the allocator never gives it to
+  another mission). Its agent state lives in `<workspace_root>/C-<id>` (helper `state_dir`, slice 1C). PE keeps its own redacted copy of every message
+  (`console_messages`). Plans are validated by `console/plan.py` (generated from the check catalogue) and stored (`console_plans`).
+- New edge `awaiting_decision -> investigating` (operator only, observe/propose only); anyone may now cancel out of `needs_operator` (resuming stays the operator's).
+- `ConsoleService` (create/post/interrupt/archive + `tick`): follow-ups start at the supervisor tick; idle conversations archive after `archive_after_days`; an
+  archive stops a running turn, closes the mission, empties the state directory with a cleanup session as the same uid, THEN frees the uid.
+- `ModelBroker.set_mission_cap`: a turn may spend only what is left of its conversation's budget (set before the broker opens the turn's endpoint).
+- Config `missions.console` (off by default; needs the broker, the forced-settings hooks, `console.model` in `model_broker.models`).
+- Tables are additive (`console_*`, `reserved_uids`): no schema bump, an older Core ignores them.
+
+**Verified:** 6,931 unit tests; the standard VM run (now 283, it includes `tests/test_console_privileged.py`) under both Core strategies, including the Console end to end
+with the REAL supervisor, helper, worker sockets, model broker (stand-in upstream), the grant's env policy and the real claude CLI: two turns, one uid, resumed context, archive
+that frees everything. Review: Claude `/code-review xhigh` (15 findings, all fixed with regression tests, commit e974507); a `high` re-review of that fix commit was run (see the
+commit log). **Codex was SKIPPED for slice 2** (usage limit until 21:12 on 2026-10-25), per the CLAUDE.md rule; it is not queued.
+
+**Not built (next):**
+1. Slice 3, the UI and its API: nothing exposes `ConsoleService` over HTTP/RPC yet (dashboard routes, SSE/polling of messages and events, the Console page from the design package).
+2. Telegram parity, plan cards and Confirm (P2: confirming mints the hash-bound Repair grant; `console_plans.status` already models pending/superseded/scrapped/expired/confirmed).
+3. A resume that finds no conversation does not auto-restart from PE's stored thread (the turn fails and says so; the operator sends again). The first turn's id is only stored once confirmed, which removes the common cause.
+4. Not yet tested: workspace-resident `.mcp.json`, `.claude/agents|skills|commands`, `CLAUDE.md` planted by a turn (see the findings doc); E6 with the installed `pe_hook.py`; 20 random kill points; one live E1 on the host.
+5. The conversation's tool budget is counted by the installed hooks only (stream events are notes, to avoid counting each call twice).
+
+**Before enabling on the live host:** deploy a new tag (code only; the rc7 helper already has `state_dir`), add `missions.console.enabled: true` and confirm `console.model` is
+one of your OpenRouter `model_broker.models`; run one conversation, watch `journalctl -u casa-planetexpress`, check the uid is released after an archive.
