@@ -187,6 +187,17 @@ a few percent of 20 random samples. Both are tested first in P1 slice 1; the fal
 3. The Console UI from the design package: list, thread, activity trail, composer, budget meter, read-only.
 4. Start from a sentence and from an incident; follow-ups; close with cleanup.
 
+## Settings isolation: what slice 1 closed and what it did not (2026-10-25)
+
+Slice 1 part B launches every mission session with `--settings <Core-owned file> --setting-sources ""`. On the real CLI under the real launcher
+(both strategies) a hook planted in the session's own `.claude/settings.json` runs without the flags and does not with them; PE's hook fires either
+way. (The CLI already ignores a project file's *permission* entries in an untrusted workspace, so the live gap was hooks.)
+
+That closes settings **files** only. Not yet tested, and required as P1 tests before any persisted conversation state: workspace-resident
+`.mcp.json`, `.claude/agents/*`, `.claude/skills/*`, `.claude/commands/*` and `CLAUDE.md` planted by a turn, and whether any of them can carry hooks,
+tools or instructions that govern a later turn. If one can, the state directory must not be the cwd the CLI scans, or the turn must be launched
+with the matching "no project config" switch.
+
 ## Still to run (now P1 gates, see condition 1)
 
 - E6 with the installed `pe_hook.py`; a kill mid-tool-call; 20 randomised kill points; a 60 s freeze; one live E1 on the host.

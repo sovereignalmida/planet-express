@@ -665,7 +665,9 @@ class Supervisor:
                 # the directory and sockets to the session. Registered first so a failed launch stops it again.
                 run.stop_socket = self.socket_provider.start(cs)
                 full_env.update(self.socket_provider.env(cs))
-            if self.hook_argv is not None and run.hook_dir is not None:
+            if self.hook_argv is not None:
+                if run.hook_dir is None:
+                    raise ContainmentError("the runtime's settings are to be forced but there is no Core-owned hook directory")
                 argv = self.hook_argv(argv, run.hook_dir)
             spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), env=full_env,
                               token=token, sock_dir=self.socket_provider is not None)

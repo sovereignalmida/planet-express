@@ -813,17 +813,28 @@ def claude_code_argv(argv: Sequence[str], hook_dir: Path) -> list[str]:
     """The runtime's argv with PE's settings forced on it: the hook settings by `--settings`, and `--setting-sources ""` so NO other
     settings file is read. Without it the CLI also loads user, project and local settings, and the project ones live in the
     session's own workspace (`.claude/settings.json`): a session could plant permissions or hooks there that govern its own later
-    behaviour, or the next turn's. Any `--settings` or `--setting-sources` the configured argv already has is dropped, so PE's win."""
-    out: list[str] = []
+    behaviour, or the next turn's. This closes the settings *files* only; other workspace-resident configuration (`.mcp.json`,
+    `.claude/agents`, `.claude/skills`, `.claude/commands`, `CLAUDE.md`) is a separate question, tracked as a Console (P1) test list.
+    It assumes the configured argv runs the claude CLI directly, which is what `install_claude_code` means. Any `--settings` or `--setting-sources` the configured argv already has is dropped, so PE's win. The flags go before a `--`
+    terminator, if there is one: after it they would be prompt text and silently not apply."""
+    head: list[str] = []
     skip = False
-    for arg in argv:
+    args = list(argv)
+    for index, arg in enumerate(args):
+        if arg == "--":                          # everything after the terminator is positional: never an option, never stripped
+            tail = args[index:]
+            break
         if skip:
             skip = False
         elif arg in ("--settings", "--setting-sources"):
+            if index + 1 >= len(args) or args[index + 1].startswith("-"):
+                raise ValueError(f"{arg} has no value: refusing to guess which argument was meant")
             skip = True
         elif not arg.startswith(("--settings=", "--setting-sources=")):
-            out.append(arg)
-    return [*out, "--settings", str(Path(hook_dir) / "settings.json"), "--setting-sources", ""]
+            head.append(arg)
+    else:
+        tail = []
+    return [*head, "--settings", str(Path(hook_dir) / "settings.json"), "--setting-sources", "", *tail]
 
 
 def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:

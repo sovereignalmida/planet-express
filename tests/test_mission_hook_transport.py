@@ -445,3 +445,28 @@ def test_the_supervisor_launches_the_session_with_the_forced_settings_and_a_runt
     plain.sup.start(plain.mid)
     plain_argv = plain.cont.spawns(plain.session_ids()[0])[0]["argv"]
     assert "--settings" not in plain_argv and "--setting-sources" not in plain_argv
+
+
+def test_the_forced_flags_go_before_an_option_terminator_and_nothing_after_it_is_stripped(tmp_path):
+    from planet_express.missions.hooks import claude_code_argv
+    hook_dir = tmp_path / "h"
+    got = claude_code_argv(["/usr/bin/claude", "-p", "--model", "m", "--", "--settings", "tell me about --setting-sources"], hook_dir)
+    assert got == ["/usr/bin/claude", "-p", "--model", "m", "--settings", str(hook_dir / "settings.json"), "--setting-sources", "",
+                   "--", "--settings", "tell me about --setting-sources"]
+    assert claude_code_argv(["/usr/bin/claude", "--settings", "/x", "--", "go"], hook_dir)[:3] == ["/usr/bin/claude", "--settings", str(hook_dir / "settings.json")]
+
+
+def test_a_settings_flag_with_no_value_fails_the_start_instead_of_swallowing_the_next_argument(tmp_path):
+    import pytest
+    from planet_express.missions.hooks import claude_code_argv
+    for bad in (["/usr/bin/claude", "--setting-sources", "-p", "go"], ["/usr/bin/claude", "-p", "go", "--settings"]):
+        with pytest.raises(ValueError, match="no value"):
+            claude_code_argv(bad, tmp_path / "h")
+
+
+def test_forced_settings_with_no_core_owned_hook_directory_refuse_to_launch(tmp_path):
+    from planet_express.missions.hooks import claude_code_argv
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 5}])
+    rig.sup.hook_argv = claude_code_argv                                  # forced settings, but hook_install and hook_root are unset
+    rig.sup.start(rig.mid)
+    assert rig.session_ids() == [] or rig.cont.spawns(rig.session_ids()[0]) == []      # nothing was launched
