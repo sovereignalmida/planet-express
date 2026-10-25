@@ -105,7 +105,9 @@ def cleanup_id(session_id: str) -> str:
 
 # The session may have removed its own write permission on a directory it made, so restore the owner's access first
 # (chmod does not follow symlinks), then delete. The workspace path is a positional parameter, never part of the script.
-CLEANUP_SCRIPT = 'chmod -R u+rwX -- "$1" 2>/dev/null; exec ' + CLEANUP_FIND + ' "$1" -xdev -mindepth 1 -delete'
+# Both discard their output: the launcher's merged output pipe is never read for a cleanup session, and a full pipe would block find.
+CLEANUP_SCRIPT = ('chmod -R u+rwX -- "$1" >/dev/null 2>&1; exec ' + CLEANUP_FIND
+                  + ' "$1" -xdev -mindepth 1 -delete >/dev/null 2>&1')       # nobody drains the session's output: never let it fill
 CLEANUP_WALL_S = 60.0          # a cleanup session that has not finished by then is killed and tried again
 CLEANUP_RETRY_S = 300.0        # after a failed cleanup, wait this long before launching another for the same session
 HOOK_POLICY_ENV_MAX = 3500    # above this the hook policy travels as a file (the launcher caps an environment value at 4096)
@@ -333,6 +335,7 @@ class Supervisor:
         self.lease_ttl_s = lease_ttl_s
         self._runs: dict[str, _Run] = {}
         self._cleaners: dict[str, tuple[float, int]] = {}    # cleanup session id -> (launched at, uid), see `_clear_workspace`
+        self._cleanup_leftovers_reaped: set[str] = set()    # session ids whose cleanup cgroup a previous Core may have left was checked
         self._cleanup_retry_at: dict[str, float] = {}    # session id -> do not launch another cleanup session before this time
         self._verify_pool: Any = None
         self._verifying: dict[str, Any] = {}
@@ -377,6 +380,13 @@ class Supervisor:
             else:
                 log.warning("Mission sessions are disabled on this host (proposal-only):\n%s", report.render())
         return bool(report.ok)
+
+    def _launcher_proven(self) -> bool:
+        """The last preflight passed. Unlike `launcher_ready` this never runs one: a cleanup sweep must not run probe sessions on the
+        poll thread or use up the retry slot a real mission start needs. Until the first preflight has run, it is False."""
+        if self.preflight_fn is None:
+            return True
+        return bool(self.preflight_report is not None and self.preflight_report.ok)
 
     def _note(self, mission_id: str, body: dict[str, Any], kind: str = "note") -> None:
         self.ms.append_event(mission_id, kind, ACTOR, body)
@@ -1245,8 +1255,9 @@ class Supervisor:
         A session can leave directories Core cannot remove (the agent CLI makes its cache directory 0700, owned by the
         session uid). Core never gets more power to delete them; instead the uid that owns them deletes them. A short cleanup
         session, same uid, is launched from an empty scratch directory (the launcher refuses a workspace holding anything
-        but regular files, so the old one cannot be its cwd) and restores the owner's access, then runs `find <workspace> -mindepth 1 -delete`. Core then
-        removes the empty directory. The uid stays held until all of that has happened. Never blocks: each sweep takes one step.
+        but regular files, so the old one cannot be its cwd), restores the owner's access, then runs
+        `find <workspace> -mindepth 1 -delete`. Core then removes the empty directory. The uid stays held until all of that
+        has happened. Each sweep takes one step.
         """
         if not SESSION_ID.fullmatch(session_id):
             return False                                    # never build a path or a command from anything but a session id
@@ -1256,21 +1267,27 @@ class Supervisor:
         scratch = self.workspace_dir / cleaner_id
         entry = self._cleaners.get(cleaner_id)
         launched_at = entry[0] if entry else None
-        if launched_at is not None:
-            if not self.containment.is_empty(cleaner):
-                if float(self.clock()) - launched_at > CLEANUP_WALL_S:
-                    log.warning("cleanup session %s is overdue: killing it", cleaner_id)
-                    self._cleanup_retry_at[session_id] = float(self.clock()) + CLEANUP_RETRY_S
-                    self.containment.kill(cleaner)
-                return False
-            self.containment.cleanup(cleaner)
-            self._cleaners.pop(cleaner_id, None)
-        else:
-            # Nothing of ours is running it, but a previous Core may have left its cgroup: remove what is provably empty.
-            with contextlib.suppress(Exception):
-                self.containment.kill(cleaner)
+        try:
+            if launched_at is not None:
+                if not self.containment.is_empty(cleaner):
+                    if float(self.clock()) - launched_at > CLEANUP_WALL_S:
+                        log.warning("cleanup session %s is overdue: killing it", cleaner_id)
+                        self._cleanup_retry_at[session_id] = float(self.clock()) + CLEANUP_RETRY_S
+                        self.containment.kill(cleaner)
+                    return False
                 self.containment.cleanup(cleaner)
-        shutil.rmtree(scratch, ignore_errors=True)
+                self._cleaners.pop(cleaner_id, None)
+            elif session_id not in self._cleanup_leftovers_reaped:
+                # Nothing of ours runs it, but a previous Core may have left its cgroup: once per session, remove what is provably empty.
+                self._cleanup_leftovers_reaped.add(session_id)
+                with contextlib.suppress(Exception):
+                    self.containment.kill(cleaner)
+                    self.containment.cleanup(cleaner)
+        except Exception as exc:
+            log.warning("cleanup session %s could not be stopped or removed yet: %s", cleaner_id, type(exc).__name__)
+            return False
+        if scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
         if self.containment.uid_in_use(uid):
             return False
         shutil.rmtree(workspace, ignore_errors=True)
@@ -1284,8 +1301,8 @@ class Supervisor:
             return False
         if self._shutting_down or now < self._cleanup_retry_at.get(session_id, 0.0):
             return False
-        if not self.launcher_ready():
-            return False                                    # no session of any kind starts on a host whose preflight failed
+        if not self._launcher_proven():
+            return False                                    # no session of any kind starts on a host whose preflight has not passed
         # Like every session start, the final shutdown check, the launch and the registration happen under the lifecycle lock that
         # `begin_shutdown` takes: a cleanup session either is registered before `shutdown()` looks, or is never launched.
         with self._lifecycle:
@@ -1633,7 +1650,8 @@ class Supervisor:
         """Daemon stop: revoke every token and kill every session. Missions are NOT moved on: they stay
         `investigating`, and `recover()` at the next start restarts them within the retry budget. A session
         that cannot be proven empty stays tracked (and its cgroup stays), never silently dropped."""
-        self._shutting_down = True                  # in-flight verification jobs drop their result under the lock
+        with self._lifecycle:                       # a start or cleanup launch already inside its launch registers first
+            self._shutting_down = True              # in-flight verification jobs drop their result under the lock
         if self._verify_pool is not None:
             self._verify_pool.shutdown(wait=False, cancel_futures=True)     # a verification is re-run after restart
             deadline = time.monotonic() + VERIFY_SHUTDOWN_WAIT_S

@@ -170,24 +170,52 @@ def test_the_cleanup_id_is_bounded_stable_and_valid_for_the_longest_session_id()
     assert cleanup_id("S-one") != cleanup_id("S-two")
 
 
-def test_no_cleanup_session_starts_on_a_host_whose_launcher_preflight_failed(tmp_path):
+def test_no_cleanup_session_starts_until_a_launcher_preflight_has_passed_and_the_sweep_never_runs_one(tmp_path):
+    from types import SimpleNamespace
     rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
-    rig.sup.launcher_ready = lambda **_: False
+    ran = []
+    rig.sup.preflight_fn = lambda: ran.append(1)                         # configured, and has not run yet
     assert rig.sup.sweep_uids() == 0
-    assert not rig.cont.exists(cleanup_id(sid))
-    assert rig.ms.get_session(sid)["uid_released_at"] is None
-    del rig.sup.launcher_ready                                           # preflight passes again: it runs
+    assert not rig.cont.exists(cleanup_id(sid)) and ran == []            # fail closed, and the sweep did not run a preflight
+    rig.sup.preflight_report = SimpleNamespace(ok=False)
     rig.sup.sweep_uids()
-    assert rig.cont.exists(cleanup_id(sid))
+    assert not rig.cont.exists(cleanup_id(sid))
+    rig.sup.preflight_report = SimpleNamespace(ok=True)                  # a pass: now it runs
+    rig.sup.sweep_uids()
+    assert rig.cont.exists(cleanup_id(sid)) and ran == []
 
 
-def test_shutdown_that_begins_during_the_preflight_stops_the_cleanup_session_from_launching(tmp_path):
+def test_shutdown_that_begins_after_the_first_check_stops_the_cleanup_session_from_launching(tmp_path):
     rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
-    real = rig.sup.launcher_ready
 
-    def slow_preflight(**kw):
-        rig.sup.begin_shutdown()                                         # the race: shutdown begins while the preflight runs
-        return real(**kw)
-    rig.sup.launcher_ready = slow_preflight
+    def proven_then_shutdown():
+        rig.sup.begin_shutdown()                                         # the race: shutdown begins between the check and the launch
+        return True
+    rig.sup._launcher_proven = proven_then_shutdown
     rig.sup.sweep_uids()
     assert not rig.cont.exists(cleanup_id(sid)) and rig.sup.tracked_sessions == 0
+
+
+def test_the_cleanup_script_discards_its_output_so_a_full_pipe_cannot_block_find():
+    assert CLEANUP_SCRIPT.count(">/dev/null 2>&1") == 2
+
+
+def test_a_kill_or_cleanup_that_raises_is_logged_and_retried_not_fatal(tmp_path):
+    rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
+    rig.sup.sweep_uids()
+    rig.clock.t += CLEANUP_WALL_S + 1
+    real_kill = rig.cont.kill
+    rig.cont.kill = lambda cs: (_ for _ in ()).throw(RuntimeError("still populated"))
+    assert rig.sup.sweep_uids() == 0                                     # no exception out of the sweep
+    rig.cont.kill = real_kill
+    assert rig.cont.exists(cleanup_id(sid)) and rig.ms.get_session(sid)["uid_released_at"] is None
+
+
+def test_leftover_cleanup_cgroups_are_reaped_once_per_session_not_on_every_sweep(tmp_path):
+    rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
+    rig.sup.begin_shutdown()                                             # nothing is launched, so only the leftover path runs
+    rig.sup.sweep_uids()
+    rig.sup.sweep_uids()
+    rig.sup.sweep_uids()
+    assert rig.cont.kill_calls(cleanup_id(sid)) == 0                     # fake: no such cgroup, so the single attempt killed nothing
+    assert sid in rig.sup._cleanup_leftovers_reaped
