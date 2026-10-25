@@ -1,4 +1,4 @@
-# Operator Console, phase 0: findings (interim, 2026-10-25)
+# Operator Console, phase 0: findings (interim 2, 2026-10-25)
 
 Scope and pass lines: `v4-console-p0-spike.md`. Scripts: `scripts/spikes/console_p0_*.py` (throwaway). CLI under test: Claude Code
 2.1.310. Everything below was measured against a stand-in Messages API (no model, no cost), outside the launcher, on the developer
@@ -32,10 +32,48 @@ fd-inheritance test, which predates this work).
 4. **Streaming input is not needed for P1.** It gives a cleaner interrupt, but it keeps one process, one cgroup and one uid alive per
    conversation and changes the session id under us. Revisit only if turn-by-turn latency feels bad in use.
 
+## Under containment (VM, real launcher, both strategies; `tests/test_p0_console_privileged.py`)
+
+| Exp | Result |
+|---|---|
+| E1 resume across contained launches | **Pass.** Turn 2 in a *new* session (new cgroup, new fresh workspace, new access code, same uid) resumed the conversation; the stand-in saw turn 1's message; only turn 2's own code was used. The whole privileged suite (261 tests) still passes alongside. |
+| E2 live stream-json as a session uid | **Pass.** Events were written and parsed as in the uncontained run. |
+| E4 kill and freeze under containment | **Pass.** `cgroup.kill` mid-stream, then resume: context intact. A 8-second freeze mid-stream then thaw: the turn finished by itself with `result:success`. (More random-point samples still wanted.) |
+| E8 workspace lifetime | **Two hard constraints found, one fix verified** (below). |
+
+### E8, what it means for P1
+
+1. **The helper refuses to launch into a workspace that contains a subdirectory** ("workspace entry"; it hands over regular files
+   only, deliberately). A turn leaves `cfg/` (and `.cache`), so a *second* turn cannot reuse the first turn's workspace. Conversation
+   state therefore cannot live in a workspace the helper vets each turn.
+2. **The leaked-workspace bug reproduces** under the unprivileged-Core strategy: a `drwx--S---` directory created by the session defeats
+   Core's group access, and Core's `rm -rf` leaves the workspace and holds the uid. (The stand-in run alone did not create it; the live
+   mission's `.cache` came from a tool-using turn, so the test creates it explicitly as the session uid.)
+3. **Verified fix:** a short cleanup session as the same uid, launched from an empty scratch directory, running
+   `find <old workspace> -mindepth 1 -delete`; then Core removes the now-empty directory. No new root code, no sudo change. (My earlier
+   idea of launching the cleanup *in* the old workspace would have been refused by point 1; the scratch directory is what makes it work.)
+4. **State persistence needs a decision (P1 design):**
+   - **(c, recommended)** a conversation state directory outside the vetted workspace: a fixed root, one directory per conversation,
+     created by the helper (root) owned by the session uid with Core's group, handed to the session with `HOME` and `CLAUDE_CONFIG_DIR` pointing
+     into it. The helper only creates it and opens it with no-follow; it never walks its contents. Needs a small, reviewable helper addition
+     (second review).
+   - **(e)** no persisted CLI state: PE stores the conversation (it already stores every event) and starts each turn fresh with the
+     prior turns, plus condensed tool results, in the prompt. No helper change and trivial cleanup, but the agent loses exact tool-result
+     memory unless PE re-supplies it, and each turn re-sends the history either way.
+   My recommendation is (c); (e) is the fallback if the helper change is unwelcome.
+
+### New security requirement found: settings sources
+
+With persisted state, **a settings file left in the state directory takes effect on the next turn by default** (a hook planted in
+`CLAUDE_CONFIG_DIR/settings.json` ran, and its permission allow-list applied). A turn could therefore weaken the next turn's hooks.
+**Passing `--setting-sources ""` ignores it, and PE's own hooks passed with `--settings` still fire** (both verified). P1 must always
+launch with `--setting-sources ""` and pass hooks and permissions only through `--settings`; a test must assert a planted settings
+file is ignored. This applies to the existing single-run missions as well (low risk there, since no later run existed).
+
 ## Still to run before the P1 go/no-go
 
-- **Under containment (VM, real launcher):** E1, E2, E4 (including cgroup freeze for 60 s and thaw, kill mid-tool-call), E6 with the installed
-  `pe_hook.py`, and E8 (uid and workspace lifetime, the cleanup session that fixes the leaked-workspace bug).
+- **Under containment:** E6 with the installed `pe_hook.py` (the stand-in run proved the mechanism; the real hook needs the mission store),
+  a kill mid-*tool-call*, 20 randomised kill points, a 60 s freeze, and the uid-holding policy for idle conversations (open question 2).
 - **With a real model (needs the operator's go; token cap applies):** E5 plan schema validity (at least 18 of 20), E7 cost curve over ten
   turns, and one live run of E1 on the host through the broker.
 - More E4 samples (20, randomised) once under containment.
