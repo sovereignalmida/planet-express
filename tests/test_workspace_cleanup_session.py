@@ -219,3 +219,14 @@ def test_leftover_cleanup_cgroups_are_reaped_once_per_session_not_on_every_sweep
     rig.sup.sweep_uids()
     assert rig.cont.kill_calls(cleanup_id(sid)) == 0                     # fake: no such cgroup, so the single attempt killed nothing
     assert sid in rig.sup._cleanup_leftovers_reaped
+
+
+def test_a_leftover_cleanup_cgroup_that_cannot_be_reaped_yet_is_retried_and_nothing_launches_over_it(tmp_path):
+    rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
+    real_kill = rig.cont.kill
+    rig.cont.kill = lambda cs: (_ for _ in ()).throw(RuntimeError("transient"))
+    assert rig.sup.sweep_uids() == 0
+    assert sid not in rig.sup._cleanup_leftovers_reaped and not rig.cont.exists(cleanup_id(sid))   # not marked done, nothing launched
+    rig.cont.kill = real_kill
+    rig.sup.sweep_uids()
+    assert sid in rig.sup._cleanup_leftovers_reaped and rig.cont.exists(cleanup_id(sid))           # retried, then it proceeds

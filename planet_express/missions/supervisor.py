@@ -1279,10 +1279,9 @@ class Supervisor:
                 self._cleaners.pop(cleaner_id, None)
             elif session_id not in self._cleanup_leftovers_reaped:
                 # Nothing of ours runs it, but a previous Core may have left its cgroup: once per session, remove what is provably empty.
-                self._cleanup_leftovers_reaped.add(session_id)
-                with contextlib.suppress(Exception):
-                    self.containment.kill(cleaner)
-                    self.containment.cleanup(cleaner)
+                self.containment.kill(cleaner)
+                self.containment.cleanup(cleaner)
+                self._cleanup_leftovers_reaped.add(session_id)       # only once it worked: a failure is retried, and nothing launches over it
         except Exception as exc:
             log.warning("cleanup session %s could not be stopped or removed yet: %s", cleaner_id, type(exc).__name__)
             return False
