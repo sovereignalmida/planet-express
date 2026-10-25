@@ -121,6 +121,7 @@ def test_a_launch_failure_is_a_retry_later_not_a_crash(tmp_path):
     rig.cont.fail_launch = RuntimeError("helper refused")
     assert rig.sup.sweep_uids() == 0
     assert not (rig.sup.workspace_dir / (cleanup_id(sid))).exists()          # the scratch directory is not left behind
+    assert sid not in rig.sup._cleanup_leftovers_reaped                      # the retry reaps whatever the failed launch left first
     assert rig.ms.get_session(sid)["uid_released_at"] is None
 
 

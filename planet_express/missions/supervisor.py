@@ -1315,6 +1315,7 @@ class Supervisor:
                 self._cleaners[cleaner_id] = (now, uid)
             except Exception as exc:
                 self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
+                self._cleanup_leftovers_reaped.discard(session_id)    # a failed launch may have left its cgroup: reap it before the retry
                 shutil.rmtree(scratch, ignore_errors=True)
                 log.warning("could not start the cleanup session for %s: %s", session_id, type(exc).__name__)
         return False
