@@ -129,7 +129,7 @@ broker (safety surface), so it gets the second review.
    process per conversation and changing the session id under us.
 2. **How long does a conversation hold a session uid?** For as long as it is *open*, and open is capped. Conversation state (option c) is
    owned by one uid, so the same uid must serve every turn; handing state between uids would need a root chown step we do not want.
-   With 1000 uids and a single operator this is not a constraint: cap open conversations at 50, and archive one after 7 days idle or when
+   With 1000 uids and a single operator this is not a constraint: cap open conversations at 10, and archive one after 3 days idle or when
    the operator closes it. Archiving runs the verified cleanup session, deletes the state directory and releases the uid; the thread stays
    in PE's own event store. Reopening an archived thread starts fresh from the stored thread (option e's replay), which loses only exact
    tool-result memory. *Measured:* uid reuse and cleanup. *Not measured:* a long-idle held uid; the policy is a recommendation.
@@ -192,6 +192,6 @@ a few percent of 20 random samples. Both are tested first in P1 slice 1; the fal
 - E6 with the installed `pe_hook.py`; a kill mid-tool-call; 20 randomised kill points; a 60 s freeze; one live E1 on the host.
 - A direct widen-scope / invent-a-check test of the plan validator.
 
-## Open questions for the operator
-1. The default budget (150,000 tokens) and the open-conversation cap (50, archive after 7 days idle): fine, or different?
-2. Is it acceptable to add the small helper change for the state directory (option c), or do you prefer the no-helper-change fallback (e)?
+## Decisions (operator, 2026-10-25)
+1. Budget default 150,000 tokens per conversation: accepted. **Open conversations capped at 10; archive after 3 days idle.**
+2. **Option (c) approved:** the small helper addition for a per-conversation state directory (second review applies).
