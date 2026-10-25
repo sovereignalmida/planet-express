@@ -194,7 +194,8 @@ def test_production_cleanup_frees_a_workspace_core_cannot_remove(host):
     """`Supervisor._clear_workspace`, the production path, under the real launcher: a 0700 tree made by the session uid is emptied by a
     cleanup session as the same uid, then the workspace is removed and the uid is free. The same steps run under both Core strategies."""
     sid = host.sid("clean")
-    host.launch(["/bin/sh", "-c", "mkdir -m 700 .cache && mkdir -m 700 .cache/deep && echo x > .cache/deep/f"], uid=UIDS[0], sid=sid)
+    host.launch(["/bin/sh", "-c", "mkdir -m 700 .cache && mkdir -m 700 .cache/deep && echo x > .cache/deep/f && chmod 500 .cache/deep && "
+                 "mkdir -m 000 .sealed && ln -s /etc .cache/link"], uid=UIDS[0], sid=sid)
     assert wait_empty(host, sid)
     host.core.call("cleanup", session_id=sid)
     ws = host.cwd(sid)

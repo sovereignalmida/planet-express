@@ -51,7 +51,7 @@ from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
 from .hooks import HOOK_LOG_NAME, MAX_POLICY_FILE_BYTES
-from .launcher.spec import LaunchSpec
+from .launcher.spec import SESSION_ID, LaunchSpec
 from .models import Mission
 from .runtime import (
     RUNTIME_EVENT_KINDS,
@@ -94,7 +94,10 @@ MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll (
 MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
 CLEANUP_PREFIX = "X-"          # a cleanup session is named for the session whose workspace it empties
-CLEANUP_FIND = "/usr/bin/find"
+CLEANUP_SH, CLEANUP_FIND = "/bin/sh", "/usr/bin/find"
+# The session may have removed its own write permission on a directory it made, so restore the owner's access first
+# (chmod does not follow symlinks), then delete. The workspace path is a positional parameter, never part of the script.
+CLEANUP_SCRIPT = 'chmod -R u+rwX -- "$1" 2>/dev/null; exec ' + CLEANUP_FIND + ' "$1" -xdev -mindepth 1 -delete'
 CLEANUP_WALL_S = 60.0          # a cleanup session that has not finished by then is killed and tried again
 CLEANUP_RETRY_S = 300.0        # after a failed cleanup, wait this long before launching another for the same session
 HOOK_POLICY_ENV_MAX = 3500    # above this the hook policy travels as a file (the launcher caps an environment value at 4096)
@@ -321,7 +324,7 @@ class Supervisor:
         self.max_brief_bytes = max_brief_bytes
         self.lease_ttl_s = lease_ttl_s
         self._runs: dict[str, _Run] = {}
-        self._cleaners: dict[str, float] = {}            # cleanup session id -> when it was launched (see `_clear_workspace`)
+        self._cleaners: dict[str, tuple[float, int]] = {}    # cleanup session id -> (launched at, uid), see `_clear_workspace`
         self._cleanup_retry_at: dict[str, float] = {}    # session id -> do not launch another cleanup session before this time
         self._verify_pool: Any = None
         self._verifying: dict[str, Any] = {}
@@ -379,7 +382,7 @@ class Supervisor:
     @property
     def tracked_sessions(self) -> int:
         """Sessions Core still supervises: after `shutdown()`, any left were not proven gone."""
-        return len(self._runs)
+        return len(self._runs) + len(self._cleaners)
 
     def begin_shutdown(self) -> None:
         """No new session starts from here on (the runner calls this first; `shutdown()` then kills what is running)."""
@@ -1234,14 +1237,17 @@ class Supervisor:
         A session can leave directories Core cannot remove (the agent CLI makes its cache directory 0700, owned by the
         session uid). Core never gets more power to delete them; instead the uid that owns them deletes them. A short cleanup
         session, same uid, is launched from an empty scratch directory (the launcher refuses a workspace holding anything
-        but regular files, so the old one cannot be its cwd) and runs `find <workspace> -mindepth 1 -delete`. Core then
+        but regular files, so the old one cannot be its cwd) and restores the owner's access, then runs `find <workspace> -mindepth 1 -delete`. Core then
         removes the empty directory. The uid stays held until all of that has happened. Never blocks: each sweep takes one step.
         """
+        if not SESSION_ID.fullmatch(session_id):
+            return False                                    # never build a path or a command from anything but a session id
         workspace = self.workspace_dir / session_id
         cleaner_id = CLEANUP_PREFIX + session_id
         cleaner = ContainedSession(cleaner_id, "local_cgroup", self.containment.cgroup_path(cleaner_id), uid)
         scratch = self.workspace_dir / cleaner_id
-        launched_at = self._cleaners.get(cleaner_id)
+        entry = self._cleaners.get(cleaner_id)
+        launched_at = entry[0] if entry else None
         if launched_at is not None:
             if not self.containment.is_empty(cleaner):
                 if float(self.clock()) - launched_at > CLEANUP_WALL_S:
@@ -1268,14 +1274,14 @@ class Supervisor:
             log.warning("workspace %s survived its cleanup session: uid %s stays held", workspace, uid)
             self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
             return False
-        if now < self._cleanup_retry_at.get(session_id, 0.0):
+        if self._shutting_down or now < self._cleanup_retry_at.get(session_id, 0.0):
             return False
         try:
             scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
-            spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_FIND, str(workspace), "-xdev", "-mindepth", "1", "-delete"),
+            spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)),
                               env={"PATH": "/usr/bin:/bin"}, token=secrets.token_urlsafe(32), sock_dir=False)
             self.containment.launch(cleaner_id, spec)
-            self._cleaners[cleaner_id] = now
+            self._cleaners[cleaner_id] = (now, uid)
         except Exception as exc:
             self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
             shutil.rmtree(scratch, ignore_errors=True)
@@ -1621,6 +1627,20 @@ class Supervisor:
                     future.result(max(0.0, deadline - time.monotonic()))
         for run in list(self._runs.values()):
             self._shutdown_one(run)
+        self._stop_cleaners()
+
+    def _stop_cleaners(self) -> None:
+        """Cleanup sessions are sessions too: none outlives the daemon. A workspace left over is swept after the next start."""
+        for cleaner_id, (_, uid) in list(self._cleaners.items()):
+            cleaner = ContainedSession(cleaner_id, "local_cgroup", self.containment.cgroup_path(cleaner_id), uid)
+            try:
+                self.containment.kill(cleaner)
+                if self.containment.is_empty(cleaner):
+                    self.containment.cleanup(cleaner)
+                    shutil.rmtree(self.workspace_dir / cleaner_id, ignore_errors=True)
+                    self._cleaners.pop(cleaner_id, None)
+            except Exception:
+                log.exception("could not stop cleanup session %s", cleaner_id)
 
     def _shutdown_one(self, run: _Run) -> None:
         try:

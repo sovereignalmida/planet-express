@@ -10,8 +10,9 @@ import pytest
 from supervisor_fakes import Rig, update
 
 from planet_express.missions.supervisor import (
-    CLEANUP_FIND,
     CLEANUP_RETRY_S,
+    CLEANUP_SCRIPT,
+    CLEANUP_SH,
     CLEANUP_WALL_S,
 )
 
@@ -52,7 +53,8 @@ def test_a_workspace_core_cannot_remove_keeps_the_uid_held_and_starts_a_cleanup_
     assert rig.sup.sweep_uids() == 0
     spawn = rig.cont.spawns("X-" + sid)[0]
     workspace = rig.sup.workspace_dir / sid
-    assert spawn["argv"] == [CLEANUP_FIND, str(workspace), "-xdev", "-mindepth", "1", "-delete"]
+    assert spawn["argv"] == [CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)]     # the path is a parameter, not script text
+    assert str(workspace) not in CLEANUP_SCRIPT and "chmod -R u+rwX" in CLEANUP_SCRIPT
     assert spawn["uid"] == row["session_uid"] and spawn["sock_dir"] is False
     assert spawn["cwd"] == str(rig.sup.workspace_dir / ("X-" + sid))    # an empty scratch directory, never the old workspace
     assert os.listdir(spawn["cwd"]) == []
@@ -128,3 +130,33 @@ def test_an_ordinary_session_needs_no_cleanup_session(tmp_path):
     rig.sup.poll(rig.mid)
     assert rig.ms.get_session(sid)["uid_released_at"] is not None
     assert not rig.cont.exists("X-" + sid) and rig.cont.spawns("X-" + sid) == []
+
+
+def test_shutdown_stops_a_running_cleanup_session_and_counts_it_until_it_is_gone(tmp_path):
+    rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
+    rig.sup.sweep_uids()
+    assert rig.cont.exists("X-" + sid) and rig.sup.tracked_sessions == 1
+    rig.cont.ignore_kill("X-" + sid, 3)                                 # it resists the first kill
+    rig.sup.begin_shutdown()
+    rig.sup.shutdown()
+    assert rig.cont.exists("X-" + sid) and rig.sup.tracked_sessions == 1      # not provably dead: still reported
+    for _ in range(3):
+        rig.cont.is_empty(rig.cont._groups["X-" + sid].cs)
+    rig.sup.shutdown()
+    assert not rig.cont.exists("X-" + sid) and rig.sup.tracked_sessions == 0
+    assert not (rig.sup.workspace_dir / ("X-" + sid)).exists()
+    assert rig.ms.get_session(sid)["uid_released_at"] is None           # the workspace is still there: swept after the next start
+
+
+def test_no_cleanup_session_is_started_once_shutdown_has_begun(tmp_path):
+    rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
+    rig.sup.begin_shutdown()
+    rig.sup.sweep_uids()
+    assert not rig.cont.exists("X-" + sid)
+
+
+def test_a_session_id_that_is_not_a_session_id_never_reaches_a_command(tmp_path):
+    rig = Rig(tmp_path)
+    for hostile in ("../etc", "S-a b", "S-$(id)", "", "x" * 65):
+        assert rig.sup._clear_workspace(hostile, 60000) is False
+    assert rig.cont.spawns("X-../etc") == []
