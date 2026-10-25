@@ -24,11 +24,28 @@ SYSTEM = ("You are Planet Express's investigation agent for a Docker Compose hom
 
 
 def catalogue_text():
+    """The real catalogue: every check kind with its full JSON schema, bounds and required fields included."""
     rows = []
     for kind, model in PARAM_MODELS.items():
-        props = model.model_json_schema().get("properties", {})
-        rows.append(f"  {kind}: " + ", ".join(f"{k}:{v.get('type', 'any')}" for k, v in props.items()))
+        sch = model.model_json_schema()
+        sch.pop("title", None)
+        rows.append(f"  {kind}: {json.dumps(sch, separators=(',', ':'))}")
     return "\n".join(rows)
+
+
+def plan_schema():
+    """The proposed plan contract as JSON Schema, for --json-schema."""
+    s = {"type": "string"}
+    risk = {"type": "object", "properties": {"level": {"enum": ["low", "medium", "high"]}, "text": s}, "required": ["level", "text"], "additionalProperties": False}
+    check = {"type": "object", "properties": {"id": s, "check": {"enum": sorted(PARAM_MODELS)}, "params": {"type": "object"}},
+             "required": ["id", "check", "params"], "additionalProperties": False}
+    opt = {"type": "object", "properties": {"name": s, "recommended": {"type": "boolean"}, "summary": s, "changes": {"type": "array", "items": s},
+                                            "will_not_touch": {"type": "array", "items": s}, "risk": risk, "rolls_back_to": s, "effort": s,
+                                            "checks": {"type": "array", "items": check}},
+           "required": sorted(OPT_KEYS), "additionalProperties": False}
+    return {"type": "object", "properties": {"known": {"type": "array", "items": s}, "unsure": {"type": "array", "items": s},
+                                             "options": {"type": "array", "items": opt, "minItems": 1, "maxItems": 3}},
+            "required": ["known", "unsure", "options"], "additionalProperties": False}
 
 
 def plan_prompt(fx, via_file):
@@ -40,7 +57,7 @@ def plan_prompt(fx, via_file):
            else "Reply with only the JSON object.")
     return (f"Incident: {fx['name']}\n\nEvidence:\n{ev}\n\nInvestigate from this evidence and propose 1 to 3 options for the operator. "
             f"Exactly one option has recommended=true. Each option's `checks` are how PE will verify it worked and may ONLY use these check kinds "
-            f"and parameters:\n{catalogue_text()}\n\nShape: {shape}\n{out}")
+            f"and the exact JSON Schema of each check\'s params (respect every bound; params must match exactly, no extra fields):\n{catalogue_text()}\n\nShape: {shape}\n{out}")
 
 
 def validate(doc):
@@ -83,6 +100,19 @@ def claude_env(broker, ws, cfg):
             "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
 
 
+CLI_NOTES = []
+
+
+def auth_failed(store):
+    """True once the upstream has rejected the key: nothing after that can succeed, so stop spending time."""
+    return any(e.get("event") == "model.request" and e.get("status") in (401, 403) for e in store.events)
+
+
+def note(key, r):
+    if r.returncode and len(CLI_NOTES) < 3:
+        CLI_NOTES.append({"exit": r.returncode, "stderr": (r.stderr or "")[-300:].replace(key, "[REDACTED]"), "stdout": (r.stdout or "")[-300:].replace(key, "[REDACTED]")})
+
+
 def tokens(store):
     return sum(e.get("charged", 0) for e in store.events if e.get("event") == "model.request")
 
@@ -93,36 +123,37 @@ def main():
     ap.add_argument("--model", default="~anthropic/claude-sonnet-latest"); ap.add_argument("--haiku", default="~anthropic/claude-haiku-latest")
     ap.add_argument("--file-runs", type=int, default=20); ap.add_argument("--schema-runs", type=int, default=9)
     ap.add_argument("--turns", type=int, default=10); ap.add_argument("--standin", action="store_true")
-    ap.add_argument("--only", default="")
+    ap.add_argument("--only", default=""); ap.add_argument("--max-requests", type=int, default=400)
     a = ap.parse_args()
     key = os.environ.get("OPENROUTER_API_KEY", "")
     if not key:
         print("OPENROUTER_API_KEY is not set", file=sys.stderr); return 2
     store = Store()
-    limits = BrokerLimits(max_requests=400, max_tokens=a.cap)
+    limits = BrokerLimits(max_requests=a.max_requests, max_tokens=a.cap)
     broker_kw = dict(upstream_host="openrouter.ai", key_env="OPENROUTER_API_KEY", models=sorted({a.model, a.haiku}), limits=limits, store=store,
                      path_prefix="/api", auth_scheme="bearer",
                      session_env={"ANTHROPIC_DEFAULT_SONNET_MODEL": a.model, "ANTHROPIC_DEFAULT_HAIKU_MODEL": a.haiku, "ANTHROPIC_SMALL_FAST_MODEL": a.haiku})
     broker = ModelBroker(**broker_kw)
     stop = broker.start(Sess())
     out = {"cap_tokens": a.cap}
-    common = ["--model", a.model, "--system-prompt", SYSTEM, "--tools", "Write,Read", "--disallowedTools", "WebFetch,WebSearch,Bash", "--max-turns", "4"]
+    common = ["--model", a.model, "--system-prompt", SYSTEM, "--tools", "Write,Read", "--allowedTools", "Write,Read", "--disallowedTools", "WebFetch,WebSearch,Bash", "--max-turns", "4"]
     try:
         # ---------------- E5 ----------------
         if a.only in ("", "e5"):
             res = {"file": {"runs": 0, "valid": 0, "problems": []}, "json_schema": {"runs": 0, "valid": 0, "problems": []}}
             for method, n in (("file", a.file_runs), ("json_schema", a.schema_runs)):
                 for i in range(n):
-                    if tokens(store) > a.cap * 0.55: break
+                    if tokens(store) > a.cap * 0.55 or auth_failed(store): break
                     fx = json.loads(FIXTURES[i % len(FIXTURES)].read_text())
                     ws, cfg = tempfile.mkdtemp(prefix="pe-p0-e5-"), tempfile.mkdtemp(prefix="pe-p0-cfg-")
                     argv = [a.claude, "-p", plan_prompt(fx, method == "file"), *common]
                     if method == "json_schema":
-                        argv += ["--output-format", "json", "--json-schema", json.dumps({"type": "object"})]
+                        argv += ["--output-format", "json", "--json-schema", json.dumps(plan_schema())]
                     try:
                         r = subprocess.run(argv, env=claude_env(broker, ws, cfg), cwd=ws, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=240)
                     except subprocess.TimeoutExpired:
                         res[method]["runs"] += 1; res[method]["problems"].append("timeout"); continue
+                    note(key, r)
                     doc, probs = None, []
                     try:
                         if method == "file":
@@ -133,6 +164,10 @@ def main():
                     except Exception as exc:
                         probs = [f"unreadable: {type(exc).__name__}"]
                     probs = probs or validate(doc)
+                    if probs and isinstance(doc, dict):
+                        probs = probs + [f"shape: keys={sorted(doc)[:10]} options={type(doc.get('options')).__name__}:{len(doc.get('options') or [])}"]
+                    if probs and method == "file" and probs[0].startswith("unreadable"):
+                        probs = probs + [f"cli said: {(r.stdout or '')[-160:]!r}".replace(key, "[REDACTED]")]
                     res[method]["runs"] += 1
                     if not probs: res[method]["valid"] += 1
                     else: res[method]["problems"].append(probs[:3])
@@ -148,12 +183,13 @@ def main():
                        "Is a plain restart enough? Explain.", "What would a safe rollback look like?", "Summarise the situation in two sentences.",
                        "What do you not know yet?", "Draft the one-sentence verdict for a dashboard.", "What could make your diagnosis wrong?", "Give me a final recommendation."]
             for t in range(a.turns):
+                if auth_failed(store): out["E7_stopped"] = "upstream rejected the key"; break
                 if tokens(store) > a.cap * 0.95: out["E7_stopped"] = f"cap reached at turn {t}"; break
                 before = tokens(store); t0 = time.time()
                 flags = ["--session-id", sid] if t == 0 else ["--resume", sid]
                 r = subprocess.run([a.claude, "-p", prompts[t % len(prompts)], *flags, *common], env=claude_env(broker, ws, cfg), cwd=ws,
                                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=240)
-                reqs = [e for e in store.events if e.get("event") == "model.request"]
+                note(key, r)
                 per_turn.append({"turn": t + 1, "exit": r.returncode, "charged_tokens": tokens(store) - before, "seconds": round(time.time() - t0, 1)})
             out["E7"] = per_turn
     finally:
@@ -161,6 +197,9 @@ def main():
     ev = [e for e in store.events if e.get("event") == "model.request"]
     out["totals"] = {"requests": len(ev), "charged_tokens": tokens(store), "input_tokens": sum(e.get("input_tokens", 0) for e in ev),
                      "output_tokens": sum(e.get("output_tokens", 0) for e in ev), "broker_usage": usage}
+    from collections import Counter
+    out["statuses"] = dict(Counter(f"{e.get('event')}:{e.get('status')}" for e in store.events))
+    out["cli_notes"] = CLI_NOTES
     out["refusals"] = [{k: e.get(k) for k in ("model", "reason", "status")} for e in store.events if e.get("event") == "model.refused"][:5]
     text = json.dumps(out, indent=1)
     print(text.replace(key, "[REDACTED]"))

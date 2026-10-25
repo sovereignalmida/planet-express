@@ -70,13 +70,63 @@ With persisted state, **a settings file left in the state directory takes effect
 launch with `--setting-sources ""` and pass hooks and permissions only through `--settings`; a test must assert a planted settings
 file is ignored. This applies to the existing single-run missions as well (low risk there, since no later run existed).
 
+## Real-model results (E5, E7), 2026-10-25
+
+Run through the real broker to OpenRouter (`~anthropic/claude-sonnet-latest`), outside the launcher (the model path is what is measured).
+Total 63 requests, 366,180 tokens charged (258,306 in, 107,874 out), under the 600,000 cap.
+
+**E5, plan schema reliability: pass.**
+
+| Method | Runs | PE accepted |
+|---|---|---|
+| Agent writes `plan.json` (Write tool), PE validates | 20 | **20** |
+| `--json-schema` with the full plan schema | 6 | **6** |
+
+(The schema method stopped at 6 of 9 when the E5 half reached its share of the token cap; 6 of 6 is a thin sample, the file method is the
+proven one.) Three fixtures, rotated. Every plan passed PE's own `parse_plan` on each option's checks.
+
+What it took to get there, which is the real finding:
+1. **The agent must be given the real schema with its bounds.** With only field names and types, every plan was rejected by PE
+   (`timeout_s` and `observe_s` out of range). PE caught every one; none was repaired silently. With each check's full JSON Schema in the
+   prompt, 26 of 26 passed. P1's plan prompt is generated from `PARAM_MODELS`, never hand-written.
+2. **`--json-schema` needs a real schema.** With `{"type": "object"}` the model returned `options` as a JSON string. With the full schema it
+   was clean.
+3. **In print mode a tool the agent may use must also be in `--allowedTools`**, or Write is silently declined and no file appears.
+4. PE-side validation stays mandatory. The agent was wrong 100% of the time when under-specified, so acceptance is PE's call, not a model
+   property.
+
+Not yet tested: an agent asked to widen scope or invent a check (validation refuses unknown kinds and extra fields by construction; a
+direct test belongs in P1's suite).
+
+**E7, cost curve: pass.** Ten turns resumed in one conversation with tool use at turn 1, 10 s typical per turn, all exit 0.
+
+| Turn | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Charged tokens | 4,106 | 2,937 | 3,757 | 4,499 | 5,143 | 1,756 | 1,939 | 1,707 | 2,068 | 2,627 |
+
+About 30,500 tokens for ten turns (roughly 3,000 a turn), flat rather than climbing, which says the upstream is caching the shared history
+and the broker is counting the uncached part. A planning turn that investigates and writes a plan costs about 13,000 (E5 average). So a
+conversation of ten chat turns plus two plan turns is around 60,000 tokens. **Recommended default conversation budget: 150,000 tokens**
+(warn at 80%), which leaves room for a long investigation. Per-turn cost should be shown to the operator in the Limits panel.
+
+**Broker finding: the budget check reserves too much.** Before relaying a request the broker reserves its declared `max_tokens` plus the
+body size (`model_broker.py`, `promise`). The CLI declares a large output allowance, so with a 50,000 budget the second request was refused
+after only 5,259 tokens had been used. A conversation budget must carry that headroom on every request, or P1 must lower the declared
+output cap for conversations (the CLI honours `CLAUDE_CODE_MAX_OUTPUT_TOKENS`) so the displayed "budget left" is honest. This touches the
+broker (safety surface), so it gets the second review.
+
+**Other surprises:**
+- The CLI warns that the gateway model id is unrecognised and assumes a 200k window. Cosmetic, but set the window for the gateway.
+- A bad key made the CLI retry for about three minutes a turn. The broker's request cap bounded it, but a conversation should stop on the
+  first 401/403 and say so; P1 treats upstream auth failure as a hard stop with a plain message.
+- Spike lesson: the first full run burned about three hours on a double-pasted key. The runner now stops at the first 401/403.
+
 ## Still to run before the P1 go/no-go
 
 - **Under containment:** E6 with the installed `pe_hook.py` (the stand-in run proved the mechanism; the real hook needs the mission store),
   a kill mid-*tool-call*, 20 randomised kill points, a 60 s freeze, and the uid-holding policy for idle conversations (open question 2).
-- **With a real model (needs the operator's go; token cap applies):** E5 plan schema validity (at least 18 of 20), E7 cost curve over ten
-  turns, and one live run of E1 on the host through the broker.
+- **With a real model:** one live run of E1 on the host through the broker (E5 and E7 are done, above).
 - More E4 samples (20, randomised) once under containment.
 
 ## Open questions for the operator
-None yet. The tokens for E5 and E7 need an explicit go.
+None yet.
