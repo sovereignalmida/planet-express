@@ -179,3 +179,15 @@ def test_no_cleanup_session_starts_on_a_host_whose_launcher_preflight_failed(tmp
     del rig.sup.launcher_ready                                           # preflight passes again: it runs
     rig.sup.sweep_uids()
     assert rig.cont.exists(cleanup_id(sid))
+
+
+def test_shutdown_that_begins_during_the_preflight_stops_the_cleanup_session_from_launching(tmp_path):
+    rig, sid, _ = _finished_rig_with_stuck_workspace(tmp_path)
+    real = rig.sup.launcher_ready
+
+    def slow_preflight(**kw):
+        rig.sup.begin_shutdown()                                         # the race: shutdown begins while the preflight runs
+        return real(**kw)
+    rig.sup.launcher_ready = slow_preflight
+    rig.sup.sweep_uids()
+    assert not rig.cont.exists(cleanup_id(sid)) and rig.sup.tracked_sessions == 0

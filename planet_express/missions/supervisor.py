@@ -1286,16 +1286,21 @@ class Supervisor:
             return False
         if not self.launcher_ready():
             return False                                    # no session of any kind starts on a host whose preflight failed
-        try:
-            scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
-            spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)),
-                              env={"PATH": "/usr/bin:/bin"}, token=secrets.token_urlsafe(32), sock_dir=False)
-            self.containment.launch(cleaner_id, spec)
-            self._cleaners[cleaner_id] = (now, uid)
-        except Exception as exc:
-            self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
-            shutil.rmtree(scratch, ignore_errors=True)
-            log.warning("could not start the cleanup session for %s: %s", session_id, type(exc).__name__)
+        # Like every session start, the final shutdown check, the launch and the registration happen under the lifecycle lock that
+        # `begin_shutdown` takes: a cleanup session either is registered before `shutdown()` looks, or is never launched.
+        with self._lifecycle:
+            if self._shutting_down:
+                return False
+            try:
+                scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+                spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)),
+                                  env={"PATH": "/usr/bin:/bin"}, token=secrets.token_urlsafe(32), sock_dir=False)
+                self.containment.launch(cleaner_id, spec)
+                self._cleaners[cleaner_id] = (now, uid)
+            except Exception as exc:
+                self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
+                shutil.rmtree(scratch, ignore_errors=True)
+                log.warning("could not start the cleanup session for %s: %s", session_id, type(exc).__name__)
         return False
 
     def _settle(self, run: _Run) -> None:
