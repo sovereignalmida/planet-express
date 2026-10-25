@@ -59,6 +59,7 @@ class MissionRunner:
         self.supervisor = supervisor
         self.startup = list(startup or [])      # e.g. the checkpoint store's startup scan; each is isolated and logged
         self.controls = None                    # `assembly.RepairControls` when the daemon wired the Repair tier
+        self.console = None                     # `console.service.ConsoleService` when missions.console is enabled
         self.tripwire = tripwire          # `tripwire.TripwireMonitor` or None; it has its own thread and failure isolation
         self.prepare = prepare            # host preparation (Core's half of the cgroup layout), before anything runs
         self.worker_server = worker_server
@@ -373,8 +374,22 @@ def build_mission_runner(
     runtime = CommandRuntime(
         containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
         env_policy=env_policy)
+    console_store = console_runtime = None
+    if cfg.console.enabled:
+        from planet_express.console.runtime import ConsoleRuntime
+        from planet_express.console.store import ConsoleStore
+        console_store = ConsoleStore(store)
+        console_runtime = ConsoleRuntime(containment, console_store, cfg.console, worker_socket=cfg.worker_socket,
+                                         env_policy=env_policy, broker=model_broker)
+
+    def runtime_for(mission):
+        if getattr(mission, "runtime", None) != "console":
+            return runtime
+        if console_runtime is None:
+            raise ValueError("this is a Console conversation and the Console is off (missions.console.enabled)")
+        return console_runtime
     supervisor = Supervisor(
-        store, containment, lambda mission: runtime, enabled=enabled or (lambda: cfg.enabled),
+        store, containment, runtime_for, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
         repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
         hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json(),
@@ -395,6 +410,11 @@ def build_mission_runner(
     runner = MissionRunner(supervisor, None, interval_s, prepare, tripwire=tripwire,
                            startup=[checkpoint.startup_scan] if checkpoint is not None else [])
     runner.controls = controls
+    if console_store is not None:
+        from planet_express.console.service import ConsoleService
+        runner.console = ConsoleService(MissionStore(store), console_store, supervisor, cfg.console,
+                                        uid_range=lambda: containment.uid_range, clock=store._clock)
+        supervisor.turn_ended, supervisor.console_tick = runner.console.turn_ended, runner.console.tick
     return runner
 
 

@@ -115,6 +115,8 @@ class StreamParser:
         """The turn's result. Call after the process is provably gone and the stream has been fed to its end."""
         self.feed(b"", final=True)
         res = self.result
+        if res.subtype is None:
+            res.interrupted = True              # the stream ended with no result line: stopped part-way, what it said is still kept
         if not res.reply:
             res.reply = _clip(self._last_text, MAX_REPLY)
         return res

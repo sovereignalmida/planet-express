@@ -166,13 +166,23 @@ multi_host:
 # missions:
 #   enabled: true
 #   runtime:
-#     argv: ["/usr/local/bin/my-agent", "--mission"]   # an absolute command; no agent is bundled
+#     argv: ["/usr/local/bin/claude", "-p", "Read BRIEF.md in the current directory and carry out the mission it describes."]   # an absolute command; no agent is bundled (with missions.hooks.install_claude_code it must be the claude binary itself)
 #   model_broker:                   # lets the agent reach the model without ever holding the API key (see INSTALL.md "The model broker")
 #     enabled: true
 #     key_env: ANTHROPIC_API_KEY    # the NAME of the variable in Core's environment (/etc/planetexpress.env) that holds the real key
 #                                   # (an API key, never a subscription login). For OpenRouter also set upstream_host: openrouter.ai,
 #                                   # upstream_path_prefix: /api, auth_scheme: bearer and session_env (see INSTALL.md)
 #     models: ["claude-sonnet-4-5"] # the only model ids a mission may request
+#   hooks:                          # required by the Console: PE's settings must be the only ones the agent reads
+#     install_claude_code: true
+#     command: ["/usr/bin/python3", "/usr/local/lib/planetexpress/pe_hook.py"]
+#     root: /var/lib/planetexpress/mission-hooks
+#   console:                        # the Operator Console (off by default): conversations with a PE-aware agent. Needs model_broker and hooks above
+#     enabled: false
+#     claude: /usr/local/bin/claude       # the claude CLI itself, never a wrapper
+#     token_budget: 150000                # per conversation (a chat turn is about 3,000 tokens, a plan about 13,000)
+#     max_open: 10                        # open conversations; each keeps one session uid for its whole life
+#     archive_after_days: 3               # an idle conversation is archived: its state directory is emptied and its uid freed
 #   session_uid_min: 200000         # one uid and private group per session; not Core's uid, not systemd DynamicUser's 61184-65519, no existing account
 #   session_uid_max: 200999
 #   sock_root: /run/planetexpress-sessions

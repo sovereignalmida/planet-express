@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS console_messages (
     conversation_id TEXT NOT NULL REFERENCES console_conversations(id),
     at INTEGER NOT NULL,
     role TEXT NOT NULL,
+    actor TEXT,
     turn INTEGER,
     text TEXT NOT NULL,
     consumed_turn INTEGER

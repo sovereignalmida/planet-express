@@ -37,3 +37,25 @@ def test_out_of_bounds_values_and_unknown_keys_are_refused(kwargs):
 def test_a_tool_cannot_be_both_allowed_and_disallowed():
     with pytest.raises(ValueError, match="overlap"):
         MissionsConfig(enabled=True, console={"enabled": True, "tools": ["Bash", "Edit"]}, model_broker=BROKER, hooks=HOOKS)
+
+
+def test_the_runner_wires_the_console_only_when_it_is_enabled_and_a_console_mission_is_refused_when_it_is_off(tmp_path):
+    from missions_helpers import make_store
+    from planet_express.missions.containment import FakeContainment
+    from planet_express.missions.runner import build_mission_runner
+    store, _ = make_store(tmp_path)
+    base = {"enabled": True, "runtime": {"argv": ["/usr/local/bin/claude", "-p", "x"]}, "model_broker": BROKER, "hooks": {**HOOKS, "root": str(tmp_path / "h")}}
+    off = build_mission_runner(store, MissionsConfig(**base), containment=FakeContainment())
+    assert off.console is None and off.supervisor.console_tick is None and off.supervisor.turn_ended is None
+
+    class Mission:
+        runtime = "console"
+    with pytest.raises(ValueError, match="Console is off"):
+        off.supervisor.runtime_factory(Mission())
+    on = build_mission_runner(store, MissionsConfig(**base, console={"enabled": True}), containment=FakeContainment())
+    assert on.console is not None and on.supervisor.console_tick == on.console.tick and on.supervisor.turn_ended == on.console.turn_ended
+    assert type(on.supervisor.runtime_factory(Mission())).__name__ == "ConsoleRuntime"
+
+    class Plain:
+        runtime = "command"
+    assert type(on.supervisor.runtime_factory(Plain())).__name__ == "CommandRuntime"

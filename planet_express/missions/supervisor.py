@@ -51,7 +51,7 @@ from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
 from .hooks import HOOK_LOG_NAME, MAX_POLICY_FILE_BYTES
-from .launcher.spec import SESSION_ID, LaunchSpec
+from .launcher.spec import SESSION_ID, STATE_DIR, LaunchSpec
 from .models import Mission
 from .runtime import (
     RUNTIME_EVENT_KINDS,
@@ -335,6 +335,8 @@ class Supervisor:
         self.max_brief_bytes = max_brief_bytes
         self.lease_ttl_s = lease_ttl_s
         self._runs: dict[str, _Run] = {}
+        self.turn_ended: Callable[[str, str, bool], None] | None = None     # Console: (mission id, why the turn ended, a result was kept)
+        self.console_tick: Callable[[], None] | None = None                 # Console: starts follow-up turns, archives, runs once per tick
         self._cleaners: dict[str, tuple[float, int]] = {}    # cleanup session id -> (launched at, uid), see `_clear_workspace`
         self._cleanup_leftovers_reaped: set[str] = set()    # session ids whose cleanup cgroup a previous Core may have left was checked
         self._cleanup_retry_at: dict[str, float] = {}    # session id -> do not launch another cleanup session before this time
@@ -439,6 +441,58 @@ class Supervisor:
             raise IllegalTransition(f"{mission_id} has a cancel requested")
         with self._heartbeating(mission_id):
             self._launch(mission)
+
+    def has_run(self, mission_id: str) -> bool:
+        """A supervised session is registered for the mission (starting, running or being killed)."""
+        return mission_id in self._runs
+
+    @_per_mission
+    def start_followup(self, mission_id: str, operator: str) -> None:
+        """A Console turn after the first: the operator's next message reopens the finished conversation (`awaiting_decision`, or
+        `needs_operator` after a turn that did not finish) and a new contained session runs. The edge is the operator's, named in the
+        audit trail, and exists only for an observe/propose mission; the uid is the conversation's reserved one."""
+        actor = self._operator(operator)
+        with self._lifecycle:
+            self._require_enabled()
+            if self._shutting_down:
+                raise RepairNotReady("the supervisor is shutting down")
+            if not self.launcher_ready():
+                raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
+            mission = self.ms.get_mission(mission_id)
+            if mission.runtime != "console" or mission.tier not in ("observe", "propose"):
+                raise UnsupportedTier(f"{mission_id} is not a Console conversation")
+            if mission_id in self._runs:
+                raise ValueError(f"{mission_id} already has a running session")
+            if mission.status not in ("awaiting_decision", "needs_operator"):
+                raise IllegalTransition(f"{mission_id} is {mission.status}: it takes a follow-up only when it is waiting for the operator")
+            if mission.cancel_requested_at is not None:
+                raise IllegalTransition(f"{mission_id} has a cancel requested")
+            with self._heartbeating(mission_id):
+                self._launch(mission, actor=actor)
+
+    @_per_mission
+    def interrupt_turn(self, mission_id: str, by: str) -> bool:
+        """Stop a running Console turn at the operator's word and keep what it said: the session is killed and proven empty, then
+        collected like a finished one, and the conversation stays open. Returns False when no turn is running."""
+        if not (by.startswith("operator:") or by in ("system", "core")):
+            raise ValueError("an interrupt must name an operator or a core actor")
+        mission = self.ms.get_mission(mission_id)
+        if mission.runtime != "console":
+            raise UnsupportedTier(f"{mission_id} is not a Console conversation")
+        run = self._runs.get(mission_id)
+        if run is None or run.phase != "running" or run.cs is None or run.runtime is None or run.handle is None:
+            return False
+        self._note(mission_id, {"interrupted_by": by})
+        try:
+            self.containment.kill(run.cs)                  # freeze, cgroup.kill, wait until provably empty
+        except ContainmentError:
+            self._kill_and_advance(run, "interrupt_failed")          # it cannot be proven stopped: the normal kill path keeps trying
+            return True
+        with contextlib.suppress(Exception):
+            self._record(run, AgentUpdate.model_validate(run.runtime.status(run.handle).model_dump()))     # what it did up to the stop
+        self._drain_hook_log(run, final=True)
+        self._collect(run)
+        return True
 
     @contextlib.contextmanager
     def _heartbeating(self, mission_id: str):
@@ -554,7 +608,7 @@ class Supervisor:
         if not ok:
             raise RepairNotReady(reason)
 
-    def _launch(self, mission: Mission) -> None:
+    def _launch(self, mission: Mission, actor: str = ACTOR) -> None:
         if not self.launcher_ready():          # also on a restart after a crash: proposal-only means no session at all
             raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         grant = mission.grant()
@@ -570,7 +624,7 @@ class Supervisor:
             cs, token = issue_session(
                 self.ms, mission.id, session_id, self.containment.cgroup_path(session_id),
                 session_ttl_s=grant.budgets.wall_s + SESSION_TTL_PAD_S, lease_ttl_s=self.lease_ttl_s,
-                uid_range=self.containment.uid_range, actor=ACTOR, expected_grant_hash=mission.grant_hash)
+                uid_range=self.containment.uid_range, actor=actor, expected_grant_hash=mission.grant_hash)
         except BaseException as exc:
             with contextlib.suppress(Exception):
                 recovery.journal_done(self.ms, mission.id, intent_id, "not_applied", actor=ACTOR)   # only OUR intent
@@ -633,11 +687,21 @@ class Supervisor:
             settings.chmod(0o644)
             run.hook_sha = hashlib.sha256(settings.read_bytes()).hexdigest()
         def spawn(argv: Sequence[str], env: dict[str, str] | None = None, cwd: str | None = None,
-                  extra_fds: tuple[int, ...] = ()) -> int:
+                  extra_fds: tuple[int, ...] = (), state_dir: str | None = None) -> int:
             if extra_fds:
                 raise ContainmentError("the launcher's fd map is fixed (0, 1, 2, 3): no extra fds")
             full_env = {**self.worker_env, **(env or {}), **install_env, "PE_MISSION_ID": mission.id,
                         "PE_SESSION_TOKEN_FD": "3"}          # fd 3 is always the token pipe in the child
+            if mission.runtime == "console" and env and "CLAUDE_CONFIG_DIR" in env:
+                # PE's settings reach a Console turn through `--settings` (forced, with every other source off), so the config
+                # directory is free to be what it must be there: the conversation's persistent state, where the agent keeps its
+                # transcript for `--resume`. The hook directory stays Core-owned and read-only.
+                full_env["CLAUDE_CONFIG_DIR"] = env["CLAUDE_CONFIG_DIR"]
+            if state_dir is not None:
+                if mission.runtime != "console" or not STATE_DIR.fullmatch(state_dir):
+                    raise ContainmentError("only a Console conversation has a state directory, and its name is C-<id>")
+                # Core makes it (empty, 0700, once); the launcher adopts the directory itself for the session's uid.
+                (self.workspace_dir / state_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
             if self.hook_policy is not None:
                 # The hook layer's inputs, set by Core and nowhere else: the policy it enforces and where it records. The
                 # runtime's hooks inherit them; the session token is never given to a hook (it is on fd 3 only).
@@ -670,7 +734,7 @@ class Supervisor:
                     raise ContainmentError("the runtime's settings are to be forced but there is no Core-owned hook directory")
                 argv = self.hook_argv(argv, run.hook_dir)
             spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), env=full_env,
-                              token=token, sock_dir=self.socket_provider is not None)
+                              token=token, sock_dir=self.socket_provider is not None, state_dir=state_dir)
             launched = self.containment.launch(cs.session_id, spec)
             if launched != cs:
                 raise ContainmentError("the launcher started a different session than the one requested")
@@ -1255,7 +1319,11 @@ class Supervisor:
         return freed
 
     def _clear_workspace(self, session_id: str, uid: int) -> bool:
-        """True when the dead session's workspace is gone and no process runs as its uid, so the uid may be released.
+        return self.clear_tree(session_id, self.workspace_dir / session_id if SESSION_ID.fullmatch(session_id) else self.workspace_dir, uid)
+
+    def clear_tree(self, session_id: str, workspace: Path, uid: int) -> bool:
+        """True when `workspace` (a dead session's workspace, or a conversation's state directory, both under the workspace root and
+        keyed by `session_id`: the session's id or `C-<id>`) is gone and no process runs as its uid, so the uid may be released.
 
         A session can leave directories Core cannot remove (the agent CLI makes its cache directory 0700, owned by the
         session uid). Core never gets more power to delete them; instead the uid that owns them deletes them. A short cleanup
@@ -1264,9 +1332,8 @@ class Supervisor:
         `find <workspace> -mindepth 1 -delete`. Core then removes the empty directory. The uid stays held until all of that
         has happened. Each sweep takes one step.
         """
-        if not SESSION_ID.fullmatch(session_id):
+        if not SESSION_ID.fullmatch(session_id) or workspace.parent != self.workspace_dir or workspace.name != session_id:
             return False                                    # never build a path or a command from anything but a session id
-        workspace = self.workspace_dir / session_id
         cleaner_id = cleanup_id(session_id)
         cleaner = ContainedSession(cleaner_id, "local_cgroup", self.containment.cgroup_path(cleaner_id), uid)
         scratch = self.workspace_dir / cleaner_id
@@ -1328,6 +1395,9 @@ class Supervisor:
     def _settle(self, run: _Run) -> None:
         reason = run.reason or "crash"
         mission = self.ms.get_mission(run.mission_id)
+        if mission.runtime == "console" and self.turn_ended is not None:
+            with contextlib.suppress(Exception):
+                self.turn_ended(mission.id, reason, run.result is not None)
         if mission.tier in ("observe", "propose"):
             # The session is dead and an observe/propose session could not have changed anything: the intent is closed.
             with contextlib.suppress(Exception):
@@ -1350,7 +1420,8 @@ class Supervisor:
             # Someone else already moved the mission on. The session is dead and cleaned up; leave the state.
             self._note(mission.id, {"session_ended": reason, "left_in": mission.status})
             return
-        if reason in ("crash", "recover") and mission.cancel_requested_at is None:
+        if reason in ("crash", "recover") and mission.cancel_requested_at is None and mission.runtime != "console":
+            # (A Console turn is never restarted by itself: its message was taken, and the operator decides what to ask next.)
             if self._attempts(mission.id) < 1 + mission.grant().budgets.retries:
                 self._note(mission.id, {"restart_after": reason})
                 try:
@@ -1580,6 +1651,11 @@ class Supervisor:
                 self._finish_pending_repair_cancels()
         with contextlib.suppress(Exception):
             self.sweep_uids()
+        if self.console_tick is not None:
+            try:
+                self.console_tick()
+            except Exception:
+                log.exception("the Console's tick failed")
         try:
             self.poll_all()
         except Exception:

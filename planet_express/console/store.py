@@ -61,6 +61,7 @@ class Message:
     conversation_id: str
     at: int
     role: str
+    actor: str | None
     turn: int | None
     text: str
     consumed_turn: int | None
@@ -139,6 +140,10 @@ class ConsoleStore:
                 conn.execute("UPDATE console_conversations SET uid=NULL WHERE id=?", (conversation_id,))
         return True
 
+    def set_uid(self, conversation_id: str, uid: int | None) -> None:
+        with self.store._write() as conn:
+            conn.execute("UPDATE console_conversations SET uid=?, updated_at=? WHERE id=?", (uid, self._now(), conversation_id))
+
     def set_agent_session(self, conversation_id: str, agent_session_id: str) -> None:
         """The id the agent's own stream reported for the turn that just ran. It can change between turns (an interrupt does),
         so it is recorded every turn and never assumed stable."""
@@ -168,16 +173,16 @@ class ConsoleStore:
 
     # ── messages ───────────────────────────────────────────────────────────────────────────
     def add_message(self, conversation_id: str, role: Role, text: str, *, turn: int | None = None,
-                    require_open: bool = False) -> int:
+                    require_open: bool = False, actor: str | None = None) -> int:
         now = self._now()
         with self.store._write() as conn:
             row = conn.execute("SELECT state FROM console_conversations WHERE id=?", (conversation_id,)).fetchone()
             if row is None:
                 raise ConversationNotFound(conversation_id)
             if require_open and row["state"] != "open":
-                raise ConversationClosed(conversation_id)
-            cur = conn.execute("INSERT INTO console_messages (conversation_id, at, role, turn, text) VALUES (?, ?, ?, ?, ?)",
-                               (conversation_id, now, role, turn, clean_text(text)))
+                raise ConversationClosed("this conversation is closed: it takes no more messages")
+            cur = conn.execute("INSERT INTO console_messages (conversation_id, at, role, actor, turn, text) VALUES (?, ?, ?, ?, ?, ?)",
+                               (conversation_id, now, role, actor[:128] if actor else None, turn, clean_text(text)))
             if role == "operator":
                 conn.execute("UPDATE console_conversations SET last_activity_at=?, updated_at=? WHERE id=?", (now, now, conversation_id))
             return int(cur.lastrowid)
