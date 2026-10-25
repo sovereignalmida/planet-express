@@ -289,7 +289,7 @@ def build_mission_runner(
     it; an injected containment (tests) is trusted and only gated if a `preflight` is passed too."""
     if not cfg.enabled:
         return None
-    if not cfg.runtime.argv:
+    if not cfg.runtime.argv and not cfg.console.enabled:
         log.warning("missions.enabled is true but missions.runtime.argv is empty: no mission will run")
         return None
     real = containment is None
@@ -373,7 +373,7 @@ def build_mission_runner(
         env_policy = without_broker_key(env_policy, model_broker)
     runtime = CommandRuntime(
         containment, argv=cfg.runtime.argv, env_allow=cfg.runtime.env_allow, worker_socket=cfg.worker_socket,
-        env_policy=env_policy)
+        env_policy=env_policy) if cfg.runtime.argv else None          # a Console-only host has no mission command
     console_store = console_runtime = None
     if cfg.console.enabled:
         from planet_express.console.runtime import ConsoleRuntime
@@ -384,6 +384,8 @@ def build_mission_runner(
 
     def runtime_for(mission):
         if getattr(mission, "runtime", None) != "console":
+            if runtime is None:
+                raise ValueError("no mission runtime is configured (missions.runtime.argv)")
             return runtime
         if console_runtime is None:
             raise ValueError("this is a Console conversation and the Console is off (missions.console.enabled)")

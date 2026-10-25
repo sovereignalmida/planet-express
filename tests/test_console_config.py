@@ -1,8 +1,9 @@
 import pytest
+
 from config_schema import MissionConsoleConfig, MissionsConfig
 
 HOOKS = {"install_claude_code": True, "command": ["/usr/bin/python3", "/x/pe_hook.py"], "root": "/var/lib/pe/hooks"}
-BROKER = {"enabled": True, "upstream_host": "openrouter.ai", "models": ["m"]}
+BROKER = {"enabled": True, "upstream_host": "openrouter.ai", "models": ["~anthropic/claude-sonnet-latest"]}
 
 
 def test_the_defaults_are_the_phase_zero_numbers_and_the_console_is_off():
@@ -41,6 +42,7 @@ def test_a_tool_cannot_be_both_allowed_and_disallowed():
 
 def test_the_runner_wires_the_console_only_when_it_is_enabled_and_a_console_mission_is_refused_when_it_is_off(tmp_path):
     from missions_helpers import make_store
+
     from planet_express.missions.containment import FakeContainment
     from planet_express.missions.runner import build_mission_runner
     store, _ = make_store(tmp_path)
@@ -59,3 +61,27 @@ def test_the_runner_wires_the_console_only_when_it_is_enabled_and_a_console_miss
     class Plain:
         runtime = "command"
     assert type(on.supervisor.runtime_factory(Plain())).__name__ == "CommandRuntime"
+
+
+def test_the_console_model_must_be_one_the_broker_allows_and_a_turn_must_be_able_to_start():
+    with pytest.raises(ValueError, match="model_broker.models"):
+        MissionsConfig(enabled=True, console={"enabled": True, "model": "other-model"}, model_broker=BROKER, hooks=HOOKS)
+    with pytest.raises(ValueError, match="min_turn_tokens"):
+        MissionsConfig(enabled=True, console={"enabled": True, "token_budget": 10_000, "min_turn_tokens": 20_000}, model_broker=BROKER, hooks=HOOKS)
+
+
+def test_a_console_only_host_needs_no_mission_command(tmp_path):
+    from missions_helpers import make_store
+
+    from planet_express.missions.containment import FakeContainment
+    from planet_express.missions.runner import build_mission_runner
+    store, _ = make_store(tmp_path)
+    cfg = MissionsConfig(enabled=True, console={"enabled": True}, model_broker=BROKER, hooks={**HOOKS, "root": str(tmp_path / "h")})
+    runner = build_mission_runner(store, cfg, containment=FakeContainment())
+    assert runner is not None and runner.console is not None
+
+    class Plain:
+        runtime = "command"
+    with pytest.raises(ValueError, match="no mission runtime"):
+        runner.supervisor.runtime_factory(Plain())
+    assert build_mission_runner(store, MissionsConfig(enabled=True), containment=FakeContainment()) is None     # no command, no Console: nothing

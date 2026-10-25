@@ -161,6 +161,7 @@ class ModelBroker:
         self._connect = connect or (lambda host, timeout: http.client.HTTPSConnection(host, timeout=timeout))
         self._sessions: dict[str, _Session] = {}
         self._paused: set[str] = set()                  # mission ids whose model access is closed until an operator resumes
+        self._mission_caps: dict[str, int] = {}         # a token ceiling set BEFORE the mission's next session exists (see set_mission_cap)
         self._lock = threading.Lock()
 
     # ── the SocketProvider-like surface the Supervisor already drives ───────────────────────────────
@@ -180,6 +181,8 @@ class ModelBroker:
         if row is None:
             raise BrokerUnavailable("no such session")
         session = _Session(cs.session_id, row["mission_id"])
+        with self._lock:
+            session.cap = self._mission_caps.pop(row["mission_id"], None)       # the ceiling asked for ahead of this session
         handler = self._handler(session)
         server = _BoundedServer((LOOPBACK, 0), handler, max_connections=self.limits.max_connections)
         session.server, session.port = server, server.server_address[1]
@@ -225,6 +228,13 @@ class ModelBroker:
     def resume(self, mission_id: str, grant_hash: str) -> None:
         with self._lock:
             self._paused.discard(mission_id)
+
+    def set_mission_cap(self, mission_id: str, tokens: int) -> None:
+        """The token ceiling for the mission's NEXT session, set before that session exists (a Console turn is told what is left of its
+        conversation before the supervisor opens the turn's broker endpoint). Consumed by the next `start`; never raises a ceiling."""
+        with self._lock:
+            old = self._mission_caps.get(mission_id)
+            self._mission_caps[mission_id] = max(int(tokens), 0) if old is None else min(old, max(int(tokens), 0))
 
     def set_session_cap(self, session_id: str, tokens: int) -> bool:
         """Lower this session's token ceiling to `tokens` (never raise it above the broker's own, and never raise one already lowered).

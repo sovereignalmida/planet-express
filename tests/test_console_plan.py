@@ -155,3 +155,22 @@ def test_a_plan_valid_against_the_generated_json_schema_is_one_pe_accepts():
     jsonschema = pytest.importorskip("jsonschema")
     jsonschema.validate(good(), plan_mod.json_schema())
     parse(good())
+
+
+def test_the_plan_hash_is_the_hash_of_exactly_what_is_stored_even_when_redaction_changed_a_string():
+    from planet_express.missions.canonical import loads_strict, sha256_hex
+    doc = good()
+    doc["known"] = ["found OPENROUTER_API_KEY=sk-or-v1-" + "a" * 48 + " in the env"]
+    plan = parse(doc)
+    stored = plan_mod.canonical(plan)
+    assert stored["known"] != doc["known"]                                          # redaction did change it
+    assert plan_mod.plan_hash(plan) == sha256_hex(stored)
+    assert plan_mod.plan_hash(parse(loads_strict(json.dumps(stored)))) == plan_mod.plan_hash(plan)   # re-parsing the stored JSON agrees
+
+
+def test_a_refused_check_names_only_the_option_never_the_agents_check_id_or_kind():
+    doc = good()
+    doc["options"][1]["checks"] = [{"id": "AGENTCHOSENID", "check": "AGENTCHOSENKIND", "params": {}}]
+    with pytest.raises(PlanError) as err:
+        parse(doc)
+    assert "option 2" in str(err.value) and "AGENTCHOSEN" not in str(err.value)

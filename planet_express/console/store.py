@@ -140,10 +140,6 @@ class ConsoleStore:
                 conn.execute("UPDATE console_conversations SET uid=NULL WHERE id=?", (conversation_id,))
         return True
 
-    def set_uid(self, conversation_id: str, uid: int | None) -> None:
-        with self.store._write() as conn:
-            conn.execute("UPDATE console_conversations SET uid=?, updated_at=? WHERE id=?", (uid, self._now(), conversation_id))
-
     def set_agent_session(self, conversation_id: str, agent_session_id: str) -> None:
         """The id the agent's own stream reported for the turn that just ran. It can change between turns (an interrupt does),
         so it is recorded every turn and never assumed stable."""

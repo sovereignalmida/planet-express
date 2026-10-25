@@ -141,8 +141,11 @@ class CoreOps:
 
     # ── the Console, assembled as the daemon assembles it (real supervisor, real containment and helper, a stand-in model) ──────
     def _console(self, workspace_dir=None, base_url=None, claude=None, db_dir=None):
+        """Assembled as the daemon assembles it: the real supervisor, containment, helper, worker sockets and model broker (its upstream
+        a stand-in), the grant's own environment policy, and the Console runtime and service."""
         if getattr(self, "con", None) is not None:
             return self.con
+        import http.client
         import tempfile
         import time
         from pathlib import Path as P
@@ -152,21 +155,35 @@ class CoreOps:
         from planet_express.console.service import ConsoleService
         from planet_express.console.store import ConsoleStore
         from planet_express.core.store import Store
+        from planet_express.missions.grants import build_session_env
+        from planet_express.missions.model_broker import BrokerLimits, ModelBroker
+        from planet_express.missions.protected import ProtectedSet
+        from planet_express.missions.runner import SessionSockets, _cgroup_mount
         from planet_express.missions.store import MissionStore
         from planet_express.missions.supervisor import Supervisor
+        from planet_express.missions.worker_rpc import WorkerAuthenticator
         store = Store(P(db_dir or tempfile.mkdtemp(prefix="pe-console-")) / "pe.db", clock=time.time)
         store.init()
         ms, console = MissionStore(store), ConsoleStore(store)
         cfg = MissionConsoleConfig(claude=claude)
+        host = base_url.removeprefix("http://")
+        broker = ModelBroker(upstream_host=host, key_env="PE_TEST_UPSTREAM_KEY", models=[cfg.model], limits=BrokerLimits(), store=ms,
+                             environ={"PE_TEST_UPSTREAM_KEY": "real-upstream-key-0123456789"},
+                             connect=lambda h, timeout: http.client.HTTPConnection(h, timeout=timeout),
+                             session_env={"ANTHROPIC_DEFAULT_SONNET_MODEL": cfg.model, "ANTHROPIC_DEFAULT_HAIKU_MODEL": cfg.model,
+                                          "ANTHROPIC_SMALL_FAST_MODEL": cfg.model})
 
         def env_policy(grant, mission_id, workspace, env):
-            return {**env, "ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_API_KEY": "stand-in-code", "DISABLE_TELEMETRY": "1"}
-        runtime = ConsoleRuntime(self.c, console, cfg, worker_socket="/nonexistent/worker.sock", env_policy=env_policy)
+            # the production policy's effect: HOME is forced to the workspace and anything named like a token is dropped
+            return dict(build_session_env(grant, mission_id=mission_id, workspace=workspace, worker_socket="/nonexistent", stacks_root=None,
+                                          protected=ProtectedSet(host="local", resources=(), domains={}), base_env=env, known_tools=[]).env)
+        runtime = ConsoleRuntime(self.c, console, cfg, worker_socket="/nonexistent/worker.sock", env_policy=env_policy, broker=broker)
         sup = Supervisor(store, self.c, lambda mission: runtime, time.time, enabled=True, workspace_dir=P(workspace_dir),
-                         artifact_dir=P(tempfile.mkdtemp(prefix="pe-console-art-")))
+                         artifact_dir=P(tempfile.mkdtemp(prefix="pe-console-art-")), model_broker=broker)
+        sup.socket_provider = SessionSockets(self.c.sock_root, sup, WorkerAuthenticator(store, mount=_cgroup_mount(self.c.root)), model_broker=broker)
         service = ConsoleService(ms, console, sup, cfg, uid_range=lambda: self.c.uid_range, clock=time.time)
         sup.turn_ended, sup.console_tick = service.turn_ended, service.tick
-        self.con = {"store": store, "ms": ms, "console": console, "sup": sup, "service": service}
+        self.con = {"store": store, "ms": ms, "console": console, "sup": sup, "service": service, "broker": broker}
         return self.con
 
     def op_console_setup(self, workspace_dir, base_url, claude, db_dir=None):

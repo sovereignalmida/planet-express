@@ -32,8 +32,9 @@ SHOWN_ARGS = ("command", "file_path", "path", "pattern", "description", "url", "
 
 @dataclass(frozen=True)
 class TurnEvent:
-    """One thing for the activity trail. `kind` is `tool` (a call: the supervisor counts these against the grant's tool budget) or
-    `note` (text, and the result a tool returned): the two a runtime may write (`runtime.RUNTIME_EVENT_KINDS`)."""
+    """One thing for the activity trail. Always a `note` (a kind a runtime may write): the supervisor counts `tool` events against the
+    grant's tool budget, and the installed hooks already post one per call, so a stream `tool` event would count every call twice. The
+    trail tells a call from a result from text by the body (`call`, `result_of`, `delta`)."""
     kind: str
     body: dict[str, Any]
 
@@ -54,8 +55,10 @@ class TurnResult:
 
 
 def _clip(text: str, limit: int) -> str:
-    text = redact(text)
-    return text if len(text) <= limit else text[:limit] + " [truncated]"
+    """Redacted, then cut. Only the head is redacted (the rest is thrown away, and redacting a megabyte is slow), with room past the cut
+    so a secret that straddles it is still matched whole before the cut."""
+    head = redact(text[:limit + 512])
+    return head if len(head) <= limit and len(text) <= limit + 512 else head[:limit] + " [truncated]"
 
 
 def _flatten(content: Any) -> str:
@@ -86,13 +89,9 @@ class StreamParser:
         """Take more bytes; return the events for the complete lines in them. `final` also takes an unterminated last line."""
         events: list[TurnEvent] = []
         deltas: list[str] = []
-        buf = self._partial + data
+        *lines, buf = (self._partial + data).split(b"\n")           # one split: the last piece is a line not yet finished
         self._partial = b""
-        while True:
-            line, newline, rest = buf.partition(b"\n")
-            if not newline:
-                break
-            buf = rest
+        for line in lines:
             if self._skipping:
                 self._skipping = False
                 continue
@@ -178,7 +177,7 @@ class StreamParser:
                 self.result.tool_calls += 1
                 changes = block["name"] in CHANGING_TOOLS
                 self.result.changed_calls += int(changes)
-                events.append(TurnEvent("tool", {"call": name, "args": _summary(block["name"], block.get("input")),
+                events.append(TurnEvent("note", {"call": name, "args": _summary(block["name"], block.get("input")),
                                                  "read_only": block["name"] in READ_ONLY_TOOLS,
                                                  **({"changes_files": True} if changes else {})}))
         if texts:

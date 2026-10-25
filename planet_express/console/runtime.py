@@ -26,8 +26,8 @@ from planet_express.missions.runtime import (
 )
 
 MAX_ARG_PROMPT = 3000                 # the launcher refuses an argument over 4096 characters: a longer message travels as a file
+MAX_EVENTS_PER_POLL = 256             # AgentUpdate's own limit
 _DRAIN_PER_CALL = 256 * 1024
-MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 SYSTEM = (
     "You are Planet Express's investigation agent for one operator's Docker Compose homelab. You are PE-aware: BRIEF.md in the current "
     "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. You investigate "
@@ -41,23 +41,37 @@ class TurnRefused(RuntimeError):
     """The turn cannot start (the conversation is closed, its budget is spent, or there is no message). The message is operator-safe."""
 
 
+def _capped(events: list[AgentEvent]) -> list[AgentEvent]:
+    """At most AgentUpdate's limit of events per poll. Calls are kept in preference to text (a call is what the budgets and the trail are
+    about) and one summary note says how many were left out."""
+    if len(events) <= MAX_EVENTS_PER_POLL:
+        return events
+    keep = MAX_EVENTS_PER_POLL - 1
+    calls = [e for e in events if "call" in e.body]
+    chosen = set(map(id, calls[:keep]))
+    for event in events:
+        if len(chosen) >= keep:
+            break
+        chosen.add(id(event))
+    kept = [e for e in events if id(e) in chosen]
+    return [*kept, AgentEvent(kind="note", body={"omitted": len(events) - len(kept)})]
+
+
 class _Run:
     def __init__(self, cs, workspace: Path, conversation_id: str, turn: int):
         self.cs, self.workspace, self.conversation_id, self.turn = cs, workspace, conversation_id, turn
         self.parser = StreamParser()
         self.output_open = True
-        self.accepted = 0
 
 
 class ConsoleRuntime:
     def __init__(self, containment, console: ConsoleStore, cfg: MissionConsoleConfig, *, worker_socket: str, env_policy=None,
-                 broker=None, max_output_bytes: int = MAX_OUTPUT_BYTES):
+                 broker=None):
         self.containment = containment            # only for is_empty/kill/output capture: spawning is `context.spawn`
         self.console, self.cfg = console, cfg
         self.worker_socket = str(worker_socket)
         self.env_policy = env_policy              # grant -> environment: the broker's endpoint and code, the hook inputs
         self.broker = broker                      # to lower the turn's token ceiling to the conversation's remainder
-        self.max_output_bytes = max_output_bytes
         self._runs: dict[str, _Run] = {}
 
     # ── AgentRuntime ──────────────────────────────────────────────────────────────────────
@@ -66,6 +80,7 @@ class ConsoleRuntime:
         if conv is None or conv.state != "open":
             raise TurnRefused("this conversation is closed")
         if conv.tokens_left < self.cfg.min_turn_tokens:
+            self.console.add_message(conv.id, "system", "This conversation's model budget is used up. Start a new conversation to go on.")
             raise TurnRefused("this conversation's model budget is used up")
         message = self.console.pending(conv.id)
         if message is None:
@@ -73,27 +88,27 @@ class ConsoleRuntime:
         cs, workspace = context.session, Path(context.cwd)
         self._prepare_workspace(workspace, context.brief, message.text)
         state = str(workspace.parent / conv.state_dir)
-        if conv.agent_session_id:
-            resume = ["--resume", conv.agent_session_id]
-        else:
-            first = str(uuid.uuid4())
-            self.console.set_agent_session(conv.id, first)           # recorded before the turn runs: a crash can still be resumed
-            resume = ["--session-id", first]
+        # The agent's own session id is stored only once the stream has CONFIRMED it (`_record`): a first turn that dies before the CLI
+        # saved its transcript must not leave a `--resume` id that does not exist. Until then every turn starts a new one.
+        resume = ["--resume", conv.agent_session_id] if conv.agent_session_id else ["--session-id", str(uuid.uuid4())]
         prompt = message.text if len(message.text) <= MAX_ARG_PROMPT else (
             "The operator's message is long: read it in full from MESSAGE.md in the current directory, then answer it.")
         tools = ",".join(self.cfg.tools)
-        argv = [self.cfg.claude, "-p", prompt, *resume, "--model", self.cfg.model, "--max-turns", str(self.cfg.max_turns),
+        # The message is the LAST argument, after `--`: whatever it says (a bullet, `--verbose`, `--settings=...`) is text, never an option.
+        argv = [self.cfg.claude, "-p", *resume, "--model", self.cfg.model, "--max-turns", str(self.cfg.max_turns),
                 "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--system-prompt", SYSTEM,
-                "--tools", tools, "--allowedTools", tools, "--disallowedTools", ",".join(self.cfg.disallowed_tools)]
-        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "HOME": state, "CLAUDE_CONFIG_DIR": f"{state}/cfg",
-               "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.cfg.max_output_tokens), "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1",
+                "--tools", tools, "--allowedTools", tools, "--disallowedTools", ",".join(self.cfg.disallowed_tools), "--", prompt]
+        env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "DISABLE_TELEMETRY": "1", "DISABLE_AUTOUPDATER": "1",
                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "PE_WORKER_SOCKET": self.worker_socket,
                "PE_SESSION_TOKEN_FD": str(context.token_fd)}
         if self.env_policy is not None:
             env = dict(self.env_policy(grant, str(mission.id), str(workspace), env))
             env["PE_SESSION_TOKEN_FD"] = str(context.token_fd)
-        if self.broker is not None and not self.broker.set_session_cap(cs.session_id, conv.tokens_left):
-            raise TurnRefused("the model broker has no session for this turn")
+        # What a Console turn needs and the grant's environment policy would drop or reset (it forces HOME to the workspace and removes
+        # anything named like a token). PE computes these values itself; none is a secret and none comes from the agent.
+        env.update({"HOME": state, "CLAUDE_CONFIG_DIR": f"{state}/cfg", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.cfg.max_output_tokens)})
+        if self.broker is not None:
+            self.broker.set_mission_cap(mission.id, conv.tokens_left)      # the broker opens this turn's endpoint during spawn: ask first
         turn = self.console.begin_turn(conv.id)
         pid = context.spawn(argv, env, str(workspace), (), state_dir=conv.state_dir)
         self.console.consume(message.seq, turn)                       # taken only once the process is running
@@ -105,7 +120,7 @@ class ConsoleRuntime:
         run = self._runs[handle.run_id]
         empty = self.containment.is_empty(run.cs)           # ask "is it dead" BEFORE draining: what it wrote dying is still in the pipe
         events = run.parser.feed(self._drain(run), final=empty)
-        update = [AgentEvent(kind=e.kind, body=e.body) for e in events]
+        update = _capped([AgentEvent(kind=e.kind, body=e.body) for e in events])
         if not empty:
             return AgentUpdate(state="running", events=update)
         return AgentUpdate(state="finished" if run.parser.result.subtype is not None else "failed", events=update)
@@ -115,6 +130,12 @@ class ConsoleRuntime:
         if run is None:
             return
         self.containment.kill(run.cs)                       # raises if it cannot prove the session empty
+        try:
+            # A turn that is killed (a budget, a crash, a tamper) still used the model and still said something: keep it and charge it.
+            run.parser.feed(self._drain(run), final=True)
+            self._record(run, run.parser.finish())
+        except Exception:                                   # noqa: BLE001 -- recording must never block the kill that already happened
+            pass
         self._release(run)
         del self._runs[handle.run_id]
 
@@ -142,7 +163,7 @@ class ConsoleRuntime:
         elif not result.reply:
             self.console.add_message(conv_id, "system", "The agent gave no reply.", turn=run.turn)
         if result.session_id:
-            self.console.set_agent_session(conv_id, result.session_id)         # the id the stream last reported: it can change
+            self.console.set_agent_session(conv_id, result.session_id)         # the id the stream confirmed: it can change, so every turn
         self._plan(run)
         tokens = result.tokens
         if self.broker is not None:
@@ -152,15 +173,10 @@ class ConsoleRuntime:
         self.console.add_usage(conv_id, tokens)
 
     def _plan(self, run: _Run) -> None:
+        if not os.path.lexists(run.workspace / plan_mod.PLAN_FILE):
+            return                                                     # the agent proposed no plan this turn
         try:
-            if not stat.S_ISREG(os.lstat(run.workspace / plan_mod.PLAN_FILE).st_mode):
-                raise plan_mod.PlanError("the plan file is not a regular file")
-        except FileNotFoundError:
-            return
-        except OSError:
-            return
-        try:
-            plan = plan_mod.load_file(str(run.workspace))
+            plan = plan_mod.load_file(str(run.workspace))              # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
         except plan_mod.PlanError as exc:
             self.console.add_message(run.conversation_id, "system", f"The agent's plan was refused: {exc}", turn=run.turn)
             return
@@ -201,10 +217,8 @@ class ConsoleRuntime:
             if not chunk:
                 break
             budget -= len(chunk)
-            room = self.max_output_bytes - run.accepted
-            run.accepted += min(len(chunk), max(room, 0))
-            raw += chunk[:max(room, 0)]                  # past the cap nothing is kept, but the child keeps being drained
-        return raw
+            raw += chunk
+        return raw                       # nothing is dropped here: the parser bounds what it keeps, and the budgets bound the turn
 
     def _release(self, run: _Run) -> None:
         if run.output_open:

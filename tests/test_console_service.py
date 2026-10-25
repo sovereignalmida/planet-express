@@ -30,8 +30,8 @@ class Broker:
     def __init__(self, tokens=4000):
         self.tokens = tokens
 
-    def set_session_cap(self, session_id, tokens):
-        return True
+    def set_mission_cap(self, mission_id, tokens):
+        pass
 
     def usage(self, session_id):
         return {"requests": 2, "tokens": self.tokens, "refused": 0}
@@ -302,3 +302,42 @@ def test_every_message_and_event_is_redacted_and_the_state_directory_name_is_the
     rig.finish_turn(conv, stream=stream)
     everything = json.dumps([m.text for m in rig.console.messages(conv.id)]) + json.dumps([e.body_json for e in rig.ms.events(conv.mission_id)])
     assert secret not in everything and os.path.isdir(rig.root)
+
+
+# ── regressions from the second review ───────────────────────────────────────────────────────────
+
+def test_a_turn_that_cannot_start_is_reported_once_and_never_retried_by_itself(tmp_path):
+    rig = Rig(tmp_path, token_budget=30_000)
+    conv = rig.open()
+    rig.console.add_usage(conv.id, 15_000)                                        # 15,000 left: a turn needs 20,000
+    for _ in range(8):
+        rig.sup.tick()
+    assert len(rig._rows(conv)) == 1 and rig.status(conv) == "needs_operator"     # one attempt, no storm
+    system = [m.text for m in rig.console.messages(conv.id) if m.role == "system"]
+    assert len(system) == 2 and "budget is used up" in system[0] and system[1] == "The turn could not start."
+    assert rig.console.pending(conv.id) is None
+
+
+def test_a_conversation_that_failed_its_last_turn_can_still_be_archived_and_its_uid_comes_back(rig):
+    conv = rig.open()
+    rig.sup.tick()
+    rig.finish_turn(conv, stream=b'{"type":"system","subtype":"init","session_id":"aaaaaaaa-1111"}\n')
+    assert rig.status(conv) == "needs_operator"
+    rig.service.archive(conv.id, "chris")
+    for _ in range(4):
+        rig.sup.tick()
+    assert rig.console.get(conv.id).state == "archived" and rig.status(conv) == "cancelled"
+    assert rig.ms.reserved_uid(conv.mission_id) is None
+    assert rig.open("again").uid == 60000                                           # the pool did not leak
+
+
+def test_a_conversation_idle_in_needs_operator_is_archived_by_the_idle_policy(tmp_path):
+    rig = Rig(tmp_path, archive_after_days=3)
+    conv = rig.open()
+    rig.sup.tick()
+    rig.finish_turn(conv, stream=b"{}\n")
+    assert rig.status(conv) == "needs_operator"
+    rig.clock.t += 4 * 86_400
+    for _ in range(4):
+        rig.sup.tick()
+    assert rig.console.get(conv.id).state == "archived" and rig.ms.reserved_uid(conv.mission_id) is None

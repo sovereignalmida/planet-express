@@ -32,7 +32,7 @@ fd-inheritance test, which predates this work).
 4. **Streaming input is not needed for P1.** It gives a cleaner interrupt, but it keeps one process, one cgroup and one uid alive per
    conversation and changes the session id under us. Revisit only if turn-by-turn latency feels bad in use.
 
-## Under containment (VM, real launcher, both strategies; `tests/test_p0_console_privileged.py`)
+## Under containment (VM, real launcher, both strategies; `tests/test_console_privileged.py`)
 
 | Exp | Result |
 |---|---|

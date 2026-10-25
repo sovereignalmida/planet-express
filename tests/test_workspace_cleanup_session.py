@@ -1,6 +1,6 @@
 """A dead session's workspace that Core cannot remove is emptied by a cleanup session as the same uid; only then is the uid released.
 
-The real thing (a 0700 directory made by the session uid, deleted under the real launcher) is `tests/test_p0_console_privileged.py`.
+The real thing (a 0700 directory made by the session uid, deleted under the real launcher) is `tests/test_console_privileged.py`.
 Here the supervisor's side is checked against the fake containment: what is launched, with what, and when the uid is let go.
 """
 import os

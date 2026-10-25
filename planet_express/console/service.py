@@ -128,6 +128,12 @@ class ConsoleService:
         conv = self.console.by_mission(mission_id)
         if conv is None or had_result or reason in ("cancel", "result"):
             return
+        if reason == "start_failed":
+            # The start took the operator's message and failed: it is not retried by itself (that would be a loop that adds a message
+            # every tick). The operator sees why and sends it again, or something else.
+            message = self.console.pending(conv.id)
+            if message is not None:
+                self.console.consume(message.seq, conv.turns)
         self.console.add_message(conv.id, "system", _WHY.get(reason, "The turn did not finish."), turn=conv.turns or None)
 
     def tick(self) -> None:

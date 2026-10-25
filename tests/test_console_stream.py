@@ -23,9 +23,10 @@ def parse(data: bytes):
 
 def test_a_real_turn_with_a_tool_call_becomes_a_trail_and_a_result():
     events, result = parse(FIXTURE.read_bytes())
-    tools = [e for e in events if e.kind == "tool"]
-    assert [t.body.get("call") for t in tools] == ["Bash"]                 # one tool event per call: it is what the budget counts
-    call = tools[0].body
+    assert not any(e.kind == "tool" for e in events)                         # the hooks count calls: a stream tool event would count twice
+    calls = [e.body for e in events if "call" in e.body]
+    assert [c["call"] for c in calls] == ["Bash"]
+    call = calls[0]
     assert call["args"] == {"command": "echo hi", "description": "t"} and call["read_only"] is False
     seen = next(e.body for e in events if e.kind == "note" and "result_of" in e.body)
     assert seen["result_of"] == "Bash" and seen["excerpt"] == "hi" and seen["is_error"] is False
@@ -47,7 +48,7 @@ def test_feeding_one_byte_at_a_time_gives_the_same_events_and_result_as_feeding_
     for byte in FIXTURE.read_bytes():
         events += parser.feed(bytes([byte]))
     result = parser.finish()
-    strip = lambda evs: [e for e in evs if e.kind == "tool"]
+    strip = lambda evs: [e for e in evs if "delta" not in e.body]
     assert strip(events) == strip(whole_events)
     assert (result.reply, result.session_id, result.ok, result.tokens) == (whole.reply, whole.session_id, whole.ok, whole.tokens)
 

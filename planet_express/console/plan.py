@@ -93,8 +93,9 @@ def parse(doc: Any) -> Plan:
     for index, option in enumerate(plan.options):
         try:
             parse_plan({"catalogue_v": CATALOGUE_V, "checks": [c.model_dump() for c in option.checks]})
-        except PlanInvalid as exc:
-            raise PlanError(f"option {index + 1}: {exc}") from None
+        except PlanInvalid:
+            # PE's catalogue refused a check. Which one, and what it was called, is the agent's text: only the option is named.
+            raise PlanError(f"option {index + 1}: a verification check is not one PE can run, or its parameters are out of bounds") from None
     return plan
 
 
@@ -135,7 +136,9 @@ def canonical(plan: Plan) -> dict[str, Any]:
 
 
 def plan_hash(plan: Plan) -> str:
-    return sha256_hex(plan.model_dump(mode="json"))
+    """The hash of the plan EXACTLY as it is stored and shown (`canonical`, redacted): a grant bound to this hash is bound to the
+    content the operator reviewed, and re-parsing the stored JSON gives the same hash."""
+    return sha256_hex(canonical(plan))
 
 
 # ── generated from the catalogue (never hand-written) ─────────────────────────────────────────────

@@ -1,4 +1,4 @@
-"""Console phase 0 spike under the REAL launcher (throwaway; see docs/designs/v4-console-p0-spike.md). Root-only, disposable VM only.
+"""The Operator Console under the REAL launcher (root-only, disposable VM only): the phase-0 mechanics, the cleanup session, settings isolation, the state directory and the Console end to end.
 
 The real `claude` runs as a session uid in its own cgroup against a stand-in Messages API (no model, no cost). It checks, with the
 launcher's own rules in force, what the Console's turn model needs: resume across separate contained launches, live stream-json,
@@ -330,6 +330,7 @@ def test_the_console_end_to_end_under_the_real_launcher_two_turns_one_uid_resume
     uid = first["uid"]
     assert first["reserved"] == uid and RANGE[0] <= uid <= RANGE[1]
     assert [m[0] for m in first["messages"]] == ["operator", "agent"] and first["messages"][1][1]
+    assert first["tokens"] > 0                                                         # the real broker counted the turn's tokens and PE charged them
     info = os.stat(state)
     assert info.st_uid == uid and oct(info.st_mode & 0o7777) == "0o2770"             # adopted by the helper for the conversation's uid
     assert os.path.isdir(f"{state}/cfg") and not host.core.call("uid_in_use", uid=uid)["in_use"]

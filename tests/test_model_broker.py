@@ -310,6 +310,18 @@ def test_a_session_cap_lowers_the_token_ceiling_and_can_never_raise_it(rig):
     assert broker.set_session_cap("S-nope", 5) is False
 
 
+def test_a_mission_cap_set_before_the_session_exists_applies_to_its_next_session_once(rig):
+    """The Console asks for the turn's ceiling before the supervisor opens the turn's endpoint: the cap must wait for that session."""
+    upstream, _store, build = rig
+    broker = build(limits=BrokerLimits(max_tokens=10_000))
+    broker.set_mission_cap("M-1", 90)                                             # no session yet
+    broker.set_mission_cap("M-1", 10**9)                                          # asking for more changes nothing
+    broker.start(CS())
+    assert [ask(broker)[0].status for _ in range(4)] == [200, 200, 200, 200]      # the 90-token arithmetic again
+    assert ask(broker)[0].status == 403 and len(upstream.seen) == 4
+    assert broker._mission_caps == {}                                             # consumed: the mission's next session starts clean
+
+
 def test_a_session_cap_applies_to_its_own_session_only(rig):
     _upstream, _store, build = rig
     broker = started(build, limits=BrokerLimits(max_tokens=10_000))

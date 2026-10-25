@@ -684,6 +684,10 @@ class MissionsConfig(BaseModel):
                                  "turns, so PE's settings must be the only ones the agent reads")
             if set(self.console.tools) & set(self.console.disallowed_tools):
                 raise ValueError("missions.console.tools and disallowed_tools overlap")
+            if self.console.model not in self.model_broker.models:
+                raise ValueError("missions.console.model must be one of missions.model_broker.models: the broker refuses any other model")
+            if self.console.min_turn_tokens > self.console.token_budget:
+                raise ValueError("missions.console.min_turn_tokens exceeds token_budget: no turn could ever start")
         return self
 
     @field_validator("windows")
