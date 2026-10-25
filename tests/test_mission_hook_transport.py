@@ -417,7 +417,7 @@ def test_the_runtime_is_launched_with_pe_settings_forced_and_every_other_source_
     from planet_express.missions.hooks import claude_code_argv
     hook_dir = tmp_path / "h"
     got = claude_code_argv(["/usr/bin/claude", "-p", "go", "--model", "m"], hook_dir)
-    assert got == ["/usr/bin/claude", "-p", "go", "--model", "m", "--settings", str(hook_dir / "settings.json"), "--setting-sources", ""]
+    assert got == ["/usr/bin/claude", "--settings", str(hook_dir / "settings.json"), "--setting-sources", "", "-p", "go", "--model", "m"]
 
 
 def test_an_operator_argv_cannot_re_enable_other_settings_sources_or_point_at_other_settings(tmp_path):
@@ -426,7 +426,7 @@ def test_an_operator_argv_cannot_re_enable_other_settings_sources_or_point_at_ot
     for hostile in (["--setting-sources", "user,project,local"], ["--setting-sources=project"], ["--settings", "/tmp/x.json"],
                     ["--settings=/tmp/x.json"]):
         got = claude_code_argv(["/usr/bin/claude", *hostile, "-p", "go"], hook_dir)
-        assert got == ["/usr/bin/claude", "-p", "go", "--settings", str(hook_dir / "settings.json"), "--setting-sources", ""], hostile
+        assert got == ["/usr/bin/claude", "--settings", str(hook_dir / "settings.json"), "--setting-sources", "", "-p", "go"], hostile
 
 
 def test_the_supervisor_launches_the_session_with_the_forced_settings_and_a_runtime_without_hooks_is_untouched(tmp_path):
@@ -440,20 +440,21 @@ def test_the_supervisor_launches_the_session_with_the_forced_settings_and_a_runt
     rig.sup.start(rig.mid)
     sid = rig.session_ids()[0]
     argv = rig.cont.spawns(sid)[0]["argv"]
-    assert argv[-4:] == ["--settings", str(root / sid / "settings.json"), "--setting-sources", ""]
+    assert argv[1:5] == ["--settings", str(root / sid / "settings.json"), "--setting-sources", ""]
     plain = Rig(tmp_path / "plain", behaviours=[{"script": [update()] * 5}])
     plain.sup.start(plain.mid)
     plain_argv = plain.cont.spawns(plain.session_ids()[0])[0]["argv"]
     assert "--settings" not in plain_argv and "--setting-sources" not in plain_argv
 
 
-def test_the_forced_flags_go_before_an_option_terminator_and_nothing_after_it_is_stripped(tmp_path):
+def test_the_forced_flags_sit_right_after_the_executable_so_nothing_after_it_can_swallow_or_demote_them(tmp_path):
     from planet_express.missions.hooks import claude_code_argv
     hook_dir = tmp_path / "h"
+    forced = ["--settings", str(hook_dir / "settings.json"), "--setting-sources", ""]
     got = claude_code_argv(["/usr/bin/claude", "-p", "--model", "m", "--", "--settings", "tell me about --setting-sources"], hook_dir)
-    assert got == ["/usr/bin/claude", "-p", "--model", "m", "--settings", str(hook_dir / "settings.json"), "--setting-sources", "",
-                   "--", "--settings", "tell me about --setting-sources"]
-    assert claude_code_argv(["/usr/bin/claude", "--settings", "/x", "--", "go"], hook_dir)[:3] == ["/usr/bin/claude", "--settings", str(hook_dir / "settings.json")]
+    assert got == ["/usr/bin/claude", *forced, "-p", "--model", "m", "--", "--settings", "tell me about --setting-sources"]
+    assert claude_code_argv(["/usr/bin/claude", "-p", "--append-system-prompt"], hook_dir) == ["/usr/bin/claude", *forced, "-p", "--append-system-prompt"]
+    assert claude_code_argv(["/usr/bin/claude", "--settings", "/x", "--", "go"], hook_dir) == ["/usr/bin/claude", *forced, "--", "go"]
 
 
 def test_a_settings_flag_with_no_value_fails_the_start_instead_of_swallowing_the_next_argument(tmp_path):

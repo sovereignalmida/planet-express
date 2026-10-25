@@ -815,11 +815,12 @@ def claude_code_argv(argv: Sequence[str], hook_dir: Path) -> list[str]:
     session's own workspace (`.claude/settings.json`): a session could plant permissions or hooks there that govern its own later
     behaviour, or the next turn's. This closes the settings *files* only; other workspace-resident configuration (`.mcp.json`,
     `.claude/agents`, `.claude/skills`, `.claude/commands`, `CLAUDE.md`) is a separate question, tracked as a Console (P1) test list.
-    It assumes the configured argv runs the claude CLI directly, which is what `install_claude_code` means. Any `--settings` or `--setting-sources` the configured argv already has is dropped, so PE's win. The flags go before a `--`
-    terminator, if there is one: after it they would be prompt text and silently not apply."""
+    It assumes the configured argv runs the claude CLI directly, which is what `install_claude_code` means. Any `--settings` or `--setting-sources` the configured argv already has is dropped, so PE's win. The flags go straight after the
+    executable: appended, a `--` terminator would turn them into prompt text and a dangling value-taking option would consume them."""
     head: list[str] = []
     skip = False
     args = list(argv)
+    exe, args = args[0], args[1:]
     for index, arg in enumerate(args):
         if arg == "--":                          # everything after the terminator is positional: never an option, never stripped
             tail = args[index:]
@@ -834,7 +835,7 @@ def claude_code_argv(argv: Sequence[str], hook_dir: Path) -> list[str]:
             head.append(arg)
     else:
         tail = []
-    return [*head, "--settings", str(Path(hook_dir) / "settings.json"), "--setting-sources", "", *tail]
+    return [exe, "--settings", str(Path(hook_dir) / "settings.json"), "--setting-sources", "", *head, *tail]
 
 
 def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:
