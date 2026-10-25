@@ -1,4 +1,4 @@
-# Operator Console, phase 0: findings (interim 2, 2026-10-25)
+# Operator Console, phase 0: findings (final, 2026-10-25)
 
 Scope and pass lines: `v4-console-p0-spike.md`. Scripts: `scripts/spikes/console_p0_*.py` (throwaway). CLI under test: Claude Code
 2.1.310. Everything below was measured against a stand-in Messages API (no model, no cost), outside the launcher, on the developer
@@ -121,12 +121,77 @@ broker (safety surface), so it gets the second review.
   first 401/403 and say so; P1 treats upstream auth failure as a hard stop with a plain message.
 - Spike lesson: the first full run burned about three hours on a double-pasted key. The runner now stops at the first 401/403.
 
-## Still to run before the P1 go/no-go
+## Answers to the five questions
 
-- **Under containment:** E6 with the installed `pe_hook.py` (the stand-in run proved the mechanism; the real hook needs the mission store),
-  a kill mid-*tool-call*, 20 randomised kill points, a 60 s freeze, and the uid-holding policy for idle conversations (open question 2).
-- **With a real model:** one live run of E1 on the host through the broker (E5 and E7 are done, above).
-- More E4 samples (20, randomised) once under containment.
+1. **Turn by turn, or streaming? Turn by turn.** One contained process per operator message, resumed by the stream's current session id:
+   it resumes across processes and across contained launches, a kill at any sampled point keeps the context, it fits the supervisor as built,
+   and streaming input only queues an interjecting message (an explicit `interrupt` is needed to stop one) while holding a uid, cgroup and
+   process per conversation and changing the session id under us.
+2. **How long does a conversation hold a session uid?** For as long as it is *open*, and open is capped. Conversation state (option c) is
+   owned by one uid, so the same uid must serve every turn; handing state between uids would need a root chown step we do not want.
+   With 1000 uids and a single operator this is not a constraint: cap open conversations at 50, and archive one after 7 days idle or when
+   the operator closes it. Archiving runs the verified cleanup session, deletes the state directory and releases the uid; the thread stays
+   in PE's own event store. Reopening an archived thread starts fresh from the stored thread (option e's replay), which loses only exact
+   tool-result memory. *Measured:* uid reuse and cleanup. *Not measured:* a long-idle held uid; the policy is a recommendation.
+3. **Does the broker's access-code-per-session model need to change?** **No.** A code per turn is enough (E1, both uncontained and
+   contained: each turn used only its own code). The one broker change is the reservation headroom (see E7), a budget-accounting change,
+   not a credential change.
+4. **The plan schema.** As exercised in E5: top level `known[]`, `unsure[]`, `options[1..3]`; each option `name`, `recommended` (exactly
+   one), `summary`, `changes[]`, `will_not_touch[]`, `risk {level low|medium|high, text}`, `rolls_back_to`, `effort`, `checks[]`; each check
+   `{id, check: <catalogue kind>, params: <that kind's strict model>}`. The generator for the prompt and the `--json-schema` document is
+   `PARAM_MODELS`. **No missing check kinds were found** across the three fixture shapes (every plan validated). Two catalogue-adjacent
+   additions P2 needs: `could_not_check` as a distinct result (already in plan section 9) and a plan expiry field. Whether other incident
+   shapes need new check kinds is only known by using it; add them with the second review as they appear.
+5. **What does a conversation cost?** About 3,000 tokens per chat turn, flat across ten turns; about 13,000 for a planning turn that
+   investigates and writes a plan. Default budget **150,000 tokens**, warn at 80%, stop cleanly at the limit (the broker already refuses
+   with a clear 403). Dollar cost depends on the gateway's price; the Limits panel shows tokens, and a price line can be added once the
+   operator picks a display unit.
+
+## Go / no-go for P1: **GO**, with conditions
+
+The question phase 0 existed to answer was whether one agent context can persist across operator messages inside v4's containment, with
+PE seeing it live. Yes. The vendor CLI works as the runtime; no custom thin runtime is needed.
+
+**Recommended P1 design**
+- **Turn model:** one supervised, contained process per operator message; `--resume <current id>`; a fresh broker code per turn; record
+  the id the stream reports each turn; PE keeps its own copy of every operator message and replays from it if resume reports no
+  conversation.
+- **State:** option (c), a per-conversation state directory outside the vetted workspace, created by the helper (small, second-reviewed
+  addition; no-follow open; the helper never walks it). Fallback if the helper change is unwelcome: option (e).
+- **Launch flags, always:** `--setting-sources ""`, hooks and permissions only through `--settings`, tools by `--tools`/`--allowedTools`,
+  `--disallowedTools` for the network tools, a `--max-turns` bound, a `--system-prompt` owned by PE.
+- **Events:** parse `stream-json` (`--verbose --include-partial-messages`) into the existing event kinds; redact before persistence;
+  truncate large results; a malformed line is skipped, never fatal.
+- **Interjection:** stop the process (SIGTERM, then SIGKILL after a short wait), save the operator message first, start the next turn.
+- **Plans:** schema above, prompt and `--json-schema` generated from `PARAM_MODELS`; PE validates every plan; the file method is the
+  proven one, `--json-schema` is an acceptable second path once it has more samples.
+- **Cleanup:** the cleanup session (empty scratch cwd, same uid) is the first production change and goes in before anything else.
+- **Budget:** 150,000 tokens default; fix the reservation headroom (lower the declared output cap with `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
+  for conversations, or account for reservation separately); hard stop on the first upstream 401/403 with a plain message.
+
+**Conditions (gates inside P1, not reasons to wait):**
+1. **Before the Console ships to the host:** E6 with the installed `pe_hook.py` against the real mission store (the stand-in run proved
+   the mechanism; the real hook is unproven on resume), a kill during a tool call, 20 randomised kill points under containment, and one
+   live E1 run through the broker on the host. These cost no model tokens except the live run.
+2. **Security tests that must exist in P1:** a planted settings file is ignored; a conversation cannot read another conversation's state
+   directory; the plan validator refuses a widened scope and an invented check kind; the budget stop is clean.
+3. **Second review** on: the helper addition, the cleanup session, the broker reservation change, the launch-flag set. Codex when
+   available, Claude `/code-review` otherwise.
+
+**What would flip this to no-go:** the real `pe_hook.py` failing to apply on resume, or a kill point that corrupts context in more than
+a few percent of 20 random samples. Both are tested first in P1 slice 1; the fallback is option (e) plus a custom thin runtime.
+
+**Suggested P1 slices (each ends with the operator trying it):**
+1. Cleanup session + settings-sources hardening (applies to current missions too) + helper state directory. Safety surface, second review.
+2. Conversation store and turn runner (supervisor integration, event parsing, resume, interjection), no UI.
+3. The Console UI from the design package: list, thread, activity trail, composer, budget meter, read-only.
+4. Start from a sentence and from an incident; follow-ups; close with cleanup.
+
+## Still to run (now P1 gates, see condition 1)
+
+- E6 with the installed `pe_hook.py`; a kill mid-tool-call; 20 randomised kill points; a 60 s freeze; one live E1 on the host.
+- A direct widen-scope / invent-a-check test of the plan validator.
 
 ## Open questions for the operator
-None yet.
+1. The default budget (150,000 tokens) and the open-conversation cap (50, archive after 7 days idle): fine, or different?
+2. Is it acceptable to add the small helper change for the state directory (option c), or do you prefer the no-helper-change fallback (e)?
