@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <title>Planet Express — Operator Console (V4)</title>
+  <link rel="stylesheet" href="../design-system/styles.css">
+  <style>a{color:var(--pe-accent-ink);text-decoration:none;border:0}a:hover{color:var(--pe-accent-hi)}button{font-family:inherit}.rv-b{appearance:none;cursor:pointer;font:600 12px var(--pe-font-display);letter-spacing:.06em;color:var(--pe-ink-label);background:var(--pe-well);border:1px solid var(--pe-border);border-radius:7px;padding:6px 12px;white-space:nowrap}.rv-b:hover{color:var(--pe-ink-2);border-color:var(--pe-border-strong)}.rv-b.on{color:var(--pe-accent-hi);border-color:var(--pe-accent);background:var(--pe-accent-bg)}.rv-s{appearance:none;cursor:pointer;font:10.5px var(--pe-font-mono);color:var(--pe-ink-label);background:transparent;border:1px solid var(--pe-border);border-radius:20px;padding:3px 11px;white-space:nowrap}.rv-s.on{color:var(--pe-ink);border-color:var(--pe-ink-faint);background:var(--pe-well)}.rv-frame{position:relative;overflow:hidden;background:var(--pe-surface);display:flex;flex-direction:column}</style>
+</helmet>
+<div style="min-height:100vh;background:var(--pe-bg);display:flex;flex-direction:column" data-screen-label="Console review">
+
+  <div style="position:sticky;top:0;z-index:30;background:var(--pe-bg);border-bottom:1px solid var(--pe-border);padding:10px 20px;display:flex;flex-direction:column;gap:8px">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span class="pe-kicker">V4 · OPERATOR CONSOLE</span>
+      <sc-for list="{{ modes }}" as="m" hint-placeholder-count="2"><button type="button" class="{{ m.cls }}" onClick="{{ m.go }}">{{ m.label }}</button></sc-for>
+      <span style="width:1px;height:20px;background:var(--pe-border)"></span>
+      <sc-for list="{{ devs }}" as="d" hint-placeholder-count="2"><button type="button" class="{{ d.cls }}" onClick="{{ d.go }}">{{ d.label }}</button></sc-for>
+      <sc-if value="{{ showFit }}" hint-placeholder-val="{{ true }}"><button type="button" class="{{ fitCls }}" onClick="{{ toggleFit }}">{{ fitLabel }}</button></sc-if>
+    </div>
+    <sc-if value="{{ isFlows }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <sc-for list="{{ flowTabs }}" as="f" hint-placeholder-count="10"><button type="button" class="{{ f.cls }}" onClick="{{ f.go }}">{{ f.label }}</button></sc-for>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+        <sc-for list="{{ stateTabs }}" as="s" hint-placeholder-count="4"><button type="button" class="{{ s.cls }}" onClick="{{ s.go }}">{{ s.label }}</button></sc-for>
+        <span style="font-size:12px;color:var(--pe-ink-muted);margin-left:8px">{{ flowDesc }}</span>
+      </div>
+    </sc-if>
+    <sc-if value="{{ isComps }}" hint-placeholder-val="{{ false }}"><div style="font-size:12px;color:var(--pe-ink-muted)">Every block from the brief, section 5, with its states. Same markup the flows use. Switch Desktop / Phone to see the narrow layout.</div></sc-if>
+  </div>
+
+  <div ref="{{ stageRef }}" style="padding:20px;display:flex;justify-content:center;align-items:flex-start">
+   <div style="{{ outerStyle }}">
+    <div class="rv-frame" style="{{ frameStyle }}">
+
+      <sc-if value="{{ showTopbar }}" hint-placeholder-val="{{ true }}">
+        <header class="topbar" style="flex:none">
+          <img class="header-logo" src="../assets/logo.png" alt="Planet Express">
+          <div class="header-brand"><span class="wordmark">PLANET EXPRESS</span><span class="tagline">casalan.com · ship computer</span></div>
+          <nav class="tabs"><sc-for list="{{ tabs }}" as="t" hint-placeholder-count="6"><button class="{{ t.cls }}" type="button">{{ t.label }}</button></sc-for></nav>
+          <div class="topbar-spacer"></div>
+          <div class="header-status"><span class="led-dot"></span><span>{{ topStatus }}</span></div>
+        </header>
+      </sc-if>
+      <sc-if value="{{ showStatus }}" hint-placeholder-val="{{ false }}"><div class="pe-statusbar" style="flex:none;padding-bottom:6px"><span>14:21</span><span>LTE ▮▮▮</span></div></sc-if>
+
+      <div class="{{ conCls }}" style="{{ conStyle }}">
+
+        <sc-if value="{{ showRail }}" hint-placeholder-val="{{ true }}">
+          <aside class="pe-con-rail" aria-label="Conversations">
+            <sc-if value="{{ phoneList }}" hint-placeholder-val="{{ false }}"><div class="pe-screen-head"><span class="pe-screen-title">Console</span><div style="flex:1"></div><a href="#">Work log</a></div></sc-if>
+            <div class="pe-con-rail-top">
+              <button type="button" class="pe-con-new"><span>＋</span>New conversation</button>
+              <div class="pe-con-search"><span>⌕</span>Search conversations</div>
+            </div>
+            <div class="pe-con-list">
+              <sc-if value="{{ railEmpty }}" hint-placeholder-val="{{ false }}"><div class="pe-card none" style="margin-top:6px"><div class="pe-card-head" style="margin:0"><span class="pe-card-title sm">NO CONVERSATIONS YET</span></div><div class="pe-footnote">Ask something and it shows up here.</div></div></sc-if>
+              <sc-for list="{{ rail }}" as="grp" hint-placeholder-count="3">
+                <div class="pe-con-group">{{ grp.name }}<span class="n">{{ grp.n }}</span></div>
+                <sc-for list="{{ grp.rows }}" as="r" hint-placeholder-count="2">
+                  <button type="button" class="{{ r.cls }}" onClick="{{ r.go }}"><span class="pe-con-origin" title="{{ r.origin }}">{{ r.ico }}</span><span class="pe-con-rtitle">{{ r.title }}</span><span class="pe-con-age">{{ r.age }}<span class="{{ r.led }}"></span></span><span class="pe-con-rmeta"><span class="{{ r.stCls }}">{{ r.st }}</span></span></button>
+                </sc-for>
+              </sc-for>
+            </div>
+          </aside>
+        </sc-if>
+
+        <sc-if value="{{ showMain }}" hint-placeholder-val="{{ true }}">
+        <section class="pe-con-main" aria-label="Conversation">
+          <sc-if value="{{ showTop }}" hint-placeholder-val="{{ true }}">
+            <div class="pe-con-top">
+              <div class="pe-con-titlebar">
+                <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}"><span style="font-size:22px;color:var(--pe-ink-label);flex:none" aria-label="Back to conversations">‹</span></sc-if>
+                <div style="min-width:0;flex:1"><div class="pe-con-title">{{ title }}</div><div class="pe-con-title-sub">{{ titleSub }}</div></div>
+                <span class="{{ bud.cls }}" title="Model budget for this conversation"><span>BUDGET</span><span class="pe-bar"><span class="pe-bar-fill {{ bud.fill }}" style="display:block;width:{{ bud.w }}"></span></span><span>{{ bud.txt }}</span></span>
+                <sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}"><button type="button" class="pe-btn sm" onClick="{{ toggleCtx }}">Context</button></sc-if>
+                <sc-if value="{{ isDesk }}" hint-placeholder-val="{{ true }}"><a href="#">Work log</a><button type="button" class="pe-btn sm" onClick="{{ toggleCtx }}">{{ ctxBtn }}</button></sc-if>
+              </div>
+              <div class="{{ ver.cls }}" role="status" aria-live="polite">
+                <div class="pe-verdict-orb">{{ ver.orb }}</div>
+                <div class="pe-verdict-text"><h2>{{ ver.h }}</h2><p>{{ ver.p }}</p></div>
+                <sc-if value="{{ ver.hasTally }}" hint-placeholder-val="{{ false }}"><div class="pe-verdict-tally"><sc-for list="{{ ver.tally }}" as="t" hint-placeholder-count="1"><span class="{{ t.cls }}">{{ t.txt }}</span></sc-for></div></sc-if>
+              </div>
+            </div>
+          </sc-if>
+
+          <div class="pe-con-scroll" style="{{ scrollStyle }}">
+           <sc-for list="{{ groups }}" as="g" hint-placeholder-count="1">
+            <div class="pe-con-thread" style="{{ g.wrap }}">
+              <sc-if value="{{ g.hasTitle }}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="pe-kicker">{{ g.title }}</span><span class="pe-chip info" style="white-space:normal">{{ g.label }}</span></div></sc-if>
+              <sc-for list="{{ g.blocks }}" as="b" hint-placeholder-count="2">
+
+                <sc-if value="{{ b.isOp }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-opmsg"><span class="pe-opmsg-by">{{ b.by }}</span>
+                    <p><sc-for list="{{ b.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></p>
+                    <sc-if value="{{ b.hasChips }}" hint-placeholder-val="{{ false }}"><div class="pe-chips"><sc-for list="{{ b.chips }}" as="c" hint-placeholder-count="1"><span class="{{ c.cls }}">{{ c.txt }}</span></sc-for></div></sc-if>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isInc }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-card high" style="max-width:760px">
+                    <div class="pe-card-head"><span class="pe-led high"></span><span class="pe-card-title sm">{{ b.incTitle }}</span><div class="pe-spacer"></div><span class="pe-badge high">{{ b.incBadge }}</span></div>
+                    <div class="pe-readout" style="border-top:none;padding-top:0"><sc-for list="{{ b.incRows }}" as="r" hint-placeholder-count="3"><div class="pe-readout-row"><span class="pe-label">{{ r.k }}</span><span class="pe-value">{{ r.v }}</span></div></sc-for></div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isAgent }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-agent">
+                    <div class="pe-agent-by"><span class="pe-led {{ b.led }}"></span>{{ b.head }}</div>
+                    <div class="pe-prose"><sc-for list="{{ b.paras }}" as="pa" hint-placeholder-count="1"><p><sc-for list="{{ pa.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}" role="{{ s.role }}" tabindex="{{ s.tab }}">{{ s.txt }}</span></sc-for></p></sc-for></div>
+                    <sc-if value="{{ b.split }}" hint-placeholder-val="{{ false }}">
+                      <div class="pe-kn">
+                        <div class="pe-kn-col"><span class="pe-label">WHAT I KNOW</span><ul><sc-for list="{{ b.know }}" as="k" hint-placeholder-count="1"><li><span><sc-for list="{{ k.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}" role="{{ s.role }}" tabindex="{{ s.tab }}">{{ s.txt }}</span></sc-for></span></li></sc-for></ul></div>
+                        <div class="pe-kn-col unsure"><span class="pe-label">WHAT I'M UNSURE OF</span><ul><sc-for list="{{ b.unsure }}" as="k" hint-placeholder-count="1"><li><span><sc-for list="{{ k.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}" role="{{ s.role }}" tabindex="{{ s.tab }}">{{ s.txt }}</span></sc-for></span></li></sc-for></ul></div>
+                      </div>
+                    </sc-if>
+                    <sc-if value="{{ b.streaming }}" hint-placeholder-val="{{ false }}"><div class="pe-stream" role="status"><span class="pe-spinner"></span><span>{{ b.streamText }}</span><span class="pe-caret">▍</span></div></sc-if>
+                    <sc-if value="{{ b.hasSources }}" hint-placeholder-val="{{ false }}">
+                      <details class="pe-src"><summary>{{ b.srcSum }}</summary>
+                        <sc-for list="{{ b.sources }}" as="sr" hint-placeholder-count="2"><div class="pe-src-row"><span class="pe-ev">{{ sr.n }}</span><span><sc-for list="{{ sr.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></div></sc-for>
+                      </details>
+                    </sc-if>
+                    <sc-if value="{{ b.hasFollow }}" hint-placeholder-val="{{ false }}"><div class="pe-chips"><sc-for list="{{ b.follow }}" as="f" hint-placeholder-count="2"><button type="button" class="pe-prompt" style="padding:7px 13px;font-size:12.5px">{{ f }}</button></sc-for></div></sc-if>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isTrail }}" hint-placeholder-val="{{ false }}">
+                  <details class="pe-trail" open="{{ b.open }}">
+                    <summary><span class="car"></span><span class="sum">{{ b.sum }}</span><span class="pe-chip">{{ b.readTxt }}</span><sc-if value="{{ b.hasChg }}" hint-placeholder-val="{{ false }}"><span class="pe-chip warn">{{ b.chgTxt }}</span></sc-if></summary>
+                    <div class="pe-trail-steps">
+                      <sc-for list="{{ b.steps }}" as="st" hint-placeholder-count="3">
+                        <div class="pe-trail-step"><span class="{{ st.kcls }}">{{ st.kind }}</span><span class="pe-trail-label"><sc-for list="{{ st.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span>
+                          <sc-if value="{{ st.hasOut }}" hint-placeholder-val="{{ false }}"><div class="pe-trail-out">{{ st.out }}</div></sc-if>
+                          <sc-if value="{{ st.hasWhy }}" hint-placeholder-val="{{ false }}"><div class="pe-trail-why">{{ st.why }}</div></sc-if></div>
+                      </sc-for>
+                    </div>
+                  </details>
+                </sc-if>
+
+                <sc-if value="{{ b.isPlan }}" hint-placeholder-val="{{ false }}">
+                  <div class="{{ b.pcls }}" role="group" aria-label="Plan">
+                    <div class="pe-plan-head"><h3>PLAN</h3><span class="{{ b.pbadge }}">{{ b.ptext }}</span><div class="pe-spacer"></div><span class="pe-label">{{ b.pmeta }}</span></div>
+                    <sc-if value="{{ b.hasNote }}" hint-placeholder-val="{{ false }}"><p class="pe-plan-note">{{ b.pnote }}</p></sc-if>
+                    <div class="pe-plan-opts" role="radiogroup" aria-label="Options">
+                      <sc-for list="{{ b.opts }}" as="o" hint-placeholder-count="2">
+                        <div class="{{ o.cls }}" role="radio" aria-checked="{{ o.sel }}" tabindex="0" onClick="{{ o.pick }}" onKeyDown="{{ o.key }}">
+                          <div class="pe-opt-top"><span class="pe-opt-radio"></span><span class="pe-opt-name">OPTION {{ o.name }}</span><sc-if value="{{ o.rec }}" hint-placeholder-val="{{ false }}"><span class="pe-opt-rec">RECOMMENDED</span></sc-if></div>
+                          <div class="pe-opt-sum">{{ o.sum }}</div>
+                          <sc-if value="{{ o.rec }}" hint-placeholder-val="{{ false }}"><div class="pe-opt-why">{{ o.why }}</div></sc-if>
+                          <div class="pe-opt-sec"><span class="pe-label">WHAT CHANGES</span><ul><sc-for list="{{ o.changes }}" as="it" hint-placeholder-count="1"><li><span><sc-for list="{{ it.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></li></sc-for></ul></div>
+                          <div class="pe-opt-sec"><span class="pe-label">WILL NOT TOUCH</span><ul><sc-for list="{{ o.wont }}" as="it" hint-placeholder-count="1"><li class="no"><span><sc-for list="{{ it.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></li></sc-for></ul></div>
+                          <div class="pe-opt-sec"><span class="pe-label">RISK</span><div class="pe-opt-risk"><span class="{{ o.riskCls }}">{{ o.riskLabel }}</span><span style="font-size:12.5px;line-height:1.45;color:var(--pe-ink-body)">{{ o.riskText }}</span></div></div>
+                          <div class="pe-opt-sec"><span class="pe-label">ROLLS BACK TO</span><p><sc-for list="{{ o.rbSegs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></p></div>
+                          <div class="pe-opt-sec"><span class="pe-label">PE WILL CHECK</span><ul><sc-for list="{{ o.checks }}" as="it" hint-placeholder-count="1"><li class="chk"><span><sc-for list="{{ it.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></li></sc-for></ul></div>
+                          <div class="pe-opt-sec"><span class="pe-label">EFFORT</span><span class="pe-value">{{ o.effort }}</span></div>
+                        </div>
+                      </sc-for>
+                    </div>
+                    <sc-if value="{{ b.hasDots }}" hint-placeholder-val="{{ false }}"><div class="pe-con-dots" aria-hidden="true"><sc-for list="{{ b.opts }}" as="o" hint-placeholder-count="2"><span class="{{ o.dot }}"></span></sc-for></div></sc-if>
+                    <sc-if value="{{ b.hasDiff }}" hint-placeholder-val="{{ false }}">
+                      <div class="pe-diffbox"><span class="pe-label">WHAT YOUR EDIT CHANGED</span><div class="pe-code"><sc-for list="{{ b.diff }}" as="d" hint-placeholder-count="2"><div class="{{ d.c }}" style="white-space:pre-wrap">{{ d.txt }}</div></sc-for></div></div>
+                    </sc-if>
+                    <sc-if value="{{ b.canAct }}" hint-placeholder-val="{{ false }}">
+                      <div class="pe-plan-actions"><button type="button" class="pe-btn go" onClick="{{ b.confirm }}">{{ b.confirmLabel }}</button><button type="button" class="pe-btn" onClick="{{ b.modify }}">Modify</button><button type="button" class="pe-btn" onClick="{{ b.scopeBtn }}">Edit scope</button><div class="pe-spacer"></div><button type="button" class="pe-btn danger" onClick="{{ b.scrap }}">Scrap</button></div>
+                    </sc-if>
+                    <sc-if value="{{ b.hasFoot }}" hint-placeholder-val="{{ false }}"><div class="pe-footnote" style="margin:0"><sc-for list="{{ b.footSegs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></div></sc-if>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isScope }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-scope">
+                    <div style="display:flex;align-items:center;gap:10px"><span class="pe-kicker">EDIT SCOPE · OPTION {{ b.optName }}</span></div>
+                    <div class="pe-scope-cols">
+                      <div class="pe-scope-col"><span class="pe-label">SERVICES</span><sc-for list="{{ b.svc }}" as="r" hint-placeholder-count="4"><div class="{{ r.cls }}" role="checkbox" aria-checked="{{ r.on }}" aria-disabled="{{ r.locked }}" tabindex="0" onClick="{{ r.tog }}"><span class="box">{{ r.tick }}</span><span>{{ r.name }}</span><span class="why">{{ r.why }}</span></div></sc-for></div>
+                      <div class="pe-scope-col"><span class="pe-label">EXCLUSIONS</span><sc-for list="{{ b.excl }}" as="r" hint-placeholder-count="2"><div class="{{ r.cls }}" aria-disabled="{{ r.locked }}"><span class="box">{{ r.tick }}</span><span>{{ r.name }}</span><span class="why">{{ r.why }}</span></div></sc-for><button type="button" class="pe-btn sm" style="align-self:flex-start">＋ Add exclusion</button></div>
+                      <div class="pe-scope-col"><span class="pe-label">LIMITS</span><sc-for list="{{ b.limits }}" as="r" hint-placeholder-count="2"><div class="pe-tickrow" style="cursor:default"><span>{{ r.k }}</span><span class="why" style="font-family:var(--pe-font-mono);color:var(--pe-ink-2)">{{ r.v }}</span></div></sc-for></div>
+                    </div>
+                    <sc-if value="{{ b.changed }}" hint-placeholder-val="{{ false }}"><div class="pe-scope-changed"><span class="pe-led warn"></span>Plan changed. It must be confirmed again before anything runs.</div></sc-if>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap"><button type="button" class="pe-btn accent" onClick="{{ b.apply }}">Apply and review plan</button><button type="button" class="pe-btn ghost" onClick="{{ b.cancel }}">Cancel</button></div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isNote }}" hint-placeholder-val="{{ false }}">
+                  <div class="{{ b.ncls }}" role="status"><span class="g">{{ b.g }}</span><span><sc-for list="{{ b.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></div>
+                </sc-if>
+
+                <sc-if value="{{ b.isRun }}" hint-placeholder-val="{{ false }}">
+                  <div class="{{ b.rcls }}">
+                    <div class="pe-run-head"><span class="{{ b.led }}"></span><h3 style="font-size:14px;letter-spacing:.1em">{{ b.title }}</h3><span class="{{ b.badge }}">{{ b.btext }}</span><div class="pe-spacer"></div><span class="pe-label">{{ b.meta }}</span>
+                      <sc-if value="{{ b.hasPause }}" hint-placeholder-val="{{ false }}"><button type="button" class="pe-btn warn sm" style="padding:6px 14px;font-size:11px" onClick="{{ b.pause }}">{{ b.pauseLabel }}</button></sc-if></div>
+                    <sc-if value="{{ b.hasBar }}" hint-placeholder-val="{{ false }}"><div><div class="pe-bar"><div class="pe-bar-fill ok" style="width:{{ b.pct }}"></div></div><div class="pe-bar-cap">{{ b.barCap }}</div></div></sc-if>
+                    <div class="pe-rail">
+                      <sc-for list="{{ b.rsteps }}" as="r" hint-placeholder-count="4">
+                        <div class="{{ r.cls }}"><div class="pe-rail-gutter"><span class="{{ r.marker }}">{{ r.mark }}</span><span class="{{ r.line }}"></span></div>
+                          <div style="min-width:0;flex:1;padding-bottom:4px"><div class="pe-rail-text"><sc-for list="{{ r.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></div><div class="pe-rail-meta">{{ r.meta }}</div>
+                            <sc-if value="{{ r.hasOut }}" hint-placeholder-val="{{ false }}"><div class="{{ r.outCls }}"><sc-for list="{{ r.out }}" as="ln" hint-placeholder-count="1"><div>{{ ln.t }}</div></sc-for></div></sc-if></div>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isTw }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-tripwire" role="alert">
+                    <div class="pe-tripwire-head"><span class="pe-led crit"></span><h3>{{ b.twTitle }}</h3><div style="flex:1"></div><span class="pe-badge crit">PE PAUSED THE RUN</span></div>
+                    <p>{{ b.twText }}</p>
+                    <div style="display:flex;gap:18px;flex-wrap:wrap"><div><span class="pe-label">ROLLBACK</span><div class="pe-value" style="margin-top:3px">{{ b.twRoll }}</div></div><div><span class="pe-label">WHAT CHANGED</span><div class="pe-value" style="margin-top:3px">{{ b.twPath }}</div></div></div>
+                    <div class="pe-tripwire-btns"><button type="button" class="pe-btn">Resume</button><button type="button" class="pe-btn warn">Roll back to {{ b.twCk }}</button><button type="button" class="pe-btn accent">Take over</button></div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isTake }}" hint-placeholder-val="{{ false }}"><div class="pe-takeover"><span class="pe-led ok"></span><span><b style="color:var(--pe-ink-2)">Operator-driven.</b> {{ b.takeText }}</span></div></sc-if>
+
+                <sc-if value="{{ b.isVerify }}" hint-placeholder-val="{{ false }}">
+                  <div class="{{ b.vcls }}">
+                    <span class="pe-by-pe">CHECKED BY PE · NOT THE AGENT'S OPINION</span>
+                    <h3>{{ b.vhead }}</h3>
+                    <div style="display:flex;flex-direction:column;gap:8px"><sc-for list="{{ b.checks }}" as="c" hint-placeholder-count="3"><div class="{{ c.cls }}"><span class="pe-check-mark">{{ c.mark }}</span><div style="flex:1;min-width:0"><div class="pe-check-label"><sc-for list="{{ c.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></div><div class="pe-check-ev">{{ c.ev }}</div></div><span class="pe-check-meta">{{ c.meta }}</span></div></sc-for></div>
+                    <sc-if value="{{ b.vfail }}" hint-placeholder-val="{{ false }}"><div class="pe-plan-actions"><button type="button" class="pe-btn warn">Roll back</button><button type="button" class="pe-btn accent">Keep working on it</button><button type="button" class="pe-btn">Take over</button></div></sc-if>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isLearn }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-learn">
+                    <div><span class="pe-kicker">CLOSE AND LEARN</span><p style="margin:6px 0 0;font-size:13px;line-height:1.55;color:var(--pe-ink-body)">PE noticed {{ b.learnN }}. Nothing becomes trusted memory until you accept it.</p></div>
+                    <sc-for list="{{ b.cands }}" as="c" hint-placeholder-count="2"><div class="{{ c.cls }}"><p><sc-for list="{{ c.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></p><div class="pe-cand-btns"><span class="pe-chip">{{ c.scope }}</span><div style="flex:1"></div><sc-if value="{{ c.open }}" hint-placeholder-val="{{ true }}"><button type="button" class="pe-btn sm" onClick="{{ c.accept }}">Accept</button><button type="button" class="pe-btn sm">Edit</button><button type="button" class="pe-btn sm" onClick="{{ c.discard }}">Discard</button></sc-if><sc-if value="{{ c.done }}" hint-placeholder-val="{{ false }}"><span class="pe-value {{ c.doneCls }}">{{ c.doneTxt }}</span></sc-if></div></div></sc-for>
+                    <div class="pe-plan-actions"><button type="button" class="pe-btn accent">Close conversation</button><button type="button" class="pe-btn ghost">Keep it open</button></div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isErr }}" hint-placeholder-val="{{ false }}"><div class="pe-err" role="alert"><p>{{ b.errText }}</p><div class="pe-plan-actions"><button type="button" class="pe-btn accent">Try again</button><button type="button" class="pe-btn ghost">Details</button></div></div></sc-if>
+
+                <sc-if value="{{ b.isSkel }}" hint-placeholder-val="{{ false }}"><div class="pe-skel" aria-busy="true" aria-label="Loading conversation"><i style="width:34%"></i><i style="width:92%"></i><i style="width:78%"></i><i style="width:55%"></i></div></sc-if>
+
+                <sc-if value="{{ b.isInvite }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-invite"><img src="../assets/characters/futurama/avatar/leela.png" alt=""><h2>{{ b.invH }}</h2><p>{{ b.invP }}</p>
+                    <div class="pe-prompts"><sc-for list="{{ b.prompts }}" as="p" hint-placeholder-count="3"><button type="button" class="pe-prompt">{{ p }}</button></sc-for></div></div>
+                </sc-if>
+
+                <sc-if value="{{ b.isVer }}" hint-placeholder-val="{{ false }}">
+                  <div class="{{ b.vcls2 }}"><div class="pe-verdict-orb">{{ b.orb }}</div><div class="pe-verdict-text"><h2>{{ b.vh }}</h2><p>{{ b.vp }}</p></div></div>
+                </sc-if>
+
+                <sc-if value="{{ b.isBud }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap"><span class="{{ b.bcls }}"><span>BUDGET</span><span class="pe-bar"><span class="pe-bar-fill {{ b.fill }}" style="display:block;width:{{ b.w }}"></span></span><span>{{ b.btxt }}</span></span><span style="font-size:12.5px;color:var(--pe-ink-body)">{{ b.bnote }}</span></div>
+                </sc-if>
+
+                <sc-if value="{{ b.isComp }}" hint-placeholder-val="{{ false }}">
+                  <div class="{{ b.cc.cls }}" style="border:1px solid var(--pe-border);border-radius:12px">
+                    <div class="pe-composer-in">
+                      <sc-if value="{{ b.cc.take }}" hint-placeholder-val="{{ false }}"><div class="pe-takeover"><span class="pe-led ok"></span><span><b style="color:var(--pe-ink-2)">Operator-driven.</b> PE won't act on its own; it will still check the outcome.</span></div></sc-if>
+                      <div class="pe-composer-box"><div class="{{ b.cc.tcls }}"><sc-for list="{{ b.cc.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></div><button type="button" class="{{ b.cc.sendCls }}">{{ b.cc.send }}</button></div>
+                      <div class="pe-composer-meta"><span class="{{ b.cc.noteCls }}">{{ b.cc.note }}</span><span class="pe-spacer"></span><span>Enter to send · Shift+Enter for a new line</span></div>
+                    </div>
+                  </div>
+                </sc-if>
+
+                <sc-if value="{{ b.isSheet }}" hint-placeholder-val="{{ false }}">
+                  <div class="pe-sheet" style="position:static;border-radius:18px;border:1px solid var(--pe-border-strong);max-width:600px">
+                    <div class="pe-kicker">CONFIRM · STEP 2 OF 2</div><h2 class="pe-sheet-h">{{ b.sh.h }}</h2>
+                    <div class="pe-auth"><sc-for list="{{ b.sh.rows }}" as="r" hint-placeholder-count="4"><div class="{{ r.cls }}"><span class="pe-label">{{ r.k }}</span><span><sc-for list="{{ r.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></div></sc-for></div>
+                    <div class="pe-attrib"><span class="pe-who">AK</span><div><div class="pe-attrib-name">Logged as Alex K.</div><div class="pe-attrib-meta">operator · 2FA verified 14:17 · you approve <span class="pe-fp">{{ b.sh.fp }}</span></div></div></div>
+                    <div class="pe-sheet-btns"><button type="button" class="pe-btn go">{{ b.sh.go }}</button><button type="button" class="pe-btn">Back to the plan</button></div>
+                  </div>
+                </sc-if>
+
+              </sc-for>
+            </div>
+           </sc-for>
+          </div>
+
+          <sc-if value="{{ showComposer }}" hint-placeholder-val="{{ true }}">
+            <div class="{{ comp.cls }}">
+              <div class="pe-composer-in">
+                <sc-if value="{{ comp.take }}" hint-placeholder-val="{{ false }}"><div class="pe-takeover"><span class="pe-led ok"></span><span><b style="color:var(--pe-ink-2)">Operator-driven.</b> PE won't act on its own; it will still check the outcome.</span></div></sc-if>
+                <div class="pe-composer-box"><div class="{{ comp.tcls }}" role="textbox" aria-multiline="true" aria-label="Message"><sc-for list="{{ comp.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></div><button type="button" class="{{ comp.sendCls }}">{{ comp.send }}</button></div>
+                <div class="pe-composer-meta"><span class="{{ comp.noteCls }}">{{ comp.note }}</span><span class="pe-spacer"></span><sc-if value="{{ isDesk }}" hint-placeholder-val="{{ true }}"><span>Enter to send · Shift+Enter for a new line · @ to mention</span></sc-if></div>
+              </div>
+            </div>
+          </sc-if>
+        </section>
+        </sc-if>
+
+        <sc-if value="{{ showCtx }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ scrimStyle }}" onClick="{{ toggleCtx }}"></div>
+          <aside class="pe-con-ctx" style="{{ ctxStyle }}" aria-label="Context">
+            <div class="pe-sheet-grab" style="{{ grabStyle }}"></div>
+            <div class="pe-ctabs" role="tablist"><sc-for list="{{ ctabs }}" as="t" hint-placeholder-count="4"><button type="button" role="tab" class="{{ t.cls }}" onClick="{{ t.go }}">{{ t.label }}</button></sc-for></div>
+            <div class="pe-ctx-body">
+              <sc-if value="{{ ct.evidence }}" hint-placeholder-val="{{ true }}">
+                <div class="pe-ctx-card"><h4>INCIDENT</h4><div style="font-size:13px;color:var(--pe-ink-2)">VPN gateway unhealthy after reboot</div><div class="pe-ctx-row"><span class="pe-label">OPENED</span><span class="pe-value">14:01</span></div><div class="pe-ctx-row"><span class="pe-label">LEVEL</span><span class="pe-badge high">HIGH</span></div></div>
+                <div class="pe-ctx-card"><h4>CONTAINERS IN VIEW</h4>
+                  <sc-for list="{{ ctxCont }}" as="c" hint-placeholder-count="5"><div class="pe-ctx-row"><span style="display:flex;gap:8px;align-items:center"><span class="{{ c.led }}"></span><span class="pe-value">{{ c.n }}</span></span><span class="pe-value {{ c.lvl }}">{{ c.s }}</span></div></sc-for></div>
+                <div class="pe-ctx-card"><h4>MEMORY USED</h4><div class="pe-bar"><div class="pe-bar-fill ok" style="width:61%"></div></div><div class="pe-bar-cap" style="margin:0">61% of the agent's working context · 3 logs, 4 containers</div></div>
+              </sc-if>
+              <sc-if value="{{ ct.scope }}" hint-placeholder-val="{{ false }}">
+                <div class="pe-ctx-card"><h4>SERVICES</h4><div class="pe-chips"><span class="pe-m">qbittorrent</span><span class="pe-m">sonarr</span><span class="pe-m">radarr</span><span class="pe-m">prowlarr</span></div></div>
+                <div class="pe-ctx-card"><h4>PATHS</h4><span class="pe-value">/opt/stacks/media/compose.yml</span><span class="pe-value dim">/opt/stacks/media/config/</span></div>
+                <div class="pe-ctx-card"><h4>PROTECTED</h4><div class="pe-ctx-row"><span class="pe-value">vpn-gateway</span><span class="pe-label">LOCKED</span></div><div class="pe-ctx-row"><span class="pe-value">traefik</span><span class="pe-label">LOCKED</span></div><div class="pe-ctx-row"><span class="pe-value">/mnt/media</span><span class="pe-label">LOCKED</span></div></div>
+              </sc-if>
+              <sc-if value="{{ ct.limits }}" hint-placeholder-val="{{ false }}">
+                <div class="pe-ctx-card"><h4>MODEL BUDGET</h4><div class="pe-bar"><div class="pe-bar-fill {{ bud.fill }}" style="width:{{ bud.w }}"></div></div><div class="pe-bar-cap" style="margin:0">{{ bud.long }}</div></div>
+                <div class="pe-ctx-card"><h4>TIME</h4><div class="pe-ctx-row"><span class="pe-label">PER RUN</span><span class="pe-value">15 min</span></div><div class="pe-ctx-row"><span class="pe-label">IDLE TIMEOUT</span><span class="pe-value">30 min</span></div></div>
+                <div class="pe-ctx-card"><h4>EFFORT</h4><div class="pe-ctx-row"><span class="pe-label">STEPS PER RUN</span><span class="pe-value">12</span></div><div class="pe-ctx-row"><span class="pe-label">RESTARTS PER SERVICE</span><span class="pe-value">1</span></div></div>
+              </sc-if>
+              <sc-if value="{{ ct.record }}" hint-placeholder-val="{{ false }}">
+                <div class="pe-ctx-card"><h4>EVENT LOG</h4><div class="pe-ctx-row"><span class="pe-label">EVENTS</span><span class="pe-value">38</span></div><div class="pe-ctx-row"><span class="pe-label">LAST CHECKPOINT</span><span class="pe-value">14:19</span></div><a href="#">Open the full event log</a></div>
+                <div class="pe-ctx-card"><h4>WORK LOG</h4><span style="font-size:12.5px;line-height:1.5;color:var(--pe-ink-body)">Every conversation PE has run on this host, newest first.</span><a href="#">Open work log</a></div>
+              </sc-if>
+            </div>
+          </aside>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ sheetOn }}" hint-placeholder-val="{{ false }}">
+        <div class="pe-sheet-scrim" onClick="{{ closeSheet }}"></div>
+        <div class="{{ sheetCls }}" role="dialog" aria-modal="true" aria-label="Confirm">
+          <div class="pe-sheet-grab" style="{{ grabStyle2 }}"></div>
+          <div class="pe-kicker">CONFIRM · STEP 2 OF 2</div>
+          <h2 class="pe-sheet-h">{{ sh.h }}</h2>
+          <div class="pe-auth"><sc-for list="{{ sh.rows }}" as="r" hint-placeholder-count="4"><div class="{{ r.cls }}"><span class="pe-label">{{ r.k }}</span><span><sc-for list="{{ r.segs }}" as="s" hint-placeholder-count="1"><span class="{{ s.c }}">{{ s.txt }}</span></sc-for></span></div></sc-for></div>
+          <div class="pe-attrib"><span class="pe-who">AK</span><div><div class="pe-attrib-name">Logged as Alex K.</div><div class="pe-attrib-meta">operator · 2FA verified 14:17 · you approve <span class="pe-fp">{{ sh.fp }}</span></div></div></div>
+          <div class="pe-sheet-btns"><button type="button" class="pe-btn go" onClick="{{ closeSheet }}">{{ sh.go }}</button><button type="button" class="pe-btn" onClick="{{ closeSheet }}">Back to the plan</button></div>
+        </div>
+      </sc-if>
+
+    </div>
+   </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+const LV = { ok: '✓', warn: '!', high: '!', crit: '⚠', none: '·' };
+const T0 = 'The download apps lost internet after the reboot. Figure out why.';
+function P(s) {
+  return String(s).split(/(`[^`]+`|\[\d+\]|@[a-z][\w-]*)/).filter(x => x !== '').map(x => {
+    if (x[0] === '`') return { c: 'pe-m', txt: x.slice(1, -1), role: 'presentation', tab: -1 };
+    if (/^\[\d+\]$/.test(x)) return { c: 'pe-ev', txt: x.slice(1, -1), role: 'button', tab: 0 };
+    if (x[0] === '@') return { c: 'pe-mention', txt: x, role: 'presentation', tab: -1 };
+    return { c: '', txt: x, role: 'presentation', tab: -1 };
+  });
+}
+const L = a => a.map(s => ({ segs: P(s) }));
+const TYPES = ['Op', 'Inc', 'Agent', 'Trail', 'Plan', 'Scope', 'Note', 'Run', 'Tw', 'Take', 'Verify', 'Learn', 'Err', 'Skel', 'Invite', 'Ver', 'Bud', 'Comp', 'Sheet'];
+const D0 = Object.assign({
+  by: '', segs: [], chips: [], hasChips: false, incTitle: '', incBadge: '', incRows: [],
+  head: '', led: 'pe-led ok', paras: [], split: false, know: [], unsure: [], streaming: false, streamText: '', hasSources: false, sources: [], srcSum: '', hasFollow: false, follow: [],
+  open: false, sum: '', steps: [], readTxt: '', hasChg: false, chgTxt: '',
+  pcls: 'pe-plan', pbadge: 'pe-badge', ptext: '', pmeta: '', hasNote: false, pnote: '', opts: [], hasDots: false, hasDiff: false, diff: [], canAct: false, confirm: null, confirmLabel: '', modify: null, scopeBtn: null, scrap: null, hasFoot: false, footSegs: [],
+  optName: 'A', svc: [], excl: [], limits: [], changed: false, apply: null, cancel: null,
+  ncls: 'pe-note', g: '', rcls: 'pe-run', title: '', badge: 'pe-badge', btext: '', meta: '', hasPause: false, pause: null, pauseLabel: 'Pause', hasBar: false, pct: '0%', barCap: '', rsteps: [],
+  twTitle: '', twText: '', twRoll: '', twPath: '', twCk: '', takeText: '',
+  vcls: 'pe-verify', vhead: '', checks: [], vfail: false, learnN: '', cands: [], errText: '', invH: '', invP: '', prompts: [],
+  vcls2: '', orb: '', vh: '', vp: '', bcls: '', fill: '', w: '', btxt: '', bnote: '', cc: { segs: [] }, sh: { rows: [] }
+}, ...TYPES.map(t => ({ ['is' + t]: false })));
+const blk = (t, o) => Object.assign({}, D0, { ['is' + t]: true }, o);
+
+const RK = { low: ['pe-chip ok', 'LOW'], med: ['pe-chip warn', 'MEDIUM'], high: ['pe-chip high', 'HIGH'], none: ['pe-chip', 'NONE'] };
+const OPT = {
+  A: { name: 'A', rec: true, why: 'Fixes the cause directly, has a clean rollback, and leaves the gateway alone.', sum: 'Recreate the four dependents in order so they rebind to the gateway.', changes: ['4 services in the `media` stack: `qbittorrent`, `sonarr`, `radarr`, `prowlarr`'], wont: ['The gateway `vpn-gateway`', 'Ingress, DNS, any data volume'], risk: 'low', riskText: 'About one minute of downtime for the four apps.', rb: 'The checkpoint taken just before the run.', checks: ["Each dependent can reach the internet from inside the gateway's network", 'The `media` stack is complete'], effort: '~3 min · 6 steps',
+    go: 'Authorise recreating 4 services', scope: 'Recreate `qbittorrent`, `sonarr`, `radarr`, `prowlarr` in the `media` stack, one at a time.', backup: 'Checkpoint taken first. Config volumes covered by the Borg backup from 2d 6h ago.', fp: 'a3f9·71c2' },
+  A3: { name: 'A', rec: true, why: 'Same fix, with `prowlarr` left alone as you asked.', sum: 'Recreate three dependents in order so they rebind to the gateway.', changes: ['3 services in the `media` stack: `qbittorrent`, `sonarr`, `radarr`'], wont: ['`prowlarr` and its config (your exclusion)', 'The gateway `vpn-gateway`', 'Ingress, DNS, any data volume'], risk: 'low', riskText: 'About 40 seconds of downtime for three apps.', rb: 'The checkpoint taken just before the run.', checks: ["Each of the three can reach the internet from inside the gateway's network", 'The `media` stack is complete'], effort: '~2 min · 5 steps',
+    go: 'Authorise recreating 3 services', scope: 'Recreate `qbittorrent`, `sonarr`, `radarr` in the `media` stack, one at a time.', backup: 'Checkpoint taken first. Config volumes covered by the Borg backup from 2d 6h ago.', fp: 'd04e·b8a1' },
+  B: { name: 'B', rec: false, sum: 'Restart the gateway only and wait for the port-forward.', changes: ['1 service: `vpn-gateway`'], wont: ['The four dependents', 'Ingress, DNS, any data volume'], risk: 'med', riskText: 'Dependents may not recover without a restart of their own.', rb: 'The checkpoint taken just before the run.', checks: ['The gateway has a port-forward assigned', 'Each dependent can reach the internet'], effort: '~5 min · 3 steps',
+    go: 'Authorise restarting the gateway', scope: 'Restart `vpn-gateway` once and wait up to 3 minutes for a port-forward.', backup: 'Checkpoint taken first. Gateway config covered by the Borg backup from 2d 6h ago.', fp: '5be2·c093' },
+  C: { name: 'C', rec: false, sum: 'Make the start order explicit so this cannot recur, then recreate the dependents.', changes: ['1 file: `compose.yml` of the `media` stack (adds a health condition)', '4 services recreated'], wont: ['The gateway', 'Ingress, DNS, any data volume'], risk: 'med', riskText: 'Edits a stack file. It takes effect on the next recreate.', rb: 'The previous `compose.yml`, restored from the checkpoint.', checks: ['`compose.yml` still validates', 'Each dependent starts only after the gateway is healthy', 'Each dependent can reach the internet'], effort: '~8 min · 9 steps',
+    go: 'Authorise editing 1 file and recreating 4 services', scope: 'Edit `compose.yml`, then recreate four services in the `media` stack.', backup: '`compose.yml` is not covered by any backup. PE copies it into the checkpoint, but a host restore would not include it.', backupWarn: true, fp: '9c17·e5d2' },
+  D: { name: 'D', rec: true, why: 'Read-only, and it tells us which cause to fix.', sum: "Check whether the provider rotated the port or the start order caused this.", changes: ['Nothing. Read-only comparison of port history and start times.'], wont: ['Every service, file and volume'], risk: 'none', riskText: 'Reads only. No service is touched.', rb: 'Nothing to roll back.', checks: ['PE names which of the two causes matches the timeline'], effort: '~1 min · 2 steps',
+    go: 'Authorise the read-only check', scope: 'Read provider port history and container start times.', backup: 'Not needed. Nothing changes.', fp: '71aa·0f3c' },
+  E: { name: 'A', rec: true, why: 'The certificate expires in 9 days; renewing now leaves time to fix anything that goes wrong.', sum: 'Renew the certificate for `vault.casalan.com` and reload ingress.', changes: ['1 certificate: `vault.casalan.com`', 'Ingress reloads its config (no restart)'], wont: ['Other certificates', 'Any service or data volume'], risk: 'low', riskText: 'Ingress reload drops open connections for under a second.', rb: 'The previous certificate file, restored from the checkpoint.', checks: ['The new certificate is served on `vault.casalan.com`', 'Days until expiry is above 60'], effort: '~2 min · 4 steps',
+    go: 'Authorise renewing 1 certificate', scope: 'Renew `vault.casalan.com`, reload ingress.', backup: 'Checkpoint taken first. Certificate store covered by the Borg backup from 2d 6h ago.', fp: '2e60·4ab7' }
+};
+const PS = { pending: ['warn', 'WAITING FOR YOUR CHOICE'], edited: ['warn', 'EDITED · CONFIRM AGAIN'], superseded: ['', 'SUPERSEDED BY A NEWER PLAN'], confirmed: ['ok', 'CONFIRMED'], scrapped: ['', 'SCRAPPED'], expired: ['', 'EXPIRED'] };
+
+class Component extends DCLogic {
+  stageRef = React.createRef();
+  state = Object.assign({ mode: 'flows', dev: 'desktop', flow: 2, st: 0, fit: true, sw: 1200, opt: 'A', sheet: false, scope: false, draft: '', scrapped: false, ctab: 'Evidence', ctx: false, ctxHide: false, cand: {}, paused: false, off: {} }, (() => { try { return JSON.parse(localStorage.getItem('pe-v4-console') || '{}'); } catch (e) { return {}; } })());
+  componentDidMount() { this._m = () => this.stageRef.current && this.setState({ sw: this.stageRef.current.clientWidth - 40 }); this._m(); window.addEventListener('resize', this._m); }
+  componentWillUnmount() { window.removeEventListener('resize', this._m); }
+  save(o) { try { const s = Object.assign({ mode: this.state.mode, dev: this.state.dev, flow: this.state.flow, st: this.state.st }, o); localStorage.setItem('pe-v4-console', JSON.stringify({ mode: s.mode, dev: s.dev, flow: s.flow, st: s.st })); } catch (e) { } }
+  go(o) { this.save(o); this.setState(Object.assign({ opt: 'A', sheet: false, scope: false, draft: '', scrapped: false, ctx: false, cand: {}, paused: false, off: {} }, o)); }
+
+  kit() {
+    const S = this.state, me = this;
+    const K = {};
+    K.op = (t, o = {}) => blk('Op', Object.assign({ by: 'You · 14:06', segs: P(t), hasChips: !!(o.chips && o.chips.length) }, o));
+    K.inc = () => blk('Inc', { incTitle: 'INC-2291 · VPN GATEWAY UNHEALTHY', incBadge: 'HIGH', incRows: [{ k: 'OPENED', v: '14:01 · by PE health check' }, { k: 'AFFECTED', v: '4 services in `media`'.replace(/`/g, '') }, { k: 'SINCE REBOOT', v: '9 min' }] });
+    K.note = (lvl, g, t) => blk('Note', { ncls: 'pe-note ' + lvl, g, segs: P(t) });
+    K.agent = (o = {}) => blk('Agent', Object.assign({ head: 'PE AGENT · 14:07', hasSources: !!(o.sources && o.sources.length), hasFollow: !!(o.follow && o.follow.length) }, o, { paras: (o.paras || []).map(p => ({ segs: P(p) })), know: L(o.know || []), unsure: L(o.unsure || []), split: !!(o.know && o.know.length), sources: (o.sources || []).map((s, i) => ({ n: i + 1, segs: P(s) })), led: o.streaming ? 'pe-led ok' : 'pe-led idle' }));
+    K.answer = (o = {}) => K.agent(Object.assign({
+      paras: ["The VPN gateway container came back up before its port-forward was assigned, so the apps that join its network can't route. I looked at: gateway health [1], the port-forward status [2], and which containers share its network [3]."],
+      know: ['The gateway is healthy [1]', 'Four dependents are running but unreachable [3]'], unsure: ["Whether the provider's port rotation caused this, or the start order did [2]"],
+      sources: ['Gateway health: `vpn-gateway` healthy, up 4 min', 'Port-forward status: unassigned at 14:02, assigned 14:09 (retried once)', 'Network members: `qbittorrent`, `sonarr`, `radarr`, `prowlarr`'], srcSum: '3 sources', follow: ['Plan a fix', 'Show me the gateway logs']
+    }, o));
+    K.trail = (o = {}) => {
+      const st = (o.steps || [['read', 'Inspected `vpn-gateway`', 'running · health healthy · started 14:02:11'], ['read', 'Read the last 200 log lines of `vpn-gateway`', '14:02:44 port-forward: waiting for assignment\n14:09:31 port-forward: assigned'], ['read', 'Listed containers sharing the gateway network', '4 found']]).map(s => ({ kcls: 'pe-kind ' + (s[0] === 'read' ? '' : s[0]), kind: s[0].toUpperCase(), segs: P(s[1]), hasOut: !!s[2], out: s[2] || '', hasWhy: !!s[3], why: s[3] || '' }));
+      const nr = st.filter(x => x.kind === 'READ').length, nc = st.filter(x => x.kind === 'CHANGED').length;
+      return blk('Trail', { open: !!o.open, sum: o.sum || 'Looked at 3 containers, read 2 logs, checked the network config', steps: st, readTxt: nr + ' read-only', hasChg: nc > 0, chgTxt: nc + ' changed' });
+    };
+    K.trailLong = () => K.trail({ open: true, sum: 'Looked at 5 containers, read 3 logs, tried 2 things that did not work', steps: [['read', 'Inspected `vpn-gateway`', 'running · health healthy · started 14:02:11'], ['read', 'Read the last 200 log lines of `vpn-gateway`', '14:02:44 port-forward: waiting for assignment\n14:09:31 port-forward: assigned'], ['failed', 'Asked the provider API for the current port', 'Timed out after 10 s', 'Retried once and got an answer. The result above is from the retry.'], ['read', 'Listed containers sharing the gateway network', '4 found'], ['denied', 'Read `/opt/stacks/media/.env`', '', 'Secret files are not readable by the agent. It worked from the compose file instead.'], ['read', 'Read `compose.yml` for the `media` stack', 'network_mode: service:vpn-gateway (×4)'], ['read', 'Checked ingress routes for the four apps', 'all routes up; backends unreachable']] });
+    K.plan = (ps, keys, o = {}) => {
+      const live = !!o.live; if (live && S.scrapped && ps === 'pending') ps = 'scrapped';
+      const m = PS[ps], dead = ['superseded', 'scrapped', 'expired'].includes(ps), act = (ps === 'pending' || ps === 'edited') && !o.off;
+      const sel = live ? S.opt : (o.sel || 'A');
+      let ks = keys; if (ps === 'confirmed') ks = keys.filter(k => OPT[k].name === sel);
+      const opts = ks.map(k => { const x = OPT[k], r = RK[x.risk], on = x.name === sel && !dead;
+        return { name: x.name, rec: x.rec, why: x.why || '', sum: x.sum, changes: L(x.changes), wont: L(x.wont), riskCls: r[0], riskLabel: r[1], riskText: x.riskText, rbSegs: P(x.rb), checks: L(x.checks), effort: x.effort,
+          cls: 'pe-opt' + (on ? ' is-sel' : '') + (ps === 'confirmed' ? ' is-picked' : ''), sel: on, dot: 'pe-con-dot' + (on ? ' on' : ''),
+          pick: live && act ? () => me.setState({ opt: x.name }) : () => { }, key: e => { if (live && act && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); me.setState({ opt: x.name }); } } }; });
+      const cur = OPT[ks.find(k => OPT[k].name === sel) || ks[0]];
+      return blk('Plan', { pcls: 'pe-plan' + (ps === 'confirmed' ? ' is-confirmed' : dead ? ' is-dead' : ''), pbadge: 'pe-badge ' + m[0], ptext: m[1], pmeta: o.meta || (ks.length > 1 ? ks.length + ' OPTIONS' : '1 OPTION') + ' · ' + (o.time || '14:08'),
+        hasNote: !!o.note, pnote: o.note || '', opts, hasDots: opts.length > 1, hasDiff: !!o.diff, diff: o.diff || [], canAct: act, confirmLabel: 'Confirm option ' + sel,
+        confirm: () => me.setState({ sheet: true, sheetKey: ks.find(k => OPT[k].name === sel) || ks[0] }), modify: () => me.setState({ draft: o.draft || ('Option ' + sel + ', but ') }), scopeBtn: () => me.setState({ scope: !S.scope }), scrap: () => me.setState({ scrapped: true }),
+        hasFoot: !!o.foot, footSegs: P(o.foot || ''), _cur: cur });
+    };
+    K.scope = (o = {}) => {
+      const off = o.off || (o.live ? S.off : {}), any = Object.keys(off).some(k => off[k]);
+      const sv = n => ({ cls: 'pe-tickrow ' + (off[n] ? 'off' : 'on'), on: !off[n], locked: false, tick: off[n] ? '' : '✓', name: n, why: '', tog: o.live ? () => me.setState({ off: Object.assign({}, S.off, { [n]: !S.off[n] }) }) : () => { } });
+      const lk = (n, w) => ({ cls: 'pe-tickrow locked', on: true, locked: true, tick: '🔒'.slice(0, 0) + '–', name: n, why: w, tog: () => { } });
+      return blk('Scope', { optName: 'A', svc: [sv('qbittorrent'), sv('sonarr'), sv('radarr'), sv('prowlarr'), lk('vpn-gateway', 'Protected: gateway'), lk('traefik', 'Protected: ingress')],
+        excl: [lk('/mnt/media', 'Protected: data volume'), Object.assign(lk('media/prowlarr/config', 'Your exclusion'), { cls: 'pe-tickrow on', locked: false, tick: '✓' })].slice(0, any || o.showExcl ? 2 : 1), limits: [{ k: 'Time', v: '15 min' }, { k: 'Steps', v: '12' }, { k: 'Restarts per service', v: '1' }],
+        changed: any || !!o.changed, apply: () => me.setState({ scope: false, draft: 'Option A, but leave `prowlarr` alone.' }), cancel: () => me.setState({ scope: false, off: {} }) });
+    };
+    const rs = (state, text, meta, out) => { const M = { done: ['done', '✓'], active: ['active', ''], pending: ['', ''], failed: ['failed', '✕'], paused: ['paused', '!'], skipped: ['skipped', '–'] }[state];
+      return { cls: 'pe-rail-item is-' + state, marker: 'pe-marker ' + M[0], mark: M[1], line: 'pe-rail-line' + (state === 'done' ? ' done' : ''), segs: P(text), meta: meta || '', hasOut: !!out, out: (out || []).map(t => ({ t })), outCls: 'pe-output' + (state === 'failed' ? ' crit' : '') }; };
+    K.rs = rs;
+    K.run = (o) => { const steps = o.steps.slice(); steps[steps.length - 1] = Object.assign({}, steps[steps.length - 1], { line: '' });
+      const paused = o.lvl === 'crit' || (o.live && S.paused), lvlc = o.lvl || (paused ? 'warn' : 'ok');
+      return blk('Run', { rcls: 'pe-run' + (o.lvl === 'crit' ? ' is-paused' : ''), led: 'pe-led ' + (o.done ? 'ok' : lvlc), title: o.title || 'RUN · OPTION A', badge: 'pe-badge ' + (o.done ? 'ok' : lvlc), btext: o.badge || (paused ? 'PAUSED BY YOU' : 'WORKING'), meta: o.meta || 'started 14:19 · 3 of 5 steps', hasPause: !!o.pauseBtn, pause: () => me.setState({ paused: !S.paused }), pauseLabel: paused ? 'Resume' : 'Pause', hasBar: o.pct != null, pct: (o.pct || 0) + '%', barCap: o.barCap || '', rsteps: steps }); };
+    K.stepsRun = (upto) => { const l = [['Checkpoint taken', '14:19:02 · `ckpt-1419`'], ['Recreate `qbittorrent`', '14:19:14 · 11 s · healthy'], ['Recreate `sonarr`', '14:19:27 · 9 s · healthy'], ['Recreate `radarr`', '14:19:40 · running'], ['PE checks the result', 'after the last step']];
+      return l.map((x, i) => rs(i < upto ? 'done' : i === upto ? 'active' : 'pending', x[0], x[1], i === upto && i === 3 ? ['docker compose up -d radarr', 'Container radarr  Recreated', 'Container radarr  Starting…'].slice(0, 3) : null)); };
+    K.tw = (o = {}) => blk('Tw', Object.assign({ twTitle: 'PAUSED: SOMETHING OUTSIDE THE PLAN CHANGED', twText: 'A file under the ingress configuration changed while step 3 was running. It is not part of this plan, so PE stopped before doing anything else. Steps 1 and 2 are complete.', twRoll: 'Available · checkpoint from 14:02', twPath: 'ingress config · 14:21:07', twCk: '14:02' }, o));
+    K.verify = (kind) => {
+      const C = (s, t, ev, meta) => ({ cls: 'pe-check ' + s, mark: { passed: '✓', failed: '✕', unknown: '?' }[s], segs: P(t), ev, meta });
+      if (kind === 'ok') return blk('Verify', { vcls: 'pe-verify ok', vhead: 'All 3 checks passed', checks: [C('passed', '`qbittorrent`, `sonarr`, `radarr` can reach the internet', 'Fetched an external address from inside the gateway network · 3 of 3 · 14:22:10', 'PASS'), C('passed', 'The `media` stack is complete', '4 of 4 services running · healthy', 'PASS'), C('passed', 'The gateway was not touched', 'Container id and start time unchanged since 14:02:11', 'PASS')] });
+      if (kind === 'fail') return blk('Verify', { vcls: 'pe-verify crit', vhead: "1 of 3 failed: `qbittorrent` still can't reach the internet", vfail: true, checks: [C('passed', '`sonarr` and `radarr` can reach the internet', 'External fetch succeeded from both · 14:22:10', 'PASS'), C('failed', '`qbittorrent` can reach the internet from inside the gateway network', 'No route: connection timed out after 5 s (3 tries) · 14:22:19', 'FAIL'), C('passed', 'The `media` stack is complete', '4 of 4 services running', 'PASS')] });
+      return blk('Verify', { vcls: 'pe-verify warn', vhead: '2 of 3 passed, 1 could not be checked', checks: [C('passed', '`sonarr` can reach the internet', 'External fetch succeeded · 14:22:10', 'PASS'), C('passed', 'The `media` stack is complete', '4 of 4 services running', 'PASS'), C('unknown', 'The gateway port-forward is stable', "The provider status page didn't answer. Can't tell either way.", 'COULD NOT CHECK')] });
+    };
+    K.learn = () => { const c = [['The gateway needs about 6 minutes after a reboot before its port-forward is assigned. Dependents started earlier lose their route.', 'media stack'], ['`prowlarr` runs a long sync on Sundays. Leave it out of restarts that day.', '`prowlarr`']];
+      return blk('Learn', { learnN: '2 lessons from this one', cands: c.map((x, i) => { const st = S.cand[i]; return { cls: 'pe-cand' + (st === 'a' ? ' is-accepted' : st === 'd' ? ' is-discarded' : ''), segs: P(x[0]), scope: x[1].replace(/`/g, ''), open: !st, done: !!st, doneTxt: st === 'a' ? 'ACCEPTED' : 'DISCARDED', doneCls: st === 'a' ? 'ok' : 'none', accept: () => me.setState({ cand: Object.assign({}, S.cand, { [i]: 'a' }) }), discard: () => me.setState({ cand: Object.assign({}, S.cand, { [i]: 'd' }) }) }; }) }); };
+    K.err = t => blk('Err', { errText: t });
+    K.skel = () => blk('Skel', {});
+    K.take = t => blk('Take', { takeText: t || 'PE has stopped acting on this thread. It will still check the outcome of anything you run.' });
+    K.ver = (lvl, h, p) => blk('Ver', { vcls2: 'pe-verdict compact ' + lvl, orb: LV[lvl], vh: h, vp: p });
+    K.bud = (pct, note) => { const b = this.budget(pct); return blk('Bud', { bcls: b.cls, fill: b.fill, w: b.w, btxt: b.txt, bnote: note }); };
+    K.compB = (m, o) => blk('Comp', { cc: this.composer(m, o) });
+    K.sheetB = (key) => blk('Sheet', { sh: this.sheet(key) });
+    return K;
+  }
+  budget(p) {
+    const stop = p >= 100, warn = p >= 80 && !stop;
+    return { cls: 'pe-budget' + (stop ? ' stop' : warn ? ' warn' : ''), fill: stop ? 'crit' : warn ? 'warn' : 'ok', w: Math.min(p, 100) + '%', txt: stop ? 'LIMIT REACHED' : p + '% used', long: stop ? 'Limit reached. PE stops asking the model. Reading and your own commands still work; new analysis resumes at the next reset (00:00).' : warn ? p + '% used. At 100% PE stops asking the model and keeps what it has.' : p + '% used of this conversation\'s allowance.' };
+  }
+  composer(mode, o = {}) {
+    const S = this.state, M = {
+      idle: { note: 'Ask about your homelab, or reference a service with @.', send: 'Send', ph: 'Ask PE about your homelab…' },
+      busy: { note: 'Working. Your message will pause it.', send: 'Pause and send', ph: 'Add something, or wait for the answer…' },
+      live: { note: 'Run in progress. Sending a message pauses the run and says so in the thread.', nc: 'warn', send: 'Pause and send', ph: 'Message PE (pauses the run)…', live: true },
+      paused: { note: 'Paused. Nothing resumes until you choose Resume.', nc: 'crit', send: 'Send', ph: 'Tell PE what to do about this…', live: true },
+      take: { note: 'You are driving. PE will still check the outcome.', send: 'Send', ph: 'Note for the record…', take: true },
+      off: { note: o.reason || 'Disabled.', nc: 'warn', send: 'Send', ph: o.ph || 'Unavailable', off: true }
+    }[mode], txt = S.draft || o.text || '';
+    return { cls: 'pe-composer' + (M.live ? ' is-live' : '') + (M.off ? ' is-off' : ''), take: !!M.take, tcls: 'pe-composer-text' + (txt ? ' has' : ''), segs: txt ? P(txt) : [{ c: '', txt: M.ph }], sendCls: 'pe-btn' + (M.off ? ' is-off' : ' accent'), send: M.send, note: M.note, noteCls: M.nc || '' };
+  }
+  sheet(key) {
+    const x = OPT[key] || OPT.A;
+    return { h: x.go.replace('Authorise', 'You are authorising') + '. Nothing else will run.'.replace(/^/, ''), go: x.go, fp: x.fp, rows: [
+      { cls: 'pe-auth-row', k: 'SCOPE', segs: P(x.scope) }, { cls: 'pe-auth-row' + (x.backupWarn ? ' warn' : ''), k: 'BACKUP', segs: P((x.backupWarn ? 'Not covered. ' : '') + x.backup) },
+      { cls: 'pe-auth-row', k: 'WILL NOT TOUCH', segs: P(x.wont.join(' · ')) }, { cls: 'pe-auth-row', k: 'LIMITS', segs: P('15 min · 12 steps · 1 restart per service. PE pauses if anything outside this scope changes.') }, { cls: 'pe-auth-row', k: 'ROLLBACK', segs: P(x.rb) }] };
+  }
+  V(lvl, h, p, tally) { return { cls: 'pe-verdict compact ' + lvl, orb: LV[lvl], h, p, hasTally: !!(tally && tally.length), tally: (tally || []).map(t => ({ cls: 'pe-chip ' + t[0], txt: t[1] })) }; }
+
+  defs() {
+    const K = this.kit(), S = this.state, op1 = K.op(T0), tr = K.trail();
+    const ST = (label, o) => Object.assign({ label, title: 'Download apps lost internet after reboot', origin: 'you', grp: 'Needs you', rst: 'Needs your call', rlvl: 'warn', bud: 34, comp: 'idle', view: 'thread' }, o);
+    const dA = [{ c: 'del', txt: '- scope: qbittorrent, sonarr, radarr, prowlarr' }, { c: 'add', txt: '+ scope: qbittorrent, sonarr, radarr' }, { c: 'add', txt: '+ exclude: media/prowlarr/config   (you, 14:15)' }];
+    const edit = [K.op(T0), tr, K.answer(), K.plan('superseded', ['A', 'B'], { note: 'Replaced by the edited plan below.' })];
+    const editedPlan = (extra) => K.plan('edited', ['A3', 'B'], Object.assign({ diff: dA, note: 'You edited option A. Option B is unchanged. Confirm again to run.', time: '14:15', live: true }, extra));
+    const mod2 = K.op("Option A, but leave `prowlarr` alone. It's mid-sync.", { by: 'You · 14:15' });
+    const flows = [
+      { n: 1, name: 'Ask and investigate', desc: 'The happy path to an answer. No change is made.', states: [
+        ST('Loading', { blocks: [K.op(T0), K.skel()], v: this.V('none', 'Getting ready', 'Opening the conversation.'), rst: 'Getting ready', rlvl: 'none', grp: 'Working', bud: 0, comp: 'busy' }),
+        ST('Streaming', { blocks: [op1, K.trail(), K.agent({ paras: ["The VPN gateway container came back up before its port-forward was assigned, so the apps that join its network can't route."], streaming: true, streamText: 'Reading the network config…' })], v: this.V('ok', 'Looking into it', 'Read-only so far. Nothing has been changed.'), rst: 'Looking into it', rlvl: 'ok', grp: 'Working', bud: 12, comp: 'busy' }),
+        ST('Answered', { blocks: [op1, tr, K.answer()], v: this.V('ok', 'Result ready', 'The cause is probable, not certain. No change was made.', [['ok', 'READ-ONLY']]), rst: 'Result ready', rlvl: 'ok', grp: 'Recent' }),
+        ST('Long content', { blocks: [op1, K.trailLong(), K.answer({ paras: ["The VPN gateway container came back up before its port-forward was assigned, so the apps that join its network can't route. I looked at: gateway health [1], the port-forward status [2], and which containers share its network [3].", "All four dependents use `network_mode: service:vpn-gateway`, so they share the gateway's network namespace. When the gateway restarts, that namespace is rebuilt, and containers that were attached to the old one keep a dead reference [3].", "Ingress routes for the four apps are all up, but their backends are unreachable [3]. That matches the picture: the apps are running, the route to them exists, and nothing can leave the gateway."], sources: ['Gateway health: `vpn-gateway` healthy, up 4 min', 'Port-forward status: unassigned at 14:02, assigned 14:09 (retried once)', 'Network members: `qbittorrent`, `sonarr`, `radarr`, `prowlarr`', 'Compose file: `network_mode: service:vpn-gateway` ×4', 'Ingress routes: 4 up, 4 backends unreachable'] })], v: this.V('ok', 'Result ready', 'Long thread. The answer is pinned in the strip, the detail is below.'), rst: 'Result ready', rlvl: 'ok', grp: 'Recent' }),
+        ST('Error', { blocks: [op1, K.trail({ steps: [['read', 'Inspected `vpn-gateway`', 'running · health healthy']] }), K.err("The model didn't answer: the provider timed out after 30 s. Nothing was changed. Your question is saved.")], v: this.V('high', "Didn't work", 'The model provider timed out. Nothing was changed.'), rst: "Didn't work", rlvl: 'high', grp: 'Recent' })] },
+      { n: 2, name: 'Plan, modify, confirm, verified', desc: 'The full loop, with the plan card, a modify turn and the confirm sheet.', states: [
+        ST('Plan ready', { blocks: [op1, tr, K.answer({ follow: [] }), K.plan('pending', ['A', 'B'], { live: true })], v: this.V('warn', 'Needs your call', 'Two options. Nothing changes until you confirm one.', [['warn', '2 OPTIONS']]) }),
+        ST('Modify', { blocks: [op1, tr, K.answer({ follow: [] }), K.plan('pending', ['A', 'B'], { live: true }), K.scope({ live: true, off: { prowlarr: true }, showExcl: true, changed: true })], v: this.V('warn', 'Editing the plan', "Your edit isn't applied until you review and confirm it."), comp: 'idle', _draft: "Option A, but leave `prowlarr` alone. It's mid-sync." }),
+        ST('Edited plan', { blocks: [op1, tr, K.answer({ follow: [] }), mod2, K.agent({ head: 'PE AGENT · 14:15', paras: ["Done. I removed `prowlarr` from option A and kept its config out of scope. The plan has changed, so it needs your confirmation again."] }), editedPlan()], v: this.V('warn', 'Needs your call', 'The plan changed. Confirm it again before anything runs.', [['warn', 'EDITED']]) }),
+        ST('Confirm sheet', { blocks: [op1, tr, K.answer({ follow: [] }), mod2, editedPlan({ live: true })], v: this.V('warn', 'Needs your call', 'Step 2 of 2: confirm exactly what you are authorising.'), forceSheet: 'A3' }),
+        ST('Running', { blocks: [mod2, K.plan('confirmed', ['A3'], { meta: 'CONFIRMED 14:18', foot: 'Confirmed by Alex K. at 14:18 · fingerprint `d04e·b8a1`' }), K.run({ live: true, pauseBtn: true, pct: 60, barCap: 'step 3 of 5 · about 40 s left', steps: K.stepsRun(3) })], v: this.V('ok', 'Working', 'Step 3 of 5. Calm so far; PE pauses if anything outside the plan changes.'), grp: 'Working', rst: 'Working', rlvl: 'ok', comp: 'live' }),
+        ST('Verified + learn', { blocks: [K.plan('confirmed', ['A3'], { meta: 'CONFIRMED 14:18', foot: 'Confirmed by Alex K. at 14:18 · fingerprint `d04e·b8a1`' }), K.run({ done: true, badge: 'DONE', meta: '14:19 → 14:21 · 2 min', steps: K.stepsRun(5).map(r => Object.assign({}, r, { cls: 'pe-rail-item is-done', marker: 'pe-marker done', mark: '✓', line: 'pe-rail-line done', hasOut: false })) }), K.verify('ok'), K.learn()], v: this.V('ok', 'Done and verified', 'All 3 checks passed. PE ran the checks itself.', [['ok', '3 / 3 PASS']]), grp: 'Recent', rst: 'Done and verified', rlvl: 'ok' }),
+        ST('Three options', { blocks: [op1, tr, K.answer({ follow: [] }), K.plan('pending', ['A', 'B', 'C'], { live: true })], v: this.V('warn', 'Needs your call', 'Three options. Option A is recommended.', [['warn', '3 OPTIONS']]) })] },
+      { n: 3, name: 'Scrap and redirect', desc: 'Throw the plan away and take PE somewhere else.', states: [
+        ST('Scrapped', { blocks: [op1, tr, K.answer({ follow: [] }), K.plan('scrapped', ['A', 'B']), K.note('', '·', 'You scrapped this plan at 14:12. Nothing was changed.')], v: this.V('none', 'Scrapped', 'Tell PE what to do instead.'), grp: 'Recent', rst: 'Scrapped', rlvl: 'none', _draft: 'Scrap that. First check whether the provider rotated the port.' }),
+        ST('Redirected', { blocks: [K.plan('superseded', ['A', 'B']), K.op('Scrap that. First check whether the provider rotated the port.', { by: 'You · 14:13' }), K.agent({ head: 'PE AGENT · 14:13', paras: ["Understood. I've dropped both options and will only compare the provider's port history with the start times. That is read-only."] }), K.plan('pending', ['D'], { live: true, time: '14:13' })], v: this.V('warn', 'Needs your call', 'A read-only check. Nothing changes.', [['warn', '1 OPTION']]) })] },
+      { n: 4, name: 'A run goes wrong', desc: 'Tripwire, then roll back.', states: [
+        ST('Tripwire', { blocks: [K.plan('confirmed', ['A3'], { meta: 'CONFIRMED 14:18', foot: 'Confirmed by Alex K. at 14:18 · fingerprint `d04e·b8a1`' }), K.run({ lvl: 'crit', badge: 'PAUSED BY PE', meta: 'paused 14:21 · 2 of 5 steps', steps: [K.rs('done', 'Checkpoint taken', '14:19:02 · `ckpt-1419`'), K.rs('done', 'Recreate `qbittorrent`', '14:19:14 · healthy'), K.rs('paused', 'Recreate `sonarr`', 'stopped before starting'), K.rs('pending', 'Recreate `radarr`'), K.rs('pending', 'PE checks the result')] }), K.tw()], v: this.V('crit', 'Paused: something unexpected changed', 'An ingress file changed outside this plan. PE stopped. You choose what happens next.'), grp: 'Needs you', rst: 'Paused: something unexpected changed', rlvl: 'crit', comp: 'paused' }),
+        ST('Rolled back', { blocks: [K.run({ done: true, badge: 'ROLLED BACK', title: 'ROLLBACK', meta: '14:23 → 14:24', steps: [K.rs('done', 'Stopped `sonarr` start', '14:23:02'), K.rs('done', 'Restored `qbittorrent` from `ckpt-1419`', '14:23:20 · healthy'), K.rs('done', 'Compared state with the checkpoint', 'matches, except the ingress file'), K.rs('done', 'Left the ingress file as you have it', 'not part of PE\'s checkpoint scope')] }), K.note('warn', '!', 'Rolled back to the checkpoint from `14:02`. The ingress file change was not reverted; it is outside this plan.'), K.agent({ head: 'PE AGENT · 14:24', paras: ["The apps are back to how they were before the run. The ingress file under `traefik/dynamic` was edited at 14:21 by something other than PE. Do you want me to look at what changed?"], follow: ['Show what changed in the ingress file', 'Leave it'] })], v: this.V('warn', 'Rolled back', 'The run was undone. The ingress change is still there.'), grp: 'Needs you', rst: 'Rolled back', rlvl: 'warn' })] },
+      { n: 5, name: 'Verification fails', desc: 'The result is PE\'s check, not the agent\'s opinion.', states: [
+        ST('Failed', { blocks: [K.run({ done: true, badge: 'DONE · CHECK FAILED', meta: '14:19 → 14:21', steps: K.stepsRun(5).map(r => Object.assign({}, r, { cls: 'pe-rail-item is-done', marker: 'pe-marker done', mark: '✓', line: 'pe-rail-line done', hasOut: false })) }), K.verify('fail')], v: this.V('high', "Didn't work", "2 of 3 checks passed. `qbittorrent` still can't reach the internet.".replace(/`/g, ''), [['crit', '1 FAILED']]), rst: "Didn't work", rlvl: 'high' }),
+        ST('Could not check', { blocks: [K.run({ done: true, badge: 'DONE', meta: '14:19 → 14:21', steps: K.stepsRun(5).map(r => Object.assign({}, r, { cls: 'pe-rail-item is-done', marker: 'pe-marker done', mark: '✓', line: 'pe-rail-line done', hasOut: false })) }), K.verify('unk'), K.note('warn', '!', "PE can't prove this worked. It will not call it done.")], v: this.V('warn', 'Needs you', "PE couldn't check everything, so it isn't calling this done."), rst: 'Needs you', rlvl: 'warn' }),
+        ST('Keep working', { blocks: [K.verify('fail'), K.note('', '·', 'You chose Keep working on it at 14:23.'), K.trail({ steps: [['read', 'Read logs of `qbittorrent` since 14:19', 'tunnel: no handshake'], ['read', 'Compared its network settings with `sonarr`']] }), K.agent({ head: 'PE AGENT · 14:24', paras: ['`qbittorrent` kept a fixed endpoint in its own config, so it ignores the new gateway address.'], streaming: true, streamText: 'Drafting a new plan…' })], v: this.V('ok', 'Looking into it', 'New analysis. The earlier run is already finished and logged.'), grp: 'Working', rst: 'Looking into it', rlvl: 'ok', comp: 'busy' }),
+        ST('Take over', { blocks: [K.verify('fail'), K.take(), K.op('I will fix the endpoint in the qbittorrent config myself.', { by: 'You · 14:26' })], v: this.V('ok', 'You are driving', 'PE stops acting on this thread but will check the outcome when you say so.'), rst: 'Operator-driven', rlvl: 'ok', comp: 'take' })] },
+      { n: 6, name: 'Start from an incident', desc: 'The evidence is already in the thread. The operator did not write a prompt.', states: [
+        ST('Evidence attached', { blocks: [K.op('Look into this incident.', { by: 'Opened from incident · 14:10', chips: [{ cls: 'pe-ref incident', txt: 'INC-2291' }, { cls: 'pe-ref', txt: 'vpn-gateway' }] }), K.inc(), K.trail(), K.agent({ head: 'PE AGENT · 14:10', paras: ['This incident opened 9 minutes after a reboot. The gateway is healthy now, but four apps still cannot route [1].'], sources: ['Incident: gateway unhealthy 14:01 to 14:09, then healthy'], srcSum: '1 source', streaming: true, streamText: 'Checking which apps share the gateway…' })], v: this.V('ok', 'Looking into it', 'Started from the incident. Evidence is already attached.'), origin: 'incident', title: 'INC-2291 VPN gateway unhealthy', grp: 'Working', rst: 'Looking into it', rlvl: 'ok', comp: 'busy' })] },
+      { n: 7, name: 'PE started this', desc: 'A conversation PE opened for automated work. The operator replies to it.', states: [
+        ST('PE opened it', { blocks: [K.note('', '✈', 'PE opened this conversation at `04:12` after the nightly certificate check. You did not start it.'), K.agent({ head: 'PE · 04:12', paras: ['The certificate for `vault.casalan.com` expires in 9 days [1]. Renewing it takes about two minutes. I have not changed anything.'], sources: ['Certificate store: `vault.crt` expires in 9 days'], srcSum: '1 source' }), K.plan('pending', ['E'], { live: true, time: '04:12' })], v: this.V('warn', 'Needs your call', 'PE found this on its own and wants your decision.', [['warn', 'STARTED BY PE']]), origin: 'pe', title: 'Renew vault certificate before it expires', rst: 'Needs your call', rlvl: 'warn' }),
+        ST('You replied', { blocks: [K.note('', '✈', 'PE opened this conversation at `04:12` after the nightly certificate check.'), K.agent({ head: 'PE · 04:12', paras: ['The certificate for `vault.casalan.com` expires in 9 days. I have not changed anything.'] }), K.op('Do it tonight after 22:00, not now.', { by: 'You · 07:40' }), K.agent({ head: 'PE AGENT · 07:40', paras: ["I will hold the plan and ask you again at 22:00. I will not run it myself."] }), K.plan('edited', ['E'], { live: true, time: '07:40', diff: [{ c: 'add', txt: '+ ask again: today 22:00' }, { c: '', txt: '  run: only after you confirm' }] })], v: this.V('warn', 'Needs your call', 'Waiting until 22:00. Nothing runs without you.'), origin: 'pe', title: 'Renew vault certificate before it expires', rst: 'Needs your call', rlvl: 'warn' })] },
+      { n: 8, name: 'Phone', desc: 'Reading, answering a plan card, confirming and pausing, all in the thumb zone.', phone: true, states: [
+        ST('Conversation list', { view: 'list', blocks: [], v: this.V('none', '', '') }),
+        ST('Reading a thread', { blocks: [op1, tr, K.answer({ follow: [] })], v: this.V('ok', 'Result ready', 'Cause is probable, not certain.'), grp: 'Recent' }),
+        ST('Answer the plan', { blocks: [K.answer({ follow: [], paras: ['The gateway came back before its port-forward was assigned, so the dependents cannot route [1].'], know: [], unsure: [] }), K.plan('pending', ['A', 'B'], { live: true })], v: this.V('warn', 'Needs your call', 'Swipe to compare. Nothing changes until you confirm.', [['warn', '2 OPTIONS']]) }),
+        ST('Confirm', { blocks: [K.plan('pending', ['A', 'B'], { live: true })], v: this.V('warn', 'Needs your call', 'Step 2 of 2.'), forceSheet: 'A' }),
+        ST('Running + pause', { blocks: [K.plan('confirmed', ['A3'], { meta: 'CONFIRMED 14:18' }), K.run({ live: true, pauseBtn: true, pct: 60, barCap: 'step 3 of 5', steps: K.stepsRun(3) })], v: this.V('ok', 'Working', 'Step 3 of 5.'), grp: 'Working', rst: 'Working', rlvl: 'ok', comp: 'live' }),
+        ST('Context sheet', { blocks: [op1, tr, K.answer({ follow: [] })], v: this.V('ok', 'Result ready', 'Cause is probable, not certain.'), forceCtx: true, grp: 'Recent' })] },
+      { n: 9, name: 'Degraded', desc: 'What the Console says, and what it disables.', states: [
+        ST('Host settling', { blocks: [op1, tr, K.agent({ paras: ["The host rebooted 3 minutes ago and is still settling. Readings may change in the next few minutes, so I'll hold off recommending changes."], head: 'PE AGENT · 14:09' }), K.note('warn', '!', 'The host is still settling after a reboot. Confirming changes is disabled until it is steady, about 4 minutes.')], v: this.V('warn', 'Host still settling', 'You can ask questions. Changes are disabled for now.'), comp: 'idle', rst: 'Result ready', rlvl: 'warn' }),
+        ST('Proposal-only', { blocks: [op1, tr, K.answer({ follow: [] }), K.plan('pending', ['A', 'B'], { off: true, note: 'This host is in proposal-only mode. You can read the plan, but PE will not run it.' })], v: this.V('warn', 'Result ready', 'Proposal-only mode: PE can plan but not act on this host.'), comp: 'off', compOpt: { reason: 'Proposal-only mode. Messages are disabled; PE can still show plans.', ph: 'Disabled in proposal-only mode' }, rst: 'Result ready', rlvl: 'warn' }),
+        ST('Budget exhausted', { blocks: [op1, tr, K.answer({ follow: [] }), K.note('crit', '⚠', 'Model budget reached. PE stopped asking the model. Your thread and its evidence stay readable; you can still run your own commands. New analysis resumes at 00:00.')], v: this.V('crit', 'Model budget reached', 'PE has stopped analysing. Nothing is running.'), bud: 100, comp: 'off', compOpt: { reason: 'Budget used up. Resets at 00:00.', ph: 'Disabled until the budget resets' }, rst: 'Needs you', rlvl: 'crit' })] },
+      { n: 10, name: 'First run', desc: 'Empty list, the invitation, the first conversation.', states: [
+        ST('Empty', { railEmpty: true, blocks: [blk('Invite', { invH: 'Ask about your homelab.', invP: 'Describe what is wrong or what you want. PE looks, tells you what it found, and proposes options. Nothing changes until you confirm.', prompts: ['The download apps lost internet after the reboot. Figure out why.', 'Why is the disk on /mnt/media at 87%?', 'Which certificates expire in the next 30 days?'] })], v: this.V('none', 'No conversations yet', 'Pick a prompt or write your own.'), title: 'New conversation', bud: 0, hideTitleSub: true, noCur: true }),
+        ST('First message', { railOnlyCur: true, blocks: [K.op('Which certificates expire in the next 30 days?', { by: 'You · 14:30' }), K.agent({ head: 'PE AGENT · 14:30', paras: ['One certificate is inside 30 days: `vault.casalan.com`, 9 days left [1].'], streaming: true, streamText: 'Checking the other two…', sources: ['Certificate store: 3 certificates read'], srcSum: '1 source' })], v: this.V('ok', 'Looking into it', 'Read-only.'), title: 'Which certificates expire in the next 30 days?', grp: 'Working', rst: 'Looking into it', rlvl: 'ok', bud: 3, comp: 'busy' })] }
+    ];
+    return flows;
+  }
+
+  comps() {
+    const K = this.kit(), S = this.state;
+    const G = (title, label, blocks, wide) => ({ title, label, blocks, hasTitle: true, wrap: 'padding-top:6px;border-top:1px dashed var(--pe-border-dash)' });
+    const pl = (ps, keys, o) => K.plan(ps, keys, o);
+    const T = K.trail();
+    return [
+      G('00 · STATUS VOCABULARY', 'Verdict strip, 12 states', [['none', 'Getting ready', 'Queued. Nothing has started.'], ['ok', 'Looking into it', 'Read-only investigation.'], ['warn', 'Result ready', 'Asks something of you.'], ['warn', 'Needs your call', 'A repair plan is waiting.'], ['ok', 'Working', 'Executing the confirmed plan.'], ['crit', 'Paused: something unexpected changed', 'PE stopped. You choose.'], ['ok', 'Checking it worked', 'PE is running its checks.'], ['ok', 'Done and verified', 'All checks passed.'], ['high', "Didn't work", 'A check failed.'], ['warn', 'Rolled back', 'The run was undone.'], ['crit', "Needs you: PE isn't sure what state this is in", 'PE lost track. Review before acting.'], ['none', 'Scrapped', 'You discarded the plan.']].map(x => K.ver(x[0], x[1], x[2]))),
+      G('01 · OPERATOR MESSAGE', 'Plain · with references · from an incident', [K.op(T0), K.op('Look at @vpn-gateway and the `media` stack.', { chips: [{ cls: 'pe-ref', txt: 'vpn-gateway' }, { cls: 'pe-ref', txt: 'media stack' }] }), K.op('Look into this incident.', { by: 'Opened from incident · 14:10', chips: [{ cls: 'pe-ref incident', txt: 'INC-2291' }] })]),
+      G('02 · AGENT MESSAGE', 'Streaming · evidence chips · known vs unsure · loading', [K.skel(), K.agent({ paras: ["The VPN gateway container came back up before its port-forward was assigned, so the apps that join its network can't route."], streaming: true, streamText: 'Reading the network config…' }), K.answer()]),
+      G('03 · ACTIVITY TRAIL', 'Collapsed · expanded with read, denied, failed', [T, K.trailLong()]),
+      G('04 · PLAN CARD', 'Pending (2) · pending (3, swipe on phone) · edited · confirmed', [pl('pending', ['A', 'B']), pl('pending', ['A', 'B', 'C']), pl('edited', ['A3', 'B'], { diff: [{ c: 'del', txt: '- scope: qbittorrent, sonarr, radarr, prowlarr' }, { c: 'add', txt: '+ scope: qbittorrent, sonarr, radarr' }], note: 'You edited option A. Confirm again to run.' }), pl('confirmed', ['A3'], { foot: 'Confirmed by Alex K. at 14:18 · fingerprint `d04e·b8a1`' })]),
+      G('04b · PLAN CARD', 'Superseded · scrapped · expired · proposal-only', [pl('superseded', ['A', 'B'], { note: 'Replaced by a newer plan.' }), pl('scrapped', ['A', 'B']), pl('expired', ['A', 'B'], { note: 'Not confirmed within 24 h. The facts it relied on may have changed. Ask PE for a fresh plan.' }), pl('pending', ['A', 'B'], { off: true, note: 'Proposal-only mode: you can read this plan but PE will not run it.' })]),
+      G('05 · EDIT SCOPE', 'Untouched · changed (needs re-confirmation) · locked items', [K.scope({}), K.scope({ off: { prowlarr: true }, showExcl: true, changed: true })]),
+      G('06 · CONFIRM SHEET', 'Clean · with a backup warning', [K.sheetB('A3'), K.sheetB('C')]),
+      G('07 · EXECUTION TIMELINE', 'Healthy · paused by you · done', [K.run({ pauseBtn: true, pct: 60, barCap: 'step 3 of 5', steps: K.stepsRun(3) }), K.run({ lvl: 'warn', pauseBtn: true, badge: 'PAUSED BY YOU', meta: 'paused 14:20', steps: [K.rs('done', 'Checkpoint taken', '14:19:02'), K.rs('done', 'Recreate `qbittorrent`', '14:19:14 · healthy'), K.rs('paused', 'Recreate `sonarr`', 'waiting for you'), K.rs('pending', 'Recreate `radarr`')] }), K.run({ done: true, badge: 'DONE', steps: K.stepsRun(5).map(r => Object.assign({}, r, { cls: 'pe-rail-item is-done', marker: 'pe-marker done', mark: '✓', line: 'pe-rail-line done', hasOut: false })) })]),
+      G('08 · TRIPWIRE BANNER', 'Interrupts the timeline', [K.tw()]),
+      G('09 · INTERJECT / TAKE OVER', 'Run live · paused · operator-driven', [K.note('warn', '!', 'You sent a message, so PE paused the run at step 3. Resume when you are ready.'), K.take(), K.compB('live'), K.compB('paused'), K.compB('take')]),
+      G('10 · VERIFICATION RESULT', 'All pass · one failed · could not check', [K.verify('ok'), K.verify('fail'), K.verify('unk')]),
+      G('11 · CLOSE AND LEARN', 'Memory candidates', [K.learn()]),
+      G('12 · SYSTEM NOTICES', 'Quiet, in-thread. Never toasts', [K.note('', '✈', 'PE opened this conversation after the nightly certificate check.'), K.note('warn', '!', 'The host is still settling after a reboot. Changes are disabled for about 4 minutes.'), K.note('warn', '!', 'Model budget 80% used. At 100% PE stops asking the model.'), K.note('crit', '⚠', 'PE paused this because a file outside the plan changed.'), K.note('ok', '✓', 'Checkpoint taken: `ckpt-1419`.')]),
+      G('13 · COMPOSER', 'Idle · busy · off (proposal-only) · off (budget)', [K.compB('idle', { text: 'Why did @vpn-gateway restart?' }), K.compB('busy'), K.compB('off', { reason: 'Proposal-only mode. Messages are disabled; PE can still show plans.', ph: 'Disabled in proposal-only mode' }), K.compB('off', { reason: 'Budget used up. Resets at 00:00.', ph: 'Disabled until the budget resets' })]),
+      G('14 · BUDGET METER', 'Normal · 80% warn · limit reached', [K.bud(34, "Normal. Nothing to do."), K.bud(82, 'Warn at 80%. PE says what happens at the limit.'), K.bud(100, 'Stopped. Reading and your own commands still work; new analysis resumes at 00:00.')]),
+      G('15 · INVITE (FIRST RUN)', 'Empty state. Personality allowed here', [blk('Invite', { invH: 'Ask about your homelab.', invP: 'Describe what is wrong or what you want. PE looks, tells you what it found, and proposes options. Nothing changes until you confirm.', prompts: ['The download apps lost internet after the reboot. Figure out why.', 'Why is the disk on /mnt/media at 87%?', 'Which certificates expire in the next 30 days?'] })])
+    ];
+  }
+
+  renderVals() {
+    const S = this.state, me = this, isComps = S.mode === 'components';
+    const flows = isComps ? [] : this.defs();
+    const fl = flows.find(f => f.n === S.flow) || flows[0] || { states: [], phone: false };
+    const stI = Math.min(S.st, Math.max(fl.states.length - 1, 0));
+    const st = fl.states[stI] || {};
+    const dev = fl.phone && !isComps ? 'phone' : S.dev, isPhone = dev === 'phone', isDesk = !isPhone;
+    const bud = this.budget(st.bud != null ? st.bud : 34);
+    // thread blocks
+    let blocks = st.blocks || [];
+    if (!isComps && S.scope) { const i = blocks.findIndex(b => b.isPlan && b.canAct); if (i > -1) { blocks = blocks.slice(); blocks.splice(i + 1, 0, this.kit().scope({ live: true })); } }
+    if (!isComps && S.scrapped) { const i = blocks.findIndex(b => b.isPlan && b.ptext === 'SCRAPPED'); if (i > -1 && !blocks.some(b => b.isNote && b.g === '·' && /scrapped/i.test(b.segs[0].txt))) { blocks = blocks.slice(); blocks.splice(i + 1, 0, this.kit().note('', '·', 'You scrapped this plan. Nothing was changed. Tell PE what to do instead.')); } }
+    const groups = isComps ? this.comps() : [{ title: '', label: '', hasTitle: false, wrap: '', blocks }];
+    // rail
+    const base = [{ id: 'n1', g: 'Needs you', t: 'Renew vault certificate before it expires', o: 'pe', st: 'Needs your call', l: 'warn', age: '12m', dot: true },
+      { id: 'w1', g: 'Working', t: 'Prune unused images on the media stack', o: 'you', st: 'Working', l: 'ok', age: '3m' },
+      { id: 'r1', g: 'Recent', t: 'Why did Grafana lose its datasource?', o: 'you', st: 'Done and verified', l: 'ok', age: '2d' },
+      { id: 'r2', g: 'Recent', t: 'Disk 87% on /mnt/media', o: 'incident', st: 'Scrapped', l: 'none', age: '3d' },
+      { id: 'r3', g: 'Recent', t: 'Explain the nightly backup schedule', o: 'you', st: 'Done and verified', l: 'ok', age: '5d' }];
+    let rows = base.slice(); const isPE = st.origin === 'pe';
+    if (isPE) rows = rows.filter(r => r.id !== 'n1');
+    if (st.railOnlyCur) rows = [];
+    if (!st.noCur && !st.railEmpty) rows.unshift({ id: 'cur', g: st.grp || 'Needs you', t: st.title || '', o: st.origin || 'you', st: st.rst || '', l: st.rlvl || 'none', age: 'now', dot: st.rlvl === 'warn' || st.rlvl === 'crit' });
+    if (st.railEmpty) rows = [];
+    const ico = { you: '❯', incident: '⚠', pe: '✈' };
+    const rail = ['Needs you', 'Working', 'Recent'].map(n => ({ name: n.toUpperCase(), rows: rows.filter(r => r.g === n) })).filter(g => g.rows.length).map(g => ({ name: g.name, n: g.rows.length, rows: g.rows.map(r => ({ cls: 'pe-con-row' + (r.id === 'cur' ? ' is-sel' : ''), ico: ico[r.o], origin: { you: 'You asked', incident: 'From an incident', pe: 'PE started it' }[r.o], title: r.t, age: r.age, led: r.dot ? 'pe-led ' + (r.l === 'crit' ? 'crit' : 'warn') : '', st: r.st, stCls: 'st ' + r.l, go: () => { if (r.id === 'cur' && isPhone) me.go({ st: Math.min(1, fl.states.length - 1) }); } })) }));
+    // composer
+    const comp = this.composer(st.comp || 'idle', Object.assign({ text: st._draft && !S.draft ? st._draft : '' }, st.compOpt || {}));
+    // sheet
+    const sheetKey = st.forceSheet || S.sheetKey || 'A';
+    const sheetOn = !isComps && (!!st.forceSheet || S.sheet);
+    const showCtx = !isComps && (isDesk ? !S.ctxHide : (S.ctx || !!st.forceCtx)) && !(isPhone && st.view === 'list');
+    const ctxOnPhone = isPhone && showCtx;
+    const sc = S.fit ? Math.min(1, Math.max(S.sw, 320) / 1440) : 1;
+    const showMain = !(isPhone && st.view === 'list') , phoneList = isPhone && st.view === 'list';
+    const conCls = 'pe-con' + (isComps ? ' solo' : isPhone ? ' solo' : (S.ctxHide ? ' no-ctx' : ''));
+    const ctabs = ['Evidence', 'Scope', 'Limits', 'Record'].map(l => ({ label: l, cls: 'pe-ctab' + (S.ctab === l ? ' is-active' : ''), go: () => me.setState({ ctab: l }) }));
+    const fnames = fl.states.map((s, i) => ({ label: s.label, cls: 'rv-s' + (i === stI ? ' on' : ''), go: () => me.go({ st: i }) }));
+    return {
+      stageRef: this.stageRef, isFlows: !isComps, isComps, isPhone, isDesk,
+      modes: [['flows', 'Flows 1–10'], ['components', 'Component sheet']].map(([k, l]) => ({ label: l, cls: 'rv-b' + (S.mode === k ? ' on' : ''), go: () => me.go({ mode: k }) })),
+      devs: [['desktop', 'Desktop 1440×900'], ['phone', 'Phone 390×844']].map(([k, l]) => ({ label: l, cls: 'rv-b' + (dev === k ? ' on' : ''), go: () => me.go({ dev: k }) })),
+      showFit: isDesk && !isComps, fitLabel: S.fit ? 'Fit to width' : '100%', fitCls: 'rv-b', toggleFit: () => me.setState({ fit: !S.fit }),
+      flowTabs: flows.map(f => ({ label: f.n + ' ' + f.name, cls: 'rv-b' + (f.n === S.flow ? ' on' : ''), go: () => me.go({ flow: f.n, st: 0 }) })),
+      stateTabs: fnames, flowDesc: fl.desc || '',
+      outerStyle: isComps ? 'width:' + (isPhone ? 390 : 1100) + 'px;max-width:100%' : isPhone ? '' : 'width:' + Math.round(1440 * sc) + 'px;height:' + Math.round(900 * sc) + 'px',
+      frameStyle: isComps ? 'width:100%;border:1px solid var(--pe-border);border-radius:' + (isPhone ? 30 : 14) + 'px' : isPhone ? 'width:390px;height:844px;border-radius:30px;border:1px solid var(--pe-border-strong)' : 'width:1440px;height:900px;transform:scale(' + sc + ');transform-origin:0 0;border:1px solid var(--pe-border);border-radius:12px',
+      showTopbar: isDesk && !isComps, showStatus: isPhone && !isComps,
+      tabs: ['Overview', 'Services', 'Backups', 'Network', 'Actions', 'Console'].map(t => ({ label: t, cls: 'tab' + (t === 'Console' ? ' active' : '') })), topStatus: 'pipeline idle · scanned 4 min ago',
+      conCls, conStyle: isComps ? 'height:auto' : 'flex:1;min-height:0;height:auto',
+      showRail: !isComps && (isDesk || phoneList), phoneList, railEmpty: !!st.railEmpty, rail,
+      showMain: isComps || showMain, showTop: !isComps, title: st.title || '', titleSub: st.hideTitleSub ? '' : ({ you: 'you asked', incident: 'from an incident', pe: 'PE started this' }[st.origin || 'you'] + ' · 14:06'),
+      bud, toggleCtx: () => isDesk ? me.setState({ ctxHide: !S.ctxHide }) : me.setState({ ctx: !S.ctx }), ctxBtn: S.ctxHide ? 'Show panel' : 'Hide panel',
+      ver: st.v || this.V('none', '', ''), groups, scrollStyle: isComps ? 'overflow:visible;flex:none;padding:18px 24px 26px;gap:30px' : '',
+      showComposer: !isComps, comp,
+      showCtx, ctxStyle: ctxOnPhone ? 'position:absolute;left:0;right:0;bottom:0;height:64%;z-index:6;border-left:none;border-top:1px solid var(--pe-border-strong);border-radius:22px 22px 30px 30px;background:var(--pe-panel)' : '',
+      scrimStyle: ctxOnPhone ? 'position:absolute;inset:0;z-index:5;background:rgba(4,8,14,.72)' : 'display:none', grabStyle: ctxOnPhone ? 'margin:10px auto 0' : 'display:none',
+      ctabs, ct: { evidence: S.ctab === 'Evidence', scope: S.ctab === 'Scope', limits: S.ctab === 'Limits', record: S.ctab === 'Record' },
+      ctxCont: [['vpn-gateway', 'ok', 'healthy'], ['qbittorrent', 'warn', 'unreachable'], ['sonarr', 'warn', 'unreachable'], ['radarr', 'warn', 'unreachable'], ['prowlarr', 'warn', 'unreachable']].map(c => ({ n: c[0], led: 'pe-led ' + c[1], s: c[2], lvl: c[1] })),
+      sheetOn, sh: this.sheet(sheetKey), sheetCls: isPhone ? 'pe-sheet' : 'pe-sheet center', grabStyle2: isPhone ? '' : 'display:none', closeSheet: () => me.setState({ sheet: false })
+    };
+  }
+}
+</script>
+</body>
+</html>

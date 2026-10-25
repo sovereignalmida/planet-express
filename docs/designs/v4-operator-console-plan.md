@@ -172,3 +172,16 @@ candidates at close; PE-initiated conversations for automated work.
   grants.
 - Cost: every turn spends model budget. The budget display is part of P1, not an afterthought.
 - UI scope is large. The design brief limits it to a small set of new components built on the existing design system.
+
+## 9. Design received; engineering answers to its open questions (2026-10-25)
+
+The Claude Design package is in `docs/designs/planet_express_design_v23/` (`handoffs/V4-OPERATOR-CONSOLE.md`, `screens/Console.dc.html`,
+`design-system/components/25-console.css`, also appended to `static/cockpit.css`; drift check passes with the single file).
+
+1. **Who writes the verdict sentence?** PE, from a template over state and counts. Agent text is untrusted and never sets a verdict.
+2. **`could_not_check`** is a first-class verification result, and it never counts as a pass. Today an unrunnable check fails closed; P2 makes
+   it a distinct, visible result.
+3. **Plan expiry.** A plan is valid for 24 hours or until the evidence it rests on changes (scope or grant hash re-derived), whichever is first.
+   Expired asks the operator to re-check and re-propose; it never executes.
+4. **Missions replaced?** Yes, in P4. Old `/missions/<id>` links redirect to the matching work-log entry. Work log is a list inside the Console.
+5. **Drift check with one file:** confirmed.
