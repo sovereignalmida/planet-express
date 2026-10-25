@@ -41,7 +41,7 @@ class CoreOps:
     def op_whoami(self):
         return {"euid": os.geteuid(), "egid": os.getegid(), "groups": os.getgroups()}
 
-    def op_launch(self, session_id, uid, cwd, argv, env=None, token="T" * 48, sock_dir=False, make_cwd=True):
+    def op_launch(self, session_id, uid, cwd, argv, env=None, token="T" * 48, sock_dir=False, make_cwd=True, state_dir=None):
         if make_cwd and not os.path.isdir(cwd):
             os.mkdir(cwd, 0o700)
         if sock_dir:                             # what the Supervisor's SessionSockets does: BEFORE the launch
@@ -52,8 +52,12 @@ class CoreOps:
             listener.bind(os.path.join(directory, "worker.sock"))
             listener.listen(4)
             self.listeners[session_id] = listener
+        if state_dir is not None:                # what a conversation does: Core makes it beside the workspaces, once
+            path = os.path.join(os.path.dirname(cwd), state_dir)
+            if not os.path.isdir(path):
+                os.mkdir(path, 0o700)
         spec = LaunchSpec(uid=uid, cwd=cwd, argv=tuple(argv), env=env or {"PATH": "/usr/bin:/bin"}, token=token,
-                          sock_dir=sock_dir)
+                          sock_dir=sock_dir, state_dir=state_dir)
         cs = self.c.launch(session_id, spec)
         self.sessions[session_id] = cs
         return {"session_id": cs.session_id, "kind": cs.kind, "cgroup_path": cs.cgroup_path,

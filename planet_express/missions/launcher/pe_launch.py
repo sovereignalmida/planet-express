@@ -6,7 +6,7 @@ be audited without the rest of the project. It is installed as a root-owned file
 non-symlink directory chain and run either by `sudo -n` (Ubuntu, unprivileged Core) or directly (MOS, Core is
 root). It takes NO arguments (the sudoers rule forbids any) and reads ONE JSON spec on stdin:
 
-    {session_id, worker_uid, cwd, argv, env, token, sock_dir?}
+    {session_id, worker_uid, cwd, argv, env, token, sock_dir?, state_dir?}
 
 Everything that decides authority comes from the root-owned launch.conf, never from the spec: the uid range,
 the gid (always equal to the uid), the cgroup root, the workspace root, the socket root, the Core identity.
@@ -20,6 +20,8 @@ What it does, in order (any failure before the cgroup join removes what it made)
   3. create `<cgroup_root>/<session_id>` (must not exist) on a cgroup2 mount, give Core the control files
      (cgroup.procs, cgroup.freeze, cgroup.kill), set pids.max; hand the workspace to the session uid;
      optionally take over the per-session socket directory Core already made and filled (chown to the session);
+     optionally adopt a per-conversation state directory `C-<id>` Core made beside the workspaces (the directory itself,
+     never its contents), so state a session writes there survives for the next session run as the same uid;
   4. token pipe -> fd 3; fd 0 /dev/null; fds 1 and 2 stay the merged output pipe Core holds; nothing else;
   5. join the cgroup, setgroups([]), setgid, setuid, verify root cannot be regained, no_new_privs, setsid,
      reset rlimits and signals, fchdir to the already-verified cwd;
@@ -55,8 +57,9 @@ MAX_ARGV_ITEMS, MAX_ARG_CHARS, MAX_ARGV_CHARS = 64, 4096, 32_768
 MAX_ENV_ITEMS, MAX_ENV_VALUE_CHARS, MAX_ENV_CHARS = 64, 4096, 32_768
 MAX_CWD_CHARS = 1024
 TOKEN_CHARS = (16, 256)
-SPEC_KEYS = frozenset({"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir"})
-SPEC_REQUIRED = SPEC_KEYS - {"sock_dir"}
+STATE_DIR = re.compile(r"C-[A-Za-z0-9_-]{1,62}")
+SPEC_KEYS = frozenset({"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir", "state_dir"})
+SPEC_REQUIRED = SPEC_KEYS - {"sock_dir", "state_dir"}
 CONF_KEYS = frozenset({"version", "uid_min", "uid_max", "core_uid", "core_gid", "cgroup_root",
                        "workspace_root", "sock_root", "pids_max"})
 
@@ -107,6 +110,8 @@ def check_wire(obj):
         raise Refused("token")
     if "sock_dir" in obj and not isinstance(obj["sock_dir"], bool):
         raise Refused("sock_dir")
+    if "state_dir" in obj and (not isinstance(obj["state_dir"], str) or not STATE_DIR.fullmatch(obj["state_dir"])):
+        raise Refused("state_dir")
     return obj
 
 
@@ -398,6 +403,34 @@ def adopt_sock_dir(conf, session_id, uid, gid):
     return conf["sock_root"] + "/" + session_id
 
 
+def adopt_state_dir(conf, name, uid, cwd_fd):
+    """A conversation's state (the agent's home and config) must outlive one session but belong to exactly one uid. Core made
+    `<workspace_root>/<name>` (`C-<id>`) beside the session workspaces; here the helper checks that it is a real directory, not
+    the session's own cwd, owned by Core (first use) or already by this uid, and hands the DIRECTORY to the session (uid, Core's
+    group, setgid 2770) so only that uid and Core can reach it. It never lists, opens or changes anything inside: what a session
+    left there is its own business, and a directory owned by any other uid is refused, so one conversation can never be handed
+    another's state. Nothing is created or removed here (Core's cleanup removes it)."""
+    root_fd = open_dir_nofollow(conf["workspace_root"])
+    try:
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+        except OSError:
+            raise Refused("state dir") from None
+    finally:
+        os.close(root_fd)
+    try:
+        info, cwd_info = os.fstat(fd), os.fstat(cwd_fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (uid, conf["core_uid"]):
+            raise Refused("state dir owner")
+        if (info.st_dev, info.st_ino) == (cwd_info.st_dev, cwd_info.st_ino):
+            raise Refused("state dir is the workspace")
+        os.fchown(fd, uid, conf["core_gid"])
+        os.fchmod(fd, 0o2770)
+    finally:
+        os.close(fd)
+    return conf["workspace_root"] + "/" + name
+
+
 def token_pipe(token):
     """A pipe holding the token (it is far smaller than the pipe buffer); returns the read end."""
     read_end, write_end = os.pipe()
@@ -483,6 +516,7 @@ def launch(raw, conf):
     cgroup_made = False
     try:
         sock_path = adopt_sock_dir(conf, sid, uid, gid) if spec.get("sock_dir") else None
+        state_path = adopt_state_dir(conf, spec["state_dir"], uid, cwd_fd) if spec.get("state_dir") else None
         cgroup_path, _, cg_fd = make_cgroup(conf, sid, uid)
         cgroup_made = True
         hand_over_workspace(cwd_fd, uid, conf)
@@ -502,6 +536,8 @@ def launch(raw, conf):
     status = {"ok": True, "session_id": sid, "uid": uid, "gid": gid, "cgroup": cgroup_path}
     if sock_path:
         status["sock_dir"] = sock_path
+    if state_path:
+        status["state_dir"] = state_path
     arrange_fds(token_fd)
     signal.alarm(0)
     say(status)

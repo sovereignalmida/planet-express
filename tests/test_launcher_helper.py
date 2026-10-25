@@ -402,3 +402,87 @@ def test_a_group_with_members_is_refused_and_an_empty_one_is_not(monkeypatch):
 def test_the_helpers_own_umask_does_not_depend_on_the_caller(tmp_path):
     text = HELPER_PATH.read_text()
     assert "os.umask(0o022)" in text and "os.fchmod(dir_fd, 0o755)" in text      # cgroup directory modes are explicit
+
+
+# ── the per-conversation state directory Core made beside the workspaces ─────────────────────────
+
+def make_state_dir(tmp_path, name="C-conv1", mode=0o700):
+    conf = good_conf(tmp_path)
+    root = tmp_path / "ws"
+    (root / name).mkdir(parents=True, exist_ok=True)
+    (root / name).chmod(mode)
+    (root / "S-cwd").mkdir(exist_ok=True)
+    cwd_fd = os.open(root / "S-cwd", os.O_RDONLY | os.O_DIRECTORY)
+    return conf, root, cwd_fd
+
+
+def test_a_state_directory_is_adopted_by_handing_over_the_directory_itself_and_nothing_inside(tmp_path):
+    conf, root, cwd_fd = make_state_dir(tmp_path)
+    inside = root / "C-conv1" / "cfg"
+    inside.mkdir()
+    (inside / "settings.json").write_text("{}")
+    before = os.stat(inside / "settings.json")
+    try:
+        path = helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd)
+        info = os.stat(path)
+        assert path == str(root / "C-conv1") and info.st_uid == ME and oct(info.st_mode & 0o7777) == "0o2770"
+        after = os.stat(inside / "settings.json")
+        assert (after.st_ino, after.st_mtime_ns, after.st_mode) == (before.st_ino, before.st_mtime_ns, before.st_mode)   # untouched
+    finally:
+        os.close(cwd_fd)
+
+
+def test_a_state_directory_adopted_before_is_adopted_again_by_the_same_uid(tmp_path):
+    conf, root, cwd_fd = make_state_dir(tmp_path)
+    try:
+        helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd)
+        os.chmod(root / "C-conv1", 0o700)
+        helper.adopt_state_dir({**conf, "core_uid": ME + 1}, "C-conv1", ME, cwd_fd)      # owned by the session uid now, not Core
+        assert oct(os.stat(root / "C-conv1").st_mode & 0o7777) == "0o2770"
+    finally:
+        os.close(cwd_fd)
+
+
+def test_a_state_directory_owned_by_neither_core_nor_the_session_uid_is_refused(tmp_path):
+    conf, _, cwd_fd = make_state_dir(tmp_path)
+    try:
+        with pytest.raises(helper.Refused, match="state dir owner"):
+            helper.adopt_state_dir({**conf, "core_uid": ME + 1}, "C-conv1", ME + 2, cwd_fd)     # another conversation's uid
+    finally:
+        os.close(cwd_fd)
+
+
+@pytest.mark.parametrize("make, why", [
+    (lambda root: None, "state dir"),                                                       # missing
+    (lambda root: (root / "C-link").symlink_to(root / "C-conv1"), "state dir"),             # a symlink
+    (lambda root: (root / "C-file").write_text("x"), "state dir"),                          # not a directory
+])
+def test_a_missing_symlinked_or_non_directory_state_dir_is_refused(tmp_path, make, why):
+    conf, root, cwd_fd = make_state_dir(tmp_path)
+    make(root)
+    try:
+        for name in ("C-missing", "C-link", "C-file"):
+            with pytest.raises(helper.Refused, match=why):
+                helper.adopt_state_dir(conf, name, ME, cwd_fd)
+    finally:
+        os.close(cwd_fd)
+
+
+def test_the_session_s_own_workspace_cannot_be_its_state_directory(tmp_path):
+    conf, root, _ = make_state_dir(tmp_path)
+    cwd_fd = os.open(root / "C-conv1", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(helper.Refused, match="state dir is the workspace"):
+            helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd)
+    finally:
+        os.close(cwd_fd)
+
+
+def test_a_symlinked_workspace_root_is_refused_for_the_state_dir_too(tmp_path):
+    conf, root, cwd_fd = make_state_dir(tmp_path)
+    (tmp_path / "wslink").symlink_to(root)
+    try:
+        with pytest.raises(helper.Refused):
+            helper.adopt_state_dir({**conf, "workspace_root": str(tmp_path / "wslink")}, "C-conv1", ME, cwd_fd)
+    finally:
+        os.close(cwd_fd)

@@ -42,6 +42,12 @@ BAD = {
     "token space": good_spec(token="t" * 20 + " " + "t" * 20),
     "token non-ascii": good_spec(token="é" * 20),
     "sock_dir not bool": good_spec(sock_dir=1),
+    "state_dir not a string": good_spec(state_dir=1),
+    "state_dir without the C- prefix": good_spec(state_dir="S-abc"),
+    "state_dir empty id": good_spec(state_dir="C-"),
+    "state_dir slash": good_spec(state_dir="C-a/b"),
+    "state_dir dotdot": good_spec(state_dir="C-.."),
+    "state_dir too long": good_spec(state_dir="C-" + "x" * 63),
     "not a dict": ["x"],
 }
 
@@ -54,7 +60,8 @@ def test_a_bad_spec_is_refused_by_both_sides(name):
         helper.check_wire(BAD[name])
 
 
-@pytest.mark.parametrize("spec", [good_spec(), good_spec(sock_dir=True), good_spec(env={}),
+@pytest.mark.parametrize("spec", [good_spec(), good_spec(sock_dir=True), good_spec(env={}), good_spec(state_dir="C-conv_1-a"),
+                                  good_spec(state_dir="C-" + "x" * 62),
                                   good_spec(argv=["/usr/bin/python3", "-c", "print(1)"])])
 def test_a_good_spec_is_accepted_by_both_sides(spec):
     assert check_wire(spec) is spec
@@ -72,6 +79,13 @@ def test_the_two_bounds_tables_are_the_same():
 def test_the_wire_form_never_carries_a_gid_or_a_root():
     wire = json.loads(LaunchSpec(uid=61001, cwd="/w/x", argv=("/bin/true",), token="t" * 40).to_wire("S-1"))
     assert set(wire) == {"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir"}
+
+
+def test_the_state_dir_is_on_the_wire_only_when_it_is_used():
+    used = json.loads(LaunchSpec(uid=61001, cwd="/w/x", argv=("/bin/true",), token="t" * 40, state_dir="C-abc").to_wire("S-1"))
+    assert used["state_dir"] == "C-abc"
+    with pytest.raises(SpecError):
+        LaunchSpec(uid=61001, cwd="/w/x", argv=("/bin/true",), token="t" * 40, state_dir="../etc").to_wire("S-1")
 
 
 def test_oversize_total_is_refused_before_it_can_block_a_pipe():

@@ -260,3 +260,43 @@ def test_planted_project_settings_are_ignored_and_pes_own_hook_still_fires(host,
     print("settings-source results:", results)
     assert results["control"]["planted_hook_ran"] and results["control"]["pe_hook_ran"], results       # the probe is not vacuous
     assert results["forced"]["pe_hook_ran"] and not results["forced"]["planted_hook_ran"], results
+
+
+def test_a_conversation_state_directory_survives_across_sessions_of_the_same_uid_and_is_closed_to_every_other(host):
+    """`state_dir` under the real helper: session A writes into the adopted directory; session B (new session id, new workspace, new
+    cgroup, same uid) reads it back; a session of another uid is refused; and the directory itself, not its contents, was handed over."""
+    conv = f"C-conv-{os.getpid()}-{host.n}"
+    state = f"{WS}/{conv}"
+    env = {"PATH": "/usr/bin:/bin", "STATE": state}
+    sids = []
+    try:
+        a = host.sid("stA")
+        sids.append(a)
+        host.launch(["/bin/sh", "-c", 'mkdir -m 700 "$STATE/cfg" "$STATE/.cache" && echo remembered > "$STATE/cfg/fact"'], uid=UIDS[0], sid=a,
+                    env=env, state_dir=conv)
+        assert wait_empty(host, a)
+        host.finish(a)
+        sids.remove(a)
+        info = os.stat(state)
+        assert info.st_uid == UIDS[0] and oct(info.st_mode & 0o7777) == "0o2770"
+        b = host.sid("stB")
+        sids.append(b)
+        host.launch(["/bin/sh", "-c", 'cat "$STATE/cfg/fact" > "$STATE/cfg/seen"'], uid=UIDS[0], sid=b, env=env, state_dir=conv)
+        assert wait_empty(host, b)
+        assert open(f"{state}/cfg/seen").read().strip() == "remembered"
+        host.finish(b)
+        sids.remove(b)
+        c = host.sid("stC")
+        with pytest.raises(RuntimeError, match="state dir owner"):
+            host.launch(["/bin/true"], uid=UIDS[1], sid=c, env=env, state_dir=conv)         # another uid can never be handed it
+        os.makedirs(host.cwd(c), exist_ok=True)
+        os.symlink(state, f"{WS}/C-link")
+        with pytest.raises(RuntimeError, match="state dir"):
+            host.launch(["/bin/true"], uid=UIDS[0], sid=host.sid("stD"), env=env, state_dir="C-link")
+    finally:
+        for s in sids:
+            host.finish(s)
+        for path in (f"{WS}/C-link",):
+            if os.path.islink(path):
+                os.unlink(path)
+        shutil.rmtree(state, ignore_errors=True)
