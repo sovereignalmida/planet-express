@@ -95,6 +95,14 @@ MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
 CLEANUP_PREFIX = "X-"          # a cleanup session is named for the session whose workspace it empties
 CLEANUP_SH, CLEANUP_FIND = "/bin/sh", "/usr/bin/find"
+
+
+def cleanup_id(session_id: str) -> str:
+    """The cleanup session's own id: fixed for a given session (a restarted Core finds it again) and always inside the
+    launcher's 64-character limit, whatever the length of the session id."""
+    return CLEANUP_PREFIX + hashlib.sha256(session_id.encode()).hexdigest()[:40]
+
+
 # The session may have removed its own write permission on a directory it made, so restore the owner's access first
 # (chmod does not follow symlinks), then delete. The workspace path is a positional parameter, never part of the script.
 CLEANUP_SCRIPT = 'chmod -R u+rwX -- "$1" 2>/dev/null; exec ' + CLEANUP_FIND + ' "$1" -xdev -mindepth 1 -delete'
@@ -1243,7 +1251,7 @@ class Supervisor:
         if not SESSION_ID.fullmatch(session_id):
             return False                                    # never build a path or a command from anything but a session id
         workspace = self.workspace_dir / session_id
-        cleaner_id = CLEANUP_PREFIX + session_id
+        cleaner_id = cleanup_id(session_id)
         cleaner = ContainedSession(cleaner_id, "local_cgroup", self.containment.cgroup_path(cleaner_id), uid)
         scratch = self.workspace_dir / cleaner_id
         entry = self._cleaners.get(cleaner_id)
@@ -1276,6 +1284,8 @@ class Supervisor:
             return False
         if self._shutting_down or now < self._cleanup_retry_at.get(session_id, 0.0):
             return False
+        if not self.launcher_ready():
+            return False                                    # no session of any kind starts on a host whose preflight failed
         try:
             scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
             spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)),

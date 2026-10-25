@@ -193,6 +193,7 @@ def test_a_turn_with_home_in_the_workspace_leaves_a_tree_the_helper_then_refuses
 def test_production_cleanup_frees_a_workspace_core_cannot_remove(host):
     """`Supervisor._clear_workspace`, the production path, under the real launcher: a 0700 tree made by the session uid is emptied by a
     cleanup session as the same uid, then the workspace is removed and the uid is free. The same steps run under both Core strategies."""
+    from planet_express.missions.supervisor import cleanup_id
     sid = host.sid("clean")
     host.launch(["/bin/sh", "-c", "mkdir -m 700 .cache && mkdir -m 700 .cache/deep && echo x > .cache/deep/f && chmod 500 .cache/deep && "
                  "mkdir -m 000 .sealed && ln -s /etc .cache/link"], uid=UIDS[0], sid=sid)
@@ -206,6 +207,6 @@ def test_production_cleanup_frees_a_workspace_core_cannot_remove(host):
         done = got["done"]
         time.sleep(0.3)
     assert done, got
-    assert not os.path.exists(ws) and not os.path.exists(f"{WS}/X-{sid}")      # the workspace and the scratch directory are gone
+    assert not os.path.exists(ws) and not os.path.exists(f"{WS}/{cleanup_id(sid)}")      # the workspace and the scratch directory are gone
     assert not host.core.call("uid_in_use", uid=UIDS[0])["in_use"]
-    assert not os.path.exists(f"{SESSIONS}/X-{sid}")                           # and so is the cleanup session's cgroup
+    assert not os.path.exists(f"{SESSIONS}/{cleanup_id(sid)}")                           # and so is the cleanup session's cgroup
