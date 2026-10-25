@@ -93,6 +93,10 @@ MAX_MEMORY_HITS = 20
 MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll (the final drain reads on until it is empty)
 MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
+CLEANUP_PREFIX = "X-"          # a cleanup session is named for the session whose workspace it empties
+CLEANUP_FIND = "/usr/bin/find"
+CLEANUP_WALL_S = 60.0          # a cleanup session that has not finished by then is killed and tried again
+CLEANUP_RETRY_S = 300.0        # after a failed cleanup, wait this long before launching another for the same session
 HOOK_POLICY_ENV_MAX = 3500    # above this the hook policy travels as a file (the launcher caps an environment value at 4096)
 MAX_HOOK_FIELD = 400
 MAX_DECISION_REQUESTS = 5       # worker-raised decision cards per mission; they never approve anything
@@ -317,6 +321,8 @@ class Supervisor:
         self.max_brief_bytes = max_brief_bytes
         self.lease_ttl_s = lease_ttl_s
         self._runs: dict[str, _Run] = {}
+        self._cleaners: dict[str, float] = {}            # cleanup session id -> when it was launched (see `_clear_workspace`)
+        self._cleanup_retry_at: dict[str, float] = {}    # session id -> do not launch another cleanup session before this time
         self._verify_pool: Any = None
         self._verifying: dict[str, Any] = {}
         self._verify_guard = threading.Lock()
@@ -1215,16 +1221,66 @@ class Supervisor:
                 if not self.containment.is_empty(cs):
                     continue
                 self.containment.cleanup(cs)
-                if self.containment.uid_in_use(cs.session_uid):
-                    continue
-                workspace = self.workspace_dir / row["id"]
-                shutil.rmtree(workspace, ignore_errors=True)
-                if workspace.exists():
+                if not self._clear_workspace(row["id"], cs.session_uid):
                     continue
                 freed += int(self.ms.release_session_uid(cs.session_id))
             except Exception as exc:
                 log.warning("could not reap session %s: %s", row["id"], type(exc).__name__)
         return freed
+
+    def _clear_workspace(self, session_id: str, uid: int) -> bool:
+        """True when the dead session's workspace is gone and no process runs as its uid, so the uid may be released.
+
+        A session can leave directories Core cannot remove (the agent CLI makes its cache directory 0700, owned by the
+        session uid). Core never gets more power to delete them; instead the uid that owns them deletes them. A short cleanup
+        session, same uid, is launched from an empty scratch directory (the launcher refuses a workspace holding anything
+        but regular files, so the old one cannot be its cwd) and runs `find <workspace> -mindepth 1 -delete`. Core then
+        removes the empty directory. The uid stays held until all of that has happened. Never blocks: each sweep takes one step.
+        """
+        workspace = self.workspace_dir / session_id
+        cleaner_id = CLEANUP_PREFIX + session_id
+        cleaner = ContainedSession(cleaner_id, "local_cgroup", self.containment.cgroup_path(cleaner_id), uid)
+        scratch = self.workspace_dir / cleaner_id
+        launched_at = self._cleaners.get(cleaner_id)
+        if launched_at is not None:
+            if not self.containment.is_empty(cleaner):
+                if float(self.clock()) - launched_at > CLEANUP_WALL_S:
+                    log.warning("cleanup session %s is overdue: killing it", cleaner_id)
+                    self._cleanup_retry_at[session_id] = float(self.clock()) + CLEANUP_RETRY_S
+                    self.containment.kill(cleaner)
+                return False
+            self.containment.cleanup(cleaner)
+            self._cleaners.pop(cleaner_id, None)
+        else:
+            # Nothing of ours is running it, but a previous Core may have left its cgroup: remove what is provably empty.
+            with contextlib.suppress(Exception):
+                self.containment.kill(cleaner)
+                self.containment.cleanup(cleaner)
+        shutil.rmtree(scratch, ignore_errors=True)
+        if self.containment.uid_in_use(uid):
+            return False
+        shutil.rmtree(workspace, ignore_errors=True)
+        if not workspace.exists():
+            self._cleanup_retry_at.pop(session_id, None)
+            return True
+        now = float(self.clock())
+        if launched_at is not None:
+            log.warning("workspace %s survived its cleanup session: uid %s stays held", workspace, uid)
+            self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
+            return False
+        if now < self._cleanup_retry_at.get(session_id, 0.0):
+            return False
+        try:
+            scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+            spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_FIND, str(workspace), "-xdev", "-mindepth", "1", "-delete"),
+                              env={"PATH": "/usr/bin:/bin"}, token=secrets.token_urlsafe(32), sock_dir=False)
+            self.containment.launch(cleaner_id, spec)
+            self._cleaners[cleaner_id] = now
+        except Exception as exc:
+            self._cleanup_retry_at[session_id] = now + CLEANUP_RETRY_S
+            shutil.rmtree(scratch, ignore_errors=True)
+            log.warning("could not start the cleanup session for %s: %s", session_id, type(exc).__name__)
+        return False
 
     def _settle(self, run: _Run) -> None:
         reason = run.reason or "crash"

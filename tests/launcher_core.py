@@ -118,6 +118,20 @@ class CoreOps:
     def op_read(self, path):
         return {"text": Path(path).read_text()}
 
+    def op_clear_workspace(self, session_id, uid, workspace_dir):
+        """One step of the production `Supervisor._clear_workspace`, against this Core's real containment."""
+        import time
+        from pathlib import Path as P
+
+        from planet_express.missions.supervisor import Supervisor
+        if getattr(self, "sup", None) is None:
+            self.sup = Supervisor.__new__(Supervisor)            # only what `_clear_workspace` reads; no store, no runtime
+            self.sup.workspace_dir, self.sup.containment, self.sup.clock = P(workspace_dir), self.c, time.time
+            self.sup._cleaners, self.sup._cleanup_retry_at = {}, {}
+        done = self.sup._clear_workspace(session_id, uid)
+        return {"done": done, "workspace_exists": os.path.exists(P(workspace_dir) / session_id),
+                "cleaning": sorted(self.sup._cleaners)}
+
     def op_preflight(self, workspace_root, helper, conf, python, strategy):
         from planet_express.missions.launcher.preflight import run_preflight
         low, high = self.c.uid_range[0], self.c.uid_range[1] + 1
@@ -139,7 +153,7 @@ class Core:
 
     @classmethod
     def as_user(cls, uid, **cfg):
-        env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1",
+        env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1", "CASA_CONFIG": str(ROOT / "config.example.yaml"),
                # hostile values Core might carry: sudo (env_reset) must keep every one of them away from the helper
                "LD_PRELOAD": "/nonexistent/evil.so", "LD_LIBRARY_PATH": "/nonexistent", "PYTHONSTARTUP": "/nonexistent"}
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), json.dumps(cfg), "strategy=sudo"],
