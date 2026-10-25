@@ -452,19 +452,38 @@ def test_a_state_directory_owned_by_neither_core_nor_the_session_uid_is_refused(
         os.close(cwd_fd)
 
 
-@pytest.mark.parametrize("make, why", [
-    (lambda root: None, "state dir"),                                                       # missing
-    (lambda root: (root / "C-link").symlink_to(root / "C-conv1"), "state dir"),             # a symlink
-    (lambda root: (root / "C-file").write_text("x"), "state dir"),                          # not a directory
-])
-def test_a_missing_symlinked_or_non_directory_state_dir_is_refused(tmp_path, make, why):
+def test_a_missing_symlinked_or_non_directory_state_dir_is_refused(tmp_path):
     conf, root, cwd_fd = make_state_dir(tmp_path)
-    make(root)
+    (root / "C-link").symlink_to(root / "C-conv1")
+    (root / "C-file").write_text("x")
     try:
         for name in ("C-missing", "C-link", "C-file"):
-            with pytest.raises(helper.Refused, match=why):
+            with pytest.raises(helper.Refused, match="state dir"):
                 helper.adopt_state_dir(conf, name, ME, cwd_fd)
+        assert (root / "C-link").is_symlink() and os.stat(root / "C-conv1").st_mode & 0o7777 == 0o700     # the target was not touched
     finally:
+        os.close(cwd_fd)
+
+
+def test_two_launches_naming_one_state_dir_cannot_both_pass_the_owner_check(tmp_path):
+    """The check and the chown run under an exclusive lock on the directory: with the lock held elsewhere, adoption waits."""
+    import fcntl
+    import threading
+    conf, root, cwd_fd = make_state_dir(tmp_path)
+    holder = os.open(root / "C-conv1", os.O_RDONLY | os.O_DIRECTORY)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    done = threading.Event()
+    thread = threading.Thread(target=lambda: (helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd), done.set()))
+    thread.start()
+    try:
+        assert not done.wait(0.5)                      # blocked behind the lock
+        os.close(holder)
+        holder = None
+        assert done.wait(5)
+    finally:
+        if holder is not None:
+            os.close(holder)
+        thread.join(5)
         os.close(cwd_fd)
 
 
@@ -486,3 +505,10 @@ def test_a_symlinked_workspace_root_is_refused_for_the_state_dir_too(tmp_path):
             helper.adopt_state_dir({**conf, "workspace_root": str(tmp_path / "wslink")}, "C-conv1", ME, cwd_fd)
     finally:
         os.close(cwd_fd)
+
+
+def test_a_state_dir_launch_must_use_the_sessions_own_workspace_as_cwd(tmp_path):
+    conf = good_conf(tmp_path)
+    for cwd in (f"{conf['workspace_root']}/C-conv1", f"{conf['workspace_root']}/C-conv1/sub", f"{conf['workspace_root']}/S-other"):
+        with pytest.raises(helper.Refused, match="own workspace"):
+            helper.launch(json.dumps(good_spec(session_id="S-1", cwd=cwd, state_dir="C-conv1")).encode(), conf)

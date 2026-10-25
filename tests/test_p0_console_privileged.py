@@ -268,7 +268,7 @@ def test_a_conversation_state_directory_survives_across_sessions_of_the_same_uid
     conv = f"C-conv-{os.getpid()}-{host.n}"
     state = f"{WS}/{conv}"
     env = {"PATH": "/usr/bin:/bin", "STATE": state}
-    sids = []
+    sids, refused_ids = [], []
     try:
         a = host.sid("stA")
         sids.append(a)
@@ -286,17 +286,18 @@ def test_a_conversation_state_directory_survives_across_sessions_of_the_same_uid
         assert open(f"{state}/cfg/seen").read().strip() == "remembered"
         host.finish(b)
         sids.remove(b)
-        c = host.sid("stC")
-        with pytest.raises(RuntimeError, match="state dir owner"):
-            host.launch(["/bin/true"], uid=UIDS[1], sid=c, env=env, state_dir=conv)         # another uid can never be handed it
-        os.makedirs(host.cwd(c), exist_ok=True)
-        os.symlink(state, f"{WS}/C-link")
-        with pytest.raises(RuntimeError, match="state dir"):
-            host.launch(["/bin/true"], uid=UIDS[0], sid=host.sid("stD"), env=env, state_dir="C-link")
+        for label, uid, name, why in (("stC", UIDS[1], conv, "state dir owner"), ("stD", UIDS[0], "C-link", "state dir")):
+            if name == "C-link":
+                os.symlink(state, f"{WS}/C-link")
+            refused = host.sid(label)
+            refused_ids.append(refused)
+            with pytest.raises(RuntimeError, match=why):
+                host.launch(["/bin/true"], uid=uid, sid=refused, env=env, state_dir=name)         # another uid / a symlink: refused
     finally:
         for s in sids:
             host.finish(s)
-        for path in (f"{WS}/C-link",):
-            if os.path.islink(path):
-                os.unlink(path)
+        for refused in refused_ids:                       # never launched, so no cgroup: only the workspace Core made for it
+            shutil.rmtree(host.cwd(refused), ignore_errors=True)
+        if os.path.islink(f"{WS}/C-link"):
+            os.unlink(f"{WS}/C-link")
         shutil.rmtree(state, ignore_errors=True)

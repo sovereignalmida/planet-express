@@ -21,7 +21,8 @@ What it does, in order (any failure before the cgroup join removes what it made)
      (cgroup.procs, cgroup.freeze, cgroup.kill), set pids.max; hand the workspace to the session uid;
      optionally take over the per-session socket directory Core already made and filled (chown to the session);
      optionally adopt a per-conversation state directory `C-<id>` Core made beside the workspaces (the directory itself,
-     never its contents), so state a session writes there survives for the next session run as the same uid;
+     never its contents), so state a session writes there survives for the next session run as the same uid. The cwd
+     must then be the session's own workspace. Adoption is the last step before the cgroup join;
   4. token pipe -> fd 3; fd 0 /dev/null; fds 1 and 2 stay the merged output pipe Core holds; nothing else;
   5. join the cgroup, setgroups([]), setgid, setuid, verify root cannot be regained, no_new_privs, setsid,
      reset rlimits and signals, fchdir to the already-verified cwd;
@@ -30,6 +31,7 @@ What it does, in order (any failure before the cgroup join removes what it made)
 """
 
 import ctypes
+import fcntl
 import grp
 import json
 import os
@@ -409,7 +411,10 @@ def adopt_state_dir(conf, name, uid, cwd_fd):
     the session's own cwd, owned by Core (first use) or already by this uid, and hands the DIRECTORY to the session (uid, Core's
     group, setgid 2770) so only that uid and Core can reach it. It never lists, opens or changes anything inside: what a session
     left there is its own business, and a directory owned by any other uid is refused, so one conversation can never be handed
-    another's state. Nothing is created or removed here (Core's cleanup removes it)."""
+    another's state. Nothing is created or removed here. Removing it is the caller's duty and must happen BEFORE the uid is
+    released (the supervisor's archive step: a cleanup session as the same uid, then rmdir): a uid that is reused while the old
+    directory still exists would own it. The check and the chown run under an exclusive lock on the directory, so two launches
+    naming one directory with different uids cannot both pass the owner check."""
     root_fd = open_dir_nofollow(conf["workspace_root"])
     try:
         try:
@@ -419,6 +424,7 @@ def adopt_state_dir(conf, name, uid, cwd_fd):
     finally:
         os.close(root_fd)
     try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         info, cwd_info = os.fstat(fd), os.fstat(cwd_fd)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (uid, conf["core_uid"]):
             raise Refused("state dir owner")
@@ -512,16 +518,18 @@ def launch(raw, conf):
     check_identity_unused(uid, gid)
     check_argv0(spec["argv"][0])
     sid = spec["session_id"]
+    if spec.get("state_dir") and spec["cwd"] != conf["workspace_root"] + "/" + sid:
+        raise Refused("cwd must be the session's own workspace")      # never inside, or equal to, a state directory
     cwd_fd = open_cwd(spec, conf, uid)
     cgroup_made = False
     try:
         sock_path = adopt_sock_dir(conf, sid, uid, gid) if spec.get("sock_dir") else None
-        state_path = adopt_state_dir(conf, spec["state_dir"], uid, cwd_fd) if spec.get("state_dir") else None
         cgroup_path, _, cg_fd = make_cgroup(conf, sid, uid)
         cgroup_made = True
         hand_over_workspace(cwd_fd, uid, conf)
         procs_fd = os.open("cgroup.procs", os.O_WRONLY | os.O_CLOEXEC, dir_fd=cg_fd)
         token_fd = token_pipe(spec["token"])
+        state_path = adopt_state_dir(conf, spec["state_dir"], uid, cwd_fd) if spec.get("state_dir") else None
     except BaseException:
         if cgroup_made:
             remove_cgroup(conf, sid)

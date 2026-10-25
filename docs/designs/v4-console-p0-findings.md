@@ -198,6 +198,21 @@ That closes settings **files** only. Not yet tested, and required as P1 tests be
 tools or instructions that govern a later turn. If one can, the state directory must not be the cwd the CLI scans, or the turn must be launched
 with the matching "no project config" switch.
 
+## Slice 1 as built (2026-10-25) and what P1 slice 2 must still do
+
+Built, reviewed (Codex and Claude `/code-review`, every finding fixed or recorded) and verified on the VM under both Core strategies:
+- **A. Cleanup session** (`Supervisor._clear_workspace`): frees a dead session's uncleanable workspace and its uid.
+- **B. Settings isolation**: `--settings <Core-owned file> --setting-sources ""` forced on every hooked session; config refuses a wrapper argv.
+- **C. State directory** (`state_dir` in the launch spec, `C-<id>` beside the workspaces, adopted by the helper as a directory only, under a lock,
+  after the workspace hand-over, with the cwd required to be the session's own workspace).
+
+C is plumbing: nothing in production sets `state_dir` yet. Slice 2 (the turn runner) must, and must also:
+1. **Create** `<workspace_root>/C-<id>` as Core (0700) before the first turn of a conversation.
+2. **Archive in this order:** cleanup session on the state directory (same uid, empty scratch cwd, `chmod -R` then `find -delete`, as for workspaces),
+   then remove the directory, then release the uid. A test must prove a released uid never inherits a previous conversation's directory.
+3. Test that a conversation cannot reach another's state (the helper refuses a different uid; the supervisor must never name another
+   conversation's directory) and the planted-config list in the previous section.
+
 ## Still to run (now P1 gates, see condition 1)
 
 - E6 with the installed `pe_hook.py`; a kill mid-tool-call; 20 randomised kill points; a 60 s freeze; one live E1 on the host.

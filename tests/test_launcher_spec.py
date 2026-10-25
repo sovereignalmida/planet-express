@@ -74,6 +74,7 @@ def test_the_two_bounds_tables_are_the_same():
                  "MAX_ENV_CHARS", "MAX_CWD_CHARS", "TOKEN_CHARS", "MAX_SPEC_BYTES", "STATUS_PREFIX"):
         assert getattr(core, name) == getattr(helper, name), name
     assert core.KEYS == helper.SPEC_KEYS and core.REQUIRED == helper.SPEC_REQUIRED
+    assert core.STATE_DIR.pattern == helper.STATE_DIR.pattern and core.SESSION_ID.pattern == helper.SESSION_ID.pattern
 
 
 def test_the_wire_form_never_carries_a_gid_or_a_root():
