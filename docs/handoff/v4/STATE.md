@@ -86,3 +86,16 @@ Primary orchestrator: Claude Code (account A until the 2026-10-22 usage limit; c
 
 ## Direction change (2026-10-25): the Operator Console
 Operator decision: the experience wanted is a PE-native conversation with an agent (investigate, options, confirm/scrap/modify, watch, verify), not the Missions board or one-shot Chat. Plan: `docs/designs/v4-operator-console-plan.md` (decisions 1-5 recorded, all as recommended). Design handoff for Claude Design: `docs/designs/v4-operator-console-design-brief.md`. **No feature code until the design is in and P0 (multi-turn agent under containment) is scoped.** The "open for tomorrow" list above is superseded: the workspace-cleanup bug folds into P1; the mission relabel/CLOSE/Telegram-notice/proposal-to-repair items are replaced by the Console. Still separate and small: rehearsal on the live host, INSTALL.md claude path, Subwave password rotation.
+
+### Console status (2026-10-25, end of day)
+- **P0 spike: done, GO for P1.** Findings and decisions: `docs/designs/v4-console-p0-findings.md` (budget 150,000 tokens per conversation; 10 open
+  conversations; archive after 3 days idle; option (c) approved). Design package is in `docs/designs/planet_express_design_v23/`.
+- **P1 slice 1: done on `v4-next`, NOT deployed** (the live host is still on `v4.0.0-rc6`). A: cleanup session frees a dead session's uncleanable
+  workspace and uid. B: sessions launch with `--settings <Core-owned> --setting-sources ""`; config refuses a wrapper argv when
+  `missions.hooks.install_claude_code` is on. C: launcher `state_dir` plumbing (helper change, root code). Each reviewed by Codex and Claude; VM suite
+  green (269 passed, 5 skipped). Because A and C change the root helper and B changes the launch argv, **a deploy needs a new tag, the helper
+  reinstalled (setup repair), and a mission run to confirm**; wait for the operator's go.
+- **Next: slice 2, the turn runner** (no UI): conversation store, one contained process per message with `--resume`, event parsing, interjection, state
+  directory creation and archive order, the planted-config test list, budget headroom fix. See the findings doc for the gates.
+- Housekeeping still open: shut down the VM when finished (`virsh shutdown PE_UBUNTU_TEST`); delete the spike key file (`rm -rf ~/.config/pe-spike`);
+  M-1 still in `awaiting_decision` on the live host; Subwave password rotation; INSTALL.md claude path.
