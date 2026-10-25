@@ -32,7 +32,8 @@ SHOWN_ARGS = ("command", "file_path", "path", "pattern", "description", "url", "
 
 @dataclass(frozen=True)
 class TurnEvent:
-    """One thing for the activity trail. `kind` is `tool` or `note`, the two a runtime may write (`runtime.RUNTIME_EVENT_KINDS`)."""
+    """One thing for the activity trail. `kind` is `tool` (a call: the supervisor counts these against the grant's tool budget) or
+    `note` (text, and the result a tool returned): the two a runtime may write (`runtime.RUNTIME_EVENT_KINDS`)."""
     kind: str
     body: dict[str, Any]
 
@@ -190,7 +191,7 @@ class StreamParser:
                 text = _flatten(block.get("content"))
                 clipped = len(text) > MAX_EXCERPT
                 tool_id = block.get("tool_use_id")
-                events.append(TurnEvent("tool", {
+                events.append(TurnEvent("note", {                    # a note, not a tool event: the supervisor counts tool events as calls
                     "result_of": self._tool_names.get(tool_id[:128] if isinstance(tool_id, str) else "", "?"),
                     "excerpt": _clip(text[:MAX_EXCERPT + 1], MAX_EXCERPT), "bytes": len(text),
                     "is_error": bool(block.get("is_error")), **({"clipped": True} if clipped else {})}))

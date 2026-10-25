@@ -82,11 +82,16 @@ def test_state_only_moves_forward_one_step_and_a_closed_conversation_takes_no_me
     assert cs.set_state(conv.id, "archiving") is False                                            # nothing reopens
 
 
-def test_usage_is_charged_per_finished_turn_and_never_negative(tmp_path):
+def test_turns_are_numbered_when_they_start_and_usage_is_charged_when_they_finish_and_never_negative(tmp_path):
     _, _, _, cs, conv = rig(tmp_path)
+    assert cs.begin_turn(conv.id) == 1 and cs.begin_turn(conv.id) == 2          # a turn that crashes still used its number
     assert cs.add_usage(conv.id, 4000) == 4000 and cs.add_usage(conv.id, -50) == 4000
     got = cs.get(conv.id)
     assert got.turns == 2 and got.tokens_used == 4000 and got.tokens_left == 146_000
+    with pytest.raises(ConversationNotFound):
+        cs.begin_turn("nope")
+    with pytest.raises(ConversationNotFound):
+        cs.add_usage("nope", 1)
 
 
 def test_the_agent_session_id_is_recorded_every_turn(tmp_path):

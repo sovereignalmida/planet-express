@@ -146,12 +146,25 @@ class ConsoleStore:
             conn.execute("UPDATE console_conversations SET agent_session_id=?, updated_at=? WHERE id=?",
                          (agent_session_id[:128], self._now(), conversation_id))
 
+    def begin_turn(self, conversation_id: str) -> int:
+        """Number the next turn (1, 2, ...). Counted when the turn STARTS, so a turn that crashes still has its number and the next
+        one does not reuse it."""
+        with self.store._write() as conn:
+            conn.execute("UPDATE console_conversations SET turns=turns+1, updated_at=? WHERE id=?", (self._now(), conversation_id))
+            row = conn.execute("SELECT turns FROM console_conversations WHERE id=?", (conversation_id,)).fetchone()
+            if row is None:
+                raise ConversationNotFound(conversation_id)
+            return int(row["turns"])
+
     def add_usage(self, conversation_id: str, tokens: int) -> int:
         """Charge a finished turn. Returns the tokens used in total."""
         with self.store._write() as conn:
-            conn.execute("UPDATE console_conversations SET tokens_used=tokens_used+?, turns=turns+1, updated_at=? WHERE id=?",
+            conn.execute("UPDATE console_conversations SET tokens_used=tokens_used+?, updated_at=? WHERE id=?",
                          (max(int(tokens), 0), self._now(), conversation_id))
-            return conn.execute("SELECT tokens_used FROM console_conversations WHERE id=?", (conversation_id,)).fetchone()[0]
+            row = conn.execute("SELECT tokens_used FROM console_conversations WHERE id=?", (conversation_id,)).fetchone()
+            if row is None:
+                raise ConversationNotFound(conversation_id)
+            return int(row["tokens_used"])
 
     # ── messages ───────────────────────────────────────────────────────────────────────────
     def add_message(self, conversation_id: str, role: Role, text: str, *, turn: int | None = None,

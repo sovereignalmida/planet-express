@@ -299,6 +299,24 @@ def test_the_token_budget_ends_it_too(rig):
     assert ask(broker)[0].status == 403 and len(upstream.seen) == 4                # 60 spent + 40 promised would be 100 > 90
 
 
+def test_a_session_cap_lowers_the_token_ceiling_and_can_never_raise_it(rig):
+    upstream, _store, build = rig
+    broker = started(build, limits=BrokerLimits(max_tokens=10_000))
+    assert broker.set_session_cap("S-1", 90) is True                               # a conversation's remaining budget
+    assert [ask(broker)[0].status for _ in range(4)] == [200, 200, 200, 200]       # the same arithmetic as the 90-token broker above
+    assert ask(broker)[0].status == 403 and len(upstream.seen) == 4
+    assert broker.set_session_cap("S-1", 10**9) is True                            # asking for more changes nothing
+    assert ask(broker)[0].status == 403
+    assert broker.set_session_cap("S-nope", 5) is False
+
+
+def test_a_session_cap_applies_to_its_own_session_only(rig):
+    _upstream, _store, build = rig
+    broker = started(build, limits=BrokerLimits(max_tokens=10_000))
+    broker.set_session_cap("S-1", 0)
+    assert ask(broker)[0].status == 403                                            # a zero remainder refuses at once
+
+
 def test_parallel_requests_cannot_each_pass_a_budget_that_only_one_fits(rig):
     upstream, store, build = rig
     upstream.mode = "stream"

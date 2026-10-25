@@ -24,10 +24,10 @@ def parse(data: bytes):
 def test_a_real_turn_with_a_tool_call_becomes_a_trail_and_a_result():
     events, result = parse(FIXTURE.read_bytes())
     tools = [e for e in events if e.kind == "tool"]
-    assert [t.body.get("call") for t in tools if "call" in t.body] == ["Bash"]
-    call = next(t.body for t in tools if "call" in t.body)
+    assert [t.body.get("call") for t in tools] == ["Bash"]                 # one tool event per call: it is what the budget counts
+    call = tools[0].body
     assert call["args"] == {"command": "echo hi", "description": "t"} and call["read_only"] is False
-    seen = next(t.body for t in tools if "result_of" in t.body)
+    seen = next(e.body for e in events if e.kind == "note" and "result_of" in e.body)
     assert seen["result_of"] == "Bash" and seen["excerpt"] == "hi" and seen["is_error"] is False
     assert result.ok and not result.interrupted and result.subtype == "success"
     assert result.reply == "all done here" and result.tool_calls == 1 and result.changed_calls == 0
@@ -36,8 +36,8 @@ def test_a_real_turn_with_a_tool_call_becomes_a_trail_and_a_result():
 
 def test_the_text_deltas_become_one_note_per_feed():
     events, _ = parse(FIXTURE.read_bytes())
-    notes = [e for e in events if e.kind == "note"]
-    assert len(notes) == 1 and "all done here" in notes[0].body["delta"]
+    deltas = [e for e in events if "delta" in e.body]
+    assert len(deltas) == 1 and "all done here" in deltas[0].body["delta"]
 
 
 def test_feeding_one_byte_at_a_time_gives_the_same_events_and_result_as_feeding_it_whole():
@@ -70,7 +70,7 @@ def test_a_ten_megabyte_tool_result_is_an_excerpt_not_stored_whole():
     medium = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "y" * 100_000}]}})
     events, result = parse(medium.encode())
     body = events[0].body
-    assert len(body["excerpt"]) <= MAX_EXCERPT + len(" [truncated]") and body["clipped"] is True and body["bytes"] == 100_000
+    assert events[0].kind == "note" and len(body["excerpt"]) <= MAX_EXCERPT + len(" [truncated]") and body["clipped"] is True and body["bytes"] == 100_000
 
 
 @pytest.mark.parametrize("junk", [b"not json at all\n", b"{\"type\": \n", b"[1,2,3]\n", b"\xff\xfe\x00garbage\n", b"{}\n", b"\n\n",

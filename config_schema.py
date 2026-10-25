@@ -533,6 +533,50 @@ class MissionHooksConfig(BaseModel):
         return self
 
 
+class MissionConsoleConfig(BaseModel):
+    """The Operator Console: conversations with a PE-aware agent, one contained process per operator message. Off by default.
+    It needs the model broker (the budget is enforced there) and the hooks installed with forced settings (the agent's state
+    persists between turns, so a settings file it left behind must never govern the next turn)."""
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    claude: str = "/usr/local/bin/claude"          # the claude CLI itself, never a wrapper (the forced settings are CLI flags)
+    model: str = "~anthropic/claude-sonnet-latest"
+    max_turns: int = Field(default=40, ge=1, le=200)               # the agent's own turns inside one operator message
+    token_budget: int = Field(default=150_000, ge=10_000, le=5_000_000)       # per conversation (phase 0: about 3k per chat turn, 13k per plan)
+    min_turn_tokens: int = Field(default=20_000, ge=1_000, le=1_000_000)      # a turn does not start with less than this left
+    max_output_tokens: int = Field(default=8192, ge=1024, le=32_000)         # declared per request: the broker reserves it up front
+    max_open: int = Field(default=10, ge=1, le=50)
+    archive_after_days: int = Field(default=3, ge=1, le=90)
+    turn_wall_s: int = Field(default=900, ge=60, le=7200)
+    turn_tool_calls: int = Field(default=200, ge=1, le=5000)
+    tools: list[str] = ["Bash", "Read", "Grep", "Glob", "Write"]
+    disallowed_tools: list[str] = ["WebFetch", "WebSearch", "Edit", "NotebookEdit"]
+
+    @field_validator("claude")
+    @classmethod
+    def _claude(cls, path: str) -> str:
+        if (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
+                or not re.fullmatch(r"claude(-code)?", posixpath.basename(path))):
+            raise ValueError("missions.console.claude must be the absolute path of the claude binary itself")
+        return path
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, model: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9~][A-Za-z0-9._:/~@+-]{0,127}", model):
+            raise ValueError("missions.console.model is not a model id")
+        return model
+
+    @field_validator("tools", "disallowed_tools")
+    @classmethod
+    def _tool_names(cls, names: list[str]) -> list[str]:
+        for name in names:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name):
+                raise ValueError("a tool name is letters, digits and underscores (no patterns, no arguments)")
+        return names
+
+
 def uid_range_problem(low: int, high: int) -> str | None:
     """Why a session uid range is unsafe, or None: it may not overlap systemd's DynamicUser range. Pure arithmetic, no host
     reads: whether an account already uses the range is the launcher preflight's job (`check_range_free`, which also reads
@@ -581,6 +625,7 @@ class MissionsConfig(BaseModel):
     verify: VerifyConfig = VerifyConfig()
     hooks: MissionHooksConfig = MissionHooksConfig()
     model_broker: ModelBrokerConfig = ModelBrokerConfig()
+    console: MissionConsoleConfig = MissionConsoleConfig()
     # Named time windows for standing grants (`window.deny: [backup]` resolves here when the grant is created). Each entry is
     # `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]` (see missions/window.py).
     windows: dict[str, list[str]] = {}
@@ -631,6 +676,14 @@ class MissionsConfig(BaseModel):
         if self.hooks.install_claude_code and self.runtime.argv and not re.fullmatch(r"claude(-code)?", posixpath.basename(self.runtime.argv[0])):
             raise ValueError("missions.hooks.install_claude_code forces Claude Code's settings by adding flags to missions.runtime.argv, so "
                              "argv[0] must be the claude binary itself, not a wrapper such as env or sh")
+        if self.console.enabled:
+            if not self.model_broker.enabled:
+                raise ValueError("missions.console.enabled needs missions.model_broker.enabled: the conversation budget is enforced by the broker")
+            if not self.hooks.install_claude_code:
+                raise ValueError("missions.console.enabled needs missions.hooks.install_claude_code: a conversation's state persists between "
+                                 "turns, so PE's settings must be the only ones the agent reads")
+            if set(self.console.tools) & set(self.console.disallowed_tools):
+                raise ValueError("missions.console.tools and disallowed_tools overlap")
         return self
 
     @field_validator("windows")

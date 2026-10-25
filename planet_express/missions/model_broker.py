@@ -137,6 +137,7 @@ class _Session:
         self.refused = 0
         self.refused_logged = 0
         self.closed = False              # set when the session ends: nothing may connect or send after it
+        self.cap: int | None = None             # a lower token ceiling than the broker's own for THIS session (a conversation's remainder)
         self.upstreams: set[http.client.HTTPConnection] = set()      # the vendor connections of requests still in flight
         self.server: _BoundedServer | None = None
         self.thread: threading.Thread | None = None
@@ -224,6 +225,18 @@ class ModelBroker:
     def resume(self, mission_id: str, grant_hash: str) -> None:
         with self._lock:
             self._paused.discard(mission_id)
+
+    def set_session_cap(self, session_id: str, tokens: int) -> bool:
+        """Lower this session's token ceiling to `tokens` (never raise it above the broker's own, and never raise one already lowered).
+        A Console turn is given what is left of its conversation's budget, so the budget is enforced inside the turn and not only
+        between turns. False if the session is not known."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        with session.lock:
+            session.cap = max(int(tokens), 0) if session.cap is None else min(session.cap, max(int(tokens), 0))
+        return True
 
     def usage(self, session_id: str) -> dict[str, int] | None:
         with self._lock:
@@ -347,8 +360,9 @@ class ModelBroker:
                 declared = parsed.get("max_tokens")
                 promise = (declared if isinstance(declared, int) and declared > 0 else 0) + len(body)   # a token is never under a byte
                 with session.lock:
+                    ceiling = broker.limits.max_tokens if session.cap is None else min(broker.limits.max_tokens, session.cap)
                     over = (session.requests >= broker.limits.max_requests
-                            or session.tokens + session.reserved + promise > broker.limits.max_tokens)
+                            or session.tokens + session.reserved + promise > ceiling)
                     if not over:
                         session.requests += 1
                         session.reserved += promise
