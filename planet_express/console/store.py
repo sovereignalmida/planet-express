@@ -197,4 +197,37 @@ class ConsoleStore:
         return [r[0] for r in rows]
 
 
+    # ── plans ───────────────────────────────────────────────────────────────────────────────
+    def add_plan(self, conversation_id: str, turn: int, plan: dict, plan_hash: str) -> int:
+        """Record a validated plan (the caller passes `plan.canonical`, already redacted). A newer plan supersedes the pending one."""
+        import json
+        now = self._now()
+        with self.store._write() as conn:
+            if conn.execute("SELECT 1 FROM console_conversations WHERE id=?", (conversation_id,)).fetchone() is None:
+                raise ConversationNotFound(conversation_id)
+            conn.execute("UPDATE console_plans SET status='superseded' WHERE conversation_id=? AND status='pending'", (conversation_id,))
+            cur = conn.execute("INSERT INTO console_plans (conversation_id, turn, plan_json, plan_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                               (conversation_id, turn, json.dumps(plan, sort_keys=True), plan_hash, now))
+            return int(cur.lastrowid)
+
+    def plans(self, conversation_id: str) -> list[dict]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM console_plans WHERE conversation_id=? ORDER BY id", (conversation_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def current_plan(self, conversation_id: str) -> dict | None:
+        """The pending plan, if any."""
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM console_plans WHERE conversation_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
+                               (conversation_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_plan_status(self, plan_id: int, status: str) -> bool:
+        """pending -> scrapped | expired | confirmed (P2 drives the last). A plan never leaves a final status."""
+        if status not in ("scrapped", "expired", "confirmed"):
+            raise ValueError("a plan moves from pending to scrapped, expired or confirmed")
+        with self.store._write() as conn:
+            return conn.execute("UPDATE console_plans SET status=? WHERE id=? AND status='pending'", (status, plan_id)).rowcount == 1
+
+
 __all__ = ["Conversation", "ConversationClosed", "ConversationNotFound", "ConsoleStore", "Message", "clean_text"]

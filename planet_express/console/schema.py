@@ -31,5 +31,15 @@ CREATE TABLE IF NOT EXISTS console_messages (
     text TEXT NOT NULL,
     consumed_turn INTEGER
 );
-CREATE INDEX IF NOT EXISTS console_messages_conversation ON console_messages(conversation_id, seq)
+CREATE INDEX IF NOT EXISTS console_messages_conversation ON console_messages(conversation_id, seq);
+CREATE TABLE IF NOT EXISTS console_plans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL REFERENCES console_conversations(id),
+    turn INTEGER NOT NULL,
+    plan_json TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS console_plans_conversation ON console_plans(conversation_id, id)
 """

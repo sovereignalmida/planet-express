@@ -123,3 +123,18 @@ def test_the_tables_appear_on_an_existing_database_without_a_schema_bump(tmp_pat
         names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"console_messages", "console_conversations", "reserved_uids"} <= names
         assert conn.execute("PRAGMA user_version").fetchone()[0] == before == 6
+
+
+def test_a_newer_plan_supersedes_the_pending_one_and_a_final_status_is_final(tmp_path):
+    _, _, _, cs, conv = rig(tmp_path)
+    assert cs.current_plan(conv.id) is None
+    first = cs.add_plan(conv.id, 1, {"known": []}, "a" * 64)
+    second = cs.add_plan(conv.id, 2, {"known": ["x"]}, "b" * 64)
+    assert [p["status"] for p in cs.plans(conv.id)] == ["superseded", "pending"] and cs.current_plan(conv.id)["id"] == second
+    assert cs.set_plan_status(first, "scrapped") is False                         # already superseded: stays superseded
+    assert cs.set_plan_status(second, "scrapped") is True and cs.current_plan(conv.id) is None
+    assert cs.set_plan_status(second, "confirmed") is False                       # a final status never changes
+    with pytest.raises(ValueError):
+        cs.set_plan_status(second, "superseded")
+    with pytest.raises(ConversationNotFound):
+        cs.add_plan("nope", 1, {}, "c" * 64)
