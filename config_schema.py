@@ -628,6 +628,9 @@ class MissionsConfig(BaseModel):
         if self.model_broker.enabled and self.model_broker.key_env in self.runtime.env_allow:
             raise ValueError("missions.runtime.env_allow names missions.model_broker.key_env: the real model key must never reach "
                              "a session (the broker hands the agent its own access code)")
+        if self.hooks.install_claude_code and self.runtime.argv and not re.fullmatch(r"claude(-code)?", posixpath.basename(self.runtime.argv[0])):
+            raise ValueError("missions.hooks.install_claude_code forces Claude Code's settings by adding flags to missions.runtime.argv, so "
+                             "argv[0] must be the claude binary itself, not a wrapper such as env or sh")
         return self
 
     @field_validator("windows")

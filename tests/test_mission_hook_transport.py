@@ -172,7 +172,7 @@ def test_the_config_requires_a_command_and_a_root_to_install_and_the_runner_inst
     store, _ = make_store(tmp_path)
     plain = build_mission_runner(store, MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/a"]}), containment=FakeContainment())
     assert plain.supervisor.hook_install is None and plain.supervisor.hook_policy is not None and plain.supervisor.hook_root is None
-    cfg = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/a"]},
+    cfg = MissionsConfig(enabled=True, runtime={"argv": ["/usr/local/bin/claude"]},
                          hooks={"install_claude_code": True, "command": COMMAND, "root": str(tmp_path / "hr")})
     installed = build_mission_runner(store, cfg, containment=FakeContainment())
     assert installed.supervisor.hook_root == tmp_path / "hr"
@@ -471,3 +471,15 @@ def test_forced_settings_with_no_core_owned_hook_directory_refuse_to_launch(tmp_
     rig.sup.hook_argv = claude_code_argv                                  # forced settings, but hook_install and hook_root are unset
     rig.sup.start(rig.mid)
     assert rig.session_ids() == [] or rig.cont.spawns(rig.session_ids()[0]) == []      # nothing was launched
+
+
+def test_forcing_claudes_settings_needs_the_claude_binary_as_argv0_not_a_wrapper(tmp_path):
+    import pytest
+    from config_schema import MissionsConfig
+    hooks = {"install_claude_code": True, "command": COMMAND, "root": str(tmp_path / "hr")}
+    for ok in ("/usr/local/bin/claude", "/usr/bin/claude", "/opt/x/claude-code"):
+        assert MissionsConfig(enabled=True, runtime={"argv": [ok, "-p", "go"]}, hooks=hooks)
+    for wrapper in (["/usr/bin/env", "claude", "-p", "go"], ["/bin/sh", "-c", "exec claude -p go"], ["/usr/bin/python3", "agent.py"]):
+        with pytest.raises(ValueError, match="claude binary itself"):
+            MissionsConfig(enabled=True, runtime={"argv": wrapper}, hooks=hooks)
+    assert MissionsConfig(enabled=True, runtime={"argv": ["/bin/sh", "-c", "x"]})        # without forced settings any argv is fine
