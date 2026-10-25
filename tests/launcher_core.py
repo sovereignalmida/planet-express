@@ -128,6 +128,7 @@ class CoreOps:
             self.sup = Supervisor.__new__(Supervisor)            # only what `_clear_workspace` reads; no store, no runtime
             self.sup.workspace_dir, self.sup.containment, self.sup.clock = P(workspace_dir), self.c, time.time
             self.sup._cleaners, self.sup._cleanup_retry_at, self.sup._shutting_down = {}, {}, False
+            self.sup.preflight_fn = None                          # the preflight is Supervisor.launcher_ready's own concern
         done = self.sup._clear_workspace(session_id, uid)
         return {"done": done, "workspace_exists": os.path.exists(P(workspace_dir) / session_id),
                 "cleaning": sorted(self.sup._cleaners)}
