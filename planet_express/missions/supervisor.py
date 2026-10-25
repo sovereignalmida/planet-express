@@ -294,9 +294,10 @@ class Supervisor:
                  checkpoint: Any = None, tripwire: Any = None, docker_proxy: Any = None,
                  hook_policy: Callable[[Mission], str] | None = None,
                  hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None,
-                 model_broker: Any = None):
+                 hook_argv: Callable[[Sequence[str], Path], Sequence[str]] | None = None, model_broker: Any = None):
         self.store = store
         self.hook_install = hook_install              # Path -> writes the runtime's hook settings into that (Core-owned) directory
+        self.hook_argv = hook_argv                    # (argv, hook dir) -> the argv the session is launched with (settings forced)
         self.hook_root = Path(hook_root) if hook_root else None    # Core-owned, session-readable, never session-writable
         self.hook_policy = hook_policy                # Mission -> the hook policy JSON put in the session's environment
         self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
@@ -664,6 +665,8 @@ class Supervisor:
                 # the directory and sockets to the session. Registered first so a failed launch stops it again.
                 run.stop_socket = self.socket_provider.start(cs)
                 full_env.update(self.socket_provider.env(cs))
+            if self.hook_argv is not None and run.hook_dir is not None:
+                argv = self.hook_argv(argv, run.hook_dir)
             spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), env=full_env,
                               token=token, sock_dir=self.socket_provider is not None)
             launched = self.containment.launch(cs.session_id, spec)

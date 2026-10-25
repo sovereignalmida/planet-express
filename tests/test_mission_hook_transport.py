@@ -177,6 +177,7 @@ def test_the_config_requires_a_command_and_a_root_to_install_and_the_runner_inst
     installed = build_mission_runner(store, cfg, containment=FakeContainment())
     assert installed.supervisor.hook_root == tmp_path / "hr"
     (tmp_path / "hr").mkdir()
+    assert plain.supervisor.hook_argv is None and installed.supervisor.hook_argv is not None
     assert installed.supervisor.hook_install(tmp_path / "hr") == {"CLAUDE_CONFIG_DIR": str(tmp_path / "hr")}
     assert (tmp_path / "hr" / "settings.json").exists()
 
@@ -408,3 +409,39 @@ def test_a_policy_larger_than_the_hook_will_read_refuses_the_start(tmp_path):
     rig.sup.start(rig.mid)
     events = [json.loads(e.body_json) for e in rig.ms.events(rig.mid)]
     assert {"start_failed": "ContainmentError"} in events and rig.ms.live_session(rig.mid) is None
+
+
+# ── settings sources: PE's settings are the only ones the runtime reads ─────────────────────────────
+
+def test_the_runtime_is_launched_with_pe_settings_forced_and_every_other_source_off(tmp_path):
+    from planet_express.missions.hooks import claude_code_argv
+    hook_dir = tmp_path / "h"
+    got = claude_code_argv(["/usr/bin/claude", "-p", "go", "--model", "m"], hook_dir)
+    assert got == ["/usr/bin/claude", "-p", "go", "--model", "m", "--settings", str(hook_dir / "settings.json"), "--setting-sources", ""]
+
+
+def test_an_operator_argv_cannot_re_enable_other_settings_sources_or_point_at_other_settings(tmp_path):
+    from planet_express.missions.hooks import claude_code_argv
+    hook_dir = tmp_path / "h"
+    for hostile in (["--setting-sources", "user,project,local"], ["--setting-sources=project"], ["--settings", "/tmp/x.json"],
+                    ["--settings=/tmp/x.json"]):
+        got = claude_code_argv(["/usr/bin/claude", *hostile, "-p", "go"], hook_dir)
+        assert got == ["/usr/bin/claude", "-p", "go", "--settings", str(hook_dir / "settings.json"), "--setting-sources", ""], hostile
+
+
+def test_the_supervisor_launches_the_session_with_the_forced_settings_and_a_runtime_without_hooks_is_untouched(tmp_path):
+    from planet_express.missions.hooks import claude_code_argv, install_claude_code
+    rig = Rig(tmp_path, behaviours=[{"script": [update()] * 5}])
+    root = tmp_path / "hooks"
+    root.mkdir()
+    rig.sup.hook_root = root
+    rig.sup.hook_install = lambda hook_dir: install_claude_code(hook_dir, COMMAND)
+    rig.sup.hook_argv = claude_code_argv
+    rig.sup.start(rig.mid)
+    sid = rig.session_ids()[0]
+    argv = rig.cont.spawns(sid)[0]["argv"]
+    assert argv[-4:] == ["--settings", str(root / sid / "settings.json"), "--setting-sources", ""]
+    plain = Rig(tmp_path / "plain", behaviours=[{"script": [update()] * 5}])
+    plain.sup.start(plain.mid)
+    plain_argv = plain.cont.spawns(plain.session_ids()[0])[0]["argv"]
+    assert "--settings" not in plain_argv and "--setting-sources" not in plain_argv

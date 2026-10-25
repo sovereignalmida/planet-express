@@ -809,6 +809,23 @@ def install_claude_code(hook_dir: Path, command: Sequence[str]) -> dict[str, str
     return {"CLAUDE_CONFIG_DIR": str(hook_dir)}
 
 
+def claude_code_argv(argv: Sequence[str], hook_dir: Path) -> list[str]:
+    """The runtime's argv with PE's settings forced on it: the hook settings by `--settings`, and `--setting-sources ""` so NO other
+    settings file is read. Without it the CLI also loads user, project and local settings, and the project ones live in the
+    session's own workspace (`.claude/settings.json`): a session could plant permissions or hooks there that govern its own later
+    behaviour, or the next turn's. Any `--settings` or `--setting-sources` the configured argv already has is dropped, so PE's win."""
+    out: list[str] = []
+    skip = False
+    for arg in argv:
+        if skip:
+            skip = False
+        elif arg in ("--settings", "--setting-sources"):
+            skip = True
+        elif not arg.startswith(("--settings=", "--setting-sources=")):
+            out.append(arg)
+    return [*out, "--settings", str(Path(hook_dir) / "settings.json"), "--setting-sources", ""]
+
+
 def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None:
     """One JSON line per call appended to PE_HOOK_LOG (never following a symlink). Without a log path there is nothing to
     record to, and the hook says so; it still decides."""
@@ -829,7 +846,7 @@ def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None
     return post
 
 
-__all__ = ["ALLOW", "BLOCKED_CLASSES", "Decision", "HookPolicy", "HookRunner", "claude_code_settings", "classify",
+__all__ = ["ALLOW", "BLOCKED_CLASSES", "Decision", "HookPolicy", "HookRunner", "claude_code_argv", "claude_code_settings", "classify",
            "install_claude_code", "main", "policy_for"]
 
 if __name__ == "__main__":

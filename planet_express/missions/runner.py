@@ -34,7 +34,7 @@ from planet_express.missions.discovery import (
     DiscoveredInputs,
     discover_protected_inputs,
 )
-from planet_express.missions.hooks import install_claude_code, policy_for
+from planet_express.missions.hooks import claude_code_argv, install_claude_code, policy_for
 from planet_express.missions.launcher.cgroup_tree import ensure_tree
 from planet_express.missions.launcher.config import HELPER_PATH
 from planet_express.missions.launcher.preflight import PreflightReport, run_preflight
@@ -380,6 +380,7 @@ def build_mission_runner(
         hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json(),
         hook_install=((lambda hook_dir: install_claude_code(hook_dir, cfg.hooks.command))
                       if cfg.hooks.install_claude_code else None),
+        hook_argv=claude_code_argv if cfg.hooks.install_claude_code else None,
         hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None, model_broker=model_broker)
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir,

@@ -29,7 +29,15 @@ def standin():
         pytest.skip("no claude CLI on this VM")
     import console_p0_e1_e2 as base
     import console_p0_e3_e4_e6 as e
-    srv, _ = e.server_with(lambda last, data: [(0.5, f"chunk{i} ") for i in range(12)] if "SLOW" in last else None)
+    def script(last, data):
+        if "SLOW" in last:
+            return [(0.5, f"chunk{i} ") for i in range(12)]
+        done = any(isinstance(m.get("content"), list) and any(c.get("type") == "tool_result" for c in m["content"])
+                   for m in data["messages"][-1:])
+        if "USEBASH" in last and not done:
+            return [("tool", "Bash", {"command": "true", "description": "t"})]
+        return None
+    srv, _ = e.server_with(script)
     yield srv, base.FAKE
     srv.shutdown()
 
@@ -210,3 +218,45 @@ def test_production_cleanup_frees_a_workspace_core_cannot_remove(host):
     assert not os.path.exists(ws) and not os.path.exists(f"{WS}/{cleanup_id(sid)}")      # the workspace and the scratch directory are gone
     assert not host.core.call("uid_in_use", uid=UIDS[0])["in_use"]
     assert not os.path.exists(f"{SESSIONS}/{cleanup_id(sid)}")                           # and so is the cleanup session's cgroup
+
+
+def test_planted_project_settings_are_ignored_and_pes_own_hook_still_fires(host, standin):
+    """The production launch flags (`claude_code_argv`): a settings file the session plants in its own workspace governs nothing,
+    while the hook PE installs through `--settings` runs on every tool call. The control run without the flag shows the plant works."""
+    import shlex
+
+    from planet_express.missions.hooks import claude_code_argv
+    srv, _ = standin
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    results = {}
+    for label, forced in (("control", False), ("forced", True)):
+        state = new_state(host)
+        hook_dir = f"/tmp/pe-p0-hooks-{uuid.uuid4().hex[:8]}"
+        os.makedirs(hook_dir, mode=0o755)
+        os.chmod(hook_dir, 0o755)
+        planted_log, pe_log = f"{state}/planted.log", f"{state}/pe.log"
+        pe_settings = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"echo pe >> {pe_log}"}]}]}}
+        planted = {"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"echo planted >> {planted_log}"}]}]},
+                   "permissions": {"allow": ["Bash"]}}
+        Path(hook_dir, "settings.json").write_text(json.dumps(pe_settings))
+        os.chmod(f"{hook_dir}/settings.json", 0o644)
+        base = [CLAUDE, "-p", "USEBASH", "--max-turns", "3", "--output-format", "json", "--disallowedTools", "WebFetch,WebSearch"]
+        argv = claude_code_argv(base, hook_dir) if forced else [*base, "--settings", f"{hook_dir}/settings.json"]
+        sid = host.sid("p0set")
+        ws = host.cwd(sid)
+        os.makedirs(ws, mode=0o700)
+        os.chown(ws, host.core_uid, host.core_uid if host.strategy == "sudo" else 0)
+        script = (f"mkdir -p .claude && printf '%s' {shlex.quote(json.dumps(planted))} > .claude/settings.json; "
+                  f"exec {' '.join(shlex.quote(a) for a in argv)} > {ws}/out.json 2> {ws}/out.err")
+        try:
+            host.launch(["/bin/sh", "-c", script], uid=UIDS[0], sid=sid, make_cwd=False, env=env_for(url, state, "k"))
+            assert wait_empty(host, sid)
+            results[label] = {"planted_hook_ran": os.path.exists(planted_log), "pe_hook_ran": os.path.exists(pe_log),
+                              "err": read(host, f"{ws}/out.err")[:200]}
+        finally:
+            host.finish(sid)
+            shutil.rmtree(state, ignore_errors=True)
+            shutil.rmtree(hook_dir, ignore_errors=True)
+    print("settings-source results:", results)
+    assert results["control"]["planted_hook_ran"] and results["control"]["pe_hook_ran"], results       # the probe is not vacuous
+    assert results["forced"]["pe_hook_ran"] and not results["forced"]["planted_hook_ran"], results
