@@ -108,7 +108,7 @@ def test_listing_counting_and_idle_candidates(tmp_path):
                               success_criteria="s", runtime="console")
     clock.t += 100
     second = cs.create(other.id, title="b", origin="incident", token_budget=10)
-    assert cs.count_open() == 2 and [c.id for c in cs.list()] == [second.id, conv.id]
+    assert cs.count_open() == 2 and [c.id for c in cs.conversations()] == [second.id, conv.id]
     clock.t += 1000
     cs.add_message(second.id, "operator", "still here")
     assert [c.id for c in cs.idle_since(int(clock.t) - 500)] == [conv.id]          # only the one nobody touched

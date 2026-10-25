@@ -106,7 +106,7 @@ class ConsoleStore:
             row = conn.execute("SELECT * FROM console_conversations WHERE mission_id=?", (mission_id,)).fetchone()
         return Conversation(**dict(row)) if row else None
 
-    def list(self, *, states: tuple[str, ...] = ("open", "archiving", "archived"), limit: int = 200) -> list[Conversation]:
+    def conversations(self, *, states: tuple[str, ...] = ("open", "archiving", "archived"), limit: int = 200) -> list[Conversation]:
         marks = ",".join("?" for _ in states)
         with self.store._connect() as conn:
             rows = conn.execute(f"SELECT * FROM console_conversations WHERE state IN ({marks}) "

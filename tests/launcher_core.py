@@ -139,6 +139,65 @@ class CoreOps:
         return {"done": done, "workspace_exists": os.path.exists(P(workspace_dir) / session_id),
                 "cleaning": sorted(self.sup._cleaners)}
 
+    # ── the Console, assembled as the daemon assembles it (real supervisor, real containment and helper, a stand-in model) ──────
+    def _console(self, workspace_dir=None, base_url=None, claude=None, db_dir=None):
+        if getattr(self, "con", None) is not None:
+            return self.con
+        import tempfile
+        import time
+        from pathlib import Path as P
+
+        from config_schema import MissionConsoleConfig
+        from planet_express.console.runtime import ConsoleRuntime
+        from planet_express.console.service import ConsoleService
+        from planet_express.console.store import ConsoleStore
+        from planet_express.core.store import Store
+        from planet_express.missions.store import MissionStore
+        from planet_express.missions.supervisor import Supervisor
+        store = Store(P(db_dir or tempfile.mkdtemp(prefix="pe-console-")) / "pe.db", clock=time.time)
+        store.init()
+        ms, console = MissionStore(store), ConsoleStore(store)
+        cfg = MissionConsoleConfig(claude=claude)
+
+        def env_policy(grant, mission_id, workspace, env):
+            return {**env, "ANTHROPIC_BASE_URL": base_url, "ANTHROPIC_API_KEY": "stand-in-code", "DISABLE_TELEMETRY": "1"}
+        runtime = ConsoleRuntime(self.c, console, cfg, worker_socket="/nonexistent/worker.sock", env_policy=env_policy)
+        sup = Supervisor(store, self.c, lambda mission: runtime, time.time, enabled=True, workspace_dir=P(workspace_dir),
+                         artifact_dir=P(tempfile.mkdtemp(prefix="pe-console-art-")))
+        service = ConsoleService(ms, console, sup, cfg, uid_range=lambda: self.c.uid_range, clock=time.time)
+        sup.turn_ended, sup.console_tick = service.turn_ended, service.tick
+        self.con = {"store": store, "ms": ms, "console": console, "sup": sup, "service": service}
+        return self.con
+
+    def op_console_setup(self, workspace_dir, base_url, claude, db_dir=None):
+        self._console(workspace_dir, base_url, claude, db_dir)
+        return {"ok": True}
+
+    def op_console_open(self, text, operator="chris"):
+        conv = self.con["service"].create(operator, text)
+        return {"id": conv.id, "mission": conv.mission_id, "state_dir": conv.state_dir, "uid": conv.uid}
+
+    def op_console_post(self, conversation_id, text, operator="chris"):
+        return {"seq": self.con["service"].post(conversation_id, operator, text)}
+
+    def op_console_archive(self, conversation_id, operator="chris"):
+        return {"archived": self.con["service"].archive(conversation_id, operator)}
+
+    def op_console_tick(self):
+        self.con["sup"].tick()
+        return {"ok": True}
+
+    def op_console_look(self, conversation_id):
+        import sqlite3
+        conv = self.con["console"].get(conversation_id)
+        mission = self.con["ms"].get_mission(conv.mission_id)
+        with sqlite3.connect(self.con["store"].path) as db:
+            rows = [list(r) for r in db.execute("SELECT id, session_uid, uid_released_at IS NOT NULL FROM mission_sessions "
+                                                "WHERE mission_id=? ORDER BY rowid", (conv.mission_id,))]
+        return {"state": conv.state, "mission": mission.status, "turns": conv.turns, "tokens": conv.tokens_used, "uid": conv.uid,
+                "reserved": self.con["ms"].reserved_uid(conv.mission_id), "sessions": rows,
+                "messages": [[m.role, m.text] for m in self.con["console"].messages(conversation_id)]}
+
     def op_preflight(self, workspace_root, helper, conf, python, strategy):
         from planet_express.missions.launcher.preflight import run_preflight
         low, high = self.c.uid_range[0], self.c.uid_range[1] + 1

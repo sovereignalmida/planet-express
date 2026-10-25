@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from test_launcher_privileged import ENABLED, SESSIONS, UIDS, WS, host  # noqa: F401  (host is the module fixture)
+from test_launcher_privileged import ENABLED, RANGE, SESSIONS, UIDS, WS, host  # noqa: F401  (host is the module fixture)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "spikes"))
 pytestmark = [pytest.mark.skipif(not ENABLED, reason="root-only spike: run scripts/run_privileged_tests.sh on the disposable VM")]
@@ -301,3 +301,60 @@ def test_a_conversation_state_directory_survives_across_sessions_of_the_same_uid
         if os.path.islink(f"{WS}/C-link"):
             os.unlink(f"{WS}/C-link")
         shutil.rmtree(state, ignore_errors=True)
+
+
+def test_the_console_end_to_end_under_the_real_launcher_two_turns_one_uid_resumed_context_and_an_archive_that_frees_everything(host, standin):
+    """The daemon's assembly (real supervisor, containment and helper; the real claude CLI against a stand-in model): a conversation
+    keeps its uid and its agent state across two separate contained sessions, the second resumes the first, and archiving empties
+    the state directory (including a 0700 tree Core cannot delete) and returns the uid."""
+    srv, fake = standin
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    db_dir = f"/tmp/pe-console-db-{uuid.uuid4().hex[:8]}"
+    os.makedirs(db_dir, mode=0o700)
+    os.chown(db_dir, host.core_uid, host.core_uid if host.strategy == "sudo" else 0)
+    host.core.call("console_setup", workspace_dir=WS, base_url=url, claude=CLAUDE, db_dir=db_dir)
+    conv = host.core.call("console_open", text="Remember the word PINEAPPLE")
+    state = f"{WS}/{conv['state_dir']}"
+
+    def wait_for(want_mission, turns, timeout=120):
+        end, look = time.time() + timeout, {}
+        while time.time() < end:
+            host.core.call("console_tick")
+            look = host.core.call("console_look", conversation_id=conv["id"])
+            if look["mission"] == want_mission and look["turns"] == turns and all(r[2] for r in look["sessions"]):
+                return look
+            time.sleep(0.4)
+        raise AssertionError(look)
+    fake.requests.clear()
+    first = wait_for("awaiting_decision", 1)
+    uid = first["uid"]
+    assert first["reserved"] == uid and RANGE[0] <= uid <= RANGE[1]
+    assert [m[0] for m in first["messages"]] == ["operator", "agent"] and first["messages"][1][1]
+    info = os.stat(state)
+    assert info.st_uid == uid and oct(info.st_mode & 0o7777) == "0o2770"             # adopted by the helper for the conversation's uid
+    assert os.path.isdir(f"{state}/cfg") and not host.core.call("uid_in_use", uid=uid)["in_use"]
+    assert not [d for d in os.listdir(WS) if d.startswith("S-")]                      # every session workspace was removed
+    mark = len(fake.requests)
+    host.core.call("console_post", conversation_id=conv["id"], text="what word did I ask you to remember?")
+    second = wait_for("awaiting_decision", 2)
+    assert len(second["sessions"]) == 2 and {r[1] for r in second["sessions"]} == {uid}      # a new session, the same uid
+    assert messages_have(fake, mark, "PINEAPPLE"), "the second contained process did not resume the first one's conversation"
+    # leave a tree Core cannot delete, as the CLI's cache is, then archive
+    plant = host.sid("plant2")
+    host.launch(["/bin/sh", "-c", f"mkdir -m 700 {state}/.cache && mkdir -m 000 {state}/.cache/sealed && echo x > {state}/.cache/f"],
+                uid=uid, sid=plant)
+    assert wait_empty(host, plant)
+    host.finish(plant)
+    assert host.core.call("console_archive", conversation_id=conv["id"])["archived"] is True
+    end, look = time.time() + 120, {}
+    while time.time() < end:
+        host.core.call("console_tick")
+        look = host.core.call("console_look", conversation_id=conv["id"])
+        if look["state"] == "archived":
+            break
+        time.sleep(0.4)
+    assert look["state"] == "archived" and look["mission"] == "completed" and look["reserved"] is None and look["uid"] is None, look
+    assert not os.path.exists(state) and not host.core.call("uid_in_use", uid=uid)["in_use"]
+    leftovers = [d for d in os.listdir(WS) if d.startswith(("S-", "X-", "C-"))]
+    assert not leftovers, leftovers
+    shutil.rmtree(db_dir, ignore_errors=True)

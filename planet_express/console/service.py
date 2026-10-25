@@ -142,7 +142,7 @@ class ConsoleService:
         for conv in self.console.idle_since(cutoff):
             if not self.supervisor.has_run(conv.mission_id):
                 self.archive(conv.id, "system")
-        for conv in self.console.list(states=("archiving",)):
+        for conv in self.console.conversations(states=("archiving",)):
             try:
                 self._archive_step(conv)
             except Exception:
