@@ -466,24 +466,22 @@ def test_a_missing_symlinked_or_non_directory_state_dir_is_refused(tmp_path):
 
 
 def test_two_launches_naming_one_state_dir_cannot_both_pass_the_owner_check(tmp_path):
-    """The check and the chown run under an exclusive lock on the directory: with the lock held elsewhere, adoption waits."""
+    """The check and the chown run under an exclusive lock on the directory. A held lock is a refusal, never a wait (the helper's
+    alarm would kill it halfway through a launch), and the directory is left exactly as it was."""
     import fcntl
-    import threading
     conf, root, cwd_fd = make_state_dir(tmp_path)
     holder = os.open(root / "C-conv1", os.O_RDONLY | os.O_DIRECTORY)
     fcntl.flock(holder, fcntl.LOCK_EX)
-    done = threading.Event()
-    thread = threading.Thread(target=lambda: (helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd), done.set()))
-    thread.start()
     try:
-        assert not done.wait(0.5)                      # blocked behind the lock
+        with pytest.raises(helper.Refused, match="state dir busy"):
+            helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd)
+        assert oct(os.stat(root / "C-conv1").st_mode & 0o7777) == "0o700"
         os.close(holder)
         holder = None
-        assert done.wait(5)
+        helper.adopt_state_dir(conf, "C-conv1", ME, cwd_fd)            # the lock is released with the descriptor: it now succeeds
     finally:
         if holder is not None:
             os.close(holder)
-        thread.join(5)
         os.close(cwd_fd)
 
 

@@ -413,8 +413,8 @@ def adopt_state_dir(conf, name, uid, cwd_fd):
     left there is its own business, and a directory owned by any other uid is refused, so one conversation can never be handed
     another's state. Nothing is created or removed here. Removing it is the caller's duty and must happen BEFORE the uid is
     released (the supervisor's archive step: a cleanup session as the same uid, then rmdir): a uid that is reused while the old
-    directory still exists would own it. The check and the chown run under an exclusive lock on the directory, so two launches
-    naming one directory with different uids cannot both pass the owner check."""
+    directory still exists would own it. The check and the chown run under an exclusive, non-blocking lock on the directory, so two
+    launches naming one directory with different uids cannot both pass the owner check (the second is refused as busy)."""
     root_fd = open_dir_nofollow(conf["workspace_root"])
     try:
         try:
@@ -424,7 +424,10 @@ def adopt_state_dir(conf, name, uid, cwd_fd):
     finally:
         os.close(root_fd)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)          # never wait: the alarm would end the helper mid-launch
+        except OSError:
+            raise Refused("state dir busy") from None
         info, cwd_info = os.fstat(fd), os.fstat(cwd_fd)
         if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (uid, conf["core_uid"]):
             raise Refused("state dir owner")
