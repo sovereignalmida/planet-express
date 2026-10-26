@@ -350,3 +350,13 @@ def test_approval_events_hold_no_secret_text(stack):
     dump = json.dumps([e.body_json for e in st.ms.events(mid)]) + json.dumps(st.flow.card(mid))
     assert "hunter2-secret" not in dump and "abcdef0123456789abcdef" not in dump
     assert sha256_hex({"a": 1}) and canonical_json({"a": 1}) and MissionError                        # imports used
+
+
+def test_the_console_commands_are_dispatched_to_the_console_and_say_so_when_there_is_none(stack):
+    st = stack()
+    svc, _ = service(st)
+    assert svc.telegram("/ask why is media slow", "tg.42") == "The Console is not available on this host."
+    seen = []
+    svc.console_telegram = type("T", (), {"command": lambda self, text, operator: seen.append((text, operator)) or "ok"})()
+    assert svc.telegram("/threads", "tg.42") == "ok" and seen == [("/threads", "tg.42")]
+    assert svc.telegram("/threads", "Not A Name!") == "Cannot identify the operator."

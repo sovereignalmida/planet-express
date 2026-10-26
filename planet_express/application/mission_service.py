@@ -257,6 +257,7 @@ class MissionService:
         self._incident_context = incident_context
         self._runtime = runtime
         self.console_api = None          # `console.api.ConsoleApi`, attached by the daemon when missions.console is enabled
+        self.console_telegram = None     # `console.telegram.ConsoleTelegram`, attached with it when a Telegram notifier exists
         self._incident_lock = threading.Lock()
         self.flow: ApprovalFlow | None = None      # attached by the daemon (slice 7a); None: approvals are unavailable
 
@@ -813,7 +814,9 @@ class MissionService:
 
     # ── Telegram ────────────────────────────────────────────────────────────
     TELEGRAM_COMMANDS = frozenset({"/missions", "/mission", "/cancel_mission", "/mission_card", "/approve", "/deny",
-                                  "/resume", "/rollback", "/takeover"})
+                                  "/resume", "/rollback", "/takeover", "/ask", "/reply", "/threads", "/plan", "/confirm", "/authorise",
+                                  "/withdraw", "/run", "/close"})
+    _CONSOLE_COMMANDS = frozenset({"/ask", "/reply", "/threads", "/plan", "/confirm", "/authorise", "/withdraw", "/run", "/close"})
     # Approval-flow commands. The operator is the Telegram sender (never a parameter), no command here can be elevated, and
     # /approve is bound to the first 8 hex digits of the grant hash printed on the card, so it cannot approve a card that
     # changed after it was read.
@@ -824,6 +827,12 @@ class MissionService:
         established that the message came from the configured operator chat."""
         parts = text.split()
         cmd, args = parts[0].lower(), parts[1:]
+        if cmd in self._CONSOLE_COMMANDS:
+            if self.console_telegram is None:
+                return "The Console is not available on this host."
+            if _OPERATOR.fullmatch(operator) is None:
+                return "Cannot identify the operator."
+            return self.console_telegram.command(text, operator)
         if cmd in self._FLOW_COMMANDS:
             return self._telegram_flow(cmd, args, operator)
         try:

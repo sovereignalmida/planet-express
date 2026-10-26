@@ -279,6 +279,27 @@ class ConsoleStore:
             conn.execute("UPDATE console_executions SET reported=? WHERE id=?", (",".join([*keys, key]), execution_id))
             return True
 
+    # ── Telegram: which conversations are followed there, and how far they have been sent ──
+    def tg_follow(self, conversation_id: str) -> None:
+        """Start sending this conversation's answers, plans and progress to Telegram, from now on (what already exists is not replayed)."""
+        with self.store._write() as conn:
+            conn.execute("INSERT OR IGNORE INTO console_telegram (conversation_id, last_seq, last_plan_id) VALUES (?, "
+                         "(SELECT COALESCE(MAX(seq), 0) FROM console_messages WHERE conversation_id=?), "
+                         "(SELECT COALESCE(MAX(id), 0) FROM console_plans WHERE conversation_id=?))", (conversation_id, conversation_id, conversation_id))
+
+    def tg_followed(self) -> list[dict]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM console_telegram").fetchall()
+        return [dict(r) for r in rows]
+
+    def tg_advance(self, conversation_id: str, last_seq: int, last_plan_id: int) -> None:
+        with self.store._write() as conn:
+            conn.execute("UPDATE console_telegram SET last_seq=?, last_plan_id=? WHERE conversation_id=?", (last_seq, last_plan_id, conversation_id))
+
+    def tg_unfollow(self, conversation_id: str) -> None:
+        with self.store._write() as conn:
+            conn.execute("DELETE FROM console_telegram WHERE conversation_id=?", (conversation_id,))
+
     # ── plans ───────────────────────────────────────────────────────────────────────────────
     def add_plan(self, conversation_id: str, turn: int, plan: dict, plan_hash: str) -> int:
         """Record a validated plan (the caller passes `plan.canonical`, already redacted). A newer plan supersedes the pending one."""

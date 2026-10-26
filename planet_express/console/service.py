@@ -70,6 +70,7 @@ class ConsoleService:
         self._uid_range, self._clock = uid_range, clock
         self._create_lock = threading.Lock()          # the open-conversation cap is checked and the conversation made as one step
         self._failures: dict[str, int] = {}
+        self.after_tick: Callable[[], None] | None = None          # the Telegram push, attached by the daemon
 
     # ── what the operator does ────────────────────────────────────────────────────────────
     def create(self, operator: str, text: str, *, incident_id: str | None = None, title: str | None = None) -> Conversation:
@@ -176,6 +177,11 @@ class ConsoleService:
             self._report_executions()
         except Exception:
             log.exception("console execution reporting failed")
+        if self.after_tick is not None:
+            try:
+                self.after_tick()
+            except Exception:
+                log.exception("console after-tick hook failed")
 
     def _report_executions(self) -> None:
         """Tell the thread, once each, how a confirmed plan's run is going. The words are PE's, from the mission's state and PE's own verification."""

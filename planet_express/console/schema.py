@@ -56,5 +56,10 @@ CREATE TABLE IF NOT EXISTS console_executions (
     authorised_by TEXT,
     reported TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS console_executions_conversation ON console_executions(conversation_id, id)
+CREATE INDEX IF NOT EXISTS console_executions_conversation ON console_executions(conversation_id, id);
+CREATE TABLE IF NOT EXISTS console_telegram (
+    conversation_id TEXT PRIMARY KEY REFERENCES console_conversations(id),
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    last_plan_id INTEGER NOT NULL DEFAULT 0
+)
 """
