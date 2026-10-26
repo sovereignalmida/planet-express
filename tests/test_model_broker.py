@@ -3,6 +3,7 @@ No network beyond 127.0.0.1, no real key."""
 import http.client
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -189,7 +190,7 @@ def test_a_request_is_relayed_with_the_real_key_and_the_session_never_holds_it(r
     assert json.loads(seen["body"])["model"] == MODEL                      # the body is relayed as it came
     assert response.getheader("x-should-retry") == "false" and response.getheader("anthropic-ratelimit-unified-status") == "allowed"
     assert response.getheader("Set-Cookie") is None                         # headers outside the fixed set stop here
-    assert broker.usage("S-1") == {"requests": 1, "tokens": 15, "refused": 0}
+    assert broker.usage("S-1") == {"requests": 1, "tokens": 15, "refused": 0, "reserved": 0}
 
 
 def test_the_beta_query_is_kept_and_any_other_query_is_dropped(rig):
@@ -923,3 +924,19 @@ def test_an_upstream_that_echoes_the_key_has_its_response_cut(rig):
         broker.shutdown()
         server.close()
     assert any(e[3].get("reason") == "the upstream echoed the key" for e in store.events)
+
+
+def test_usage_reports_what_in_flight_requests_were_promised(rig):
+    upstream, _store, build = rig
+    upstream.mode = "stream"
+    broker = started(build, limits=BrokerLimits(max_tokens=10_000))
+    env = broker.env(CS())
+    conn = http.client.HTTPConnection(env["ANTHROPIC_BASE_URL"].removeprefix("http://"), timeout=10)
+    conn.request("POST", "/v1/messages", body=json.dumps({"model": MODEL, "max_tokens": 100}).encode(),
+                 headers={"x-api-key": env["ANTHROPIC_API_KEY"], "content-type": "application/json"})
+    deadline = time.time() + 5
+    while broker.usage("S-1")["reserved"] == 0 and time.time() < deadline:
+        time.sleep(0.02)
+    assert broker.usage("S-1")["reserved"] >= 100 and broker.usage("S-1")["tokens"] == 0     # promised, not yet charged
+    upstream.hold.set()
+    conn.getresponse().read()

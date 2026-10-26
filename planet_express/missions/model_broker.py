@@ -256,7 +256,12 @@ class ModelBroker:
     def usage(self, session_id: str) -> dict[str, int] | None:
         with self._lock:
             session = self._sessions.get(session_id)
-        return None if session is None else {"requests": session.requests, "tokens": session.tokens, "refused": session.refused}
+        if session is None:
+            return None
+        with session.lock:
+            # `reserved` is what requests still in flight were promised: a request cut off mid-stream is charged by the handler AFTER its
+            # caller has looked, so a caller that wants a conservative total counts it too.
+            return {"requests": session.requests, "tokens": session.tokens, "refused": session.refused, "reserved": session.reserved}
 
     def _stop(self, session_id: str) -> None:
         with self._lock:

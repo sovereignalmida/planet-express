@@ -356,3 +356,25 @@ def test_events_beyond_the_per_poll_limit_are_carried_to_the_next_poll_while_the
     second = rig.runtime.status(handle)
     assert first.state == second.state == "running" and len(first.events) == 256 and len(second.events) == 14      # nothing lost while running
     assert [e.body["args"]["file_path"] for e in first.events + second.events] == [f"/a/{i}" for i in range(270)]
+
+
+def test_a_request_still_in_flight_when_the_turn_is_cut_is_charged_by_what_it_was_promised(tmp_path):
+    class InFlight(Broker):
+        def usage(self, session_id):
+            return {"requests": 1, "tokens": 1000, "refused": 0, "reserved": 8500}       # the handler has not finalised it yet
+    rig = Rig(tmp_path, broker=InFlight())
+    handle, _, cs = rig.start()
+    rig.cont.write_output(cs.session_id, b'{"type":"assistant","message":{"content":[{"type":"text","text":"partway"}]}}\n')
+    rig.runtime.cancel(handle)
+    assert rig.console.get(rig.conv.id).tokens_used == 9500                              # conservative: never an undercount
+
+
+def test_an_interrupted_turn_never_publishes_the_plan_it_had_written(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=100))
+    handle, workspace, cs = rig.start()
+    (workspace / "plan.json").write_text(json.dumps(GOOD_PLAN))
+    rig.cont.write_output(cs.session_id, b'{"type":"assistant","message":{"content":[{"type":"text","text":"drafting"}]}}\n')
+    rig.cont.crash(cs.session_id)                                                         # the stream ends with no result line: interrupted
+    assert rig.runtime.status(handle).state == "failed"
+    result = rig.runtime.collect(handle)                                                  # the supervisor's interrupt path collects it anyway
+    assert result.confidence == "low" and rig.console.current_plan(rig.conv.id) is None

@@ -160,7 +160,7 @@ class ConsoleRuntime:
         try:
             run.parser.feed(self._drain(run), final=True)
             result = run.parser.finish()
-            self._record(run, result)
+            self._record(run, result, keep_plan=not result.interrupted)       # a turn stopped part-way never publishes a plan
             reply = result.reply or "(the agent gave no reply)"
             return AgentResult(diagnosis=reply[:8000], confidence="low" if result.interrupted else "medium")
         finally:
@@ -184,7 +184,9 @@ class ConsoleRuntime:
         if self.broker is not None:
             usage = self.broker.usage(run.cs.session_id)           # the broker counts what the vendor charged: that is the budget
             if usage is not None:
-                tokens = usage["tokens"]
+                # A request cut off mid-stream is finalised by the broker after this look: count what it was promised too, so
+                # interrupting turns over and over cannot dodge the conversation's budget (conservative, never an undercount).
+                tokens = usage["tokens"] + usage.get("reserved", 0)
         self.console.add_usage(conv_id, tokens)
 
     def _plan(self, run: _Run) -> None:

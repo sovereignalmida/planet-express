@@ -180,6 +180,7 @@ multi_host:
 #   console:                        # the Operator Console (off by default): conversations with a PE-aware agent. Needs model_broker and hooks above
 #     enabled: false
 #     claude: /usr/local/bin/claude       # the claude CLI itself, never a wrapper
+#     model: claude-sonnet-4-5            # must be one of missions.model_broker.models above (OpenRouter: the alias you listed there)
 #     token_budget: 150000                # per conversation (a chat turn is about 3,000 tokens, a plan about 13,000)
 #     max_open: 10                        # open conversations; each keeps one session uid for its whole life
 #     archive_after_days: 3               # an idle conversation is archived: its state directory is emptied and its uid freed
