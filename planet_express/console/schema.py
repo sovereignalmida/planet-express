@@ -60,7 +60,6 @@ CREATE INDEX IF NOT EXISTS console_executions_conversation ON console_executions
 CREATE TABLE IF NOT EXISTS console_lessons (
     conversation_id TEXT NOT NULL REFERENCES console_conversations(id),
     card_id TEXT NOT NULL,
-    created_at INTEGER NOT NULL,
     PRIMARY KEY (conversation_id, card_id)
 );
 CREATE TABLE IF NOT EXISTS console_telegram (

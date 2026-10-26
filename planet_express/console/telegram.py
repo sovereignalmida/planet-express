@@ -269,8 +269,9 @@ def _plain(text: str, limit: int, rest: str = "…") -> str:
 def render_plan(conversation_id: str, plan: dict) -> str:
     """A pending plan card as plain text. Every word comes from the validated plan; checks are phrased from PE's own catalogue."""
     short = conversation_id[:8]
-    lines = [f"{short}: the agent has a plan (plan {plan['hash']}). Nothing changes until you authorise it: "
-             f"/confirm {short} <A|B|C> {plan['hash']} shows exactly what you would be authorising.", ""]
+    intro = (f"{short}: the agent has a plan (plan {plan['hash']}). Nothing changes until you authorise it: "
+             f"/confirm {short} <A|B|C> {plan['hash']} shows exactly what you would be authorising.")
+    lines = [intro, ""]
     if plan["plan"]["unsure"]:
         lines.append("not sure about: " + _plain("; ".join(plan["plan"]["unsure"][:3]), 400))
     for i, option in enumerate(plan["plan"]["options"]):

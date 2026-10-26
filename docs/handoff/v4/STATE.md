@@ -175,3 +175,13 @@ elevated approval (a no-backup option says to use the dashboard) and never ackno
 supervisor tick) sends the agent's answers, plan cards and PE's progress lines in batches under Telegram's limit, advancing the cursor (`console_telegram` table) only past what was sent. Untrusted text goes out as one
 inert line (no line breaks, `/commands` defused). Logs carry the exception type only (the bot token is in Telegram errors' URLs).
 Reviews: Codex (4) and Claude `/code-review xhigh` (15) fixed with tests. **Not verified live**: no real Telegram send has been made from this code.
+
+### Console memory candidates (2026-10-26): On `v4-next`, NOT deployed, NOT tagged.
+The agent may write `lessons.json` (<=5 a turn, <=20 a conversation; strict, bounded, scope names checked against the host inventory, refused if it names a scope and no inventory exists; instructions in `LESSONS_FORMAT.md`,
+which says Ship's Memory is unavailable where its tables are missing). `console/lessons.py` + `ConsoleRuntime._lessons` turn them into CANDIDATE cards (source `inferred`, actor `runtime:console-<id>`, evidence
+`conversation:<id>`) linked in `console_lessons`; secret-shaped ones are refused by the memory store and reported without echo; an already-offered lesson is never rewritten. The thread shows "Worth remembering" with Keep / Edit /
+Discard (`ConsoleApi.lesson_decide`, RPC `console.lesson`, route `/api/console/<id>/lesson`): keep = the memory store's operator-only confirm (an edit is stored as operator-stated, still secret-checked, never truncated).
+Quarantine is unchanged: nothing is retrievable by any session until kept (tested).
+Reviews: Codex (3) and Claude `/code-review xhigh` (14) fixed with tests; left on purpose: the decision logic lives in `ConsoleApi` rather than `MissionService._card_change` (two places confirm a card), and the feed
+reads each lesson's card per poll (<=20, bounded). Telegram has no lesson commands: its pushed message says to open the Console.
+Unit suite 7118 passed. Not verified live (needs a real conversation where the agent offers a lesson).

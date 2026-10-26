@@ -43,6 +43,7 @@ from planet_express.application.mission_service import (
 from planet_express.application.multi_host import FleetCache, provider_for
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
+from planet_express.memory.models import SLUG_RE
 from planet_express.widgets.fetcher import WidgetFetcher
 
 
@@ -1061,12 +1062,14 @@ def register_console_pages(app, core) -> None:
     def console_lesson(conversation_id):
         card_id = request.form.get("card_id", "")
         decision = request.form.get("decision", "")
-        if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", card_id) is None or decision not in ("keep", "discard"):
+        if SLUG_RE.fullmatch(card_id) is None or decision not in ("keep", "discard"):
             abort(400)
         params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "card_id": card_id, "decision": decision}
         statement = request.form.get("statement", "")
+        if len(statement) > 600:
+            abort(400)                                       # never cut the operator's words: refuse, so they shorten it themselves
         if statement:
-            params["statement"] = statement[:600]
+            params["statement"] = statement
         return jsonify(core("console.lesson", params))
 
     @app.post("/api/console/<conversation_id>/run/<action>")

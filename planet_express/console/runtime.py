@@ -8,6 +8,7 @@ read-only (Observe/Propose tier, hooks, no Edit); it may write `plan.json` in it
 words are untrusted data: they are redacted and stored, shown to the operator, and never executed or treated as a decision.
 """
 
+import logging
 import os
 import stat
 import uuid
@@ -15,8 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from config_schema import MissionConsoleConfig
-from planet_express.console import lessons as lessons_mod
-from planet_express.console import plan as plan_mod
+from planet_express.console import lessons as lessons_mod, plan as plan_mod
 from planet_express.console.store import ConsoleStore, clean_text
 from planet_express.console.stream import StreamParser
 from planet_express.memory import store as memory_store
@@ -40,6 +40,9 @@ SYSTEM = (
     "PLAN_FORMAT.md for the exact format and write plan.json in the current directory. You cannot approve a plan or widen what it "
     "says. If you learn something durable about this host, LESSONS_FORMAT.md says how to offer it to the operator to remember. Keep answers "
     "short and specific, and ask when the question is ambiguous.")
+
+
+log = logging.getLogger(__name__)
 
 
 class TurnRefused(RuntimeError):
@@ -94,7 +97,8 @@ class ConsoleRuntime:
         if message is None:
             raise TurnRefused("there is no message waiting")
         cs, workspace = context.session, Path(context.cwd)
-        self._prepare_workspace(workspace, context.brief, message.text, self._inventory_text())
+        self._prepare_workspace(workspace, context.brief, message.text, self._inventory_text(),
+                                lessons_mod.LESSONS_INSTRUCTIONS if self.console.memory_ready() else lessons_mod.NO_MEMORY_INSTRUCTIONS)
         state = str(workspace.parent / conv.state_dir)
         # The agent's own session id is stored only once the stream has CONFIRMED it (`_record`): a first turn that dies before the CLI
         # saved its transcript must not leave a `--resume` id that does not exist. Until then every turn starts a new one.
@@ -183,9 +187,6 @@ class ConsoleRuntime:
             self.console.add_message(conv_id, "system", "The agent gave no reply.", turn=run.turn)
         if result.session_id:
             self.console.set_agent_session(conv_id, result.session_id)         # the id the stream confirmed: it can change, so every turn
-        if keep_plan:
-            self._plan(run)
-            self._lessons(run)
         tokens = result.tokens
         if self.broker is not None:
             usage = self.broker.usage(run.cs.session_id)           # the broker counts what the vendor charged: that is the budget
@@ -193,7 +194,13 @@ class ConsoleRuntime:
                 # A request cut off mid-stream is finalised by the broker after this look: count what it was promised too, so
                 # interrupting turns over and over cannot dodge the conversation's budget (conservative, never an undercount).
                 tokens = usage["tokens"] + usage.get("reserved", 0)
-        self.console.add_usage(conv_id, tokens)
+        self.console.add_usage(conv_id, tokens)                    # before anything that can fail: what the vendor charged is always counted
+        if keep_plan:
+            self._plan(run)
+            try:
+                self._lessons(run)
+            except Exception:
+                log.exception("console lessons for %s failed", conv_id)
 
     def _plan(self, run: _Run) -> None:
         if not os.path.lexists(run.workspace / plan_mod.PLAN_FILE):
@@ -219,30 +226,39 @@ class ConsoleRuntime:
 
         def say(text: str) -> None:
             self.console.add_message(conv_id, "system", text, turn=run.turn)
+        if not self.console.memory_ready():
+            say("The agent offered lessons, but Ship's Memory is not available on this host, so none was kept.")
+            return
         try:
             found = lessons_mod.load_file(str(run.workspace), self._inventory())
         except lessons_mod.LessonError as exc:
             say(f"The agent's lessons were refused: {exc}")
             return
         room = lessons_mod.MAX_PER_CONVERSATION - len(self.console.lesson_ids(conv_id))
-        stored = dropped = 0
+        stored = secret = other = 0
         now = datetime.fromtimestamp(float(self.console.store._clock()), UTC)
         for lesson in found.lessons:
             if stored >= room:
-                dropped += 1
+                other += 1
                 continue
             try:
                 card = lessons_mod.to_card(conv_id, lesson, now)
                 with self.console.store._write() as conn:
+                    if memory_store.get_card(conn, card.id) is not None:
+                        continue                                   # already offered (waiting, kept or discarded): never rewritten under the operator's eyes
                     memory_store.upsert_candidate(conn, card, lessons_mod.actor(conv_id), now=now)
-                if self.console.add_lesson(conv_id, card.id):
-                    stored += 1
-            except Exception:                                      # noqa: BLE001 -- a secret-shaped or odd lesson is dropped, never fatal to the turn
-                dropped += 1
+                    self.console.link_lesson(conn, conv_id, card.id)   # the card and its link are one write: no orphan candidate
+                stored += 1
+            except memory_store.SecretShapedContent:
+                secret += 1
+            except Exception:                                      # noqa: BLE001 -- an odd lesson is dropped, never fatal to the turn
+                other += 1
         if stored:
-            say(f"The agent noted {stored} thing{'s' if stored != 1 else ''} worth remembering. Review {'them' if stored != 1 else 'it'} below: nothing is remembered until you keep it.")
-        if dropped:
-            say(f"{dropped} lesson{'s were' if dropped != 1 else ' was'} not kept for review (too many, or it looked like it held a secret).")
+            say(f"The agent noted {stored} thing{'s' if stored != 1 else ''} worth remembering. Open {'them' if stored != 1 else 'it'} in the Console to keep, edit or discard: nothing is remembered until you keep it.")
+        if secret:
+            say(f"{secret} lesson{'s were' if secret != 1 else ' was'} refused: {'they' if secret != 1 else 'it'} looked like {'they held' if secret != 1 else 'it held'} a secret.")
+        if other:
+            say(f"{other} lesson{'s were' if other != 1 else ' was'} not kept for review (too many, or {'they' if other != 1 else 'it'} could not be stored).")
 
     # ── the workspace and the pipe ────────────────────────────────────────────────────────
     def _inventory(self):
@@ -261,11 +277,11 @@ class ConsoleRuntime:
                 + "".join(f"- {s}\n" for s in inv.services))
 
     @staticmethod
-    def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "") -> None:
+    def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "", lessons_text: str = "") -> None:
         if not stat.S_ISDIR(workspace.lstat().st_mode):             # made by the supervisor; never created or followed here
             raise ValueError("workspace path is not a directory")
         files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_mod.instructions(), "INVENTORY.md": inventory_text,
-                 "LESSONS_FORMAT.md": lessons_mod.LESSONS_INSTRUCTIONS}
+                 "LESSONS_FORMAT.md": lessons_text}
         if len(message) > MAX_ARG_PROMPT:
             files["MESSAGE.md"] = clean_text(message)
         for name in ("BRIEF.md", "PLAN_FORMAT.md", "INVENTORY.md", "LESSONS_FORMAT.md", "MESSAGE.md", plan_mod.PLAN_FILE, lessons_mod.LESSONS_FILE):

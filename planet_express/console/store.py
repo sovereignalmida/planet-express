@@ -6,7 +6,6 @@ authorises anything; the supervisor does that, through the mission the conversat
 """
 
 import secrets
-import sqlite3
 from dataclasses import dataclass
 from typing import Literal
 
@@ -280,10 +279,18 @@ class ConsoleStore:
             return True
 
     # ── lessons: the memory candidates a conversation produced (the cards themselves live in Ship's Memory) ──
+    def memory_ready(self) -> bool:
+        """Ship's Memory exists on this database (a SQLite build without FTS5 leaves its tables out)."""
+        with self.store._connect() as conn:
+            return conn.execute("SELECT 1 FROM sqlite_master WHERE name='memory_cards'").fetchone() is not None
+
+    def link_lesson(self, conn, conversation_id: str, card_id: str) -> None:
+        """Record, inside the caller's write, that a card came from this conversation."""
+        conn.execute("INSERT OR IGNORE INTO console_lessons (conversation_id, card_id) VALUES (?, ?)", (conversation_id, card_id))
+
     def add_lesson(self, conversation_id: str, card_id: str) -> bool:
         with self.store._write() as conn:
-            return conn.execute("INSERT OR IGNORE INTO console_lessons (conversation_id, card_id, created_at) VALUES (?, ?, ?)",
-                                (conversation_id, card_id, self._now())).rowcount == 1
+            return conn.execute("INSERT OR IGNORE INTO console_lessons (conversation_id, card_id) VALUES (?, ?)", (conversation_id, card_id)).rowcount == 1
 
     def lesson_ids(self, conversation_id: str) -> list[str]:
         with self.store._connect() as conn:
@@ -355,4 +362,4 @@ class ConsoleStore:
             return conn.execute("UPDATE console_plans SET status=? WHERE id=? AND status='pending'", (status, plan_id)).rowcount == 1
 
 
-__all__ = ["Conversation", "ConversationClosed", "ConversationNotFound", "ConsoleStore", "Message", "clean_text"]
+__all__ = ["ConsoleStore", "Conversation", "ConversationClosed", "ConversationNotFound", "Message", "clean_text"]

@@ -4,7 +4,7 @@ import json
 
 import pytest
 from test_console_confirm import Rig as ConfirmRig
-from test_console_runtime import Inv, Rig as RuntimeRig, Broker
+from test_console_runtime import Broker, Inv, Rig as RuntimeRig
 
 from planet_express.console import lessons as lessons_mod
 from planet_express.console.api import ConsoleApiError
@@ -54,7 +54,7 @@ def test_a_lesson_becomes_a_quarantined_candidate_and_the_operator_is_told(tmp_p
 
 
 def test_the_same_lesson_written_again_is_not_duplicated(tmp_path):
-    rig, workspace = run_turn(tmp_path, doc())
+    rig, _ = run_turn(tmp_path, doc())
     rig.console.add_message(rig.conv.id, "operator", "and again")
     handle, workspace2, cs = rig.start()
     (workspace2 / "lessons.json").write_text(json.dumps(doc()))
@@ -69,7 +69,7 @@ def test_a_refused_file_a_secret_and_an_interrupted_turn_keep_nothing_and_never_
     rig, _ = run_turn(tmp_path / "b", doc(secret))
     assert candidates(rig) == []
     said = " ".join(m.text for m in rig.console.messages(rig.conv.id))
-    assert "not kept for review" in said and "ghp_" not in said
+    assert "looked like it held a secret" in said and "ghp_" not in said
 
 
 def test_at_most_twenty_lessons_a_conversation(tmp_path):
@@ -161,3 +161,47 @@ def test_a_candidate_is_never_retrieved_until_it_is_kept(rig):
     with rig.st.store._connect() as conn:
         found = retrieval.retrieve(conn, ["service:media/qbittorrent"], "gluetun")
     assert [c.id for c in found.cards] == [card_id]
+
+
+def test_a_scoped_lesson_is_refused_when_the_inventory_cannot_check_it_and_an_unscoped_one_is_fine():
+    with pytest.raises(lessons_mod.LessonError, match="inventory is not available"):
+        lessons_mod.parse(doc())
+    assert lessons_mod.parse(doc({"title": "t", "statement": "s"})).lessons[0].stacks == []
+
+
+def test_without_ships_memory_the_agent_is_told_so_and_nothing_is_written(tmp_path):
+    rig = RuntimeRig(tmp_path, broker=Broker(tokens=1))
+    rig.console.memory_ready = lambda: False
+    handle, workspace, cs = rig.start()
+    assert "not available on this host" in (workspace / "LESSONS_FORMAT.md").read_text()
+    (workspace / "lessons.json").write_text(json.dumps(doc()))
+    rig.finish(handle, cs)
+    assert rig.console.lesson_ids(rig.conv.id) == []
+    assert any("Ship's Memory is not available" in m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
+
+
+def test_offering_a_lesson_again_never_rewrites_a_waiting_candidate_or_reopens_a_decided_one(tmp_path):
+    rig, _ = run_turn(tmp_path, doc())
+    card_id = candidates(rig)[0].id
+    rig.console.add_message(rig.conv.id, "operator", "again")
+    handle, workspace, cs = rig.start()
+    (workspace / "lessons.json").write_text(json.dumps(doc({**LESSON, "title": "a different title", "stacks": [], "services": []})))
+    rig.finish(handle, cs)
+    with rig.store._connect() as conn:
+        card = memory_store.get_card(conn, card_id)
+    assert card.title == LESSON["title"] and card.scope == ["stack:media", "service:media/qbittorrent"]      # what the operator was shown is what is there
+    said = " ".join(m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
+    assert "secret" not in said and "not kept for review" not in said
+
+
+def test_an_interrupted_turn_offers_no_lessons(tmp_path):
+    rig = RuntimeRig(tmp_path, broker=Broker(tokens=1))
+    handle, workspace, _cs = rig.start()
+    (workspace / "lessons.json").write_text(json.dumps(doc()))
+    rig.runtime._record(rig.runtime._runs[handle.run_id], type("R", (), {"reply": "", "interrupted": True, "session_id": None, "tokens": 0})(), keep_plan=False)
+    assert rig.console.lesson_ids(rig.conv.id) == [] and candidates(rig) == []
+
+
+def test_a_lesson_title_with_a_leading_blank_line_keeps_its_real_title():
+    card = lessons_mod.to_card("c" * 16, lessons_mod.Lesson.model_validate({"title": "\nreal title", "statement": "s"}), __import__("datetime").datetime.now(__import__("datetime").UTC))
+    assert card.title == "real title"

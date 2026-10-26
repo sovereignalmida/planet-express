@@ -11,6 +11,7 @@ and with each check's full schema 26 of 26 plans validated.
 
 import json
 import os
+import re
 import stat
 from typing import Annotated, Any, Literal
 
@@ -25,8 +26,6 @@ from pydantic import (
 )
 
 from planet_express.missions.canonical import CanonicalError, loads_strict, sha256_hex
-import re
-
 from planet_express.missions.events import redact_value
 from planet_express.missions.resources import BadResource, canon
 from planet_express.missions.verify.checks import PARAM_MODELS
@@ -60,6 +59,7 @@ class CheckSpec(_Strict):
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+NAME_RE, SERVICE_RE = _NAME, _SERVICE
 
 
 class OptionScope(_Strict):
@@ -140,7 +140,7 @@ def parse(doc: Any, inventory: Any = None) -> Plan:
     return plan
 
 
-def read_doc(workspace: str, name: str, limit: int = MAX_PLAN_BYTES) -> Any:
+def read_doc(workspace: str, name: str, limit: int = MAX_PLAN_BYTES, what: str = "plan") -> Any:
     """A JSON file the agent wrote in its workspace, decoded. The worker controls the file, so it is opened without following links,
     size-capped and parsed strictly (no duplicate keys, floats or NaN). Raises PlanError (never echoing the agent's text)."""
     try:
@@ -151,22 +151,22 @@ def read_doc(workspace: str, name: str, limit: int = MAX_PLAN_BYTES) -> Any:
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
         except OSError:
-            raise PlanError("there is no plan file") from None
+            raise PlanError(f"there is no {what} file") from None
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
-                raise PlanError("the plan file is not a regular file within the size limit")
+                raise PlanError(f"the {what} file is not a regular file within the size limit")
             data = os.read(fd, limit + 1)
         finally:
             os.close(fd)
     finally:
         os.close(dir_fd)
     if len(data) > limit:
-        raise PlanError("the plan file is larger than its size limit")
+        raise PlanError(f"the {what} file is larger than its size limit")
     try:
         return loads_strict(data.decode("utf-8"))
     except (CanonicalError, UnicodeDecodeError, ValueError, RecursionError):
-        raise PlanError("the plan file is not valid JSON") from None
+        raise PlanError(f"the {what} file is not valid JSON") from None
 
 
 def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -> Plan:

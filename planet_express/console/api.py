@@ -9,12 +9,16 @@ confirm step exists (P2), and "scrap" only marks a plan as not wanted.
 
 import bisect
 import json
-import re
 import time
 from collections.abc import Callable
 from typing import Any
 
 from config_schema import MissionConsoleConfig
+from planet_express.console import (
+    execution as execution_mod,
+    lessons as lessons_mod,
+    plan as plan_mod,
+)
 from planet_express.console.service import ConsoleConflict, ConsoleError, ConsoleService
 from planet_express.console.store import (
     ConsoleStore,
@@ -23,10 +27,8 @@ from planet_express.console.store import (
     ConversationNotFound,
     clean_text,
 )
-from planet_express.console import execution as execution_mod
-from planet_express.console import lessons as lessons_mod
 from planet_express.memory import store as memory_store
-from planet_express.console import plan as plan_mod
+from planet_express.memory.models import parse_actor
 from planet_express.missions.approval_flow import FlowError, phase_demands_elevation
 from planet_express.missions.events import redact_value
 from planet_express.missions.state import TERMINAL
@@ -46,9 +48,6 @@ class ConsoleApiError(Exception):
     def __init__(self, message: str, code: str = "bad_request"):
         super().__init__(message)
         self.code = code
-
-
-_OPERATOR_ACTOR = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 
 
 def _level(text: str, level: str, group: str, h: str, p: str) -> dict:
@@ -210,9 +209,11 @@ class ConsoleApi:
             raise ConsoleApiError("That lesson is not from this conversation.", "not_found")
         if decision not in ("keep", "discard"):
             raise ConsoleApiError("that is not a decision", "bad_request")
-        if not _OPERATOR_ACTOR.fullmatch(operator):
-            raise ConsoleApiError("Cannot identify the operator.", "forbidden")
         actor = f"operator:{operator}"
+        try:
+            parse_actor(actor)
+        except ValueError:
+            raise ConsoleApiError("Cannot identify the operator.", "forbidden") from None
         try:
             with self.console.store._write() as conn:
                 current = memory_store.get_card(conn, card_id)

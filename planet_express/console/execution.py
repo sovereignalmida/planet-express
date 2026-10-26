@@ -132,4 +132,4 @@ def controls(mission: Mission) -> dict[str, bool]:
     return {name: mission.status in states for name, states in CONTROLS.items()}
 
 
-__all__ = ["conversation_status", "ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "pause_view", "repair_status", "timeline", "verification_view"]
+__all__ = ["ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "conversation_status", "pause_view", "repair_status", "timeline", "verification_view"]

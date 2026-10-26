@@ -270,3 +270,11 @@ def test_a_lesson_decision_carries_the_signed_in_operator_and_a_checked_card_id(
         assert client.post(f"/api/console/{CID}/lesson", data={"csrf_token": t, **bad}).status_code == 400
     assert client.post(f"/api/console/{CID}/lesson", data={"card_id": "cl-1", "decision": "keep"}).status_code == 400          # no CSRF token
     assert len(core.calls) == n
+
+
+def test_an_overlong_lesson_edit_is_refused_not_cut(web):
+    client, core, _ = web
+    t = token(client)
+    n = len(core.calls)
+    assert client.post(f"/api/console/{CID}/lesson", data={"csrf_token": t, "card_id": "cl-1", "decision": "keep", "statement": "x" * 601}).status_code == 400
+    assert len(core.calls) == n

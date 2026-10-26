@@ -791,7 +791,7 @@ class MissionService:
             return api().scrap_plan(v["conversation_id"], v["operator"])
 
         def lesson(p):
-            v = _params(p, {**conv, **op, "card_id": _pattern(re.compile(r"[a-z0-9][a-z0-9._-]{0,127}"), "a card id"),
+            v = _params(p, {**conv, **op, "card_id": _pattern(SLUG_RE, "a card id"),
                             "decision": _choice("keep", "discard")}, {"statement": _str(600, blank=True)})
             return api().lesson_decide(v["conversation_id"], v["card_id"], v["decision"], v["operator"], v.get("statement"))
 
