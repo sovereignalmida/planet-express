@@ -790,8 +790,8 @@ class MissionService:
         execution = {"execution_id": _int(1, 2**31)}
 
         def confirm_prepare(p):
-            v = _params(p, {**conv, **op, "plan_id": _int(1, 2**31), "option": _int(0, 2)})
-            return api().confirm_prepare(v["conversation_id"], v["plan_id"], v["option"], v["operator"])
+            v = _params(p, {**conv, **op, "plan_id": _int(1, 2**31), "option": _int(0, 2)}, {"no_backup": _bool})
+            return api().confirm_prepare(v["conversation_id"], v["plan_id"], v["option"], v["operator"], v.get("no_backup", False))
 
         def confirm_authorise(p):
             v = _params(p, {**conv, **op, **execution, **grant_hash}, {"elevated": _bool})

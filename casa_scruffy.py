@@ -320,14 +320,16 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     def unavailable(error):
         if is_console_request():
             detail = getattr(error, "detail", None)
-            status, message = {"bad_request": (400, detail or "That request was not valid."), "not_found": (404, "That conversation no longer exists."),
+            status, message = {"bad_request": (400, detail or "That request was not valid."), "not_found": (404, "That confirmation or run no longer exists." if ("/confirm/" in request.path or "/run/" in request.path)
+                                                else "That conversation no longer exists."),
                                "conflict": (409, detail or "That cannot be done right now."), "forbidden": (403, "That is not allowed."),
                                "stale": (409, detail or "That was out of date. Look at it again."),
+                               "no_backup": (409, detail or "That scope has no recent verified backup."),
                                "elevation_required": (403, detail or "That needs an elevated session. Elevate with your passphrase, then try again."),
                                "disabled": (503, "Missions are disabled on this host."),
                                "unavailable": (503, detail or "The Console is not available on this host.")}.get(
                                    error.code, (503, "The Console is unavailable; try again shortly."))
-            return jsonify(error=message), status
+            return jsonify(error=message, code=error.code), status
         if request.path.startswith("/api/config"):
             return jsonify(error="Config unavailable; try again shortly"), 503
         if is_chat_request():
@@ -1033,8 +1035,10 @@ def register_console_pages(app, core) -> None:
 
     @app.post("/api/console/<conversation_id>/confirm/prepare")
     def console_confirm_prepare(conversation_id):
-        return jsonify(core("console.confirm_prepare", {"conversation_id": conversation(conversation_id), "operator": g.operator,
-                                                         "plan_id": int_field("plan_id", 1), "option": int_field("option", 0, 2)}))
+        params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "plan_id": int_field("plan_id", 1), "option": int_field("option", 0, 2)}
+        if request.form.get("no_backup") == "1":
+            params["no_backup"] = True                       # an explicit choice in the sheet; the approval it leads to still needs an elevated session
+        return jsonify(core("console.confirm_prepare", params))
 
     @app.post("/api/console/<conversation_id>/confirm/authorise")
     def console_confirm_authorise(conversation_id):
@@ -1044,7 +1048,7 @@ def register_console_pages(app, core) -> None:
         elevated = app.elevated_operator() is not None              # true only when THIS request holds a live elevated session
         result = core("console.confirm_authorise", {"conversation_id": conversation(conversation_id), "operator": g.operator,
                                                     "execution_id": int_field("execution_id", 1), "grant_hash": grant_hash, "elevated": elevated})
-        if elevated:
+        if elevated and result.get("used_elevation"):              # slide the window only when an approval that needed elevation was recorded
             app.elevation_acted()
         return jsonify(result)
 

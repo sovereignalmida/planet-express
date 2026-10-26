@@ -262,6 +262,11 @@ class ConsoleStore:
                 cur = conn.execute(f"UPDATE console_executions SET status=? WHERE id=? AND status IN ({marks})", (status, execution_id, *allowed[status]))
             return cur.rowcount == 1
 
+    def was_reported(self, execution_id: int, key: str) -> bool:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT reported FROM console_executions WHERE id=?", (execution_id,)).fetchone()
+        return row is not None and key in (row["reported"].split(",") if row["reported"] else [])
+
     def mark_reported(self, execution_id: int, key: str) -> bool:
         """Record that a progress line (`key`) was posted into the thread; False if it already had been (so it is posted once)."""
         with self.store._write() as conn:

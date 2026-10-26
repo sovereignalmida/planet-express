@@ -24,7 +24,7 @@ from planet_express.console.store import (
 )
 from planet_express.console import execution as execution_mod
 from planet_express.console import plan as plan_mod
-from planet_express.missions.approval_flow import FlowError
+from planet_express.missions.approval_flow import FlowError, phase_demands_elevation
 from planet_express.missions.events import redact_value
 from planet_express.missions.state import TERMINAL
 from planet_express.missions.store import MissionStore
@@ -154,7 +154,7 @@ class ConsoleApi:
         try:
             seq = self.service.post(conversation_id, operator, text)
         except ConversationNotFound:
-            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
+            raise ConsoleApiError("That conversation no longer exists.", "not_found") from None
         except ConsoleConflict as exc:
             raise ConsoleApiError(str(exc), "conflict") from None
         except ConversationClosed as exc:
@@ -168,7 +168,7 @@ class ConsoleApi:
         try:
             return {"stopped": self.service.interrupt(conversation_id, operator)}
         except ConversationNotFound:
-            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
+            raise ConsoleApiError("That conversation no longer exists.", "not_found") from None
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
 
@@ -177,7 +177,7 @@ class ConsoleApi:
         try:
             return {"archiving": self.service.archive(conversation_id, operator)}
         except ConversationNotFound:
-            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
+            raise ConsoleApiError("That conversation no longer exists.", "not_found") from None
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
 
@@ -196,29 +196,35 @@ class ConsoleApi:
         conv = self._conversation(conversation_id)
         ex = self.console.execution(execution_id)
         if ex is None or ex["conversation_id"] != conv.id or ex["status"] not in ("authorised", "ended"):
-            raise ConsoleApiError("that run no longer exists", "not_found")
+            raise ConsoleApiError("That run no longer exists.", "not_found")
         if action not in execution_mod.ACTIONS:
             raise ConsoleApiError("that is not an action", "bad_request")
         flow = self._require_flow()
         actor = f"operator:{operator}"
+        restore: dict = {}
         try:
             if action == "pause":
                 flow.pause(actor, ex["mission_id"])
             elif action == "resume":
                 flow.resume(actor, ex["mission_id"])
             elif action == "rollback":
-                flow.roll_back(actor, ex["mission_id"], ack_drift=ack_drift)
+                restore = flow.roll_back(actor, ex["mission_id"], ack_drift=ack_drift)
             else:
                 flow.take_over(actor, ex["mission_id"])
         except FlowError as exc:
             raise self._flow_error(exc) from None
         said = {"pause": "paused the run", "resume": "resumed the run", "rollback": "asked PE to roll back to the checkpoint",
-                "takeover": "took over: the agent was stopped and the host is theirs. PE will still check the outcome."}[action]
+                "takeover": "took over: the agent was stopped and the host is theirs. PE checks nothing until you roll back or start a new plan."}[action]
         self.console.add_message(conv.id, "system", f"{operator} {said}.", actor=actor)
-        return {"done": action, "status": self._execution_view(conv)["status"]["text"]}
+        out = {"done": action, "status": self._execution_view(conv)["status"]["text"]}
+        if action == "rollback":
+            # A restore PE refused (typically because files changed after the checkpoint) is reported, so the page can offer the explicit
+            # "roll back anyway" the operator must choose; PE never assumes it.
+            out.update(restore=str(restore.get("restore", "unknown"))[:20], reason=str(restore.get("reason", ""))[:200])
+        return out
 
     # ── confirming a plan option: propose the repair, show the approval card, authorise bound to its hash ──────────
-    def confirm_prepare(self, conversation_id: str, plan_id: int, option: int, operator: str) -> dict:
+    def confirm_prepare(self, conversation_id: str, plan_id: int, option: int, operator: str, no_backup: bool = False) -> dict:
         """Step one of Confirm. Makes the Repair mission the option describes (the same grant checks, backup floor and protected set as any
         Repair mission; nothing here widens them) and returns what the operator is about to authorise. Nothing runs until `confirm_authorise`."""
         conv = self._conversation(conversation_id)
@@ -226,14 +232,15 @@ class ConsoleApi:
             raise ConsoleApiError("This conversation is closed.", "conflict")
         row = self.console.plan(plan_id)
         if row is None or row["conversation_id"] != conv.id:
-            raise ConsoleApiError("that plan no longer exists", "not_found")
+            raise ConsoleApiError("That plan no longer exists.", "not_found")
         plan = self._pending_plan(row)
         if not 0 <= option < len(plan.options):
             raise ConsoleApiError("that option does not exist", "bad_request")
         flow = self._require_flow()
         for ex in self.console.executions(conv.id):                                  # one execution at a time per conversation
             if ex["status"] == "proposed":
-                self._withdraw(flow, ex, operator, quiet=True)
+                if not self._withdraw(flow, ex, operator, quiet=True):
+                    raise ConsoleApiError("An earlier confirmation in this conversation is still open or already running. Finish or withdraw it first.", "conflict")
             elif ex["status"] == "authorised" and self._mission_open(ex["mission_id"]):
                 raise ConsoleApiError("A plan is already running in this conversation. Wait for it to finish, or stop it first.", "conflict")
         chosen = plan.options[option]
@@ -243,8 +250,11 @@ class ConsoleApi:
                 actor, title=f"{conv.title[:120]} · {chosen.name}"[:256], goal=plan_mod.goal_text(chosen),
                 scope={"stacks": list(chosen.scope.stacks), "services": list(chosen.scope.services), "hosts": ["local"]},
                 checks=[c.model_dump() for c in chosen.checks], exclusions=[*chosen.exclude, *chosen.will_not_touch][:32],
-                incident_id=self.ms.get_mission(conv.mission_id).incident_id)
+                incident_id=self.ms.get_mission(conv.mission_id).incident_id, acknowledged_no_backup=no_backup)
         except FlowError as exc:
+            if exc.code == "backup_floor" and not no_backup:
+                raise ConsoleApiError("This scope has no recent verified backup, so PE will not run it by default. You can prepare it anyway: "
+                                      "you would be accepting that risk, and it needs an elevated approval.", "no_backup") from None
             raise self._flow_error(exc) from None
         execution_id = self.console.add_execution(conv.id, plan_id, option, made["mission_id"], made["grant_hash"])
         self.console.add_message(conv.id, "system", f"{operator} is reviewing option {chr(65 + option)} ({chosen.name}) for confirmation. Nothing has been changed.",
@@ -258,16 +268,25 @@ class ConsoleApi:
         ex = self._execution(conv, execution_id, "proposed")
         flow = self._require_flow()
         mission = self.ms.get_mission(ex["mission_id"])
+        if mission.status != "awaiting_decision":
+            raise ConsoleApiError("That confirmation is no longer waiting for a decision (it may have been decided in the Work log).", "conflict")
         if grant_hash != mission.grant_hash or grant_hash != ex["grant_hash"]:
             raise ConsoleApiError("That grant changed since you read it. Look at it again before authorising.", "stale")
         row = self.console.plan(ex["plan_id"])
         self._pending_plan(row)                                                    # expired or scrapped since: refuse, never run it
         actor = f"operator:{operator}"
         try:
-            card = flow.card(mission.id)
-            for needed in card["required"]:
-                if needed["state"] == "pending":
-                    flow.approve(actor, mission.id, needed["phase"], needed["bound"], elevated=elevated)
+            pending = [r for r in flow.card(mission.id)["required"] if r["state"] == "pending"]
+            needs_elevation = any(r["elevated"] or phase_demands_elevation(r["phase"]) for r in pending)
+            if needs_elevation and not elevated:
+                # Checked before any phase is approved: approving "grant" and then failing on "no_backup" would leave the run half-approved and stuck.
+                raise ConsoleApiError("This needs an elevated session. Elevate, then authorise again; nothing was approved.", "elevation_required")
+            for needed in pending:
+                # The grant is bound to the fingerprint the operator saw (checked above), not to whatever the card says now.
+                flow.approve(actor, mission.id, needed["phase"], grant_hash if needed["phase"] != "plan" else needed["bound"], elevated=elevated)
+            after = flow.card(mission.id)
+            if any(r["state"] != "approve" for r in after["required"]):
+                raise ConsoleApiError("That grant is not fully approved (it was denied or still needs an approval elsewhere), so nothing was started.", "conflict")
         except FlowError as exc:
             raise self._flow_error(exc) from None
         self.console.set_execution_status(execution_id, "authorised", by=actor)
@@ -275,7 +294,7 @@ class ConsoleApi:
         plan = plan_mod.Plan.model_validate(json.loads(row["plan_json"]))
         self.console.add_message(conv.id, "system", f"Authorised by {operator}: option {chr(65 + ex['option_index'])} ({plan.options[ex['option_index']].name}). "
                                  f"PE will take a checkpoint, carry it out under supervision, then check it worked. Grant {grant_hash[:8]}.", actor=actor)
-        return {"authorised": True, "execution_id": execution_id, "mission_id": mission.id}
+        return {"authorised": True, "execution_id": execution_id, "mission_id": mission.id, "used_elevation": needs_elevation}
 
     def confirm_withdraw(self, conversation_id: str, execution_id: int, operator: str) -> dict:
         conv = self._conversation(conversation_id)
@@ -293,7 +312,7 @@ class ConsoleApi:
     @staticmethod
     def _flow_error(exc: FlowError) -> ConsoleApiError:
         code = {"conflict": "conflict", "stale": "stale", "forbidden": "forbidden", "not_found": "not_found", "unavailable": "unavailable",
-                "elevation_required": "elevation_required", "invalid_grant": "bad_request"}.get(exc.code, "bad_request")
+                "elevation_required": "elevation_required", "invalid_grant": "bad_request", "backup_floor": "bad_request"}.get(exc.code, "bad_request")
         return ConsoleApiError(str(exc), code)
 
     def _mission_open(self, mission_id: str) -> bool:
@@ -317,20 +336,34 @@ class ConsoleApi:
     def _execution(self, conv: Conversation, execution_id: int, status: str) -> dict:
         ex = self.console.execution(execution_id)
         if ex is None or ex["conversation_id"] != conv.id:
-            raise ConsoleApiError("that confirmation no longer exists", "not_found")
+            raise ConsoleApiError("That confirmation no longer exists.", "not_found")
         if ex["status"] != status:
             raise ConsoleApiError("That confirmation is no longer open.", "conflict")
         return ex
 
-    def _withdraw(self, flow, ex: dict, operator: str, *, quiet: bool) -> None:
+    def _withdraw(self, flow, ex: dict, operator: str, *, quiet: bool) -> bool:
+        """Deny the proposed repair. True only if it really is withdrawn. If it was approved from the Work log in the meantime it is a live run and
+        stays one (the confirmation becomes that run); if it could not be denied for another reason it is left as it was."""
         try:
             flow.deny(f"operator:{operator}", ex["mission_id"], ex["grant_hash"])
         except FlowError as exc:
-            if not quiet:
-                raise self._flow_error(exc) from None
+            status = self.ms.get_mission(ex["mission_id"]).status
+            approved = status == "awaiting_decision" and all(r["state"] == "approve" for r in flow.card(ex["mission_id"])["required"])
+            if status == "cancelled":
+                pass                                                          # denied or withdrawn elsewhere: nothing runs
+            elif status != "awaiting_decision" or approved:                   # approved from the Work log: the supervisor starts it on its next tick
+                self.console.set_execution_status(ex["id"], "authorised", by="operator:work-log")
+                if not quiet:
+                    raise ConsoleApiError("That was already approved from the Work log and is running. Follow it here.", "conflict") from None
+                return False
+            else:
+                if not quiet:
+                    raise self._flow_error(exc) from None
+                return False
         self.console.set_execution_status(ex["id"], "withdrawn")
         if not quiet:
             self.console.add_message(ex["conversation_id"], "system", f"{operator} withdrew the confirmation. Nothing was changed.", actor=f"operator:{operator}")
+        return True
 
     def _execution_view(self, conv: Conversation) -> dict | None:
         """The latest confirmed plan's run, live from its Repair mission: plain status, a short timeline, what a pause was about, PE's verification
@@ -369,7 +402,7 @@ class ConsoleApi:
             "warnings": [w["text"] for w in card["warnings"]],
             "backup": {"covered": bool(card["backup"].get("covered")),
                        "text": "A recent verified backup covers this scope." if card["backup"].get("covered") else
-                               "No recent verified backup covers this scope. This needs an elevated approval in the Work log."},
+                               "No recent verified backup covers this scope, and you are accepting that risk. This needs an elevated approval."},
             "protected": {"count": card["protected"]["count"], "enforced": card["protected"]["exclusions_enforced"],
                           "advisory": card["protected"]["exclusions_advisory"]},
             "limits": {"minutes": max(1, budgets["wall_s"] // 60), "steps": budgets["tool_calls"]},
@@ -381,7 +414,7 @@ class ConsoleApi:
         try:
             return self.console.get(conversation_id)
         except ConversationNotFound:
-            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
+            raise ConsoleApiError("That conversation no longer exists.", "not_found") from None
 
     def _view(self, conv: Conversation) -> dict:
         mission = self.ms.get_mission(conv.mission_id)
@@ -398,6 +431,13 @@ class ConsoleApi:
         out = describe(conv, mission.status, plan, in_flight, last_system, self.cfg.min_turn_tokens, starting)
         shown = pending or self.console.latest_plan(conv.id)                  # the card still shows an expired plan, as expired
         out.update(running=in_flight or starting, plan_row=shown if shown and shown["status"] in ("pending", "expired") else None, mission_closed=closed)
+        if not in_flight and not starting and not closed:
+            runs = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
+            if runs:                                                      # an active or troubled run is never hidden behind "Result ready"
+                override = execution_mod.conversation_status(self.ms.get_mission(runs[-1]["mission_id"]), runs[-1]["status"] == "authorised")
+                # A finished run never hides a newer plan waiting for the operator, or a closing conversation.
+                if override and not (override["group"] == "Recent" and (pending is not None or conv.state != "open")):
+                    out.update(override)
         return out
 
     def _composer(self, conv: Conversation, running: bool, spent: bool, status: dict, mission_closed: bool = False) -> dict:

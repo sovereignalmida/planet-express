@@ -271,10 +271,10 @@ class MissionStore:
         with self.store._write() as conn:
             return insert_event(conn, mission_id, kind, actor, body, self._now())
 
-    def events(self, mission_id: str, after_seq: int = 0) -> list[MissionEvent]:
+    def events(self, mission_id: str, after_seq: int = 0, kind: str | None = None) -> list[MissionEvent]:
         with self.store._connect() as conn:
-            rows = conn.execute("SELECT * FROM mission_events WHERE mission_id=? AND seq>? ORDER BY seq",
-                                (mission_id, after_seq)).fetchall()
+            rows = conn.execute("SELECT * FROM mission_events WHERE mission_id=? AND seq>?" + (" AND kind=?" if kind else "") + " ORDER BY seq",
+                                (mission_id, after_seq, *([kind] if kind else []))).fetchall()
         return [MissionEvent(**dict(r)) for r in rows]
 
     def latest_seq(self, mission_id: str) -> int:

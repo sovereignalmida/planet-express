@@ -122,11 +122,10 @@ class TripwireStore:
 
 def pause_card(ms: MissionStore, mission_id: str) -> dict[str, Any] | None:
     """The operator card payload of the mission's latest pause, from the durable event."""
-    for event in reversed(ms.events(mission_id)):
-        if event.kind == "tripwire":
-            body = json.loads(event.body_json)
-            if body.get("event") == "tripwire.paused":
-                return body
+    for event in reversed(ms.events(mission_id, kind="tripwire")):
+        body = json.loads(event.body_json)
+        if body.get("event") == "tripwire.paused":
+            return body
     return None
 
 
@@ -538,6 +537,8 @@ class TripwireMonitor:
             self.revoke_endpoints(mission.id)
         except Exception:
             log.exception("could not close the capability endpoints of %s", mission.id)
+        if cause == "operator" and not changes:
+            changes = self._changes_while_frozen(mission)               # the last scan may be 15s old: what changed since must not vanish on resume
         rollback = self._capture_post(mission)
         options = list(BASE_OPTIONS if rollback["available"] else NO_ROLLBACK_OPTIONS)
         shown = changes[:MAX_CHANGES]
@@ -552,6 +553,20 @@ class TripwireMonitor:
         self._record(mission, body)
         self.state.remove(mission.id, "intent.json")
         return cause
+
+    def _changes_while_frozen(self, mission: Mission) -> list[Change]:
+        """What differs from the baseline now that the session is frozen, for the card of an operator's pause. Judges nothing and counts nothing
+        against the budgets: it only makes sure a change made since the last scan is shown, because a resume re-baselines."""
+        try:
+            result = self.scanner.scan(self._excluded_files([mission]))
+            record = self.state.read(mission.id, "baseline.json")
+            if not result.ok or record is None or not isinstance(record.get("snapshot"), dict):
+                return []
+            changes = diff_snapshots(record["snapshot"], result.snapshot, self._ctx(mission.grant(), mission.id))
+        except Exception:                                               # noqa: BLE001 - the pause itself must still happen
+            log.exception("could not scan %s while pausing it for the operator", mission.id)
+            return []
+        return [c for c in changes if c.verdict != "allowed"]
 
     def _freeze(self, mission_id: str) -> bool:
         cs = self._session(mission_id)

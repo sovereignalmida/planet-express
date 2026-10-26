@@ -50,6 +50,7 @@ class Rig:
         self.broker = broker
         self.runtime = ConsoleRuntime(self.cont, self.console, self.cfg, worker_socket="/run/w.sock", broker=broker,
                                       env_policy=lambda grant, mid, ws, env: {**env, "ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "FROM_POLICY": "1"})
+        self.runtime.inventory = lambda: Inv                    # a plan's scope is checked against the host inventory; tests opt out explicitly
         self.root = tmp_path / "ws"
         self.n = 0
         self.spawned = []
@@ -399,8 +400,16 @@ def test_the_agent_is_given_the_inventory_and_a_plan_naming_anything_else_is_ref
     assert any("does not have" in m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
 
 
-def test_with_no_inventory_the_agent_is_told_it_cannot_name_a_scope(tmp_path):
-    rig = Rig(tmp_path)
+def test_with_no_inventory_the_agent_is_told_it_cannot_name_a_scope_and_a_plan_written_anyway_is_refused(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=1))
+    rig.runtime.inventory = None
+    handle, workspace, cs = rig.start()
+    (workspace / "plan.json").write_text(json.dumps(GOOD_PLAN))
+    rig.finish(handle, cs)
+    assert rig.console.current_plan(rig.conv.id) is None
+    assert any("inventory is not available" in m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
+    rig = Rig(tmp_path / "b")
+    rig.runtime.inventory = None
     _, workspace, _ = rig.start()
     assert "do not write plan.json" in (workspace / "INVENTORY.md").read_text()
     rig.runtime.inventory = lambda: (_ for _ in ()).throw(OSError("unreadable"))

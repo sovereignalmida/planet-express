@@ -4,10 +4,12 @@ import pytest
 from repair_fakes import build, update
 
 from config_schema import MissionConsoleConfig
+from planet_express.console import execution as ex_mod
 from planet_express.console import plan as plan_mod
 from planet_express.console.api import ConsoleApi, ConsoleApiError
 from planet_express.console.service import ConsoleService
 from planet_express.console.store import ConsoleStore
+from planet_express.missions.state import transition
 
 
 def plan_doc(scope=None, exclude=None):
@@ -193,3 +195,113 @@ def test_the_execution_belongs_to_its_conversation_and_to_one_status_at_a_time(r
     with pytest.raises(ConsoleApiError) as err:
         rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")                 # twice
     assert err.value.code == "conflict"
+
+
+def test_a_scope_with_no_recent_backup_is_refused_with_a_typed_code_and_can_be_prepared_only_when_the_operator_accepts_the_risk(tmp_path):
+    rig = Rig(tmp_path, covered=False)
+    try:
+        rig.flow.validator = lambda grant, plan: [] if grant.backup.covered or grant.backup.acknowledged_no_backup else [
+            "backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged"]
+        plan_id = rig.add_plan()
+        with pytest.raises(ConsoleApiError) as err:
+            rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+        assert err.value.code == "no_backup" and rig.console.executions(rig.conv.id) == []
+        view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris", no_backup=True)
+        assert view["backup"]["covered"] is False and view["needs_elevation"] is True and "accepting that risk" in view["backup"]["text"]
+        assert rig.st.status(view["mission_id"]) == "awaiting_decision"                                         # still nothing approved
+    finally:
+        rig.close()
+
+
+def test_a_run_approved_in_the_work_log_is_never_marked_withdrawn(rig):
+    plan_id = rig.add_plan()
+    first = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.st.approve_all(first["mission_id"])                                                                      # approved elsewhere, then the operator withdraws here
+    with pytest.raises(ConsoleApiError) as err:
+        rig.api.confirm_withdraw(rig.conv.id, first["execution_id"], "chris")
+    assert err.value.code == "conflict" and "already approved" in str(err.value)
+    assert rig.console.execution(first["execution_id"])["status"] == "authorised"                                # reconciled: it is a live run
+    with pytest.raises(ConsoleApiError, match="already running"):
+        rig.api.confirm_prepare(rig.conv.id, plan_id, 1, "chris")                                                # and a second run is blocked
+
+
+def test_preparing_again_does_not_start_a_second_run_over_one_approved_elsewhere(rig):
+    plan_id = rig.add_plan()
+    first = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.st.approve_all(first["mission_id"])
+    with pytest.raises(ConsoleApiError) as err:
+        rig.api.confirm_prepare(rig.conv.id, plan_id, 1, "chris")
+    assert err.value.code == "conflict" and rig.console.execution(first["execution_id"])["status"] == "authorised"
+    assert len(rig.console.executions(rig.conv.id)) == 1
+
+
+def test_authorising_a_grant_denied_elsewhere_starts_nothing(rig):
+    plan_id = rig.add_plan()
+    view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.flow.deny("operator:me", view["mission_id"], view["grant_hash"])
+    with pytest.raises(ConsoleApiError) as err:
+        rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
+    assert err.value.code == "conflict" and rig.console.execution(view["execution_id"])["status"] == "proposed"
+    assert rig.console.plan(plan_id)["status"] == "pending"
+
+
+def test_the_conversation_status_follows_an_active_repair_not_the_last_answer(rig):
+    plan_id = rig.add_plan()
+    view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
+    for step in ("investigating", "awaiting_decision"):                                                          # the conversation's own turn has finished
+        transition(rig.st.store, rig.conv.mission_id, step, "core")
+    shown = rig.api.feed(rig.conv.id)["conversation"]["status"]
+    assert shown["group"] == "Working"
+    assert rig.st.drive(view["mission_id"]) == "completed"
+    done = ex_mod.conversation_status(rig.st.ms.get_mission(view["mission_id"]), live=False)
+    assert done["text"] == "Done and verified" and done["group"] == "Recent"
+    paused = ex_mod.conversation_status(type("M", (), {"status": "paused_tripwire"})(), live=True)
+    assert paused["group"] == "Needs you" and paused["level"] == "crit"
+
+
+def test_authorising_without_the_elevation_a_later_phase_needs_approves_nothing(tmp_path):
+    rig = Rig(tmp_path, covered=False)
+    try:
+        rig.flow.validator = lambda grant, plan: [] if grant.backup.covered or grant.backup.acknowledged_no_backup else [
+            "backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged"]
+        view = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris", no_backup=True)
+        assert view["phases"] == ["grant", "no_backup"]
+        with pytest.raises(ConsoleApiError) as err:
+            rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris", elevated=False)
+        assert err.value.code == "elevation_required"
+        assert all(r["state"] == "pending" for r in rig.flow.card(view["mission_id"])["required"])           # not even the grant phase was approved
+        assert rig.api.confirm_withdraw(rig.conv.id, view["execution_id"], "chris") == {"withdrawn": True}    # so it can still be backed out of
+        again = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris", no_backup=True)
+        done = rig.api.confirm_authorise(rig.conv.id, again["execution_id"], again["grant_hash"], "chris", elevated=True)
+        assert done["authorised"] is True and done["used_elevation"] is True
+    finally:
+        rig.close()
+
+
+def test_an_ordinary_authorisation_reports_that_it_used_no_elevation(rig):
+    view = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
+    assert rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris", elevated=True)["used_elevation"] is False
+
+
+def test_a_refusal_for_another_reason_that_mentions_backup_is_not_offered_as_a_missing_backup(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        rig.flow.validator = lambda grant, plan: ["scope stack 'backups' is not in the discovered inventory", "backup floor: the scope is not covered"]
+        with pytest.raises(ConsoleApiError) as err:
+            rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
+        assert err.value.code == "bad_request"
+    finally:
+        rig.close()
+
+
+def test_a_run_that_finished_does_not_hide_a_newer_plan_waiting_for_a_decision(rig):
+    view = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
+    rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
+    for step in ("investigating", "awaiting_decision"):
+        transition(rig.st.store, rig.conv.mission_id, step, "core")
+    rig.st.drive(view["mission_id"])
+    rig.console.consume(rig.console.pending(rig.conv.id).seq, 1) if rig.console.pending(rig.conv.id) else None
+    rig.add_plan()
+    shown = rig.api.feed(rig.conv.id)["conversation"]["status"]
+    assert shown["group"] == "Needs you" and shown["text"] == "Needs your call", shown

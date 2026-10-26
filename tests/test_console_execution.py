@@ -73,7 +73,7 @@ def test_a_failed_verification_shows_which_check_failed_and_offers_the_next_step
         v = feed["verification"]
         assert v is not None and v["level"] in ("high", "warn") and v["by_pe"] is True
         rig.service.tick()
-        assert any("you can roll back, take over, or ask the agent to keep working" in t for t in rig.thread())
+        assert any("Look at the run above; you can roll back" in t for t in rig.thread())          # only the controls the state really offers are named
     finally:
         rig.close()
 
@@ -148,13 +148,13 @@ def test_a_tripwire_pause_is_shown_with_what_changed_and_never_as_the_operators(
         rig.close()
 
 
-def test_take_over_stops_the_agent_and_says_pe_still_checks_the_outcome(tmp_path):
+def test_take_over_stops_the_agent_and_says_plainly_that_pe_checks_nothing_until_asked(tmp_path):
     rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
     try:
         view = rig.start_run()
         rig.st.sup.tick()
         rig.api.execution_action(rig.conv.id, view["execution_id"], "takeover", "chris")
-        assert any("took over" in t and "PE will still check the outcome" in t for t in rig.thread())
+        assert any("took over" in t and "PE checks nothing until you roll back" in t for t in rig.thread())
     finally:
         rig.close()
 
@@ -182,3 +182,36 @@ def test_the_controls_follow_the_state_table():
                              ("needs_operator", {"rollback"}), ("verifying", set()), ("completed", set()), ("awaiting_decision", set())):
         got = {k for k, v in ex_mod.controls(SimpleNamespace(status=status)).items() if v}
         assert got == expected, status
+
+
+def test_a_rollback_reports_what_the_restore_did_so_a_refusal_is_never_a_silent_success(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
+    try:
+        view = rig.start_run()
+        rig.st.sup.tick()
+        rig.api.execution_action(rig.conv.id, view["execution_id"], "pause", "chris")
+        out = rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
+        assert out["done"] == "rollback" and out["restore"] in ("done", "refused", "failed", "unknown") and isinstance(out["reason"], str)
+    finally:
+        rig.close()
+
+
+def test_an_operator_pause_shows_what_changed_since_the_last_scan_so_a_resume_cannot_hide_it(tmp_path):
+    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
+    try:
+        view = rig.start_run()
+        rig.st.sup.tick()
+        touch(rig.st.rig.fs / "etc" / "hosts", "10.0.0.1 changed between scans\n")                       # no scan has run since
+        rig.api.execution_action(rig.conv.id, view["execution_id"], "pause", "chris")
+        paused = rig.feed()["execution"]["pause"]
+        assert paused["by_operator"] is True and any("/etc/hosts" in c for c in paused["changes"])
+    finally:
+        rig.close()
+
+
+def test_a_failed_verification_marks_the_check_step_not_the_run_step_whatever_state_it_ends_in():
+    mission = type("M", (), {"status": "needs_operator", "checkpoint_id": "ck", "verification_result_json": "{}"})()
+    states = {s["label"]: s["state"] for s in ex_mod.timeline(mission, "operator:chris")}
+    assert states["Carrying out the plan"] == "done" and states["PE checks it worked"] == "bad"
+    no_check = type("M", (), {"status": "needs_operator", "checkpoint_id": "ck", "verification_result_json": None})()
+    assert {s["label"]: s["state"] for s in ex_mod.timeline(no_check, None)}["Carrying out the plan"] == "bad"

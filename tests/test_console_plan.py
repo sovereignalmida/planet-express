@@ -231,3 +231,17 @@ def test_the_prompt_and_the_schema_describe_the_scope_and_point_at_the_inventory
     assert "INVENTORY.md" in text and "scope" in text and "exclude" in text
     option = plan_mod.json_schema()["properties"]["options"]["items"]
     assert "scope" in option["required"] and option["properties"]["scope"]["additionalProperties"] is False
+
+
+def test_what_an_option_will_not_touch_must_fit_the_grant_it_becomes_part_of():
+    doc = good()
+    doc["options"][0]["will_not_touch"] = ["x" * 501]
+    with pytest.raises(PlanError):
+        parse(doc)
+    doc = good()
+    doc["options"][0]["will_not_touch"] = [f"thing {i}" for i in range(20)]
+    doc["options"][0]["exclude"] = [f"service:media/s{i}" for i in range(13)]
+    with pytest.raises(PlanError):                                                    # 33 together: none is silently dropped on the way to the grant
+        parse(doc)
+    doc["options"][0]["exclude"] = doc["options"][0]["exclude"][:12]
+    assert len(parse(doc).options[0].exclude) == 12

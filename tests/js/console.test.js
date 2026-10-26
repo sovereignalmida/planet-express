@@ -120,6 +120,7 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
   const doc = makeDoc({ status: { enabled: true, proposal_only: false }, selected: "0123456789abcdef" });
   const win = { history: { pushState() {} }, location: { assign() {}, pathname: "/console" }, URLSearchParams, clearTimeout() {}, setTimeout: () => 0, addEventListener() {},
     fetch: async (url, opts) => { requests.push([url, opts && opts.method || "GET", opts && opts.body && String(opts.body)]);
+      const forced = win.__override && win.__override(url); if (forced) return forced;
       const body = url.includes("/feed") ? FEED : url.includes("/list") ? LIST : url.endsWith("/confirm/prepare") ? VIEW : { id: "0123456789abcdef", scrapped: true };
       return { ok: true, status: 200, json: async () => body }; } };
   const page = C.boot(doc, win);
@@ -296,6 +297,15 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     const thread = walk(doc.getElementById("con-thread"));
     assert.ok(!thread.some(n => n.className === "pe-tripwire") && thread.some(n => n.textContent.includes("Paused by you.")));
   });
+  await atest("an operator pause shows what changed since the last scan before Resume is offered", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Paused by you", level: "warn" }, controls: { pause: false, resume: true, rollback: true, takeover: true },
+      pause: { by_operator: true, cause: "operator", changes: ["host:local/path:/etc/hosts: modified"], more: 2, rollback_available: true, checkpoint: "ck-1", who: "operator:chris" } };
+    await page.loadFeed();
+    const block = walk(doc.getElementById("con-thread")).find(n => n.className === "pe-con-pause");
+    assert.ok(block.textContent.includes("Changed since PE last looked: host:local/path:/etc/hosts: modified · +2 more"));
+    const order = block.children.map(c => c.className.split(" ")[0] + ":" + c.textContent.slice(0, 7));
+    assert.ok(order.findIndex(t => t.includes("Changed")) > -1 && order.findIndex(t => t.includes("Changed")) < order.length - 1, order.join("|"));   // the buttons come after the warning
+  });
   await atest("PE's verification is labelled as PE's, marks each check, and a could-not-check is its own state", async () => {
     FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you: PE isn't sure what state this is in", level: "crit" }, finished: false, pause: null,
       controls: { pause: false, resume: false, rollback: true, takeover: false },
@@ -309,6 +319,70 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.deepStrictEqual(walk(v).filter(n => n.className === "pe-check-meta").map(n => n.textContent), ["PASS", "COULD NOT CHECK", "FAIL"]);
     assert.ok(walk(v).some(n => n.tag === "button" && n.textContent === "Keep working on it"));
     assert.ok(!walk(v).some(n => ["img", "script"].includes(n.tag)));
+  });
+  const settle = async (n = 5) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)); };
+  const reply = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
+  const rollButtons = () => walk(doc.getElementById("con-thread")).filter(n => n.tag === "button").map(n => n.textContent);
+  await atest("a run that needs the operator but has no pause or verification still offers its controls", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, pause: null, verification: null,
+      controls: { pause: false, resume: false, rollback: true, takeover: true } };
+    await page.loadFeed();
+    const labels = rollButtons();
+    assert.ok(labels.includes("Roll back to the checkpoint") && labels.includes("Take over"), labels.join("|"));
+  });
+  await atest("a refused rollback offers an explicit second choice, and only that choice sends ack_drift", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, pause: null, verification: null,
+      controls: { pause: false, resume: false, rollback: true, takeover: true } };
+    await page.loadFeed();
+    win.__override = url => url.endsWith("/run/rollback") ? reply({ done: "rollback", status: "Needs you", restore: "refused", reason: "files changed after the checkpoint" }) : null;
+    const roll = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Roll back to the checkpoint"));
+    roll().fire("click"); roll().fire("click"); await settle();
+    assert.ok(!requests.filter(r => r[0].endsWith("/run/rollback")).some(r => r[2].includes("ack_drift")), "the first attempt never acknowledges drift");
+    const thread = walk(doc.getElementById("con-thread"));
+    assert.ok(thread.some(n => n.textContent.includes("PE did not restore: files changed after the checkpoint")));
+    const anyway = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && (n.textContent.startsWith("Roll back anyway") || n.textContent.startsWith("Overwrite")));
+    anyway().fire("click");
+    assert.ok(anyway().textContent.includes("Click again"), "overwriting is two clicks");
+    anyway().fire("click"); await settle();
+    assert.ok(requests.some(r => r[0].endsWith("/run/rollback") && r[2].includes("ack_drift=1")));
+    win.__override = null;
+  });
+  await atest("an armed rollback does not follow the operator into another conversation", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), pause: null, verification: null, controls: { pause: false, resume: false, rollback: true, takeover: true } };
+    await page.loadFeed();
+    walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent === "Roll back to the checkpoint").fire("click");
+    assert.ok(rollButtons().some(t => t.includes("Click again")));
+    page.select("0123456789abcdef", false); await settle(6);
+    assert.ok(!rollButtons().some(t => t.includes("Click again")), rollButtons().join("|"));
+  });
+  await atest("a scope with no backup asks first, and only the explicit choice prepares it with no_backup", async () => {
+    FEED.execution = null; FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; await page.loadFeed();
+    win.__override = (url) => url.endsWith("/confirm/prepare") && !win.__ok ? reply({ error: "This scope has no recent verified backup.", code: "no_backup" }, 409) : null;
+    walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Confirm option")).fire("click"); await settle();
+    const ask = walk(doc.getElementById("con-sheet"));
+    assert.ok(ask.some(n => n.textContent.includes("NO RECENT BACKUP")) && ask.some(n => n.textContent.includes("no recent verified backup")));
+    assert.ok(!requests.filter(r => r[0].endsWith("/confirm/prepare")).some(r => r[2].includes("no_backup")));
+    win.__ok = true;
+    ask.find(n => n.tag === "button" && n.textContent.startsWith("Prepare it anyway")).fire("click"); await settle();
+    assert.ok(requests.some(r => r[0].endsWith("/confirm/prepare") && r[2].includes("no_backup=1")));
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent === "Back to the plan").fire("click"); await settle();
+    win.__override = null; win.__ok = false;
+  });
+  await atest("while an authorisation is in flight the sheet cannot be dismissed and nothing is withdrawn", async () => {
+    FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; FEED.execution = null; await page.loadFeed();
+    walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Confirm option")).fire("click"); await settle();
+    let release; const held = new Promise(r => { release = r; });
+    win.__override = url => url.endsWith("/confirm/authorise") ? held.then(() => reply({ authorised: true })) : null;
+    const before = requests.filter(r => r[0].endsWith("/confirm/withdraw")).length;
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent.startsWith("Authorise")).fire("click"); await settle();
+    const dialog = walk(doc.getElementById("con-sheet")).find(n => n.attrs.role === "dialog");
+    dialog.fire("keydown", { key: "Escape", preventDefault() {} });
+    walk(doc.getElementById("con-sheet")).find(n => n.className === "pe-sheet-scrim").fire("click");
+    await settle();
+    assert.strictEqual(requests.filter(r => r[0].endsWith("/confirm/withdraw")).length, before, "no withdrawal while authorising");
+    assert.ok(doc.getElementById("con-sheet").children.length > 0, "the sheet stays until the answer");
+    release(); await settle(8); win.__override = null;
+    assert.strictEqual(doc.getElementById("con-sheet").children.length, 0);
   });
   void all;
   if (failures) { console.log(failures + " failed"); process.exit(1); }

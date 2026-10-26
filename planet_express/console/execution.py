@@ -80,9 +80,34 @@ def pause_view(card: dict | None) -> dict[str, Any] | None:
             "who": (card.get("errors") or {}).get("by") if by_operator else None}
 
 
+def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
+    """How a conversation reads while a confirmed plan is running or needs attention: derived from the run, so an active repair is never hidden
+    behind 'Result ready'. None when the run needs no say in the conversation's status."""
+    status = mission.status
+    if live and status in ("awaiting_decision", "queued", "investigating", "executing", "verifying", "rollback_pending"):
+        return {"text": "Working on the plan", "level": "ok", "group": "Working",
+                "verdict": {"h": "Carrying out the confirmed plan", "p": "PE is supervising it and will check it worked."}}
+    if status == "paused_tripwire":
+        return {"text": "Run paused", "level": "crit", "group": "Needs you",
+                "verdict": {"h": "The run is paused", "p": "Look at the run below for what you can do next."}}
+    if status in ("needs_operator", "recovery_required", "failed"):
+        return {"text": "Run needs you", "level": "crit" if status != "failed" else "high", "group": "Needs you",
+                "verdict": {"h": "The run didn't finish cleanly" if status != "failed" else "The run didn't pass PE's checks",
+                            "p": "Look at the run below for what you can do next."}}
+    if status == "completed":
+        return {"text": "Done and verified", "level": "ok", "group": "Recent",
+                "verdict": {"h": "The plan was carried out and verified", "p": "PE's own checks passed."}}
+    if status == "rolled_back":
+        return {"text": "Rolled back", "level": "warn", "group": "Recent",
+                "verdict": {"h": "The run was rolled back", "p": "The host is back at the checkpoint."}}
+    return None
+
+
 def timeline(mission: Mission, authorised_by: str | None) -> list[dict[str, str]]:
     status = mission.status
     bad = status in ("failed", "rolled_back", "rollback_pending", "needs_operator", "recovery_required", "cancelled")
+    # A failed verification ends in needs_operator, rollback_pending or rolled_back (on_verify_fail), not only in `failed`.
+    checked_and_failed = bool(mission.verification_result_json) and status in ("failed", "needs_operator", "rollback_pending", "rolled_back", "recovery_required")
     checkpoint = "done" if mission.checkpoint_id else ("now" if status in ("awaiting_decision", "queued") else "todo")
     if status == "paused_tripwire":
         run = "paused"
@@ -90,11 +115,13 @@ def timeline(mission: Mission, authorised_by: str | None) -> list[dict[str, str]
         run = "now"
     elif status in ("verifying", "completed"):
         run = "done"
+    elif checked_and_failed:
+        run = "done"                                       # the plan was carried out; it is the check that failed
     elif bad:
         run = "bad"
     else:
         run = "todo"
-    check = "now" if status == "verifying" else "done" if status == "completed" else "bad" if (status == "failed" and mission.verification_result_json) else "todo"
+    check = ("now" if status == "verifying" else "done" if status == "completed" else "bad" if checked_and_failed else "todo")
     return [{"label": "Authorised", "state": "done", "meta": (authorised_by or "").removeprefix("operator:")},
             {"label": "Checkpoint taken", "state": checkpoint, "meta": "so it can be rolled back"},
             {"label": "Carrying out the plan", "state": run, "meta": ""},
@@ -105,4 +132,4 @@ def controls(mission: Mission) -> dict[str, bool]:
     return {name: mission.status in states for name, states in CONTROLS.items()}
 
 
-__all__ = ["ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "pause_view", "repair_status", "timeline", "verification_view"]
+__all__ = ["conversation_status", "ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "pause_view", "repair_status", "timeline", "verification_view"]

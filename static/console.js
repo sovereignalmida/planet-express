@@ -111,7 +111,7 @@
                    text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
     const state = { selected: null, list: [], feed: null, messages: [], events: [], lastMessage: 0, lastEvent: 0, newMode: true,
                     picked: {}, openTrails: {}, scrapArmed: false, archiveArmed: false, timer: null, error: null, sending: false,
-                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {} };
+                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {}, drift: null, preparing: false };
     const ORIGINS = { operator: ["Y", "You asked"], incident: ["!", "From an incident"], pe: ["P", "PE started it"] };
     const EXAMPLES = ["The download apps lost internet after the reboot. Figure out why.", "Why is the media stack slow right now?",
                       "Which containers restarted in the last day, and why?"];
@@ -129,7 +129,7 @@
       if (response.status === 401) { window.location.assign("/login?next=/console"); throw new Error("Please log in again."); }
       let data = {};
       try { data = await response.json(); } catch (_e) { /* an empty or non-JSON body */ }
-      if (!response.ok) { const err = new Error(data.error || "The Console is unavailable; try again shortly."); err.status = response.status; throw err; }
+      if (!response.ok) { const err = new Error(data.error || "The Console is unavailable; try again shortly."); err.status = response.status; err.code = data.code; throw err; }
       return data;
     }
     const post = (url, fields) => request(url, { method: "POST", body: new window.URLSearchParams({ csrf_token: csrf, ...(fields || {}) }) });
@@ -294,10 +294,18 @@
     }
 
     // ── a confirmed plan's run: timeline, a pause's reason, PE's verification ──
-    async function runAction(name, x) {
-      if (name === "rollback" && !state.armed.rollback) { state.armed.rollback = true; state.sig.thread = ""; renderThread(); return; }
+    async function runAction(name, x, ackDrift) {
+      const armKey = ackDrift ? "drift" : name;
+      if ((name === "rollback") && !state.armed[armKey]) { state.armed = { [armKey]: true }; state.sig.thread = ""; renderThread(); return; }
       state.armed = {};
-      try { await post("/api/console/" + state.selected + "/run/" + name, { execution_id: String(x.id) }); state.firstPaint = "bottom"; await loadFeed(); } catch (e) { fail(e); }
+      const fields = { execution_id: String(x.id) };
+      if (ackDrift) fields.ack_drift = "1";
+      try {
+        const result = await post("/api/console/" + state.selected + "/run/" + name, fields);
+        // A restore PE refused because files changed since the checkpoint is never a silent success: the operator is offered the explicit choice.
+        state.drift = name === "rollback" && result.restore === "refused" ? { id: x.id, reason: result.reason || "Files changed since the checkpoint." } : null;
+        state.firstPaint = "bottom"; state.sig.thread = ""; await loadFeed();
+      } catch (e) { fail(e); }
     }
     function runButtons(x, names) {
       const wrap = el("div", "pe-tripwire-btns");
@@ -306,8 +314,14 @@
       for (const n of names) {
         if (!x.controls[n]) continue;
         const b = el("button", cls[n], labels[n]); b.type = "button";
-        b.addEventListener("click", () => runAction(n, x));
+        b.addEventListener("click", () => runAction(n, x, false));
         wrap.appendChild(b);
+      }
+      if (state.drift && state.drift.id === x.id && names.includes("rollback") && x.controls.rollback) {
+        const note = el("div", "pe-note warn", "PE did not restore: " + state.drift.reason); note.setAttribute("role", "alert");
+        const any = el("button", "pe-btn warn", state.armed.drift ? "Overwrite those changes? Click again" : "Roll back anyway (files changed since the checkpoint)"); any.type = "button";
+        any.addEventListener("click", () => runAction("rollback", x, true));
+        wrap.appendChild(note); wrap.appendChild(any);
       }
       return wrap;
     }
@@ -336,7 +350,12 @@
       const p = x.pause;
       if (p.by_operator) {
         const note = add(el("div", "pe-takeover"), el("span", "pe-led warn"), add(el("span"), el("b", "", "Paused by you. "), document.createTextNode("The run is frozen. Resume it, roll back to the checkpoint, or take over.")));
-        return add(el("div", "pe-con-pause"), note, runButtons(x, ["resume", "rollback", "takeover"]));
+        const out = add(el("div", "pe-con-pause"), note);
+        if (p.changes.length) {       // what changed since PE's last scan, found while freezing: shown before Resume is offered, because a resume re-baselines
+          const seen = el("div", "pe-note high", "Changed since PE last looked: " + p.changes.join(" · ") + (p.more ? " · +" + p.more + " more" : "")); seen.setAttribute("role", "alert");
+          out.appendChild(seen);
+        }
+        return add(out, runButtons(x, ["resume", "rollback", "takeover"]));
       }
       const box = el("div", "pe-tripwire"); box.setAttribute("role", "alert");
       add(box, add(el("div", "pe-tripwire-head"), el("span", "pe-led crit"), el("h3", "", "Something outside the plan changed"), el("div", "pe-spacer"), el("span", "pe-badge crit", "PE PAUSED THE RUN")),
@@ -373,20 +392,32 @@
       const out = [runBlock(x)];
       if (x.pause) out.push(tripwireBlock(x));
       if (x.verification) out.push(verifyBlock(x));
+      // A run that needs the operator but has neither a pause nor a verification to hang the buttons on (after a take-over, a restart, a refused
+      // rollback) still gets its controls: the thread must never say "you can roll back" with nothing to click.
+      if (!x.pause && !x.verification && (x.controls.resume || x.controls.rollback || x.controls.takeover)) {
+        out.push(add(el("div", "pe-con-pause"), runButtons(x, ["resume", "rollback", "takeover"])));
+      }
       return out;
     }
 
     // ── the confirm sheet: what exactly is being authorised, bound to a fingerprint ──
-    async function openConfirm(planInfo, index) {
-      state.error = null; state.sheetError = null;
+    async function openConfirm(planInfo, index, noBackup) {
+      if (state.preparing || state.sheetBusy) return;                    // a double click prepares once
+      state.preparing = true; state.error = null; state.sheetError = null;
+      const fields = { plan_id: String(planInfo.id), option: String(index) };
+      if (noBackup) fields.no_backup = "1";
       try {
-        state.sheet = await post("/api/console/" + state.selected + "/confirm/prepare", { plan_id: String(planInfo.id), option: String(index) });
+        state.sheet = await post("/api/console/" + state.selected + "/confirm/prepare", fields);
         state.sheet.index = index; renderSheet();
-      } catch (e) { fail(e); }
+      } catch (e) {
+        if (e.code === "no_backup") { state.sheet = { ask: "no_backup", planInfo, index, message: e.message }; renderSheet(); }
+        else fail(e);
+      } finally { state.preparing = false; }
     }
     async function closeSheet(withdraw) {
+      if (state.sheetBusy) return;                                       // authorising: Back, Escape and the scrim wait until it has answered
       const v = state.sheet; state.sheet = null; state.sheetError = null; renderSheet();
-      if (withdraw && v) { try { await post("/api/console/" + state.selected + "/confirm/withdraw", { execution_id: String(v.execution_id) }); } catch (_e) { /* it may already be gone */ } }
+      if (withdraw && v && v.execution_id) { try { await post("/api/console/" + state.selected + "/confirm/withdraw", { execution_id: String(v.execution_id) }); } catch (_e) { /* it may already be gone */ } }
     }
     async function authorise() {
       const v = state.sheet; if (!v || state.sheetBusy) return;
@@ -396,10 +427,25 @@
         state.sheet = null; state.sheetBusy = false; renderSheet(); state.firstPaint = "bottom"; await loadFeed(); await refreshList();
       } catch (e) { state.sheetBusy = false; state.sheetError = e.message; renderSheet(); }
     }
+    function renderAsk(v) {
+      const scrim = el("div", "pe-sheet-scrim"); scrim.addEventListener("click", () => closeSheet(false));
+      const dialog = el("div", "pe-sheet center"); dialog.setAttribute("role", "dialog"); dialog.setAttribute("aria-modal", "true"); dialog.setAttribute("aria-label", "No recent backup");
+      const go = el("button", "pe-btn warn", "Prepare it anyway (needs elevated approval)"); go.type = "button";
+      go.addEventListener("click", () => { state.sheet = null; renderSheet(); openConfirm(v.planInfo, v.index, true); });
+      const back = el("button", "pe-btn", "Back to the plan"); back.type = "button"; back.addEventListener("click", () => closeSheet(false));
+      add(dialog, el("div", "pe-kicker", "NO RECENT BACKUP"), el("h2", "pe-sheet-h", "PE will not run this by default"), el("p", "", v.message), add(el("div", "pe-sheet-btns"), go, back));
+      add(refs.sheet, scrim, dialog);
+      back.focus();
+      dialog.addEventListener("keydown", ev => {
+        if (ev.key === "Escape") { ev.preventDefault(); closeSheet(false); }
+        else if (ev.key === "Tab") { const ring = [go, back]; const i = ring.indexOf(document.activeElement); ev.preventDefault(); ring[(i + (ev.shiftKey ? ring.length - 1 : 1)) % ring.length].focus(); }
+      });
+    }
     function renderSheet() {
       refs.sheet.replaceChildren();
       const v = state.sheet;
       if (!v) return;
+      if (v.ask) { renderAsk(v); return; }
       const scrim = el("div", "pe-sheet-scrim"); scrim.addEventListener("click", () => closeSheet(true));
       const dialog = el("div", "pe-sheet center"); dialog.setAttribute("role", "dialog"); dialog.setAttribute("aria-modal", "true"); dialog.setAttribute("aria-label", "Confirm");
       const row = (label, value, warn) => add(el("div", "pe-auth-row" + (warn ? " warn" : "")), el("span", "pe-label", label), el("span", "", value));
@@ -414,7 +460,7 @@
                       add(el("div"), el("div", "pe-attrib-name", "Logged as " + v.operator), add(el("div", "pe-attrib-meta"), document.createTextNode("operator · you approve "), el("span", "pe-fp", v.fingerprint))));
       const go = el("button", "pe-btn go", "Authorise: " + v.option); go.type = "button"; go.disabled = state.sheetBusy;
       go.addEventListener("click", authorise);
-      const back = el("button", "pe-btn", "Back to the plan"); back.type = "button"; back.addEventListener("click", () => closeSheet(true));
+      const back = el("button", "pe-btn", "Back to the plan"); back.type = "button"; back.disabled = state.sheetBusy; back.addEventListener("click", () => closeSheet(true));
       add(dialog, el("div", "pe-kicker", "CONFIRM · STEP 2 OF 2"), el("h2", "pe-sheet-h", "Authorise: " + v.option),
           ...v.warnings.map(w => { const n = el("div", "pe-note warn", w); n.setAttribute("role", "status"); return n; }), rows, who);
       if (v.needs_elevation) add(dialog, el("div", "pe-note high", "This needs an elevated dashboard session. Elevate with your passphrase, then authorise."));
@@ -431,7 +477,7 @@
     function renderThread() {
       const f0 = state.feed;
       const sig = JSON.stringify([state.newMode, !!f0, state.messages.map(m => m.seq), state.lastEvent, f0 && f0.running, f0 && f0.plan && [f0.plan.id, f0.plan.status, f0.plan.expired],
-                                  f0 && f0.execution, state.picked, state.scrapArmed, state.armed, state.error && !f0]);
+                                  f0 && f0.execution, state.picked, state.scrapArmed, state.armed, state.drift, state.error && !f0]);
       if (sig === state.sig.thread && state.firstPaint !== "load") return;     // unchanged: keep the nodes, the selection and the focus
       state.sig.thread = sig;
       const keep = refs.scroll.scrollHeight - refs.scroll.scrollTop - refs.scroll.clientHeight < 90;
@@ -561,7 +607,15 @@
       state.archiveArmed = state.archiveArmed && feed.conversation.state === "open";
       renderTop(); renderThread(); renderComposer(); renderRail();
     }
+    function leaveConversation() {
+      // Per-conversation UI state never travels with the operator: an armed rollback, a drift offer and an open sheet belong to the one they were for.
+      if (state.sheetBusy) return false;
+      if (state.sheet) closeSheet(true);
+      state.armed = {}; state.drift = null;
+      return true;
+    }
     function select(id, push) {
+      if (!leaveConversation()) return;
       state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null;
       state.sig = { rail: "", top: "", thread: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
@@ -570,12 +624,14 @@
       loadFeed(true).catch(fail);
     }
     function startNew(push) {
+      if (!leaveConversation()) return;
       state.selected = null; state.newMode = true; state.feed = null; state.sig = { rail: "", top: "", thread: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({}, "", "/console");
       renderRail(); renderTop(); renderThread(); renderComposer(); refs.text.focus();
     }
     function showList() {
+      if (!leaveConversation()) return;
       con.classList.remove("is-thread"); con.classList.add("is-list");
       if (window.history) window.history.pushState({}, "", "/console");
       state.selected = null; state.feed = null; state.newMode = true; renderRail(); renderTop(); renderThread(); renderComposer();

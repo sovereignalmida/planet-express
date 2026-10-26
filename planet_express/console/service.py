@@ -186,8 +186,9 @@ class ConsoleService:
             conv_id, status = ex["conversation_id"], mission.status
 
             def say(key: str, text: str, ex=ex, conv_id=conv_id) -> None:
-                if self.console.mark_reported(ex["id"], key):
+                if not self.console.was_reported(ex["id"], key):            # post first, then record: a failed insert is retried, never lost
                     self.console.add_message(conv_id, "system", text)
+                    self.console.mark_reported(ex["id"], key)
             if status == "executing":
                 say("executing", "PE took a checkpoint and is carrying out the plan.")
             elif status == "paused_tripwire":
@@ -201,12 +202,19 @@ class ConsoleService:
                 say("verifying", "The plan has been carried out. PE is checking it worked.")
             elif status == "completed":
                 verification = ex_mod.verification_view(mission)
-                say("completed", f"Done and verified by PE: {verification['headline'].lower() if verification else 'all checks passed'}.")
+                if verification:
+                    say("completed", f"Done and verified by PE: {verification['headline'].lower()}.")
+                else:
+                    say("completed", "The run finished, but PE has no verification result to show for this grant. Do not rely on it until it is checked.")
             elif status in ("failed", "rolled_back", "needs_operator", "recovery_required", "cancelled"):
                 verification = ex_mod.verification_view(mission)
                 text, _ = ex_mod.repair_status(mission)
                 tail = f" {verification['headline']}." if verification else ""
-                say(f"ended:{status}", f"{text}.{tail} Look at the run above; you can roll back, take over, or ask the agent to keep working on it.")
+                offered = [label for name, label in (("rollback", "roll back"), ("takeover", "take over")) if ex_mod.controls(mission)[name]]
+                if status in ("needs_operator", "recovery_required"):
+                    offered.append("ask the agent to keep working on it")
+                next_steps = f" Look at the run above; you can {', '.join(offered[:-1])}{' or ' if len(offered) > 1 else ''}{offered[-1]}." if offered else ""
+                say(f"ended:{status}", f"{text}.{tail}{next_steps}")
             if status in ex_mod.TERMINALISH:
                 self.console.set_execution_status(ex["id"], "ended")
 

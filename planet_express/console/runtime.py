@@ -193,8 +193,13 @@ class ConsoleRuntime:
     def _plan(self, run: _Run) -> None:
         if not os.path.lexists(run.workspace / plan_mod.PLAN_FILE):
             return                                                     # the agent proposed no plan this turn
+        inventory = self._inventory()
+        if inventory is None:
+            # The agent was told it cannot name a scope: a plan written anyway is refused, never taken on faith.
+            self.console.add_message(run.conversation_id, "system", "The agent's plan was refused: this host's inventory is not available, so its scope cannot be checked.", turn=run.turn)
+            return
         try:
-            plan = plan_mod.load_file(str(run.workspace), inventory=self._inventory())              # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
+            plan = plan_mod.load_file(str(run.workspace), inventory=inventory)              # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
         except plan_mod.PlanError as exc:
             self.console.add_message(run.conversation_id, "system", f"The agent's plan was refused: {exc}", turn=run.turn)
             return

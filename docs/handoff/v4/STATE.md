@@ -149,3 +149,21 @@ parity (replies, plan-card buttons carrying the grant fingerprint); memory candi
 Known and left: the per-poll query count (bounded by `max_open` and the poll rate).
 
 **Before enabling on the live host:** deploy a new tag (code only), set `missions.console.enabled: true` with `console.model` inside your broker's `models`, restart core, open `/console`.
+
+### Console P2 (2026-10-26): plans, Confirm, the run in the thread. On `v4-next`, NOT deployed, NOT tagged.
+Live host is still on `v4.0.0-rc7`.
+
+**What exists:** a plan option carries a structured scope and exclusions validated against the host inventory (fails closed when no inventory); Confirm = two steps
+(`console.confirm_prepare` proposes the Repair through the real `ApprovalFlow`, `confirm_authorise` approves bound to the grant fingerprint the operator saw, `confirm_withdraw`);
+the run is followed in the conversation (`console/execution.py`: status, timeline, tripwire card, PE's verification with could-not-check distinct, controls pause/resume/rollback/take over);
+progress lines are posted once each by `ConsoleService._report_executions`; the page has the confirm sheet, run blocks and a no-backup ask (`code: no_backup`; accepting it adds the elevated `no_backup` phase).
+
+**Reviews:** Codex 7 findings and Claude `/code-review xhigh` 14 findings, all fixed with tests; a Codex pass on those fixes found 2 more, fixed. Notable fixes on the safety surface:
+operator pause now scans while frozen and shows what changed since the last scan (a resume re-baselines, so it must not hide it); approval is all-or-nothing (elevation checked before any phase is approved);
+withdraw never marks a run withdrawn that was approved elsewhere; a typed `backup_floor` flow code replaces string matching; rollback reports a refused restore and offers an explicit, two-click "roll back anyway" (`ack_drift`).
+Verified: unit suite 7073 passed, VM privileged suite 283 passed, node tests.
+
+**Known and left:** the per-poll query count (one `executions` query per idle conversation on list polls; bounded by `max_open`); take-over leaves nothing verifying (the thread says so);
+the live host cannot run Repair missions until protected-set discovery is readable by the service (Confirm says "needs Repair missions" there).
+
+**Not built (next):** Telegram parity; context panel; close-and-learn memory candidates; P4 retire old Chat/Missions (Work log link still goes to /missions). The first live Repair from the Console is the P2 acceptance test.

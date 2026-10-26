@@ -249,7 +249,9 @@ class ApprovalFlow:
             raise FlowError(f"Invalid grant: {_clip(exc, 300)}") from None
         reasons = self.validator(grant, plan)
         if reasons:
-            raise FlowError("The grant is not valid: " + "; ".join(_clip(r, 160) for r in reasons[:6]), "invalid_grant")
+            # A grant refused ONLY for the backup floor is the operator's to override (acknowledge no backup, which needs an elevated approval).
+            only_floor = all(r.startswith("backup floor:") for r in reasons)
+            raise FlowError("The grant is not valid: " + "; ".join(_clip(r, 160) for r in reasons[:6]), "backup_floor" if only_floor else "invalid_grant")
         origin = "incident" if incident_id else "operator"
         who = actor
         try:

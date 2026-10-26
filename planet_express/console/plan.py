@@ -36,6 +36,7 @@ MAX_PLAN_BYTES = 128 * 1024
 PLAN_FILE = "plan.json"
 Line = Annotated[StrictStr, Field(min_length=1, max_length=600)]
 Short = Annotated[StrictStr, Field(min_length=1, max_length=200)]
+Carve = Annotated[StrictStr, Field(min_length=1, max_length=500)]        # becomes a grant exclusion (512 max): never longer than the grant takes
 
 
 class PlanError(ValueError):
@@ -81,13 +82,19 @@ class Option(_Strict):
     recommended: StrictBool
     summary: Line
     changes: Annotated[list[Line], Field(max_length=32)]
-    will_not_touch: Annotated[list[Line], Field(max_length=32)]
+    will_not_touch: Annotated[list[Carve], Field(max_length=32)]
     risk: Risk
     rolls_back_to: Line
     effort: Short
     scope: OptionScope
     exclude: Annotated[list[StrictStr], Field(max_length=32)] = []      # concrete resource ids (`service:media/gluetun`) the grant must carve out
     checks: Annotated[list[CheckSpec], Field(min_length=1, max_length=32)]
+
+    @model_validator(mode="after")
+    def _carve_outs_fit_the_grant(self) -> "Option":
+        if len(self.exclude) + len(self.will_not_touch) > 32:
+            raise ValueError("an option may list at most 32 things it will not touch and excludes, together")        # all of them reach the grant, none silently dropped
+        return self
 
 
 class Plan(_Strict):
