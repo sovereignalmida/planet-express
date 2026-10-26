@@ -1051,6 +1051,23 @@ class Supervisor:
         return mission
 
     @_per_mission
+    def pause(self, mission_id: str, actor: str) -> str:
+        """The operator's Pause on a running Repair mission: the session is frozen exactly as a tripwire pause freezes it, and the operator then
+        resumes, rolls back or takes over from the same card. Refused unless the mission is executing under a supervised session and the
+        tripwire monitor is running (nothing could resume a pause the monitor cannot see)."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        self._repair_mission(mission_id, "executing")
+        run = self._runs.get(mission_id)
+        if run is None or run.phase != "running" or run.cs is None:
+            raise ResumeRefused("no supervised session for this mission, so there is nothing to pause")
+        if self.tripwire is None or not getattr(self.tripwire, "running", False):
+            raise ResumeRefused("the tripwire monitor is not running, so a pause could not be resumed")
+        if not self.tripwire.pause_for_operator(mission_id, actor):
+            raise ResumeRefused("the mission could not be paused (it may have just finished)")
+        return self.ms.get_mission(mission_id).status
+
+    @_per_mission
     def resume(self, mission_id: str, actor: str) -> str:
         """Operator 'resume' on a tripwire card. In this order, every step before the thaw able to refuse: the grant hash is
         re-authorised (the execution predicate), the tripwire baseline is re-taken (the operator has seen what tripped it), the

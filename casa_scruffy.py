@@ -1053,6 +1053,15 @@ def register_console_pages(app, core) -> None:
         return jsonify(core("console.confirm_withdraw", {"conversation_id": conversation(conversation_id), "operator": g.operator,
                                                           "execution_id": int_field("execution_id", 1)}))
 
+    @app.post("/api/console/<conversation_id>/run/<action>")
+    def console_run_action(conversation_id, action):
+        if action not in ("pause", "resume", "rollback", "takeover"):
+            abort(404)
+        params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "execution_id": int_field("execution_id", 1), "action": action}
+        if action == "rollback":
+            params["ack_drift"] = request.form.get("ack_drift") == "1"
+        return jsonify(core("console.execution_action", params))
+
     app.add_url_rule("/api/console/<conversation_id>/interrupt", "console_interrupt", action("console.interrupt"), methods=["POST"])
     app.add_url_rule("/api/console/<conversation_id>/archive", "console_archive", action("console.archive"), methods=["POST"])
     app.add_url_rule("/api/console/<conversation_id>/plan/scrap", "console_scrap", action("console.scrap_plan"), methods=["POST"])

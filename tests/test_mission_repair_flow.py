@@ -653,3 +653,72 @@ def test_a_stale_checkpoint_that_cannot_be_retired_defers_the_start_instead_of_b
     st.env.svc.store.remove = real_remove
     st.sup.tick()                                                                           # the disk recovers: retired, retaken, started
     assert st.ms.get_mission(mid).checkpoint_id not in (None, first) and st.ms.live_session(mid) is not None
+
+
+# ── the operator's Pause (the Console's interject) ───────────────────────────────────────────────
+
+def test_an_operator_pause_freezes_the_run_exactly_as_a_tripwire_pause_does_and_resume_reopens_it(stack):
+    st = stack(behaviours=[{"script": [update()] * 8}], with_proxy=True)
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    assert st.status(mid) == "executing"
+    session = st.runtimes[0].context.session
+    grant_hash = st.ms.get_mission(mid).grant_hash
+    assert st.flow.pause("operator:alice", mid)["status"] == "paused_tripwire"
+    assert st.cont._groups[session.session_id].frozen and not st.proxy.usable(mid, grant_hash)         # frozen, endpoints closed
+    pause = [b for k, a, b in events(st, mid) if b.get("event") == "tripwire.paused"][-1]
+    assert pause["cause"] == "operator" and pause["errors"] == {"by": "operator:alice"} and pause["changes"] == []
+    assert pause["rollback"]["available"] is True                                                    # the same card: roll back is offered
+    st.flow.resume("operator:alice", mid)
+    assert st.status(mid) == "executing" and st.proxy.usable(mid, grant_hash) and not st.cont._groups[session.session_id].frozen
+
+
+def test_an_operator_pause_can_be_followed_by_a_rollback(stack):
+    st = stack(behaviours=[{"script": [update()] * 8}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.flow.pause("operator:alice", mid)
+    assert st.flow.roll_back("operator:alice", mid)["status"] in ("rolled_back", "needs_operator")
+    assert st.status(mid) != "paused_tripwire"
+
+
+def test_only_an_operator_may_pause_and_only_an_executing_mission_with_a_supervised_session(stack):
+    from planet_express.missions.approval_flow import FlowError
+    st = stack(behaviours=[{"script": [update()] * 8}])
+    mid = st.propose()["mission_id"]
+    with pytest.raises(FlowError):
+        st.flow.pause("core", mid)                                                  # not an operator
+    with pytest.raises(FlowError, match="executing|awaiting"):
+        st.flow.pause("operator:alice", mid)                                        # not running yet
+    st.approve_all(mid)
+    st.sup.tick()
+    st.sup._runs.clear()                                                            # a Core restart: no supervised session
+    with pytest.raises(FlowError, match="no supervised session"):
+        st.flow.pause("operator:alice", mid)
+    assert st.status(mid) == "executing"
+
+
+def test_a_pause_is_refused_while_the_tripwire_monitor_is_not_running(stack):
+    from planet_express.missions.approval_flow import FlowError
+    st = stack(behaviours=[{"script": [update()] * 8}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.monitor.stop()
+    with pytest.raises(FlowError, match="monitor is not running"):
+        st.flow.pause("operator:alice", mid)
+    assert st.status(mid) == "executing"
+
+
+def test_pausing_twice_or_after_the_run_finished_is_refused_in_words(stack):
+    from planet_express.missions.approval_flow import FlowError
+    st = stack(behaviours=[{"script": [update()] * 8}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.flow.pause("operator:alice", mid)
+    with pytest.raises(FlowError, match="executing"):
+        st.flow.pause("operator:alice", mid)
+    assert st.monitor.pause_for_operator(mid, "operator:alice") is False             # the monitor itself only pauses an executing mission

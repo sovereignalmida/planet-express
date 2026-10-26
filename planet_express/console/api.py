@@ -22,6 +22,7 @@ from planet_express.console.store import (
     ConversationNotFound,
     clean_text,
 )
+from planet_express.console import execution as execution_mod
 from planet_express.console import plan as plan_mod
 from planet_express.missions.approval_flow import FlowError
 from planet_express.missions.events import redact_value
@@ -135,7 +136,7 @@ class ConsoleApi:
                           "by": (m.actor or "").removeprefix("operator:") or None} for m in messages],
             "last_message": messages[-1].seq if messages else after_message,
             "events": events, "last_event": last_event, "turn_starts": turn_starts,
-            "plan": self._plan(plan), "status": status,
+            "plan": self._plan(plan), "execution": self._execution_view(conv), "status": status,
         }
 
     # ── actions (the operator is the authenticated dashboard or Telegram identity) ─────────
@@ -188,6 +189,33 @@ class ConsoleApi:
             raise ConsoleApiError("there is no pending plan to scrap", "conflict")
         self.console.add_message(conv.id, "system", f"Plan scrapped by {operator}. Nothing was changed.", actor=f"operator:{operator}")
         return {"scrapped": True}
+
+    def execution_action(self, conversation_id: str, execution_id: int, action: str, operator: str, *, ack_drift: bool = False) -> dict:
+        """The operator's controls on a running plan: pause, resume, roll back, take over. Each goes through the same approval-flow action the Work log
+        uses (as the signed-in operator); the supervisor decides whether it can be done now. Nothing here is available to the agent."""
+        conv = self._conversation(conversation_id)
+        ex = self.console.execution(execution_id)
+        if ex is None or ex["conversation_id"] != conv.id or ex["status"] not in ("authorised", "ended"):
+            raise ConsoleApiError("that run no longer exists", "not_found")
+        if action not in execution_mod.ACTIONS:
+            raise ConsoleApiError("that is not an action", "bad_request")
+        flow = self._require_flow()
+        actor = f"operator:{operator}"
+        try:
+            if action == "pause":
+                flow.pause(actor, ex["mission_id"])
+            elif action == "resume":
+                flow.resume(actor, ex["mission_id"])
+            elif action == "rollback":
+                flow.roll_back(actor, ex["mission_id"], ack_drift=ack_drift)
+            else:
+                flow.take_over(actor, ex["mission_id"])
+        except FlowError as exc:
+            raise self._flow_error(exc) from None
+        said = {"pause": "paused the run", "resume": "resumed the run", "rollback": "asked PE to roll back to the checkpoint",
+                "takeover": "took over: the agent was stopped and the host is theirs. PE will still check the outcome."}[action]
+        self.console.add_message(conv.id, "system", f"{operator} {said}.", actor=actor)
+        return {"done": action, "status": self._execution_view(conv)["status"]["text"]}
 
     # ── confirming a plan option: propose the repair, show the approval card, authorise bound to its hash ──────────
     def confirm_prepare(self, conversation_id: str, plan_id: int, option: int, operator: str) -> dict:
@@ -303,6 +331,31 @@ class ConsoleApi:
         self.console.set_execution_status(ex["id"], "withdrawn")
         if not quiet:
             self.console.add_message(ex["conversation_id"], "system", f"{operator} withdrew the confirmation. Nothing was changed.", actor=f"operator:{operator}")
+
+    def _execution_view(self, conv: Conversation) -> dict | None:
+        """The latest confirmed plan's run, live from its Repair mission: plain status, a short timeline, what a pause was about, PE's verification
+        and which controls apply now. Computed from state at every feed, so it is never stale and never the agent's account."""
+        shown = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
+        if not shown:
+            return None
+        ex = shown[-1]
+        mission = self.ms.get_mission(ex["mission_id"])
+        pause = None
+        if mission.status == "paused_tripwire":
+            from planet_express.missions.tripwire.monitor import pause_card
+            pause = execution_mod.pause_view(pause_card(self.ms, mission.id))
+        text, level = execution_mod.repair_status(mission, pause["who"] if pause and pause["by_operator"] else None)
+        row = self.console.plan(ex["plan_id"])
+        name = ""
+        if row is not None:
+            try:
+                name = json.loads(row["plan_json"])["options"][ex["option_index"]]["name"]
+            except (ValueError, KeyError, IndexError):
+                name = ""
+        return {"id": ex["id"], "option": ex["option_index"], "name": name, "fingerprint": ex["grant_hash"][:8], "status": {"text": text, "level": level},
+                "timeline": execution_mod.timeline(mission, ex["authorised_by"]), "pause": pause,
+                "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission),
+                "finished": mission.status in execution_mod.TERMINALISH}
 
     def _confirm_view(self, flow, execution_id: int, mission_id: str, option: plan_mod.Option, operator: str) -> dict:
         """What the operator is about to authorise, in plain words, from the approval card PE built (never from the agent's text)."""

@@ -101,3 +101,16 @@ def test_the_confirm_methods_answer_unavailable_when_the_host_cannot_run_repairs
     with pytest.raises(RpcError) as err:
         rig.call("console.confirm_prepare", {"conversation_id": made["id"], "operator": "chris", "plan_id": plan_id, "option": 0})
     assert err.value.code == "unavailable" and "Repair missions" in str(err.value)
+
+
+@pytest.mark.parametrize("params", [
+    {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 1, "action": "explode"},
+    {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 0, "action": "pause"},
+    {"conversation_id": "0123456789abcdef", "operator": "chris", "action": "pause"},
+    {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 1, "action": "pause", "mission_id": "M-1"},
+    {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 1, "action": "rollback", "ack_drift": "yes"},
+])
+def test_the_run_actions_take_exact_params_and_never_a_mission_id(rig, params):
+    with pytest.raises(RpcError) as err:
+        rig.call("console.execution_action", params)
+    assert err.value.code == "bad_request"

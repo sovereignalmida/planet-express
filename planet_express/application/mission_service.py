@@ -801,10 +801,14 @@ class MissionService:
             v = _params(p, {**conv, **op, **execution})
             return api().confirm_withdraw(v["conversation_id"], v["execution_id"], v["operator"])
 
+        def execution_action(p):
+            v = _params(p, {**conv, **op, **execution, "action": _choice("pause", "resume", "rollback", "takeover")}, {"ack_drift": _bool})
+            return api().execution_action(v["conversation_id"], v["execution_id"], v["action"], v["operator"], ack_drift=v.get("ack_drift", False))
+
         table = {"console.status": status, "console.list": list_, "console.feed": feed, "console.create": create, "console.post": post,
                  "console.interrupt": interrupt, "console.archive": archive, "console.scrap_plan": scrap,
                  "console.confirm_prepare": confirm_prepare, "console.confirm_authorise": confirm_authorise,
-                 "console.confirm_withdraw": confirm_withdraw}
+                 "console.confirm_withdraw": confirm_withdraw, "console.execution_action": execution_action}
         return {name: guarded(fn) for name, fn in table.items()}
 
     # ── Telegram ────────────────────────────────────────────────────────────

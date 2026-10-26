@@ -172,6 +172,43 @@ class ConsoleService:
                 self._archive_step(conv)
             except Exception:
                 log.exception("console archive of %s failed", conv.id)
+        try:
+            self._report_executions()
+        except Exception:
+            log.exception("console execution reporting failed")
+
+    def _report_executions(self) -> None:
+        """Tell the thread, once each, how a confirmed plan's run is going. The words are PE's, from the mission's state and PE's own verification."""
+        from planet_express.console import execution as ex_mod
+        from planet_express.missions.tripwire.monitor import pause_card
+        for ex in self.console.live_executions():
+            mission = self.ms.get_mission(ex["mission_id"])
+            conv_id, status = ex["conversation_id"], mission.status
+
+            def say(key: str, text: str, ex=ex, conv_id=conv_id) -> None:
+                if self.console.mark_reported(ex["id"], key):
+                    self.console.add_message(conv_id, "system", text)
+            if status == "executing":
+                say("executing", "PE took a checkpoint and is carrying out the plan.")
+            elif status == "paused_tripwire":
+                view = ex_mod.pause_view(pause_card(self.ms, mission.id))
+                if view and view["by_operator"]:
+                    say(f"paused:{mission.updated_at}", "The run is paused. Resume it, roll back to the checkpoint, or take over.")
+                else:
+                    what = "; ".join(view["changes"][:3]) if view and view["changes"] else "something outside the plan changed"
+                    say(f"paused:{mission.updated_at}", f"PE paused the run: {what}. Nothing else has been done. Resume, roll back, or take over.")
+            elif status == "verifying":
+                say("verifying", "The plan has been carried out. PE is checking it worked.")
+            elif status == "completed":
+                verification = ex_mod.verification_view(mission)
+                say("completed", f"Done and verified by PE: {verification['headline'].lower() if verification else 'all checks passed'}.")
+            elif status in ("failed", "rolled_back", "needs_operator", "recovery_required", "cancelled"):
+                verification = ex_mod.verification_view(mission)
+                text, _ = ex_mod.repair_status(mission)
+                tail = f" {verification['headline']}." if verification else ""
+                say(f"ended:{status}", f"{text}.{tail} Look at the run above; you can roll back, take over, or ask the agent to keep working on it.")
+            if status in ex_mod.TERMINALISH:
+                self.console.set_execution_status(ex["id"], "ended")
 
     # ── internals ─────────────────────────────────────────────────────────────────────────
     def _followup(self, conv: Conversation) -> None:

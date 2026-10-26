@@ -395,6 +395,10 @@ class ApprovalFlow:
         self._audit(f"mission.{name}", mission=mission_id, operator=actor)
         return out
 
+    def pause(self, actor: str, mission_id: str) -> dict[str, Any]:
+        self._tripwire_action("pause", mission_id, actor)
+        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}
+
     def resume(self, actor: str, mission_id: str) -> dict[str, Any]:
         self._tripwire_action("resume", mission_id, actor)
         return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}

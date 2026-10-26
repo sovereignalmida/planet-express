@@ -32,7 +32,7 @@ class Core:
             "console.create": {"id": CID}, "console.post": {"seq": 3}, "console.interrupt": {"stopped": True},
             "console.archive": {"archiving": True}, "console.scrap_plan": {"scrapped": True},
             "console.confirm_prepare": {"execution_id": 4, "grant_hash": "a" * 64}, "console.confirm_authorise": {"authorised": True},
-            "console.confirm_withdraw": {"withdrawn": True},
+            "console.confirm_withdraw": {"withdrawn": True}, "console.execution_action": {"done": "pause", "status": "Paused by you"},
             "canary.candidates": [], "proposal.list_pending": []}
 
     def __call__(self, method, params):
@@ -239,3 +239,21 @@ def test_stale_and_elevation_refusals_reach_the_operator_in_words(web):
     core.errors["console.confirm_authorise"] = ("elevation_required", "This approval needs an elevated dashboard session")
     r = client.post(CONFIRM + "/authorise", data={"csrf_token": t, "execution_id": "4", "grant_hash": HASH})
     assert r.status_code == 403 and "elevated" in r.get_json()["error"]
+
+
+def test_the_run_controls_post_the_action_as_the_signed_in_operator_and_unknown_actions_do_not_exist(web):
+    client, core, _ = web
+    base = f"/api/console/{CID}/run"
+    assert client.post(base + "/pause", data={"execution_id": "4"}).status_code == 400                  # CSRF
+    t = token(client)
+    for action in ("pause", "resume", "takeover"):
+        assert client.post(f"{base}/{action}", data={"csrf_token": t, "execution_id": "4", "operator": "mallory"}).status_code == 200
+        assert core.calls[-1] == ("console.execution_action", {"conversation_id": CID, "operator": "alice", "execution_id": 4, "action": action})
+    client.post(f"{base}/rollback", data={"csrf_token": t, "execution_id": "4", "ack_drift": "1"})
+    assert core.calls[-1][1]["ack_drift"] is True and core.calls[-1][1]["action"] == "rollback"
+    client.post(f"{base}/rollback", data={"csrf_token": t, "execution_id": "4"})
+    assert core.calls[-1][1]["ack_drift"] is False
+    n = len(core.calls)
+    assert client.post(f"{base}/explode", data={"csrf_token": t, "execution_id": "4"}).status_code == 404
+    assert client.post(f"{base}/pause", data={"csrf_token": t, "execution_id": "x"}).status_code == 400
+    assert len(core.calls) == n

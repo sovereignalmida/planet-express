@@ -498,6 +498,15 @@ class TripwireMonitor:
             return None
         return ContainedSession(row["id"], "local_cgroup", row["cgroup_path"], row["session_uid"])
 
+    def pause_for_operator(self, mission_id: str, actor: str) -> bool:
+        """The operator's word to stop: freeze the run exactly as a tripwire pause would (same freeze, same endpoint revocation, same
+        post-change capture, same card), with cause `operator`. Only an executing mission can be paused; anything else returns False."""
+        mission = self.ms.get_mission(mission_id)
+        if mission.status != "executing":
+            return False
+        self._pause(mission, "operator", [], {"by": actor}, None)
+        return self.ms.get_mission(mission_id).status == "paused_tripwire"
+
     def _pause_all(self, cause: str, detail: str = "") -> None:
         for mission in self.ms.list_missions("executing"):
             try:
