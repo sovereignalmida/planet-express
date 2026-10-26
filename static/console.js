@@ -184,7 +184,7 @@
     // ── thread ──
     function prose(parent, text) {
       const box = el("div", "pe-prose pe-con-prose");
-      const inl = (target, items) => { for (const i of items) add(target, i.t === "code" ? el("code", "pe-code", i.v) : i.t === "bold" ? el("strong", "", i.v) : document.createTextNode(i.v)); };
+      const inl = (target, items) => { for (const i of items) add(target, i.t === "code" ? el("code", "pe-con-icode", i.v) : i.t === "bold" ? el("strong", "", i.v) : document.createTextNode(i.v)); };
       for (const b of proseBlocks(text)) {
         if (b.t === "p") inl(add(box, el("p")).lastChild, b.c);
         else if (b.t === "pre") add(box, el("pre", "pe-code pe-con-pre", b.v));
@@ -303,7 +303,14 @@
         const status = add(el("div", "pe-stream"), el("span", "pe-spinner"), el("span", "", "Working…"), el("span", "pe-caret", "▍")); status.setAttribute("role", "status");
         refs.thread.appendChild(add(live, status));
       }
-      if (keep || state.firstPaint) refs.scroll.scrollTop = refs.scroll.scrollHeight;
+      if (state.firstPaint === "load") {
+        // Opening a conversation: start at the last answer (the plan below it is read in that context), not at the very bottom.
+        const agents = Array.from(refs.thread.children).filter(c => String(c.className).startsWith("pe-agent"));
+        const anchor = agents[agents.length - 1];
+        const top = anchor && anchor.getBoundingClientRect
+          ? anchor.getBoundingClientRect().top - refs.scroll.getBoundingClientRect().top + refs.scroll.scrollTop : 0;
+        refs.scroll.scrollTop = top > 0 ? Math.max(top - 16, 0) : refs.scroll.scrollHeight;
+      } else if (keep || state.firstPaint) refs.scroll.scrollTop = refs.scroll.scrollHeight;
       state.firstPaint = false;
     }
 
@@ -360,7 +367,7 @@
     async function loadFeed(reset) {
       if (!state.selected) return;
       const id = state.selected;
-      if (reset) { state.messages = []; state.events = []; state.lastMessage = 0; state.lastEvent = 0; state.feed = null; state.firstPaint = true; }
+      if (reset) { state.messages = []; state.events = []; state.lastMessage = 0; state.lastEvent = 0; state.feed = null; state.firstPaint = "load"; }
       const feed = await request("/api/console/" + id + "/feed?after_message=" + state.lastMessage + "&after_event=" + state.lastEvent);
       if (id !== state.selected) return;                        // the operator moved on while this was in flight
       const known = new Set(state.messages.map(m => m.seq));
