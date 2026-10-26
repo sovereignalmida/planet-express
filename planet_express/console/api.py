@@ -9,6 +9,7 @@ confirm step exists (P2), and "scrap" only marks a plan as not wanted.
 
 import bisect
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -23,6 +24,8 @@ from planet_express.console.store import (
     clean_text,
 )
 from planet_express.console import execution as execution_mod
+from planet_express.console import lessons as lessons_mod
+from planet_express.memory import store as memory_store
 from planet_express.console import plan as plan_mod
 from planet_express.missions.approval_flow import FlowError, phase_demands_elevation
 from planet_express.missions.events import redact_value
@@ -43,6 +46,9 @@ class ConsoleApiError(Exception):
     def __init__(self, message: str, code: str = "bad_request"):
         super().__init__(message)
         self.code = code
+
+
+_OPERATOR_ACTOR = re.compile(r"[A-Za-z0-9._@-]{1,64}")
 
 
 def _level(text: str, level: str, group: str, h: str, p: str) -> dict:
@@ -136,7 +142,7 @@ class ConsoleApi:
                           "by": (m.actor or "").removeprefix("operator:") or None} for m in messages],
             "last_message": messages[-1].seq if messages else after_message,
             "events": events, "last_event": last_event, "turn_starts": turn_starts,
-            "plan": self._plan(plan), "execution": self._execution_view(conv), "status": status,
+            "plan": self._plan(plan), "execution": self._execution_view(conv), "lessons": self._lessons(conv), "status": status,
         }
 
     # ── actions (the operator is the authenticated dashboard or Telegram identity) ─────────
@@ -180,6 +186,62 @@ class ConsoleApi:
             raise ConsoleApiError("That conversation no longer exists.", "not_found") from None
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
+
+    def _lessons(self, conv: Conversation) -> list[dict]:
+        """What this conversation offered to remember, with where each stands: candidate (waiting for the operator), kept or discarded."""
+        ids = self.console.lesson_ids(conv.id)
+        if not ids:
+            return []
+        out = []
+        with self.console.store._connect() as conn:
+            for card_id in ids[:lessons_mod.MAX_PER_CONVERSATION]:
+                card = memory_store.get_card(conn, card_id)
+                if card is None:
+                    continue
+                out.append({"id": card.id, "title": card.title, "statement": card.statement, "scope": list(card.scope)[:8],
+                            "state": {"candidate": "waiting", "confirmed": "kept", "deprecated": "discarded"}[card.status]})
+        return out
+
+    def lesson_decide(self, conversation_id: str, card_id: str, decision: str, operator: str, statement: str | None = None) -> dict:
+        """Keep (optionally with the operator's own wording) or discard one lesson. Keeping is the memory store's operator-only confirm: until
+        then the card is quarantined and no session sees it. The operator may decide on a conversation that has since closed."""
+        conv = self._conversation(conversation_id)
+        if card_id not in self.console.lesson_ids(conv.id):
+            raise ConsoleApiError("That lesson is not from this conversation.", "not_found")
+        if decision not in ("keep", "discard"):
+            raise ConsoleApiError("that is not a decision", "bad_request")
+        if not _OPERATOR_ACTOR.fullmatch(operator):
+            raise ConsoleApiError("Cannot identify the operator.", "forbidden")
+        actor = f"operator:{operator}"
+        try:
+            with self.console.store._write() as conn:
+                current = memory_store.get_card(conn, card_id)
+                if current is None:
+                    raise ConsoleApiError("That lesson no longer exists.", "not_found")
+                if current.status != "candidate":
+                    raise ConsoleApiError("That lesson was already decided.", "conflict")
+                if decision == "discard":
+                    memory_store.deprecate(conn, card_id, actor, "discarded from the Console")
+                else:
+                    words = (statement or "").strip()
+                    if words and words != current.statement:
+                        if len(words) > lessons_mod.MAX_STATEMENT:
+                            raise ConsoleApiError(f"Keep it under {lessons_mod.MAX_STATEMENT} characters.", "bad_request")
+                        # The operator's own words: the card is now operator-stated, and still goes through the memory store's checks (secrets).
+                        edited = current.model_copy(update={"statement": words, "source": "operator-stated"})
+                        memory_store.upsert_candidate(conn, edited, actor, detail="edited from the Console")
+                    memory_store.confirm(conn, card_id, actor)
+        except ConsoleApiError:
+            raise
+        except memory_store.UnknownCard:
+            raise ConsoleApiError("That lesson no longer exists.", "not_found") from None
+        except (memory_store.InvalidTransition, memory_store.CardExistsError):
+            raise ConsoleApiError("That lesson was already decided.", "conflict") from None
+        except memory_store.MemoryStoreError as exc:
+            raise ConsoleApiError(f"That could not be saved: {str(exc)[:160]}", "bad_request") from None
+        self.console.add_message(conv.id, "system", f"{operator} {'kept' if decision == 'keep' else 'discarded'} a lesson: {current.title[:100]}",
+                                 actor=actor)
+        return {"decided": decision}
 
     def scrap_plan(self, conversation_id: str, operator: str) -> dict:
         """The operator does not want the pending plan. Nothing was changed by it, so nothing is undone; the conversation goes on."""

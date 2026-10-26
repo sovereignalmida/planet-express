@@ -279,6 +279,17 @@ class ConsoleStore:
             conn.execute("UPDATE console_executions SET reported=? WHERE id=?", (",".join([*keys, key]), execution_id))
             return True
 
+    # ── lessons: the memory candidates a conversation produced (the cards themselves live in Ship's Memory) ──
+    def add_lesson(self, conversation_id: str, card_id: str) -> bool:
+        with self.store._write() as conn:
+            return conn.execute("INSERT OR IGNORE INTO console_lessons (conversation_id, card_id, created_at) VALUES (?, ?, ?)",
+                                (conversation_id, card_id, self._now())).rowcount == 1
+
+    def lesson_ids(self, conversation_id: str) -> list[str]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT card_id FROM console_lessons WHERE conversation_id=? ORDER BY rowid", (conversation_id,)).fetchall()
+        return [r["card_id"] for r in rows]
+
     # ── Telegram: which conversations are followed there, and how far they have been sent ──
     def tg_follow(self, conversation_id: str) -> None:
         """Start sending this conversation's answers, plans and progress to Telegram, from now on (what already exists is not replayed)."""

@@ -790,6 +790,11 @@ class MissionService:
             v = _params(p, {**conv, **op})
             return api().scrap_plan(v["conversation_id"], v["operator"])
 
+        def lesson(p):
+            v = _params(p, {**conv, **op, "card_id": _pattern(re.compile(r"[a-z0-9][a-z0-9._-]{0,127}"), "a card id"),
+                            "decision": _choice("keep", "discard")}, {"statement": _str(600, blank=True)})
+            return api().lesson_decide(v["conversation_id"], v["card_id"], v["decision"], v["operator"], v.get("statement"))
+
         grant_hash = {"grant_hash": _pattern(re.compile(r"[0-9a-f]{64}"), "a grant hash")}
         execution = {"execution_id": _int(1, 2**31)}
 
@@ -812,7 +817,8 @@ class MissionService:
         table = {"console.status": status, "console.list": list_, "console.feed": feed, "console.create": create, "console.post": post,
                  "console.interrupt": interrupt, "console.archive": archive, "console.scrap_plan": scrap,
                  "console.confirm_prepare": confirm_prepare, "console.confirm_authorise": confirm_authorise,
-                 "console.confirm_withdraw": confirm_withdraw, "console.execution_action": execution_action}
+                 "console.confirm_withdraw": confirm_withdraw, "console.execution_action": execution_action,
+                 "console.lesson": lesson}
         return {name: guarded(fn) for name, fn in table.items()}
 
     # ── Telegram ────────────────────────────────────────────────────────────

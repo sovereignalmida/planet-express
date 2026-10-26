@@ -32,7 +32,7 @@ class Core:
             "console.create": {"id": CID}, "console.post": {"seq": 3}, "console.interrupt": {"stopped": True},
             "console.archive": {"archiving": True}, "console.scrap_plan": {"scrapped": True},
             "console.confirm_prepare": {"execution_id": 4, "grant_hash": "a" * 64}, "console.confirm_authorise": {"authorised": True},
-            "console.confirm_withdraw": {"withdrawn": True}, "console.execution_action": {"done": "pause", "status": "Paused by you"},
+            "console.confirm_withdraw": {"withdrawn": True}, "console.lesson": {"decided": "keep"}, "console.execution_action": {"done": "pause", "status": "Paused by you"},
             "canary.candidates": [], "proposal.list_pending": []}
 
     def __call__(self, method, params):
@@ -256,4 +256,17 @@ def test_the_run_controls_post_the_action_as_the_signed_in_operator_and_unknown_
     n = len(core.calls)
     assert client.post(f"{base}/explode", data={"csrf_token": t, "execution_id": "4"}).status_code == 404
     assert client.post(f"{base}/pause", data={"csrf_token": t, "execution_id": "x"}).status_code == 400
+    assert len(core.calls) == n
+
+
+def test_a_lesson_decision_carries_the_signed_in_operator_and_a_checked_card_id(web):
+    client, core, _ = web
+    t = token(client)
+    ok = client.post(f"/api/console/{CID}/lesson", data={"csrf_token": t, "card_id": "cl-0123456789abcdef", "decision": "keep", "statement": "my words", "operator": "mallory"})
+    assert ok.status_code == 200
+    assert core.calls[-1] == ("console.lesson", {"conversation_id": CID, "operator": "alice", "card_id": "cl-0123456789abcdef", "decision": "keep", "statement": "my words"})
+    n = len(core.calls)
+    for bad in ({"card_id": "../x", "decision": "keep"}, {"card_id": "cl-1", "decision": "maybe"}, {"card_id": "CL-1", "decision": "keep"}):
+        assert client.post(f"/api/console/{CID}/lesson", data={"csrf_token": t, **bad}).status_code == 400
+    assert client.post(f"/api/console/{CID}/lesson", data={"card_id": "cl-1", "decision": "keep"}).status_code == 400          # no CSRF token
     assert len(core.calls) == n

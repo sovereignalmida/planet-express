@@ -114,3 +114,17 @@ def test_the_run_actions_take_exact_params_and_never_a_mission_id(rig, params):
     with pytest.raises(RpcError) as err:
         rig.call("console.execution_action", params)
     assert err.value.code == "bad_request"
+
+
+def test_lesson_params_are_exact_and_decisions_are_the_operators(rig):
+    made = rig.call("console.create", {"operator": "chris", "text": "why?"})
+    for params in ({"conversation_id": made["id"], "operator": "chris", "card_id": "cl-1", "decision": "maybe"},
+                   {"conversation_id": made["id"], "operator": "chris", "card_id": "../x", "decision": "keep"},
+                   {"conversation_id": made["id"], "operator": "chris", "card_id": "cl-1", "decision": "keep", "extra": 1},
+                   {"conversation_id": made["id"], "card_id": "cl-1", "decision": "keep"}):
+        with pytest.raises(RpcError) as err:
+            rig.call("console.lesson", params)
+        assert err.value.code == "bad_request"
+    with pytest.raises(RpcError) as err:                                                   # a card this conversation never offered
+        rig.call("console.lesson", {"conversation_id": made["id"], "operator": "chris", "card_id": "cl-1", "decision": "keep"})
+    assert err.value.code == "not_found"

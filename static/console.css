@@ -42,3 +42,10 @@
 /* The page's panels form their own stacking contexts (container queries), so the sheet and its scrim must be raised above them. */
 #con-sheet .pe-sheet-scrim { z-index: 49; }
 #con-sheet .pe-sheet { z-index: 50; }
+
+/* what the conversation offered to remember */
+.pe-con-lessons { margin: 12px 0; }
+.pe-con-lesson { padding: 10px 0; border-top: 1px solid var(--pe-line, rgba(127,127,127,.25)); }
+.pe-con-lesson-title { font-weight: 600; margin-bottom: 4px; }
+.pe-con-lesson.discarded .pe-con-pre { opacity: .55; text-decoration: line-through; }
+.pe-con-edit { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--pe-line, rgba(127,127,127,.4)); background: transparent; color: inherit; resize: vertical; }

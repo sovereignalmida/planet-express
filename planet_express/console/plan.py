@@ -140,9 +140,9 @@ def parse(doc: Any, inventory: Any = None) -> Plan:
     return plan
 
 
-def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -> Plan:
-    """The file method: the agent writes `plan.json` in its workspace. The worker controls that file, so it is opened without
-    following links, size-capped and parsed strictly (no duplicate keys, floats or NaN), then validated."""
+def read_doc(workspace: str, name: str, limit: int = MAX_PLAN_BYTES) -> Any:
+    """A JSON file the agent wrote in its workspace, decoded. The worker controls the file, so it is opened without following links,
+    size-capped and parsed strictly (no duplicate keys, floats or NaN). Raises PlanError (never echoing the agent's text)."""
     try:
         dir_fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
@@ -154,21 +154,24 @@ def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -
             raise PlanError("there is no plan file") from None
         try:
             info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_PLAN_BYTES:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                 raise PlanError("the plan file is not a regular file within the size limit")
-            data = os.read(fd, MAX_PLAN_BYTES + 1)
+            data = os.read(fd, limit + 1)
         finally:
             os.close(fd)
     finally:
         os.close(dir_fd)
-    if len(data) > MAX_PLAN_BYTES:
+    if len(data) > limit:
         raise PlanError("the plan file is larger than its size limit")
     try:
-        return parse(loads_strict(data.decode("utf-8")), inventory)
-    except (CanonicalError, UnicodeDecodeError, ValueError, RecursionError) as exc:
-        if isinstance(exc, PlanError):
-            raise
+        return loads_strict(data.decode("utf-8"))
+    except (CanonicalError, UnicodeDecodeError, ValueError, RecursionError):
         raise PlanError("the plan file is not valid JSON") from None
+
+
+def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -> Plan:
+    """The file method: the agent writes `plan.json` in its workspace; it is read by `read_doc`, then validated."""
+    return parse(read_doc(workspace, name), inventory)
 
 
 def check_phrase(check: Any) -> str:
@@ -262,4 +265,4 @@ def instructions() -> str:
 
 
 __all__ = ["MAX_PLAN_BYTES", "PLAN_FILE", "Option", "Plan", "PlanError", "canonical", "catalogue_text", "check_phrase", "goal_text",
-           "instructions", "json_schema", "load_file", "parse", "plan_hash"]
+           "instructions", "json_schema", "load_file", "parse", "plan_hash", "read_doc"]

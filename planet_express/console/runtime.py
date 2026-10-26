@@ -11,12 +11,15 @@ words are untrusted data: they are redacted and stored, shown to the operator, a
 import os
 import stat
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from config_schema import MissionConsoleConfig
+from planet_express.console import lessons as lessons_mod
 from planet_express.console import plan as plan_mod
 from planet_express.console.store import ConsoleStore, clean_text
 from planet_express.console.stream import StreamParser
+from planet_express.memory import store as memory_store
 from planet_express.missions.runtime import (
     AgentEvent,
     AgentResult,
@@ -35,7 +38,8 @@ SYSTEM = (
     "with your read tools and answer plainly: say what you know, with the evidence behind it, and what you are unsure of. You never "
     "change the host. When the right response is a change, propose it as a plan the operator can confirm, scrap or modify: read "
     "PLAN_FORMAT.md for the exact format and write plan.json in the current directory. You cannot approve a plan or widen what it "
-    "says. Keep answers short and specific, and ask when the question is ambiguous.")
+    "says. If you learn something durable about this host, LESSONS_FORMAT.md says how to offer it to the operator to remember. Keep answers "
+    "short and specific, and ask when the question is ambiguous.")
 
 
 class TurnRefused(RuntimeError):
@@ -181,6 +185,7 @@ class ConsoleRuntime:
             self.console.set_agent_session(conv_id, result.session_id)         # the id the stream confirmed: it can change, so every turn
         if keep_plan:
             self._plan(run)
+            self._lessons(run)
         tokens = result.tokens
         if self.broker is not None:
             usage = self.broker.usage(run.cs.session_id)           # the broker counts what the vendor charged: that is the budget
@@ -205,6 +210,40 @@ class ConsoleRuntime:
             return
         self.console.add_plan(run.conversation_id, run.turn, plan_mod.canonical(plan), plan_mod.plan_hash(plan))
 
+    def _lessons(self, run: _Run) -> None:
+        """`lessons.json` becomes memory CANDIDATES (quarantined: nothing uses them until the operator keeps them). A refused or secret-shaped
+        lesson is dropped and said so, without echoing it."""
+        if not os.path.lexists(run.workspace / lessons_mod.LESSONS_FILE):
+            return
+        conv_id = run.conversation_id
+
+        def say(text: str) -> None:
+            self.console.add_message(conv_id, "system", text, turn=run.turn)
+        try:
+            found = lessons_mod.load_file(str(run.workspace), self._inventory())
+        except lessons_mod.LessonError as exc:
+            say(f"The agent's lessons were refused: {exc}")
+            return
+        room = lessons_mod.MAX_PER_CONVERSATION - len(self.console.lesson_ids(conv_id))
+        stored = dropped = 0
+        now = datetime.fromtimestamp(float(self.console.store._clock()), UTC)
+        for lesson in found.lessons:
+            if stored >= room:
+                dropped += 1
+                continue
+            try:
+                card = lessons_mod.to_card(conv_id, lesson, now)
+                with self.console.store._write() as conn:
+                    memory_store.upsert_candidate(conn, card, lessons_mod.actor(conv_id), now=now)
+                if self.console.add_lesson(conv_id, card.id):
+                    stored += 1
+            except Exception:                                      # noqa: BLE001 -- a secret-shaped or odd lesson is dropped, never fatal to the turn
+                dropped += 1
+        if stored:
+            say(f"The agent noted {stored} thing{'s' if stored != 1 else ''} worth remembering. Review {'them' if stored != 1 else 'it'} below: nothing is remembered until you keep it.")
+        if dropped:
+            say(f"{dropped} lesson{'s were' if dropped != 1 else ' was'} not kept for review (too many, or it looked like it held a secret).")
+
     # ── the workspace and the pipe ────────────────────────────────────────────────────────
     def _inventory(self):
         if self.inventory is None:
@@ -225,10 +264,11 @@ class ConsoleRuntime:
     def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "") -> None:
         if not stat.S_ISDIR(workspace.lstat().st_mode):             # made by the supervisor; never created or followed here
             raise ValueError("workspace path is not a directory")
-        files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_mod.instructions(), "INVENTORY.md": inventory_text}
+        files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_mod.instructions(), "INVENTORY.md": inventory_text,
+                 "LESSONS_FORMAT.md": lessons_mod.LESSONS_INSTRUCTIONS}
         if len(message) > MAX_ARG_PROMPT:
             files["MESSAGE.md"] = clean_text(message)
-        for name in ("BRIEF.md", "PLAN_FORMAT.md", "INVENTORY.md", "MESSAGE.md", plan_mod.PLAN_FILE):
+        for name in ("BRIEF.md", "PLAN_FORMAT.md", "INVENTORY.md", "LESSONS_FORMAT.md", "MESSAGE.md", plan_mod.PLAN_FILE, lessons_mod.LESSONS_FILE):
             try:
                 (workspace / name).unlink()                          # unlink never follows a link; clears a previous attempt
             except FileNotFoundError:

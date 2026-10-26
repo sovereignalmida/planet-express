@@ -111,7 +111,7 @@
                    text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
     const state = { selected: null, list: [], feed: null, messages: [], events: [], lastMessage: 0, lastEvent: 0, newMode: true,
                     picked: {}, openTrails: {}, scrapArmed: false, archiveArmed: false, timer: null, error: null, sending: false,
-                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {}, drift: null, preparing: false };
+                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {}, drift: null, preparing: false, editing: null, draft: "" };
     const ORIGINS = { operator: ["Y", "You asked"], incident: ["!", "From an incident"], pe: ["P", "PE started it"] };
     const EXAMPLES = ["The download apps lost internet after the reboot. Figure out why.", "Why is the media stack slow right now?",
                       "Which containers restarted in the last day, and why?"];
@@ -388,6 +388,49 @@
       }
       return box;
     }
+    // ── what the conversation offered to remember: nothing is kept until the operator says so ──
+    async function decideLesson(lesson, decision, statement) {
+      const fields = { card_id: lesson.id, decision };
+      if (statement) fields.statement = statement;
+      try {
+        await post("/api/console/" + state.selected + "/lesson", fields);
+        state.editing = null; state.draft = ""; state.sig.thread = ""; await loadFeed();
+      } catch (e) { fail(e); }
+    }
+    function lessonsBlock(lessons) {
+      const waiting = lessons.filter(l => l.state === "waiting");
+      const box = el("div", "pe-card pe-con-lessons");
+      add(box, add(el("div", "pe-card-head"), el("span", "pe-card-title sm", "WORTH REMEMBERING" + (waiting.length ? " · " + waiting.length + " WAITING" : "")),
+                   el("span", "pe-footnote", "Nothing is remembered, or shown to any later investigation, until you keep it.")));
+      for (const l of lessons) {
+        const row = el("div", "pe-con-lesson " + l.state);
+        add(row, el("div", "pe-con-lesson-title", l.title));
+        if (l.state === "waiting" && state.editing === l.id) {
+          const area = el("textarea", "pe-con-edit"); area.value = state.draft || l.statement; area.rows = 3; area.maxLength = 600;
+          area.setAttribute("aria-label", "Edit what is remembered");
+          area.addEventListener("input", () => { state.draft = area.value; });
+          const save = el("button", "pe-btn go sm", "Save and keep"); save.type = "button";
+          save.addEventListener("click", () => decideLesson(l, "keep", area.value.trim()));
+          const cancel = el("button", "pe-btn ghost sm", "Cancel"); cancel.type = "button";
+          cancel.addEventListener("click", () => { state.editing = null; state.draft = ""; state.sig.thread = ""; renderThread(); });
+          add(row, area, add(el("div", "pe-plan-actions"), save, cancel));
+        } else {
+          add(row, el("p", "pe-con-pre", l.statement));
+          if (l.scope.length) add(row, el("div", "pe-footnote", l.scope.join(" · ")));
+          if (l.state === "waiting") {
+            const keep = el("button", "pe-btn go sm", "Keep"); keep.type = "button"; keep.addEventListener("click", () => decideLesson(l, "keep"));
+            const edit = el("button", "pe-btn sm", "Edit"); edit.type = "button";
+            edit.addEventListener("click", () => { state.editing = l.id; state.draft = l.statement; state.sig.thread = ""; renderThread(); });
+            const drop = el("button", "pe-btn ghost sm", "Discard"); drop.type = "button"; drop.addEventListener("click", () => decideLesson(l, "discard"));
+            add(row, add(el("div", "pe-plan-actions"), keep, edit, drop));
+          } else {
+            add(row, el("span", "pe-badge " + (l.state === "kept" ? "ok" : "none"), l.state === "kept" ? "KEPT" : "DISCARDED"));
+          }
+        }
+        box.appendChild(row);
+      }
+      return box;
+    }
     function executionBlocks(x) {
       const out = [runBlock(x)];
       if (x.pause) out.push(tripwireBlock(x));
@@ -477,7 +520,7 @@
     function renderThread() {
       const f0 = state.feed;
       const sig = JSON.stringify([state.newMode, !!f0, state.messages.map(m => m.seq), state.lastEvent, f0 && f0.running, f0 && f0.plan && [f0.plan.id, f0.plan.status, f0.plan.expired],
-                                  f0 && f0.execution, state.picked, state.scrapArmed, state.armed, state.drift, state.error && !f0]);
+                                  f0 && f0.execution, f0 && f0.lessons, state.editing, state.picked, state.scrapArmed, state.armed, state.drift, state.error && !f0]);
       if (sig === state.sig.thread && state.firstPaint !== "load") return;     // unchanged: keep the nodes, the selection and the focus
       state.sig.thread = sig;
       const keep = refs.scroll.scrollHeight - refs.scroll.scrollTop - refs.scroll.clientHeight < 90;
@@ -508,6 +551,7 @@
       }
       if (planInfo && !planShown) refs.thread.appendChild(planCard(planInfo));
       if (f.execution) for (const block of executionBlocks(f.execution)) refs.thread.appendChild(block);
+      if (f.lessons && f.lessons.length) refs.thread.appendChild(lessonsBlock(f.lessons));
       if (f.running) {
         const turn = Math.max(f.conversation.turns, 1);
         if (!shown.has(turn)) { const tb = trailBlock(turn, true); if (tb) refs.thread.appendChild(tb); }
@@ -611,7 +655,7 @@
       // Per-conversation UI state never travels with the operator: an armed rollback, a drift offer and an open sheet belong to the one they were for.
       if (state.sheetBusy) return false;
       if (state.sheet) closeSheet(true);
-      state.armed = {}; state.drift = null;
+      state.armed = {}; state.drift = null; state.editing = null; state.draft = "";
       return true;
     }
     function select(id, push) {

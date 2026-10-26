@@ -1057,6 +1057,18 @@ def register_console_pages(app, core) -> None:
         return jsonify(core("console.confirm_withdraw", {"conversation_id": conversation(conversation_id), "operator": g.operator,
                                                           "execution_id": int_field("execution_id", 1)}))
 
+    @app.post("/api/console/<conversation_id>/lesson")
+    def console_lesson(conversation_id):
+        card_id = request.form.get("card_id", "")
+        decision = request.form.get("decision", "")
+        if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", card_id) is None or decision not in ("keep", "discard"):
+            abort(400)
+        params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "card_id": card_id, "decision": decision}
+        statement = request.form.get("statement", "")
+        if statement:
+            params["statement"] = statement[:600]
+        return jsonify(core("console.lesson", params))
+
     @app.post("/api/console/<conversation_id>/run/<action>")
     def console_run_action(conversation_id, action):
         if action not in ("pause", "resume", "rollback", "takeover"):

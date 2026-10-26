@@ -384,6 +384,29 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     release(); await settle(8); win.__override = null;
     assert.strictEqual(doc.getElementById("con-sheet").children.length, 0);
   });
+  await atest("lessons are offered with Keep, Edit and Discard; hostile text stays text; nothing is kept without a click", async () => {
+    FEED.execution = null; FEED.plan = null;
+    FEED.lessons = [{ id: "cl-1", title: "T " + EVIL, statement: "S " + EVIL, scope: ["stack:media"], state: "waiting" },
+                    { id: "cl-2", title: "done one", statement: "kept text", scope: [], state: "kept" }];
+    await page.loadFeed();
+    const box = walk(doc.getElementById("con-thread")).find(n => (n.className || "").includes("pe-con-lessons"));
+    assert.ok(box.textContent.includes("WORTH REMEMBERING · 1 WAITING") && box.textContent.includes("KEPT") && box.textContent.includes("until you keep it"));
+    assert.ok(!walk(box).some(n => ["img", "script"].includes(n.tag)) && box.textContent.includes("<img src=x"));
+    const before = requests.filter(r => r[0].endsWith("/lesson")).length;
+    assert.strictEqual(before, 0, "showing a lesson posts nothing");
+    const btn = label => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent === label);
+    btn("Keep").fire("click"); await settle();
+    assert.ok(requests.some(r => r[0].endsWith("/lesson") && r[2].includes("card_id=cl-1") && r[2].includes("decision=keep") && !r[2].includes("statement=")));
+    btn("Discard").fire("click"); await settle();
+    assert.ok(requests.some(r => r[0].endsWith("/lesson") && r[2].includes("decision=discard")));
+    btn("Edit").fire("click");
+    const area = walk(doc.getElementById("con-thread")).find(n => n.tag === "textarea");
+    assert.ok(area && area.value.startsWith("S "), "the edit box starts from the agent's words");
+    area.value = "my own words"; area.fire("input");
+    btn("Save and keep").fire("click"); await settle();
+    assert.ok(requests.some(r => r[0].endsWith("/lesson") && r[2].includes("decision=keep") && r[2].includes("statement=my+own+words")));
+    FEED.lessons = [];
+  });
   void all;
   if (failures) { console.log(failures + " failed"); process.exit(1); }
   console.log("all passed");
