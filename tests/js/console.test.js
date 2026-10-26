@@ -206,6 +206,21 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     find().fire("click"); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
     assert.ok(requests.some(r => r[0].endsWith("/archive") && r[1] === "POST"));
   });
+  await atest("Stop shows only when the turn is really running, and a dead plan has no Scrap", async () => {
+    const stopHidden = () => doc.getElementById("con-stop").hidden;
+    page.select("0123456789abcdef", false);
+    await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
+    assert.strictEqual(stopHidden(), true);                                  // FEED has no stoppable turn
+    FEED.running = true; FEED.stoppable = false; await page.loadFeed();
+    assert.strictEqual(stopHidden(), true, "queued, not stoppable: no Stop");
+    FEED.stoppable = true; await page.loadFeed();
+    assert.strictEqual(stopHidden(), false);
+    FEED.running = false; FEED.stoppable = false;
+    FEED.plan = { ...FEED.plan, status: "expired", expired: true }; await page.loadFeed();
+    const buttons = walk(doc.getElementById("con-thread")).filter(n => n.tag === "button").map(n => n.textContent);
+    assert.ok(!buttons.some(t => t.startsWith("Scrap")) && !buttons.includes("Modify"), "no actions on an expired plan: " + buttons);
+    assert.ok(walk(doc.getElementById("con-thread")).some(n => n.textContent.includes("has expired")));
+  });
   void all;
   if (failures) { console.log(failures + " failed"); process.exit(1); }
   console.log("all passed");

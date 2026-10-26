@@ -119,6 +119,7 @@ class ConsoleApi:
         plan = view.pop("plan_row")
         running = view.pop("running")
         status_view = view["mission_closed"]
+        stoppable = self.supervisor.has_run(conv.mission_id) and not status_view        # a turn that is actually running, not one still queued
         used_pct = min(100, round(100 * conv.tokens_used / conv.token_budget)) if conv.token_budget else 100
         spent = conv.tokens_left < self.cfg.min_turn_tokens
         return {
@@ -126,7 +127,7 @@ class ConsoleApi:
                              "status": {k: view[k] for k in ("text", "level", "group")}, "verdict": view["verdict"]},
             "budget": {"used_pct": used_pct, "tokens_used": conv.tokens_used, "token_budget": conv.token_budget, "tokens_left": conv.tokens_left,
                        "state": "stop" if spent else "warn" if used_pct >= 80 else "ok"},
-            "running": running, "composer": self._composer(conv, running, spent, status, status_view),
+            "running": running, "stoppable": stoppable, "composer": self._composer(conv, running, spent, status, status_view),
             "messages": [{"seq": m.seq, "role": m.role, "turn": m.turn, "at": m.at, "text": clean_text(m.text, MAX_TEXT),
                           "by": (m.actor or "").removeprefix("operator:") or None} for m in messages],
             "last_message": messages[-1].seq if messages else after_message,

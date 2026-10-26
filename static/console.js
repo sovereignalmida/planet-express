@@ -270,6 +270,9 @@
         options.push(opt); group.appendChild(opt);
       });
       card.appendChild(group);
+      if (dead || planInfo.status !== "pending") {
+        return add(card, el("p", "pe-con-plan-foot", "This plan has expired, so it can no longer be acted on. Ask the agent for a fresh one."));
+      }
       const modify = el("button", "pe-btn", "Modify"); modify.type = "button";
       modify.addEventListener("click", () => {
         const o = plan.options[state.picked[planInfo.id]];
@@ -363,7 +366,7 @@
       refs.text.disabled = off || state.sending;
       refs.send.disabled = off || state.sending;
       refs.send.textContent = state.newMode ? "Start" : "Send";
-      refs.stop.hidden = !(state.feed && state.feed.running && !state.newMode && c.mode !== "off");
+      refs.stop.hidden = !(state.feed && state.feed.stoppable && !state.newMode && c.mode !== "off");
       refs.note.textContent = state.error || c.reason || (state.newMode ? "Nothing runs until you press Start." : "");
       refs.note.setAttribute("role", state.error ? "alert" : "status");
     }

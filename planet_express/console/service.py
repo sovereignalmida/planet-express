@@ -9,6 +9,8 @@ archive empties the state directory with a cleanup session as the same uid and o
 
 import logging
 import shutil
+import sqlite3
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -66,6 +68,7 @@ class ConsoleService:
                  uid_range: Callable[[], tuple[int, int] | None], clock: Callable[[], float]):
         self.ms, self.console, self.supervisor, self.cfg = ms, console, supervisor, cfg
         self._uid_range, self._clock = uid_range, clock
+        self._create_lock = threading.Lock()          # the open-conversation cap is checked and the conversation made as one step
         self._failures: dict[str, int] = {}
 
     # ── what the operator does ────────────────────────────────────────────────────────────
@@ -74,6 +77,10 @@ class ConsoleService:
         actor = _actor(operator)
         if not text.strip():
             raise ConsoleError("a conversation starts with a message")
+        with self._create_lock:
+            return self._create(actor, text, incident_id, title)
+
+    def _create(self, actor: str, text: str, incident_id: str | None, title: str | None) -> Conversation:
         if self.console.count_open() >= self.cfg.max_open:
             raise ConsoleFull(f"{self.cfg.max_open} conversations are open: archive one first")
         uid_range = self._uid_range()
@@ -81,9 +88,12 @@ class ConsoleService:
             raise ConsoleError("this host has no session identities: the Console cannot run")
         grant = Grant.model_validate({"tier": "observe", "budgets": {"wall_s": self.cfg.turn_wall_s, "tool_calls": self.cfg.turn_tool_calls,
                                                                       "retries": 0}})
-        mission = self.ms.create_mission(title=clean_text(title or text, 120).splitlines()[0], origin="incident" if incident_id else "operator",
-                                         incident_id=incident_id, grant=grant, goal=clean_text(text, 4000),
-                                         success_criteria="Answer the operator and help them decide.", runtime="console", actor=actor)
+        try:
+            mission = self.ms.create_mission(title=clean_text(title or text, 120).splitlines()[0], origin="incident" if incident_id else "operator",
+                                             incident_id=incident_id, grant=grant, goal=clean_text(text, 4000),
+                                             success_criteria="Answer the operator and help them decide.", runtime="console", actor=actor)
+        except sqlite3.IntegrityError:
+            raise ConsoleError("that incident no longer exists") from None
         try:
             try:
                 uid = self.ms.reserve_uid(mission.id, uid_range)

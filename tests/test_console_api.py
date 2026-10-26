@@ -250,3 +250,41 @@ def test_archiving_twice_says_it_was_already_archiving(rig):
     made = rig.api.create("chris", "hello")
     assert rig.api.archive(made["id"], "chris") == {"archiving": True}
     assert rig.api.archive(made["id"], "chris") == {"archiving": False}
+
+
+def test_stop_is_offered_only_for_a_turn_that_is_actually_running(rig):
+    made = rig.api.create("chris", "hello")
+    queued = rig.api.feed(made["id"])
+    assert queued["running"] is True and queued["stoppable"] is False                    # queued: nothing to stop yet
+    rig.sup.tick()
+    assert rig.api.feed(made["id"])["stoppable"] is True
+    rig.finish_turn(rig.console.get(made["id"]))
+    assert rig.api.feed(made["id"])["stoppable"] is False
+
+
+def test_two_creations_at_once_cannot_both_take_the_last_slot(tmp_path):
+    import threading
+    rig = ApiRig(tmp_path, max_open=3)
+    rig.api.create("chris", "one")
+    results, barrier = [], threading.Barrier(6)
+
+    def go(i):
+        barrier.wait()
+        try:
+            results.append(("ok", rig.api.create("chris", f"race {i}")["id"]))
+        except ConsoleApiError as exc:
+            results.append(("refused", exc.code))
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(6)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert sum(1 for kind, _ in results if kind == "ok") == 2 and rig.console.count_open() == 3          # the cap held
+    assert all(code == "conflict" for kind, code in results if kind == "refused")
+    reserved = {rig.ms.reserved_uid(c.mission_id) for c in rig.console.conversations()}
+    assert len(reserved) == 3 and None not in reserved                                                  # and no uid leaked
+
+
+def test_an_incident_that_no_longer_exists_is_refused_in_words_and_reserves_nothing(rig):
+    with pytest.raises(ConsoleApiError) as err:
+        rig.api.create("chris", "look", incident_id="f" * 12)
+    assert err.value.code == "bad_request" and "no longer exists" in str(err.value)
+    assert rig.console.count_open() == 0
