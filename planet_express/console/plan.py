@@ -25,7 +25,10 @@ from pydantic import (
 )
 
 from planet_express.missions.canonical import CanonicalError, loads_strict, sha256_hex
+import re
+
 from planet_express.missions.events import redact_value
+from planet_express.missions.resources import BadResource, canon
 from planet_express.missions.verify.checks import PARAM_MODELS
 from planet_express.missions.verify.plan import CATALOGUE_V, PlanInvalid, parse_plan
 
@@ -54,6 +57,25 @@ class CheckSpec(_Strict):
     params: dict[str, Any]
 
 
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_SERVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+class OptionScope(_Strict):
+    """What the option may touch, in the host inventory's own vocabulary: stacks by name, services as `<stack>/<service>`. It is what a grant
+    is made from if the operator confirms, so it is checked against the host's inventory and the protected set, never taken on faith."""
+    stacks: Annotated[list[StrictStr], Field(max_length=8)] = []
+    services: Annotated[list[StrictStr], Field(max_length=32)] = []
+
+    @model_validator(mode="after")
+    def _shape(self) -> "OptionScope":
+        if not self.stacks and not self.services:
+            raise ValueError("an option must name at least one stack or service")
+        if not all(_NAME.fullmatch(s) for s in self.stacks) or not all(_SERVICE.fullmatch(s) for s in self.services):
+            raise ValueError("stack and service names are plain names, services as <stack>/<service>")
+        return self
+
+
 class Option(_Strict):
     name: Short
     recommended: StrictBool
@@ -63,6 +85,8 @@ class Option(_Strict):
     risk: Risk
     rolls_back_to: Line
     effort: Short
+    scope: OptionScope
+    exclude: Annotated[list[StrictStr], Field(max_length=32)] = []      # concrete resource ids (`service:media/gluetun`) the grant must carve out
     checks: Annotated[list[CheckSpec], Field(min_length=1, max_length=32)]
 
 
@@ -78,11 +102,12 @@ class Plan(_Strict):
         return self
 
 
-_KNOWN_FIELDS = frozenset(name for model in (Plan, Option, Risk, CheckSpec) for name in model.model_fields)
+_KNOWN_FIELDS = frozenset(name for model in (Plan, Option, Risk, CheckSpec, OptionScope) for name in model.model_fields)
 
 
-def parse(doc: Any) -> Plan:
-    """Validate a decoded plan: the shape, then every option's checks against the catalogue. Raises PlanError."""
+def parse(doc: Any, inventory: Any = None) -> Plan:
+    """Validate a decoded plan: the shape, then every option's scope against the host's inventory (when one is given) and its exclusions as
+    resource ids, then every option's checks against the catalogue. Raises PlanError (never echoing the agent's text)."""
     try:
         plan = Plan.model_validate(doc)
     except ValidationError as exc:
@@ -91,6 +116,15 @@ def parse(doc: Any) -> Plan:
         where = ".".join(str(p) if isinstance(p, int) or p in _KNOWN_FIELDS else "?" for p in first["loc"])
         raise PlanError(f"the plan is not valid: {where[:80]}: {first['type']}") from None
     for index, option in enumerate(plan.options):
+        if inventory is not None:
+            stacks, services = set(inventory.stacks), set(inventory.services)
+            if not set(option.scope.stacks) <= stacks or not set(option.scope.services) <= services:
+                raise PlanError(f"option {index + 1}: it names a stack or service this host does not have")
+        for resource in option.exclude:
+            try:
+                canon(resource)
+            except BadResource:
+                raise PlanError(f"option {index + 1}: an exclusion is not a resource id such as service:<stack>/<service>") from None
         try:
             parse_plan({"catalogue_v": CATALOGUE_V, "checks": [c.model_dump() for c in option.checks]})
         except PlanInvalid:
@@ -99,7 +133,7 @@ def parse(doc: Any) -> Plan:
     return plan
 
 
-def load_file(workspace: str, *, name: str = PLAN_FILE) -> Plan:
+def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -> Plan:
     """The file method: the agent writes `plan.json` in its workspace. The worker controls that file, so it is opened without
     following links, size-capped and parsed strictly (no duplicate keys, floats or NaN), then validated."""
     try:
@@ -123,7 +157,7 @@ def load_file(workspace: str, *, name: str = PLAN_FILE) -> Plan:
     if len(data) > MAX_PLAN_BYTES:
         raise PlanError("the plan file is larger than its size limit")
     try:
-        return parse(loads_strict(data.decode("utf-8")))
+        return parse(loads_strict(data.decode("utf-8")), inventory)
     except (CanonicalError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         if isinstance(exc, PlanError):
             raise
@@ -161,10 +195,13 @@ def json_schema() -> dict[str, Any]:
             "required": ["level", "text"], "additionalProperties": False}
     check = {"type": "object", "properties": {"id": text, "check": {"enum": sorted(PARAM_MODELS)}, "params": {"type": "object"}},
              "required": ["id", "check", "params"], "additionalProperties": False}
-    names = ["name", "recommended", "summary", "changes", "will_not_touch", "risk", "rolls_back_to", "effort", "checks"]
+    names = ["name", "recommended", "summary", "changes", "will_not_touch", "risk", "rolls_back_to", "effort", "scope", "checks"]
+    scope = {"type": "object", "additionalProperties": False, "required": ["stacks", "services"], "properties": {
+        "stacks": {"type": "array", "items": text, "maxItems": 8}, "services": {"type": "array", "items": text, "maxItems": 32}}}
     option = {"type": "object", "additionalProperties": False, "required": names, "properties": {
         "name": text, "recommended": {"type": "boolean"}, "summary": text, "changes": {"type": "array", "items": text},
         "will_not_touch": {"type": "array", "items": text}, "risk": risk, "rolls_back_to": text, "effort": text,
+        "scope": scope, "exclude": {"type": "array", "items": text, "maxItems": 32},
         "checks": {"type": "array", "items": check, "minItems": 1}}}
     return {"type": "object", "additionalProperties": False, "required": ["known", "unsure", "options"], "properties": {
         "known": {"type": "array", "items": text}, "unsure": {"type": "array", "items": text},
@@ -175,7 +212,10 @@ PLAN_INSTRUCTIONS = (
     "When the right response is a change, write your plan as plan.json in the current directory (use the Write tool). It is a JSON "
     "object with `known` (what the evidence shows), `unsure` (what it does not), and 1 to 3 `options`. Exactly one option has "
     "`recommended` true. Each option has: name, recommended, summary (one sentence), changes (services or files it would touch), "
-    "will_not_touch, risk {level low|medium|high, text}, rolls_back_to, effort, and checks. `checks` are how PE will verify the "
+    "will_not_touch, risk {level low|medium|high, text}, rolls_back_to, effort, scope, exclude (optional) and checks. `scope` is "
+    "{stacks: [...], services: [...]}: exactly what the option would touch, using ONLY names listed in INVENTORY.md (services as "
+    "<stack>/<service>); anything outside it is off limits to the execution. `exclude` lists resource ids such as service:<stack>/<service> "
+    "that must be carved out even inside the scope. `checks` are how PE will verify the "
     "option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, no extra "
     "fields):\n{catalogue}\nYou cannot approve a plan, and a plan carries no permissions: the operator confirms an option and PE "
     "applies only what that option says. Do not change anything on the host yourself.")

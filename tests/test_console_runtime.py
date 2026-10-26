@@ -19,7 +19,7 @@ from planet_express.missions.store import MissionStore
 FIXTURE = Path(__file__).parent / "fixtures" / "console_stream_tool_turn.jsonl"
 GOOD_PLAN = {"known": ["a"], "unsure": ["b"], "options": [{
     "name": "n", "recommended": True, "summary": "s", "changes": ["c"], "will_not_touch": ["w"], "risk": {"level": "low", "text": "t"},
-    "rolls_back_to": "r", "effort": "e", "checks": [{"id": "up", "check": "container_state", "params": {"container": "gluetun"}}]}]}
+    "rolls_back_to": "r", "effort": "e", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, "checks": [{"id": "up", "check": "container_state", "params": {"container": "gluetun"}}]}]}
 
 
 class Broker:
@@ -378,3 +378,30 @@ def test_an_interrupted_turn_never_publishes_the_plan_it_had_written(tmp_path):
     assert rig.runtime.status(handle).state == "failed"
     result = rig.runtime.collect(handle)                                                  # the supervisor's interrupt path collects it anyway
     assert result.confidence == "low" and rig.console.current_plan(rig.conv.id) is None
+
+
+class Inv:
+    stacks = ("media",)
+    services = ("media/qbittorrent",)
+
+
+def test_the_agent_is_given_the_inventory_and_a_plan_naming_anything_else_is_refused(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=1))
+    rig.runtime.inventory = lambda: Inv
+    handle, workspace, cs = rig.start()
+    inventory = (workspace / "INVENTORY.md").read_text()
+    assert "- media\n" in inventory and "- media/qbittorrent\n" in inventory and oct((workspace / "INVENTORY.md").stat().st_mode & 0o777) == "0o400"
+    bad = json.loads(json.dumps(GOOD_PLAN))
+    bad["options"][0]["scope"] = {"stacks": ["not-a-stack"], "services": []}
+    (workspace / "plan.json").write_text(json.dumps(bad))
+    rig.finish(handle, cs)
+    assert rig.console.current_plan(rig.conv.id) is None
+    assert any("does not have" in m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
+
+
+def test_with_no_inventory_the_agent_is_told_it_cannot_name_a_scope(tmp_path):
+    rig = Rig(tmp_path)
+    _, workspace, _ = rig.start()
+    assert "do not write plan.json" in (workspace / "INVENTORY.md").read_text()
+    rig.runtime.inventory = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+    assert "do not write plan.json" in rig.runtime._inventory_text()                       # an unreadable inventory is no inventory, never a wider one

@@ -9,11 +9,11 @@ from planet_express.console.store import ConsoleStore
 
 GOOD_PLAN = {"known": ["the gateway is healthy"], "unsure": ["whether the start order caused it"], "options": [
     {"name": "Recreate dependents", "recommended": True, "summary": "Recreate the four dependents.", "changes": ["4 services"],
-     "will_not_touch": ["the gateway"], "risk": {"level": "low", "text": "about a minute"}, "rolls_back_to": "the checkpoint", "effort": "2 min",
+     "will_not_touch": ["the gateway"], "risk": {"level": "low", "text": "about a minute"}, "rolls_back_to": "the checkpoint", "effort": "2 min", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, 
      "checks": [{"id": "up", "check": "container_state", "params": {"container": "gluetun"}}]},
     {"name": "Restart the gateway", "recommended": False, "summary": "Restart only the gateway.", "changes": ["gluetun"],
      "will_not_touch": ["dependents"], "risk": {"level": "medium", "text": "may not recover"}, "rolls_back_to": "the checkpoint",
-     "effort": "1 min", "checks": [{"id": "up", "check": "container_state", "params": {"container": "gluetun"}}]}]}
+     "effort": "1 min", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, "checks": [{"id": "up", "check": "container_state", "params": {"container": "gluetun"}}]}]}
 
 
 class ApiRig(Rig):

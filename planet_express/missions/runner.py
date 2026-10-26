@@ -380,7 +380,8 @@ def build_mission_runner(
         from planet_express.console.store import ConsoleStore
         console_store = ConsoleStore(store)
         console_runtime = ConsoleRuntime(containment, console_store, cfg.console, worker_socket=cfg.worker_socket,
-                                         env_policy=env_policy, broker=model_broker)
+                                         env_policy=env_policy, broker=model_broker,
+                                         inventory=getattr(controls, "inventory", None))
 
     def runtime_for(mission):
         if getattr(mission, "runtime", None) != "console":

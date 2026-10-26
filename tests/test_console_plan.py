@@ -18,10 +18,10 @@ def good():
                 {"name": "Recreate dependents", "recommended": True, "summary": "Recreate the four dependents in order.",
                  "changes": ["4 services in the media stack"], "will_not_touch": ["the gateway", "ingress", "DNS"],
                  "risk": {"level": "low", "text": "about a minute of downtime"}, "rolls_back_to": "the checkpoint taken just before",
-                 "effort": "2 minutes", "checks": [copy.deepcopy(CHECK)]},
+                 "effort": "2 minutes", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, "checks": [copy.deepcopy(CHECK)]},
                 {"name": "Restart the gateway", "recommended": False, "summary": "Restart only the gateway.", "changes": ["gluetun"],
                  "will_not_touch": ["the dependents"], "risk": {"level": "medium", "text": "dependents may not recover"},
-                 "rolls_back_to": "the checkpoint", "effort": "1 minute", "checks": [copy.deepcopy(CHECK)]}]}
+                 "rolls_back_to": "the checkpoint", "effort": "1 minute", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, "checks": [copy.deepcopy(CHECK)]}]}
 
 
 def test_a_good_plan_is_accepted_and_hashes_stably():
@@ -180,3 +180,54 @@ def test_a_deeply_nested_plan_file_is_a_refused_plan_not_a_crash(tmp_path):
     (tmp_path / "plan.json").write_text("[" * 100_000)
     with pytest.raises(PlanError, match="not valid JSON"):
         load_file(str(tmp_path))
+
+
+# ── the structured scope (what a grant is made from if the operator confirms) ─────────────────────
+
+class Inv:
+    stacks = ("media", "network")
+    services = ("media/qbittorrent", "media/gluetun", "network/adguard")
+
+
+def test_every_option_must_name_a_scope_and_its_names_are_plain():
+    for scope in ({}, {"stacks": [], "services": []}, {"stacks": ["../etc"]}, {"services": ["noslash"]}, {"services": ["a/b/c"]},
+                  {"stacks": ["media"], "paths": ["/etc"]}, {"stacks": ["x" * 129]}, {"stacks": [f"s{i}" for i in range(9)]}):
+        doc = good()
+        doc["options"][0]["scope"] = scope
+        with pytest.raises(PlanError):
+            parse(doc)
+    doc = good()
+    del doc["options"][0]["scope"]
+    with pytest.raises(PlanError):
+        parse(doc)
+
+
+def test_a_scope_naming_something_the_host_does_not_have_is_refused_when_the_inventory_is_known():
+    assert parse(good(), Inv)                                                            # media and media/qbittorrent exist
+    for scope in ({"stacks": ["ghost"]}, {"services": ["media/ghost"]}, {"stacks": ["media"], "services": ["network/nothing"]}):
+        doc = good()
+        doc["options"][1]["scope"] = scope
+        with pytest.raises(PlanError, match="option 2: it names a stack or service this host does not have"):
+            parse(doc, Inv)
+    assert parse(doc)                                                                    # with no inventory only the shape is checked
+
+
+def test_exclusions_must_be_resource_ids_and_are_part_of_the_hash():
+    doc = good()
+    doc["options"][0]["exclude"] = ["service:media/gluetun", "host:local/path:/srv/data"]
+    plan = parse(doc, Inv)
+    assert plan.options[0].exclude == ["service:media/gluetun", "host:local/path:/srv/data"]
+    other = good()
+    assert plan_mod.plan_hash(parse(other)) != plan_mod.plan_hash(plan)                  # scope and exclusions are what the operator confirms
+    for bad in ("the gateway", "service:no-slash", "kind:x", "host:../service:a/b", "s" * 600):
+        doc = good()
+        doc["options"][0]["exclude"] = [bad]
+        with pytest.raises(PlanError, match="option 1: an exclusion is not a resource id"):
+            parse(doc)
+
+
+def test_the_prompt_and_the_schema_describe_the_scope_and_point_at_the_inventory_file():
+    text = plan_mod.instructions()
+    assert "INVENTORY.md" in text and "scope" in text and "exclude" in text
+    option = plan_mod.json_schema()["properties"]["options"]["items"]
+    assert "scope" in option["required"] and option["properties"]["scope"]["additionalProperties"] is False

@@ -70,12 +70,13 @@ class ConsoleRuntime:
     counts_calls_from_events = True           # the supervisor also counts the calls this runtime reports (`call` events) against the tool budget
 
     def __init__(self, containment, console: ConsoleStore, cfg: MissionConsoleConfig, *, worker_socket: str, env_policy=None,
-                 broker=None):
+                 broker=None, inventory=None):
         self.containment = containment            # only for is_empty/kill/output capture: spawning is `context.spawn`
         self.console, self.cfg = console, cfg
         self.worker_socket = str(worker_socket)
         self.env_policy = env_policy              # grant -> environment: the broker's endpoint and code, the hook inputs
         self.broker = broker                      # to lower the turn's token ceiling to the conversation's remainder
+        self.inventory = inventory                # () -> the host's stacks and services (None where Repair is not available): a plan's scope is checked against it
         self._runs: dict[str, _Run] = {}
 
     # ── AgentRuntime ──────────────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ class ConsoleRuntime:
         if message is None:
             raise TurnRefused("there is no message waiting")
         cs, workspace = context.session, Path(context.cwd)
-        self._prepare_workspace(workspace, context.brief, message.text)
+        self._prepare_workspace(workspace, context.brief, message.text, self._inventory_text())
         state = str(workspace.parent / conv.state_dir)
         # The agent's own session id is stored only once the stream has CONFIRMED it (`_record`): a first turn that dies before the CLI
         # saved its transcript must not leave a `--resume` id that does not exist. Until then every turn starts a new one.
@@ -193,21 +194,36 @@ class ConsoleRuntime:
         if not os.path.lexists(run.workspace / plan_mod.PLAN_FILE):
             return                                                     # the agent proposed no plan this turn
         try:
-            plan = plan_mod.load_file(str(run.workspace))              # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
+            plan = plan_mod.load_file(str(run.workspace), inventory=self._inventory())              # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
         except plan_mod.PlanError as exc:
             self.console.add_message(run.conversation_id, "system", f"The agent's plan was refused: {exc}", turn=run.turn)
             return
         self.console.add_plan(run.conversation_id, run.turn, plan_mod.canonical(plan), plan_mod.plan_hash(plan))
 
     # ── the workspace and the pipe ────────────────────────────────────────────────────────
+    def _inventory(self):
+        if self.inventory is None:
+            return None
+        try:
+            return self.inventory()
+        except Exception:                                           # noqa: BLE001 -- an unreadable inventory means no plan can name a scope, never a wider one
+            return None
+
+    def _inventory_text(self) -> str:
+        inv = self._inventory()
+        if inv is None:
+            return "The host inventory is not available, so a plan cannot name a scope: describe what you would do and do not write plan.json.\n"
+        return ("Stacks on this host:\n" + "".join(f"- {s}\n" for s in inv.stacks) + "\nServices (as <stack>/<service>):\n"
+                + "".join(f"- {s}\n" for s in inv.services))
+
     @staticmethod
-    def _prepare_workspace(workspace: Path, brief: str, message: str) -> None:
+    def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "") -> None:
         if not stat.S_ISDIR(workspace.lstat().st_mode):             # made by the supervisor; never created or followed here
             raise ValueError("workspace path is not a directory")
-        files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_mod.instructions()}
+        files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_mod.instructions(), "INVENTORY.md": inventory_text}
         if len(message) > MAX_ARG_PROMPT:
             files["MESSAGE.md"] = clean_text(message)
-        for name in ("BRIEF.md", "PLAN_FORMAT.md", "MESSAGE.md", plan_mod.PLAN_FILE):
+        for name in ("BRIEF.md", "PLAN_FORMAT.md", "INVENTORY.md", "MESSAGE.md", plan_mod.PLAN_FILE):
             try:
                 (workspace / name).unlink()                          # unlink never follows a link; clears a previous attempt
             except FileNotFoundError:

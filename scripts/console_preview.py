@@ -25,11 +25,11 @@ PLAN = {"known": ["The VPN gateway is healthy.", "Four containers share its netw
         "options": [
             {"name": "Recreate the dependents", "recommended": True, "summary": "Recreate the four dependents in order so they rebind to the gateway.",
              "changes": ["4 services in the media stack"], "will_not_touch": ["the gateway", "ingress", "DNS", "any data volume"],
-             "risk": {"level": "low", "text": "About one minute of downtime."}, "rolls_back_to": "the checkpoint taken just before", "effort": "about 2 minutes",
+             "risk": {"level": "low", "text": "About one minute of downtime."}, "rolls_back_to": "the checkpoint taken just before", "effort": "about 2 minutes", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, 
              "checks": [{"id": "a", "check": "container_state", "params": {"container": "qbittorrent"}}, {"id": "b", "check": "http", "params": {"url": "http://qbittorrent:8080/"}}]},
             {"name": "Restart the gateway only", "recommended": False, "summary": "Restart the gateway and wait for the port-forward.",
              "changes": ["gluetun"], "will_not_touch": ["the dependents"], "risk": {"level": "medium", "text": "The dependents may not recover on their own."},
-             "rolls_back_to": "the checkpoint", "effort": "about 1 minute", "checks": [{"id": "g", "check": "container_state", "params": {"container": "gluetun"}}]}]}
+             "rolls_back_to": "the checkpoint", "effort": "about 1 minute", "scope": {"stacks": ["media"], "services": ["media/qbittorrent"]}, "checks": [{"id": "g", "check": "container_state", "params": {"container": "gluetun"}}]}]}
 AGENT = ("The VPN gateway container came back up **before its port-forward was assigned**, so the apps that join its network can't route.\n\n"
          "I looked at:\n- the gateway's health\n- the port-forward status\n- which containers share its network\n\nThe gateway reports `healthy`; four dependents are running but unreachable.")
 EVENTS = [{"seq": 1, "at": 1, "turn": 1, "type": "call", "kind": "ran", "name": "Bash", "detail": "docker inspect gluetun --format '{{.State.Health.Status}}'"},
