@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 os.environ.setdefault("CASA_CONFIG", str(ROOT / "config.example.yaml"))
 
-A, B, C = "a" * 16, "b" * 16, "c" * 16
+A, B, C, D, E = "a" * 16, "b" * 16, "c" * 16, "d" * 16, "e" * 16
 STATUS = {"enabled": True, "open": 3, "max_open": 10, "token_budget": 150000, "min_turn_tokens": 20000, "proposal_only": False, "proposal_only_reason": None}
 PLAN = {"known": ["The VPN gateway is healthy.", "Four containers share its network and are running."],
         "unsure": ["Whether the provider's port rotation or the start order caused it."],
@@ -40,6 +40,15 @@ EVENTS = [{"seq": 1, "at": 1, "turn": 1, "type": "call", "kind": "ran", "name": 
           {"seq": 6, "at": 1, "turn": 1, "type": "call", "kind": "changed", "name": "Write", "detail": "plan.json"}]
 
 
+VIEW = {"execution_id": 4, "mission_id": "M-9", "grant_hash": "9f3a1c22" + "0" * 56, "fingerprint": "9F3A1C22", "operator": "alex", "option": "Recreate the dependents",
+        "summary": "s", "scope": {"stacks": ["media"], "services": ["media/qbittorrent", "media/sonarr"]}, "warnings": [],
+        "backup": {"covered": True, "text": "A recent verified backup covers this scope."},
+        "protected": {"count": 7, "enforced": ["service:media/gluetun"], "advisory": ["the gateway", "any data volume"]}, "limits": {"minutes": 30, "steps": 200},
+        "checks": ["qbittorrent is running and stable", "http://qbittorrent:8080/ answers"], "on_verify_fail": "needs_operator", "needs_elevation": False, "phases": ["grant"]}
+TIMELINE = [{"label": "Authorised", "state": "done", "meta": "alex"}, {"label": "Checkpoint taken", "state": "done", "meta": "so it can be rolled back"},
+            {"label": "Carrying out the plan", "state": "paused", "meta": ""}, {"label": "PE checks it worked", "state": "todo", "meta": "PE's own checks, not the agent's say-so"}]
+
+
 def feed(cid):
     base = {"budget": {"used_pct": 24, "tokens_used": 36000, "token_budget": 150000, "tokens_left": 114000, "state": "ok"}, "turn_starts": [1], "status": STATUS,
             "composer": {"mode": "idle", "reason": None}, "last_message": 9, "last_event": 6}
@@ -55,6 +64,24 @@ def feed(cid):
                 "status": {"text": "Looking into it", "level": "ok", "group": "Working"}, "verdict": {"h": "Working on it", "p": "The agent is investigating. You can stop it at any time."}},
                 "running": True, "composer": {"mode": "busy", "reason": "Working. Your message waits for this turn to finish, or press Stop to interrupt it."},
                 "messages": [{**ops[0], "text": "Why is the media stack slow right now?"}], "events": EVENTS[:4] + [{"seq": 7, "at": 1, "turn": 1, "type": "delta", "text": "The disk latency on the NAS mount looks high; checking whether"}], "plan": None}
+    if cid in (D, E):
+        paused = cid == D
+        run = {"id": 4, "option": 0, "name": "Recreate the dependents", "fingerprint": "9F3A1C22", "finished": not paused,
+               "status": {"text": "Paused: something unexpected changed", "level": "crit"} if paused else {"text": "Needs you: PE isn't sure what state this is in", "level": "crit"},
+               "timeline": TIMELINE if paused else [{**t, "state": "done"} for t in TIMELINE[:2]] + [{**TIMELINE[2], "state": "done"}, {**TIMELINE[3], "state": "bad"}],
+               "pause": {"by_operator": False, "cause": "firewall", "changes": ["host:local/path:/etc/traefik/dynamic.yml: modified"], "more": 0, "rollback_available": True,
+                         "checkpoint": "ck-2026-10-26-14:02", "who": None} if paused else None,
+               "controls": {"pause": False, "resume": paused, "rollback": True, "takeover": True},
+               "verification": None if paused else {"headline": "1 of 3 failed: qbittorrent is running and stable", "level": "high", "by_pe": True, "checks": [
+                   {"state": "pass", "label": "sonarr is running and stable", "evidence": "running for 94s, no restarts"},
+                   {"state": "could_not_check", "label": "the media project has all its services", "evidence": "timed out"},
+                   {"state": "fail", "label": "qbittorrent is running and stable", "evidence": "restarted 3 times in the last minute"}]}}
+        return {**base, "conversation": {"id": cid, "title": "Download apps lost internet after the reboot", "origin": "operator", "state": "open", "turns": 1,
+                "status": {"text": "Working" if paused else "Didn't work", "level": "crit", "group": "Needs you"},
+                "verdict": {"h": "Paused: something unexpected changed" if paused else "The run didn't pass PE's checks", "p": "PE froze the run before anything else happened." if paused else "1 of 3 checks failed."}},
+                "running": False, "messages": ops + [{"seq": 2, "role": "agent", "turn": 1, "at": 2, "text": AGENT, "by": None},
+                {"seq": 3, "role": "system", "turn": 1, "at": 3, "text": "Authorised by alex: option A (Recreate the dependents). PE will take a checkpoint, carry it out under supervision, then check it worked. Grant 9f3a1c22.", "by": None}],
+                "events": EVENTS, "plan": None, "execution": run}
     return {**base, "conversation": {"id": C, "title": "Check the backups", "origin": "pe", "state": "open", "turns": 1,
             "status": {"text": "Didn't finish", "level": "high", "group": "Needs you"}, "verdict": {"h": "The last turn didn't finish", "p": "The agent stopped unexpectedly."}},
             "running": False, "messages": [{**ops[0], "text": "Check the backups"}, {"seq": 2, "role": "system", "turn": 1, "at": 2, "text": "The agent stopped unexpectedly.", "by": None}],
@@ -103,7 +130,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        self._send(json.dumps({"id": A, "seq": 1, "stopped": True, "scrapped": True}))
+        if self.path.endswith("/confirm/prepare"):
+            return self._send(json.dumps(VIEW))
+        self._send(json.dumps({"id": A, "seq": 1, "stopped": True, "scrapped": True, "authorised": True, "withdrawn": True, "done": "x"}))
 
     def log_message(self, *a):
         pass

@@ -1,6 +1,6 @@
 /* The Console page's own layout. The component styles (pe-con-*, pe-opmsg, pe-agent, pe-trail, pe-plan, pe-composer, ...) are the design
    system's, appended to cockpit.css; this file only fits them into the page and adds the phone list/thread switch. */
-.pe-console-wrap { height: calc(100dvh - 76px); min-height: 480px; }
+.pe-console-wrap { height: calc(100dvh - 76px); min-height: 480px; position: relative; }
 .pe-console-wrap .pe-con { height: 100%; }
 .pe-con-main { background: var(--pe-bg); }
 .pe-con-main[hidden], .pe-con-top[hidden] { display: none; }
@@ -32,3 +32,13 @@
   .pe-con.is-thread .pe-con-rail { display: none; }
   .pe-con-back { display: inline-block; }
 }
+
+.pe-con-tw-facts { display: flex; gap: 18px; flex-wrap: wrap; }
+.pe-con-pause { display: flex; flex-direction: column; gap: 10px; }
+.pe-con-checks { display: flex; flex-direction: column; gap: 8px; }
+.pe-con-check-body { flex: 1; min-width: 0; }
+.pe-check.unknown { border: 1px solid rgba(245,184,32,.35); background: rgba(245,184,32,.05); }
+.pe-run-head .pe-btn { margin-left: 4px; }
+/* The page's panels form their own stacking contexts (container queries), so the sheet and its scrim must be raised above them. */
+#con-sheet .pe-sheet-scrim { z-index: 49; }
+#con-sheet .pe-sheet { z-index: 50; }

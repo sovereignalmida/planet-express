@@ -32,7 +32,7 @@ function makeDoc(json) {
   doc.getElementById = id => doc._byId[id] || null;
   doc.querySelector = () => ({ content: "csrf-xyz" });
   doc.addEventListener = (ev, fn) => { (doc.listeners[ev] = doc.listeners[ev] || []).push(fn); };
-  for (const id of ["pe-con", "con-list", "con-top", "con-scroll", "con-thread", "con-composer", "con-text", "con-send", "con-stop", "con-note", "con-new"]) {
+  for (const id of ["pe-con", "con-sheet", "con-list", "con-top", "con-scroll", "con-thread", "con-composer", "con-text", "con-send", "con-stop", "con-note", "con-new"]) {
     const n = new FakeNode("div", doc); n.id = id; doc._byId[id] = n;
   }
   const boot = new FakeNode("script", doc); boot._text = JSON.stringify(json); doc._byId["con-boot"] = boot;
@@ -99,6 +99,14 @@ const PLAN = { known: ["gateway healthy " + EVIL], unsure: ["start order"], opti
   { name: "Recreate", recommended: true, summary: "Recreate " + EVIL, changes: ["4 services"], will_not_touch: ["the gateway"], risk: { level: "low", text: "a minute" },
     rolls_back_to: "the checkpoint", effort: "2 min", checks: [{ id: "u", check: "container_state", params: { container: "gluetun" } }] },
   { name: "Restart", recommended: false, summary: "s", changes: ["g"], will_not_touch: ["d"], risk: { level: "high", text: "bad" }, rolls_back_to: "r", effort: "1 min", checks: [] }] };
+const VIEW = { execution_id: 4, mission_id: "M-9", grant_hash: "a".repeat(64), fingerprint: "aaaaaaaa", operator: "chris", option: "Recreate " + EVIL, summary: "s",
+  scope: { stacks: ["media"], services: ["media/qbittorrent"] }, warnings: ["BACKUP NOTE " + EVIL], backup: { covered: true, text: "A recent verified backup covers this scope." },
+  protected: { count: 7, enforced: ["service:media/gluetun"], advisory: ["the gateway"] }, limits: { minutes: 15, steps: 200 }, checks: ["qbittorrent is running and stable"],
+  on_verify_fail: "needs_operator", needs_elevation: false, phases: ["grant"] };
+const EXEC = { id: 4, option: 0, name: "Recreate", fingerprint: "aaaaaaaa", status: { text: "Working", level: "ok" }, finished: false,
+  timeline: [{ label: "Authorised", state: "done", meta: "chris" }, { label: "Checkpoint taken", state: "done", meta: "so it can be rolled back" },
+             { label: "Carrying out the plan", state: "now", meta: "" }, { label: "PE checks it worked", state: "todo", meta: "PE's own checks" }],
+  pause: null, verification: null, controls: { pause: true, resume: false, rollback: false, takeover: true } };
 const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "operator", state: "open", turns: 1, status: { text: "Needs your call", level: "warn", group: "Needs you" },
                                verdict: { h: "Waiting for your choice between 2 options", p: "Recommended: Recreate. Nothing has been changed." } },
   budget: { used_pct: 24, tokens_used: 24000, token_budget: 100000, tokens_left: 76000, state: "ok" }, running: false, composer: { mode: "idle", reason: null },
@@ -112,7 +120,7 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
   const doc = makeDoc({ status: { enabled: true, proposal_only: false }, selected: "0123456789abcdef" });
   const win = { history: { pushState() {} }, location: { assign() {}, pathname: "/console" }, URLSearchParams, clearTimeout() {}, setTimeout: () => 0, addEventListener() {},
     fetch: async (url, opts) => { requests.push([url, opts && opts.method || "GET", opts && opts.body && String(opts.body)]);
-      const body = url.includes("/feed") ? FEED : url.includes("/list") ? LIST : { id: "0123456789abcdef", scrapped: true };
+      const body = url.includes("/feed") ? FEED : url.includes("/list") ? LIST : url.endsWith("/confirm/prepare") ? VIEW : { id: "0123456789abcdef", scrapped: true };
       return { ok: true, status: 200, json: async () => body }; } };
   const page = C.boot(doc, win);
   await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
@@ -130,8 +138,9 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     const classes = doc.getElementById("con-thread").children.map(c => c.className.split(" ")[0]);
     assert.deepStrictEqual(classes, ["pe-opmsg", "pe-trail", "pe-agent", "pe-plan", "pe-note"]);
     const plan = doc.getElementById("con-thread").children[3];
-    assert.ok(plan.textContent.includes("RECOMMENDED") && plan.textContent.includes("gluetun is running and stable") && plan.textContent.includes("not available yet"));
-    assert.ok(!walk(plan).some(n => n.tag === "button" && /confirm/i.test(n.textContent)), "there is no Confirm button yet");
+    assert.ok(plan.textContent.includes("RECOMMENDED") && plan.textContent.includes("gluetun is running and stable") && plan.textContent.includes("Nothing changes until you authorise"));
+    const confirm = walk(plan).find(n => n.tag === "button" && n.textContent === "Confirm option A");
+    assert.ok(confirm && confirm.className.includes("go"), "the primary action names the option");
   });
   await atest("the verdict strip is a polite live region and says what PE wrote", () => {
     const verdict = top.find(n => n.className.startsWith("pe-verdict"));
@@ -220,6 +229,86 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     const buttons = walk(doc.getElementById("con-thread")).filter(n => n.tag === "button").map(n => n.textContent);
     assert.ok(!buttons.some(t => t.startsWith("Scrap")) && !buttons.includes("Modify"), "no actions on an expired plan: " + buttons);
     assert.ok(walk(doc.getElementById("con-thread")).some(n => n.textContent.includes("has expired")));
+  });
+  await atest("confirming prepares the repair, shows the sheet with the fingerprint, and authorising posts exactly that hash", async () => {
+    FEED.running = false; FEED.stoppable = false; FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN };
+    page.select("0123456789abcdef", false);
+    for (let i = 0; i < 4; i++) await new Promise(r => setImmediate(r));
+    const confirm = walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Confirm option"));
+    confirm.fire("click");
+    for (let i = 0; i < 4; i++) await new Promise(r => setImmediate(r));
+    const prep = requests.find(r => r[0].endsWith("/confirm/prepare"));
+    assert.ok(prep && prep[2].includes("plan_id=1") && prep[2].includes("option=0") && prep[2].includes("csrf_token=csrf-xyz"));
+    const sheet = walk(doc.getElementById("con-sheet"));
+    const dialog = sheet.find(n => n.attrs.role === "dialog");
+    assert.ok(dialog && dialog.attrs["aria-modal"] === "true");
+    const text = dialog.textContent;
+    for (const want of ["CONFIRM · STEP 2 OF 2", "aaaaaaaa", "Logged as chris", "media (stack)", "service:media/gluetun", "15 min", "qbittorrent is running and stable", "Back to the plan"]) assert.ok(text.includes(want), want);
+    assert.ok(sheet.some(n => n.tag === "button" && n.textContent.startsWith("Authorise: Recreate")), "the primary button names the action");
+    assert.ok(!sheet.some(n => ["img", "script"].includes(n.tag)), "hostile text in the sheet stays text");
+    sheet.find(n => n.tag === "button" && n.textContent.startsWith("Authorise")).fire("click");
+    for (let i = 0; i < 6; i++) await new Promise(r => setImmediate(r));
+    const auth = requests.find(r => r[0].endsWith("/confirm/authorise"));
+    assert.ok(auth && auth[2].includes("execution_id=4") && auth[2].includes("grant_hash=" + "a".repeat(64)));
+    assert.strictEqual(doc.getElementById("con-sheet").children.length, 0, "the sheet closes once authorised");
+  });
+  await atest("Back to the plan withdraws the proposed repair and closes the sheet", async () => {
+    FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; FEED.execution = null; await page.loadFeed();
+    const confirm = walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Confirm option"));
+    confirm.fire("click");
+    for (let i = 0; i < 4; i++) await new Promise(r => setImmediate(r));
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent === "Back to the plan").fire("click");
+    for (let i = 0; i < 3; i++) await new Promise(r => setImmediate(r));
+    assert.ok(requests.some(r => r[0].endsWith("/confirm/withdraw") && r[2].includes("execution_id=4")));
+    assert.strictEqual(doc.getElementById("con-sheet").children.length, 0);
+  });
+  await atest("a run shows its timeline in PE's words and a Pause only while it is running", async () => {
+    FEED.plan = null; FEED.execution = JSON.parse(JSON.stringify(EXEC)); await page.loadFeed();
+    const thread = walk(doc.getElementById("con-thread"));
+    const run = thread.find(n => n.className.startsWith("pe-run"));
+    assert.ok(run && run.textContent.includes("RUN · OPTION A · Recreate") && run.textContent.includes("WORKING") && run.textContent.includes("grant aaaaaaaa"));
+    assert.deepStrictEqual(walk(run).filter(n => n.className.startsWith("pe-marker")).map(n => n.className.split(" ")[1] || ""), ["done", "done", "active", ""]);
+    assert.ok(thread.some(n => n.tag === "button" && n.textContent === "Pause"));
+    await page.loadFeed();
+  });
+  await atest("a tripwire pause is an alert with what changed and the three controls; rolling back takes two clicks", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Paused: something unexpected changed", level: "crit" },
+      pause: { by_operator: false, cause: "firewall", changes: ["host:local/path:/etc/hosts: modified"], more: 0, rollback_available: true, checkpoint: "ck-1", who: null },
+      controls: { pause: false, resume: true, rollback: true, takeover: true } };
+    await page.loadFeed();
+    const thread = walk(doc.getElementById("con-thread"));
+    const tw = thread.find(n => n.className === "pe-tripwire");
+    assert.strictEqual(tw.attrs.role, "alert");
+    assert.ok(tw.textContent.includes("PE PAUSED THE RUN") && tw.textContent.includes("/etc/hosts") && tw.textContent.includes("checkpoint ck-1"));
+    const labels = walk(tw).filter(n => n.tag === "button").map(n => n.textContent);
+    assert.deepStrictEqual(labels, ["Resume", "Roll back to the checkpoint", "Take over"]);
+    const before = requests.filter(r => r[0].includes("/run/rollback")).length;
+    const roll = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Roll back"));
+    roll().fire("click");
+    assert.ok(roll().textContent.includes("Click again") && requests.filter(r => r[0].includes("/run/rollback")).length === before);
+    roll().fire("click"); for (let i = 0; i < 4; i++) await new Promise(r => setImmediate(r));
+    assert.ok(requests.some(r => r[0].endsWith("/run/rollback") && r[2].includes("execution_id=4")));
+  });
+  await atest("a pause by the operator is not drawn as a tripwire alert", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Paused by you", level: "warn" }, controls: { pause: false, resume: true, rollback: true, takeover: true },
+      pause: { by_operator: true, cause: "operator", changes: [], more: 0, rollback_available: true, checkpoint: "ck-1", who: "operator:chris" } };
+    await page.loadFeed();
+    const thread = walk(doc.getElementById("con-thread"));
+    assert.ok(!thread.some(n => n.className === "pe-tripwire") && thread.some(n => n.textContent.includes("Paused by you.")));
+  });
+  await atest("PE's verification is labelled as PE's, marks each check, and a could-not-check is its own state", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you: PE isn't sure what state this is in", level: "crit" }, finished: false, pause: null,
+      controls: { pause: false, resume: false, rollback: true, takeover: false },
+      verification: { headline: "1 of 3 failed: qbittorrent is running and stable", level: "high", by_pe: true, checks: [
+        { state: "pass", label: "sonarr is running and stable", evidence: "ok" }, { state: "could_not_check", label: "the media project has all its services", evidence: "bad params" },
+        { state: "fail", label: "qbittorrent is running and stable", evidence: "restarting " + EVIL }] } };
+    await page.loadFeed();
+    const v = walk(doc.getElementById("con-thread")).find(n => n.className.startsWith("pe-verify"));
+    assert.ok(v.className.includes("crit") && v.textContent.includes("CHECKED BY PE") && v.textContent.includes("NOT THE AGENT'S OPINION"));
+    assert.deepStrictEqual(walk(v).filter(n => n.className.startsWith("pe-check ")).map(n => n.className), ["pe-check passed", "pe-check unknown", "pe-check failed"]);
+    assert.deepStrictEqual(walk(v).filter(n => n.className === "pe-check-meta").map(n => n.textContent), ["PASS", "COULD NOT CHECK", "FAIL"]);
+    assert.ok(walk(v).some(n => n.tag === "button" && n.textContent === "Keep working on it"));
+    assert.ok(!walk(v).some(n => ["img", "script"].includes(n.tag)));
   });
   void all;
   if (failures) { console.log(failures + " failed"); process.exit(1); }

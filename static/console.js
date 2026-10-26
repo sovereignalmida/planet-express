@@ -107,11 +107,11 @@
     const csrf = document.querySelector('meta[name="csrf-token"]').content;
     const bootData = JSON.parse(document.getElementById("con-boot").textContent);
     const $ = id => document.getElementById(id);
-    const refs = { list: $("con-list"), top: $("con-top"), scroll: $("con-scroll"), thread: $("con-thread"), composer: $("con-composer"),
+    const refs = { sheet: $("con-sheet"), list: $("con-list"), top: $("con-top"), scroll: $("con-scroll"), thread: $("con-thread"), composer: $("con-composer"),
                    text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
     const state = { selected: null, list: [], feed: null, messages: [], events: [], lastMessage: 0, lastEvent: 0, newMode: true,
                     picked: {}, openTrails: {}, scrapArmed: false, archiveArmed: false, timer: null, error: null, sending: false,
-                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" } };
+                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {} };
     const ORIGINS = { operator: ["Y", "You asked"], incident: ["!", "From an incident"], pe: ["P", "PE started it"] };
     const EXAMPLES = ["The download apps lost internet after the reboot. Figure out why.", "Why is the media stack slow right now?",
                       "Which containers restarted in the last day, and why?"];
@@ -273,6 +273,9 @@
       if (dead || planInfo.status !== "pending") {
         return add(card, el("p", "pe-con-plan-foot", "This plan has expired, so it can no longer be acted on. Ask the agent for a fresh one."));
       }
+      const letter = String.fromCharCode(65 + state.picked[planInfo.id]);
+      const confirm = el("button", "pe-btn go", "Confirm option " + letter); confirm.type = "button";
+      confirm.addEventListener("click", () => openConfirm(planInfo, state.picked[planInfo.id]));
       const modify = el("button", "pe-btn", "Modify"); modify.type = "button";
       modify.addEventListener("click", () => {
         const o = plan.options[state.picked[planInfo.id]];
@@ -285,15 +288,150 @@
         state.scrapArmed = false;
         try { await post("/api/console/" + state.selected + "/plan/scrap"); await loadFeed(); } catch (e) { fail(e); }
       });
-      add(card, add(el("div", "pe-plan-actions pe-con-plan-actions"), modify, scrap),
-          el("p", "pe-con-plan-foot", "Nothing here changes your host. Confirming and running a plan is not available yet; use Modify to talk it through, or Scrap to set it aside."));
+      add(card, add(el("div", "pe-plan-actions pe-con-plan-actions"), confirm, modify, scrap),
+          el("p", "pe-con-plan-foot", "Nothing changes until you authorise it on the next step. Use Modify to talk it through, or Scrap to set it aside."));
       return card;
+    }
+
+    // ── a confirmed plan's run: timeline, a pause's reason, PE's verification ──
+    async function runAction(name, x) {
+      if (name === "rollback" && !state.armed.rollback) { state.armed.rollback = true; state.sig.thread = ""; renderThread(); return; }
+      state.armed = {};
+      try { await post("/api/console/" + state.selected + "/run/" + name, { execution_id: String(x.id) }); state.firstPaint = "bottom"; await loadFeed(); } catch (e) { fail(e); }
+    }
+    function runButtons(x, names) {
+      const wrap = el("div", "pe-tripwire-btns");
+      const labels = { pause: "Pause", resume: "Resume", rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint", takeover: "Take over" };
+      const cls = { pause: "pe-btn warn sm", resume: "pe-btn", rollback: "pe-btn warn", takeover: "pe-btn accent" };
+      for (const n of names) {
+        if (!x.controls[n]) continue;
+        const b = el("button", cls[n], labels[n]); b.type = "button";
+        b.addEventListener("click", () => runAction(n, x));
+        wrap.appendChild(b);
+      }
+      return wrap;
+    }
+    const MARK = { done: ["done", "✓"], now: ["active", ""], paused: ["paused", "II"], bad: ["failed", "✕"], todo: ["", ""] };
+    function runBlock(x) {
+      const paused = x.pause !== null && x.pause !== undefined;
+      const box = el("div", "pe-run" + (paused && !x.pause.by_operator ? " is-paused" : ""));
+      const badge = el("span", "pe-badge " + ({ ok: "ok", warn: "warn", high: "high", crit: "crit", none: "none" }[x.status.level] || "none"), x.status.text.toUpperCase());
+      const head = add(el("div", "pe-run-head"), el("span", "pe-led " + (x.status.level === "ok" ? "ok" : x.status.level === "none" ? "" : x.status.level)),
+                       el("h3", "", "RUN · OPTION " + String.fromCharCode(65 + x.option) + (x.name ? " · " + x.name : "")), badge, el("div", "pe-spacer"),
+                       el("span", "pe-label pe-con-hash", "grant " + x.fingerprint));
+      if (x.controls.pause) { const pause = runButtons(x, ["pause"]).children[0]; if (pause) head.appendChild(pause); }
+      add(box, head);
+      const rail = el("div", "pe-rail");
+      x.timeline.forEach((step, i) => {
+        const m = MARK[step.state] || MARK.todo;
+        const row = el("div", "pe-rail-item" + (step.state === "done" ? " is-done" : step.state === "todo" ? " is-pending" : step.state === "paused" ? " is-paused" : ""));
+        const marker = el("span", "pe-marker " + m[0], m[1]);
+        const gutter = add(el("div", "pe-rail-gutter"), marker, i < x.timeline.length - 1 ? el("span", "pe-rail-line" + (step.state === "done" ? " done" : "")) : null);
+        add(row, gutter, add(el("div"), el("div", "pe-rail-text", step.label), step.meta ? el("div", "pe-rail-meta", step.meta) : null));
+        rail.appendChild(row);
+      });
+      return add(box, rail);
+    }
+    function tripwireBlock(x) {
+      const p = x.pause;
+      if (p.by_operator) {
+        const note = add(el("div", "pe-takeover"), el("span", "pe-led warn"), add(el("span"), el("b", "", "Paused by you. "), document.createTextNode("The run is frozen. Resume it, roll back to the checkpoint, or take over.")));
+        return add(el("div", "pe-con-pause"), note, runButtons(x, ["resume", "rollback", "takeover"]));
+      }
+      const box = el("div", "pe-tripwire"); box.setAttribute("role", "alert");
+      add(box, add(el("div", "pe-tripwire-head"), el("span", "pe-led crit"), el("h3", "", "Something outside the plan changed"), el("div", "pe-spacer"), el("span", "pe-badge crit", "PE PAUSED THE RUN")),
+          el("p", "", "PE froze the run before anything else happened. Nothing further has been done."));
+      const facts = el("div", "pe-con-tw-facts");
+      add(facts, add(el("div"), el("span", "pe-label", "ROLLBACK"), el("div", "pe-value", p.rollback_available ? "Available" + (p.checkpoint ? " · checkpoint " + p.checkpoint : "") : "Not available")),
+          add(el("div"), el("span", "pe-label", "WHAT CHANGED"), el("div", "pe-value", p.changes.length ? p.changes.join(" · ") + (p.more ? " · +" + p.more + " more" : "") : "Not recorded")));
+      return add(box, facts, runButtons(x, ["resume", "rollback", "takeover"]));
+    }
+    function verifyBlock(x) {
+      const v = x.verification;
+      const box = el("div", "pe-verify " + ({ ok: "ok", warn: "warn", high: "crit", crit: "crit" }[v.level] || ""));
+      add(box, el("span", "pe-by-pe", "CHECKED BY PE · NOT THE AGENT'S OPINION"), el("h3", "", v.headline));
+      const list = el("div", "pe-con-checks");
+      for (const c of v.checks) {
+        const state = { pass: "passed", fail: "failed", could_not_check: "unknown" }[c.state];
+        const row = el("div", "pe-check " + state);
+        add(row, el("span", "pe-check-mark", { pass: "✓", fail: "✕", could_not_check: "?" }[c.state]),
+            add(el("div", "pe-con-check-body"), el("div", "pe-check-label", c.label), c.evidence ? el("div", "pe-check-ev", c.evidence) : null),
+            el("span", "pe-check-meta", { pass: "PASS", fail: "FAIL", could_not_check: "COULD NOT CHECK" }[c.state]));
+        list.appendChild(row);
+      }
+      add(box, list);
+      if (v.level !== "ok" && x.finished !== undefined) {
+        const keep = el("button", "pe-btn accent", "Keep working on it"); keep.type = "button";
+        keep.addEventListener("click", () => { refs.text.value = "Keep working on it: "; autosize(); refs.text.focus(); });
+        const actions = el("div", "pe-plan-actions");
+        add(actions, runButtons(x, ["rollback", "takeover"]), keep);
+        box.appendChild(actions);
+      }
+      return box;
+    }
+    function executionBlocks(x) {
+      const out = [runBlock(x)];
+      if (x.pause) out.push(tripwireBlock(x));
+      if (x.verification) out.push(verifyBlock(x));
+      return out;
+    }
+
+    // ── the confirm sheet: what exactly is being authorised, bound to a fingerprint ──
+    async function openConfirm(planInfo, index) {
+      state.error = null; state.sheetError = null;
+      try {
+        state.sheet = await post("/api/console/" + state.selected + "/confirm/prepare", { plan_id: String(planInfo.id), option: String(index) });
+        state.sheet.index = index; renderSheet();
+      } catch (e) { fail(e); }
+    }
+    async function closeSheet(withdraw) {
+      const v = state.sheet; state.sheet = null; state.sheetError = null; renderSheet();
+      if (withdraw && v) { try { await post("/api/console/" + state.selected + "/confirm/withdraw", { execution_id: String(v.execution_id) }); } catch (_e) { /* it may already be gone */ } }
+    }
+    async function authorise() {
+      const v = state.sheet; if (!v || state.sheetBusy) return;
+      state.sheetBusy = true; state.sheetError = null; renderSheet();
+      try {
+        await post("/api/console/" + state.selected + "/confirm/authorise", { execution_id: String(v.execution_id), grant_hash: v.grant_hash });
+        state.sheet = null; state.sheetBusy = false; renderSheet(); state.firstPaint = "bottom"; await loadFeed(); await refreshList();
+      } catch (e) { state.sheetBusy = false; state.sheetError = e.message; renderSheet(); }
+    }
+    function renderSheet() {
+      refs.sheet.replaceChildren();
+      const v = state.sheet;
+      if (!v) return;
+      const scrim = el("div", "pe-sheet-scrim"); scrim.addEventListener("click", () => closeSheet(true));
+      const dialog = el("div", "pe-sheet center"); dialog.setAttribute("role", "dialog"); dialog.setAttribute("aria-modal", "true"); dialog.setAttribute("aria-label", "Confirm");
+      const row = (label, value, warn) => add(el("div", "pe-auth-row" + (warn ? " warn" : "")), el("span", "pe-label", label), el("span", "", value));
+      const scope = [...v.scope.stacks.map(s => s + " (stack)"), ...v.scope.services].join(" · ") || "nothing";
+      const wont = (v.protected.enforced.length ? v.protected.enforced.join(" · ") + " · " : "") + "protected resources stay protected (" + v.protected.count + ")" +
+        (v.protected.advisory.length ? " · " + v.protected.advisory.join(" · ") : "");
+      const rows = el("div", "pe-auth");
+      add(rows, row("SCOPE", scope), row("BACKUP", (v.backup.covered ? "" : "Not covered. ") + v.backup.text, !v.backup.covered), row("WILL NOT TOUCH", wont),
+          row("LIMITS", v.limits.minutes + " min · " + v.limits.steps + " steps. PE pauses if anything outside this scope changes."),
+          row("PE WILL CHECK", v.checks.join(" · ")), row("ROLLBACK", "PE takes a checkpoint just before it starts; you can roll back to it from here."));
+      const who = add(el("div", "pe-attrib"), el("span", "pe-who", v.operator.slice(0, 2).toUpperCase()),
+                      add(el("div"), el("div", "pe-attrib-name", "Logged as " + v.operator), add(el("div", "pe-attrib-meta"), document.createTextNode("operator · you approve "), el("span", "pe-fp", v.fingerprint))));
+      const go = el("button", "pe-btn go", "Authorise: " + v.option); go.type = "button"; go.disabled = state.sheetBusy;
+      go.addEventListener("click", authorise);
+      const back = el("button", "pe-btn", "Back to the plan"); back.type = "button"; back.addEventListener("click", () => closeSheet(true));
+      add(dialog, el("div", "pe-kicker", "CONFIRM · STEP 2 OF 2"), el("h2", "pe-sheet-h", "Authorise: " + v.option),
+          ...v.warnings.map(w => { const n = el("div", "pe-note warn", w); n.setAttribute("role", "status"); return n; }), rows, who);
+      if (v.needs_elevation) add(dialog, el("div", "pe-note high", "This needs an elevated dashboard session. Elevate with your passphrase, then authorise."));
+      if (state.sheetError) { const err = el("div", "pe-note high", state.sheetError); err.setAttribute("role", "alert"); dialog.appendChild(err); }
+      add(dialog, add(el("div", "pe-sheet-btns"), go, back));
+      add(refs.sheet, scrim, dialog);
+      go.focus();
+      dialog.addEventListener("keydown", ev => {
+        if (ev.key === "Escape") { ev.preventDefault(); closeSheet(true); }
+        else if (ev.key === "Tab") { const ring = [go, back]; const i = ring.indexOf(document.activeElement); ev.preventDefault(); ring[(i + (ev.shiftKey ? ring.length - 1 : 1)) % ring.length].focus(); }
+      });
     }
 
     function renderThread() {
       const f0 = state.feed;
       const sig = JSON.stringify([state.newMode, !!f0, state.messages.map(m => m.seq), state.lastEvent, f0 && f0.running, f0 && f0.plan && [f0.plan.id, f0.plan.status, f0.plan.expired],
-                                  state.picked, state.scrapArmed, state.error && !f0]);
+                                  f0 && f0.execution, state.picked, state.scrapArmed, state.armed, state.error && !f0]);
       if (sig === state.sig.thread && state.firstPaint !== "load") return;     // unchanged: keep the nodes, the selection and the focus
       state.sig.thread = sig;
       const keep = refs.scroll.scrollHeight - refs.scroll.scrollTop - refs.scroll.clientHeight < 90;
@@ -323,6 +461,7 @@
         }
       }
       if (planInfo && !planShown) refs.thread.appendChild(planCard(planInfo));
+      if (f.execution) for (const block of executionBlocks(f.execution)) refs.thread.appendChild(block);
       if (f.running) {
         const turn = Math.max(f.conversation.turns, 1);
         if (!shown.has(turn)) { const tb = trailBlock(turn, true); if (tb) refs.thread.appendChild(tb); }
