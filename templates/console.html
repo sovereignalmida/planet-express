@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>Planet Express — Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ asset('cockpit.css') }}">
+  <link rel="stylesheet" href="{{ asset('missions.css') }}">
+  <link rel="stylesheet" href="{{ asset('console.css') }}">
+</head>
+<body class="pe-console-page">
+{# The Operator Console. This page is a shell: static/console.js draws the conversation list and the thread from the JSON feed, using
+   text only (nothing the agent says is ever inserted as HTML). Every action is a CSRF-checked POST as the signed-in operator. #}
+<div class="scanline" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+
+{% include "_topbar.html" %}
+
+{% if state != "ready" %}
+<main class="main-col"><div class="tab-panel active">
+  <section class="panel" aria-label="Console unavailable">
+    <div class="panel-head-row"><h3>CONSOLE</h3><span class="status-chip">OFF</span></div>
+    {% if state == "disabled" %}
+    <p class="muted-body">Missions are disabled on this host, and the Console needs them. Set <code>missions.enabled: true</code> in config.yaml and restart core.</p>
+    {% else %}
+    <p class="muted-body">The Console is not enabled on this host. Set <code>missions.console.enabled: true</code> in config.yaml (it needs the model broker and the installed hooks, see <code>config.example.yaml</code>), then restart core.</p>
+    {% endif %}
+  </section>
+</div></main>
+{% else %}
+<div class="pe-console-wrap">
+  <div class="pe-con no-ctx is-list" id="pe-con" data-selected="{{ selected or '' }}">
+    <aside class="pe-con-rail" aria-label="Conversations">
+      <div class="pe-con-rail-top">
+        <button type="button" class="pe-con-new" id="con-new"><span aria-hidden="true">＋</span>New conversation</button>
+      </div>
+      <div class="pe-con-list" id="con-list" aria-live="polite"></div>
+    </aside>
+    <section class="pe-con-main" aria-label="Conversation" id="con-main">
+      <div class="pe-con-top" id="con-top" hidden></div>
+      <div class="pe-con-scroll" id="con-scroll"><div class="pe-con-thread" id="con-thread"></div></div>
+      <div class="pe-composer" id="con-composer">
+        <div class="pe-composer-in">
+          <div class="pe-composer-box">
+            <textarea class="pe-composer-text" id="con-text" rows="1" aria-label="Message" maxlength="8000" placeholder="Ask about your homelab…"></textarea>
+            <button type="button" class="pe-btn" id="con-stop" hidden>Stop</button>
+            <button type="button" class="pe-btn accent" id="con-send">Send</button>
+          </div>
+          <div class="pe-composer-meta"><span id="con-note"></span><span class="pe-spacer"></span><span class="pe-con-keys">Enter to send · Shift+Enter for a new line</span></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+<script type="application/json" id="con-boot">{{ {"status": status, "selected": selected} | tojson }}</script>
+<script src="{{ asset('console.js') }}" defer></script>
+{% endif %}
+</body>
+</html>

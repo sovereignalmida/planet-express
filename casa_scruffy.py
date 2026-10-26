@@ -135,6 +135,7 @@ def register_template_helpers(app) -> None:
     # The Missions/Memory nav links and the incident Investigate button follow the flag. Core is
     # authoritative (it answers "disabled" to every mission method); this only decides what to offer.
     app.jinja_env.globals["missions_enabled"] = lambda: bool(config.MISSIONS_ENABLED)
+    app.jinja_env.globals["console_enabled"] = lambda: bool(config.MISSIONS_ENABLED and config.MISSIONS.console.enabled)
     app.add_template_filter(extract_host)
     app.add_template_filter(_extra_host_count, "extra_host_count")
 
@@ -188,7 +189,10 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
         if response.get("ok") is not True:
             error = response.get("error")
             code = error.get("code") if isinstance(error, dict) else "internal"
-            raise RpcError("Core request failed", code)
+            failure = RpcError("Core request failed", code)
+            # The Console's refusals are written for the operator ("5 conversations are open: archive one first"): keep the text.
+            failure.detail = error.get("message") if isinstance(error, dict) and isinstance(error.get("message"), str) else None
+            raise failure
         result = response.get("result")
         if not isinstance(result, (dict, list)):
             raise RpcError("Core unavailable")
@@ -197,11 +201,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     def is_chat_request():
         return request.path.startswith("/api/chat")
 
+    def is_console_request():
+        return request.path.startswith("/api/console")
+
     def is_json_request():
         # This list is not only about response format: POST CSRF is checked for exactly the
         # paths it matches (see the auth hook below), so a JSON route left out of it is a
         # route with no CSRF check. /api/scan starts a host-wide scan and belongs here.
-        return (is_chat_request() or request.path.startswith("/api/containers/")
+        return (is_chat_request() or is_console_request() or request.path.startswith("/api/containers/")
                 or request.path.startswith("/api/approvals")
                 or request.path.startswith("/api/executions/")
                 or request.path.startswith("/api/incidents")
@@ -311,6 +318,14 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
 
     @app.errorhandler(RpcError)
     def unavailable(error):
+        if is_console_request():
+            detail = getattr(error, "detail", None)
+            status, message = {"bad_request": (400, "That request was not valid."), "not_found": (404, "That conversation no longer exists."),
+                               "conflict": (409, detail or "That cannot be done right now."), "forbidden": (403, "That is not allowed."),
+                               "disabled": (503, "Missions are disabled on this host."),
+                               "unavailable": (503, detail or "The Console is not available on this host.")}.get(
+                                   error.code, (503, "The Console is unavailable; try again shortly."))
+            return jsonify(error=message), status
         if request.path.startswith("/api/config"):
             return jsonify(error="Config unavailable; try again shortly"), 503
         if is_chat_request():
@@ -898,6 +913,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
         return render_template("execution.html", execution_id=execution_id)
 
     register_mission_pages(app, core)
+    register_console_pages(app, core)
     app.add_url_rule("/", "index", partial(index, core))
     app.add_url_rule("/hosts", "hosts", partial(hosts, fleet_cache))
     app.add_url_rule("/api/widget", view_func=widget)
@@ -934,6 +950,82 @@ _MEMORY_NOTICES = {
     "disabled": "Missions are disabled on this host.",
     "unavailable": "Ship's Memory is unavailable on this host.",
 }
+
+
+CONVERSATION_ID_RE = re.compile(r"[0-9a-f]{16}")
+INCIDENT_ID_RE_WEB = re.compile(r"[0-9a-f]{12}")
+CONSOLE_TEXT_MAX = 8000
+
+
+def register_console_pages(app, core) -> None:
+    """The Operator Console page and its JSON endpoints. The page is a shell: the thread is drawn by static/console.js from `feed`
+    (text only, never HTML). Every mutation is a form-encoded POST with the session CSRF token; the acting operator is always the signed-in
+    session's (`g.operator`). Core answers `disabled` while missions are off and `unavailable` while the Console is not enabled."""
+    def shell(template, **context):
+        ctx = {"health": dashboard_data.summarize_health(), "pipeline_status": dashboard_data.summarize_pipeline_status()}
+        return render_template(template, ctx=ctx, **context)
+
+    def conversation(conversation_id):
+        if CONVERSATION_ID_RE.fullmatch(conversation_id) is None:
+            abort(404)
+        return conversation_id
+
+    def text_field():
+        text = request.form.get("text", "")
+        if not text.strip() or len(text) > CONSOLE_TEXT_MAX:
+            abort(400)
+        return text
+
+    @app.get("/console")
+    @app.get("/console/<conversation_id>")
+    def console_page(conversation_id=None):
+        if conversation_id is not None:
+            conversation(conversation_id)
+        try:
+            status = core("console.status", {})
+        except RpcError as error:
+            if error.code in ("disabled", "unavailable"):
+                return shell("console.html", page="console", state=error.code, status=None, selected=None)
+            raise
+        return shell("console.html", page="console", state="ready", status=status, selected=conversation_id)
+
+    @app.get("/api/console/list")
+    def console_list():
+        return jsonify(core("console.list", {}))
+
+    @app.get("/api/console/<conversation_id>/feed")
+    def console_feed(conversation_id):
+        params = {"conversation_id": conversation(conversation_id)}
+        for name in ("after_message", "after_event"):
+            value = request.args.get(name)
+            if value is not None:
+                if re.fullmatch(r"[0-9]{1,15}", value) is None:
+                    abort(400)
+                params[name] = int(value)
+        return jsonify(core("console.feed", params))
+
+    @app.post("/api/console/new")
+    def console_new():
+        params = {"operator": g.operator, "text": text_field()}
+        incident = request.form.get("incident_id", "")
+        if incident:
+            if INCIDENT_ID_RE_WEB.fullmatch(incident) is None:
+                abort(400)
+            params["incident_id"] = incident
+        return jsonify(core("console.create", params))
+
+    @app.post("/api/console/<conversation_id>/message")
+    def console_message(conversation_id):
+        return jsonify(core("console.post", {"conversation_id": conversation(conversation_id), "operator": g.operator, "text": text_field()}))
+
+    def action(method):
+        def view(conversation_id):
+            return jsonify(core(method, {"conversation_id": conversation(conversation_id), "operator": g.operator}))
+        return view
+
+    app.add_url_rule("/api/console/<conversation_id>/interrupt", "console_interrupt", action("console.interrupt"), methods=["POST"])
+    app.add_url_rule("/api/console/<conversation_id>/archive", "console_archive", action("console.archive"), methods=["POST"])
+    app.add_url_rule("/api/console/<conversation_id>/plan/scrap", "console_scrap", action("console.scrap_plan"), methods=["POST"])
 
 
 def register_mission_pages(app, core) -> None:

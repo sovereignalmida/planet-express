@@ -71,6 +71,7 @@ CREATABLE_ORIGINS = ("operator", "incident")
 # Defined once; the dashboard imports these rather than keeping copies.
 MISSION_ID_RE = re.compile(r"M-[0-9]{1,9}")
 INCIDENT_ID_RE = re.compile(r"[0-9a-f]{12}")
+CONVERSATION_ID_RE = re.compile(r"[0-9a-f]{16}")
 _OPERATOR = re.compile(r"[a-z0-9_.-]{1,32}")
 _PREFERRED_ORDER = (
     "draft", "queued", "investigating", "awaiting_decision", "blocked", "needs_operator", "executing", "verifying",
@@ -255,6 +256,7 @@ class MissionService:
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self._incident_context = incident_context
         self._runtime = runtime
+        self.console_api = None          # `console.api.ConsoleApi`, attached by the daemon when missions.console is enabled
         self._incident_lock = threading.Lock()
         self.flow: ApprovalFlow | None = None      # attached by the daemon (slice 7a); None: approvals are unavailable
 
@@ -729,7 +731,64 @@ class MissionService:
                  "mission.cancel": cancel, "mission.from_incident": from_incident,
                  "memory.candidates": candidates, "memory.cards": cards, "memory.review_due": review_due,
                  "memory.confirm": confirm, "memory.reverify": reverify, "memory.deprecate": deprecate, "memory.search": search}
-        return {name: wrap(fn) for name, fn in table.items()}
+        handlers = {name: wrap(fn) for name, fn in table.items()}
+        handlers.update({name: wrap(fn) for name, fn in self._console_table().items()})
+        return handlers
+
+    # ── Console (the Operator Console's read models and actions; see console/api.py) ─────────────────
+    def _console_table(self) -> dict[str, Callable[[Any], Any]]:
+        from planet_express.console.api import ConsoleApiError
+        op = {"operator": _OPERATOR_CHECK}
+        conv = {"conversation_id": _pattern(CONVERSATION_ID_RE, "a conversation id")}
+
+        def api():
+            if self.console_api is None:
+                raise MissionError("The Console is not enabled on this host.", "unavailable")
+            return self.console_api
+
+        def guarded(fn):
+            def call(params):
+                try:
+                    return fn(params)
+                except ConsoleApiError as exc:
+                    raise MissionError(str(exc), exc.code) from None
+            return call
+
+        def status(p):
+            _params(p, {})
+            return api().status()
+
+        def list_(p):
+            _params(p, {})
+            return api().list()
+
+        def feed(p):
+            v = _params(p, conv, {"after_message": _int(0, 2**62), "after_event": _int(0, 2**62)})
+            return api().feed(v["conversation_id"], v.get("after_message", 0), v.get("after_event", 0))
+
+        def create(p):
+            v = _params(p, {**op, "text": _str(8000)}, {"incident_id": _pattern(INCIDENT_ID_RE, "an incident id")})
+            return api().create(v["operator"], v["text"], v.get("incident_id"))
+
+        def post(p):
+            v = _params(p, {**conv, **op, "text": _str(8000)})
+            return api().post(v["conversation_id"], v["operator"], v["text"])
+
+        def interrupt(p):
+            v = _params(p, {**conv, **op})
+            return api().interrupt(v["conversation_id"], v["operator"])
+
+        def archive(p):
+            v = _params(p, {**conv, **op})
+            return api().archive(v["conversation_id"], v["operator"])
+
+        def scrap(p):
+            v = _params(p, {**conv, **op})
+            return api().scrap_plan(v["conversation_id"], v["operator"])
+
+        table = {"console.status": status, "console.list": list_, "console.feed": feed, "console.create": create, "console.post": post,
+                 "console.interrupt": interrupt, "console.archive": archive, "console.scrap_plan": scrap}
+        return {name: guarded(fn) for name, fn in table.items()}
 
     # ── Telegram ────────────────────────────────────────────────────────────
     TELEGRAM_COMMANDS = frozenset({"/missions", "/mission", "/cancel_mission", "/mission_card", "/approve", "/deny",

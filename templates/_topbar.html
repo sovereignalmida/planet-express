@@ -13,6 +13,9 @@
       {% else %}<a class="tab" href="{{ url_for('index') }}#{{ name }}">{{ label }}</a>
       {% endif %}{% endfor %}
       <a class="tab{{ ' active' if page == 'hosts' }}" href="{{ url_for('hosts') }}">Hosts</a>
+      {% if console_enabled() %}
+      <a class="tab{{ ' active' if page == 'console' }}" href="{{ url_for('console_page') }}">Console</a>
+      {% endif %}
       {% if missions_enabled() %}
       <a class="tab{{ ' active' if page == 'missions' }}" href="{{ url_for('missions_page') }}">Missions</a>
       <a class="tab{{ ' active' if page == 'memory' }}" href="{{ url_for('memory_page') }}">Memory</a>

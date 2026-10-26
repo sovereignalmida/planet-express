@@ -3084,6 +3084,11 @@ def run_bot() -> None:
         # every approval method says "unavailable" (observe/propose missions are unaffected).
         from planet_express.missions.assembly import build_approval_flow
         missions.flow = build_approval_flow(store, config.MISSIONS, mission_runner, mission_runner.controls)
+        if mission_runner.console is not None:
+            # The Operator Console's read models and actions (RPC `console.*`); without it they answer "unavailable".
+            from planet_express.console.api import ConsoleApi
+            service = mission_runner.console
+            missions.console_api = ConsoleApi(service, service.console, service.ms, service.supervisor, config.MISSIONS.console)
     shutdown = threading.Event()
     if mission_runner is not None:
         # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff

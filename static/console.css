@@ -1,0 +1,30 @@
+/* The Console page's own layout. The component styles (pe-con-*, pe-opmsg, pe-agent, pe-trail, pe-plan, pe-composer, ...) are the design
+   system's, appended to cockpit.css; this file only fits them into the page and adds the phone list/thread switch. */
+.pe-console-wrap { height: calc(100dvh - 76px); min-height: 480px; }
+.pe-console-wrap .pe-con { height: 100%; }
+.pe-con-main { background: var(--pe-bg); }
+.pe-con-main[hidden], .pe-con-top[hidden] { display: none; }
+.pe-composer-text { flex: 1; min-width: 0; resize: none; background: transparent; border: 0; outline: 0; color: var(--pe-ink); font: inherit;
+  line-height: 1.45; max-height: 200px; padding: 2px 0; }
+.pe-composer-text:disabled { color: var(--pe-ink-faint); cursor: not-allowed; }
+.pe-composer.is-off .pe-composer-box { opacity: .65; }
+.pe-btn[hidden] { display: none; }
+.pe-con-back { display: none; font-size: 22px; color: var(--pe-ink-label); background: none; border: 0; cursor: pointer; padding: 0 6px 0 0; }
+.pe-con-keys { color: var(--pe-ink-faint); }
+.pe-con-empty { max-width: 640px; margin: 8vh auto 0; display: flex; flex-direction: column; gap: 14px; }
+.pe-con-empty h2 { font-family: var(--pe-font-display); font-size: 22px; margin: 0; color: var(--pe-ink); }
+.pe-con-empty p { margin: 0; color: var(--pe-ink-body); line-height: 1.55; }
+.pe-con-prose p { margin: 0 0 .7em; } .pe-con-prose p:last-child { margin-bottom: 0; }
+.pe-con-pre { white-space: pre-wrap; word-break: break-word; }
+.pe-con-sys { max-width: 760px; }
+.pe-con-plan-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.pe-con-plan-foot { margin: 10px 0 0; font-size: 12.5px; color: var(--pe-ink-label); }
+.pe-con-hash { font-family: var(--pe-font-mono); }
+.pe-con-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+@media (max-width: 760px) {
+  .pe-console-wrap { height: calc(100dvh - 120px); }
+  .pe-console-wrap .pe-con, .pe-console-wrap .pe-con.no-ctx { grid-template-columns: minmax(0, 1fr); }
+  .pe-con.is-list .pe-con-main { display: none; }
+  .pe-con.is-thread .pe-con-rail { display: none; }
+  .pe-con-back { display: inline-block; }
+}
