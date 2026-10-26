@@ -299,3 +299,21 @@ def test_a_reserved_uid_outside_the_current_range_refuses_the_session(tmp_path):
     ms.reserve_uid(a.id, (61000, 61002))
     with pytest.raises(SessionConflict, match="outside the session range"):
         start(ms, a, "S-a", (62000, 62002))
+
+
+def test_only_an_observe_or_propose_mission_can_be_cancelled_by_core_out_of_needs_operator(tmp_path):
+    from missions_helpers import advance_to
+
+    from planet_express.missions.state import IllegalTransition, transition
+    store, ms, (a,) = missions(tmp_path, 1)
+    advance_to(ms, a.id, "needs_operator")
+    transition(store, a.id, "cancelled", "system")                                    # an observe mission: closing it is not resuming it
+    assert ms.get_mission(a.id).status == "cancelled"
+    from missions_helpers import new_mission
+    from test_missions_state_events import approve_all, force_status
+    repair = new_mission(ms, Grant.model_validate({"tier": "repair"}))
+    approve_all(store, repair)
+    force_status(store, repair.id, "needs_operator")
+    with pytest.raises(IllegalTransition, match="only an operator"):
+        transition(store, repair.id, "cancelled", "system")                           # a mission that may mutate stays the operator's
+    transition(store, repair.id, "cancelled", "operator:chris")

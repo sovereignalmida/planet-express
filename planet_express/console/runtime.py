@@ -27,6 +27,7 @@ from planet_express.missions.runtime import (
 
 MAX_ARG_PROMPT = 3000                 # the launcher refuses an argument over 4096 characters: a longer message travels as a file
 MAX_EVENTS_PER_POLL = 256             # AgentUpdate's own limit
+MAX_BACKLOG = 10_000                  # events carried between polls while the turn runs
 _DRAIN_PER_CALL = 256 * 1024
 SYSTEM = (
     "You are Planet Express's investigation agent for one operator's Docker Compose homelab. You are PE-aware: BRIEF.md in the current "
@@ -58,13 +59,16 @@ def _capped(events: list[AgentEvent]) -> list[AgentEvent]:
 
 
 class _Run:
-    def __init__(self, cs, workspace: Path, conversation_id: str, turn: int):
-        self.cs, self.workspace, self.conversation_id, self.turn = cs, workspace, conversation_id, turn
+    def __init__(self, cs, workspace: Path, conversation_id: str, turn: int, mission_id: str = ""):
+        self.cs, self.workspace, self.conversation_id, self.turn, self.mission_id = cs, workspace, conversation_id, turn, mission_id
         self.parser = StreamParser()
+        self.backlog: list[AgentEvent] = []
         self.output_open = True
 
 
 class ConsoleRuntime:
+    counts_calls_from_events = True           # the supervisor also counts the calls this runtime reports (`call` events) against the tool budget
+
     def __init__(self, containment, console: ConsoleStore, cfg: MissionConsoleConfig, *, worker_socket: str, env_policy=None,
                  broker=None):
         self.containment = containment            # only for is_empty/kill/output capture: spawning is `context.spawn`
@@ -80,7 +84,6 @@ class ConsoleRuntime:
         if conv is None or conv.state != "open":
             raise TurnRefused("this conversation is closed")
         if conv.tokens_left < self.cfg.min_turn_tokens:
-            self.console.add_message(conv.id, "system", "This conversation's model budget is used up. Start a new conversation to go on.")
             raise TurnRefused("this conversation's model budget is used up")
         message = self.console.pending(conv.id)
         if message is None:
@@ -109,18 +112,27 @@ class ConsoleRuntime:
         env.update({"HOME": state, "CLAUDE_CONFIG_DIR": f"{state}/cfg", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.cfg.max_output_tokens)})
         if self.broker is not None:
             self.broker.set_mission_cap(mission.id, conv.tokens_left)      # the broker opens this turn's endpoint during spawn: ask first
-        turn = self.console.begin_turn(conv.id)
-        pid = context.spawn(argv, env, str(workspace), (), state_dir=conv.state_dir)
+        try:
+            turn = self.console.begin_turn(conv.id)
+            pid = context.spawn(argv, env, str(workspace), (), state_dir=conv.state_dir)
+        except BaseException:
+            if self.broker is not None:
+                self.broker.clear_mission_cap(mission.id)              # no session was opened: the ceiling must not wait for a later one
+            raise
         self.console.consume(message.seq, turn)                       # taken only once the process is running
         run_id = f"{mission.id}:{cs.session_id}"
-        self._runs[run_id] = _Run(cs, workspace, conv.id, turn)
+        self._runs[run_id] = _Run(cs, workspace, conv.id, turn, mission.id)
         return RunHandle(run_id=run_id, session_id=cs.session_id, pid=pid)
 
     def status(self, handle) -> AgentUpdate:
         run = self._runs[handle.run_id]
         empty = self.containment.is_empty(run.cs)           # ask "is it dead" BEFORE draining: what it wrote dying is still in the pipe
         events = run.parser.feed(self._drain(run), final=empty)
-        update = _capped([AgentEvent(kind=e.kind, body=e.body) for e in events])
+        pending = run.backlog + [AgentEvent(kind=e.kind, body=e.body) for e in events]
+        if empty or len(pending) <= MAX_EVENTS_PER_POLL:
+            update, run.backlog = _capped(pending), []                 # the last poll must hand everything over: calls first, the rest summarised
+        else:
+            update, run.backlog = pending[:MAX_EVENTS_PER_POLL], pending[MAX_EVENTS_PER_POLL:][-MAX_BACKLOG:]    # carried to the next poll, in order
         if not empty:
             return AgentUpdate(state="running", events=update)
         return AgentUpdate(state="finished" if run.parser.result.subtype is not None else "failed", events=update)
@@ -133,9 +145,11 @@ class ConsoleRuntime:
         try:
             # A turn that is killed (a budget, a crash, a tamper) still used the model and still said something: keep it and charge it.
             run.parser.feed(self._drain(run), final=True)
-            self._record(run, run.parser.finish())
+            self._record(run, run.parser.finish(), keep_plan=False)       # a stopped turn's plan is not offered to the operator
         except Exception:                                   # noqa: BLE001 -- recording must never block the kill that already happened
             pass
+        if self.broker is not None:
+            self.broker.clear_mission_cap(run.mission_id)
         self._release(run)
         del self._runs[handle.run_id]
 
@@ -154,7 +168,7 @@ class ConsoleRuntime:
             self._runs.pop(handle.run_id, None)
 
     # ── what is kept of a turn ────────────────────────────────────────────────────────────
-    def _record(self, run: _Run, result) -> None:
+    def _record(self, run: _Run, result, *, keep_plan: bool = True) -> None:
         conv_id = run.conversation_id
         if result.reply:
             self.console.add_message(conv_id, "agent", result.reply, turn=run.turn)
@@ -164,7 +178,8 @@ class ConsoleRuntime:
             self.console.add_message(conv_id, "system", "The agent gave no reply.", turn=run.turn)
         if result.session_id:
             self.console.set_agent_session(conv_id, result.session_id)         # the id the stream confirmed: it can change, so every turn
-        self._plan(run)
+        if keep_plan:
+            self._plan(run)
         tokens = result.tokens
         if self.broker is not None:
             usage = self.broker.usage(run.cs.session_id)           # the broker counts what the vendor charged: that is the budget

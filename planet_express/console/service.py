@@ -134,7 +134,10 @@ class ConsoleService:
             message = self.console.pending(conv.id)
             if message is not None:
                 self.console.consume(message.seq, conv.turns)
-        self.console.add_message(conv.id, "system", _WHY.get(reason, "The turn did not finish."), turn=conv.turns or None)
+        why = _WHY.get(reason, "The turn did not finish.")
+        if reason == "start_failed" and conv.tokens_left < self.cfg.min_turn_tokens:
+            why = "This conversation's model budget is used up. Start a new conversation to go on."
+        self.console.add_message(conv.id, "system", why, turn=conv.turns or None)
 
     def tick(self) -> None:
         """Once per supervisor tick: start follow-up turns, archive the idle, advance the archives. One conversation's trouble never

@@ -33,6 +33,9 @@ class Broker:
     def set_mission_cap(self, mission_id, tokens):
         pass
 
+    def clear_mission_cap(self, mission_id):
+        pass
+
     def usage(self, session_id):
         return {"requests": 2, "tokens": self.tokens, "refused": 0}
 
@@ -314,7 +317,7 @@ def test_a_turn_that_cannot_start_is_reported_once_and_never_retried_by_itself(t
         rig.sup.tick()
     assert len(rig._rows(conv)) == 1 and rig.status(conv) == "needs_operator"     # one attempt, no storm
     system = [m.text for m in rig.console.messages(conv.id) if m.role == "system"]
-    assert len(system) == 2 and "budget is used up" in system[0] and system[1] == "The turn could not start."
+    assert len(system) == 1 and "budget is used up" in system[0]                 # one message, and it says why
     assert rig.console.pending(conv.id) is None
 
 

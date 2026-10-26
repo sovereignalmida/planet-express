@@ -117,9 +117,11 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         raise IllegalTransition(f"{frm} -> {to} is not a legal transition")
     if tier in ("observe", "propose") and to in EXECUTION_STATES:
         raise IllegalTransition(f"{tier} missions never reach {to}")
-    if frm == "needs_operator" and to != "cancelled" and not actor.startswith("operator:"):
-        # Resuming is the operator's act. Closing it is not a resumption: Core and the system may cancel a mission that is waiting
-        # for the operator (an archived Console conversation whose last turn failed would otherwise never finish archiving).
+    closing_a_conversation = to == "cancelled" and tier in ("observe", "propose")
+    if frm == "needs_operator" and not closing_a_conversation and not actor.startswith("operator:"):
+        # Resuming is the operator's act. Closing an observe/propose mission is not a resumption and it cannot have changed the host: Core
+        # and the system may cancel one that is waiting for the operator (an archived Console conversation whose last turn failed would
+        # otherwise never finish archiving). A mission that may mutate the host stays the operator's to decide, cancel included.
         raise IllegalTransition("only an operator may resume a needs_operator mission")
     if frm == "awaiting_decision" and to == "investigating":
         # Reopening a finished mission for more work is the operator's act, and only an observe/propose mission can be reopened:

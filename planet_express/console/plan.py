@@ -124,7 +124,7 @@ def load_file(workspace: str, *, name: str = PLAN_FILE) -> Plan:
         raise PlanError("the plan file is larger than its size limit")
     try:
         return parse(loads_strict(data.decode("utf-8")))
-    except (CanonicalError, UnicodeDecodeError, ValueError) as exc:
+    except (CanonicalError, UnicodeDecodeError, ValueError, RecursionError) as exc:
         if isinstance(exc, PlanError):
             raise
         raise PlanError("the plan file is not valid JSON") from None

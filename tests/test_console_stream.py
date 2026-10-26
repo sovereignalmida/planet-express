@@ -130,3 +130,12 @@ def test_an_overlong_unterminated_line_is_dropped_to_its_newline_and_the_stream_
     parser.feed(FIXTURE.read_bytes(), final=True)
     result = parser.finish()
     assert result.truncated and result.skipped_lines == 1 and result.session_id == "2dc11a5c-9cef-4ce6-98ca-232a0476de7a"
+
+
+def test_a_cut_text_always_carries_its_marker_even_when_redaction_shortens_it():
+    from planet_express.console.stream import _clip
+    secret_line = "TOKEN=" + "z" * 50                                              # redaction replaces the value: the text gets SHORTER
+    text = secret_line * 4 + "tail " * 40
+    out = _clip(text, 100)
+    assert out.endswith(" [truncated]") and "z" * 10 not in out
+    assert _clip("short", 100) == "short"

@@ -174,3 +174,9 @@ def test_a_refused_check_names_only_the_option_never_the_agents_check_id_or_kind
     with pytest.raises(PlanError) as err:
         parse(doc)
     assert "option 2" in str(err.value) and "AGENTCHOSEN" not in str(err.value)
+
+
+def test_a_deeply_nested_plan_file_is_a_refused_plan_not_a_crash(tmp_path):
+    (tmp_path / "plan.json").write_text("[" * 100_000)
+    with pytest.raises(PlanError, match="not valid JSON"):
+        load_file(str(tmp_path))

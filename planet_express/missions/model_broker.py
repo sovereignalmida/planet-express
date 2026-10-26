@@ -236,6 +236,11 @@ class ModelBroker:
             old = self._mission_caps.get(mission_id)
             self._mission_caps[mission_id] = max(int(tokens), 0) if old is None else min(old, max(int(tokens), 0))
 
+    def clear_mission_cap(self, mission_id: str) -> None:
+        """Drop a mission cap no session consumed (the start failed before the broker opened an endpoint), so it cannot clamp a later session."""
+        with self._lock:
+            self._mission_caps.pop(mission_id, None)
+
     def set_session_cap(self, session_id: str, tokens: int) -> bool:
         """Lower this session's token ceiling to `tokens` (never raise it above the broker's own, and never raise one already lowered).
         A Console turn is given what is left of its conversation's budget, so the budget is enforced inside the turn and not only

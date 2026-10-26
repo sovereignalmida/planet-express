@@ -29,6 +29,9 @@ class Broker:
     def set_mission_cap(self, mission_id, tokens):
         self.caps[mission_id] = tokens
 
+    def clear_mission_cap(self, mission_id):
+        pass
+
     def usage(self, session_id):
         return {"requests": 3, "tokens": self.tokens, "refused": 0}
 
@@ -187,7 +190,7 @@ def test_a_closed_conversation_a_spent_budget_or_no_message_refuses_the_turn_bef
         quiet.start()
     for rig in (spent, closed, quiet):
         assert rig.spawned == []
-    assert any(m.role == "system" and "budget is used up" in m.text for m in spent.console.messages(spent.conv.id))   # and the thread says why
+    assert not any(m.role == "system" for m in spent.console.messages(spent.conv.id))            # the service says why, once (turn_ended)
     assert spent.console.get(spent.conv.id).turns == 0 and spent.console.pending(spent.conv.id) is not None
 
 
@@ -314,3 +317,42 @@ def test_a_very_large_stream_still_ends_with_its_result_line(tmp_path):
     rig.cont.write_output(cs.session_id, json.dumps({"type": "result", "subtype": "success", "result": "the end", "usage": {}}).encode())
     rig.cont.crash(cs.session_id)
     assert rig.runtime.status(handle).state == "finished" and rig.runtime.collect(handle).diagnosis == "the end"
+
+
+def test_a_killed_turns_plan_is_not_offered_and_a_start_that_fails_leaves_no_cap_behind(tmp_path):
+    class CapBroker(Broker):
+        def __init__(self):
+            super().__init__(tokens=500)
+            self.cleared = []
+
+        def clear_mission_cap(self, mission_id):
+            self.cleared.append(mission_id)
+    rig = Rig(tmp_path, broker=CapBroker())
+    handle, workspace, cs = rig.start()
+    (workspace / "plan.json").write_text(json.dumps(GOOD_PLAN))
+    rig.runtime.cancel(handle)                                                      # killed (a tamper, a crash, a budget)
+    assert rig.console.current_plan(rig.conv.id) is None and rig.broker.cleared == [rig.mission.id]
+    assert rig.console.get(rig.conv.id).tokens_used == 500                          # but it is still charged
+    rig.console.add_message(rig.conv.id, "operator", "again")
+    workspace2 = rig.root / "S-9"
+    workspace2.mkdir(parents=True)
+    cs2 = rig.cont.launch("S-9", LaunchSpec(uid=60000, cwd=str(workspace2), argv=("/x/claude",), token="t" * 40))
+
+    def broken(*a, **kw):
+        raise OSError("the launcher refused")
+    with pytest.raises(OSError):
+        rig.runtime.start(rig.mission, RunContext(brief="b", session=cs2, token_fd=3, env={}, cwd=str(workspace2), spawn=broken),
+                          Grant.model_validate({"tier": "observe"}))
+    assert rig.broker.cleared == [rig.mission.id, rig.mission.id]                    # the failed start released its ceiling
+
+
+def test_events_beyond_the_per_poll_limit_are_carried_to_the_next_poll_while_the_turn_runs(tmp_path):
+    rig = Rig(tmp_path)
+    handle, _, cs = rig.start()
+    calls = "\n".join(json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": str(i), "name": "Read",
+                                                                                   "input": {"file_path": f"/a/{i}"}}]}}) for i in range(270))
+    rig.cont.write_output(cs.session_id, calls.encode() + b"\n")
+    first = rig.runtime.status(handle)
+    second = rig.runtime.status(handle)
+    assert first.state == second.state == "running" and len(first.events) == 256 and len(second.events) == 14      # nothing lost while running
+    assert [e.body["args"]["file_path"] for e in first.events + second.events] == [f"/a/{i}" for i in range(270)]

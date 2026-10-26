@@ -57,8 +57,8 @@ class TurnResult:
 def _clip(text: str, limit: int) -> str:
     """Redacted, then cut. Only the head is redacted (the rest is thrown away, and redacting a megabyte is slow), with room past the cut
     so a secret that straddles it is still matched whole before the cut."""
-    head = redact(text[:limit + 512])
-    return head if len(head) <= limit and len(text) <= limit + 512 else head[:limit] + " [truncated]"
+    out = redact(text[:limit + 512])[:limit]
+    return out + " [truncated]" if len(text) > limit else out
 
 
 def _flatten(content: Any) -> str:

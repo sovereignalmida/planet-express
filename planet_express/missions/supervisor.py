@@ -178,6 +178,7 @@ class _Run:
     session_id: str | None
     started_at: float
     tool_calls: int = 0
+    calls_stream: int = 0                     # calls the runtime's own stream reported (a Console turn): the budget uses the larger of the two counts
     output_bytes: int = 0
     phase: Literal["running", "killing"] = "running"
     reason: str | None = None
@@ -821,7 +822,7 @@ class Supervisor:
         def over_budget() -> str | None:
             elapsed = float(self.clock()) - run.started_at
             for name, over in (("wall", elapsed > grant.budgets.wall_s),
-                               ("tool_calls", run.tool_calls > grant.budgets.tool_calls),
+                               ("tool_calls", max(run.tool_calls, run.calls_stream) > grant.budgets.tool_calls),
                                ("output_bytes", run.output_bytes > grant.budgets.output_bytes)):
                 if over:
                     return name
@@ -854,9 +855,12 @@ class Supervisor:
             return self._kill_and_advance(run, "crash")
 
     def _record(self, run: _Run, update: AgentUpdate) -> None:
+        from_events = getattr(run.runtime, "counts_calls_from_events", False)
         for event in update.events:
             if event.kind == "tool":
                 run.tool_calls += 1
+            elif from_events and "call" in event.body:
+                run.calls_stream += 1                  # the installed hooks count the same calls into `tool_calls`: neither source alone can be lost
             try:
                 size = len(json.dumps(event.body, default=str))
                 self.ms.append_event(run.mission_id, event.kind, "worker", dict(event.body))
