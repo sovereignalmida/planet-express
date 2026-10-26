@@ -3088,7 +3088,8 @@ def run_bot() -> None:
             # The Operator Console's read models and actions (RPC `console.*`); without it they answer "unavailable".
             from planet_express.console.api import ConsoleApi
             service = mission_runner.console
-            missions.console_api = ConsoleApi(service, service.console, service.ms, service.supervisor, config.MISSIONS.console)
+            missions.console_api = ConsoleApi(service, service.console, service.ms, service.supervisor, config.MISSIONS.console,
+                                              flow=lambda: missions.flow)
     shutdown = threading.Event()
     if mission_runner is not None:
         # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff

@@ -31,6 +31,8 @@ class Core:
             "console.status": STATUS, "console.list": {"conversations": [], "status": STATUS}, "console.feed": FEED,
             "console.create": {"id": CID}, "console.post": {"seq": 3}, "console.interrupt": {"stopped": True},
             "console.archive": {"archiving": True}, "console.scrap_plan": {"scrapped": True},
+            "console.confirm_prepare": {"execution_id": 4, "grant_hash": "a" * 64}, "console.confirm_authorise": {"authorised": True},
+            "console.confirm_withdraw": {"withdrawn": True},
             "canary.candidates": [], "proposal.list_pending": []}
 
     def __call__(self, method, params):
@@ -182,3 +184,58 @@ def test_the_console_tab_follows_the_config_flag(web, monkeypatch):
     monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
     page = client.get("/console").get_data(as_text=True)
     assert 'href="/console"' in page and "tab active" in page
+
+
+HASH = "a" * 64
+CONFIRM = f"/api/console/{CID}/confirm"
+
+
+def test_the_confirm_routes_need_csrf_and_the_operator_is_the_signed_in_one(web):
+    client, core, _ = web
+    for path in ("/prepare", "/authorise", "/withdraw"):
+        assert client.post(CONFIRM + path, data={"plan_id": "1", "option": "0", "execution_id": "4", "grant_hash": HASH}).status_code == 400
+    assert core.methods() == []
+    t = token(client)
+    assert client.post(CONFIRM + "/prepare", data={"csrf_token": t, "plan_id": "7", "option": "1", "operator": "mallory", "scope": "*"}).status_code == 200
+    assert core.calls[-1] == ("console.confirm_prepare", {"conversation_id": CID, "operator": "alice", "plan_id": 7, "option": 1})
+    assert client.post(CONFIRM + "/withdraw", data={"csrf_token": t, "execution_id": "4"}).status_code == 200
+    assert core.calls[-1] == ("console.confirm_withdraw", {"conversation_id": CID, "operator": "alice", "execution_id": 4})
+
+
+def test_authorising_sends_the_fingerprinted_hash_and_elevation_only_from_a_live_elevated_session(web):
+    client, core, _ = web
+    t = token(client)
+    r = client.post(CONFIRM + "/authorise", data={"csrf_token": t, "execution_id": "4", "grant_hash": HASH, "elevated": "1"})
+    assert r.status_code == 200
+    method, params = core.calls[-1]
+    assert method == "console.confirm_authorise" and params == {"conversation_id": CID, "operator": "alice", "execution_id": 4, "grant_hash": HASH, "elevated": False}   # a form field cannot elevate
+
+
+@pytest.mark.parametrize("data", [{"plan_id": "x", "option": "0"}, {"plan_id": "0", "option": "0"}, {"plan_id": "1", "option": "3"}, {"plan_id": "1", "option": "-1"},
+                                  {"plan_id": "1" * 11, "option": "0"}, {"option": "0"}])
+def test_confirm_prepare_ids_are_validated_before_core_is_asked(web, data):
+    client, core, _ = web
+    t = token(client)
+    n = len(core.calls)
+    assert client.post(CONFIRM + "/prepare", data={"csrf_token": t, **data}).status_code == 400
+    assert len(core.calls) == n
+
+
+@pytest.mark.parametrize("hash_", ["", "short", "A" * 64, "g" * 64, "a" * 63, "a" * 65])
+def test_authorise_needs_a_full_lowercase_hash(web, hash_):
+    client, core, _ = web
+    t = token(client)
+    n = len(core.calls)
+    assert client.post(CONFIRM + "/authorise", data={"csrf_token": t, "execution_id": "4", "grant_hash": hash_}).status_code == 400
+    assert len(core.calls) == n
+
+
+def test_stale_and_elevation_refusals_reach_the_operator_in_words(web):
+    client, core, _ = web
+    t = token(client)
+    core.errors["console.confirm_authorise"] = ("stale", "That grant changed since you read it. Look at it again before authorising.")
+    r = client.post(CONFIRM + "/authorise", data={"csrf_token": t, "execution_id": "4", "grant_hash": HASH})
+    assert r.status_code == 409 and "changed since you read it" in r.get_json()["error"]
+    core.errors["console.confirm_authorise"] = ("elevation_required", "This approval needs an elevated dashboard session")
+    r = client.post(CONFIRM + "/authorise", data={"csrf_token": t, "execution_id": "4", "grant_hash": HASH})
+    assert r.status_code == 403 and "elevated" in r.get_json()["error"]

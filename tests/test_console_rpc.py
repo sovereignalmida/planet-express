@@ -69,3 +69,35 @@ def test_disabled_and_unavailable_answer_like_the_mission_methods(tmp_path):
         with pytest.raises(RpcError) as err:
             on_without_console.handlers()[method]({})
         assert err.value.code == "unavailable"
+
+
+H = "a" * 64
+
+
+@pytest.mark.parametrize("method, params", [
+    ("console.confirm_prepare", {"conversation_id": "0123456789abcdef", "operator": "chris", "plan_id": 0, "option": 0}),
+    ("console.confirm_prepare", {"conversation_id": "0123456789abcdef", "operator": "chris", "plan_id": 1, "option": 3}),
+    ("console.confirm_prepare", {"conversation_id": "0123456789abcdef", "operator": "chris", "plan_id": "1", "option": 0}),
+    ("console.confirm_prepare", {"conversation_id": "0123456789abcdef", "operator": "chris", "plan_id": 1, "option": 0, "scope": {"stacks": ["*"]}}),
+    ("console.confirm_authorise", {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 1, "grant_hash": "short"}),
+    ("console.confirm_authorise", {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 1, "grant_hash": H.upper()}),
+    ("console.confirm_authorise", {"conversation_id": "0123456789abcdef", "operator": "chris", "execution_id": 1, "grant_hash": H, "elevated": "yes"}),
+    ("console.confirm_withdraw", {"conversation_id": "0123456789abcdef", "operator": "chris"}),
+])
+def test_the_confirm_methods_take_exact_params_and_no_scope_or_grant_can_be_smuggled_in(rig, method, params):
+    with pytest.raises(RpcError) as err:
+        rig.call(method, params)
+    assert err.value.code == "bad_request"
+
+
+def test_the_confirm_methods_answer_unavailable_when_the_host_cannot_run_repairs(rig):
+    made = rig.call("console.create", {"operator": "chris", "text": "x"})
+    from planet_express.console import plan as plan_mod
+    plan = plan_mod.parse({"known": [], "unsure": [], "options": [{
+        "name": "n", "recommended": True, "summary": "s", "changes": ["c"], "will_not_touch": ["w"], "risk": {"level": "low", "text": "t"},
+        "rolls_back_to": "r", "effort": "e", "scope": {"stacks": ["media"], "services": []},
+        "checks": [{"id": "u", "check": "http", "params": {"url": "http://localhost/"}}]}]})
+    plan_id = rig.console.add_plan(made["id"], 1, plan_mod.canonical(plan), plan_mod.plan_hash(plan))
+    with pytest.raises(RpcError) as err:
+        rig.call("console.confirm_prepare", {"conversation_id": made["id"], "operator": "chris", "plan_id": plan_id, "option": 0})
+    assert err.value.code == "unavailable" and "Repair missions" in str(err.value)

@@ -786,8 +786,25 @@ class MissionService:
             v = _params(p, {**conv, **op})
             return api().scrap_plan(v["conversation_id"], v["operator"])
 
+        grant_hash = {"grant_hash": _pattern(re.compile(r"[0-9a-f]{64}"), "a grant hash")}
+        execution = {"execution_id": _int(1, 2**31)}
+
+        def confirm_prepare(p):
+            v = _params(p, {**conv, **op, "plan_id": _int(1, 2**31), "option": _int(0, 2)})
+            return api().confirm_prepare(v["conversation_id"], v["plan_id"], v["option"], v["operator"])
+
+        def confirm_authorise(p):
+            v = _params(p, {**conv, **op, **execution, **grant_hash}, {"elevated": _bool})
+            return api().confirm_authorise(v["conversation_id"], v["execution_id"], v["grant_hash"], v["operator"], v.get("elevated", False))
+
+        def confirm_withdraw(p):
+            v = _params(p, {**conv, **op, **execution})
+            return api().confirm_withdraw(v["conversation_id"], v["execution_id"], v["operator"])
+
         table = {"console.status": status, "console.list": list_, "console.feed": feed, "console.create": create, "console.post": post,
-                 "console.interrupt": interrupt, "console.archive": archive, "console.scrap_plan": scrap}
+                 "console.interrupt": interrupt, "console.archive": archive, "console.scrap_plan": scrap,
+                 "console.confirm_prepare": confirm_prepare, "console.confirm_authorise": confirm_authorise,
+                 "console.confirm_withdraw": confirm_withdraw}
         return {name: guarded(fn) for name, fn in table.items()}
 
     # ── Telegram ────────────────────────────────────────────────────────────

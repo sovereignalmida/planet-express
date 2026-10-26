@@ -322,6 +322,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             detail = getattr(error, "detail", None)
             status, message = {"bad_request": (400, detail or "That request was not valid."), "not_found": (404, "That conversation no longer exists."),
                                "conflict": (409, detail or "That cannot be done right now."), "forbidden": (403, "That is not allowed."),
+                               "stale": (409, detail or "That was out of date. Look at it again."),
+                               "elevation_required": (403, detail or "That needs an elevated session. Elevate with your passphrase, then try again."),
                                "disabled": (503, "Missions are disabled on this host."),
                                "unavailable": (503, detail or "The Console is not available on this host.")}.get(
                                    error.code, (503, "The Console is unavailable; try again shortly."))
@@ -1022,6 +1024,34 @@ def register_console_pages(app, core) -> None:
         def view(conversation_id):
             return jsonify(core(method, {"conversation_id": conversation(conversation_id), "operator": g.operator}))
         return view
+
+    def int_field(name, low=0, high=2**31):
+        value = request.form.get(name, "")
+        if re.fullmatch(r"[0-9]{1,10}", value) is None or not low <= int(value) <= high:
+            abort(400)
+        return int(value)
+
+    @app.post("/api/console/<conversation_id>/confirm/prepare")
+    def console_confirm_prepare(conversation_id):
+        return jsonify(core("console.confirm_prepare", {"conversation_id": conversation(conversation_id), "operator": g.operator,
+                                                         "plan_id": int_field("plan_id", 1), "option": int_field("option", 0, 2)}))
+
+    @app.post("/api/console/<conversation_id>/confirm/authorise")
+    def console_confirm_authorise(conversation_id):
+        grant_hash = request.form.get("grant_hash", "")
+        if re.fullmatch(r"[0-9a-f]{64}", grant_hash) is None:
+            abort(400)
+        elevated = app.elevated_operator() is not None              # true only when THIS request holds a live elevated session
+        result = core("console.confirm_authorise", {"conversation_id": conversation(conversation_id), "operator": g.operator,
+                                                    "execution_id": int_field("execution_id", 1), "grant_hash": grant_hash, "elevated": elevated})
+        if elevated:
+            app.elevation_acted()
+        return jsonify(result)
+
+    @app.post("/api/console/<conversation_id>/confirm/withdraw")
+    def console_confirm_withdraw(conversation_id):
+        return jsonify(core("console.confirm_withdraw", {"conversation_id": conversation(conversation_id), "operator": g.operator,
+                                                          "execution_id": int_field("execution_id", 1)}))
 
     app.add_url_rule("/api/console/<conversation_id>/interrupt", "console_interrupt", action("console.interrupt"), methods=["POST"])
     app.add_url_rule("/api/console/<conversation_id>/archive", "console_archive", action("console.archive"), methods=["POST"])

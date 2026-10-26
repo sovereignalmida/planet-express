@@ -224,6 +224,56 @@ class ConsoleStore:
         return [r[0] for r in rows]
 
 
+    # ── executions: a confirmed plan option and the Repair mission made from it ─────────────────────────
+    def add_execution(self, conversation_id: str, plan_id: int, option_index: int, mission_id: str, grant_hash: str) -> int:
+        with self.store._write() as conn:
+            cur = conn.execute("INSERT INTO console_executions (conversation_id, plan_id, option_index, mission_id, grant_hash, created_at) "
+                               "VALUES (?, ?, ?, ?, ?, ?)", (conversation_id, plan_id, option_index, mission_id, grant_hash, self._now()))
+            return int(cur.lastrowid)
+
+    def execution(self, execution_id: int) -> dict | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM console_executions WHERE id=?", (execution_id,)).fetchone()
+        return dict(row) if row else None
+
+    def executions(self, conversation_id: str) -> list[dict]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM console_executions WHERE conversation_id=? ORDER BY id", (conversation_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def live_executions(self) -> list[dict]:
+        """Authorised executions whose progress is still being reported into their conversation."""
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM console_executions WHERE status='authorised' ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def set_execution_status(self, execution_id: int, status: str, *, by: str | None = None) -> bool:
+        """proposed -> authorised | withdrawn; authorised -> ended. Forward only."""
+        allowed = {"authorised": ("proposed",), "withdrawn": ("proposed",), "ended": ("authorised",)}
+        if status not in allowed:
+            raise ValueError("an execution moves to authorised, withdrawn or ended")
+        now = self._now()
+        marks = ",".join("?" for _ in allowed[status])
+        with self.store._write() as conn:
+            if status == "authorised":
+                cur = conn.execute(f"UPDATE console_executions SET status=?, authorised_at=?, authorised_by=? WHERE id=? AND status IN ({marks})",
+                                   (status, now, by, execution_id, *allowed[status]))
+            else:
+                cur = conn.execute(f"UPDATE console_executions SET status=? WHERE id=? AND status IN ({marks})", (status, execution_id, *allowed[status]))
+            return cur.rowcount == 1
+
+    def mark_reported(self, execution_id: int, key: str) -> bool:
+        """Record that a progress line (`key`) was posted into the thread; False if it already had been (so it is posted once)."""
+        with self.store._write() as conn:
+            row = conn.execute("SELECT reported FROM console_executions WHERE id=?", (execution_id,)).fetchone()
+            if row is None:
+                return False
+            keys = row["reported"].split(",") if row["reported"] else []
+            if key in keys:
+                return False
+            conn.execute("UPDATE console_executions SET reported=? WHERE id=?", (",".join([*keys, key]), execution_id))
+            return True
+
     # ── plans ───────────────────────────────────────────────────────────────────────────────
     def add_plan(self, conversation_id: str, turn: int, plan: dict, plan_hash: str) -> int:
         """Record a validated plan (the caller passes `plan.canonical`, already redacted). A newer plan supersedes the pending one."""
@@ -247,6 +297,11 @@ class ConsoleStore:
         with self.store._connect() as conn:
             row = conn.execute("SELECT * FROM console_plans WHERE conversation_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
                                (conversation_id,)).fetchone()
+        return dict(row) if row else None
+
+    def plan(self, plan_id: int) -> dict | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM console_plans WHERE id=?", (plan_id,)).fetchone()
         return dict(row) if row else None
 
     def latest_plan(self, conversation_id: str) -> dict | None:

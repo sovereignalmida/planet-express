@@ -22,6 +22,8 @@ from planet_express.console.store import (
     ConversationNotFound,
     clean_text,
 )
+from planet_express.console import plan as plan_mod
+from planet_express.missions.approval_flow import FlowError
 from planet_express.missions.events import redact_value
 from planet_express.missions.state import TERMINAL
 from planet_express.missions.store import MissionStore
@@ -86,8 +88,9 @@ def _age(now: float, then: int) -> str:
 
 class ConsoleApi:
     def __init__(self, service: ConsoleService, console: ConsoleStore, ms: MissionStore, supervisor: Supervisor,
-                 cfg: MissionConsoleConfig, *, clock: Callable[[], float] = time.time):
+                 cfg: MissionConsoleConfig, *, clock: Callable[[], float] = time.time, flow: Callable[[], Any] | None = None):
         self.service, self.console, self.ms, self.supervisor, self.cfg, self._clock = service, console, ms, supervisor, cfg, clock
+        self._flow = flow                      # () -> the approval flow, or None where Repair missions are not available (late-bound by the daemon)
 
     # ── reads ─────────────────────────────────────────────────────────────────────────────
     def status(self) -> dict:
@@ -186,7 +189,141 @@ class ConsoleApi:
         self.console.add_message(conv.id, "system", f"Plan scrapped by {operator}. Nothing was changed.", actor=f"operator:{operator}")
         return {"scrapped": True}
 
+    # ── confirming a plan option: propose the repair, show the approval card, authorise bound to its hash ──────────
+    def confirm_prepare(self, conversation_id: str, plan_id: int, option: int, operator: str) -> dict:
+        """Step one of Confirm. Makes the Repair mission the option describes (the same grant checks, backup floor and protected set as any
+        Repair mission; nothing here widens them) and returns what the operator is about to authorise. Nothing runs until `confirm_authorise`."""
+        conv = self._conversation(conversation_id)
+        if conv.state != "open":
+            raise ConsoleApiError("This conversation is closed.", "conflict")
+        row = self.console.plan(plan_id)
+        if row is None or row["conversation_id"] != conv.id:
+            raise ConsoleApiError("that plan no longer exists", "not_found")
+        plan = self._pending_plan(row)
+        if not 0 <= option < len(plan.options):
+            raise ConsoleApiError("that option does not exist", "bad_request")
+        flow = self._require_flow()
+        for ex in self.console.executions(conv.id):                                  # one execution at a time per conversation
+            if ex["status"] == "proposed":
+                self._withdraw(flow, ex, operator, quiet=True)
+            elif ex["status"] == "authorised" and self._mission_open(ex["mission_id"]):
+                raise ConsoleApiError("A plan is already running in this conversation. Wait for it to finish, or stop it first.", "conflict")
+        chosen = plan.options[option]
+        actor = f"operator:{operator}"
+        try:
+            made = flow.propose_repair(
+                actor, title=f"{conv.title[:120]} · {chosen.name}"[:256], goal=plan_mod.goal_text(chosen),
+                scope={"stacks": list(chosen.scope.stacks), "services": list(chosen.scope.services), "hosts": ["local"]},
+                checks=[c.model_dump() for c in chosen.checks], exclusions=[*chosen.exclude, *chosen.will_not_touch][:32],
+                incident_id=self.ms.get_mission(conv.mission_id).incident_id)
+        except FlowError as exc:
+            raise self._flow_error(exc) from None
+        execution_id = self.console.add_execution(conv.id, plan_id, option, made["mission_id"], made["grant_hash"])
+        self.console.add_message(conv.id, "system", f"{operator} is reviewing option {chr(65 + option)} ({chosen.name}) for confirmation. Nothing has been changed.",
+                                 actor=actor)
+        return self._confirm_view(flow, execution_id, made["mission_id"], chosen, operator)
+
+    def confirm_authorise(self, conversation_id: str, execution_id: int, grant_hash: str, operator: str, elevated: bool = False) -> dict:
+        """Step two: the operator authorises exactly the grant whose fingerprint they saw. If the grant changed in between, it is refused as
+        stale and they must look again. Approval is recorded through the same flow as any other, as the signed-in operator."""
+        conv = self._conversation(conversation_id)
+        ex = self._execution(conv, execution_id, "proposed")
+        flow = self._require_flow()
+        mission = self.ms.get_mission(ex["mission_id"])
+        if grant_hash != mission.grant_hash or grant_hash != ex["grant_hash"]:
+            raise ConsoleApiError("That grant changed since you read it. Look at it again before authorising.", "stale")
+        row = self.console.plan(ex["plan_id"])
+        self._pending_plan(row)                                                    # expired or scrapped since: refuse, never run it
+        actor = f"operator:{operator}"
+        try:
+            card = flow.card(mission.id)
+            for needed in card["required"]:
+                if needed["state"] == "pending":
+                    flow.approve(actor, mission.id, needed["phase"], needed["bound"], elevated=elevated)
+        except FlowError as exc:
+            raise self._flow_error(exc) from None
+        self.console.set_execution_status(execution_id, "authorised", by=actor)
+        self.console.set_plan_status(row["id"], "confirmed")
+        plan = plan_mod.Plan.model_validate(json.loads(row["plan_json"]))
+        self.console.add_message(conv.id, "system", f"Authorised by {operator}: option {chr(65 + ex['option_index'])} ({plan.options[ex['option_index']].name}). "
+                                 f"PE will take a checkpoint, carry it out under supervision, then check it worked. Grant {grant_hash[:8]}.", actor=actor)
+        return {"authorised": True, "execution_id": execution_id, "mission_id": mission.id}
+
+    def confirm_withdraw(self, conversation_id: str, execution_id: int, operator: str) -> dict:
+        conv = self._conversation(conversation_id)
+        ex = self._execution(conv, execution_id, "proposed")
+        self._withdraw(self._require_flow(), ex, operator, quiet=False)
+        return {"withdrawn": True}
+
     # ── internals ─────────────────────────────────────────────────────────────────────────
+    def _require_flow(self):
+        flow = self._flow() if self._flow is not None else None
+        if flow is None:
+            raise ConsoleApiError("Running a plan needs Repair missions, which are not available on this host.", "unavailable")
+        return flow
+
+    @staticmethod
+    def _flow_error(exc: FlowError) -> ConsoleApiError:
+        code = {"conflict": "conflict", "stale": "stale", "forbidden": "forbidden", "not_found": "not_found", "unavailable": "unavailable",
+                "elevation_required": "elevation_required", "invalid_grant": "bad_request"}.get(exc.code, "bad_request")
+        return ConsoleApiError(str(exc), code)
+
+    def _mission_open(self, mission_id: str) -> bool:
+        return self.ms.get_mission(mission_id).status not in TERMINAL
+
+    def _pending_plan(self, row: dict | None) -> plan_mod.Plan:
+        """The plan a confirmation may act on: pending, within its 24 hours, and exactly what was hashed when it was stored."""
+        if row is None or row["status"] != "pending":
+            raise ConsoleApiError("That plan is no longer waiting for a decision.", "conflict")
+        if int(self._clock()) - int(row["created_at"]) > PLAN_TTL_S:
+            self.console.set_plan_status(row["id"], "expired")
+            raise ConsoleApiError("That plan has expired. Ask the agent for a fresh one.", "conflict")
+        try:
+            plan = plan_mod.Plan.model_validate(json.loads(row["plan_json"]))
+        except ValueError:
+            raise ConsoleApiError("That plan could not be read.", "conflict") from None
+        if plan_mod.plan_hash(plan) != row["plan_hash"]:
+            raise ConsoleApiError("That plan does not match what was recorded. Ask the agent for a fresh one.", "conflict")
+        return plan
+
+    def _execution(self, conv: Conversation, execution_id: int, status: str) -> dict:
+        ex = self.console.execution(execution_id)
+        if ex is None or ex["conversation_id"] != conv.id:
+            raise ConsoleApiError("that confirmation no longer exists", "not_found")
+        if ex["status"] != status:
+            raise ConsoleApiError("That confirmation is no longer open.", "conflict")
+        return ex
+
+    def _withdraw(self, flow, ex: dict, operator: str, *, quiet: bool) -> None:
+        try:
+            flow.deny(f"operator:{operator}", ex["mission_id"], ex["grant_hash"])
+        except FlowError as exc:
+            if not quiet:
+                raise self._flow_error(exc) from None
+        self.console.set_execution_status(ex["id"], "withdrawn")
+        if not quiet:
+            self.console.add_message(ex["conversation_id"], "system", f"{operator} withdrew the confirmation. Nothing was changed.", actor=f"operator:{operator}")
+
+    def _confirm_view(self, flow, execution_id: int, mission_id: str, option: plan_mod.Option, operator: str) -> dict:
+        """What the operator is about to authorise, in plain words, from the approval card PE built (never from the agent's text)."""
+        card = flow.card(mission_id)
+        budgets = card["budgets"]
+        pending = [r for r in card["required"] if r["state"] == "pending"]
+        return {
+            "execution_id": execution_id, "mission_id": mission_id, "grant_hash": card["grant_hash"], "fingerprint": card["grant_hash"][:8],
+            "operator": operator, "option": option.name, "summary": option.summary,
+            "scope": {"stacks": card["scope"]["stacks"], "services": card["scope"]["services"]},
+            "warnings": [w["text"] for w in card["warnings"]],
+            "backup": {"covered": bool(card["backup"].get("covered")),
+                       "text": "A recent verified backup covers this scope." if card["backup"].get("covered") else
+                               "No recent verified backup covers this scope. This needs an elevated approval in the Work log."},
+            "protected": {"count": card["protected"]["count"], "enforced": card["protected"]["exclusions_enforced"],
+                          "advisory": card["protected"]["exclusions_advisory"]},
+            "limits": {"minutes": max(1, budgets["wall_s"] // 60), "steps": budgets["tool_calls"]},
+            "checks": [plan_mod.check_phrase(c) for c in option.checks], "on_verify_fail": card["verification"]["on_verify_fail"],
+            "needs_elevation": any(r["elevated"] for r in pending), "phases": [r["phase"] for r in pending],
+        }
+
     def _conversation(self, conversation_id: str) -> Conversation:
         try:
             return self.console.get(conversation_id)

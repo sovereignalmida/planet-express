@@ -42,5 +42,19 @@ CREATE TABLE IF NOT EXISTS console_plans (
     status TEXT NOT NULL DEFAULT 'pending',
     created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS console_plans_conversation ON console_plans(conversation_id, id)
+CREATE INDEX IF NOT EXISTS console_plans_conversation ON console_plans(conversation_id, id);
+CREATE TABLE IF NOT EXISTS console_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL REFERENCES console_conversations(id),
+    plan_id INTEGER NOT NULL REFERENCES console_plans(id),
+    option_index INTEGER NOT NULL,
+    mission_id TEXT NOT NULL UNIQUE REFERENCES missions(id),
+    grant_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    created_at INTEGER NOT NULL,
+    authorised_at INTEGER,
+    authorised_by TEXT,
+    reported TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS console_executions_conversation ON console_executions(conversation_id, id)
 """

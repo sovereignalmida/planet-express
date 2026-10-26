@@ -164,6 +164,35 @@ def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -
         raise PlanError("the plan file is not valid JSON") from None
 
 
+def check_phrase(check: Any) -> str:
+    """A check in words (the page has the same phrasing): from PE's catalogue kind and its parameters."""
+    params = getattr(check, "params", None) or (check.get("params") if isinstance(check, dict) else None) or {}
+    kind = getattr(check, "check", None) or (check.get("check") if isinstance(check, dict) else "a check")
+    if kind == "container_state":
+        return f"{params.get('container', 'a container')} is running and stable"
+    if kind == "http":
+        return f"{params.get('url', 'a URL')} answers"
+    if kind == "mount_readable":
+        return f"{params.get('path', 'a path')} is readable" + (f" inside {params['container']}" if params.get("container") else "")
+    if kind == "project_complete":
+        return f"the {params.get('project', 'stack')} project has all its services"
+    if kind == "exec_probe":
+        argv = params.get("argv") or ["a command"]
+        return f"{params.get('container', 'a container')} can run {argv[0]}"
+    bits = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(params.items())[:3])
+    return f"{kind}" + (f" ({bits})" if bits else "")
+
+
+def goal_text(option: Option) -> str:
+    """The approved option as the execution's goal (what the agent is asked to carry out and what the operator's approval card shows).
+    Built by PE from the validated option, never from free agent prose outside it."""
+    lines = [f"Carry out this plan the operator approved: {option.name}.", option.summary, "", "Change only what it says:"]
+    lines += [f"- {c}" for c in option.changes]
+    lines += ["", "Do not touch:"] + [f"- {w}" for w in option.will_not_touch]
+    lines += ["", f"Roll back to: {option.rolls_back_to}", "", "PE will check afterwards that:"] + [f"- {check_phrase(c)}" for c in option.checks]
+    return "\n".join(lines)[:8000]
+
+
 def canonical(plan: Plan) -> dict[str, Any]:
     """The plan as stored: redacted string leaves, so nothing an agent smuggled into prose is kept as a secret."""
     return redact_value(plan.model_dump(mode="json"))
@@ -225,5 +254,5 @@ def instructions() -> str:
     return PLAN_INSTRUCTIONS.replace("{catalogue}", catalogue_text())
 
 
-__all__ = ["MAX_PLAN_BYTES", "PLAN_FILE", "Option", "Plan", "PlanError", "canonical", "catalogue_text", "instructions",
-           "json_schema", "load_file", "parse", "plan_hash"]
+__all__ = ["MAX_PLAN_BYTES", "PLAN_FILE", "Option", "Plan", "PlanError", "canonical", "catalogue_text", "check_phrase", "goal_text",
+           "instructions", "json_schema", "load_file", "parse", "plan_hash"]
