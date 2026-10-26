@@ -451,6 +451,10 @@ class ConsoleApi:
             return {"mode": "busy", "reason": "Working. Your message waits for this turn to finish, or press Stop to interrupt it."}
         return {"mode": "idle", "reason": None}
 
+    def plan_card(self, row: dict | None) -> dict | None:
+        """A stored plan row as the card the operator reads (the same shape the page gets)."""
+        return self._plan(row)
+
     def _plan(self, row: dict | None) -> dict | None:
         if row is None:
             return None

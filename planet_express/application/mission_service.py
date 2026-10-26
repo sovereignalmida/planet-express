@@ -246,6 +246,9 @@ def _actor(operator: str) -> str:
     return f"operator:{operator}"
 
 
+from planet_express.console.telegram import COMMANDS as CONSOLE_COMMANDS  # noqa: E402
+
+
 class MissionService:
     def __init__(self, store: Store, *, enabled: Callable[[], bool] | bool = False,
                  incident_context: Callable[[str], dict | None] | None = None,
@@ -814,9 +817,8 @@ class MissionService:
 
     # ── Telegram ────────────────────────────────────────────────────────────
     TELEGRAM_COMMANDS = frozenset({"/missions", "/mission", "/cancel_mission", "/mission_card", "/approve", "/deny",
-                                  "/resume", "/rollback", "/takeover", "/ask", "/reply", "/threads", "/plan", "/confirm", "/authorise",
-                                  "/withdraw", "/run", "/close"})
-    _CONSOLE_COMMANDS = frozenset({"/ask", "/reply", "/threads", "/plan", "/confirm", "/authorise", "/withdraw", "/run", "/close"})
+                                  "/resume", "/rollback", "/takeover"} | CONSOLE_COMMANDS)
+    _CONSOLE_COMMANDS = CONSOLE_COMMANDS
     # Approval-flow commands. The operator is the Telegram sender (never a parameter), no command here can be elevated, and
     # /approve is bound to the first 8 hex digits of the grant hash printed on the card, so it cannot approve a card that
     # changed after it was read.

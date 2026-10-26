@@ -167,3 +167,11 @@ Verified: unit suite 7073 passed, VM privileged suite 283 passed, node tests.
 the live host cannot run Repair missions until protected-set discovery is readable by the service (Confirm says "needs Repair missions" there).
 
 **Not built (next):** Telegram parity; context panel; close-and-learn memory candidates; P4 retire old Chat/Missions (Work log link still goes to /missions). The first live Repair from the Console is the P2 acceptance test.
+
+### Console Telegram parity (2026-10-26): On `v4-next`, NOT deployed, NOT tagged.
+`planet_express/console/telegram.py` (`ConsoleTelegram`) over the same `ConsoleApi` as the page, dispatched from `MissionService.telegram` (`/ask /reply /threads /plan /confirm /authorise (/authorize) /withdraw /run /close`).
+`/confirm <id> <A|B|C> <plan8>` binds to the plan code on the plan card read (a revised plan is refused); the card puts the `/authorise <id> <hash8>` line first and is bounded; Telegram never gives an
+elevated approval (a no-backup option says to use the dashboard) and never acknowledges drift on a rollback. `/ask` `/reply` `/confirm` `/authorise` follow the conversation: a push (`push_async`, own thread, never in the
+supervisor tick) sends the agent's answers, plan cards and PE's progress lines in batches under Telegram's limit, advancing the cursor (`console_telegram` table) only past what was sent. Untrusted text goes out as one
+inert line (no line breaks, `/commands` defused). Logs carry the exception type only (the bot token is in Telegram errors' URLs).
+Reviews: Codex (4) and Claude `/code-review xhigh` (15) fixed with tests. **Not verified live**: no real Telegram send has been made from this code.

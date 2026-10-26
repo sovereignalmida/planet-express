@@ -1910,12 +1910,15 @@ def handle_message(
                 "/mission_card `<id>` — A repair mission's approval card\n"
                 "/approve `<id>` `<hash8>` — Approve the next step of a card (never an elevated one)\n"
                 "/deny `<id>` `<hash8>` — Deny and close a repair mission\n"
-                "/resume `M-<n>`, /rollback `M-<n>`, /takeover `M-<n>` — Act on a tripwire pause (or roll back a mission)\n"
-                "/ask `<question>` — Start a Console conversation; answers and plans come back here\n"
-                "/reply `[id]` `<text>`, /threads, /plan `[id]` — Follow up, list, show the plan\n"
-                "/confirm `<id>` `<A|B|C>`, /authorise `<id>` `<hash8>`, /withdraw `<id>` — Confirm a plan option (never an elevated one)\n"
-                "/run `<id>` `pause|resume|rollback|takeover`, /close `<id>` — Control the run, close the conversation"
+                "/resume `M-<n>`, /rollback `M-<n>`, /takeover `M-<n>` — Act on a tripwire pause (or roll back a mission)"
             )
+            if missions.console_telegram is not None:
+                help_text += (
+                    "\n/ask `<question>` — Start a Console conversation; answers and plans come back here\n"
+                    "/reply `[id]` `<text>`, /threads, /plan `[id]` — Follow up, list, show the plan\n"
+                    "/confirm `<id>` `<A|B|C>` `<plan8>`, /authorise `<id>` `<hash8>`, /withdraw `<id>` — Confirm a plan option (never an elevated one)\n"
+                    "/run `<id>` `pause|resume|rollback|takeover`, /close `<id>` — Control the run, close the conversation"
+                )
         notifier.notify(help_text)
 
 
@@ -3097,7 +3100,7 @@ def run_bot() -> None:
             # Telegram parity: the same API as plain-text commands, plus a push of what a followed conversation produced.
             from planet_express.console.telegram import ConsoleTelegram
             missions.console_telegram = ConsoleTelegram(missions.console_api, service.console, lambda text: notifier.notify(TelegramClient.s(text)))
-            service.after_tick = missions.console_telegram.push
+            service.after_tick = missions.console_telegram.push_async
     shutdown = threading.Event()
     if mission_runner is not None:
         # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff
