@@ -42,11 +42,15 @@ class ConsoleError(RuntimeError):
     """A request the Console refuses. The message is for the operator."""
 
 
-class ConsoleFull(ConsoleError):
+class ConsoleConflict(ConsoleError):
+    """The request is fine but the conversation's state does not allow it now (full, spent, closed)."""
+
+
+class ConsoleFull(ConsoleConflict):
     pass
 
 
-class BudgetSpent(ConsoleError):
+class BudgetSpent(ConsoleConflict):
     pass
 
 
@@ -104,6 +108,8 @@ class ConsoleService:
         if not text.strip():
             raise ConsoleError("a message cannot be empty")
         conv = self.console.get(conversation_id)
+        if self.ms.get_mission(conv.mission_id).status in TERMINAL:
+            raise ConsoleConflict("this conversation was closed from the Work log: start a new conversation")
         if conv.tokens_left < self.cfg.min_turn_tokens:
             raise BudgetSpent("this conversation's model budget is used up: start a new conversation")
         return self.console.add_message(conversation_id, "operator", text, actor=actor, require_open=True)
@@ -200,4 +206,4 @@ class ConsoleService:
             self.console.set_state(conv.id, "archived")
 
 
-__all__ = ["BudgetSpent", "ConsoleError", "ConsoleFull", "ConsoleService"]
+__all__ = ["BudgetSpent", "ConsoleConflict", "ConsoleError", "ConsoleFull", "ConsoleService"]

@@ -75,9 +75,13 @@ def test_a_pending_plan_is_shown_and_the_status_says_it_needs_a_call_with_the_re
     assert "Recommended: Recreate dependents" in feed["conversation"]["verdict"]["p"]
     assert feed["plan"]["status"] == "pending" and feed["plan"]["hash"] == "aaaaaaaa" and feed["plan"]["expired"] is False
     assert feed["plan"]["plan"]["options"][0]["name"] == "Recreate dependents"
-    rig.clock.t += PLAN_TTL_S + 5
-    assert rig.api.feed(made["id"])["plan"]["expired"] is True
     assert rig.api.list()["conversations"][0]["status"]["group"] == "Needs you"
+    rig.clock.t += PLAN_TTL_S + 5
+    feed = rig.api.feed(made["id"])
+    assert feed["plan"]["expired"] is True and feed["plan"]["status"] == "expired"        # still shown, as expired
+    assert rig.console.current_plan(conv.id) is None                                       # and never pending again: nothing may act on it
+    assert feed["conversation"]["status"]["text"] == "Result ready"
+    assert rig.api.list()["conversations"][0]["status"]["group"] == "Recent"
 
 
 def test_scrapping_a_plan_changes_nothing_and_says_so_and_only_a_pending_plan_can_be_scrapped(rig):
@@ -185,3 +189,64 @@ def test_the_list_groups_and_ages_conversations_and_hides_archived_ones(rig):
 
 def test_the_fixture_is_the_real_stream_the_trail_was_built_from():
     assert FIXTURE.exists() and ConsoleStore is not None
+
+
+def test_a_first_load_of_a_long_conversation_shows_the_newest_messages_and_the_newest_trail(rig):
+    made = rig.api.create("chris", "start")
+    rig.sup.tick()
+    conv = rig.console.get(made["id"])
+    rig.finish_turn(conv)
+    for i in range(250):
+        rig.console.add_message(conv.id, "system", f"note {i}")
+    first = rig.api.feed(made["id"])
+    texts = [m["text"] for m in first["messages"]]
+    assert len(texts) == 200 and texts[-1] == "note 249" and "note 0" not in texts          # the newest 200, oldest first
+    assert [m["seq"] for m in first["messages"]] == sorted(m["seq"] for m in first["messages"])
+    nxt = rig.api.feed(made["id"], after_message=first["last_message"])
+    assert nxt["messages"] == []
+
+
+def test_the_failure_reason_is_the_latest_one_however_long_the_conversation(rig):
+    made = rig.api.create("chris", "hello")
+    rig.sup.tick()
+    conv = rig.console.get(made["id"])
+    rig.finish_turn(conv, stream=b'{"type":"system","subtype":"init","session_id":"aaaaaaaa-1111"}\n')
+    for i in range(250):
+        rig.console.add_message(conv.id, "agent", f"filler {i}")
+    rig.console.add_message(conv.id, "system", "The most recent reason.")
+    assert rig.api.feed(made["id"])["conversation"]["verdict"]["p"] == "The most recent reason."
+
+
+def test_a_conversation_whose_work_record_was_closed_elsewhere_reads_as_closed_and_takes_no_messages(rig):
+    from planet_express.missions.state import transition
+    made = rig.api.create("chris", "hello")
+    rig.sup.tick()
+    conv = rig.console.get(made["id"])
+    rig.finish_turn(conv)
+    transition(rig.store, conv.mission_id, "completed", "operator:chris")                   # closed from the Work log
+    feed = rig.api.feed(made["id"])
+    assert feed["conversation"]["status"]["text"] == "Closed" and feed["composer"] == {"mode": "off", "reason": "This conversation is closed."}
+    with pytest.raises(ConsoleApiError) as err:
+        rig.api.post(made["id"], "chris", "anyone there?")
+    assert err.value.code == "conflict" and "closed from the Work log" in str(err.value)
+    assert rig.console.pending(conv.id) is None                                              # nothing is left waiting forever
+
+
+def test_a_conversation_that_vanishes_between_the_check_and_the_action_is_not_found_not_an_internal_error(rig):
+    from planet_express.console.store import ConversationNotFound
+    made = rig.api.create("chris", "hello")
+
+    def gone(*a, **k):
+        raise ConversationNotFound("x")
+    for name, call in (("post", lambda: rig.api.post(made["id"], "chris", "x")), ("interrupt", lambda: rig.api.interrupt(made["id"], "chris")),
+                       ("archive", lambda: rig.api.archive(made["id"], "chris"))):
+        setattr(rig.service, name, gone)
+        with pytest.raises(ConsoleApiError) as err:
+            call()
+        assert err.value.code == "not_found"
+
+
+def test_archiving_twice_says_it_was_already_archiving(rig):
+    made = rig.api.create("chris", "hello")
+    assert rig.api.archive(made["id"], "chris") == {"archiving": True}
+    assert rig.api.archive(made["id"], "chris") == {"archiving": False}

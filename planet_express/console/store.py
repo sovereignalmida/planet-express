@@ -189,6 +189,19 @@ class ConsoleStore:
                                 (conversation_id, after, limit)).fetchall()
         return [Message(**dict(r)) for r in rows]
 
+    def recent_messages(self, conversation_id: str, limit: int = 200) -> list[Message]:
+        """The newest `limit` messages, oldest first (what a first load of a long conversation should show)."""
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM console_messages WHERE conversation_id=? ORDER BY seq DESC LIMIT ?",
+                                (conversation_id, limit)).fetchall()
+        return [Message(**dict(r)) for r in reversed(rows)]
+
+    def last_system_text(self, conversation_id: str) -> str | None:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT text FROM console_messages WHERE conversation_id=? AND role='system' ORDER BY seq DESC LIMIT 1",
+                               (conversation_id,)).fetchone()
+        return row[0] if row else None
+
     def pending(self, conversation_id: str) -> Message | None:
         """The oldest operator message no turn has taken yet."""
         with self.store._connect() as conn:
@@ -234,6 +247,12 @@ class ConsoleStore:
         with self.store._connect() as conn:
             row = conn.execute("SELECT * FROM console_plans WHERE conversation_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
                                (conversation_id,)).fetchone()
+        return dict(row) if row else None
+
+    def latest_plan(self, conversation_id: str) -> dict | None:
+        """The newest plan whatever its status (the card shows an expired or scrapped one as such)."""
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT * FROM console_plans WHERE conversation_id=? ORDER BY id DESC LIMIT 1", (conversation_id,)).fetchone()
         return dict(row) if row else None
 
     def set_plan_status(self, plan_id: int, status: str) -> bool:

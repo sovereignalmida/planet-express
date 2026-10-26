@@ -166,6 +166,46 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     await page.send();
     assert.ok(requests.some(r => r[0] === "/api/console/new" && r[1] === "POST" && r[2].includes("csrf_token=csrf-xyz")));
   });
+  await atest("overlapping feed loads never duplicate trail events and settle with one record of each", async () => {
+    page.select("0123456789abcdef", false);
+    await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
+    await Promise.all([page.loadFeed(), page.loadFeed(), page.loadFeed()]);
+    const seqs = page.state.events.map(e => e.seq);
+    assert.strictEqual(new Set(seqs).size, seqs.length, "no event twice");
+    assert.strictEqual(seqs.length, FEED.events.length);
+    assert.strictEqual(page.state.messages.length, FEED.messages.length);
+  });
+  await atest("a poll that finds nothing new leaves the drawn nodes alone (selection and focus survive)", async () => {
+    const before = doc.getElementById("con-thread").children.slice();
+    const railBefore = doc.getElementById("con-list").children.slice();
+    await page.loadFeed();
+    page.renderThread(); page.renderRail();
+    assert.ok(before.every((n, i) => doc.getElementById("con-thread").children[i] === n), "thread nodes are the same objects");
+    assert.ok(railBefore.every((n, i) => doc.getElementById("con-list").children[i] === n), "rail nodes are the same objects");
+  });
+  await atest("opening a conversation shows a loading note, never the new-conversation invite, until its feed arrives", async () => {
+    const slow = makeDoc({ status: { enabled: true, proposal_only: false }, selected: null });
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const win2 = { ...win, fetch: async (url) => { if (url.includes("/feed")) await gate; return { ok: true, status: 200, json: async () => (url.includes("/feed") ? FEED : LIST) }; } };
+    const p2 = C.boot(slow, win2);
+    p2.select("0123456789abcdef", false);
+    const texts = walk(slow.getElementById("con-thread")).map(n => n.textContent).join(" ");
+    assert.ok(texts.includes("Loading the conversation"), texts);
+    assert.ok(!texts.includes("What do you want to look into"), "no invite inside an existing conversation");
+    release();
+  });
+  await atest("the title bar has an Archive button that needs a second click", async () => {
+    const find = () => walk(doc.getElementById("con-top")).find(n => n.tag === "button" && n.textContent.startsWith("Archive"));
+    page.select("0123456789abcdef", false);
+    await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
+    const before = requests.filter(r => r[0].endsWith("/archive")).length;
+    find().fire("click");
+    assert.ok(find().textContent.includes("Click again"));
+    assert.strictEqual(requests.filter(r => r[0].endsWith("/archive")).length, before, "the first click only arms it");
+    find().fire("click"); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
+    assert.ok(requests.some(r => r[0].endsWith("/archive") && r[1] === "POST"));
+  });
   void all;
   if (failures) { console.log(failures + " failed"); process.exit(1); }
   console.log("all passed");

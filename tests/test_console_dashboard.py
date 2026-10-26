@@ -145,8 +145,9 @@ def test_the_cores_refusals_reach_the_operator_in_words_with_the_right_status(we
     core.errors["console.post"] = ("not_found", "internal detail that must not show")
     r = client.post(f"/api/console/{CID}/message", data={"csrf_token": t, "text": "x"})
     assert r.status_code == 404 and "internal" not in r.get_data(as_text=True)
-    core.errors["console.post"] = ("bad_request", "x")
-    assert client.post(f"/api/console/{CID}/message", data={"csrf_token": t, "text": "x"}).status_code == 400
+    core.errors["console.post"] = ("bad_request", "this host has no session identities: the Console cannot run")
+    r = client.post(f"/api/console/{CID}/message", data={"csrf_token": t, "text": "x"})
+    assert r.status_code == 400 and "no session identities" in r.get_json()["error"]            # the operator is told why
     core.errors["console.list"] = ("unavailable", "The Console is not enabled on this host.")
     r = client.get("/api/console/list")
     assert r.status_code == 503 and "not enabled" in r.get_json()["error"]

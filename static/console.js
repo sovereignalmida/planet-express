@@ -110,7 +110,8 @@
     const refs = { list: $("con-list"), top: $("con-top"), scroll: $("con-scroll"), thread: $("con-thread"), composer: $("con-composer"),
                    text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
     const state = { selected: null, list: [], feed: null, messages: [], events: [], lastMessage: 0, lastEvent: 0, newMode: true,
-                    picked: {}, openTrails: {}, scrapArmed: false, timer: null, error: null, sending: false };
+                    picked: {}, openTrails: {}, scrapArmed: false, archiveArmed: false, timer: null, error: null, sending: false,
+                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" } };
     const ORIGINS = { operator: ["Y", "You asked"], incident: ["!", "From an incident"], pe: ["P", "PE started it"] };
     const EXAMPLES = ["The download apps lost internet after the reboot. Figure out why.", "Why is the media stack slow right now?",
                       "Which containers restarted in the last day, and why?"];
@@ -135,6 +136,9 @@
 
     // ── rail ──
     function renderRail() {
+      const sig = JSON.stringify([state.list, state.selected]);
+      if (sig === state.sig.rail) return;                      // nothing changed: leave the nodes (and any focus) alone
+      state.sig.rail = sig;
       refs.list.replaceChildren();
       if (!state.list.length) {
         const card = el("div", "pe-card none");
@@ -161,6 +165,9 @@
     // ── top bar ──
     function renderTop() {
       const f = state.feed;
+      const sig = JSON.stringify([state.newMode, f && f.conversation, f && f.budget, state.archiveArmed]);
+      if (sig === state.sig.top) return;
+      state.sig.top = sig;
       refs.top.replaceChildren();
       if (!f || state.newMode) { refs.top.hidden = true; return; }
       refs.top.hidden = false;
@@ -173,7 +180,16 @@
       const fill = el("span", "pe-bar-fill " + (b.state === "ok" ? "" : b.state)); fill.style.cssText = "display:block;width:" + b.used_pct + "%";
       add(meter, el("span", "", "BUDGET"), add(el("span", "pe-bar"), fill), el("span", "", budgetLabel(b)));
       const log = el("a", "", "Work log"); log.href = "/missions";
-      const bar = add(el("div", "pe-con-titlebar"), back, title, meter, log);
+      const open = c.state === "open";
+      const archive = el("button", "pe-btn sm" + (state.archiveArmed ? " danger" : " ghost"), state.archiveArmed ? "Archive? Click again" : "Archive"); archive.type = "button";
+      archive.title = "Close this conversation: its working files are removed and its slot is freed";
+      archive.hidden = !open;
+      archive.addEventListener("click", async () => {
+        if (!state.archiveArmed) { state.archiveArmed = true; state.sig.top = ""; renderTop(); return; }
+        state.archiveArmed = false;
+        try { await post("/api/console/" + state.selected + "/archive"); await loadFeed(); await refreshList(); } catch (e) { fail(e); }
+      });
+      const bar = add(el("div", "pe-con-titlebar"), back, title, meter, archive, log);
       const v = c.verdict, level = c.status.level;
       const orb = { ok: "✓", warn: "!", high: "✕", crit: "✕", none: "…" }[level] || "…";
       const verdict = el("div", "pe-verdict compact " + level); verdict.setAttribute("role", "status"); verdict.setAttribute("aria-live", "polite");
@@ -272,9 +288,20 @@
     }
 
     function renderThread() {
+      const f0 = state.feed;
+      const sig = JSON.stringify([state.newMode, !!f0, state.messages.map(m => m.seq), state.lastEvent, f0 && f0.running, f0 && f0.plan && [f0.plan.id, f0.plan.status, f0.plan.expired],
+                                  state.picked, state.scrapArmed, state.error && !f0]);
+      if (sig === state.sig.thread && state.firstPaint !== "load") return;     // unchanged: keep the nodes, the selection and the focus
+      state.sig.thread = sig;
       const keep = refs.scroll.scrollHeight - refs.scroll.scrollTop - refs.scroll.clientHeight < 90;
       refs.thread.replaceChildren();
-      if (state.newMode || !state.feed) { renderInvite(); return; }
+      if (state.newMode) { renderInvite(); return; }
+      if (!state.feed) {
+        const wait = el("div", "pe-note", state.error ? "Could not load this conversation. " + state.error : "Loading the conversation…");
+        wait.setAttribute("role", state.error ? "alert" : "status");
+        refs.thread.appendChild(wait);
+        return;
+      }
       const f = state.feed, planInfo = f.plan;
       const shown = new Set();
       let planShown = false;
@@ -365,6 +392,19 @@
       state.list = data.conversations; state.status = data.status; renderRail();
     }
     async function loadFeed(reset) {
+      // One fetch at a time: a poll and an action finishing together would otherwise both append the same events. A request that arrives
+      // while one is in flight is answered by a second fetch right after it (the first may predate the action).
+      if (state.inflight) {
+        if (!reset) { state.again = true; return state.inflight; }
+        await state.inflight.catch(() => {});
+      }
+      state.inflight = (async () => {
+        try { await loadFeedNow(reset); while (state.again) { state.again = false; await loadFeedNow(false); } }
+        finally { state.inflight = null; }
+      })();
+      return state.inflight;
+    }
+    async function loadFeedNow(reset) {
       if (!state.selected) return;
       const id = state.selected;
       if (reset) { state.messages = []; state.events = []; state.lastMessage = 0; state.lastEvent = 0; state.feed = null; state.firstPaint = "load"; }
@@ -372,20 +412,23 @@
       if (id !== state.selected) return;                        // the operator moved on while this was in flight
       const known = new Set(state.messages.map(m => m.seq));
       for (const m of feed.messages) if (!known.has(m.seq)) state.messages.push(m);
-      state.events = state.events.concat(feed.events);
+      const seen = new Set(state.events.map(e => e.seq));
+      for (const e of feed.events) if (!seen.has(e.seq)) state.events.push(e);
       state.lastMessage = feed.last_message; state.lastEvent = feed.last_event;
       state.feed = feed; state.status = feed.status; state.error = null; state.scrapArmed = state.scrapArmed && !!feed.plan;
+      state.archiveArmed = state.archiveArmed && feed.conversation.state === "open";
       renderTop(); renderThread(); renderComposer(); renderRail();
     }
     function select(id, push) {
-      state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false;
+      state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null;
+      state.sig = { rail: "", top: "", thread: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({ id }, "", "/console/" + id);
       renderRail(); renderThread(); renderComposer();
       loadFeed(true).catch(fail);
     }
     function startNew(push) {
-      state.selected = null; state.newMode = true; state.feed = null;
+      state.selected = null; state.newMode = true; state.feed = null; state.sig = { rail: "", top: "", thread: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({}, "", "/console");
       renderRail(); renderTop(); renderThread(); renderComposer(); refs.text.focus();
@@ -425,7 +468,7 @@
       if (bootData.selected) select(bootData.selected, false);
       schedule(false);
     });
-    return { state, select, startNew, send, renderThread, renderRail };
+    return { state, select, startNew, send, renderThread, renderRail, loadFeed };
   }
 
   if (typeof document !== "undefined" && document.getElementById && document.getElementById("pe-con")) boot(document, window);

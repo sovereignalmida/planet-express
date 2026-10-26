@@ -14,12 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from config_schema import MissionConsoleConfig
-from planet_express.console.service import (
-    BudgetSpent,
-    ConsoleError,
-    ConsoleFull,
-    ConsoleService,
-)
+from planet_express.console.service import ConsoleConflict, ConsoleError, ConsoleService
 from planet_express.console.store import (
     ConsoleStore,
     Conversation,
@@ -28,6 +23,7 @@ from planet_express.console.store import (
     clean_text,
 )
 from planet_express.missions.events import redact_value
+from planet_express.missions.state import TERMINAL
 from planet_express.missions.store import MissionStore
 from planet_express.missions.supervisor import Supervisor
 
@@ -58,6 +54,8 @@ def describe(conv: Conversation, mission_status: str, plan: dict | None, running
         return _level("Archived", "none", "Recent", "Archived", "This conversation is closed and its working files are gone.")
     if conv.state == "archiving":
         return _level("Archiving", "none", "Recent", "Archiving", "Stopping and cleaning up; it takes a moment.")
+    if mission_status in TERMINAL:
+        return _level("Closed", "none", "Recent", "This conversation was closed", "It was closed from the Work log. Start a new conversation to go on.")
     if running:
         return _level("Looking into it", "ok", "Working", "Working on it", "The agent is investigating. You can stop it at any time.")
     if starting:
@@ -102,20 +100,25 @@ class ConsoleApi:
 
     def list(self) -> dict:
         now = self._clock()
+        status = self.status()
         rows = []
         for conv in self.console.conversations(states=("open", "archiving"), limit=200):
             view = self._view(conv)
             rows.append({"id": conv.id, "title": conv.title, "origin": conv.origin, "state": conv.state, "age": _age(now, conv.last_activity_at),
                          "turns": conv.turns, "status": {k: view[k] for k in ("text", "level", "group")}})
-        return {"conversations": rows, "status": self.status()}
+        return {"conversations": rows, "status": status}
 
     def feed(self, conversation_id: str, after_message: int = 0, after_event: int = 0) -> dict:
         conv = self._conversation(conversation_id)
         view = self._view(conv)
-        messages = self.console.messages(conv.id, after=after_message, limit=MAX_MESSAGES)
+        status = self.status()
+        # A first load of a long conversation shows the NEWEST messages; later polls ask for what is after the last one seen.
+        messages = (self.console.recent_messages(conv.id, MAX_MESSAGES) if after_message == 0
+                    else self.console.messages(conv.id, after=after_message, limit=MAX_MESSAGES))
         events, last_event, turn_starts = self._events(conv, after_event)
         plan = view.pop("plan_row")
         running = view.pop("running")
+        status_view = view["mission_closed"]
         used_pct = min(100, round(100 * conv.tokens_used / conv.token_budget)) if conv.token_budget else 100
         spent = conv.tokens_left < self.cfg.min_turn_tokens
         return {
@@ -123,19 +126,19 @@ class ConsoleApi:
                              "status": {k: view[k] for k in ("text", "level", "group")}, "verdict": view["verdict"]},
             "budget": {"used_pct": used_pct, "tokens_used": conv.tokens_used, "token_budget": conv.token_budget, "tokens_left": conv.tokens_left,
                        "state": "stop" if spent else "warn" if used_pct >= 80 else "ok"},
-            "running": running, "composer": self._composer(conv, running, spent),
+            "running": running, "composer": self._composer(conv, running, spent, status, status_view),
             "messages": [{"seq": m.seq, "role": m.role, "turn": m.turn, "at": m.at, "text": clean_text(m.text, MAX_TEXT),
                           "by": (m.actor or "").removeprefix("operator:") or None} for m in messages],
             "last_message": messages[-1].seq if messages else after_message,
             "events": events, "last_event": last_event, "turn_starts": turn_starts,
-            "plan": self._plan(plan), "status": self.status(),
+            "plan": self._plan(plan), "status": status,
         }
 
     # ── actions (the operator is the authenticated dashboard or Telegram identity) ─────────
     def create(self, operator: str, text: str, incident_id: str | None = None) -> dict:
         try:
             conv = self.service.create(operator, text, incident_id=incident_id)
-        except ConsoleFull as exc:
+        except ConsoleConflict as exc:
             raise ConsoleApiError(str(exc), "conflict") from None
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
@@ -145,7 +148,9 @@ class ConsoleApi:
         self._conversation(conversation_id)
         try:
             seq = self.service.post(conversation_id, operator, text)
-        except BudgetSpent as exc:
+        except ConversationNotFound:
+            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
+        except ConsoleConflict as exc:
             raise ConsoleApiError(str(exc), "conflict") from None
         except ConversationClosed as exc:
             raise ConsoleApiError(str(exc), "conflict") from None
@@ -157,6 +162,8 @@ class ConsoleApi:
         self._conversation(conversation_id)
         try:
             return {"stopped": self.service.interrupt(conversation_id, operator)}
+        except ConversationNotFound:
+            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
 
@@ -164,6 +171,8 @@ class ConsoleApi:
         self._conversation(conversation_id)
         try:
             return {"archiving": self.service.archive(conversation_id, operator)}
+        except ConversationNotFound:
+            raise ConsoleApiError("that conversation no longer exists", "not_found") from None
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
 
@@ -185,22 +194,24 @@ class ConsoleApi:
 
     def _view(self, conv: Conversation) -> dict:
         mission = self.ms.get_mission(conv.mission_id)
-        in_flight = self.supervisor.has_run(conv.mission_id) or mission.status == "investigating"
+        closed = mission.status in TERMINAL
+        in_flight = not closed and (self.supervisor.has_run(conv.mission_id) or mission.status == "investigating")
         waiting = self.console.pending(conv.id) is not None and mission.status in ("queued", "draft", "awaiting_decision", "needs_operator")
-        starting = not in_flight and (mission.status in ("queued", "draft") or waiting)
-        plan_row = self.console.current_plan(conv.id)
-        plan = json.loads(plan_row["plan_json"]) if plan_row else None
-        system = []
-        if mission.status == "needs_operator":                              # the reason is only needed when the last turn failed
-            system = [m.text for m in self.console.messages(conv.id, limit=MAX_MESSAGES) if m.role == "system"]
-        out = describe(conv, mission.status, plan, in_flight, system[-1] if system else None, self.cfg.min_turn_tokens, starting)
-        out.update(running=in_flight or starting, plan_row=plan_row)
+        starting = not closed and not in_flight and (mission.status in ("queued", "draft") or waiting)
+        pending = self.console.current_plan(conv.id)
+        if pending is not None and int(self._clock()) - int(pending["created_at"]) > PLAN_TTL_S:
+            self.console.set_plan_status(pending["id"], "expired")            # an expired plan is never pending again: nothing may act on it
+            pending = None
+        plan = json.loads(pending["plan_json"]) if pending else None
+        last_system = self.console.last_system_text(conv.id) if mission.status == "needs_operator" else None
+        out = describe(conv, mission.status, plan, in_flight, last_system, self.cfg.min_turn_tokens, starting)
+        shown = pending or self.console.latest_plan(conv.id)                  # the card still shows an expired plan, as expired
+        out.update(running=in_flight or starting, plan_row=shown if shown and shown["status"] in ("pending", "expired") else None, mission_closed=closed)
         return out
 
-    def _composer(self, conv: Conversation, running: bool, spent: bool) -> dict:
-        if conv.state != "open":
+    def _composer(self, conv: Conversation, running: bool, spent: bool, status: dict, mission_closed: bool = False) -> dict:
+        if conv.state != "open" or mission_closed:
             return {"mode": "off", "reason": "This conversation is closed."}
-        status = self.status()
         if status["proposal_only"]:
             return {"mode": "off", "reason": status["proposal_only_reason"]}
         if spent:
@@ -215,18 +226,23 @@ class ConsoleApi:
         plan = redact_value(json.loads(row["plan_json"]))
         age = int(self._clock()) - int(row["created_at"])
         return {"id": row["id"], "turn": row["turn"], "status": row["status"], "created_at": row["created_at"], "hash": row["plan_hash"][:8],
-                "expired": age > PLAN_TTL_S, "plan": plan}
+                "expired": row["status"] == "expired" or age > PLAN_TTL_S, "plan": plan}
 
     def _events(self, conv: Conversation, after: int) -> tuple[list[dict], int, list[int]]:
         """The agent's activity for the trail, redacted and bounded, each tagged with the turn it belongs to (turns are the
         investigating transitions of the conversation's mission)."""
         with self.ms.store._connect() as conn:
             starts = [r[0] for r in conn.execute(
-                "SELECT seq FROM mission_events WHERE mission_id=? AND kind='state' AND body_json LIKE '%\"to\": \"investigating\"%' ORDER BY seq",
+                "SELECT seq FROM mission_events WHERE mission_id=? AND kind='state' AND json_extract(body_json, '$.to')='investigating' ORDER BY seq",
                 (conv.mission_id,))]
-            rows = conn.execute("SELECT seq, at, kind, actor, body_json FROM mission_events WHERE mission_id=? AND seq>? "
-                                "AND kind IN ('note','tool') AND actor='worker' ORDER BY seq LIMIT ?",
-                                (conv.mission_id, after, MAX_EVENTS)).fetchall()
+            if after == 0:      # a first load of a busy conversation shows the NEWEST activity, not the first
+                rows = list(reversed(conn.execute("SELECT seq, at, kind, actor, body_json FROM mission_events WHERE mission_id=? "
+                                                  "AND kind IN ('note','tool') AND actor='worker' ORDER BY seq DESC LIMIT ?",
+                                                  (conv.mission_id, MAX_EVENTS)).fetchall()))
+            else:
+                rows = conn.execute("SELECT seq, at, kind, actor, body_json FROM mission_events WHERE mission_id=? AND seq>? "
+                                    "AND kind IN ('note','tool') AND actor='worker' ORDER BY seq LIMIT ?",
+                                    (conv.mission_id, after, MAX_EVENTS)).fetchall()
         out = []
         for seq, at, kind, _actor, body_json in rows:
             try:

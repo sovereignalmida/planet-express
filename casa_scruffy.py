@@ -320,7 +320,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     def unavailable(error):
         if is_console_request():
             detail = getattr(error, "detail", None)
-            status, message = {"bad_request": (400, "That request was not valid."), "not_found": (404, "That conversation no longer exists."),
+            status, message = {"bad_request": (400, detail or "That request was not valid."), "not_found": (404, "That conversation no longer exists."),
                                "conflict": (409, detail or "That cannot be done right now."), "forbidden": (403, "That is not allowed."),
                                "disabled": (503, "Missions are disabled on this host."),
                                "unavailable": (503, detail or "The Console is not available on this host.")}.get(
