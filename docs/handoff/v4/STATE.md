@@ -130,3 +130,22 @@ commit log). **Codex was SKIPPED for slice 2** (usage limit until 21:12 on 2026-
 
 **Before enabling on the live host:** deploy a new tag (code only; the rc7 helper already has `state_dir`), add `missions.console.enabled: true` and confirm `console.model` is
 one of your OpenRouter `model_broker.models`; run one conversation, watch `journalctl -u casa-planetexpress`, check the uid is released after an archive.
+
+### Console slice 3 (2026-10-26): the API and the page. On `v4-next`, NOT deployed, NOT tagged.
+Live host is still on `v4.0.0-rc7`. Nothing below runs until deployed AND `missions.console.enabled: true`.
+
+**What exists:** `planet_express/console/api.py` (`ConsoleApi`: list, live feed, plain-language status and verdict written by PE, open/post/interrupt/archive/scrap-plan) behind
+`console.*` RPC methods in `application/mission_service.py` (the daemon attaches it in `casa_farnsworth.py`); dashboard routes `/console`, `/console/<id>`, `/api/console/*` in
+`casa_scruffy.py` (CSRF on every POST, operator = the signed-in one, strict ids, Core's operator-written refusals shown); `templates/console.html`, `static/console.js`, `static/console.css`.
+The page draws everything with text nodes only (a node test under a fake DOM that throws on markup APIs proves hostile text stays text). Plan cards are READ-ONLY: Modify pre-fills the composer,
+Scrap sets the plan aside; there is no Confirm until P2. Checked in a real browser (desktop 1440x900, phone 390x844) with `scripts/console_preview.py` (canned conversations, no host).
+
+**Verified:** node tests (`tests/js/console.test.js`, run by `tests/test_console_js.py`), API/RPC/dashboard tests, the full unit suite. Review: Claude `/code-review high` (11 findings fixed with
+tests, commit 69c44c5); Codex pass on slice 3 see the commit log.
+
+**Not built (next):** P2 (Confirm sheet: mints the hash-bound Repair grant from a plan option, live execution view, tripwire banner, PE verification in the thread, rollback); Telegram
+parity (replies, plan-card buttons carrying the grant fingerprint); memory candidates at close; the "Work log" link still goes to the Missions page (P4 folds it in); the context panel
+(Evidence/Scope/Limits/Record) is not drawn yet; incident -> conversation (`console.create` already takes `incident_id`; no button yet).
+Known and left: the per-poll query count (bounded by `max_open` and the poll rate).
+
+**Before enabling on the live host:** deploy a new tag (code only), set `missions.console.enabled: true` with `console.model` inside your broker's `models`, restart core, open `/console`.
