@@ -195,3 +195,9 @@ Codex (6, then 3 more on the fixes) and Claude `/code-review high` (8) fixed wit
 Left: Evidence has no per-container levels or "context used %" from the design (needs inventory/levels in the feed); Record shows counts only, no links.
 **Not built (next):** P4 retire old Chat/Missions pages (Work log folded in); incident -> conversation button.
 
+
+### v4.0.0-rc8 (2026-10-27): tagged on `v4-next`, NOT deployed. Live host is still on `v4.0.0-rc7`.
+Adds, since rc7: Console P2 (plans, Confirm, the run in the thread), Telegram parity, memory candidates, the context panel. Verified: unit suite 7120 passed; privileged suite 271 passed / 17 skipped in Docker and
+283 passed / 5 skipped on the Ubuntu test VM (`PE_PYTHON=/opt/pe-venv/bin/python PE_VM_DIR=/opt/pe-privileged-tests scripts/run_privileged_tests.sh --vm 192.168.122.142`; the MOS VM was off and was not run).
+**Not verified live:** a real Telegram send from the console code; a real conversation where the agent offers a lesson; the context panel in a real browser; the first live Repair from the Console (the P2 acceptance test).
+**Not built (next):** P4 retire old Chat/Missions pages (Work log folded in); incident -> conversation button.
