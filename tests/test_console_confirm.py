@@ -305,3 +305,19 @@ def test_a_run_that_finished_does_not_hide_a_newer_plan_waiting_for_a_decision(r
     rig.add_plan()
     shown = rig.api.feed(rig.conv.id)["conversation"]["status"]
     assert shown["group"] == "Needs you" and shown["text"] == "Needs your call", shown
+
+
+def test_the_context_panel_follows_the_run_counts_only_enforced_protection_and_says_when_it_has_ended(rig):
+    plan_id = rig.add_plan(plan_doc(exclude=["service:media/db"]))
+    view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
+    before = rig.api.feed(rig.conv.id)["context"]
+    grant = rig.st.ms.get_mission(view["mission_id"]).grant()
+    assert grant.advisory_exclusions(), "the free-form exclusion is only a note"
+    assert before["scope"]["kind"] == "run" and before["scope"]["stacks"] == ["media"]
+    assert before["scope"]["protected"] == len(set(grant.protected.resources) | set(grant.enforced_exclusions()))
+    assert before["scope"]["protected"] < len(grant.protected.resources) + len(grant.exclusions)
+    assert rig.st.drive(view["mission_id"]) == "completed"
+    after = rig.api.feed(rig.conv.id)["context"]
+    assert after["scope"]["kind"] == "last_run"                              # an ended run is history, not something the operator can act on
+    assert after["record"]["runs"] == 1 and after["record"]["events"] > before["record"]["events"]     # the run's own events are part of the record

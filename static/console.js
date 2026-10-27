@@ -108,10 +108,10 @@
     const bootData = JSON.parse(document.getElementById("con-boot").textContent);
     const $ = id => document.getElementById(id);
     const refs = { sheet: $("con-sheet"), list: $("con-list"), top: $("con-top"), scroll: $("con-scroll"), thread: $("con-thread"), composer: $("con-composer"),
-                   text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
+                   ctx: $("con-ctx"), text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
     const state = { selected: null, list: [], feed: null, messages: [], events: [], lastMessage: 0, lastEvent: 0, newMode: true,
                     picked: {}, openTrails: {}, scrapArmed: false, archiveArmed: false, timer: null, error: null, sending: false,
-                    inflight: null, again: false, sig: { rail: "", top: "", thread: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {}, drift: null, preparing: false, editing: null, draft: "", area: null, deciding: false };
+                    inflight: null, again: false, ctxTab: "evidence", ctxOpen: false, sig: { rail: "", top: "", thread: "", ctx: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {}, drift: null, preparing: false, editing: null, draft: "", area: null, deciding: false };
     const ORIGINS = { operator: ["Y", "You asked"], incident: ["!", "From an incident"], pe: ["P", "PE started it"] };
     const EXAMPLES = ["The download apps lost internet after the reboot. Figure out why.", "Why is the media stack slow right now?",
                       "Which containers restarted in the last day, and why?"];
@@ -189,13 +189,80 @@
         state.archiveArmed = false;
         try { await post("/api/console/" + state.selected + "/archive"); await loadFeed(); await refreshList(); } catch (e) { fail(e); }
       });
-      const bar = add(el("div", "pe-con-titlebar"), back, title, meter, archive, log);
+      const ctxBtn = el("button", "pe-btn sm ghost pe-con-ctxbtn", "Context"); ctxBtn.type = "button"; ctxBtn.setAttribute("aria-label", "Show context"); ctxBtn.setAttribute("aria-expanded", state.ctxOpen ? "true" : "false");
+      ctxBtn.addEventListener("click", () => { state.ctxOpen = !state.ctxOpen; state.ctxFocus = state.ctxOpen; ctxBtn.setAttribute("aria-expanded", state.ctxOpen ? "true" : "false"); renderCtx(); });
+      const bar = add(el("div", "pe-con-titlebar"), back, title, meter, ctxBtn, archive, log);
       const v = c.verdict, level = c.status.level;
       const orb = { ok: "✓", warn: "!", high: "✕", crit: "✕", none: "…" }[level] || "…";
       const verdict = el("div", "pe-verdict compact " + level); verdict.setAttribute("role", "status"); verdict.setAttribute("aria-live", "polite");
       add(verdict, el("div", "pe-verdict-orb", orb), add(el("div", "pe-verdict-text"), el("h2", "", v.h), el("p", "", v.p)));
       add(refs.top, bar, verdict);
     }
+
+    // ── context panel: what PE itself knows about this conversation (read from its records, never the agent's account) ──
+    const CTX_TABS = [["evidence", "Evidence"], ["scope", "Scope"], ["limits", "Limits"], ["record", "Record"]];
+    function ctxRows(x) {
+      const list = items => items.length ? items.join(", ") : "none";
+      if (state.ctxTab === "scope") return [["Can act on", { run: "the confirmed run", last_run: "nothing: the last run has ended" }[x.scope.kind] || "nothing: read-only"], ["Stacks", list(x.scope.stacks)],
+        ["Services", list(x.scope.services)], ["Paths", list(x.scope.paths)], ["Protected (enforced)", String(x.scope.protected)]];
+      if (state.ctxTab === "limits") return [["Model budget (this conversation)", x.limits.token_budget.toLocaleString() + " tokens"], ["Time" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), x.limits.minutes + " min"], ["Steps" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), String(x.limits.steps)]];
+      if (state.ctxTab === "record") return [["Events", String(x.record.events)], ["Runs", String(x.record.runs)], ["Checkpoint", x.record.checkpoint ? "taken" : "none"]];
+      return [["Incident", x.evidence.incident || "none"], ["Turns", String(x.evidence.turns)], ["Budget used", x.evidence.budget_used_pct + "%"]];
+    }
+    function renderCtx() {
+      const f = state.feed, x = f && f.context;
+      const sig = JSON.stringify([state.newMode, x, state.ctxTab, state.ctxOpen]);
+      if (sig === state.sig.ctx) return;
+      state.sig.ctx = sig;
+      const kept = Array.from(refs.ctx.querySelectorAll ? refs.ctx.querySelectorAll("button") : []).indexOf(document.activeElement);   // a poll redraw must not drop focus
+      refs.ctx.replaceChildren();
+      const show = !!x && !state.newMode;
+      refs.ctx.hidden = !show;
+      con.classList[show ? "remove" : "add"]("no-ctx");
+      con.classList[show && state.ctxOpen ? "add" : "remove"]("ctx-open");
+      if (!show) { for (const part of [refs.top, refs.scroll, refs.composer]) part.inert = false; return; }
+      const narrow = !window.matchMedia || window.matchMedia("(max-width: 900px)").matches;
+      const sheet = state.ctxOpen && narrow;                              // on a narrow screen it is a modal sheet: focus goes in, Escape and the Context button return it
+      state.ctxModal = sheet;
+      for (const part of [refs.top, refs.scroll, refs.composer]) part.inert = sheet;      // the rest of the page cannot be reached behind the sheet
+      if (sheet) { refs.ctx.setAttribute("role", "dialog"); refs.ctx.setAttribute("aria-modal", "true"); }
+      else { refs.ctx.setAttribute("role", "complementary"); refs.ctx.setAttribute("aria-modal", "false"); }
+      const tabs = el("div", "pe-ctabs"); tabs.setAttribute("role", "tablist");
+      for (const [key, label] of CTX_TABS) {
+        const tab = el("button", "pe-ctab" + (key === state.ctxTab ? " is-active" : ""), label); tab.type = "button";
+        tab.setAttribute("role", "tab"); tab.setAttribute("aria-selected", key === state.ctxTab ? "true" : "false");
+        tab.addEventListener("click", () => {
+          state.ctxTab = key; renderCtx();
+          const again = refs.ctx.children[0] && refs.ctx.children[0].children[CTX_TABS.findIndex(t => t[0] === key)]; if (again) again.focus();    // the redraw replaced the tab the operator was on
+        });
+        tabs.appendChild(tab);
+      }
+      const card = el("div", "pe-ctx-card");
+      add(card, el("h4", "", (CTX_TABS.find(t => t[0] === state.ctxTab) || CTX_TABS[0])[1].toUpperCase()));
+      for (const [k, v] of ctxRows(x)) add(card, add(el("div", "pe-ctx-row"), el("span", "pe-footnote", k), el("span", "", v)));
+      add(refs.ctx, tabs, add(el("div", "pe-ctx-body"), card));
+      if (kept >= 0 && refs.ctx.querySelectorAll) { const again = refs.ctx.querySelectorAll("button")[kept]; if (again) again.focus(); }
+      if (sheet && state.ctxFocus) { state.ctxFocus = false; const first = tabs.children[0]; if (first) first.focus(); }
+    }
+    function closeCtx() {
+      if (!state.ctxOpen) return;
+      state.ctxOpen = false; renderCtx();
+      const btn = refs.top.querySelector && refs.top.querySelector(".pe-con-ctxbtn"); if (btn) { btn.setAttribute("aria-expanded", "false"); btn.focus(); }
+    }
+    if (window.matchMedia) {                                    // widening past the breakpoint turns the sheet back into a plain panel
+      const narrowQuery = window.matchMedia("(max-width: 900px)");
+      if (narrowQuery.addEventListener) narrowQuery.addEventListener("change", () => { state.sig.ctx = ""; renderCtx(); });
+    }
+    refs.ctx.addEventListener("keydown", ev => {
+      if (!state.ctxModal) return;
+      if (ev.key === "Escape") { ev.preventDefault(); closeCtx(); return; }
+      if (ev.key !== "Tab") return;                             // keep Tab inside the sheet
+      const stops = Array.from(refs.ctx.querySelectorAll ? refs.ctx.querySelectorAll("button") : []);
+      if (!stops.length) return;
+      const at = stops.indexOf(document.activeElement);
+      if (ev.shiftKey && at <= 0) { ev.preventDefault(); stops[stops.length - 1].focus(); }
+      else if (!ev.shiftKey && at === stops.length - 1) { ev.preventDefault(); stops[0].focus(); }
+    });
 
     // ── thread ──
     function prose(parent, text) {
@@ -660,36 +727,36 @@
       state.lastMessage = feed.last_message; state.lastEvent = feed.last_event;
       state.feed = feed; state.status = feed.status; state.error = null; state.scrapArmed = state.scrapArmed && !!feed.plan;
       state.archiveArmed = state.archiveArmed && feed.conversation.state === "open";
-      renderTop(); renderThread(); renderComposer(); renderRail();
+      renderTop(); renderThread(); renderComposer(); renderRail(); renderCtx();
     }
     function leaveConversation() {
       // Per-conversation UI state never travels with the operator: an armed rollback, a drift offer and an open sheet belong to the one they were for.
       if (state.sheetBusy) return false;
       if (state.sheet) closeSheet(true);
-      state.armed = {}; state.drift = null; state.editing = null; state.draft = ""; state.area = null;
+      state.ctxOpen = false; state.armed = {}; state.drift = null; state.editing = null; state.draft = ""; state.area = null;
       return true;
     }
     function select(id, push) {
       if (!leaveConversation()) return;
       state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null;
-      state.sig = { rail: "", top: "", thread: "" };
+      state.sig = { rail: "", top: "", thread: "", ctx: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({ id }, "", "/console/" + id);
-      renderRail(); renderThread(); renderComposer();
+      renderRail(); renderThread(); renderComposer(); renderCtx();
       loadFeed(true).catch(fail);
     }
     function startNew(push) {
       if (!leaveConversation()) return;
-      state.selected = null; state.newMode = true; state.feed = null; state.sig = { rail: "", top: "", thread: "" };
+      state.selected = null; state.newMode = true; state.feed = null; state.sig = { rail: "", top: "", thread: "", ctx: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({}, "", "/console");
-      renderRail(); renderTop(); renderThread(); renderComposer(); refs.text.focus();
+      renderCtx(); renderRail(); renderTop(); renderThread(); renderComposer(); refs.text.focus();
     }
     function showList() {
       if (!leaveConversation()) return;
       con.classList.remove("is-thread"); con.classList.add("is-list");
       if (window.history) window.history.pushState({}, "", "/console");
-      state.selected = null; state.feed = null; state.newMode = true; renderRail(); renderTop(); renderThread(); renderComposer();
+      state.selected = null; state.feed = null; state.newMode = true; renderCtx(); renderRail(); renderTop(); renderThread(); renderComposer();
     }
     function schedule(now) {
       window.clearTimeout(state.timer);
@@ -711,7 +778,7 @@
     refs.newBtn.addEventListener("click", () => startNew(true));
     window.addEventListener("popstate", () => {
       const m = /\/console\/([0-9a-f]{16})/.exec(window.location.pathname);
-      if (m) select(m[1], false); else { state.selected = null; state.newMode = true; state.feed = null; con.classList.add("is-list"); con.classList.remove("is-thread"); renderRail(); renderTop(); renderThread(); renderComposer(); }
+      if (m) select(m[1], false); else { if (!leaveConversation()) return; state.selected = null; state.newMode = true; state.feed = null; con.classList.add("is-list"); con.classList.remove("is-thread"); renderCtx(); renderRail(); renderTop(); renderThread(); renderComposer(); }
     });
     document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(true); });
 

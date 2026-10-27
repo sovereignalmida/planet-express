@@ -49,3 +49,14 @@
 .pe-con-lesson-title { font-weight: 600; margin-bottom: 4px; }
 .pe-con-lesson.discarded .pe-con-pre { opacity: .55; text-decoration: line-through; }
 .pe-con-edit { width: 100%; box-sizing: border-box; font: inherit; padding: 8px; border-radius: 6px; border: 1px solid var(--pe-line, rgba(127,127,127,.4)); background: transparent; color: inherit; resize: vertical; }
+
+/* Context panel: beside the thread on a wide screen, a bottom sheet behind the Context button on a narrow one. */
+.pe-con-ctxbtn { display: none; }
+@media (max-width: 900px) {
+  .pe-con-ctxbtn { display: inline-flex; }
+  .pe-con { grid-template-columns: 272px minmax(0,1fr); }          /* the sheet floats, so the hidden panel takes no column */
+  .pe-con-ctx { display: none; }
+  .pe-con.ctx-open .pe-con-ctx { display: flex; position: absolute; left: 0; right: 0; bottom: 0; max-height: 60%; z-index: 5; border-left: none; border-top: 1px solid var(--pe-border-strong); }
+}
+.pe-con-ctx[hidden] { display: none; }
+@media (max-width: 900px) { .pe-con-titlebar { flex-wrap: wrap; row-gap: 8px; } .pe-con-titlebar > div { flex-basis: 40%; } }

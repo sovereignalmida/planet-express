@@ -282,6 +282,12 @@ class MissionStore:
             return int(conn.execute("SELECT COALESCE(MAX(seq), 0) FROM mission_events WHERE mission_id=?",
                                     (mission_id,)).fetchone()[0])
 
+    def activity_count(self, mission_ids: list[str]) -> int:
+        if not mission_ids:
+            return 0
+        with self.store._connect() as conn:
+            return int(conn.execute(f"SELECT COUNT(*) FROM mission_events WHERE mission_id IN ({','.join('?' * len(mission_ids))})", mission_ids).fetchone()[0])
+
     def proxy_write_since(self, mission_id: str, after_seq: int) -> bool:
         """Whether an accepted proxy write began after a scan cursor, even if its result is already recorded."""
         with self.store._connect() as conn:

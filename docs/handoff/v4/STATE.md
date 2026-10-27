@@ -185,3 +185,13 @@ Quarantine is unchanged: nothing is retrievable by any session until kept (teste
 Reviews: Codex (3) and Claude `/code-review xhigh` (14) fixed with tests; left on purpose: the decision logic lives in `ConsoleApi` rather than `MissionService._card_change` (two places confirm a card), and the feed
 reads each lesson's card per poll (<=20, bounded). Telegram has no lesson commands: its pushed message says to open the Console.
 Unit suite 7118 passed. Not verified live (needs a real conversation where the agent offers a lesson).
+
+### Console context panel (2026-10-27): On `v4-next`, NOT deployed, NOT tagged.
+The feed carries `context` (`ConsoleApi._context`), read from PE's own records and never the agent's account: Evidence (incident id, turns, budget used), Scope (stacks, services, paths and the count of ENFORCED
+protection only: free-form `will_not_touch` notes are not counted; `read_only` / `run` / `last_run` so an ended run is never shown as actionable), Limits (model budget, minutes, steps of the run's grant), Record (events across the
+conversation's mission and every run's, runs, checkpoint taken). `static/console.js` `renderCtx` draws four tabs with text nodes only; wide screens show it as the third column, under 900px it is a modal bottom sheet behind a
+Context button (focus in, Tab kept inside, Escape returns focus, reset when the operator changes conversation).
+Codex (6, then 3 more on the fixes) and Claude `/code-review high` (8) fixed with tests: focus survives poll redraws, `[hidden]` CSS override, the sheet is inert behind it and reverts on widening, Limits says whether it is the conversation's or the run's, `MissionStore.activity_count` replaces a private-connection query. Left on purpose: `feed()` reads executions and missions a few times per poll (bounded, same known cost as before). Unit suite 7120 passed.
+Left: Evidence has no per-container levels or "context used %" from the design (needs inventory/levels in the feed); Record shows counts only, no links.
+**Not built (next):** P4 retire old Chat/Missions pages (Work log folded in); incident -> conversation button.
+

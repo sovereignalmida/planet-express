@@ -142,6 +142,7 @@ class ConsoleApi:
             "last_message": messages[-1].seq if messages else after_message,
             "events": events, "last_event": last_event, "turn_starts": turn_starts,
             "plan": self._plan(plan), "execution": self._execution_view(conv), "lessons": self._lessons(conv), "status": status,
+            "context": self._context(conv, used_pct),
         }
 
     # ── actions (the operator is the authenticated dashboard or Telegram identity) ─────────
@@ -452,6 +453,26 @@ class ConsoleApi:
                 "timeline": execution_mod.timeline(mission, ex["authorised_by"]), "pause": pause,
                 "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission),
                 "finished": mission.status in execution_mod.TERMINALISH}
+
+    def _context(self, conv: Conversation, used_pct: int) -> dict:
+        """The side panel, read from PE's own records (the mission's grant, its event log, the run's checkpoint), never from the agent's account.
+        Scope and limits are those of the latest confirmed run when there is one, otherwise of the conversation's own read-only mission."""
+        runs = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
+        own = self.ms.get_mission(conv.mission_id)
+        mission = self.ms.get_mission(runs[-1]["mission_id"]) if runs else own
+        grant = mission.grant()
+        ids = [conv.mission_id] + [r["mission_id"] for r in runs]       # the whole record: the conversation's own mission and every run's
+        events = self.ms.activity_count(ids)
+        active = bool(runs) and mission.status not in execution_mod.TERMINALISH
+        # Only exclusions that name a concrete resource are enforced; the free-form ones are notes, so they are not counted as protection.
+        protected = len(set(grant.protected.resources) | set(grant.enforced_exclusions()))
+        return {
+            "evidence": {"incident": own.incident_id, "turns": conv.turns, "budget_used_pct": used_pct},
+            "scope": {"kind": "run" if active else "last_run" if runs else "read_only", "stacks": list(grant.scope.stacks), "services": list(grant.scope.services),
+                      "paths": list(grant.scope.paths), "protected": protected},
+            "limits": {"kind": "run" if runs else "conversation", "token_budget": conv.token_budget, "minutes": max(1, grant.budgets.wall_s // 60), "steps": grant.budgets.tool_calls},
+            "record": {"events": events, "checkpoint": mission.checkpoint_id is not None, "runs": len(runs)},
+        }
 
     def _confirm_view(self, flow, execution_id: int, mission_id: str, option: plan_mod.Option, operator: str) -> dict:
         """What the operator is about to authorise, in plain words, from the approval card PE built (never from the agent's text)."""

@@ -288,3 +288,17 @@ def test_an_incident_that_no_longer_exists_is_refused_in_words_and_reserves_noth
         rig.api.create("chris", "look", incident_id="f" * 12)
     assert err.value.code == "bad_request" and "no longer exists" in str(err.value)
     assert rig.console.count_open() == 0
+
+
+def test_the_context_panel_reads_scope_limits_and_record_from_pe_not_the_agent(rig):
+    made = rig.api.create("chris", "why is the media stack slow?")
+    rig.sup.tick()
+    conv = rig.console.get(made["id"])
+    rig.finish_turn(conv)
+    ctx = rig.api.feed(made["id"])["context"]
+    conv = rig.console.get(made["id"])
+    assert ctx["evidence"] == {"incident": None, "turns": 1, "budget_used_pct": min(100, round(100 * conv.tokens_used / conv.token_budget))}
+    assert ctx["limits"]["kind"] == "conversation"
+    assert ctx["scope"]["kind"] == "read_only" and ctx["scope"]["services"] == [] and ctx["scope"]["paths"] == []
+    assert ctx["limits"]["token_budget"] == conv.token_budget and ctx["limits"]["minutes"] >= 1
+    assert ctx["record"]["events"] > 0 and ctx["record"]["runs"] == 0 and ctx["record"]["checkpoint"] is False

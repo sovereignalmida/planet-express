@@ -32,7 +32,7 @@ function makeDoc(json) {
   doc.getElementById = id => doc._byId[id] || null;
   doc.querySelector = () => ({ content: "csrf-xyz" });
   doc.addEventListener = (ev, fn) => { (doc.listeners[ev] = doc.listeners[ev] || []).push(fn); };
-  for (const id of ["pe-con", "con-sheet", "con-list", "con-top", "con-scroll", "con-thread", "con-composer", "con-text", "con-send", "con-stop", "con-note", "con-new"]) {
+  for (const id of ["pe-con", "con-sheet", "con-list", "con-top", "con-scroll", "con-thread", "con-composer", "con-ctx", "con-text", "con-send", "con-stop", "con-note", "con-new"]) {
     const n = new FakeNode("div", doc); n.id = id; doc._byId[id] = n;
   }
   const boot = new FakeNode("script", doc); boot._text = JSON.stringify(json); doc._byId["con-boot"] = boot;
@@ -113,7 +113,8 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
   messages: [{ seq: 1, role: "operator", turn: null, at: 1, text: "why? " + EVIL, by: "chris" }, { seq: 2, role: "agent", turn: 1, at: 2, text: "It is **the gateway**.\n\n- " + EVIL, by: null },
              { seq: 3, role: "system", turn: 1, at: 3, text: "note " + EVIL, by: null }],
   last_message: 3, events: [{ seq: 5, at: 1, turn: 1, type: "call", kind: "ran", name: "Bash", detail: EVIL }, { seq: 6, at: 1, turn: 1, type: "result", name: "Bash", excerpt: EVIL, failed: false }], last_event: 6,
-  turn_starts: [4], plan: { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }, status: { enabled: true, proposal_only: false } };
+  turn_starts: [4], context: { evidence: { incident: EVIL, turns: 1, budget_used_pct: 24 }, scope: { kind: "read_only", stacks: [EVIL], services: [], paths: [], protected: 2 },
+    limits: { token_budget: 100000, minutes: 30, steps: 200 }, record: { events: 9, checkpoint: false, runs: 0 } }, plan: { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }, status: { enabled: true, proposal_only: false } };
 
 (async () => {
   const requests = [];
@@ -185,6 +186,17 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.strictEqual(seqs.length, FEED.events.length);
     assert.strictEqual(page.state.messages.length, FEED.messages.length);
   });
+  await atest("the context panel shows PE's records as text, and switches tabs", async () => {
+    const ctx = doc.getElementById("con-ctx");
+    assert.strictEqual(ctx.hidden, false);
+    assert.ok(ctx.textContent.includes("Incident") && ctx.textContent.includes(EVIL));
+    const tabs = ctx.children[0].children;
+    assert.deepStrictEqual(tabs.map(t => t.textContent), ["Evidence", "Scope", "Limits", "Record"]);
+    tabs[1].fire("click");
+    assert.ok(ctx.textContent.includes("nothing: read-only") && ctx.textContent.includes(EVIL) && ctx.textContent.includes("Protected"));
+    ctx.children[0].children[3].fire("click");
+    assert.ok(ctx.textContent.includes("Events") && ctx.textContent.includes("9"));
+  });
   await atest("a poll that finds nothing new leaves the drawn nodes alone (selection and focus survive)", async () => {
     const before = doc.getElementById("con-thread").children.slice();
     const railBefore = doc.getElementById("con-list").children.slice();
@@ -192,6 +204,21 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     page.renderThread(); page.renderRail();
     assert.ok(before.every((n, i) => doc.getElementById("con-thread").children[i] === n), "thread nodes are the same objects");
     assert.ok(railBefore.every((n, i) => doc.getElementById("con-list").children[i] === n), "rail nodes are the same objects");
+  });
+  await atest("on a narrow screen the context sheet is a dialog, Escape closes it, and it does not follow the operator to another conversation", async () => {
+    const ctx = doc.getElementById("con-ctx"), con = doc.getElementById("pe-con");
+    const find = (n, pred) => pred(n) ? n : n.children.map(c => find(c, pred)).find(Boolean);
+    const btn = find(doc.getElementById("con-top"), n => /pe-con-ctxbtn/.test(n.className));
+    btn.fire("click");
+    assert.ok(/ctx-open/.test(con.className) && ctx.attrs.role === "dialog" && ctx.attrs["aria-modal"] === "true");
+    assert.strictEqual(doc.getElementById("con-scroll").inert, true, "the thread is inert behind the sheet");
+    ctx.fire("keydown", { key: "Escape", preventDefault() {} });
+    assert.ok(!/ctx-open/.test(con.className) && ctx.attrs.role === "complementary");
+    assert.strictEqual(doc.getElementById("con-scroll").inert, false);
+    btn.fire("click");
+    assert.ok(/ctx-open/.test(con.className));
+    page.select("0123456789abcdef", false);
+    assert.strictEqual(page.state.ctxOpen, false);
   });
   await atest("opening a conversation shows a loading note, never the new-conversation invite, until its feed arrives", async () => {
     const slow = makeDoc({ status: { enabled: true, proposal_only: false }, selected: null });
