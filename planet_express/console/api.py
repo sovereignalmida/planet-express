@@ -7,6 +7,8 @@ into `operator:<name>` by the service. Nothing here approves, widens or executes
 confirm step exists (P2), and "scrap" only marks a plan as not wanted.
 """
 
+from __future__ import annotations
+
 import bisect
 import json
 import time

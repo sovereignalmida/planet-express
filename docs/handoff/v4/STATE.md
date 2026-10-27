@@ -201,3 +201,9 @@ Adds, since rc7: Console P2 (plans, Confirm, the run in the thread), Telegram pa
 283 passed / 5 skipped on the Ubuntu test VM (`PE_PYTHON=/opt/pe-venv/bin/python PE_VM_DIR=/opt/pe-privileged-tests scripts/run_privileged_tests.sh --vm 192.168.122.142`; the MOS VM was off and was not run).
 **Not verified live:** a real Telegram send from the console code; a real conversation where the agent offers a lesson; the context panel in a real browser; the first live Repair from the Console (the P2 acceptance test).
 **Not built (next):** P4 retire old Chat/Missions pages (Work log folded in); incident -> conversation button.
+
+### v4.0.0-rc9 (2026-10-27): replaces rc8 (do not deploy rc8). On `v4-next`, NOT deployed until the operator restarts the services.
+rc8 did not import on the live host's Python 3.12: `ConsoleApi.list()` shadows the builtin `list` inside the class body, so `-> list[dict]` in `_lessons` raised `TypeError` at load. The dev venv is **Python 3.14**
+(annotations are lazy), so the whole unit suite passed. Fix: `from __future__ import annotations` in `console/api.py`. **Lesson:** before any deploy, import every module and run the suite under the host's interpreter
+(Ubuntu test VM: `/opt/pe-venv/bin/python`, 3.12), and load the live config from a throwaway `git worktree` of the tag before touching the running checkout.
+3.12 results on the VM as root: 67 failures, 66 identical on rc7 (the tests assume a non-root Core), 1 the same kind (`test_console_service` archive/cleanup-session expects Core unable to remove a directory; root can). Non-root: 0 expected.
