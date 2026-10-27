@@ -254,7 +254,7 @@ class FakeDaemon:
                                                                                               "Cmd": ["run", "--password=hunter2hunter2"]},
                                               "HostConfig": c.get("host_config", {}), "Mounts": c.get("mounts", [])})
             if op == "logs" or op == "stats":
-                payload = b"x" * self.stream_bytes
+                payload = getattr(self, "payload", None) or b"x" * self.stream_bytes
                 conn.sendall(b"HTTP/1.0 200 OK\r\nContent-Type: application/vnd.docker.raw-stream\r\n\r\n" + payload)
                 if self.stream_bytes == 0:
                     threading.Event().wait(0.5)

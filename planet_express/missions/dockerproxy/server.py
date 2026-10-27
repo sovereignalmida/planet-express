@@ -4,6 +4,7 @@ objects it names, and for a write check the session's authority NOW, record the 
 from the validated parts. Streams and hijacked connections are bounded in bytes and time and stop the moment the session is
 revoked or paused. Any parse doubt, any daemon surprise, any exception: the client gets a refusal and nothing is forwarded."""
 
+import contextlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from .httpwire import (
     respond,
     strict_json,
 )
+from .logredact import LogRedactor
 from .policy import ContainerInfo, Plan, Policy, Route, redact_inspect
 from .upstream import Upstream, UpstreamError, request_target, status_of
 
@@ -277,7 +279,8 @@ class ProxyServer:
         if route.hijack:
             return self._hijack(conn, target, plan, upgrade, session, write_id)
         if route.stream and plan.method == "GET":
-            return self._stream(conn, target, session, self._event_line if route.name == "events" else None)
+            return self._stream(conn, target, session, self._event_line if route.name == "events" else None,
+                                LogRedactor() if route.name == "container.logs" else None)
         body: Any = plan.body
         length = None
         ctype = "application/json" if plan.body is not None else None
@@ -473,7 +476,7 @@ class ProxyServer:
             actor["Attributes"] = {k: ("[REDACTED]" if _is_secret_key(str(k)) else redact_value(v)) for k, v in attrs.items()}
         return json.dumps(redact_value(doc), separators=(",", ":")).encode() + b"\n"
 
-    def _stream(self, conn: socket.socket, target: str, session, transform=None) -> None:
+    def _stream(self, conn: socket.socket, target: str, session, transform=None, chunker=None) -> None:
         sock, head_bytes, rest = self.upstream.stream(target)
         try:
             status, headers = status_of(head_bytes)
@@ -485,7 +488,7 @@ class ProxyServer:
             extra = {k.title(): headers[k] for k in PASS_HEADERS if k in headers and _SAFE_VALUE.fullmatch(headers[k])}
             self._send_head(conn, 200, ctype, extra)
             self._pump(conn, sock, rest, self.limits.stream_bytes, self.limits.stream_s, session, one_way=True,
-                       transform=transform)
+                       transform=transform, chunker=chunker)
         finally:
             sock.close()
 
@@ -527,7 +530,7 @@ class ProxyServer:
             self._record_result(session, plan.route, status, write_id)
 
     def _pump(self, client: socket.socket, up: socket.socket, first: bytes, cap: int, seconds: float, session, *,
-              one_way: bool, transform=None) -> None:
+              one_way: bool, transform=None, chunker=None) -> None:
         """daemon -> client (and client -> daemon unless one_way), bounded in total bytes and time, ended as soon as the
         session is revoked or paused. A client that has sent everything is half-closed toward the daemon."""
         deadline, moved, pending = time.monotonic() + seconds, 0, b""
@@ -543,10 +546,28 @@ class ProxyServer:
             *done, pending = pending.split(b"\n")
             return b"".join(transform(line) for line in done if line)
 
-        if first:
-            out = lines(first) if transform else first
+        def pass_through(chunk: bytes) -> bytes:
+            if chunker is not None:                         # a stateful, frame-aware transform (a container's log): nothing unredacted goes on
+                return chunker.feed(chunk)
+            return lines(chunk) if transform else chunk
+
+        sent = 0                                            # bytes sent after a transform: the cap holds on what the session receives
+
+        def deliver(dest: socket.socket, out: bytes) -> bool:
+            nonlocal sent
+            if chunker is not None:
+                fits = chunker.fit(out, cap - sent)
+                sent += len(fits)
+                if fits:
+                    dest.sendall(fits)
+                return len(fits) == len(out)                # redaction can expand: the stream ends at the last whole frame or line that fits
             if out:
-                client.sendall(out)
+                dest.sendall(out)
+            return True
+
+        if first:
+            if not deliver(client, pass_through(first)):
+                return
             moved += len(first)
         while sources and moved < cap and time.monotonic() < deadline and self._alive(session):
             ready, _, _ = select.select(sources, [], [], 1.0)
@@ -557,6 +578,9 @@ class ProxyServer:
                     data = b""
                 if not data:
                     if src is up:
+                        if chunker is not None:
+                            with contextlib.suppress(OSError):
+                                deliver(client, chunker.finish())
                         return
                     sources.remove(src)
                     try:
@@ -569,8 +593,11 @@ class ProxyServer:
                 dest.settimeout(10)
                 data = data if moved <= cap else data[: cap - before]
                 try:
-                    out = lines(data) if transform and src is up else data
-                    if out:
+                    out = pass_through(data) if src is up and (transform or chunker is not None) else data
+                    if src is up and chunker is not None:
+                        if not deliver(dest, out):
+                            return
+                    elif out:
                         dest.sendall(out)
                 except OSError:
                     return

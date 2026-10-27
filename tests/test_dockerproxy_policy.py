@@ -626,6 +626,19 @@ def test_read_only_policy_serves_reads_and_nothing_else(root):
         Policy(None, FakeInspector())
 
 
+def test_investigation_mode_reads_any_container_and_still_changes_nothing(root):
+    p = Policy(None, FakeInspector(), read_only=True, investigate=True)
+    for target in ("/v1.43/containers/json", "/v1.43/containers/plex/json", "/v1.43/containers/plex/logs", "/v1.43/containers/plex/stats",
+                   "/v1.43/events", "/v1.43/networks"):
+        assert not p.match(head("GET", target))[0].write
+    for method, target in (("POST", "/v1.43/containers/create"), ("POST", "/v1.43/containers/plex/start"), ("POST", "/v1.43/containers/plex/stop"),
+                           ("POST", "/v1.43/containers/plex/restart"), ("DELETE", "/v1.43/containers/plex"), ("POST", "/v1.43/containers/plex/exec"),
+                           ("PUT", "/v1.43/containers/plex/archive"), ("GET", "/v1.43/containers/plex/archive"), ("GET", "/v1.43/containers/plex/top"), ("POST", "/v1.43/images/create"), ("GET", "/v1.43/exec/x/json")):
+        with pytest.raises(Refusal):
+            p.match(head(method, target))
+    assert Policy(make_scope(str(root)), FakeInspector(), investigate=True).investigate is False      # the flag means nothing on a policy that is not read-only
+
+
 def test_a_bind_source_that_is_a_file_name_trick_is_refused_by_normalisation_not_by_existence(policy, root):
     assert os.path.exists(root / "stacks" / "media" / "config")
     refused(policy, host(Binds=[f"{root}/stacks/media/config/../config:/x"]), "normalised")

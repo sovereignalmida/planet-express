@@ -102,6 +102,7 @@ class DockerProxyService:
         self.upstream = upstream or Upstream(docker_socket)
         self._paused: dict[str, float] = {}         # mission id -> when it was paused (monotonic)
         self._servers: dict[str, tuple[str, ProxyServer]] = {}
+        self._readers: dict[str, ProxyServer] = {}      # investigation sessions' read-only servers (nothing to pause: they change nothing)
         self._lock = threading.Lock()
 
     # ── pause and resume (what the Supervisor and the tripwire call) ────────────────────────────
@@ -145,8 +146,10 @@ class DockerProxyService:
             raise RuntimeError("no such session")
         mission = self.ms.get_mission(row["mission_id"])
         grant = mission.grant()
-        if mission.tier not in REPAIR_UP or grant.docker != "proxy":
+        if grant.docker != "proxy":
             return None
+        if mission.tier not in REPAIR_UP:
+            return self._start_investigation(cs)
         scope = Scope.from_grant(grant, protected=tuple(self.protected()), stacks_root=self.stacks_root,
                                  protected_gids=self.protected_gids)
         execs = ExecTable(self.limits.execs)
@@ -169,16 +172,36 @@ class DockerProxyService:
             server.stop()
         return stop
 
+    def _start_investigation(self, cs) -> Callable[[], None] | None:
+        """An Observe or Propose session reads the whole Docker host (list, inspect, logs, stats, processes, files, events) and changes nothing:
+        the server refuses every write by policy, so the agent never needs the real socket. Any container is readable, protected ones included:
+        reading is how an investigation works, and what the session may CHANGE is governed elsewhere (tier, tripwire, hooks)."""
+        if cs.session_uid is None:
+            return None
+        policy = Policy(None, DaemonInspector(self.upstream), read_only=True, investigate=True, versions=served_versions(self.upstream.api_version()))
+        server = ProxyServer(self.path(cs.session_id), policy=policy, upstream=self.upstream, gate=None, allowed_uids={cs.session_uid},
+                             limits=self.limits, name=f"dockerproxy-ro-{cs.session_id[:8]}")
+        server.start()
+        with self._lock:
+            self._readers[cs.session_id] = server
+
+        def stop() -> None:
+            with self._lock:
+                self._readers.pop(cs.session_id, None)
+            server.stop()
+        return stop
+
     def env(self, cs) -> dict[str, str]:
         with self._lock:
-            bound = cs.session_id in self._servers
+            bound = cs.session_id in self._servers or cs.session_id in self._readers
         path = self.path(cs.session_id)
         return {"PE_DOCKER_SOCKET": path, "DOCKER_HOST": f"unix://{path}"} if bound else {}
 
     def shutdown(self) -> None:
         with self._lock:
-            servers = [s for _, s in self._servers.values()]
+            servers = [s for _, s in self._servers.values()] + list(self._readers.values())
             self._servers.clear()
+            self._readers.clear()
         for server in servers:
             server.stop()
 

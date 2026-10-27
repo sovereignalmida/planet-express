@@ -135,7 +135,7 @@ def test_a_repair_session_gets_its_own_proxy_socket_and_its_environment_names_on
     assert restart(path, token)[0] == 204
 
 
-def test_an_observe_session_gets_no_proxy_and_no_docker_environment(tmp_path):
+def test_an_observe_session_gets_a_read_only_proxy_and_the_docker_environment(tmp_path):
     rig = Rig(tmp_path, tier="observe", behaviours=[{"script": [update()] * 3}])
     d = tempfile.mkdtemp(prefix="dps")
     try:
@@ -143,8 +143,11 @@ def test_an_observe_session_gets_no_proxy_and_no_docker_environment(tmp_path):
         rig.sup.socket_provider = SessionSockets(d, rig.sup, None, build=lambda path, *a, **k: StubWorker(path), proxy=svc)
         rig.sup.start(rig.mid)
         sid = rig.session_ids()[0]
-        assert not os.path.exists(os.path.join(d, sid, "proxy.sock"))
-        assert "DOCKER_HOST" not in rig.cont.spawns(sid)[0]["env"] and os.path.exists(os.path.join(d, sid, "worker.sock"))
+        assert os.path.exists(os.path.join(d, sid, "proxy.sock")) and os.path.exists(os.path.join(d, sid, "worker.sock"))
+        assert rig.cont.spawns(sid)[0]["env"]["DOCKER_HOST"] == f"unix://{os.path.join(d, sid, 'proxy.sock')}"
+        assert sid in svc._readers and sid not in svc._servers          # a reader is never in the pause/resume table: it changes nothing
+        rig.sup.shutdown()
+        assert not os.path.exists(os.path.join(d, sid, "proxy.sock")) and not svc._readers
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

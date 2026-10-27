@@ -390,8 +390,30 @@ def test_an_unreadable_answer_from_a_redacted_route_is_never_passed_through(prox
 def test_streams_are_bounded_in_bytes(env):
     env.daemon.stream_bytes = 2 * 1024 * 1024
     env.make(Limits(head_s=2, stream_bytes=64 * 1024, stream_s=5))
-    status, _, body = env.req("GET", "/containers/qbittorrent/logs?follow=1&stdout=1")
+    status, _, body = env.req("GET", "/containers/qbittorrent/stats?stream=1")
     assert status == 200 and 0 < len(body) <= 64 * 1024 + 8192
+
+
+def test_a_log_reaches_the_session_redacted_framed_or_plain_and_an_unterminated_flood_is_cut(env):
+    secret = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef"
+    text = f"connecting with api_key={secret}\nready\n".encode()
+    for payload in (bytes([1, 0, 0, 0]) + len(text).to_bytes(4, "big") + text, text):
+        env.daemon.payload = payload
+        if env.servers:
+            env.servers[-1].stop()
+        env.make()
+        status, _, body = env.req("GET", "/containers/qbittorrent/logs?stdout=1")
+        assert status == 200 and secret.encode() not in body and b"ready" in body
+    env.daemon.payload = b"password=x\n" * 400                                  # redaction makes each line longer: the cap is on what the session receives
+    env.servers[-1].stop()
+    env.make(Limits(head_s=2, stream_bytes=4096, stream_s=3))
+    status, _, body = env.req("GET", "/containers/qbittorrent/logs?stdout=1")
+    assert status == 200 and 0 < len(body) <= 4096
+    env.daemon.payload = b"x" * (1 << 17)
+    env.servers[-1].stop()
+    env.make()
+    status, _, body = env.req("GET", "/containers/qbittorrent/logs?stdout=1")
+    assert status == 200 and body == b""                                      # never passed on to make it fit
 
 
 def test_streams_are_bounded_in_time_and_stop_when_the_session_is_paused(env):

@@ -215,6 +215,7 @@ class Route:
     hijack: bool = False
     json_response: bool = False
     readonly_ok: bool = False
+    investigate_ok: bool = False                  # served to an investigation session too (read-only, any container): logs (redacted) and stats
 
 
 def _r(path: str) -> re.Pattern:
@@ -243,9 +244,9 @@ ROUTES: tuple[Route, ...] = (
           json_response=True, readonly_ok=True),
     Route("container.logs", ("GET",), _r("/containers/{id}/logs"),
           query=_q("follow", "stdout", "stderr", "since", "until", "timestamps", "tail"), target="container", need="scope",
-          stream=True),
+          stream=True, investigate_ok=True),
     Route("container.stats", ("GET",), _r("/containers/{id}/stats"), query=_q("stream", "one-shot"), target="container",
-          need="scope", stream=True),
+          need="scope", stream=True, investigate_ok=True),
     Route("container.archive.get", ("GET", "HEAD"), _r("/containers/{id}/archive"), query=_q("path"), target="container",
           need="scope", stream=True),
     Route("images.list", ("GET",), _r("/images/json"), query=_q("all", "filters", "digests"), json_response=True,
@@ -340,10 +341,10 @@ class Policy:
                  exec_owner: Callable[[str], str | None] = lambda exec_id: None,
                  json_cap: int = JSON_CAP, archive_cap: int = ARCHIVE_CAP,
                  versions: frozenset[str] = API_VERSIONS, is_socket: Callable[[str], bool] | None = None,
-                 label_allow: Iterable[str] = ()):
+                 label_allow: Iterable[str] = (), investigate: bool = False):
         if not read_only and scope is None:
             raise ValueError("a scoped policy needs a scope")
-        self.scope, self.inspector, self.read_only = scope, inspector, read_only
+        self.scope, self.inspector, self.read_only, self.investigate = scope, inspector, read_only, investigate and read_only
         self.exec_owner, self.json_cap, self.archive_cap, self.versions = exec_owner, json_cap, archive_cap, versions
         self._is_socket = is_socket or _is_unix_socket
         self.label_allow = tuple(label_allow)
@@ -383,7 +384,7 @@ class Policy:
             if head.method not in route.methods:
                 wrong_method = True                       # another route may share the path (archive get / put)
                 continue
-            if self.read_only and not route.readonly_ok:
+            if self.read_only and not (route.readonly_ok or (self.investigate and route.investigate_ok)):
                 raise Refusal("this proxy is read-only: endpoint not served")
             if head.version is None and route.name not in ("ping", "version"):
                 raise Refusal("an API version is required")

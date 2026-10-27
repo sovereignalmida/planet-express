@@ -333,8 +333,9 @@ def build_mission_runner(
                 secret_values=lambda: [v for v in (os.environ.get(var) for var in refs.values()) if v]
                 + (model_broker.secret_values() if model_broker is not None else []))
     authenticator = WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)) if real else None
-    if docker_proxy is None and real and repair_wiring is not None and stacks_root is not None:
-        # Built BEFORE the controls: the tripwire's pause closes the proxy through the callback `build_repair_controls` captures,
+    if docker_proxy is None and real and stacks_root is not None:
+        # Built whether or not Repair is available: Observe and Propose sessions read the Docker host through it (read-only), and a host whose
+        # protected-set discovery is incomplete still investigates. Repair sessions only start where the repair wiring exists. Built BEFORE the controls: the tripwire's pause closes the proxy through the callback `build_repair_controls` captures,
         # so the service has to exist when that is assembled (a pause that never reached the proxy would leave it open).
         from planet_express.missions.dockerproxy.service import DockerProxyService
         docker_proxy = DockerProxyService(
