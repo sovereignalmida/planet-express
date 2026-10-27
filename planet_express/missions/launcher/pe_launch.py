@@ -60,10 +60,16 @@ MAX_ENV_ITEMS, MAX_ENV_VALUE_CHARS, MAX_ENV_CHARS = 64, 4096, 32_768
 MAX_CWD_CHARS = 1024
 TOKEN_CHARS = (16, 256)
 STATE_DIR = re.compile(r"C-[A-Za-z0-9_-]{1,62}")
-SPEC_KEYS = frozenset({"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir", "state_dir"})
-SPEC_REQUIRED = SPEC_KEYS - {"sock_dir", "state_dir"}
+SPEC_KEYS = frozenset({"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir", "state_dir", "read_logs"})
+SPEC_REQUIRED = SPEC_KEYS - {"sock_dir", "state_dir", "read_logs"}
 CONF_KEYS = frozenset({"version", "uid_min", "uid_max", "core_uid", "core_gid", "cgroup_root",
                        "workspace_root", "sock_root", "pids_max"})
+CONF_OPTIONAL = frozenset({"log_groups"})
+# The only groups a log-reading session may be given: they read the host's logs and carry nothing else. The root-owned conf
+# names some of these, never the spec (a spec can only ask for "the log groups"). An allowlist, not a list of groups to avoid:
+# any other group (docker, incus-admin, podman, ...) can be control, and nobody can enumerate those.
+LOG_GROUPS_ALLOWED = frozenset({"adm", "systemd-journal"})
+MAX_LOG_GROUPS = 4
 
 
 class Refused(Exception):
@@ -112,6 +118,8 @@ def check_wire(obj):
         raise Refused("token")
     if "sock_dir" in obj and not isinstance(obj["sock_dir"], bool):
         raise Refused("sock_dir")
+    if "read_logs" in obj and not isinstance(obj["read_logs"], bool):
+        raise Refused("read_logs")
     if "state_dir" in obj and (not isinstance(obj["state_dir"], str) or not STATE_DIR.fullmatch(obj["state_dir"])):
         raise Refused("state_dir")
     return obj
@@ -187,7 +195,7 @@ def load_conf(path=CONF_PATH, *, trusted_uid=0, below="/"):
     finally:
         os.close(fd)
     conf = parse_json(raw)
-    if not isinstance(conf, dict) or set(conf) != CONF_KEYS or conf["version"] != 1:
+    if not isinstance(conf, dict) or not CONF_KEYS <= set(conf) <= CONF_KEYS | CONF_OPTIONAL or conf["version"] != 1:
         raise Refused("conf keys")
     ints = ("uid_min", "uid_max", "core_uid", "core_gid", "pids_max")
     if not all(type(conf[k]) is int and conf[k] >= 0 for k in ints):
@@ -197,7 +205,26 @@ def load_conf(path=CONF_PATH, *, trusted_uid=0, below="/"):
     paths = [conf[k] for k in ("cgroup_root", "workspace_root", "sock_root")]
     if not all(_norm_abs(p) and p != "/" for p in paths) or len(set(paths)) != 3:
         raise Refused("conf paths")
+    groups = conf.get("log_groups", [])
+    if (not isinstance(groups, list) or len(groups) > MAX_LOG_GROUPS or len(set(groups)) != len(groups)
+            or not all(isinstance(g, str) and g in LOG_GROUPS_ALLOWED for g in groups)):
+        raise Refused("conf log_groups")
     return conf
+
+
+def log_gids(conf):
+    """The gids of the conf's log groups that exist on this host (a group that is absent is skipped: not every host has
+    every group). Refused: gid 0, Core's own group, any gid in the session range, or a group with an unexpected primary use."""
+    out = []
+    for name in conf.get("log_groups", []):
+        try:
+            gid = grp.getgrnam(name).gr_gid
+        except KeyError:
+            continue
+        if gid == 0 or gid == conf["core_gid"] or conf["uid_min"] <= gid <= conf["uid_max"]:
+            raise Refused("log group gid")
+        out.append(gid)
+    return out
 
 
 # ── opening without following links ───────────────────────────────────────────────────────────────
@@ -466,11 +493,13 @@ def arrange_fds(token_fd, out_fd=1):
     os.closerange(4, limit if limit != resource.RLIM_INFINITY else 1 << 20)
 
 
-def drop_privileges(uid, gid):
-    os.setgroups([])
+def drop_privileges(uid, gid, extra_gids=()):
+    """`extra_gids` is empty for every session except one the spec asked to read logs for (see `log_gids`)."""
+    os.setgroups(list(extra_gids))
     os.setresgid(gid, gid, gid)
     os.setresuid(uid, uid, uid)
-    if (os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid) or os.getgroups()):
+    if (os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid)
+            or set(os.getgroups()) - {gid} != set(extra_gids)):
         raise Refused("identity not dropped")
     try:
         os.setuid(0)
@@ -541,7 +570,7 @@ def launch(raw, conf):
     os.write(procs_fd, b"0")                   # "0" means the writing process itself
     os.close(procs_fd)
     os.close(cg_fd)
-    drop_privileges(uid, gid)
+    drop_privileges(uid, gid, log_gids(conf) if spec.get("read_logs") else ())
     reset_process_state()
     os.fchdir(cwd_fd)
     status = {"ok": True, "session_id": sid, "uid": uid, "gid": gid, "cgroup": cgroup_path}

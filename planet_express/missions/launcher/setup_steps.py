@@ -80,6 +80,7 @@ class Paths:
     uid_min: int = _DEFAULTS.session_uid_min
     uid_max: int = _DEFAULTS.session_uid_max
     pids_max: int = DEFAULT_PIDS_MAX
+    log_groups: tuple = ()
     cgroup_root: str = _DEFAULTS.cgroup_root
     sock_root: str = _DEFAULTS.sock_root
     helper: str = HELPER_PATH
@@ -111,13 +112,14 @@ class Paths:
         rules = tuple((r.unit, tuple(r.actions)) for r in getattr(missions, "worker_sudo_rules", ()))
         return cls(uid_min=missions.session_uid_min, uid_max=missions.session_uid_max, cgroup_root=missions.cgroup_root,
                    sock_root=missions.sock_root, worker_sudo_rules=rules,
+                   log_groups=tuple(getattr(missions, "read_log_groups", ())),
                    worker_sudo_all_sessions=bool(getattr(missions, "worker_sudo_all_sessions", False)),
                    workspace_root=missions.workspace_root or os.path.join(state_dir, "mission-workspaces"), **kw)
 
     def launch_conf(self) -> LaunchConf:
         return LaunchConf(uid_min=self.uid_min, uid_max=self.uid_max, core_uid=self.core_uid, core_gid=self.core_gid,
                           cgroup_root=self.cgroup_root, workspace_root=self.workspace_root, sock_root=self.sock_root,
-                          pids_max=self.pids_max)
+                          pids_max=self.pids_max, log_groups=tuple(self.log_groups))
 
 
 # ── small, careful file operations ─────────────────────────────────────────────────────────────────
@@ -1107,7 +1109,7 @@ def cli_paths(args, core_uid: int, core_gid: int) -> Paths:
     extra = mos_launcher_paths(args.pe_home) if args.flavour == "mos" else {}
     return Paths(core_uid=core_uid, core_gid=core_gid, core_user=args.core_user, flavour=args.flavour,
                  workspace_root=args.workspace_root, cgroup_root=args.cgroup_root, sock_root=args.sock_root,
-                 uid_min=args.uid_min, uid_max=args.uid_max, **extra)
+                 uid_min=args.uid_min, uid_max=args.uid_max, log_groups=tuple(getattr(args, "log_group", None) or ()), **extra)
 
 
 def main(argv: list[str] | None = None) -> int:               # pragma: no cover -- a thin CLI over the above
@@ -1127,6 +1129,8 @@ def main(argv: list[str] | None = None) -> int:               # pragma: no cover
     parser.add_argument("--sock-root", default=_DEFAULTS.sock_root, help="missions.sock_root")
     parser.add_argument("--uid-min", type=int, default=_DEFAULTS.session_uid_min)
     parser.add_argument("--uid-max", type=int, default=_DEFAULTS.session_uid_max)
+    parser.add_argument("--log-group", action="append", help="missions.read_log_groups: a group an Observe/Propose session may read "
+                        "the host's logs through (repeat; e.g. adm, systemd-journal). Must match config.yaml")
     args = parser.parse_args(argv)
     account = pwd.getpwnam(args.core_user)
     paths = cli_paths(args, account.pw_uid, account.pw_gid)

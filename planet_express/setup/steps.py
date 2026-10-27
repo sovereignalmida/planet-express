@@ -270,6 +270,7 @@ class _LauncherParams(_Params):
     conf: AbsPath | None = None             # MOS only: where launch.conf lives (under the data pool; Ubuntu has a fixed path)
     worker_sudo_rules: tuple[_WorkerSudoRule, ...] = ()   # the worker-sudoers ceiling (generated text, shown in the plan)
     worker_sudo_all_sessions: bool = False  # the operator's acknowledgement that every session uid gets the ceiling
+    log_groups: tuple[Literal["adm", "systemd-journal"], ...] = ()   # launch.conf's log groups (missions.read_log_groups)
     worker_sudoers_reconcile: bool = False  # no rules, but an earlier setup's generated file is on the host: remove it
 
     @model_validator(mode="after")

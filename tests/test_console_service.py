@@ -344,3 +344,15 @@ def test_a_conversation_idle_in_needs_operator_is_archived_by_the_idle_policy(tm
     for _ in range(4):
         rig.sup.tick()
     assert rig.console.get(conv.id).state == "archived" and rig.ms.reserved_uid(conv.mission_id) is None
+
+
+def test_a_conversation_is_started_with_the_hosts_log_groups_only_when_the_host_is_set_up_for_it(rig, tmp_path):
+    conv = rig.open()
+    rig.sup.tick()
+    assert rig.spawns(conv)[0]["read_logs"] is False             # the default: no groups, exactly as before
+    other = Rig(tmp_path / "second")
+    other.sup.read_logs = True                                   # missions.read_log_groups is set (the runner passes it)
+    conv2 = other.open()
+    other.sup.tick()
+    assert other.ms.get_mission(conv2.mission_id).tier == "observe"
+    assert other.spawns(conv2)[0]["read_logs"] is True

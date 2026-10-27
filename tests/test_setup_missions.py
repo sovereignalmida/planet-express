@@ -52,11 +52,11 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged. Re-pinned again in slice 7b: the config file setup renders now carries
-    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed. All three re-pinned for the model broker: the config file setup renders now carries the `missions.model_broker` defaults (enabled: false); no step changed. MOS re-pinned after the v3 hotfix merge: the post-start.sh hook body (part of the plan) now runs in a background subshell; the full-tier id moved with systemd/casa-stacks.service.template (PR #15 widened the stack start-up budget). Re-pinned for the Console: the config file setup renders now carries the `missions.console` defaults (enabled: false); no step changed.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "7f9e125973073b01"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "322498d4bcfefc20"
+    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed. All three re-pinned for the model broker: the config file setup renders now carries the `missions.model_broker` defaults (enabled: false); no step changed. MOS re-pinned after the v3 hotfix merge: the post-start.sh hook body (part of the plan) now runs in a background subshell; the full-tier id moved with systemd/casa-stacks.service.template (PR #15 widened the stack start-up budget). Re-pinned for the Console: the config file setup renders now carries the `missions.console` defaults (enabled: false); no step changed. Re-pinned for investigation access: the rendered config carries `missions.read_log_groups: []`; no step changed.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "27a2d685c4b6a5e2"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "b4326c52f750172f"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "bd71a84db387d9de"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "9a882f1445ab8c2f"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
@@ -189,6 +189,19 @@ def test_the_plan_preview_shows_the_generated_sudoers_text():
     assert sudoers.preview["type"] == "file" and sudoers.preview["path"] == "/etc/sudoers.d/planetexpress-launch"
     assert 'pe ALL=(root) NOPASSWD: /usr/libexec/planetexpress/pe-launch ""' in text
     assert "env_reset, !setenv, !env_editor" in text and sudoers.preview["mode"] == "0440"
+
+
+def test_the_log_groups_reach_launch_conf_and_a_plan_without_them_writes_none():
+    plain = plan(mreport(), answers(missions=ON))
+    with_logs = plan(mreport(), answers(missions={**ON, "read_log_groups": ["adm", "systemd-journal"]}))
+    assert plain.to_public()["plan_id"] != with_logs.to_public()["plan_id"]
+    assert not launcher(plain)[0].params.get("log_groups") and launcher(with_logs)[0].params["log_groups"] == ["adm", "systemd-journal"]
+    from planet_express.setup.plan import _launcher_paths
+    written = _launcher_paths(launcher(with_logs)[0].params).launch_conf().render()
+    assert '"adm"' in written and '"systemd-journal"' in written
+    assert "log_groups" not in _launcher_paths(launcher(plain)[0].params).launch_conf().render()
+    with pytest.raises(Exception):
+        answers(missions={**ON, "read_log_groups": ["docker"]})
 
 
 def test_every_launcher_preview_says_what_will_be_written_and_where():

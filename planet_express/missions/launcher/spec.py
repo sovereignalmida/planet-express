@@ -18,8 +18,8 @@ MAX_ENV_ITEMS, MAX_ENV_VALUE_CHARS, MAX_ENV_CHARS = 64, 4096, 32_768
 MAX_CWD_CHARS = 1024
 TOKEN_CHARS = (16, 256)
 STATE_DIR = re.compile(r"C-[A-Za-z0-9_-]{1,62}")
-KEYS = frozenset({"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir", "state_dir"})
-REQUIRED = KEYS - {"sock_dir", "state_dir"}
+KEYS = frozenset({"session_id", "worker_uid", "cwd", "argv", "env", "token", "sock_dir", "state_dir", "read_logs"})
+REQUIRED = KEYS - {"sock_dir", "state_dir", "read_logs"}
 STATUS_PREFIX = "PE-LAUNCH-STATUS "
 
 
@@ -64,6 +64,8 @@ def check_wire(obj) -> dict:
         raise SpecError("token")
     if "sock_dir" in obj and not isinstance(obj["sock_dir"], bool):
         raise SpecError("sock_dir")
+    if "read_logs" in obj and not isinstance(obj["read_logs"], bool):
+        raise SpecError("read_logs")
     if "state_dir" in obj and (not isinstance(obj["state_dir"], str) or not STATE_DIR.fullmatch(obj["state_dir"])):
         raise SpecError("state_dir")
     return obj
@@ -78,6 +80,7 @@ class LaunchSpec:
     env: dict[str, str] = field(default_factory=dict)
     token: str = field(default="", repr=False)          # never in a repr, a log or an exception
     sock_dir: bool = False
+    read_logs: bool = False               # ask the helper for the conf's log groups (adm, systemd-journal): host logs readable, nothing else
     state_dir: str | None = None          # `C-<id>`: a conversation's state directory beside the workspaces (see pe_launch.adopt_state_dir)
 
     def to_wire(self, session_id: str) -> bytes:
@@ -85,6 +88,8 @@ class LaunchSpec:
                "env": dict(self.env), "token": self.token, "sock_dir": self.sock_dir}
         if self.state_dir is not None:             # sent only when used: a helper that does not know the key refuses it, fail closed
             obj["state_dir"] = self.state_dir
+        if self.read_logs:                         # likewise sent only when used: an older helper refuses the key, so the flag is opt-in
+            obj["read_logs"] = True
         check_wire(obj)
         data = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
         if len(data) > MAX_SPEC_BYTES:

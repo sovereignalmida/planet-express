@@ -86,7 +86,7 @@ class FakeContainment:
         group.members.add(self._next_pid)
         group.spawns.append({"pid": self._next_pid, "argv": list(spec.argv), "env": dict(spec.env), "cwd": spec.cwd,
                              "uid": spec.uid, "token": spec.token, "sock_dir": spec.sock_dir,
-                             "state_dir": spec.state_dir})
+                             "state_dir": spec.state_dir, "read_logs": spec.read_logs})
         return cs
 
     def uid_in_use(self, uid: int) -> bool:

@@ -134,7 +134,7 @@ def host(request):
     paths = Paths(core_uid=core_uid, core_gid=core_gid, core_user="pe-core-test", uid_min=RANGE[0], uid_max=RANGE[1],
                   cgroup_root=str(SESSIONS), workspace_root=WS, sock_root=SOCKS, interpreter=INTERP,
                   flavour="systemd" if strategy == "sudo" else "mos", unit_dropin="/tmp/pe-launcher-test-dropin.conf",
-                  boot_script="/tmp/pe-launcher-test-boot.sh", systemctl="/bin/true")
+                  boot_script="/tmp/pe-launcher-test-boot.sh", systemctl="/bin/true", log_groups=("adm",))
     journal = MemoryJournal()
     steps = launcher_steps(paths)
     done = repair_all(steps, journal)
@@ -177,6 +177,27 @@ def test_the_session_runs_as_its_own_uid_and_gid_with_no_groups_and_no_new_privs
         seen = first_json(host, sid)
         assert seen["ids"] == [[UIDS[0]] * 3, [UIDS[0]] * 3, []] and seen["nnp"] == "1" and seen["sid"] is True
         assert seen["cwd"] == host.cwd(sid) and got["session_uid"] == UIDS[0]
+    finally:
+        host.finish(sid)
+
+
+def test_a_session_that_asks_for_the_log_groups_gets_exactly_those_and_no_others(host):
+    import grp
+    try:
+        adm = grp.getgrnam("adm").gr_gid
+    except KeyError:
+        pytest.skip("this host has no adm group")
+    code = ("import json,os\nprint(json.dumps({'groups':sorted(os.getgroups()),'gid':os.getresgid()}),flush=True)\n"
+            "import time;time.sleep(300)")
+    sid, _ = host.launch(py(code), read_logs=True)
+    try:
+        seen = first_json(host, sid)
+        assert seen["groups"] == [adm] and seen["gid"] == [UIDS[0]] * 3
+    finally:
+        host.finish(sid)
+    sid, _ = host.launch(py(code))                           # the same host, a session that does not ask: no groups, as ever
+    try:
+        assert first_json(host, sid)["groups"] == []
     finally:
         host.finish(sid)
 

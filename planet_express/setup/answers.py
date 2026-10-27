@@ -108,12 +108,14 @@ class MissionsAnswers(_Strict):
     workspace_root: AbsPath | None = None      # unset: `mission-workspaces` in the state directory, as Core defaults it
     worker_sudo_rules: list[WorkerSudoRuleConfig] = []   # the worker tier's sudo ceiling; empty: no worker sudoers file
     worker_sudo_all_sessions: bool = False               # required to generate it: every session uid gets the ceiling
+    read_log_groups: list[str] = []                      # adm, systemd-journal: what an Observe/Propose session reads the host's logs with
 
     @model_validator(mode="after")
     def _as_the_config_would_accept_it(self):
         try:
             MissionsConfig(enabled=False, session_uid_min=self.session_uid_min, session_uid_max=self.session_uid_max,
-                           sock_root=self.sock_root, cgroup_root=self.cgroup_root, workspace_root=self.workspace_root)
+                           sock_root=self.sock_root, cgroup_root=self.cgroup_root, workspace_root=self.workspace_root,
+                           read_log_groups=self.read_log_groups)
         except ValidationError as exc:
             raise ValueError(str(exc.errors()[0]["msg"]).removeprefix("Value error, ")) from None
         if self.enabled:

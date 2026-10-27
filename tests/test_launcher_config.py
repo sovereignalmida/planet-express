@@ -139,3 +139,87 @@ def test_a_bad_workspace_root_is_a_config_error():
     for bad in ("relative", "/a/../b", "/"):
         with pytest.raises(ValueError):
             MissionsConfig(workspace_root=bad)
+
+
+# ── log groups: what a session that reads logs is started with ───────────────────────────────────
+
+def test_an_empty_log_group_list_is_not_written_so_an_older_helper_still_accepts_the_file():
+    assert "log_groups" not in json.loads(conf().render())
+    with_groups = conf(log_groups=("adm", "systemd-journal"))
+    assert json.loads(with_groups.render())["log_groups"] == ["adm", "systemd-journal"]
+    assert LaunchConf.parse(with_groups.render()) == with_groups
+
+
+@pytest.mark.parametrize("bad", [("root",), ("docker",), ("sudo",), ("incus-admin",), ("podman",), ("Adm",), ("adm", "adm"),
+                                 ("adm", "systemd-journal", "syslog"), ("",)])
+def test_any_group_that_is_not_a_log_reader_is_refused_by_every_side(tmp_path, bad):
+    from config_schema import MissionsConfig
+    with pytest.raises(ConfError):
+        conf(log_groups=bad)
+    with pytest.raises(ValueError):
+        MissionsConfig(read_log_groups=list(bad))
+    raw = json.loads(conf().render())
+    raw["log_groups"] = list(bad)
+    path = tmp_path / "launch.conf"
+    path.write_text(json.dumps(raw))
+    path.chmod(0o600)
+    tmp_path.chmod(0o755)
+    with pytest.raises(helper.Refused):
+        helper.load_conf(str(path), trusted_uid=os.geteuid(), below=str(tmp_path))
+
+
+def test_the_three_allowlists_are_the_same():
+    from config_schema import LOG_READER_GROUPS
+    from planet_express.missions.launcher import config as core
+    assert core.LOG_GROUPS_ALLOWED == helper.LOG_GROUPS_ALLOWED == LOG_READER_GROUPS == {"adm", "systemd-journal"}
+    assert core.MAX_LOG_GROUPS == helper.MAX_LOG_GROUPS
+
+
+def test_the_log_gids_are_the_conf_groups_that_exist_and_never_gid_0_core_or_the_session_range(monkeypatch):
+    import grp
+    table = {"adm": 4, "systemd-journal": 999, "rooty": 0, "coreg": 777, "insession": 61500}
+
+    class G:
+        def __init__(self, gid):
+            self.gr_gid = gid
+
+    def getgrnam(name):
+        if name not in table:
+            raise KeyError(name)
+        return G(table[name])
+
+    monkeypatch.setattr(grp, "getgrnam", getgrnam)
+    base = {"core_gid": 777, "uid_min": 61000, "uid_max": 61999}
+    assert helper.log_gids({**base, "log_groups": ["adm", "missing", "systemd-journal"]}) == [4, 999]
+    assert helper.log_gids(base) == []
+    for name in ("rooty", "coreg", "insession"):
+        with pytest.raises(helper.Refused):
+            helper.log_gids({**base, "log_groups": [name]})
+
+
+def test_drop_privileges_keeps_only_the_asked_groups(monkeypatch):
+    calls = {}
+    state = {"groups": []}
+    monkeypatch.setattr(helper.os, "setgroups", lambda g: (calls.__setitem__("groups", list(g)), state.__setitem__("groups", list(g))))
+    monkeypatch.setattr(helper.os, "setresgid", lambda *a: None)
+    monkeypatch.setattr(helper.os, "setresuid", lambda *a: None)
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (61001,) * 3)
+    monkeypatch.setattr(helper.os, "getresgid", lambda: (61001,) * 3)
+    monkeypatch.setattr(helper.os, "getgroups", lambda: state["groups"])
+
+    def no_root(_):
+        raise PermissionError
+
+    class Libc:
+        def prctl(self, *a):
+            return 0
+
+    monkeypatch.setattr(helper.os, "setuid", no_root)
+    monkeypatch.setattr(helper.ctypes, "CDLL", lambda *a, **k: Libc())
+    helper.drop_privileges(61001, 61001)
+    assert calls["groups"] == []                         # the default is what it always was: no groups at all
+    helper.drop_privileges(61001, 61001, [4, 999])
+    assert calls["groups"] == [4, 999]
+    monkeypatch.setattr(helper.os, "getgroups", lambda: [4, 999, 0])      # something extra survived: not dropped
+    with pytest.raises(helper.Refused):
+        helper.drop_privileges(61001, 61001, [4, 999])

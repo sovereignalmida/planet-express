@@ -226,7 +226,7 @@ def test_the_acknowledged_domain_lets_controls_build(tmp_path):
     assert runner.controls is not None
 
 
-def test_an_unreadable_subtree_is_a_failure_not_a_partial_scan(tmp_path):
+def test_an_unreadable_subtree_is_protected_whole_and_does_not_sink_the_scan(tmp_path):
     from planet_express.missions.discovery import default_scan
     root = Path(stacks(tmp_path, "media/inner"))
     locked = root / "media"
@@ -236,12 +236,29 @@ def test_an_unreadable_subtree_is_a_failure_not_a_partial_scan(tmp_path):
         if os.access(locked, os.R_OK):
             pytest.skip("running with privileges that ignore permissions")
         with pytest.raises(OSError):
-            default_scan(str(root))
+            default_scan(str(root))                       # asked for no blind spots: an incomplete scan is still a failure
+        blind: list[str] = []
+        default_scan(str(root), blind=blind)
+        assert blind == [str(locked)]
         got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
                                         read_text=lambda p: MOUNTINFO, exists=lambda p: False)
-        assert "credentials" in got.failures
+        assert "credentials" not in got.failures          # what Core cannot read is protected, so the set is complete
+        assert str(locked) in got.credentials and got.blind == (str(locked),)
     finally:
         locked.chmod(0o755)
+
+
+def test_an_unreadable_stacks_root_is_still_a_failure(tmp_path):
+    root = Path(stacks(tmp_path, "media"))
+    root.chmod(0)
+    try:
+        if os.access(root, os.R_OK):
+            pytest.skip("running with privileges that ignore permissions")
+        got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
+                                        read_text=lambda p: MOUNTINFO, exists=lambda p: False)
+        assert "credentials" in got.failures and got.blind == ()
+    finally:
+        root.chmod(0o755)
 
 
 def test_a_permission_failure_probing_backup_config_is_not_absence(tmp_path):

@@ -193,14 +193,30 @@ def _read_json_line(fd: int, timeout_s: float) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
-def judge_probe(report: PreflightReport, seen: dict | None, uid: int, *, sock_dir: bool) -> None:
-    """What the probe process (running as the throwaway uid) reported about its own powers."""
+def log_group_gids(names) -> list[int]:
+    """The gids of the configured log groups that exist on this host (the helper skips an absent one the same way)."""
+    import grp
+    out = []
+    for name in names:
+        try:
+            out.append(grp.getgrnam(name).gr_gid)
+        except KeyError:
+            continue
+    return sorted(out)
+
+
+def judge_probe(report: PreflightReport, seen: dict | None, uid: int, *, sock_dir: bool,
+                log_gids: list[int] | None = None) -> None:
+    """What the probe process (running as the throwaway uid) reported about its own powers. `log_gids` is None when sessions are
+    not set up to read logs (they must then have no supplementary group at all) and the gids the helper must have given
+    otherwise: a helper or launch.conf that disagrees with `missions.read_log_groups` fails here, not on the first real session."""
     if seen is None:
         report.add("probe session ran", False, "it reported nothing")
         return
     ids = seen.get("ids") or [[], [], None]
-    report.add("session identity", ids[0] == [uid] * 3 and ids[1] == [uid] * 3 and ids[2] == [],
-               f"uid/gid {uid}, no supplementary groups" if ids[0] == [uid] * 3 else f"ran as {ids}")
+    want = sorted(log_gids or [])
+    report.add("session identity", ids[0] == [uid] * 3 and ids[1] == [uid] * 3 and sorted(ids[2] or []) == want and isinstance(ids[2], list),
+               (f"uid/gid {uid}, " + (f"log groups {want} only" if want else "no supplementary groups")) if ids[0] == [uid] * 3 else f"ran as {ids}")
     denied = seen.get("denied") or {}
     for name in ("cgroup.procs", "cgroup.freeze", "cgroup.kill", "parent cgroup.procs", "grandparent cgroup.procs"):
         value = denied.get(name)
@@ -269,7 +285,8 @@ def _untraversable(path: str) -> str | None:
 
 
 def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock_root: str | None, probe_uid: int,
-              python: str, token: str = "p" * 40, wait_s: float = 10.0, check_reach: bool = False) -> None:
+              python: str, token: str = "p" * 40, wait_s: float = 10.0, check_reach: bool = False,
+              log_groups: tuple[str, ...] = ()) -> None:
     """Launch, freeze (+confirm), thaw, kill (+confirm empty), remove: all as the real Core identity."""
     sid = "PREFLIGHT-" + os.urandom(4).hex()
     workspace = os.path.join(workspace_root, sid)
@@ -302,6 +319,7 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
             probe_sock = sock.directory
         spec = LaunchSpec(
             uid=probe_uid, cwd=workspace, env={"PATH": "/usr/bin:/bin"}, token=token, sock_dir=bool(sock_root),
+            read_logs=bool(log_groups),          # the probe asks exactly as a real Observe/Propose session will
             argv=(python, "-I", "-c", PROBE_SCRIPT, cgroup, parent, os.path.dirname(parent), probe_sock, workspace))
         try:
             cs = containment.launch(sid, spec)
@@ -309,7 +327,8 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
             report.add("launch a throwaway session through the helper", False, str(exc))
             return
         report.add("launch a throwaway session through the helper", True, f"uid {probe_uid}")
-        judge_probe(report, _read_json_line(containment.output_fd(cs), wait_s), probe_uid, sock_dir=bool(sock_root))
+        judge_probe(report, _read_json_line(containment.output_fd(cs), wait_s), probe_uid, sock_dir=bool(sock_root),
+                    log_gids=log_group_gids(log_groups) if log_groups else None)
         # Core must be able to SEE a session's processes to ever prove a uid unused: a /proc mounted hidepid would
         # make `uid_in_use` read false while they run, so the probe checks it while the session is alive.
         report.add("Core sees the running session's processes in /proc", containment.uid_in_use(probe_uid))
@@ -346,7 +365,8 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
 def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root: str | None, probe_uid: int,
                   helper: str, conf: str, python: str = "/usr/bin/python3", trusted_uid: int = 0, below: str = "/",
                   uid_range: tuple[int, int] | None = None, sudo: bool = False, check_reach: bool = False,
-                  run=subprocess.run, getpwall=None, getgrall=None, held_uids=None) -> PreflightReport:
+                  run=subprocess.run, getpwall=None, getgrall=None, held_uids=None,
+                  log_groups: tuple[str, ...] = ()) -> PreflightReport:
     report = PreflightReport(strategy)
     if uid_range is not None:
         low, high = uid_range
@@ -366,7 +386,7 @@ def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root:
         report.add("probe interpreter", False, f"{python} is not an executable file")
         return report
     run_probe(report, containment, workspace_root=workspace_root, sock_root=sock_root, probe_uid=probe_uid,
-              python=python, check_reach=check_reach)
+              python=python, check_reach=check_reach, log_groups=tuple(log_groups))
     return report
 
 

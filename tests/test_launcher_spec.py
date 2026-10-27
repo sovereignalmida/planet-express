@@ -42,6 +42,8 @@ BAD = {
     "token space": good_spec(token="t" * 20 + " " + "t" * 20),
     "token non-ascii": good_spec(token="é" * 20),
     "sock_dir not bool": good_spec(sock_dir=1),
+    "read_logs not bool": good_spec(read_logs=1),
+    "read_logs a string": good_spec(read_logs="yes"),
     "state_dir not a string": good_spec(state_dir=1),
     "state_dir without the C- prefix": good_spec(state_dir="S-abc"),
     "state_dir empty id": good_spec(state_dir="C-"),
@@ -60,7 +62,7 @@ def test_a_bad_spec_is_refused_by_both_sides(name):
         helper.check_wire(BAD[name])
 
 
-@pytest.mark.parametrize("spec", [good_spec(), good_spec(sock_dir=True), good_spec(env={}), good_spec(state_dir="C-conv_1-a"),
+@pytest.mark.parametrize("spec", [good_spec(), good_spec(sock_dir=True), good_spec(read_logs=True), good_spec(env={}), good_spec(state_dir="C-conv_1-a"),
                                   good_spec(state_dir="C-" + "x" * 62),
                                   good_spec(argv=["/usr/bin/python3", "-c", "print(1)"])])
 def test_a_good_spec_is_accepted_by_both_sides(spec):
@@ -110,3 +112,10 @@ def test_duplicate_keys_and_json_constants_are_refused_by_the_helper():
         helper.parse_json(b"\xff\xfe")
     with pytest.raises(helper.Refused):
         helper.parse_json(b"[" * 100000)
+
+
+def test_read_logs_is_on_the_wire_only_when_it_is_asked_for():
+    plain = json.loads(LaunchSpec(uid=61001, cwd="/w/S-1", argv=("/bin/true",), token="t" * 32).to_wire("S-1"))
+    asked = json.loads(LaunchSpec(uid=61001, cwd="/w/S-1", argv=("/bin/true",), token="t" * 32, read_logs=True).to_wire("S-1"))
+    assert "read_logs" not in plain        # an older helper refuses the key, so a session that does not ask never sends it
+    assert asked["read_logs"] is True

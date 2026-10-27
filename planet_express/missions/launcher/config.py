@@ -7,6 +7,7 @@ module renders and parses the file for setup and for a Core that IS root (MOS), 
 
 import json
 import os
+import re
 import stat
 from dataclasses import asdict, dataclass
 
@@ -16,6 +17,8 @@ SUDOERS_PATH = "/etc/sudoers.d/planetexpress-launch"
 SYSTEMD_DYNAMIC_UIDS = (61184, 65519)  # systemd DynamicUser= allocates here; a session uid in it could be another service's
 DEFAULT_UID_RANGE = (200000, 200999)   # clear of systemd's DynamicUser range and of normal accounts: the ONE default
 DEFAULT_PIDS_MAX = 512
+MAX_LOG_GROUPS = 4
+LOG_GROUPS_ALLOWED = frozenset({"adm", "systemd-journal"})   # pe_launch.py holds the same list: an allowlist, tests keep them equal
 
 
 def mos_conf_path(home: str) -> str:
@@ -62,6 +65,7 @@ class LaunchConf:
     sock_root: str
     pids_max: int = DEFAULT_PIDS_MAX
     version: int = 1
+    log_groups: tuple[str, ...] = ()      # groups a log-reading session gets (adm, systemd-journal); absent from the file when empty
 
     def __post_init__(self):
         for name in ("uid_min", "uid_max", "core_uid", "core_gid", "pids_max"):
@@ -78,6 +82,9 @@ class LaunchConf:
                 raise ConfError("conf paths must be normalised absolute paths")
         if len(set(paths)) != 3:
             raise ConfError("cgroup_root, workspace_root and sock_root must differ")
+        if (not isinstance(self.log_groups, tuple) or len(self.log_groups) > MAX_LOG_GROUPS or len(set(self.log_groups)) != len(self.log_groups)
+                or not all(g in LOG_GROUPS_ALLOWED for g in self.log_groups)):
+            raise ConfError("log_groups may only name groups that read logs and nothing else: adm, systemd-journal")
 
     @property
     def probe_uid(self) -> int:
@@ -85,7 +92,12 @@ class LaunchConf:
         return self.uid_max
 
     def render(self) -> str:
-        return json.dumps(asdict(self), indent=2, sort_keys=True) + "\n"
+        data = asdict(self)
+        if self.log_groups:
+            data["log_groups"] = list(self.log_groups)
+        else:
+            del data["log_groups"]            # an empty list is not written: the file stays what an older helper accepts
+        return json.dumps(data, indent=2, sort_keys=True) + "\n"
 
     @classmethod
     def parse(cls, text: str) -> "LaunchConf":
@@ -95,6 +107,8 @@ class LaunchConf:
             raise ConfError("launch.conf is not JSON") from exc
         if not isinstance(raw, dict):
             raise ConfError("launch.conf must be an object")
+        if isinstance(raw.get("log_groups"), list):
+            raw["log_groups"] = tuple(raw["log_groups"])
         try:
             return cls(**raw)
         except TypeError as exc:

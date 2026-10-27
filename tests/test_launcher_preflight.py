@@ -619,3 +619,17 @@ def test_a_workspace_under_a_private_directory_is_reported_as_unreachable(tmp_pa
     assert not report.ok
     assert "workspace root reachable by session users" in report.render()
     assert "missions.workspace_root" in report.render()
+
+
+def test_a_probe_that_asked_for_log_groups_must_hold_exactly_those_and_one_that_did_not_must_hold_none():
+    def judged(groups, log_gids):
+        report = PreflightReport("direct")
+        seen = json.loads(json.dumps(GOOD_SEEN))
+        seen["ids"][2] = groups
+        judge_probe(report, seen, UID, sock_dir=True, log_gids=log_gids)
+        return verdicts(report)["session identity"]
+    assert judged([], None) and judged([], [])                       # as ever: nothing configured, nothing granted
+    assert judged([4, 999], [999, 4]) and judged([4], [4])           # exactly the configured groups that exist
+    assert not judged([], [4, 999])                                  # an older helper, or a launch.conf without the groups: caught at startup
+    assert not judged([4, 999], None)                                # groups nobody configured
+    assert not judged([4, 999, 0], [4, 999]) and not judged([4], [4, 999])

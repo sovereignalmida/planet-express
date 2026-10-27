@@ -55,6 +55,7 @@ class DiscoveredInputs:
     backup: tuple[str, ...] = ()
     failures: dict[str, str] = field(default_factory=dict)       # domain -> why it could not be established
     acknowledged: tuple[str, ...] = ()                           # domains the operator named in protected_absent
+    blind: tuple[str, ...] = ()                                  # directories Core could not read: protected whole (see `default_scan`)
 
     def kwargs(self) -> dict[str, tuple[str, ...]]:
         return {"storage_mounts": self.storage_mounts, "volumes": self.volumes, "ingress": self.ingress,
@@ -65,13 +66,26 @@ MAX_SCAN_DEPTH = 8
 MAX_SCAN_ENTRIES = 50_000
 
 
-def default_scan(root: str, depth: int = MAX_SCAN_DEPTH, limit: int = MAX_SCAN_ENTRIES) -> list[tuple[str, bool]]:
-    """(path, is_dir) for every entry under `root` (symlinks not followed). Raises OSError when `root` or any directory below
-    it is unreadable, or when the tree is deeper or larger than the bounds: an incomplete scan is a failure, not a result."""
+def default_scan(root: str, depth: int = MAX_SCAN_DEPTH, limit: int = MAX_SCAN_ENTRIES,
+                 blind: list[str] | None = None) -> list[tuple[str, bool]]:
+    """(path, is_dir) for every entry under `root` (symlinks not followed). Raises OSError when `root` is unreadable, or when the
+    tree is deeper or larger than the bounds: an incomplete scan is a failure, not a result.
+
+    A directory BELOW `root` that Core may not read (a container's data directory, owned by another account) is the usual case on
+    a real host, and it need not sink the scan: with `blind` given, its path is appended there and the walk goes on. The caller
+    protects every blind directory whole, because what Core cannot read it cannot prove free of secrets. Without `blind` it
+    raises, as before."""
     out: list[tuple[str, bool]] = []
 
     def walk(directory: str, level: int) -> None:
-        with os.scandir(directory) as it:
+        try:
+            it = os.scandir(directory)
+        except PermissionError:
+            if blind is None or level == 1:
+                raise
+            blind.append(directory)
+            return
+        with it:
             for entry in sorted(it, key=lambda e: e.name):
                 is_dir = entry.is_dir(follow_symlinks=False)
                 out.append((entry.path, is_dir))
@@ -148,7 +162,8 @@ def discover_protected_inputs(
         from planet_express.missions.checkpoint.provider import default_bounded_runner
         bounded = default_bounded_runner
     read_text = read_text or _default_read
-    scan = scan or default_scan
+    blind: list[str] = []
+    scan = scan or (lambda root: default_scan(root, blind=blind))
     exists = exists or _default_exists
     failures: dict[str, str] = {}
     mounts: list[str] = []
@@ -217,6 +232,7 @@ def discover_protected_inputs(
     except OSError as exc:
         fail("credentials", f"stacks tree unreadable: {type(exc).__name__}")
         entries = []
+    paths["credentials"].extend(blind)            # unreadable below the root: protected whole, never searched around
     for path, is_dir in entries:
         base = os.path.basename(path).lower()
         if is_dir:
@@ -249,7 +265,8 @@ def discover_protected_inputs(
         failures.pop(domain, None)
     return DiscoveredInputs(
         storage_mounts=tuple(mounts), volumes=tuple(volumes), ingress=result["ingress"], dns=result["dns"],
-        credentials=result["credentials"], backup=result["backup"], failures=failures, acknowledged=acknowledged)
+        credentials=result["credentials"], backup=result["backup"], failures=failures, acknowledged=acknowledged,
+        blind=tuple(sorted(set(blind))))
 
 
 __all__ = ["ACKNOWLEDGEABLE", "DiscoveredInputs", "discover_protected_inputs", "parse_mountinfo"]

@@ -290,6 +290,7 @@ _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", re.IGNORECASE)
 MOUNTINFO_PATH = "/proc/self/mountinfo"      # tests point this at a fake mount table
 _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+LOG_READER_GROUPS = frozenset({"adm", "systemd-journal"})     # the launcher holds the same allowlist (tests keep them equal)
 
 
 class MissionRuntimeConfig(BaseModel):
@@ -659,6 +660,11 @@ class MissionsConfig(BaseModel):
     # per-grant group), so it grants the ceiling to Observe/Propose and rules-less Repair sessions too. Fail closed: the file is
     # not generated, planned or treated as managed unless the operator acknowledges that here.
     worker_sudo_all_sessions: bool = False
+    # Host groups an Observe or Propose session (the Console too) is started with, so it can read the host's logs the way the
+    # operator can: `adm` (/var/log) and `systemd-journal` (journalctl). Only those two are accepted (the launcher holds the
+    # same allowlist): read access and nothing else. The root-owned launch.conf is written from this list at setup, and a
+    # helper installed before this existed refuses the flag: reinstall it first. Empty: sessions get no groups, as before.
+    read_log_groups: list[str] = []
     # Brokered tools: tool name -> {name: base url}, and secret ref -> the NAME of a Core environment variable that
     # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
     tool_sites: dict[str, dict[str, str]] = {}
@@ -723,6 +729,13 @@ class MissionsConfig(BaseModel):
             if not item or len(item) > 512 or "\0" in item:
                 raise ValueError("entries must be non-empty strings of at most 512 characters")
         return items
+
+    @field_validator("read_log_groups")
+    @classmethod
+    def _read_log_groups(cls, names: list[str]) -> list[str]:
+        if len(set(names)) != len(names) or not set(names) <= LOG_READER_GROUPS:
+            raise ValueError("missions.read_log_groups may only name groups that read logs and nothing else: adm, systemd-journal")
+        return names
 
     @field_validator("worker_user")
     @classmethod
