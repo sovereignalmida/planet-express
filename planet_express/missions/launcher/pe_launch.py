@@ -24,7 +24,7 @@ What it does, in order (any failure before the cgroup join removes what it made)
      never its contents), so state a session writes there survives for the next session run as the same uid. The cwd
      must then be the session's own workspace. Adoption is the last step before the cgroup join;
   4. token pipe -> fd 3; fd 0 /dev/null; fds 1 and 2 stay the merged output pipe Core holds; nothing else;
-  5. join the cgroup, setgroups([]), setgid, setuid, verify root cannot be regained, no_new_privs, setsid,
+  5. join the cgroup, setgroups([] or the conf's log groups, only when the spec asks), setgid, setuid, verify root cannot be regained, no_new_privs, setsid,
      reset rlimits and signals, fchdir to the already-verified cwd;
   6. write ONE framed status line (`PE-LAUNCH-STATUS {json}`) as the first line of the merged output, then execve
      exactly argv with exactly the spec env. The exec'd pid is not tracked; the cgroup is.
@@ -499,7 +499,7 @@ def drop_privileges(uid, gid, extra_gids=()):
     os.setresgid(gid, gid, gid)
     os.setresuid(uid, uid, uid)
     if (os.getresuid() != (uid, uid, uid) or os.getresgid() != (gid, gid, gid)
-            or set(os.getgroups()) - {gid} != set(extra_gids)):
+            or sorted(os.getgroups()) != sorted(set(extra_gids))):
         raise Refused("identity not dropped")
     try:
         os.setuid(0)

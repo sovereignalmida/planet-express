@@ -639,7 +639,8 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         "Mission control is set up on the host only. Core reads missions.* from its config, so put the same values "
         f"there (missions.enabled: true, session_uid_min/max {shown}, sock_root {params['sock_root']}, cgroup_root "
         f"{params['cgroup_root']}, workspace_root {params['workspace_root']}"
-        + (f", launch_conf {conf_path}" if mos else "") + "); launch.conf is written from these answers "
+        + (f", launch_conf {conf_path}" if mos else "")
+        + (f", read_log_groups {params['log_groups']} (it must match launch.conf or startup preflight fails)" if params.get("log_groups") else "") + "); launch.conf is written from these answers "
         "and the helper refuses a request that disagrees with it.")
     if mos:
         b.warnings.append(f"On MOS the sessions cgroup is recreated at every boot by {params['boot_script']}, which the "
