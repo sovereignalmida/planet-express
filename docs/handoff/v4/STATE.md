@@ -234,4 +234,7 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   Fix: install 2.1.4 (`@opencode/cli-linux-x64@2.1.4` from npm, or the v2 installer with `--version 2.1.4`), then `oc_delegate.sh selftest`.
 - **Pushed** `v4-next` and tag `v4.0.0-rc10` (tag = `2fa866c`) to origin over SSH (`git@github.com:...`; the box's `gh` HTTPS token is invalid).
 - `~/.config/pe-spike` is already gone. Both test VMs are defined and shut off.
-- This box's `~/.ssh/id_ed25519` is not authorised on the live host (`casaMediaServer` in `~/.ssh/config`): add it before I can check deploy steps 2-4 there.
+- OpenCode 2.1.4 installed (operator ran it): `test_oc_delegate.py` 212 passed / 3 skipped; `oc_delegate.sh selftest` 132/132 ok.
+- Live host SSH works from this box (`casaMediaServer`). rc10 pre-check on the host (a `git archive` copy in /tmp, removed after; the live checkout untouched): all 176 modules import
+  under the host venv's Python 3.12 with the live config, and the config validates (missions on, console on, `read_log_groups` empty). rc9 to rc10 changes nothing in
+  requirements, systemd or deploy.sh. Next: the operator runs the deploy (step 2), then the helper reinstall (step 3).
