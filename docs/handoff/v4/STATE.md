@@ -227,3 +227,11 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   4. Re-ask the radarr question in the Console and see whether it can now investigate (Docker logs, journal, inventory).
 - **Open after that:** secrets policy for file reads (the hook still blocks secret files; `inspect` env values and the journal are unredacted); incident-to-conversation button; retire the old Chat/Missions pages (needs the user's go); the unexplained fd-map test flake (`test_exactly_fds_0_1_2_3...[direct]`, passed on rerun).
 - **Housekeeping:** delete `~/.config/pe-spike`; shut down the VM `PE_UBUNTU_TEST` when finished.
+
+### New dev box (2026-10-30): resumed here
+- Headless dev box `chris-U59`. Dev venv is `venv/` on **Python 3.12** (the live host's interpreter). Unit suite under 3.12: 7140 passed, 178 skipped, 10 failed, all
+  in `tests/test_oc_delegate.py` because this box has OpenCode 0.15.23 (the wrapper was built against 2.1.4; 0.15 rejects its flags). Not deployed code.
+  Fix: install 2.1.4 (`@opencode/cli-linux-x64@2.1.4` from npm, or the v2 installer with `--version 2.1.4`), then `oc_delegate.sh selftest`.
+- **Pushed** `v4-next` and tag `v4.0.0-rc10` (tag = `2fa866c`) to origin over SSH (`git@github.com:...`; the box's `gh` HTTPS token is invalid).
+- `~/.config/pe-spike` is already gone. Both test VMs are defined and shut off.
+- This box's `~/.ssh/id_ed25519` is not authorised on the live host (`casaMediaServer` in `~/.ssh/config`): add it before I can check deploy steps 2-4 there.
