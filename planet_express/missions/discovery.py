@@ -41,6 +41,7 @@ PSEUDO_FS = frozenset({"proc", "sysfs", "tmpfs", "devtmpfs", "devpts", "ramfs", 
 SYSTEM_MOUNT_PREFIXES = ("/boot", "/efi", "/proc", "/sys", "/dev", "/run", "/snap", "/var/lib/docker/",
                          "/var/lib/containerd", "/var/lib/kubelet")
 SECRET_DIRS = frozenset({"secrets", ".secrets"})
+VENDORED_DIRS = frozenset({"node_modules", "bower_components", "site-packages", "dist-packages", ".git"})   # third-party trees, VCS internals
 MAX_OUTPUT = 1024 * 1024
 TIMEOUT = 20
 
@@ -62,7 +63,7 @@ class DiscoveredInputs:
                 "dns": self.dns, "credentials": self.credentials, "backup": self.backup}
 
 
-MAX_SCAN_DEPTH = 8
+MAX_SCAN_DEPTH = 32                 # a stack's vendored source tree (node_modules) runs past 10; exceeding MAX_SCAN_ENTRIES still fails
 MAX_SCAN_ENTRIES = 50_000
 
 
@@ -145,6 +146,11 @@ def _data_mounts(table: Sequence[tuple[str, str]]) -> list[str]:
             continue
         found.append(point)
     return sorted(set(found))
+
+
+def _vendored(path: str, stacks_root: str) -> bool:
+    """Is `path` inside a third-party package tree (or a .git directory) below the stacks root?"""
+    return any(part.lower() in VENDORED_DIRS for part in os.path.relpath(path, stacks_root).split(os.sep)[:-1])
 
 
 def _matches(tokens: Sequence[str], name: str, image: str) -> bool:
@@ -230,14 +236,16 @@ def discover_protected_inputs(
     try:
         entries = scan(stacks_root)
     except OSError as exc:
-        fail("credentials", f"stacks tree unreadable: {type(exc).__name__}")
+        bound = exc.errno is None                       # raised by a scan bound, not by the OS
+        fail("credentials", f"stacks tree not fully scanned: {str(exc)[:200]}" if bound
+             else f"stacks tree unreadable: {type(exc).__name__}")
         entries = []
     paths["credentials"].extend(blind)            # unreadable below the root: protected whole, never searched around
     for path, is_dir in entries:
         base = os.path.basename(path).lower()
         if is_dir:
             for domain, tokens in families:
-                if any(t in base for t in tokens):
+                if any(t in base for t in tokens) and not _vendored(path, stacks_root):   # a package named `cyborg` is not a backup
                     evidence[domain] = True
                     paths[domain].append(path)
             if base in SECRET_DIRS:

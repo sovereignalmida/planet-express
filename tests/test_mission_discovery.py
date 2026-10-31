@@ -257,6 +257,7 @@ def test_an_unreadable_stacks_root_is_still_a_failure(tmp_path):
         got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
                                         read_text=lambda p: MOUNTINFO, exists=lambda p: False)
         assert "credentials" in got.failures and got.blind == ()
+        assert "unreadable" in got.failures["credentials"]        # a permission failure still says so
     finally:
         root.chmod(0o755)
 
@@ -305,3 +306,35 @@ def test_nested_secrets_are_found_and_a_scan_that_hits_its_bounds_is_a_failure(t
         default_scan(str(root), depth=2)
     with pytest.raises(OSError):
         default_scan(str(root), limit=2)
+
+
+def test_a_vendored_tree_ten_levels_deep_is_searched_and_one_past_the_bound_still_fails(tmp_path):
+    from planet_express.missions import discovery
+    from planet_express.missions.discovery import default_scan
+    deep = "mcp/server/node_modules/@scope/sdk/dist/cjs/server/auth/handlers"      # the live host's deepest path: 10 levels
+    root = Path(stacks(tmp_path, deep))
+    (root / deep / "prod.env").write_text("X=1\n")
+    got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
+                                    read_text=lambda p: MOUNTINFO, exists=lambda p: False)
+    assert "credentials" not in got.failures and f"{root}/{deep}/prod.env" in got.credentials
+    too_deep = Path(stacks(tmp_path / "other", "/".join(["d"] * (discovery.MAX_SCAN_DEPTH + 1))))
+    with pytest.raises(OSError):
+        default_scan(str(too_deep), blind=[])                 # the depth bound is a failure, never a blind spot
+    got = discover_protected_inputs(MissionsConfig(), stacks_root=str(too_deep), bounded=Host().bounded,
+                                    read_text=lambda p: MOUNTINFO, exists=lambda p: False)
+    assert "credentials" in got.failures and got.blind == ()
+    assert "deeper than" in got.failures["credentials"]       # the bound is named, not reported as an unreadable tree
+
+
+def test_names_inside_vendored_trees_are_not_component_evidence(tmp_path):
+    root = Path(stacks(tmp_path, "tasks/server/node_modules/cyborg", "tasks/server/node_modules/unbound-lib", "backup-restic",
+                       "proxy/vendor/traefik", "node_modules-traefik",
+                       "tools/py/Dist-Packages/coredns-client", "app/.git/refs/heads/feat/traefik-v3",
+                       "node_modules/cyborg"))
+    got = discover_protected_inputs(MissionsConfig(), stacks_root=str(root), bounded=Host().bounded,
+                                    read_text=lambda p: MOUNTINFO, exists=lambda p: False)
+    assert got.dns == () and not any("node_modules/" in p for p in got.backup) and got.ingress == tuple(sorted(
+        (f"{root}/node_modules-traefik", f"{root}/proxy/vendor/traefik")))        # nor Dist-Packages/coredns-client
+    assert f"{root}/backup-restic" in got.backup                               # outside a package tree it still counts
+    assert f"{root}/proxy/vendor/traefik" in got.ingress                       # `vendor` is not a package tree here
+    assert f"{root}/node_modules-traefik" in got.ingress                       # nor is a stack that happens to be named so

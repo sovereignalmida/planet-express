@@ -238,3 +238,28 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
 - Live host SSH works from this box (`casaMediaServer`). rc10 pre-check on the host (a `git archive` copy in /tmp, removed after; the live checkout untouched): all 176 modules import
   under the host venv's Python 3.12 with the live config, and the config validates (missions on, console on, `read_log_groups` empty). rc9 to rc10 changes nothing in
   requirements, systemd or deploy.sh. Next: the operator runs the deploy (step 2), then the helper reinstall (step 3).
+
+### rc10 deployed, rc11 discovery fix (2026-10-31)
+- **rc10 deployed** to the live host (snapshot `data/snapshots/20261031T140314Z-pre-rc10`, rollback target rc9 `0bc80d6`). Both units active, launcher
+  preflight PASS, no tracebacks. Step 3 (helper reinstall, then `read_log_groups`) not yet run.
+- **Repair was still unavailable on rc10**: protected-set discovery failed on (a) `credentials`: the stacks scan hit its depth bound in
+  `vikunja-mcp/server/node_modules` (the tree is 10 deep; the bound was 8), and (b) `backup`: Core cannot test `/root/.config/borg` (/root is 0700).
+- **rc11 (discovery only)**: `MAX_SCAN_DEPTH` 8 -> 32 (the 50,000-entry cap is unchanged and still fails); directory names inside package trees
+  (`node_modules`, `bower_components`, `site-packages`, `dist-packages`) and `.git` are no longer ingress/dns/backup evidence; a scan bound is
+  reported by name instead of "unreadable: OSError". On the live host credentials is now clean (23 paths, 1 blind dir); only `backup` remains.
+- Reviews: Codex 8 passes and Claude `/code-review high` 5 passes over the iterations; the final diff is Codex-clean. Tried and REMOVED after review
+  (each opened more edge cases than it closed): protecting depth-bound subtrees whole (unhashable by the tripwire), treating untestable backup
+  candidates as protected (every Repair start would hit BlindBaseline), a long-path ancestor fallback (could protect a whole stack or be carved
+  out), a startup warning for blind paths (under-reported), and autofs-as-storage (below).
+- Left, with reasons: the entry cap still fails a host whose package trees exceed 50,000 entries (no worse than before; live tree is 6,194);
+  `.env.*` files inside package trees become protected credentials (fail-safe; none on the live host); container-name token matching is
+  substring-based (pre-existing).
+- **Open, own item: idle automounts are not protected.** `autofs` is pseudo in discovery, so `/mnt/casabu` (the Unraid backup share, a systemd
+  automount) is in the protected set only if mounted at discovery time. Protecting it needs: the tripwire must not size idle automounts (sizing
+  mounts it, blocks when the NAS is down), the idle set must be re-read per scan, a skipped volume must be reported, and automount/expiry must
+  not read as a protected mount change. Interim: operator set the share to `file_mode=0640,dir_mode=0750` (uid 1000), so session uids cannot
+  write it; pending `daemon-reload` + umount to take effect.
+- **Operator decisions before Repair is available on the live host**: `missions.protected_absent: [backup]` (backup is the Unraid share, no
+  borg/restic config on this host; confirm `/root/.config/{borg,borgmatic,restic}` absent) and
+  `missions.tripwire_accept_blind: ["path:/home/casaroot/stacks/vikunja/db/18/docker"]` (Postgres data dir Core cannot read).
+- Full suite (Python 3.12): 7152 passed, 178 skipped. The VM privileged suite was not re-run (no privileged code changed).
