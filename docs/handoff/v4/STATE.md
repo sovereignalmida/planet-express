@@ -263,3 +263,16 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   borg/restic config on this host; confirm `/root/.config/{borg,borgmatic,restic}` absent) and
   `missions.tripwire_accept_blind: ["path:/home/casaroot/stacks/vikunja/db/18/docker"]` (Postgres data dir Core cannot read).
 - Full suite (Python 3.12): 7152 passed, 178 skipped. The VM privileged suite was not re-run (no privileged code changed).
+
+### rc11 deployed, investigation access live (2026-10-31)
+- Live host on `v4.0.0-rc11` (snapshot `pre-rc11`, rollback target rc10). With the config below, discovery reports no failures: **Repair is
+  wired on the live host for the first time** (no "Repair missions are not available" at startup).
+- Config added (backups `config.yaml.bak-pre-rc11-*`, `config.yaml.bak-pre-loggroups-*`): `missions.protected_absent: [backup]` (backups go to
+  the Unraid share), `missions.tripwire_accept_blind: ["path:/home/casaroot/stacks/vikunja/db/18/docker"]`, `missions.read_log_groups: [adm,
+  systemd-journal]`.
+- Launcher helper and launch.conf reinstalled (`setup_steps probe` showed only those two as TODO; `repair` fixed both). Startup check after the
+  restart: PASS, session probe holds exactly gids 4 (adm) and 999 (systemd-journal).
+- `/mnt/casabu` now mounts `file_mode=0640,dir_mode=0750` (uid 1000). Lesson: `umount` of an automount that has already idled out unmounts the
+  autofs trigger and fails `mnt-casabu.automount`; recovery is `systemctl restart mnt-casabu.automount`.
+- **Next:** ask the radarr question again in the Console (can it now read Docker logs, the journal and the inventory?); the first live
+  Repair from the Console is still the P2 acceptance test. Open: idle-automount protection (own item, above).
