@@ -276,3 +276,8 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   autofs trigger and fails `mnt-casabu.automount`; recovery is `systemctl restart mnt-casabu.automount`.
 - **Next:** ask the radarr question again in the Console (can it now read Docker logs, the journal and the inventory?); the first live
   Repair from the Console is still the P2 acceptance test. Open: idle-automount protection (own item, above).
+- **Radarr question re-asked (M-3, 2026-10-31): investigation access works.** The session read Docker through the read-only proxy (ps, logs,
+  inspect), found Radarr healthy and traced the failures to Prowlarr's indexers (429 disables, Cloudflare blocks, category mismatches);
+  8 model requests, 45,792 tokens, 36 s. Docker log redaction held (API-key lines `[REDACTED]`). Journal/`/var/log` access was not exercised.
+  Compare M-2 on rc9: "uid 200000 is denied ... couldn't reach any evidence". The agent offered a Prowlarr-restart plan: a candidate for the first
+  live Repair from the Console.
