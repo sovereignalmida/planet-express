@@ -51,6 +51,9 @@ HARDENING_ENV = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEM
                  "DISABLE_FEEDBACK_COMMAND": "1", "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": "1",
                  "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"}
 _CHUNK = 8192
+# Bytes of request body per token, for the reservation only. Anthropic's tokenizer averages about 3.5-4 bytes a token on English,
+# JSON and code; a request that runs over its estimate is still charged what the vendor counted when it finishes.
+BYTES_PER_TOKEN_ESTIMATE = 4
 _MAX_LINE = 1 << 20
 
 
@@ -133,7 +136,8 @@ class _Session:
         self.lock = threading.Lock()
         self.requests = 0
         self.tokens = 0
-        self.reserved = 0                # tokens promised to requests still in flight
+        self.reserved = 0                # tokens promised to requests still in flight (an estimate: what admission counts)
+        self.at_risk = 0                 # the worst case of those same requests (what one cut off mid-stream is charged)
         self.refused = 0
         self.refused_logged = 0
         self.closed = False              # set when the session ends: nothing may connect or send after it
@@ -259,9 +263,9 @@ class ModelBroker:
         if session is None:
             return None
         with session.lock:
-            # `reserved` is what requests still in flight were promised: a request cut off mid-stream is charged by the handler AFTER its
-            # caller has looked, so a caller that wants a conservative total counts it too.
-            return {"requests": session.requests, "tokens": session.tokens, "refused": session.refused, "reserved": session.reserved}
+            # `reserved` is the worst case of the requests still in flight: a request cut off mid-stream is charged that by the handler
+            # AFTER its caller has looked, so a caller that wants a conservative total counts it too.
+            return {"requests": session.requests, "tokens": session.tokens, "refused": session.refused, "reserved": session.at_risk}
 
     def _stop(self, session_id: str) -> None:
         with self._lock:
@@ -375,10 +379,16 @@ class ModelBroker:
                 why = broker._permitted(session)           # the last look before this request counts against the budget
                 if why:
                     return self._refuse(403, "permission_error", f"model access is closed: {why}")
-                # What this request may cost, promised before it is relayed: the output cap it declares plus a generous guess at
-                # its input. Without a reservation, parallel requests could each pass the check while none had finished.
+                # What this request may cost, promised before it is relayed: the output cap it declares plus an estimate of its
+                # input. Without a reservation, parallel requests could each pass the check while none had finished. The estimate is
+                # not a bound: a request that finishes is charged what the vendor counted, so the last request admitted under a cap
+                # can run past it by that request's misestimate. Promising the body's raw bytes (a token is never under a byte) made
+                # it a bound but over-promised a resumed conversation several-fold (its whole context is re-sent each request), which
+                # refused its second turn at a third of its budget. `worst` keeps that bound for a request whose real cost is unknown.
                 declared = parsed.get("max_tokens")
-                promise = (declared if isinstance(declared, int) and declared > 0 else 0) + len(body)   # a token is never under a byte
+                output = declared if isinstance(declared, int) and declared > 0 else 0
+                promise = output + -(-len(body) // BYTES_PER_TOKEN_ESTIMATE)
+                worst = output + len(body)
                 with session.lock:
                     ceiling = broker.limits.max_tokens if session.cap is None else min(broker.limits.max_tokens, session.cap)
                     over = (session.requests >= broker.limits.max_requests
@@ -386,19 +396,21 @@ class ModelBroker:
                     if not over:
                         session.requests += 1
                         session.reserved += promise
+                        session.at_risk += worst
                 if over:
                     return self._refuse(403, "permission_error", "the mission's model budget is used up")
                 state = {"released": False, "contacted": False}
                 try:
-                    self._relay(path, body, model, key, promise, state)
+                    self._relay(path, body, model, key, promise, worst, state)
                 finally:
                     with session.lock:
                         if not state["released"]:
                             session.reserved -= promise
+                            session.at_risk -= worst
                             if state["contacted"]:
-                                session.tokens += promise      # the vendor was reached and no usage came back: assume the worst
+                                session.tokens += worst        # the vendor was reached and no usage came back: assume the worst
 
-            def _relay(self, path: str, body: bytes, model: str, key: str, promise: int, state: dict) -> None:
+            def _relay(self, path: str, body: bytes, model: str, key: str, promise: int, worst: int, state: dict) -> None:
                 started = time.monotonic()
                 headers = {name: value for name in FORWARD_REQUEST_HEADERS if (value := self.headers.get(name))}
                 if broker.auth_scheme == "bearer":
@@ -462,11 +474,12 @@ class ModelBroker:
                 counter.finish()
                 charge = counter.total
                 completed = counter.complete()                  # the vendor's own end marker arrived, not just a closed socket
-                if status == 200 and not completed:
-                    charge = max(charge, promise)           # cut short or cut off: the vendor may still have billed all of it
+                if state["contacted"] and not completed:
+                    charge = max(charge, worst)             # cut short, cut off, or no answer after it was sent: the vendor may have billed all of it
                 with session.lock:
                     session.tokens += charge
                     session.reserved -= promise                 # in one step: no request ever sees both counted
+                    session.at_risk -= worst
                     state["released"] = True
                 broker._record(session, "model.request", {
                     "path": path, "model": model, "status": status, "input_tokens": counter.input, "output_tokens": counter.output,

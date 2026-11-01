@@ -281,3 +281,17 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   8 model requests, 45,792 tokens, 36 s. Docker log redaction held (API-key lines `[REDACTED]`). Journal/`/var/log` access was not exercised.
   Compare M-2 on rc9: "uid 200000 is denied ... couldn't reach any evidence". The agent offered a Prowlarr-restart plan: a candidate for the first
   live Repair from the Console.
+
+### First live Repair attempt: broker over-reserved, fixed in rc12 (2026-11-01)
+- Asked M-3 (turn 2, resumed) for a Prowlarr-restart plan. The turn's second model request was refused: "the mission's model budget is used up"
+  (events 144-150). Cause: the broker promised each request `max_tokens + body bytes` before relaying it. A resumed turn re-sends its whole
+  context (about 65-95 KB here), so with 104,208 left the first request (charged 31,676) left too little for the second promise. This is the P0
+  "budget check reserves too much" finding (`v4-console-p0-findings.md`); `CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192` had only halved it.
+- Fix (`model_broker.py`): the promise is `max_tokens + ceil(bytes / 4)` (an estimate, `BYTES_PER_TOKEN_ESTIMATE`); a finished request is still
+  charged the vendor's usage. The old bytes bound survives as `worst`: charged when the vendor was reached and no usage came back, a stream was
+  cut short, or the request was sent and never answered (that last case charged 0 before: pre-existing gap, found by the Claude review). A new
+  `at_risk` counter holds the in-flight worst case, and `usage()["reserved"]` reports it, so the Console's cut-off-turn accounting stays
+  conservative. Accepted trade-off: requests admitted under a cap can overshoot it by their own misestimate (bounded by `max_requests` and the
+  connection cap).
+- Reviews: Codex 2 rounds, no findings. Claude review: no issues in the change; one pre-existing gap (above), fixed.
+- Full suite (Python 3.12): 7154 passed, 178 skipped.

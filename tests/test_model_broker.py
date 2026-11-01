@@ -294,18 +294,19 @@ def test_the_request_budget_ends_in_a_refusal_that_is_not_retryable(rig):
 
 def test_the_token_budget_ends_it_too(rig):
     upstream, _store, build = rig
-    # each request is promised its body size (40 bytes here) before it runs, and costs 15 tokens as the vendor counts them
+    # each request is promised a quarter of its body size (40 bytes here, so 10) before it runs, and costs 15 tokens as the vendor
+    # counts them
     broker = started(build, limits=BrokerLimits(max_tokens=90))
-    assert [ask(broker)[0].status for _ in range(4)] == [200, 200, 200, 200]       # 0, 15, 30, 45 spent + 40 promised each
-    assert ask(broker)[0].status == 403 and len(upstream.seen) == 4                # 60 spent + 40 promised would be 100 > 90
+    assert [ask(broker)[0].status for _ in range(6)] == [200] * 6                  # 0, 15, ... 75 spent + 10 promised each
+    assert ask(broker)[0].status == 403 and len(upstream.seen) == 6                # 90 spent + 10 promised would be 100 > 90
 
 
 def test_a_session_cap_lowers_the_token_ceiling_and_can_never_raise_it(rig):
     upstream, _store, build = rig
     broker = started(build, limits=BrokerLimits(max_tokens=10_000))
     assert broker.set_session_cap("S-1", 90) is True                               # a conversation's remaining budget
-    assert [ask(broker)[0].status for _ in range(4)] == [200, 200, 200, 200]       # the same arithmetic as the 90-token broker above
-    assert ask(broker)[0].status == 403 and len(upstream.seen) == 4
+    assert [ask(broker)[0].status for _ in range(6)] == [200] * 6                  # the same arithmetic as the 90-token broker above
+    assert ask(broker)[0].status == 403 and len(upstream.seen) == 6
     assert broker.set_session_cap("S-1", 10**9) is True                            # asking for more changes nothing
     assert ask(broker)[0].status == 403
     assert broker.set_session_cap("S-nope", 5) is False
@@ -318,9 +319,28 @@ def test_a_mission_cap_set_before_the_session_exists_applies_to_its_next_session
     broker.set_mission_cap("M-1", 90)                                             # no session yet
     broker.set_mission_cap("M-1", 10**9)                                          # asking for more changes nothing
     broker.start(CS())
-    assert [ask(broker)[0].status for _ in range(4)] == [200, 200, 200, 200]      # the 90-token arithmetic again
-    assert ask(broker)[0].status == 403 and len(upstream.seen) == 4
+    assert [ask(broker)[0].status for _ in range(6)] == [200] * 6                 # the 90-token arithmetic again
+    assert ask(broker)[0].status == 403 and len(upstream.seen) == 6
     assert broker._mission_caps == {}                                             # consumed: the mission's next session starts clean
+
+
+def test_a_resumed_conversation_is_not_refused_for_re_sending_its_context(rig):
+    """The live failure: a resumed Console turn re-sends its whole context on every request. Promising the raw body bytes refused the
+    turn's second request with most of the budget unspent; the promise is now an estimate, and the charge is what the vendor counted."""
+    upstream, _store, build = rig
+    broker = started(build, limits=BrokerLimits(max_tokens=200_000))
+    context = {"model": MODEL, "max_tokens": 32_000, "messages": [{"role": "user", "content": "x" * 120_000}]}
+    broker.set_session_cap("S-1", 104_208)                     # the conversation's remainder that turn
+    assert [ask(broker, body=context)[0].status for _ in range(3)] == [200, 200, 200]      # ~62k promised, 15 charged each
+    assert broker.usage("S-1")["tokens"] == 45 and len(upstream.seen) == 3
+
+
+def test_a_request_still_cannot_be_admitted_when_its_estimate_does_not_fit(rig):
+    upstream, _store, build = rig
+    broker = started(build, limits=BrokerLimits(max_tokens=200_000))
+    broker.set_session_cap("S-1", 30_000)
+    body = {"model": MODEL, "max_tokens": 1_000, "messages": [{"role": "user", "content": "x" * 120_000}]}    # ~31k promised
+    assert ask(broker, body=body)[0].status == 403 and len(upstream.seen) == 0
 
 
 def test_a_session_cap_applies_to_its_own_session_only(rig):
@@ -660,6 +680,7 @@ def test_an_upstream_timeout_is_recorded_as_the_504_the_client_got(rig):
     broker.start(CS())
     try:
         assert ask(broker)[0].status == 504
+        assert broker.usage("S-1")["tokens"] >= 40      # sent, never answered: the vendor may have billed it, so the worst case is charged
     finally:
         broker.shutdown()
         silent.close()
@@ -682,7 +703,7 @@ def test_a_response_cut_short_is_charged_what_it_was_promised(rig):
             break
         threading.Event().wait(0.05)
     upstream.hold.set()
-    assert broker.usage("S-1")["tokens"] >= 500         # the promise, not the 10 tokens seen so far
+    assert broker.usage("S-1")["tokens"] >= 500 + 40     # the worst case (output cap + body bytes), not the 10 tokens seen so far
 
 
 def test_a_stream_that_finished_is_charged_only_what_the_vendor_counted(rig):
@@ -730,7 +751,7 @@ def test_a_finished_request_frees_its_promise_in_the_same_step_it_is_charged(rig
     assert ask(broker)[0].status == 200
     with broker._lock:
         session = broker._sessions["S-1"]
-    assert session.reserved == 0 and session.tokens == 15
+    assert session.reserved == 0 and session.at_risk == 0 and session.tokens == 15
 
 
 def test_the_broker_key_is_stripped_from_any_session_environment_by_name_and_by_value(rig):
@@ -820,7 +841,7 @@ def test_a_request_that_reached_the_vendor_but_died_unexpectedly_is_charged_its_
         threading.Event().wait(0.05)
     with broker._lock:
         session = broker._sessions["S-1"]
-    assert session.reserved == 0                         # nothing is left promised, and no request is un-accounted
+    assert session.reserved == 0 and session.at_risk == 0     # nothing is left promised, and no request is un-accounted
 
 
 def test_a_gateway_mounted_under_a_path_with_bearer_auth_is_reached_that_way(rig):
@@ -937,6 +958,6 @@ def test_usage_reports_what_in_flight_requests_were_promised(rig):
     deadline = time.time() + 5
     while broker.usage("S-1")["reserved"] == 0 and time.time() < deadline:
         time.sleep(0.02)
-    assert broker.usage("S-1")["reserved"] >= 100 and broker.usage("S-1")["tokens"] == 0     # promised, not yet charged
+    assert broker.usage("S-1")["reserved"] >= 100 + 40 and broker.usage("S-1")["tokens"] == 0    # its worst case, not yet charged
     upstream.hold.set()
     conn.getresponse().read()
