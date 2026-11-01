@@ -314,3 +314,17 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
      or a gate that tolerates password-only sudo and recognises v3's generated allowlist (weaker; needs the second review's view).
 - Experience: the operator rated the flow "pretty disjointed" (four failures, raw pydantic text in the composer footer, typed "confirm option a"
   went to the agent, a no-backup refusal on a restart that changes no files, "taking a checkpoint" shown while the start was blocked).
+- Operator commented out `casaroot ALL=(ALL) NOPASSWD: /bin/systemctl start|stop *.mount` in `/etc/sudoers` (backup
+  `/root/sudoers.bak-20261101`; sudoers `*` matches spaces, so it allowed starting/stopping ANY unit as root). `visudo -c` OK, no wildcard rule
+  left in `sudo -n -l`, v3's exact mount rules still allow (`sudo -l -n /usr/bin/systemctl stop casamedia.mount`).
+- Still open on the host: `/etc/sudoers.d/planetexpress` (v3) allows NOPASSWD start/stop of system mounts (`-.mount`, `home.mount`,
+  `tmp.mount`, `boot-efi.mount`, `run-credentials-*`, `sys-kernel-*`): narrow `sudo_allowlist` to the data mounts and re-run the wizard.
+- Gate parser false positive: v3's lines end `# matched glob '*.mount'` and the gate reads the `*` in the comment as a wildcard (comments
+  are not stripped; careful: `#<digits>` is a uid in sudoers).
+- **Actions (v3) and Missions (v4) are not mutually exclusive.** Missions change containers through the Docker proxy, which never takes the
+  `PipelineState` host-mutation lock (no reference in `missions/` or `console/`); `run_mission_runbook` (which does) has only test callers.
+  v3 never checks mission leases. A scan can run mid-mission. UI: only the incident card links them, once.
+- **rc13 scope:** (1) protected-list cap; (2) Console elevation dialog; (3) sudoers gate: comment stripping, password-only rules tolerated
+  unless auth is disabled/timestamps shared, v3 file accepted when byte-identical to its generator, read ACL for the Core user;
+  (4) Actions/Missions mutual exclusion (proxy writes take the host lock, v3 checks leases, scans wait); (5) cross-links (incident card lists
+  its missions, Actions shows mission work); (6) experience: blocked starts say why, plain error text, a typed "confirm" points at the button.
