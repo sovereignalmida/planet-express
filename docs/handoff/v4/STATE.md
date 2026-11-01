@@ -347,3 +347,9 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   left by an interrupted run; removed, 212 oc tests pass).
 - Live host before a Repair: narrow `sudo_allowlist` (`*.mount` glob -> the data mounts) and re-run the v3 wizard; deploy rc13; run
   `setup_steps repair` (adds `sudoers-readable`).
+- Live host, 2026-11-01 15:29: `sudo_allowlist` narrowed to exact units (casa-stacks.service start/stop/restart; start/stop of
+  casa_knowledge, casa_scratch, casamedia_nfs, erugo_nfs, immichPhotos_nfs, urphotos_nfs, mnt-casabu .mount; `globs: []`; backup
+  `config.yaml.bak-pre-allowlist-202611011525`). The `*.mount` glob had grown to 180+ units (docker netns/overlay). New
+  `/etc/sudoers.d/planetexpress` generated with v3's `generate_sudoers_snippet` and installed by the operator (old file at
+  `/root/planetexpress.sudoers.bak-20261101`). `sudo -n -l`: NOPASSWD only for those units and the launcher. rc13's gate, simulated
+  against the host's real sudoers and groups: ok (8 v3 rules accepted, `%sudo` reported as a password rule). Core restarted clean.
