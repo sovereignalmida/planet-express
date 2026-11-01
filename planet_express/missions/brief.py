@@ -24,6 +24,7 @@ EXCLUSION_PREFIX = "Excluded:"
 MAX_EXCLUSION = 1024                   # bytes; an exclusion is never shortened, so a longer one is refused
 FIELD_CAP = 2000                       # bytes of goal / success criteria kept in the brief
 MAX_LIST = 16                          # scope entries per kind, and constraints, kept in the brief
+PROTECTED_CAP = 4096                   # bytes of the protected list kept in the brief (the full set is still enforced)
 MAX_CONSTRAINT = 200                   # bytes
 MIN_USEFUL = 200                       # below this, an item is omitted rather than cut to nothing
 
@@ -102,6 +103,23 @@ def _bounded(values: Sequence[str], limit: int = MAX_LIST) -> str:
     return shown + (f" (+{len(values) - limit} more)" if len(values) > limit else "")
 
 
+def _protected(values: Sequence[str]) -> str:
+    """The protected set, broadest (shortest) first, up to PROTECTED_CAP bytes. Entries are never cut (a cut path names
+    a broader prefix); a host that protects hundreds of volumes is told how many were left out, and that all are enforced."""
+    shown: list[str] = []
+    used = 0
+    for value in sorted(values, key=len):
+        text = _exact(value)
+        size = len(text.encode("utf-8")) + 2
+        if used + size > PROTECTED_CAP:
+            break
+        shown.append(text)
+        used += size
+    hidden = len(values) - len(shown)
+    note = f" (+{hidden} more not listed here; every one is still enforced)" if hidden else ""
+    return ", ".join(shown) + note
+
+
 def _field(text: str) -> str:
     """Goal and success criteria are bounded so the fixed sections can always fit the cap."""
     text = _clean(text)                      # redact the whole value BEFORE any cut, never a fragment after
@@ -127,7 +145,7 @@ def _scope_lines(mission: Mission) -> str:
         if values:
             lines.append(f"{name}: " + _bounded(values))
     if grant.protected.resources:
-        lines.append("protected (never touch): " + ", ".join(_exact(v) for v in grant.protected.resources))
+        lines.append("protected (never touch): " + _protected(grant.protected.resources))
     if grant.exclusions:
         lines.append("exclusions: " + ", ".join(_exact(v) for v in grant.exclusions))
     b = grant.budgets

@@ -138,6 +138,23 @@ def _json(raw: str | None, limit: int = MAX_JSON) -> Any:
     return value
 
 
+MAX_PROTECTED_SHOWN = 32    # protected resources returned with a mission's grant; the count says how many there are
+
+
+def _grant_out(raw: str) -> Any:
+    """The stored grant for display. The site's protected set is copied into every grant and can run to hundreds of
+    volume paths, which would push the whole grant past MAX_JSON and hide its scope; it is shortened, with its count."""
+    try:
+        grant = json.loads(raw)
+        resources = grant["protected"]["resources"]
+    except (ValueError, KeyError, TypeError):
+        return _json(raw)
+    if isinstance(resources, list) and len(resources) > MAX_PROTECTED_SHOWN:
+        grant["protected"] = {"resources": resources[:MAX_PROTECTED_SHOWN], "count": len(resources), "shortened": True}
+        return _json(json.dumps(grant))
+    return _json(raw)
+
+
 def _event_out(event: MissionEvent) -> dict[str, Any]:
     return {"seq": event.seq, "at": event.at, "kind": event.kind, "actor": _text(event.actor, 128),
             "body": _json(event.body_json)}
@@ -314,7 +331,7 @@ class MissionService:
         out = _mission_summary(m)
         out.update({
             "goal": _text(m.goal), "success_criteria": _text(m.success_criteria),
-            "grant": _json(m.grant_json), "grant_hash": m.grant_hash,
+            "grant": _grant_out(m.grant_json), "grant_hash": m.grant_hash,
             "plan": _json(m.plan_json), "plan_hash": m.plan_hash,
             "verification_plan": _json(m.verification_plan_json),
             "verification_result": _json(m.verification_result_json),

@@ -14,7 +14,7 @@ import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .models import Grant, VerificationPlan
+from .models import GRANT_JSON_MAX, MAX_PROTECTED, Grant, VerificationPlan
 from .protected import ProtectedSet
 from .resources import BadResource, canon, contains, split
 from .store import grant_resources
@@ -59,8 +59,18 @@ def grant_hash(grant: Grant) -> str:
 
 
 def with_site_protected(grant: Grant, protected: ProtectedSet) -> Grant:
-    """Copy the site's protected set into the grant (it is hashed, so approval binds to it)."""
-    return Grant.model_validate({**grant.model_dump(mode="json"), "protected": {"resources": list(protected.resources)}})
+    """Copy the site's protected set into the grant (it is hashed, so approval binds to it). A set too large to store
+    with the grant is refused here, in words, rather than as a schema error from the store."""
+    count = len(protected.resources)
+    if count > MAX_PROTECTED:
+        raise ValueError(f"the site protects {count} resources, more than the {MAX_PROTECTED} a grant can carry; "
+                         "protect a parent path instead of each volume, or prune unused Docker volumes")
+    out = Grant.model_validate({**grant.model_dump(mode="json"), "protected": {"resources": list(protected.resources)}})
+    size = len(out.canonical().encode("utf-8"))   # bytes: at least what the store counts (characters), and what RPC frames count
+    if size > GRANT_JSON_MAX:
+        raise ValueError(f"the site's {count} protected resources make the grant {size} bytes, over the {GRANT_JSON_MAX} "
+                         "a mission can store; protect a parent path instead of each volume, or prune unused Docker volumes")
+    return out
 
 
 def _under_root(path: str, roots: Iterable[str]) -> bool:

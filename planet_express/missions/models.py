@@ -31,9 +31,14 @@ SessionKind = Literal["local_cgroup", "local_uid", "remote_tunnel"]
 Int = StrictInt
 Str = Annotated[StrictStr, Field(max_length=512)]
 Text = Annotated[StrictStr, Field(max_length=8192)]
-JsonText = Annotated[StrictStr, Field(max_length=262144)]
+GRANT_JSON_MAX = 262144                  # a stored JSON document, the grant among them
+JsonText = Annotated[StrictStr, Field(max_length=GRANT_JSON_MAX)]
 ResourceId = Annotated[StrictStr, Field(min_length=1, max_length=512)]
 ShortList = Annotated[list[Str], Field(max_length=256)]
+# The site's protected set is copied into every grant, and discovery lists every Docker volume, so it outgrows ShortList on
+# a busy host. Its real bound is the stored grant's size (GRANT_JSON_MAX), which `with_site_protected` checks and explains.
+MAX_PROTECTED = 4096
+ProtectedList = Annotated[list[Str], Field(max_length=MAX_PROTECTED)]
 
 PHASE_RE = re.compile(r"^(grant|plan|broad_sudo|no_backup|critical:\d{1,6})$")
 
@@ -60,7 +65,7 @@ class StandingCeilings(_Strict):
 
 
 class Protected(_Strict):
-    resources: ShortList = []
+    resources: ProtectedList = []
 
 
 class Window(_Strict):
