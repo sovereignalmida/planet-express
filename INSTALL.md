@@ -271,7 +271,10 @@ session holds a uid in the old one.
    `worker_sudo_all_sessions`. The plan lists every step below and its risk; each is reversible.
 2. **Launcher steps** (root, in this order, journalled so undo and repair work): `session-uid-range`, `launcher-helper`
    (`/usr/libexec/planetexpress/pe-launch`, the only code that starts a session), `launcher-sudoers`
-   (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `cgroup-tree` (a `Delegate=yes` drop-in
+   (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `sudoers-readable` (a read-only ACL for
+   the Core user on `/etc/sudoers` and `/etc/sudoers.d`, so the Repair gate can check every sudo rule that reaches Core;
+   `visudo` drops it from `/etc/sudoers` when it saves, so run `repair` again after editing sudoers; nothing to do when
+   Core runs as root), `cgroup-tree` (a `Delegate=yes` drop-in
    for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root` and `socket-root`. With
    `worker_sudo_rules` set, `worker-sudoers` also writes `/etc/sudoers.d/planetexpress-worker`: exact units and actions,
    never a wildcard, shown to you first. They can be run by hand: `python3 -m planet_express.missions.launcher.setup_steps

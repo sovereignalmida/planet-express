@@ -26,7 +26,7 @@ import re
 import shlex
 import stat
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,6 +47,7 @@ SOURCE = Path(pe_launch.__file__)
 _SHELL_SAFE = re.compile(r"/[A-Za-z0-9._@+/-]*")
 _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 UNIT_DROPIN = "/etc/systemd/system/casa-planetexpress.service.d/launcher.conf"
+_RUN_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 
 
 class StepError(Exception):
@@ -102,6 +103,10 @@ class Paths:
     group: str = "/etc/group"
     visudo: str = "/usr/sbin/visudo"
     systemctl: str = "/usr/bin/systemctl"
+    sudoers_main: str = "/etc/sudoers"
+    sudoers_dir: str = "/etc/sudoers.d"
+    setfacl: str = "/usr/bin/setfacl"
+    getfacl: str = "/usr/bin/getfacl"
     mountinfo: str = "/proc/self/mountinfo"
     check_delegation: bool = True                 # require Core's cgroup to exist and be Core's (tests may turn it off)
     run: Callable = field(default=subprocess.run, repr=False)
@@ -1018,10 +1023,184 @@ class SocketRoot(_CoreDir):
     mode = 0o711          # Core makes each session's directory below it; the launcher hands that one to the session
 
 
+class SudoersReadable(Step):
+    """Core reads every sudoers file, so the Repair gate's `sudoers-managed` check can run as Core. Needed only when Core is not
+    root (an install where Core runs as the operator's own account). A read-only POSIX ACL entry for the Core user on
+    `/etc/sudoers` and each file in `/etc/sudoers.d`, traverse on the directory, and a default entry so a file added later
+    inherits it. Mode bits stay 0440 (sudo and `visudo -c` accept the files); `visudo -c` is run after every change.
+    `visudo` replaces `/etc/sudoers` when it saves, which drops the entry: the gate then fails closed and names this step."""
+    name = "sudoers-readable"
+    ubuntu_only = True
+
+    def _targets(self) -> list[tuple[str, str]]:
+        """Every file the Repair gate will read (the same include walk: `@include`/`@includedir`, recursively) and the
+        directories that hold them. Run as root, so the walk itself can read what it follows."""
+        from planet_express.missions.launcher.side_doors import SideDoorPaths, SudoersManaged     # side_doors imports this module
+        p = self.p
+        gate = SudoersManaged(SideDoorPaths(core_user=p.core_user, uid_min=p.uid_min, uid_max=p.uid_max,
+                                            sudoers=p.sudoers_main, sudoers_dir=p.sudoers_dir))
+        files = gate._files()
+        dirs = dict.fromkeys([p.sudoers_dir] if os.path.isdir(p.sudoers_dir) else [])
+        for path in files:
+            dirs[os.path.dirname(path)] = None
+        return [*((d, "rx") for d in dirs), *((f, "r") for f in dict.fromkeys([p.sudoers_main, *files]))]
+
+    def _untraversable(self, targets: list[tuple[str, str]]) -> list[str]:
+        """Ancestors ABOVE the sudoers directories that Core cannot pass through. Setup never widens those (they are not
+        sudo's): the operator moves the include or opens the directory, then runs this step again."""
+        own = {path for path, need in targets if need == "rx"}
+        blocked: dict[str, None] = {}
+        for path, _need in targets:
+            current, top = os.path.dirname(path), self.p.below.rstrip("/")
+            while current not in ("/", "", top):
+                if current not in own and not self._can(current, "x"):
+                    blocked[current] = None
+                current = os.path.dirname(current)
+        return list(blocked)
+
+    def _acl(self, path: str, default: bool = False) -> dict[str, str]:
+        argv = [self.p.getfacl, "-cpn", *(["-d"] if default else []), "--", path]
+        result = self.p.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=20, env=_RUN_ENV, check=False)
+        if result.returncode != 0:
+            raise StepError(f"getfacl {path} failed: {(result.stderr or b'').decode(errors='replace').strip()[:160]}")
+        entries = {}
+        for line in (result.stdout or b"").decode(errors="replace").splitlines():
+            kind, _, rest = line.removeprefix("default:").partition(":")
+            qualifier, _, perms = rest.partition(":")
+            entries[f"{kind}:{qualifier}"] = perms.split()[0] if perms else ""
+        return entries
+
+    def _can(self, path: str, need: str) -> bool:
+        info = os.lstat(path)
+        bits = {"r": stat.S_IROTH, "x": stat.S_IXOTH}
+        if info.st_uid == self.p.core_uid:
+            return all(info.st_mode & (bits[c] << 6) for c in need)
+        if all(info.st_mode & bits[c] for c in need):
+            return True
+        entries = self._acl(path)
+        mine, mask = entries.get(f"user:{self.p.core_uid}", ""), entries.get("mask:", "rwx")
+        return all(c in mine and c in mask for c in need)
+
+    def probe(self) -> Probe:
+        if self.p.core_uid == 0:
+            return Probe(True, "Core runs as root")
+        try:
+            targets = self._targets()
+            stuck = self._untraversable(targets)
+            if stuck:
+                return Probe(False, f"Core cannot pass through {', '.join(stuck[:3])} to reach an included sudoers file; setup "
+                                    "does not change directories that are not sudo's (move the include, or open the directory)",
+                             blocked=True)
+            missing = [path for path, need in targets if not self._can(path, need)]
+            foreign = [path for path in missing if self._foreign(self._acl(path))]
+            if os.path.isdir(self.p.sudoers_dir) and self._foreign(self._acl(self.p.sudoers_dir, default=True)):
+                foreign.append(f"{self.p.sudoers_dir} (default ACL)")
+            if foreign:
+                return Probe(False, f"{', '.join(foreign[:3])} already carr{'ies' if len(foreign) == 1 else 'y'} ACL entries setup did "
+                                    "not make; setup will not change them (adding Core would recalculate their mask). Give Core "
+                                    "read access by hand, or remove those entries, then run this step again", blocked=True)
+            default = self._default_ok()
+        except (OSError, StepError) as exc:
+            return Probe(False, f"cannot inspect the sudoers files: {exc}", blocked=True)
+        if missing:
+            return Probe(False, f"Core cannot read {', '.join(missing[:4])}{' ...' if len(missing) > 4 else ''}")
+        if not default:
+            return Probe(False, f"a file added to {self.p.sudoers_dir} later would not be readable by Core")
+        return Probe(True, "Core can read every sudoers file (read-only ACL)")
+
+    def _foreign(self, entries: Mapping[str, str]) -> list[str]:
+        """ACL entries setup did not make: a named user other than Core, a named group, or a mask without Core's entry.
+        Adding Core's entry recalculates the mask, which could widen what those others get, so setup leaves such a file alone."""
+        mine = f"user:{self.p.core_uid}"
+        out = [k for k in entries if (k.startswith("user:") and k not in ("user:", mine)) or (k.startswith("group:") and k != "group:")]
+        if "mask:" in entries and mine not in entries:
+            out.append("mask:")
+        return out
+
+    def _default_ok(self) -> bool:
+        """A file added to sudoers.d later inherits an entry Core can read through (the default mask counts too)."""
+        if not os.path.isdir(self.p.sudoers_dir):
+            return True
+        entries = self._acl(self.p.sudoers_dir, default=True)
+        return "r" in entries.get(f"user:{self.p.core_uid}", "") and "r" in entries.get("mask:", "r")
+
+    def _setfacl(self, *argv: str) -> None:
+        result = self.p.run([self.p.setfacl, *argv], stdin=subprocess.DEVNULL, capture_output=True, timeout=20, env=_RUN_ENV,
+                            check=False)
+        if result.returncode != 0:
+            raise StepError(f"setfacl {' '.join(argv)[:160]} failed: {(result.stderr or b'').decode(errors='replace').strip()[:160]}")
+
+    def _sudo_still_valid(self) -> bool:
+        result = self.p.run([self.p.visudo, "-c"], stdin=subprocess.DEVNULL, capture_output=True, timeout=30, env=_RUN_ENV,
+                            check=False)
+        return result.returncode == 0
+
+    def repair(self, journal) -> dict:
+        state = self.probe()
+        if state.ok:
+            return {}
+        if state.blocked:
+            raise StepError(state.detail)
+        who = str(self.p.core_uid)
+        # path -> Core's entry before this step ("" when it had none), so undo puts back exactly what was there.
+        prior: dict[str, str] = {}
+        evidence = {"core_uid": self.p.core_uid, "files": list(prior), "prior": prior, "default_dir": None, "default_prior": None}
+        try:
+            for path, need in self._targets():
+                if not self._can(path, need):
+                    had = self._acl(path).get(f"user:{who}", "")
+                    keep = "".join(c for c in "rwx" if c in had or c in need)
+                    journal.append("evidence", step=self.name, data=dict(evidence, intent=path, intent_prior=had))
+                    self._setfacl("-m", f"u:{who}:{keep}", "--", path)
+                    prior[path] = had
+                    evidence["files"] = list(prior)
+            if not self._default_ok():
+                current = self._acl(self.p.sudoers_dir, default=True)
+                had, mask = current.get(f"user:{who}", ""), current.get("mask:")
+                journal.append("evidence", step=self.name, data=dict(evidence, intent="default", intent_prior=had))
+                self._setfacl("-d", "-m", f"u:{who}:r", "--", self.p.sudoers_dir)     # recalculates the default mask
+                evidence["default_dir"], evidence["default_prior"] = self.p.sudoers_dir, {"user": had, "mask": mask}
+            journal.append("evidence", step=self.name, data=dict(evidence))
+            if not self._sudo_still_valid():
+                raise StepError("visudo -c fails after the read ACLs were added")
+            if not self.probe().ok:
+                raise StepError("the read ACLs were set but Core still cannot read every sudoers file")
+        except (StepError, OSError):
+            self._remove(evidence)                     # nothing half-done is left behind
+            raise
+        return dict(evidence)
+
+    def _remove(self, evidence: dict) -> list[str]:
+        who, removed = str(evidence.get("core_uid", self.p.core_uid)), []
+        prior = evidence.get("prior") or {path: "" for path in evidence.get("files") or []}
+        for path, had in prior.items():
+            if os.path.lexists(path):
+                if had:
+                    self._setfacl("-m", f"u:{who}:{had}", "--", path)                # what Core had before, exactly
+                else:
+                    self._setfacl("-x", f"u:{who}", "--", path)
+                removed.append(path)
+        directory = evidence.get("default_dir")
+        if directory and os.path.isdir(directory):
+            before = evidence.get("default_prior") or {}
+            if before.get("user"):
+                self._setfacl("-d", "-m", f"u:{who}:{before['user']}", "--", directory)
+            else:
+                self._setfacl("-d", "-x", f"u:{who}", "--", directory)
+            if before.get("mask") is not None:
+                self._setfacl("-d", "-m", f"m::{before['mask']}", "--", directory)
+            removed.append(f"default ACL on {directory}")
+        return removed
+
+    def undo(self, journal, evidence: dict) -> str:
+        removed = self._remove(evidence)
+        return f"removed Core's read ACL from {', '.join(removed)}" if removed else "nothing to remove"
+
+
 def launcher_steps(paths: Paths) -> list[Step]:
     """The steps in dependency order, minus those that do not apply on this host's flavour."""
-    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), WorkerSudoers(paths), CgroupTree(paths),
-             WorkspaceRoot(paths), SocketRoot(paths)]
+    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), WorkerSudoers(paths),
+             SudoersReadable(paths), CgroupTree(paths), WorkspaceRoot(paths), SocketRoot(paths)]
     return [s for s in steps if s.applies()]
 
 

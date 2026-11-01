@@ -24,7 +24,8 @@ from planet_express.setup.steps import CATALOGUE
 from planet_express.setup.undo import undo as _undo
 
 REPO = str(Path(__file__).resolve().parent.parent)
-NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "cgroup-tree", "workspace-root", "socket-root"]
+NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "sudoers-readable", "cgroup-tree", "workspace-root",
+         "socket-root"]
 MOS_NAMES = ["session-uid-range", "launcher-helper", "helper-store", "cgroup-tree", "workspace-root", "socket-root"]
 ON = {"enabled": True}
 
@@ -284,7 +285,7 @@ def params_for(p):
 
 
 def names_for(p):
-    return [n for n in NAMES if not (n == "launcher-sudoers" and p.flavour != "systemd")]
+    return [n for n in NAMES if not (n in ("launcher-sudoers", "sudoers-readable") and p.flavour != "systemd")]
 
 
 def install_plan(p, kind="launcher.step", names=None):
@@ -779,7 +780,7 @@ def test_apply_installs_the_worker_sudoers_and_a_cleared_config_removes_it_again
     rule = [{"unit": "plex.service", "actions": ["restart"]}]
     target = str(tree / "etc" / "sudoers.d" / "pe-worker")
     p = paths(tree, worker_sudoers=target, worker_sudo_rules=(("plex.service", ("restart",)),), worker_sudo_all_sessions=True)
-    names = ["session-uid-range", "launcher-helper", "launcher-sudoers", "worker-sudoers", "cgroup-tree", "workspace-root",
+    names = ["session-uid-range", "launcher-helper", "launcher-sudoers", "worker-sudoers", "sudoers-readable", "cgroup-tree", "workspace-root",
              "socket-root"]
     first = make_plan([step(i, "launcher.step", n, name=n, **params_for(p), worker_sudo_rules=rule, worker_sudo_all_sessions=True)
                        for i, n in enumerate(names, 1)])

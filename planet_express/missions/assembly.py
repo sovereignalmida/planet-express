@@ -47,6 +47,9 @@ class RepairWiring:
     provider: Any                                   # a `CheckpointProvider` (Systemd or Mos) over the stacks root
     scan: Callable[[], Mapping[str, Any]]           # `casa_leela.run_full`
     core_user: str                                  # the account Core runs as (the side-door gate compares against it)
+    # (unit, action) -> declared by config.yaml's v3 `sudo_allowlist`? The side-door gate accepts the v3 setup's exact no-password
+    # `systemctl` rules for Core when they are declared there. None (MOS, or no allowlist): no v3 rule is accepted.
+    v3_sudo_allowed: Callable[[str, str], bool] | None = None
 
 
 @dataclass
@@ -138,7 +141,8 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
 
     from .launcher.side_doors import SideDoorPaths, repair_gate_report, side_door_steps
     paths = SideDoorPaths(core_user=wiring.core_user, uid_min=cfg.session_uid_min, uid_max=cfg.session_uid_max,
-                          proxy_ports=tuple(cfg.docker_proxy_ports), managed=managed_sudoers(cfg, wiring.core_user))
+                          proxy_ports=tuple(cfg.docker_proxy_ports), managed=managed_sudoers(cfg, wiring.core_user),
+                          v3_allowed=wiring.v3_sudo_allowed)
     steps = side_door_steps(paths)
 
     def gate() -> Any:

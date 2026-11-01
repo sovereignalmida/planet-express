@@ -32,17 +32,45 @@ def paths(tmp_path, **over):
                 unit_dropin=str(tmp_path / "etc" / "systemd" / "launcher.conf"),
                 boot_script=str(tmp_path / "data" / "launcher-boot.sh"), interpreter="/usr/bin/python3",
                 owner_uid=ME, owner_gid=MY_GID, below=str(tmp_path), passwd=str(tmp_path / "passwd"), check_delegation=False,
-                group=str(tmp_path / "group"), run=visudo_ok)
+                group=str(tmp_path / "group"), run=visudo_ok, sudoers_main=str(tmp_path / "etc" / "sudoers"),
+                sudoers_dir=str(tmp_path / "etc" / "sudoers.d"))
     base.update(over)
+    ACLS.clear()
     (tmp_path / "etc" / "sudoers.d").mkdir(parents=True, exist_ok=True)
     (tmp_path / "etc" / "sudoers.d").chmod(0o755)
     (tmp_path / "etc").chmod(0o755)
+    (tmp_path / "etc" / "sudoers").write_text("root ALL=(ALL:ALL) ALL\n")
     (tmp_path / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\npe:x:1000:1000::/home/pe:/bin/sh\n")
     (tmp_path / "group").write_text("root:x:0:\npe:x:1000:\n")
     return Paths(**base)
 
 
+ACLS: dict[tuple[str, bool], dict[str, str]] = {}          # (path, default?) -> {"user:<uid>": perms}: a fake getfacl/setfacl
+
+
+def fake_acl(argv):
+    default = "-d" in argv
+    path = argv[-1]
+    entries = ACLS.setdefault((path, default), {})
+    if argv[0].endswith("getfacl"):
+        return subprocess.CompletedProcess(argv, 0, "".join(f"{k}:{v}\n" for k, v in entries.items()).encode(), b"")
+    if "-m" in argv:
+        for spec in argv[argv.index("-m") + 1].split(","):
+            if spec.startswith("m::"):
+                entries["mask:"] = spec[3:]
+            else:
+                key, _, perms = spec.removeprefix("u:").partition(":")
+                entries[f"user:{key}"] = perms
+                if "mask:" in entries:                     # setfacl recalculates an existing mask, as the real one does
+                    entries["mask:"] = "".join(c for c in "rwx" if any(c in v for k, v in entries.items() if k != "mask:"))
+    elif "-x" in argv:
+        entries.pop("user:" + argv[argv.index("-x") + 1].removeprefix("u:"), None)
+    return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
 def visudo_ok(argv, **kw):
+    if argv[0].endswith(("getfacl", "setfacl")):
+        return fake_acl(argv)
     visudo_ok.calls.append(argv)
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -62,13 +90,13 @@ def by_name(steps):
 
 def test_the_steps_are_named_in_dependency_order(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path))]
-    assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "cgroup-tree", "workspace-root",
-                     "socket-root"]
+    assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "sudoers-readable", "cgroup-tree",
+                     "workspace-root", "socket-root"]
 
 
 def test_mos_has_no_sudoers_step(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path, flavour="mos"))]
-    assert "launcher-sudoers" not in names and "cgroup-tree" in names
+    assert "launcher-sudoers" not in names and "sudoers-readable" not in names and "cgroup-tree" in names
 
 
 # ── probe, repair, probe ────────────────────────────────────────────────────
@@ -389,6 +417,8 @@ def test_the_systemd_step_runs_daemon_reload_and_is_pending_until_the_cgroup_is_
     calls = []
 
     def run(argv, **kw):
+        if argv[0].endswith(("getfacl", "setfacl")):
+            return fake_acl(argv)
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, b"", b"")
     p = paths(tmp_path, check_delegation=True, run=run, cgroup_root=str(tmp_path / "svc" / "sessions"))
@@ -596,3 +626,131 @@ def test_a_step_probe_over_a_chain_the_helper_refuses_names_the_directory_and_th
     os.chmod(data, 0o775)                                    # group-writable: the breach
     state = by_name(launcher_steps(p))["helper-store"].probe()
     assert state.blocked and f"chown root:root {data} && chmod 755 {data}" in state.detail
+
+
+# ── sudoers-readable (rc13: Core runs as the operator's account and must read sudoers for the Repair gate) ──────────────
+
+def _readable(tmp_path, core_uid):
+    from planet_express.missions.launcher.setup_steps import SudoersReadable
+    p = paths(tmp_path, core_uid=core_uid)
+    for name in ("sudoers",):
+        (tmp_path / "etc" / name).chmod(0o440)
+    (tmp_path / "etc" / "sudoers.d" / "planetexpress").write_text("x ALL=(root) /bin/true\n")
+    (tmp_path / "etc" / "sudoers.d" / "planetexpress").chmod(0o440)
+    return p, SudoersReadable(p)
+
+
+def test_sudoers_readable_is_satisfied_by_a_root_core(tmp_path):
+    _p, step = _readable(tmp_path, 0)
+    assert step.probe().ok and "root" in step.probe().detail
+
+
+def test_sudoers_readable_adds_read_only_acls_validates_and_undo_removes_them(tmp_path):
+    p, step = _readable(tmp_path, 4242)                 # not the files' owner, no "other" bits: only an ACL can let it read
+    before = step.probe()
+    assert not before.ok and not before.blocked and "cannot read" in before.detail
+    visudo_ok.calls.clear()
+    evidence = step.repair(MemoryJournal())
+    assert step.probe().ok
+    assert ACLS[(p.sudoers_main, False)] == {"user:4242": "r"}
+    assert ACLS[(str(tmp_path / "etc" / "sudoers.d" / "planetexpress"), False)] == {"user:4242": "r"}
+    assert ACLS[(p.sudoers_dir, True)] == {"user:4242": "r"}               # a file added later inherits it
+    assert [p.visudo, "-c"] in visudo_ok.calls                              # sudo still accepts its configuration
+    assert "removed" in step.undo(MemoryJournal(), evidence)
+    assert all(not entries for entries in ACLS.values()) and not step.probe().ok
+
+
+def test_sudoers_readable_takes_its_acls_back_when_visudo_rejects_the_result(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+
+    def run(argv, **kw):
+        if argv[0].endswith(("getfacl", "setfacl")):
+            return fake_acl(argv)
+        return subprocess.CompletedProcess(argv, 1, b"", b"bad")
+    step.p.run = run
+    with pytest.raises(StepError, match="visudo"):
+        step.repair(MemoryJournal())
+    assert all(not entries for entries in ACLS.values())
+
+
+def test_sudoers_readable_probe_fails_closed_when_the_acls_cannot_be_read(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+    step.p.run = lambda argv, **kw: subprocess.CompletedProcess(argv, 1, b"", b"Operation not supported")
+    probe = step.probe()
+    assert not probe.ok and probe.blocked
+
+
+def test_sudoers_readable_covers_files_reached_through_includes_outside_sudoers_d(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+    extra = tmp_path / "opt" / "sudo-extra"
+    extra.mkdir(parents=True)
+    (extra / "ops").write_text("x ALL=(root) /bin/true\n")
+    (extra / "ops").chmod(0o440)
+    extra.chmod(0o750)
+    (tmp_path / "etc" / "sudoers").chmod(0o640)
+    (tmp_path / "etc" / "sudoers").write_text(f"root ALL=(ALL:ALL) ALL\n@includedir {p.sudoers_dir}\n@includedir {extra}\n")
+    (tmp_path / "etc" / "sudoers").chmod(0o440)
+    step.repair(MemoryJournal())
+    assert ACLS[(str(extra / "ops"), False)] == {"user:4242": "r"}
+    assert ACLS[(str(extra), False)] == {"user:4242": "rx"}
+    assert step.probe().ok
+
+
+def test_sudoers_readable_stops_before_any_change_when_an_include_sits_under_a_closed_directory(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+    closed = tmp_path / "opt" / "private"
+    (closed / "sudo").mkdir(parents=True)
+    (closed / "sudo" / "ops").write_text("x ALL=(root) /bin/true\n")
+    closed.chmod(0o700)
+    (tmp_path / "etc" / "sudoers").chmod(0o640)
+    (tmp_path / "etc" / "sudoers").write_text(f"@includedir {p.sudoers_dir}\n@includedir {closed / 'sudo'}\n")
+    probe = step.probe()
+    assert not probe.ok and probe.blocked and str(closed) in probe.detail
+    with pytest.raises(StepError):
+        step.repair(MemoryJournal())
+    assert all(not entries for entries in ACLS.values())                    # nothing was half-done
+    closed.chmod(0o755)
+
+
+def test_sudoers_readable_rolls_back_when_the_final_check_fails(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+    original = step.probe
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        return original() if calls["n"] == 1 else type(original())(False, "still unreadable")
+    step.probe = flaky
+    with pytest.raises(StepError, match="still cannot read"):
+        step.repair(MemoryJournal())
+    assert all(not entries for entries in ACLS.values())
+
+
+def test_sudoers_readable_undo_restores_an_entry_core_already_had(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+    ACLS[(p.sudoers_main, False)] = {"user:4242": "---"}                  # an existing, insufficient entry
+    evidence = step.repair(MemoryJournal())
+    assert ACLS[(p.sudoers_main, False)]["user:4242"] == "r"
+    step.undo(MemoryJournal(), evidence)
+    assert ACLS[(p.sudoers_main, False)] == {"user:4242": "---"}           # put back, not deleted
+
+
+def test_sudoers_readable_fixes_a_default_mask_that_hides_the_entry_and_undo_restores_it(tmp_path):
+    p, step = _readable(tmp_path, 4242)
+    ACLS[(p.sudoers_dir, True)] = {"user:4242": "r", "mask:": "---"}       # the entry is there, the mask makes it useless
+    assert not step.probe().ok
+    evidence = step.repair(MemoryJournal())
+    assert ACLS[(p.sudoers_dir, True)]["mask:"] == "r" and step.probe().ok
+    step.undo(MemoryJournal(), evidence)
+    assert ACLS[(p.sudoers_dir, True)] == {"user:4242": "r", "mask:": "---"}
+
+
+@pytest.mark.parametrize("entries", [{"user:1234": "r"}, {"group:5678": "r"}, {"mask:": "r"}])
+def test_sudoers_readable_will_not_touch_a_file_that_already_has_acls_it_did_not_make(tmp_path, entries):
+    p, step = _readable(tmp_path, 4242)
+    ACLS[(p.sudoers_main, False)] = dict(entries)
+    probe = step.probe()
+    assert not probe.ok and probe.blocked and "did not make" in probe.detail
+    with pytest.raises(StepError):
+        step.repair(MemoryJournal())
+    assert ACLS[(p.sudoers_main, False)] == entries

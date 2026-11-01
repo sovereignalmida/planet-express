@@ -257,7 +257,7 @@ class _LauncherParams(_Params):
     the uid range or the paths. What each does is fixed in `planet_express/missions/launcher/setup_steps.py`: there
     is no free-form content here, and the helper, sudoers and launch.conf text is generated from these values."""
     name: Literal["session-uid-range", "launcher-helper", "helper-store", "launcher-sudoers", "worker-sudoers",
-                  "cgroup-tree", "workspace-root", "socket-root"]
+                  "sudoers-readable", "cgroup-tree", "workspace-root", "socket-root"]
     core_user: Name
     flavour: Literal["systemd", "mos"]
     uid_min: int = Field(gt=0, lt=2**31)
@@ -285,7 +285,7 @@ class _LauncherParams(_Params):
             raise ValueError("only MOS keeps a persistent helper copy")
         if self.name == "helper-store" and not self.helper_store:
             raise ValueError("the helper-store step needs the path of the persistent helper copy")
-        if self.name == "launcher-sudoers" and self.flavour != "systemd":
+        if self.name in ("launcher-sudoers", "sudoers-readable") and self.flavour != "systemd":
             raise ValueError("there is no sudo on MOS, so no launcher sudoers")
         if self.name == "worker-sudoers" and (self.flavour != "systemd"
                                               or not (self.worker_sudo_rules or self.worker_sudoers_reconcile)):

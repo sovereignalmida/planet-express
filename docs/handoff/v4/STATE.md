@@ -328,3 +328,22 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   unless auth is disabled/timestamps shared, v3 file accepted when byte-identical to its generator, read ACL for the Core user;
   (4) Actions/Missions mutual exclusion (proxy writes take the host lock, v3 checks leases, scans wait); (5) cross-links (incident card lists
   its missions, Actions shows mission work); (6) experience: blocked starts say why, plain error text, a typed "confirm" points at the button.
+
+### rc13 part 1: sudoers gate for an operator-account Core (2026-11-01, operator chose option 2: no Core-user migration)
+- `side_doors.SudoersManaged`: trailing comments stripped (quote/escape aware; `#uid` kept). A rule WITHOUT `NOPASSWD` that reaches
+  Core but no session identity is tolerated and reported as an accepted risk, unless a `Defaults` line that can apply to Core (global,
+  `@host`, `>runas`, `!cmnd`, or `:users` reaching Core; continued lines joined) sets `!authenticate`, `!tty_tickets` or
+  `timestamp_type=global`. A `NOPASSWD` rule for Core alone is accepted when it is exactly `(root) NOPASSWD: /usr/bin/systemctl
+  <start|stop|restart> <unit>[, ...]`, no other tag (SETENV would allow LD_PRELOAD), every pair declared by config.yaml's v3
+  `sudo_allowlist` (`casa_bender._sudo_action_allowed`, via `RepairWiring.v3_sudo_allowed`; None on MOS), and no unit a mount of
+  an OS tree (`-`, home, tmp, boot, dev, proc, sys, run, var, usr, etc, ...). Repair never comments out a password rule.
+- New launcher setup step `sudoers-readable` (root): read-only ACL for the Core uid on every sudoers file the gate reads (includes
+  followed), rx on their directories, default ACL on `/etc/sudoers.d`; `visudo -c` after; rollback on any failure; undo restores
+  Core's prior entries; refuses files with ACL entries it did not make and includes under directories Core cannot traverse.
+  Also needed by ANY non-root Core (a dedicated user cannot read 0440 root sudoers either): the VMs hid it by running Core as root.
+- Reviews: Codex 5 rounds (include graph, ancestors, rollback, scoped Defaults, default mask, prior entries, foreign ACLs: all fixed;
+  round 5 clean). Claude review: SETENV accepted (fixed), continued Defaults (already fixed by the logical-line reader), getfacl -d
+  prefix (verified: no prefix; stripped defensively). Full suite 7206 passed / 178 skipped (one selftest failure was a probe branch
+  left by an interrupted run; removed, 212 oc tests pass).
+- Live host before a Repair: narrow `sudo_allowlist` (`*.mount` glob -> the data mounts) and re-run the v3 wizard; deploy rc13; run
+  `setup_steps repair` (adds `sudoers-readable`).

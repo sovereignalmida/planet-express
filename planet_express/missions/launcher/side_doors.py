@@ -3,9 +3,15 @@
     worker-identity       no session uid is Core, root or in the `docker` group, and the docker gid is not a session gid
     docker-tcp-exposure   the Docker daemon has no unauthenticated TCP listener (config, units and live sockets); a
                           socket proxy with an allowlist is acceptable once the operator names its port
-    sudoers-managed       every sudoers rule that reaches Core is one the generator wrote, byte for byte; unmanaged ones
-                          (a wildcard that sudoers matches across spaces, `ALL`) are reported and removed by `repair`
-                          only with approval, validated with `visudo -c`, undone from journaled evidence
+    sudoers-managed       every sudoers rule that reaches Core without a password is one the generator wrote, byte for
+                          byte, or an exact `systemctl <action> <unit>` the operator's v3 `sudo_allowlist` declares;
+                          unmanaged ones (a wildcard that sudoers matches across spaces, `ALL`) are reported and removed
+                          by `repair` only with approval, validated with `visudo -c`, undone from journaled evidence.
+                          A rule that needs a password and reaches Core only (never a session identity) is tolerated
+                          and reported, unless a `Defaults` line turns authentication off or shares cached tickets:
+                          Core runs with no terminal and no password. That is weaker than a dedicated Core user
+                          (a process holding Core's uid can still wait for the operator to type the password into
+                          something it controls) and is reported as an accepted risk, never silently.
 
 Same discipline as `setup_steps` (probe reads only; repair compares what it saw and refuses over anything that is not
 setup's; undo refuses once the file moved on), written against plain paths so the tests run on a throwaway tree.
@@ -110,6 +116,9 @@ class SideDoorPaths:
     visudo: str = "/usr/sbin/visudo"
     ss: str = "ss"
     managed: Mapping[str, bytes] = field(default_factory=dict)      # sudoers path -> the generator's exact output
+    # (unit, action) -> does config.yaml's v3 `sudo_allowlist` declare it? None: no v3 allowlist is recognised.
+    v3_allowed: Callable[[str, str], bool] | None = field(default=None, repr=False)
+    systemctl: str = "/usr/bin/systemctl"
     proxy_ports: Sequence[int] = ()                                  # operator-acknowledged allowlisting socket proxies
     approve: Callable[[str, str], bool] = lambda step, detail: False   # nothing is repaired without a yes
     owner_uid: int = 0
@@ -368,10 +377,34 @@ class DockerTcpExposure(Step):
 _ALIAS_KINDS = ("User", "Runas", "Host", "Cmnd")
 _ALIAS_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _ALIAS_SPLIT = re.compile(r"\s*:\s*(?=[A-Z][A-Z0-9_]*\s*=)")
+# Defaults that make a password rule usable without the password: authentication off, or a cached ticket shared beyond
+# the terminal that earned it.
+_AUTH_WEAKENED = re.compile(r"!\s*authenticate\b|!\s*tty_tickets\b|\btimestamp_type\s*=\s*\"?global\b")
+_V3_COMMAND = re.compile(r"(\S+) (start|stop|restart) ([A-Za-z0-9@_.:\\-]+)")
+# Mount units of the operating system's own trees: no v3 allowlist entry makes a no-password stop of these acceptable.
+_SYSTEM_TREES = frozenset({"", "home", "tmp", "boot", "dev", "proc", "sys", "run", "var", "usr", "etc", "opt", "root", "snap",
+                           "srv", "lib", "bin", "sbin"})
 _SKIP = re.compile(r"^(Defaults|Cmnd_Alias|Host_Alias|Runas_Alias|User_Alias|@include|#include|@includedir|#includedir)\b")
 
 
-def _logical_lines(text: str) -> list[tuple[int, int, str]]:
+def _unquoted_comment_stripped(text: str) -> str:
+    """`text` up to a `#` that sudo would read as a comment: after whitespace, outside double quotes, not escaped, not a uid."""
+    quoted, escaped, blank_before = False, False, True
+    for index, char in enumerate(text):
+        if escaped:
+            escaped, blank_before = False, False                 # `\ ` is part of a word, not a separator
+            continue
+        if char == "\\":
+            escaped = True
+        elif char == '"':
+            quoted = not quoted
+        elif char == "#" and not quoted and blank_before and not text[index + 1:index + 2].isdigit():
+            return text[:index]
+        blank_before = char.isspace()
+    return text
+
+
+def _logical_lines(text: str, strip_comments: bool = True) -> list[tuple[int, int, str]]:
     """(first physical line, last physical line, joined text) for each non-comment logical line."""
     out, buffer, start = [], "", 0
     for number, raw in enumerate(text.splitlines()):
@@ -385,7 +418,10 @@ def _logical_lines(text: str) -> list[tuple[int, int, str]]:
         stripped = buffer.strip()
         # `#1001 ALL=...` is a rule for uid 1001, not a comment; only `#include`, `#includedir` and plain text are.
         if stripped and not (stripped.startswith("#") and not re.match(r"^#(\d|include)", stripped)):
-            out.append((start, number, stripped))
+            if strip_comments and not re.match(r"^#include", stripped):
+                stripped = _unquoted_comment_stripped(stripped).rstrip()    # `... # matched glob '*.mount'` is a comment
+            if stripped:
+                out.append((start, number, stripped))
         buffer = ""
     return out
 
@@ -443,6 +479,80 @@ class SudoersManaged(Step):
                     queue.append((target, depth + 1))
         return files
 
+    def _auth_weakened(self, texts: Mapping[str, str], names: set[str], core_uid: int | None, gids: set[int],
+                       aliases: dict[str, dict[str, list[str]]]) -> bool:
+        """Does any `Defaults` line that can apply to Core turn authentication off or share cached tickets? Global, host-,
+        runas- and command-scoped lines always count (they can apply to Core); `Defaults:<users>` counts unless its users
+        provably do not include Core. A comment is stripped only outside quotes, so `"A #B", !authenticate` still counts."""
+        for text in texts.values():
+            for _first, _last, line in _logical_lines(text, strip_comments=False):
+                match = re.match(r"^Defaults([:>@!]?)(\S*)\s*(.*)$", line)
+                if match is None:
+                    continue
+                kind, scope, rest = match.groups()
+                if not _AUTH_WEAKENED.search(_unquoted_comment_stripped(rest)):
+                    continue
+                if kind != ":":
+                    return True
+                users = []
+                for item in (u for u in scope.split(",") if u):
+                    leaves = self._expand_users(item, aliases["User"])
+                    if leaves is None:
+                        return True                                     # cannot tell who it names: assume Core
+                    users += leaves
+                if any(self._reaches(u, names, core_uid, gids) for u in users):
+                    return True
+        return False
+
+    def _session_principals(self) -> tuple[set[str], set[int]]:
+        """Names and gids that reach a SESSION identity (`ALL` included): a password rule that reaches these is never tolerated."""
+        p = self.p
+        passwd, groups = _passwd(_read(p.passwd)), _groups(_read(p.group))
+        sessions = {n for n, u, g in passwd if p.uid_min <= u <= p.uid_max or p.uid_min <= g <= p.uid_max}
+        names, gids = {"ALL", *sessions}, set()
+        for gname, (gid, members) in groups.items():
+            if p.uid_min <= gid <= p.uid_max or sessions & set(members):
+                names.add("%" + gname)
+                gids.add(gid)
+        return names, gids
+
+    def _reaches_session(self, token: str, names: set[str], gids: set[int]) -> bool:
+        p = self.p
+        if token in names:
+            return True
+        match = re.fullmatch(r"%?#(\d+)", token)
+        if match:
+            number = int(match.group(1))
+            return p.uid_min <= number <= p.uid_max or (token.startswith("%") and number in gids)
+        return False
+
+    def _v3_rule(self, line: str, users: list[str]) -> bool:
+        """An exact `<systemctl> <action> <unit>` list, run as root, for Core alone, every pair declared by the v3 allowlist
+        and none a mount of the operating system's own trees."""
+        p = self.p
+        if p.v3_allowed is None or set(users) != {p.core_user}:
+            return False
+        _left, _eq, right = line.partition("=")
+        runas = re.match(r"^\s*\(([^)]*)\)\s*", right)
+        if runas is None or runas.group(1).strip() != "root":
+            return False
+        # Only the tag v3's generator writes: any other (SETENV lets the caller pass LD_PRELOAD past env_reset; EXEC, a
+        # log tag, a digest) makes it something the generator never wrote.
+        commands = re.sub(r"^NOPASSWD\s*:\s*", "", right[runas.end():].strip())
+        if re.search(r"\b[A-Z_]+\s*:", commands):
+            return False
+        items = [c.strip() for c in commands.split(",")]
+        for item in items:
+            match = _V3_COMMAND.fullmatch(item)
+            if match is None or match.group(1) != p.systemctl:
+                return False
+            action, unit = match.group(2), match.group(3).replace("\\\\", "\\")
+            if unit.endswith(".mount") and (unit == "-.mount" or unit.split("-", 1)[0].removesuffix(".mount") in _SYSTEM_TREES):
+                return False
+            if not p.v3_allowed(unit, action):
+                return False
+        return bool(items)
+
     def _principals(self) -> tuple[set[str], int | None, set[int]]:
         """Names, Core's uid and the gids it belongs to: what a sudoers user token must match to reach Core."""
         p = self.p
@@ -476,9 +586,12 @@ class SudoersManaged(Step):
 
     def _violations(self) -> dict[str, list[tuple[int, int, str, str]]]:
         """Rules that reach Core or any session identity and are not the generator's, plus every line this reader cannot
-        parse with confidence (reported as `unparseable`: when in doubt the host is NOT clean)."""
+        parse with confidence (reported as `unparseable`: when in doubt the host is NOT clean). What is tolerated instead
+        (a password rule for Core only; an exact v3 allowlist rule) is left in `self.accepted`, so the probe can say so."""
         p = self.p
+        self.accepted: list[tuple[str, str, str]] = []           # (path, kind, line)
         names, core_uid, gids = self._principals()
+        session_names, session_gids = self._session_principals()
         texts: dict[str, str] = {}
         for path in self._files():
             data = read_regular(path)
@@ -496,6 +609,7 @@ class SudoersManaged(Step):
                         name, eq, members = definition.partition("=")
                         if eq and _ALIAS_NAME.fullmatch(name.strip()):
                             aliases[match.group(1)][name.strip()] = [m.strip() for m in members.split(",") if m.strip()]
+        weakened = self._auth_weakened(texts, names, core_uid, gids, aliases)
         out: dict[str, list[tuple[int, int, str, str]]] = {}
 
         def note(path: str, first: int, last: int, line: str, kind: str) -> None:
@@ -516,6 +630,18 @@ class SudoersManaged(Step):
                     continue
                 users, cmds = parsed
                 if not any(self._reaches(u, names, core_uid, gids) for u in users):
+                    continue
+                reaches_session = any(self._reaches_session(u, session_names, session_gids) for u in users)
+                no_password = re.search(r"\bNOPASSWD\s*:", line.partition("=")[2]) is not None
+                if not no_password and not weakened and not reaches_session:
+                    self.accepted.append((path, "password", line))
+                    continue
+                if not no_password:
+                    why = "reaches a session identity" if reaches_session else "a Defaults line weakens authentication"
+                    note(path, first, last, line, f"password rule ({why})")
+                    continue
+                if no_password and not reaches_session and self._v3_rule(line, users):
+                    self.accepted.append((path, "v3 allowlist", line))
                     continue
                 kind = ("wildcard" if "*" in cmds else "ALL" if re.search(r"(^|[\s,])ALL($|[\s,])", cmds)
                         else "unmanaged")
@@ -575,9 +701,21 @@ class SudoersManaged(Step):
         try:
             found = self._violations()
         except (StepError, OSError) as exc:
-            return Probe(False, f"cannot check sudoers: {exc}", blocked=True)
+            hint = (" (Core cannot read the sudoers files: run the launcher setup's `sudoers-readable` step as root)"
+                    if "Permission denied" in str(exc) else "")
+            return Probe(False, f"cannot check sudoers: {exc}{hint}", blocked=True)
         if not found:
-            return Probe(True, "only generator-managed sudoers rules reach Core")
+            password = sum(1 for _p, kind, _l in self.accepted if kind == "password")
+            v3 = sum(1 for _p, kind, _l in self.accepted if kind == "v3 allowlist")
+            if not password and not v3:
+                return Probe(True, "only generator-managed sudoers rules reach Core")
+            extra = []
+            if v3:
+                extra.append(f"{v3} exact v3 sudo_allowlist rule(s)")
+            if password:
+                extra.append(f"{password} rule(s) that need a password (accepted risk: Core has no terminal and no password, "
+                             "but it shares the operator's account)")
+            return Probe(True, "no unmanaged no-password sudoers rule reaches Core; also reaching it: " + "; ".join(extra))
         parts = []
         for path, items in sorted(found.items()):
             for _a, _b, line, kind in items[:2]:
@@ -591,8 +729,12 @@ class SudoersManaged(Step):
         if state.blocked:
             raise StepError(state.detail)
         p = self.p
-        _approved(p, self.name, state.detail)
         found = self._violations()
+        human = [line for items in found.values() for _a, _b, line, kind in items if kind.startswith("password rule")]
+        if human:
+            raise StepError("setup will not remove a sudo rule that needs a password (it may be how you administer this host): "
+                            f"{human[0][:80]!r}; fix the Defaults line or the rule by hand")
+        _approved(p, self.name, state.detail)
         evidence: dict[str, dict] = {}
         for path, items in sorted(found.items()):
             previous = (read_regular(path) or b"").decode("utf-8", errors="replace")
