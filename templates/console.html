@@ -58,6 +58,8 @@
   </div>
 </div>
 <script type="application/json" id="con-boot">{{ {"status": status, "selected": selected} | tojson }}</script>
+{% include "_elevate.html" %}
+<script src="{{ asset('elevate.js') }}"></script>
 <script src="{{ asset('console.js') }}" defer></script>
 {% endif %}
 </body>

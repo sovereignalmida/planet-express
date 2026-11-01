@@ -2360,8 +2360,12 @@ def test_the_dashboard_carries_the_elevation_prompt():
     """A backend gate with no way to satisfy it is a feature removed, not secured: with
     sensitive config edits enabled, apply would 403 with nothing the operator could do."""
     page = (ROOT / "templates/dashboard.html").read_text()
-    assert 'id="elevate-dialog"' in page
-    assert 'id="elevate-passphrase"' in page and 'type="password"' in page
+    # The dialog is shared with the Console, in one partial.
+    assert '{% include "_elevate.html" %}' in page
+    assert page.index('{% include "_elevate.html" %}') < page.index("asset('elevate.js')")
+    dialog = (ROOT / "templates/_elevate.html").read_text()
+    assert 'id="elevate-dialog"' in dialog
+    assert 'id="elevate-passphrase"' in dialog and 'type="password"' in dialog
     # The script tags, not any mention: config.js is named in a comment much earlier in this
     # file, and comparing against that compares nothing.
     elevate = page.index("asset('elevate.js')")

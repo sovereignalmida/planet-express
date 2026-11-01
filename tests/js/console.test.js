@@ -411,6 +411,49 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     release(); await settle(8); win.__override = null;
     assert.strictEqual(doc.getElementById("con-sheet").children.length, 0);
   });
+  const openAuthSheet = async () => {
+    FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; FEED.execution = null; await page.loadFeed();
+    walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Confirm option")).fire("click"); await settle();
+  };
+  const authorises = () => requests.filter(r => r[0].endsWith("/confirm/authorise")).length;
+  const needsElevation = () => reply({ error: "This needs an elevated session. Elevate, then authorise again; nothing was approved.", code: "elevation_required" }, 403);
+  await atest("an authorisation that needs the passphrase asks for it, then sends the same authorisation again", async () => {
+    await openAuthSheet();
+    const asked = []; let calls = 0;
+    win.peElevate = async because => { asked.push(because); return true; };
+    win.__override = url => url.endsWith("/confirm/authorise") ? Promise.resolve(++calls === 1 ? needsElevation() : reply({ authorised: true })) : null;
+    const before = authorises();
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent.startsWith("Authorise")).fire("click"); await settle(10);
+    assert.strictEqual(asked.length, 1, "the passphrase is asked for once");
+    assert.ok(asked[0].includes("Nothing has been approved yet"));
+    const sent = requests.filter(r => r[0].endsWith("/confirm/authorise")).slice(before);
+    assert.strictEqual(sent.length, 2, "sent again after elevating");
+    assert.strictEqual(sent[0][2], sent[1][2], "the retry carries exactly the same execution and grant hash");
+    assert.strictEqual(doc.getElementById("con-sheet").children.length, 0, "the sheet closes once authorised");
+    win.__override = null; delete win.peElevate;
+  });
+  await atest("backing out of the passphrase prompt approves nothing and says so on the sheet", async () => {
+    await openAuthSheet();
+    win.peElevate = async () => false;
+    win.__override = url => url.endsWith("/confirm/authorise") ? Promise.resolve(needsElevation()) : null;
+    const before = authorises();
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent.startsWith("Authorise")).fire("click"); await settle(10);
+    assert.strictEqual(authorises() - before, 1, "not sent again without the passphrase");
+    const alert = walk(doc.getElementById("con-sheet")).find(n => n.attrs.role === "alert");
+    assert.ok(alert && alert.textContent.includes("passphrase was not entered, so nothing was approved"));
+    win.__override = null; delete win.peElevate;
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent === "Back to the plan").fire("click"); await settle();
+  });
+  await atest("another refusal is shown as it is, with no passphrase prompt", async () => {
+    await openAuthSheet();
+    let asked = 0; win.peElevate = async () => { asked++; return true; };
+    win.__override = url => url.endsWith("/confirm/authorise") ? Promise.resolve(reply({ error: "That grant changed since you read it.", code: "stale" }, 409)) : null;
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent.startsWith("Authorise")).fire("click"); await settle(10);
+    assert.strictEqual(asked, 0);
+    assert.ok(walk(doc.getElementById("con-sheet")).find(n => n.attrs.role === "alert").textContent.includes("That grant changed"));
+    win.__override = null; delete win.peElevate;
+    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent === "Back to the plan").fire("click"); await settle();
+  });
   await atest("lessons are offered with Keep, Edit and Discard; hostile text stays text; nothing is kept without a click", async () => {
     FEED.execution = null; FEED.plan = null;
     FEED.lessons = [{ id: "cl-1", title: "T " + EVIL, statement: "S " + EVIL, scope: ["stack:media"], state: "waiting" },

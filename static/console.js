@@ -541,8 +541,16 @@
     async function authorise() {
       const v = state.sheet; if (!v || state.sheetBusy) return;
       state.sheetBusy = true; state.sheetError = null; renderSheet();
+      const send = () => post("/api/console/" + state.selected + "/confirm/authorise", { execution_id: String(v.execution_id), grant_hash: v.grant_hash });
       try {
-        await post("/api/console/" + state.selected + "/confirm/authorise", { execution_id: String(v.execution_id), grant_hash: v.grant_hash });
+        try { await send(); } catch (e) {
+          // The server says when this needs the passphrase again (and approved nothing). Ask once, here, then send it again;
+          // the server decides a second time. Still busy while the prompt is up, so Back cannot withdraw underneath it.
+          if (e.code !== "elevation_required" || typeof window.peElevate !== "function") throw e;
+          const elevated = await window.peElevate("Authorising this needs your passphrase again. Nothing has been approved yet.");
+          if (!elevated) throw new Error("Not authorised: the passphrase was not entered, so nothing was approved. Authorise again when ready.");
+          await send();
+        }
         state.sheet = null; state.sheetBusy = false; renderSheet(); state.firstPaint = "bottom"; await loadFeed(); await refreshList();
       } catch (e) { state.sheetBusy = false; state.sheetError = e.message; renderSheet(); }
     }

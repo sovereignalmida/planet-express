@@ -1,0 +1,21 @@
+{# T47: the passphrase prompt for actions above the unelevated ceiling. One dialog, shared by every page that needs one
+   (the dashboard's config apply and stack control, the Console's Authorise); static/elevate.js drives it.
+
+   At page level rather than inside a tab panel: a panel is display:none while its tab is not the active one, and
+   showModal() on a dialog in a hidden subtree renders nothing at all. #}
+  <dialog id="elevate-dialog" aria-labelledby="elevate-title">
+      <div class="pe-sheet warn">
+        <div class="pe-sheet-grab" aria-hidden="true"></div>
+        <h2 id="elevate-title">CONFIRM IT IS YOU</h2>
+        <p id="elevate-note" class="elevate-note">This action needs your passphrase again.</p>
+        <form method="dialog">
+          <label class="elevate-label" for="elevate-passphrase">PASSPHRASE</label>
+          <input id="elevate-passphrase" name="passphrase" type="password"
+                 autocomplete="current-password" required>
+          <div class="config-sheet-actions">
+            <button type="button" class="pe-btn" data-elevate-cancel>CANCEL</button>
+            <button type="submit" class="pe-btn warn" id="elevate-confirm">CONFIRM</button>
+          </div>
+        </form>
+      </div>
+  </dialog>

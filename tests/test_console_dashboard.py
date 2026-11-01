@@ -168,6 +168,16 @@ def test_the_page_is_a_shell_with_the_status_and_nothing_from_a_conversation(web
     assert core.methods() == ["console.status"]                                         # only the status: the thread comes from the feed
 
 
+def test_the_console_carries_the_passphrase_prompt_so_authorise_can_elevate(web):
+    """Authorise answers `elevation_required` when a phase needs the passphrase again; the Console asks for it in place
+    (the shared dialog and elevate.js, loaded before console.js) instead of sending the operator to another page."""
+    client, _, _ = web
+    page = client.get(f"/console/{CID}").get_data(as_text=True)
+    assert 'id="elevate-dialog"' in page and 'id="elevate-passphrase"' in page and 'type="password"' in page
+    assert page.index("elevate.js") < page.index("console.js") and page.index('id="elevate-dialog"') < page.index("elevate.js")
+    assert page.count('id="elevate-dialog"') == 1
+
+
 def test_when_the_console_is_not_enabled_the_page_says_how_to_turn_it_on(web):
     client, core, _ = web
     core.errors["console.status"] = ("unavailable", "x")
