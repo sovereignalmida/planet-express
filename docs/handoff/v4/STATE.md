@@ -295,3 +295,22 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   connection cap).
 - Reviews: Codex 2 rounds, no findings. Claude review: no issues in the change; one pre-existing gap (above), fixed.
 - Full suite (Python 3.12): 7154 passed, 178 skipped.
+
+### rc12 deployed; first live Repair blocked four more times (2026-11-01)
+- rc12 live (snapshot `20261101T130626Z-pre-rc12`, rollback rc11 `fe14933`). The Console turn budget now holds: M-5's turn made 9 requests,
+  34,549 tokens, none refused.
+- Blockers hit trying to restart Prowlarr through the Console (M-4..M-7, all cancelled; the operator restarted Prowlarr by hand, `/ping` OK):
+  1. **Protected-set cap.** `Protected.resources` is a `ShortList` (max 256); the live set was 902 (829 `data_volumes`, 799 of the 823 Docker
+     volumes dangling). Confirm returned 400 "Invalid grant ... at most 256 items". Operator ran `docker volume prune` (now 30 volumes, set 109)
+     and restarted Core. Code fix still needed: own cap for the protected list, checked against `grant_json` 262144 and RPC `MAX_FRAME` 1 MB.
+  2. **No passphrase prompt in the Console.** Accepting the backup floor ("Prepare it anyway") needs an elevated session; `console.html` does
+     not load `elevate.js`/the dialog, so Authorise just 403s. Workaround used: `peElevate(...)` from the Overview page's devtools.
+  3. **Non-root Core cannot run the `sudoers-managed` gate.** Core (casaroot) cannot read `/etc/sudoers` (0440 root), so every Repair start
+     waits forever: "cannot check sudoers: /etc/sudoers is not a plain file (Permission denied)". VMs ran Core as root and hid this.
+  4. **Run as root, the gate fails anyway** (worker-identity and docker-tcp pass): `%sudo ALL=(ALL:ALL) ALL` (casaroot is in `sudo`),
+     `casaroot ALL=(ALL) NOPASSWD: /bin/systemctl start *.mount` in `/etc/sudoers`, and v3's own `/etc/sudoers.d/planetexpress` read as
+     unmanaged/wildcard. Root cause: on this host Core runs as the operator's admin account (groups sudo, docker, adm), not the dedicated
+     less-privileged Core user v4's side-door model assumes. **Design decision for the operator before rc13**: a dedicated Core user (migration),
+     or a gate that tolerates password-only sudo and recognises v3's generated allowlist (weaker; needs the second review's view).
+- Experience: the operator rated the flow "pretty disjointed" (four failures, raw pydantic text in the composer footer, typed "confirm option a"
+  went to the agent, a no-backup refusal on a restart that changes no files, "taking a checkpoint" shown while the start was blocked).
