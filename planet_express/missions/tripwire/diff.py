@@ -280,6 +280,8 @@ def _files(base: dict, cur: dict, ctx: DiffContext) -> list[Change]:
 def _shrunk(b: dict, c: dict) -> str | None:
     if c.get("absent") and not b.get("absent"):
         return "volume is gone"
+    if c.get("blind") and not b.get("blind"):
+        return "volume became unreadable"         # a baseline Core could read and now cannot: its contents are hidden (review, rc13.1)
     if b.get("absent") or c.get("absent") or b.get("blind") or c.get("blind"):
         return None
     if not b["capped"] and not c["capped"]:

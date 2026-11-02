@@ -96,9 +96,12 @@ def _meta(st: os.stat_result) -> str:
     return f"{stat.S_IMODE(st.st_mode):o}:{st.st_uid}:{st.st_gid}"
 
 
-def _file_digest(path: str, size: int) -> str:
-    if size > MAX_FILE_BYTES:
-        raise SignalError("a watched file is too large to hash")
+def _file_digest(path: str, st: os.stat_result) -> str:
+    if st.st_size > MAX_FILE_BYTES:
+        # Too big to read inside the signal timeout: watch it by its stat signature rather than failing the whole signal,
+        # which would stop every Repair on the host over one large file (rc13 live run). ctime is what makes this hold: a
+        # write can keep the size and `utime` can put mtime back, but both move ctime, and only root can set it (Codex, rc13.1).
+        return f"large:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_ino}"
     h = hashlib.sha256()
     with open(path, "rb") as handle:
         while chunk := handle.read(1 << 20):
@@ -142,7 +145,7 @@ def hash_path(env: ScanEnv, path: str) -> str:
             if stat.S_ISLNK(st.st_mode):
                 h.update(f"l\0{rel}\0{os.readlink(current)}\0{_meta(st)}\n".encode(errors="replace"))
             elif stat.S_ISREG(st.st_mode):
-                h.update(f"f\0{rel}\0{_file_digest(current, st.st_size)}\0{_meta(st)}\n".encode())
+                h.update(f"f\0{rel}\0{_file_digest(current, st)}\0{_meta(st)}\n".encode())
             elif stat.S_ISDIR(st.st_mode):
                 h.update(f"d\0{rel}\0{_meta(st)}\n".encode())
                 children = sorted(os.listdir(current), reverse=True)
@@ -364,12 +367,22 @@ def collect_packages(env: ScanEnv) -> dict[str, str]:
 
 def collect_volumes(env: ScanEnv) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for rid, path in env.volume_paths:
+    paths = list(env.volume_paths)
+    for index, (rid, path) in enumerate(paths):
+        # Each volume walks for a fair share of what is left, so one big tree (an NFS share) cannot starve the rest and
+        # make the signal miss its timeout (rc13 live run: 36 volumes, one 3 s budget).
+        stop = None
+        if env.deadline is not None:
+            now = env.clock()
+            stop = now + max(0.0, env.deadline - 0.5 - now) / (len(paths) - index)
         real = env.real(path)
         try:
             vfs = os.statvfs(real)
         except FileNotFoundError:
             out[rid] = {"absent": True}
+            continue
+        except PermissionError:
+            out[rid] = {"blind": True}                  # Core cannot reach it (/var/lib/docker/volumes is root-only)
             continue
         except OSError as exc:
             raise SignalError(f"cannot stat a data volume ({exc.strerror})") from None
@@ -384,16 +397,17 @@ def collect_volumes(env: ScanEnv) -> dict[str, Any]:
         except OSError as exc:
             raise SignalError(f"cannot list a data volume ({exc.strerror})") from None
         stack = [real]
-        while stack:
+        while stack and not capped:
             # A big volume cannot be walked inside the signal timeout: stop early and say so (`capped`), and the diff
-            # compares the cheap whole-filesystem figures instead. Running out of time is not a failed signal.
-            if entries >= MAX_VOLUME_ENTRIES or (env.deadline is not None and env.clock() > env.deadline - 0.5):
-                capped = True
-                break
+            # compares the cheap whole-filesystem figures instead. Running out of time is not a failed signal. Checked per
+            # entry: a single large directory on a network share can take longer than the whole budget.
             current = stack.pop()
             try:
                 with os.scandir(current) as it:
                     for entry in it:
+                        if entries >= MAX_VOLUME_ENTRIES or (stop is not None and env.clock() >= stop):
+                            capped = True
+                            break
                         entries += 1
                         try:
                             if entry.is_dir(follow_symlinks=False):

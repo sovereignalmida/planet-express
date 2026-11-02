@@ -59,7 +59,8 @@ class Host:
         if sub == "ps":
             return 0, "\n".join(f"{n}\t{img}" for n, (img, _) in self.containers.items()), "", trunc
         if sub == "inspect":
-            mounts = [{"Type": "bind", "Source": s} for s in self.containers[argv[-1]][1]]
+            mounts = [{"Type": "bind", "Source": s[0], "Destination": s[1]} if isinstance(s, tuple) else {"Type": "bind", "Source": s}
+                      for s in self.containers[argv[-1]][1]]
             return 0, json.dumps(mounts), "", trunc
         return 1, "", "unknown", False
 

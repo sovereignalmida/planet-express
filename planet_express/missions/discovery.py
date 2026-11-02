@@ -153,6 +153,14 @@ def _vendored(path: str, stacks_root: str) -> bool:
     return any(part.lower() in VENDORED_DIRS for part in os.path.relpath(path, stacks_root).split(os.sep)[:-1])
 
 
+def _log_mount(destination: str) -> bool:
+    """A bind the container writes its logs to (`/var/log/traefik`, `/app/logs/access.log`). It changes on every request,
+    so watching it would pause every mission, and an access log is not configuration: it is left out of the set."""
+    parts = [p for p in destination.lower().split("/") if p]
+    return (destination.startswith("/var/log/") or destination == "/var/log" or any(p in ("log", "logs") for p in parts)
+            or (bool(parts) and parts[-1].endswith(".log")))
+
+
 def _matches(tokens: Sequence[str], name: str, image: str) -> bool:
     base = image.lower().rsplit("/", 1)[-1].split(":", 1)[0]
     return any(t in base or t in name.lower() for t in tokens)
@@ -227,7 +235,8 @@ def discover_protected_inputs(
                     continue
                 for m in listed or []:
                     src = m.get("Source", "") if isinstance(m, dict) else ""
-                    if m.get("Type") == "bind" and src.startswith("/") and not src.endswith("docker.sock"):
+                    if (m.get("Type") == "bind" and src.startswith("/") and not src.endswith("docker.sock")
+                            and not _log_mount(str(m.get("Destination", "")))):
                         paths[domain].append(src)
     except RuntimeError as exc:
         for domain in ("ingress", "dns", "backup"):
