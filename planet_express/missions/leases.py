@@ -241,3 +241,39 @@ def check_fence(store: Store, resource: str, mission_id: str, fence: int) -> Non
     if (row is None or row["mission_id"] != mission_id or row["fence"] != fence
             or row["suspect_at"] is not None or row["expires_at"] <= now):
         raise StaleFence(f"stale fence {fence} for {resource}")
+
+
+def _plain(resource: str) -> str:
+    """`host:local/stack:media` -> `media (stack)`, for a sentence an operator reads."""
+    try:
+        r = parse_resource(resource)
+    except ValueError:
+        return resource[:80]
+    return f"{r.name} ({r.kind})"[:80]
+
+
+def claim_reason(store: Store) -> str | None:
+    """What missions hold on this host, in words, or None when nothing is held. The v3 host lock refuses every
+    non-mission change while this is not None (a suspect lease still counts: its holder may still be running).
+
+    One exception: a mission in `needs_operator` with no session that could still be running has handed the host to the
+    operator (a take-over, a held cancel, a failed run). Its leases still fence other missions out, but they do not stop
+    the operator's own tools: blocking Actions, config apply and update rollbacks until the mission is closed would leave
+    the operator nothing to fix the host with, and safe-prune would stop silently."""
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT l.mission_id, l.resource FROM mission_leases l JOIN missions m ON m.id = l.mission_id "
+            "WHERE NOT (m.status = 'needs_operator' AND NOT EXISTS ("
+            "  SELECT 1 FROM mission_sessions s WHERE s.mission_id = l.mission_id AND (s.revoked_at IS NULL OR s.state = 'live'))) "
+            "ORDER BY l.acquired_at, l.mission_id, l.resource").fetchall()
+    if not rows:
+        return None
+    held: dict[str, list[str]] = {}
+    for r in rows:
+        held.setdefault(r["mission_id"], []).append(_plain(r["resource"]))
+    parts = []
+    for mission_id, resources in held.items():
+        more = f" and {len(resources) - 2} more" if len(resources) > 2 else ""
+        parts.append(f"{mission_id} is working on {', '.join(resources[:2])}{more}")
+    return "; ".join(parts[:3]) + (f"; and {len(parts) - 3} more missions" if len(parts) > 3 else "") + \
+        " (it finishes, or is cancelled, before anything else changes the host)"

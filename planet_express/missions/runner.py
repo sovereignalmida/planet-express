@@ -281,7 +281,7 @@ def build_mission_runner(
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
     stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None, verifier=None,
-    repair_wiring=None, docker_proxy=None, checkpoint=None, discovery=None, model_broker=None,
+    repair_wiring=None, docker_proxy=None, checkpoint=None, discovery=None, model_broker=None, host_lock=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
@@ -341,7 +341,7 @@ def build_mission_runner(
         docker_proxy = DockerProxyService(
             store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
             stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
-            protected_gids=_protected_gids(), label_allow=cfg.docker_label_allow)
+            protected_gids=_protected_gids(), label_allow=cfg.docker_label_allow, host_lock=host_lock)
     controls = None
     if repair_wiring is not None and protected is not None and found.failures:
         # G4-F1: a required protected domain could not be established, so the tripwire and the proxy would be partly blind.
@@ -401,7 +401,7 @@ def build_mission_runner(
                       if cfg.hooks.install_claude_code else None),
         hook_argv=claude_code_argv if cfg.hooks.install_claude_code else None,
         hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None, model_broker=model_broker,
-        read_logs=bool(cfg.read_log_groups))
+        read_logs=bool(cfg.read_log_groups), host_lock=host_lock)
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir,
                                                        held_uids=lambda: held_session_uids(store))

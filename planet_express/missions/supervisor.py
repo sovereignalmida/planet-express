@@ -296,8 +296,11 @@ class Supervisor:
                  hook_policy: Callable[[Mission], str] | None = None,
                  hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None,
                  hook_argv: Callable[[Sequence[str], Path], Sequence[str]] | None = None, model_broker: Any = None,
-                 read_logs: bool = False):
+                 read_logs: bool = False, host_lock: Any = None):
         self.store = store
+        # v3's host-mutation lock (casa_farnsworth.PipelineState), or None. A Repair start waits while a v3 change holds it;
+        # the Docker proxy takes it for each mission write.
+        self.host_lock = host_lock
         self.read_logs = read_logs                    # Observe/Propose sessions are launched with the host's log groups (launch.conf names them)
         self.hook_install = hook_install              # Path -> writes the runtime's hook settings into that (Core-owned) directory
         self.hook_argv = hook_argv                    # (argv, hook dir) -> the argv the session is launched with (settings forced)
@@ -544,6 +547,11 @@ class Supervisor:
         # acquire is idempotent for the same mission, so `issue_session` takes the same leases (and fences) again.
         held_early = self._acquire_early(mission)
         try:
+            # Asked AFTER the leases are held: from here no v3 change can take the lock (it refuses while a mission holds a
+            # lease), so one already holding it is the only thing to wait for, and nothing can slip in after this check.
+            owner = getattr(self.host_lock, "mutation_owner", None) if self.host_lock is not None else None
+            if owner and not owner.startswith("mission:"):
+                raise StartDeferred(f"waiting for {owner} to finish changing the host")
             retire = getattr(self.checkpoint, "retire_unused", None)
             if mission.checkpoint_id is not None and retire is not None:
                 # An earlier start got as far as a checkpoint but never launched a session. That picture of the host may be

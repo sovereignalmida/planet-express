@@ -70,6 +70,7 @@ class Gate(Protocol):
     def check_write(self, session) -> None: ...       # Refusal unless a write is allowed right now
     def alive(self, session) -> bool: ...             # streams and hijacks poll this
     def record(self, session, body: dict) -> None: ...  # raises if the event could not be written
+    # Optional: `host(hold=...)`, a context manager around each write that serialises it with v3's host changes (StoreGate.host).
 
 
 class ExecTable:
@@ -211,11 +212,16 @@ class ProxyServer:
             upgrade = self.policy.check_upgrade(route, head)
             body, length = self._read_body(conn, head, route)
             plan = self.policy.plan(route, head.method, groups, query, body, length)
-            write_id = None
-            if route.write:
+            if not route.write:
+                self._forward(conn, head, plan, upgrade, session)
+                return
+            # A write holds the host lock (when the gate has one) from before its authority is checked until the daemon has
+            # answered, so the check is made right before acting and nothing else changes the host meanwhile.
+            host = getattr(self.gate, "host", None)
+            with (host(hold=not route.hijack) if host is not None else contextlib.nullcontext()):
                 self.gate.check_write(session)
                 write_id = self._record(session, plan, head)
-            self._forward(conn, head, plan, upgrade, session, write_id)
+                self._forward(conn, head, plan, upgrade, session, write_id)
         except Refusal as refusal:
             self._note_refusal(session, head, route, refusal)
             refuse(conn, refusal.status, refusal.reason)

@@ -795,8 +795,15 @@ class PipelineState:
     # in the store now and a typed action never parks the pipeline, so nothing can enter it — a
     # status file written before the upgrade may still say it, and is read as idle (slice 5b-5).
 
-    def __init__(self, maintenance: Callable[[], MaintenanceWindow | None] = active_window):
+    # A mission's own changes take the lock under an owner with this prefix; nothing else may use it.
+    MISSION_OWNER_PREFIX = "mission:"
+
+    def __init__(self, maintenance: Callable[[], MaintenanceWindow | None] = active_window,
+                 mission_claims: Callable[[], str | None] | None = None):
         self.maintenance = maintenance
+        # What a mission holds on this host right now (its leases), in words, or None. While anything is held, no v3 change
+        # starts: Actions, the update passes, safe-prune and config apply wait for the mission to finish or be cancelled.
+        self.mission_claims = mission_claims
         self._lock = threading.Lock()
         self._state = self.IDLE
         self._pending_plan_id: str | None = None
@@ -900,6 +907,20 @@ class PipelineState:
     #            │
     #            └─ False ──► report "busy (<busy_reason>)", change nothing
     #                         (another mutation holds the lock, or a scan is RUNNING)
+    def set_mission_claims(self, claims: Callable[[], str | None] | None) -> None:
+        with self._lock:
+            self.mission_claims = claims
+
+    def _claim(self) -> str | None:
+        """Called under _lock. Unreadable claims refuse: a v3 change must never run over a mission it could not see."""
+        if self.mission_claims is None:
+            return None
+        try:
+            return self.mission_claims()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(f"Could not read mission claims: {exc}")
+            return "mission claims could not be read"
+
     @property
     def mutation_owner(self) -> str | None:
         with self._lock:
@@ -915,6 +936,8 @@ class PipelineState:
                 return self._mutation_owner
             if self._state == self.RUNNING:
                 return "scan running"
+            if claim := self._claim():
+                return claim
             return f"pipeline {self._state}"
 
     def try_begin_mutation(
@@ -930,11 +953,18 @@ class PipelineState:
             snapshot. during_scan=True is only for safe-prune, which runs inside the
             scan itself;
           - require_idle additionally refuses unless the pipeline is IDLE (the weekly
-            update pass, which has always waited for a pending plan too)."""
+            update pass, which has always waited for a pending plan too);
+          - refused, unless the owner is a mission's, while a mission holds any lease (v4,
+            rc13): a mission is mid-change on what it leased, and v3 cannot see its scope.
+            Read here, under the same acquisition, so a lease committed before this check
+            always refuses, and a v3 change that got the lock first is seen by the mission's
+            own start check (Supervisor._start_repair) after its leases are taken."""
         with self._lock:
             if self.maintenance() is not None:
                 return False
             if self._mutation_owner is not None:
+                return False
+            if not owner.startswith(self.MISSION_OWNER_PREFIX) and self._claim() is not None:
                 return False
             if self._state == self.RUNNING and not during_scan:
                 return False
@@ -3085,8 +3115,14 @@ def run_bot() -> None:
     )
 
     # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).
+    # Actions and Missions see each other: while a mission holds a lease, no v3 change starts (the busy message names the
+    # mission); the mission's own writes take the same lock (the Docker proxy, typed steps). Registered BEFORE mission control
+    # starts (its thread can take leases at once) and whether or not it starts: a lease left from an earlier run still counts.
+    from planet_express.missions import leases as mission_leases
+    state.set_mission_claims(lambda: mission_leases.claim_reason(store))
     mission_runner = start_mission_runner(store, config.MISSIONS, enabled=lambda: config.MISSIONS_ENABLED,
-                                          stacks_root=str(config.STACKS_ROOT), repair_wiring=_repair_wiring())
+                                          stacks_root=str(config.STACKS_ROOT), repair_wiring=_repair_wiring(),
+                                          host_lock=state)
     if mission_runner is not None:
         # The approval flow answers the dashboard and Telegram only when the Repair controls were built; without them
         # every approval method says "unavailable" (observe/propose missions are unaffected).

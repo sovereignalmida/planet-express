@@ -5,11 +5,12 @@ session's endpoints, `.resume(mission_id, grant_hash)` when the operator resumes
 `proxy.sock` next to `worker.sock`. A paused session keeps its socket and every request on it is a 503 until a resume has
 re-proved the approval; a revoked session is refused at authentication."""
 
+import contextlib
 import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 
 from planet_express.integrations.rpc import PeerCred
 from planet_express.missions import approvals, leases
@@ -89,13 +90,49 @@ class StoreGate:
     def record(self, session, body: dict) -> None:
         self.ms.append_event(self.mission_id, "tool", ACTOR, {"session": self.session_id, **body})
 
+    @contextlib.contextmanager
+    def host(self, *, hold: bool) -> Iterator[None]:
+        """v3's host-mutation lock around one write, so a mission's change and an Actions-tab or automatic v3 change never
+        run at the same time (and a scan does not start in the middle of one). Waits up to the service's `host_wait_s` for
+        a v3 change already under way, then refuses. `during_scan`: a scan observes, and what it would change waits on the
+        mission's leases instead, so a write does not stall behind a long scan. `hold=False` (exec and attach streams,
+        which can stay open for as long as a shell does) only proves nothing else is changing the host as it starts."""
+        lock = self.service.host_lock
+        if lock is None:
+            yield
+            return
+        owner = f"mission:{self.mission_id}:proxy:{os.urandom(4).hex()}"
+        deadline = time.monotonic() + self.service.host_wait_s
+        while not lock.try_begin_mutation(owner, during_scan=True):
+            # The session is told a fixed phrase; who holds the lock (another mission, an approval id, the maintenance
+            # reason) is Core's to log, not the session's to read.
+            maintenance = getattr(lock, "maintenance", None)
+            if maintenance is not None and maintenance() is not None:
+                log.info("docker proxy: %s write refused: maintenance window", self.mission_id)
+                raise Refusal("the host is in a maintenance window; nothing changes until it ends", 409)
+            if time.monotonic() >= deadline:
+                log.info("docker proxy: %s write refused after waiting: host busy (%s)", self.mission_id, lock.busy_reason)
+                raise Refusal("the host is busy with another change; try again shortly", 409)
+            self.service.sleep(self.service.host_poll_s)
+        if not hold:
+            lock.end_mutation(owner)
+            yield
+            return
+        try:
+            yield
+        finally:
+            lock.end_mutation(owner)
+
 
 class DockerProxyService:
     def __init__(self, store, *, authenticator, docker_socket: str = DEFAULT_DOCKER_SOCKET, sock_root: str,
                  stacks_root: str | None = None, protected: Callable[[], Iterable[str]] = lambda: (),
                  protected_gids: Iterable[int] = (), limits: Limits = DEFAULT_LIMITS, upstream: Upstream | None = None,
-                 label_allow: Iterable[str] = ()):
+                 label_allow: Iterable[str] = (), host_lock=None, host_wait_s: float = 120.0, host_poll_s: float = 0.25,
+                 sleep: Callable[[float], None] = time.sleep):
         self.store, self.ms = store, MissionStore(store)
+        # v3's host-mutation lock (PipelineState), taken for each write (StoreGate.host); None leaves writes unserialised.
+        self.host_lock, self.host_wait_s, self.host_poll_s, self.sleep = host_lock, host_wait_s, host_poll_s, sleep
         self.authenticator, self.sock_root = authenticator, sock_root
         self.docker_socket, self.stacks_root, self.protected = docker_socket, stacks_root, protected
         self.protected_gids, self.limits, self.label_allow = tuple(protected_gids), limits, tuple(label_allow)
