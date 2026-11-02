@@ -353,3 +353,34 @@ The first live Console conversation ("why is radarr failing?") had nothing to in
   `/etc/sudoers.d/planetexpress` generated with v3's `generate_sudoers_snippet` and installed by the operator (old file at
   `/root/planetexpress.sudoers.bak-20261101`). `sudo -n -l`: NOPASSWD only for those units and the launcher. rc13's gate, simulated
   against the host's real sudoers and groups: ok (8 v3 rules accepted, `%sudo` reported as a password rule). Core restarted clean.
+
+### v4.0.0-rc13 (2026-11-02): tagged on `v4-next`, NOT pushed, NOT deployed. Live host is on rc12.
+Commits since rc12: `d4a4d29` (sudoers gate, part 1 above), `f3c6f53`, `6e65391`, `7dd62d1`, `921a2c8`, `1d3d120`. Full suite 7268 passed.
+- **Protected-set cap** (`f3c6f53`): `Protected.resources` caps at 4096, bounded in practice by the stored grant (262144 bytes, UTF-8);
+  `with_site_protected` refuses over either in words. Display only shortens it: the brief lists broadest first up to 4 KB ("+N more ...
+  still enforced"; the full list would have overflowed the 32 KB brief), `mission.get` returns 32 plus the count. Enforcement reads the
+  full set. Codex P2 (bytes not characters) fixed.
+- **Passphrase prompt in the Console** (`6e65391`): `templates/_elevate.html` shared by both pages; Authorise on `elevation_required`
+  calls `peElevate` and re-sends the identical execution and grant hash once. Reviews clean.
+- **Actions and Missions lock each other out** (`7dd62d1`): while a mission holds a lease, `try_begin_mutation` refuses every
+  non-`mission:` owner (busy reason names the mission); a Repair start defers while a v3 change holds the lock (checked after its
+  leases, race-free); each proxied Docker write holds the lock (waits up to 120 s; exec/attach only check at start; maintenance refuses
+  at once; the session sees a fixed phrase). Scans still run. A `needs_operator` mission with no live session no longer blocks the
+  operator's tools (its leases still fence other missions). Claims registered before mission control starts. Left: a mission's typed
+  step is refused, not queued, while its own proxy write is in flight; 8 per-session connections can queue on the lock.
+- **Restart-only repairs skip the backup floor** (`921a2c8`, operator decision 2026-11-02): plan option `restart_only` -> grant
+  `docker: "lifecycle"`. Enforced: proxy serves reads plus container start/stop/restart only (no kill, no custom signal, grace >= 10 s);
+  typed steps restart/start/stop/waits/checks only; no sudo rules, paths, mounts or credentials. Floor waived only if
+  `lifecycle_write_reach` finds nothing in the stack dirs any session identity could write (uid range, private gids, log groups;
+  owner/ACL user/group class under mask/other as a union; links out of a stack, unreadable or >50k entries keep the floor); asked at
+  proposal and again at the checkpoint. Standing grants still need a covered backup. Reviews: Codex 4 passes (kill; identity-aware
+  ACLs; multi-uid classes and symlinks; RPC schema) and the Claude review (native shell unchanged) all fixed. Live host: no session
+  identity can enter `/home/casaroot` (0750, ACL only for planetexpress-web), so a restart-only Prowlarr plan needs no backup.
+  Note: a service with `stop_grace_period` < 10 s has its compose restart refused (the agent can pass `--timeout 10`).
+- **Console experience** (`1d3d120`): "Waiting to start" with the reason (supervisor notes only; also when the launcher or the Repair
+  controls are not ready, and after a checkpoint); pydantic refusals as "field: problem" (`approval_flow.plain_error`); a typed
+  "confirm"/"yes" while a plan waits is held with a hint pointing at Confirm (a second Send goes through).
+- **Deferred to rc14:** cross-links (the incident card lists its missions; the Actions tab shows mission work).
+- **Deploy** (as rc12, plus one root step): snapshot `pre-rc13`, checkout the tag, `setup_steps repair` as root (adds
+  `sudoers-readable`; journal-based, re-runs the others idempotently), restart both units, check the log for "Repair
+  available" and the gate passing. No requirements, unit or launcher-helper changes since rc12.
