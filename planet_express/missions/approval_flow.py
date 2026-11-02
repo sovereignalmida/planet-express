@@ -55,6 +55,22 @@ def _clip(text: Any, limit: int = MAX_CARD_TEXT) -> str:
     return redact(str(text))[:limit]
 
 
+def plain_error(exc: BaseException, limit: int = MAX_CARD_TEXT) -> str:
+    """An exception as an operator reads it. A pydantic error becomes "field: what is wrong" for its first two problems, with no
+    input values and no documentation links (the raw form put both, and a type name, in the Console's footer)."""
+    if isinstance(exc, ValidationError):
+        errors = exc.errors(include_url=False, include_input=False, include_context=False)
+        parts = []
+        for err in errors[:2]:
+            where = ".".join(str(p) for p in err.get("loc", ())) or "the request"
+            msg = str(err.get("msg", "is not valid")).removeprefix("Value error, ").removeprefix("Assertion failed, ")
+            parts.append(f"{where}: {msg}")
+        text = "; ".join(parts) + (f" (and {len(errors) - 2} more)" if len(errors) > 2 else "")
+    else:
+        text = str(exc)
+    return _clip(text, limit)
+
+
 def require_actor(actor: str) -> str:
     if not isinstance(actor, str) or not actor.startswith(OPERATOR_PREFIX) or len(actor) <= len(OPERATOR_PREFIX):
         raise FlowError("this is an operator decision", "forbidden")
@@ -232,7 +248,7 @@ class ApprovalFlow:
         try:
             plan = validate_plan(VerificationPlan.model_validate({"catalogue_v": 1, "checks": checks}))
         except (ValidationError, PlanInvalid, ValueError) as exc:
-            raise FlowError(f"Invalid verification plan: {_clip(exc, 200)}") from None
+            raise FlowError(f"Invalid verification plan: {plain_error(exc, 200)}") from None
         if not plan.checks:
             raise FlowError("A repair mission needs at least one verification check")
         try:
@@ -250,7 +266,7 @@ class ApprovalFlow:
             grant = Grant.model_validate({**body, "backup": {**body["backup"], "covered": covered}})
             grant = with_site_protected(grant, self.protected())
         except (ValidationError, ValueError) as exc:
-            raise FlowError(f"Invalid grant: {_clip(exc, 300)}") from None
+            raise FlowError(f"Invalid grant: {plain_error(exc, 300)}") from None
         reasons = self.validator(grant, plan)
         if reasons:
             # A grant refused ONLY for the backup floor is the operator's to override (acknowledge no backup, which needs an elevated approval).

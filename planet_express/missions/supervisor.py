@@ -1681,6 +1681,9 @@ class Supervisor:
             self._start_approved_repairs(ready)
             with contextlib.suppress(Exception):
                 self._finish_pending_repair_cancels()
+        else:
+            with contextlib.suppress(Exception):
+                self._note_repairs_unavailable()
         with contextlib.suppress(Exception):
             self.sweep_uids()
         if self.console_tick is not None:
@@ -1711,8 +1714,11 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self._settle_without_session(mission.id, "cancel")
                 continue
-            if (not ready or self._defer_pending(mission.id)
-                    or not approvals.execution_predicate(self.store, mission.id).ok):
+            if self._defer_pending(mission.id) or not approvals.execution_predicate(self.store, mission.id).ok:
+                continue
+            if not ready:
+                # Said once, so an authorised run never sits silently looking as if it were starting.
+                self._wait_noted(mission.id, "the session launcher's preflight has not passed yet (see the Missions page)")
                 continue
             try:
                 self.start(mission.id)
@@ -1724,6 +1730,14 @@ class Supervisor:
                 self._wait_noted(mission.id, str(exc))
             except Exception as exc:                  # noqa: BLE001 - one mission's start never stops the others
                 self._start_failed(mission.id, exc)
+
+    def _note_repairs_unavailable(self) -> None:
+        """Without the checkpoint, tripwire and verifier no Repair can start; an authorised one says so instead of looking busy."""
+        for mission in self.ms.list_missions("awaiting_decision"):
+            if (mission.tier == "repair" and mission.id not in self._runs
+                    and approvals.execution_predicate(self.store, mission.id).ok):
+                self._wait_noted(mission.id, "Repair missions are not available on this host right now (the checkpoint, tripwire "
+                                             "or verifier is not running; see the Missions page)")
 
     def _clear_waiting(self, mission_id: str) -> None:
         for table in (self._waiting, self._deferred_since, self._deferred_retry):
@@ -1755,6 +1769,7 @@ class Supervisor:
         self._start_failures[mission_id] = count
         log.warning("mission %s did not start (%s), attempt %d", mission_id, type(exc).__name__, count)
         self._note(mission_id, {"start_failed": type(exc).__name__, "attempt": count})
+        self._waiting.pop(mission_id, None)                 # a wait after this failure is said again, not hidden behind it
         if count >= START_ATTEMPTS and mission_id not in self._runs:
             self._start_failures.pop(mission_id, None)
             self._settle_without_session(mission_id, "start_failed")

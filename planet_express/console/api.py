@@ -445,6 +445,9 @@ class ConsoleApi:
             from planet_express.missions.tripwire.monitor import pause_card
             pause = execution_mod.pause_view(pause_card(self.ms, mission.id))
         text, level = execution_mod.repair_status(mission, pause["who"] if pause and pause["by_operator"] else None)
+        waiting = execution_mod.start_waiting(self.ms, mission)
+        if waiting:
+            text, level = "Waiting to start", "warn"
         row = self.console.plan(ex["plan_id"])
         name = ""
         if row is not None:
@@ -453,7 +456,7 @@ class ConsoleApi:
             except (ValueError, KeyError, IndexError):
                 name = ""
         return {"id": ex["id"], "option": ex["option_index"], "name": name, "fingerprint": ex["grant_hash"][:8], "status": {"text": text, "level": level},
-                "timeline": execution_mod.timeline(mission, ex["authorised_by"]), "pause": pause,
+                "timeline": execution_mod.timeline(mission, ex["authorised_by"], waiting), "pause": pause,
                 "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission),
                 "finished": mission.status in execution_mod.TERMINALISH}
 

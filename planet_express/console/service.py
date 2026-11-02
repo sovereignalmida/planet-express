@@ -242,7 +242,8 @@ class ConsoleService:
             self._failures[conv.id] = count
             if count >= FOLLOWUP_FAILURES:
                 self.console.consume(message.seq, conv.turns)
-                self.console.add_message(conv.id, "system", f"PE could not start this turn: {str(exc)[:160]}")
+                from planet_express.missions.approval_flow import plain_error
+                self.console.add_message(conv.id, "system", f"PE could not start this turn: {plain_error(exc, 160)}")
                 self._failures.pop(conv.id, None)
 
     def _archive_step(self, conv: Conversation) -> None:

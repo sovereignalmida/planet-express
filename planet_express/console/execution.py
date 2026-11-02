@@ -103,7 +103,39 @@ def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
     return None
 
 
-def timeline(mission: Mission, authorised_by: str | None) -> list[dict[str, str]]:
+SUPERVISOR = "supervisor"           # missions.supervisor.ACTOR: only its own notes say why a start is waiting
+_WAIT_KEYS = ("start_waiting", "start_failed", "checkpoint_refused", "baseline_refused", "checkpoint_taken")
+
+
+def start_waiting(ms: Any, mission: Mission) -> str | None:
+    """Why an authorised Repair has not started yet, in words, from the supervisor's latest start note; None when nothing is in the
+    way (or the run has moved on). Without it the timeline showed "Checkpoint taken" in progress for a start that was blocked."""
+    if mission.status != "awaiting_decision":
+        return None
+    with ms.store._connect() as conn:                    # the newest supervisor notes only: a feed poll must not read the whole log
+        rows = conn.execute("SELECT body_json FROM mission_events WHERE mission_id=? AND kind='note' AND actor=? "
+                            "ORDER BY seq DESC LIMIT 50", (mission.id, SUPERVISOR)).fetchall()
+    for row in rows:
+        try:
+            body = json.loads(row["body_json"])
+        except ValueError:
+            continue
+        key = next((k for k in _WAIT_KEYS if k in body), None)
+        if key is None:
+            continue
+        if key == "checkpoint_taken":
+            return None
+        if key == "start_waiting":
+            return str(body["start_waiting"])[:300]
+        if key == "start_failed":
+            return f"the last start attempt failed ({str(body['start_failed'])[:80]}); PE tries again shortly"
+        if key == "checkpoint_refused":
+            return f"no checkpoint could be taken: {str(body.get('why') or body['checkpoint_refused'])[:240]}"
+        return "the tripwire's picture of the host could not be taken; PE tries again shortly"
+    return None
+
+
+def timeline(mission: Mission, authorised_by: str | None, waiting: str | None = None) -> list[dict[str, str]]:
     status = mission.status
     bad = status in ("failed", "rolled_back", "rollback_pending", "needs_operator", "recovery_required", "cancelled")
     # A failed verification ends in needs_operator, rollback_pending or rolled_back (on_verify_fail), not only in `failed`.
@@ -123,8 +155,11 @@ def timeline(mission: Mission, authorised_by: str | None) -> list[dict[str, str]
         run = "todo"
     check = ("now" if status == "verifying" else "done" if status == "completed" else "bad" if checked_and_failed else "todo")
     return [{"label": "Authorised", "state": "done", "meta": (authorised_by or "").removeprefix("operator:")},
-            {"label": "Checkpoint taken", "state": checkpoint, "meta": "so it can be rolled back"},
-            {"label": "Carrying out the plan", "state": run, "meta": ""},
+            ({"label": "Waiting to start", "state": "now", "meta": waiting} if waiting and not mission.checkpoint_id else
+             {"label": "Checkpoint taken", "state": checkpoint, "meta": "so it can be rolled back"}),
+            # A start that fails after its checkpoint (the tripwire baseline, the launch) waits at the next step instead.
+            ({"label": "Waiting to start", "state": "now", "meta": waiting} if waiting and mission.checkpoint_id else
+             {"label": "Carrying out the plan", "state": run, "meta": ""}),
             {"label": "PE checks it worked", "state": check, "meta": "PE's own checks, not the agent's say-so"}]
 
 

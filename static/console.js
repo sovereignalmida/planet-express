@@ -97,7 +97,13 @@
     return b.state === "stop" ? "used up" : b.used_pct + "% used";
   }
 
-  const pure = { inline, proseBlocks, trailFor, checkPhrase, groupRail, budgetLabel };
+  // A short message that only says yes, typed while a plan waits: the agent cannot run anything, so it would answer with words and
+  // the operator would wait for a change that never comes (M-5). The page points at the Confirm button instead.
+  const APPROVAL_NUDGE = "Typing it here only tells the agent, and the agent cannot run anything. To go ahead, use the Confirm option button on the plan above. Press Send again to send this message anyway.";
+  function soundsLikeApproval(text) {
+    return /^\s*(please\s+)?(confirm(ed)?|approved?|authori[sz]e(d)?|yes|yep|yeah|go( ahead)?|do it|proceed|ok(ay)?|run it|go for it)(\s+(it|that|this|the plan|option\s*[a-c1-3]|[a-c]))?[\s.!]*$/i.test(String(text || ""));
+  }
+  const pure = { inline, proseBlocks, trailFor, checkPhrase, groupRail, budgetLabel, soundsLikeApproval };
   if (typeof module !== "undefined" && module.exports) { module.exports = { ...pure, boot: (doc, win) => boot(doc, win) }; }
 
   // ── DOM ──────────────────────────────────────────────────────────────────────────────────────────
@@ -682,13 +688,21 @@
       refs.send.disabled = off || state.sending;
       refs.send.textContent = state.newMode ? "Start" : "Send";
       refs.stop.hidden = !(state.feed && state.feed.stoppable && !state.newMode && c.mode !== "off");
-      refs.note.textContent = state.error || c.reason || (state.newMode ? "Nothing runs until you press Start." : "");
-      refs.note.setAttribute("role", state.error ? "alert" : "status");
+      const nudge = state.approvalNudged !== null && state.approvalNudged !== undefined && refs.text.value.trim() === state.approvalNudged ? APPROVAL_NUDGE : "";
+      refs.note.textContent = state.error || nudge || c.reason || (state.newMode ? "Nothing runs until you press Start." : "");
+      refs.note.setAttribute("role", state.error || nudge ? "alert" : "status");
     }
 
     async function send() {
       const text = refs.text.value.trim();
       if (!text || state.sending) return;
+      const plan = !state.newMode && state.feed && state.feed.plan;
+      if (plan && plan.status === "pending" && !plan.expired && soundsLikeApproval(text) && state.approvalNudged !== text) {
+        state.approvalNudged = text;                     // shown until the text changes; a second Send of the same words goes through
+        renderComposer();
+        return;
+      }
+      state.approvalNudged = null;
       state.sending = true; state.error = null; renderComposer();
       try {
         if (state.newMode) {
@@ -746,7 +760,7 @@
     }
     function select(id, push) {
       if (!leaveConversation()) return;
-      state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null;
+      state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null; state.approvalNudged = null;
       state.sig = { rail: "", top: "", thread: "", ctx: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({ id }, "", "/console/" + id);
@@ -783,6 +797,9 @@
     });
     refs.text.addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } });
     refs.text.addEventListener("input", autosize);
+    refs.text.addEventListener("input", () => {                              // editing the words clears the hint, and what it remembered
+      if (state.approvalNudged && refs.text.value.trim() !== state.approvalNudged) { state.approvalNudged = null; renderComposer(); }
+    });
     refs.newBtn.addEventListener("click", () => startNew(true));
     window.addEventListener("popstate", () => {
       const m = /\/console\/([0-9a-f]{16})/.exec(window.location.pathname);

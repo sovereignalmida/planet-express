@@ -86,6 +86,11 @@ test("the rail groups by who needs what and drops empty groups", () => {
   const rows = [{ id: "a", status: { group: "Recent" } }, { id: "b", status: { group: "Needs you" } }];
   assert.deepStrictEqual(C.groupRail(rows).map(g => g.name), ["Needs you", "Recent"]);
 });
+test("a short yes is recognised as an approval, a real question is not", () => {
+  for (const t of ["confirm", "Confirm.", "yes", "go ahead", "do it!", "approve option B", "please confirm", "ok", "run it", "authorise"]) assert.ok(C.soundsLikeApproval(t), t);
+  for (const t of ["yes but why is gluetun restarting?", "confirm the logs first", "what would option B change?", "", "no"]) assert.ok(!C.soundsLikeApproval(t), t);
+});
+
 test("budget labels", () => {
   assert.strictEqual(C.budgetLabel({ state: "ok", used_pct: 24 }), "24% used");
   assert.strictEqual(C.budgetLabel({ state: "stop", used_pct: 99 }), "used up");
@@ -159,6 +164,24 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     const sent = requests.find(r => r[1] === "POST");
     assert.strictEqual(sent[0], "/api/console/0123456789abcdef/message");
     assert.ok(sent[2].includes("csrf_token=csrf-xyz") && sent[2].includes("text=and+the+logs%3F"));
+  });
+  await atest("typing a yes while a plan waits points at the Confirm button and sends nothing; a second Send goes through", async () => {
+    const posts = () => requests.filter(r => r[1] === "POST" && r[0].endsWith("/message")).length;
+    const before = posts();
+    doc.getElementById("con-text").value = "confirm";
+    await page.send();
+    assert.strictEqual(posts(), before, "not sent to the agent");
+    const note = doc.getElementById("con-note");
+    assert.ok(note.textContent.includes("use the Confirm option button") && note.attrs.role === "alert");
+    await page.send();
+    assert.strictEqual(posts(), before + 1, "the operator insisted");
+    const text = doc.getElementById("con-text");
+    text.value = "confirm"; await page.send();
+    assert.strictEqual(posts(), before + 1, "a fresh yes is caught again");
+    text.value = "confirm it"; text.fire("input"); text.value = "confirm"; text.fire("input");
+    await page.send();
+    assert.strictEqual(posts(), before + 1, "editing away and back forgets the earlier acknowledgement");
+    text.value = ""; text.fire("input");
   });
   await atest("scrapping a plan takes two clicks", async () => {
     const find = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Scrap"));
