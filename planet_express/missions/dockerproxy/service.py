@@ -183,7 +183,7 @@ class DockerProxyService:
             raise RuntimeError("no such session")
         mission = self.ms.get_mission(row["mission_id"])
         grant = mission.grant()
-        if grant.docker != "proxy":
+        if grant.docker not in ("proxy", "lifecycle"):
             return None
         if mission.tier not in REPAIR_UP:
             return self._start_investigation(cs)
@@ -191,7 +191,8 @@ class DockerProxyService:
                                  protected_gids=self.protected_gids)
         execs = ExecTable(self.limits.execs)
         policy = Policy(scope, DaemonInspector(self.upstream), exec_owner=execs.owner,
-                        versions=served_versions(self.upstream.api_version()), label_allow=self.label_allow)
+                        versions=served_versions(self.upstream.api_version()), label_allow=self.label_allow,
+                        lifecycle=grant.docker == "lifecycle")
         gate: Gate = StoreGate(self, cs.session_id, mission.id, mission.grant_hash, self.authenticator)
         server = ProxyServer(self.path(cs.session_id), policy=policy, upstream=self.upstream, gate=gate, execs=execs,
                              limits=self.limits, name=f"dockerproxy-{cs.session_id[:8]}")

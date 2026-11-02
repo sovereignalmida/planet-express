@@ -110,6 +110,23 @@ def discover_inventory(stacks_root: str) -> Inventory:
     return Inventory(hosts=("local",), stacks=tuple(stacks), services=tuple(services), mounts=(), path_roots=(stacks_root,))
 
 
+def session_principals(cfg: Any) -> "SessionPrincipals | None":
+    """The identities a session can hold (the launcher's uid range, the same-numbered private gids, the log groups it may be
+    given). None when a log group cannot be resolved: what a session could write is then not known, and nothing is waived."""
+    import grp
+
+    from .grants import SessionPrincipals
+    gids = set()
+    for name in getattr(cfg, "read_log_groups", ()) or ():
+        try:
+            gids.add(grp.getgrnam(name).gr_gid)
+        except KeyError:
+            continue                                     # the launcher skips a group the host does not have, too
+        except Exception:                                # noqa: BLE001
+            return None
+    return SessionPrincipals(cfg.session_uid_min, cfg.session_uid_max, frozenset(gids))
+
+
 def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, containment: Any, broker: Any, protected: Any,
                           stacks_root: str, enabled: Callable[[], bool], proxy: Any = None,
                           model_broker: Any = None) -> RepairControls:
@@ -121,6 +138,8 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         mission_store=ms, root=cfg.checkpoint.root or str(state_dir / "checkpoints"), stacks_root=stacks_root,
         provider=wiring.provider, backup=backup, settings=CheckpointSettings.from_config(cfg.checkpoint), enabled=enabled,
         baseline_provider=lambda: normalize(wiring.scan()))
+    principals = session_principals(cfg)
+    checkpoint.session_principals = principals            # a restart-only grant's backup waiver is asked again at start
 
     def revoke(mission_id: str) -> None:
         """The monitor's pause closes every capability endpoint the session holds."""
@@ -156,7 +175,8 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
 
     def validator(grant: Grant, plan: VerificationPlan) -> list[str]:
         problems = validate_grant(grant, inventory=inventory(), protected=protected, known_checks={c.id for c in plan.checks},
-                                  known_tools=known_tools, limits=limits, stacks_root=stacks_root, verification_plan=plan)
+                                  known_tools=known_tools, limits=limits, stacks_root=stacks_root, verification_plan=plan,
+                                  session_principals=principals)
         if grant.sudo.mode == "scoped":              # broad sudo is a separate, elevated approval and is never generated
             problems += outside_ceiling(cfg.worker_sudo_rules if cfg.worker_sudo_all_sessions else [], grant.sudo.rules)
         return problems

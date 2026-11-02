@@ -101,6 +101,10 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
         warnings.append({"kind": "broad_sudo", "text": "BROAD SUDO: this worker may run any privileged command. Needs an elevated approval."})
     if grant.docker == "raw":
         warnings.append({"kind": "docker_raw", "text": "RAW DOCKER: the worker talks to the Docker daemon without the scope-enforcing proxy."})
+    if grant.docker == "lifecycle":
+        warnings.append({"kind": "lifecycle", "text": "RESTART ONLY: through Docker and typed steps the worker may only start, stop and "
+                                                      "restart in-scope containers. It skips the backup floor only if its own account "
+                                                      "cannot write in its stacks (checked at proposal and again at start)."})
     if grant.backup.acknowledged_no_backup:
         warnings.append({"kind": "no_backup", "text": "NO BACKUP: the scope has no recent verified backup and the grant accepts running without one."})
     if grant.tier == "critical":
@@ -190,7 +194,7 @@ class ApprovalFlow:
         (privileged, the Docker socket, a read-write system mount, devices, ...) the grant is host root in practice. The proxy
         refuses to act on such containers, and the card says which they are so the operator knows what the grant cannot do (or
         should not scope). A view that cannot be built is itself shown: silence must not read as 'none'."""
-        if self.host_root_view is None or grant.docker != "proxy":
+        if self.host_root_view is None or grant.docker not in ("proxy", "lifecycle"):
             return []
         try:
             found = self.host_root_view(grant)

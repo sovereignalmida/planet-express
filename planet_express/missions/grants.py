@@ -11,6 +11,7 @@ name. The grant hash is `Grant.hash()` (RFC 8785 canonical JSON, `canonical.py`)
 
 import os
 import re
+import stat
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -73,13 +74,138 @@ def with_site_protected(grant: Grant, protected: ProtectedSet) -> Grant:
     return out
 
 
+LIFECYCLE_WALK_LIMIT = 50_000      # entries looked at per grant before the answer is "could not be checked"
+
+
+@dataclass(frozen=True)
+class SessionPrincipals:
+    """Every identity a session process can hold: a uid in the launcher's range, the private gid of the same number, and the
+    configured log groups (missions.read_log_groups)."""
+    uid_min: int
+    uid_max: int
+    gids: frozenset[int] = frozenset()
+
+    def uid(self, uid: int) -> bool:
+        return self.uid_min <= uid <= self.uid_max
+
+    def gid(self, gid: int) -> bool:
+        return self.uid_min <= gid <= self.uid_max or gid in self.gids
+
+
+_ACL_XATTR = "system.posix_acl_access"
+_ACL_USER, _ACL_GROUP_OBJ, _ACL_GROUP, _ACL_MASK = 0x02, 0x04, 0x08, 0x10
+
+
+def _acl(path: str) -> list[tuple[int, int, int]] | None:
+    """The file's access ACL as (tag, perm, id) entries, or None when it has none beyond its mode bits."""
+    import errno
+    import struct
+    try:
+        raw = os.getxattr(path, _ACL_XATTR, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA)):
+            return None
+        raise
+    if len(raw) < 4 or (len(raw) - 4) % 8 or struct.unpack_from("<I", raw)[0] != 2:
+        raise OSError(f"unreadable ACL on {path[:120]}")
+    return [struct.unpack_from("<HHI", raw, off) for off in range(4, len(raw), 8)]
+
+
+def _session_may(path: str, st: os.stat_result, who: SessionPrincipals, bit: int) -> bool:
+    """Whether ANY session identity has `bit` (2 write, 1 traverse). Sessions are many uids, each falling in a different class
+    (one may own the file while the next gets the group or other bits), so this is the union of every class a session could
+    land in: the owner bits if a session uid owns it, a named ACL user's entry, the group class when a session gid matches it,
+    and the other bits (some session uid is always neither owner nor named). Over-counting only keeps the floor (Codex, rc13)."""
+    mode = st.st_mode
+    if mode & bit:
+        return True
+    if who.uid(st.st_uid) and (mode >> 6) & bit:
+        return True
+    entries = _acl(path)
+    if entries is None:
+        return bool(who.gid(st.st_gid) and (mode >> 3) & bit)
+    mask = next((perm for tag, perm, _id in entries if tag == _ACL_MASK), 7)
+    for tag, perm, ident in entries:
+        if not perm & mask & bit:
+            continue
+        if tag == _ACL_USER and who.uid(ident):
+            return True
+        if (tag == _ACL_GROUP_OBJ and who.gid(st.st_gid)) or (tag == _ACL_GROUP and who.gid(ident)):
+            return True
+    return False
+
+
+def lifecycle_write_reach(grant: Grant, stacks_root: str | None, principals: SessionPrincipals | None, *,
+                          limit: int = LIFECYCLE_WALK_LIMIT) -> str | None:
+    """None when no session identity can write anything in the grant's stack directories. Otherwise why not, in words.
+
+    A `docker: lifecycle` grant skips the backup floor because the proxy and the typed steps can only restart containers; the
+    session still has its own shell, so the waiver holds only if that shell cannot write in scope either. Access is worked out
+    for the session's actual identities (its uid range, the private gids, the log groups) through owner, group and ACL entries,
+    not just the 'other' bits. A directory no session identity can traverse stops the walk; anything one could write, or a tree
+    too large or unreadable to check, or an unknown identity, means the floor applies as usual (Codex review, rc13)."""
+    if principals is None:
+        return "the session identities are not known, so what a session could write cannot be checked"
+    if not stacks_root:
+        return "the stacks root is not known, so what the session could write cannot be checked"
+    stacks = sorted({*grant.scope.stacks, *(s.split("/", 1)[0] for s in grant.scope.services)})
+    seen = 0
+    for name in stacks:
+        top = os.path.join(stacks_root, name)
+        try:
+            if os.path.islink(top):
+                return f"{top[:160]} is a symbolic link, so what it reaches cannot be bounded"
+            real_top = os.path.realpath(top)
+            reachable = True
+            parts = os.path.normpath(top).split(os.sep)
+            for i in range(1, len(parts)):
+                ancestor = os.sep.join(parts[:i]) or os.sep
+                if not os.path.lexists(ancestor):
+                    reachable = False                            # nothing exists down there to write
+                    break
+                if not _session_may(ancestor, os.lstat(ancestor), principals, 1):
+                    reachable = False
+                    break
+            if not reachable or not os.path.lexists(top):
+                continue
+            pending = [top]
+            while pending:
+                here = pending.pop()
+                st = os.lstat(here)
+                if not _session_may(here, st, principals, 1):
+                    continue                                     # no session identity can enter: nothing below is in reach
+                if _session_may(here, st, principals, 2):
+                    return f"{here[:160]} can be written by a session"
+                with os.scandir(here) as entries:
+                    for entry in entries:
+                        seen += 1
+                        if seen > limit:
+                            return f"the stack directories hold more than {limit} entries, too many to check"
+                        est = entry.stat(follow_symlinks=False)
+                        if stat.S_ISLNK(est.st_mode):
+                            # A session's shell follows links. One that stays inside this stack directory reaches only what the
+                            # walk checks anyway; one that leads anywhere else (or nowhere yet) is not bounded by this walk.
+                            target = os.path.realpath(entry.path)
+                            if not (target == real_top or target.startswith(real_top + os.sep)) or not os.path.lexists(target):
+                                return f"{entry.path[:160]} is a link that leads outside its stack directory"
+                            continue
+                        if stat.S_ISDIR(est.st_mode):
+                            pending.append(entry.path)
+                        elif _session_may(entry.path, est, principals, 2):
+                            return f"{entry.path[:160]} can be written by a session"
+        except OSError as exc:
+            return f"{top[:160]} could not be checked ({type(exc).__name__})"
+    return None
+
+
 def _under_root(path: str, roots: Iterable[str]) -> bool:
     return any(path == r.rstrip("/") or path.startswith(r.rstrip("/") + "/") for r in roots)
 
 
 def validate_grant(grant: Grant, *, inventory: Inventory, protected: ProtectedSet, known_checks: Collection[str],
                    known_tools: Collection[str], limits: SiteLimits, stacks_root: str | None = None,
-                   verification_plan: VerificationPlan | None = None) -> list[str]:
+                   verification_plan: VerificationPlan | None = None,
+                   session_principals: SessionPrincipals | None = None) -> list[str]:
     """Every reason this grant must not be offered for approval; empty means valid."""
     out: list[str] = []
     scope = grant.scope
@@ -134,8 +260,16 @@ def validate_grant(grant: Grant, *, inventory: Inventory, protected: ProtectedSe
             out.append("a mutating grant needs a non-empty scope")
         if not grant.verification.checks:
             out.append("a mutating grant needs at least one verification check")
+        # A lifecycle grant can only start, stop and restart containers (the proxy and the typed-step gate enforce it). When the
+        # session's own account cannot write in its stacks either, no data it could lose is in reach and the floor does not apply.
         if not (grant.backup.covered or grant.backup.acknowledged_no_backup):
-            out.append("backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged")
+            reach = lifecycle_write_reach(grant, stacks_root, session_principals) if grant.docker == "lifecycle" \
+                else "not restart-only"
+            if grant.docker == "lifecycle" and reach is not None:
+                out.append(f"backup floor: a restart-only repair skips the backup only when nothing in its stacks is writable "
+                           f"by the session, and {reach}")
+            elif reach is not None:
+                out.append("backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged")
     for check in grant.verification.checks:
         if check not in known_checks:
             out.append(f"verification check {check[:64]!r} does not exist")
@@ -271,5 +405,5 @@ def scan_session_env(se: SessionEnv, secrets: Collection[str], *, max_files: int
     return hits
 
 
-__all__ = ["EnvLeak", "Inventory", "SessionEnv", "SiteLimits", "build_session_env", "grant_hash", "make_env_policy", "scan_session_env",
+__all__ = ["SessionPrincipals", "lifecycle_write_reach", "EnvLeak", "Inventory", "SessionEnv", "SiteLimits", "build_session_env", "grant_hash", "make_env_policy", "scan_session_env",
            "validate_grant", "with_site_protected"]

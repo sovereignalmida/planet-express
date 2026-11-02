@@ -274,6 +274,9 @@ def test_propose_repair_over_rpc_validates_before_anyone_is_asked(stack):
             "checks": [{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}]}
     made = call(handlers, "mission.propose_repair", **base)
     assert made["status"] == "awaiting_decision" and made["grant_hash"]
+    restart_only = call(handlers, "mission.propose_repair", **{**base, "docker": "lifecycle"})       # rc13: restart-only repairs
+    assert restart_only["status"] == "awaiting_decision" and st.ms.get_mission(restart_only["mission_id"]).grant().docker == "lifecycle"
+    assert call(handlers, "mission.propose_repair", **{**base, "docker": "anything"})["error"] == "bad_request"
     assert call(handlers, "mission.propose_repair", **{**base, "checks": []})["error"] == "bad_request"
     assert call(handlers, "mission.propose_repair", **{**base, "checks": [{"id": "x", "check": "shell", "params": {}}]})["error"] == "bad_request"
     st.flow.validator = lambda grant, plan: ["scope stack 'secrets' is not in the discovered inventory"]

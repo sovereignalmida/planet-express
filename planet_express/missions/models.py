@@ -123,7 +123,9 @@ class Grant(_Strict):
     budgets: Budgets = Budgets()
     effects: Effects = Effects()
     on_verify_fail: Literal["needs_operator", "rollback"] = "needs_operator"
-    docker: Literal["proxy", "raw"] = "proxy"
+    # "lifecycle": the proxy serves reads and only start/stop/restart/kill of in-scope containers (a restart-only repair). It
+    # cannot reach data, so it needs no recent backup; it carries no sudo rules, paths, mounts or brokered credentials.
+    docker: Literal["proxy", "raw", "lifecycle"] = "proxy"
     verification: GrantVerification = GrantVerification()
     backup: Backup = Backup()
 
@@ -131,6 +133,9 @@ class Grant(_Strict):
     def _raw_docker_needs_broad_sudo(self) -> "Grant":
         if self.docker == "raw" and self.sudo.mode != "broad":
             raise ValueError("docker: raw requires sudo.mode = broad")
+        if self.docker == "lifecycle" and (self.sudo.mode != "scoped" or self.sudo.rules or self.scope.paths
+                                           or self.scope.mounts or self.credentials):
+            raise ValueError("docker: lifecycle carries no sudo rules, paths, mounts or credentials")
         return self
 
     def canonical(self) -> str:

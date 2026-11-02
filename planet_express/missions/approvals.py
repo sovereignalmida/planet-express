@@ -190,6 +190,8 @@ def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, no
         reasons.append("standing grants refuse broad_sudo")
     if grant.backup.acknowledged_no_backup:
         reasons.append("standing grants refuse no_backup")
+    if grant.docker == "lifecycle" and not grant.backup.covered:
+        reasons.append("standing grants need a covered backup, restart-only included")
     # What the standing grant did not name does not ride along with an unattended start.
     extra = sorted(set(grant.credentials) - set(ceilings.credentials))
     if extra:

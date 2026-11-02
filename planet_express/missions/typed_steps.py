@@ -53,6 +53,11 @@ MISSION_STEP_TYPES = frozenset({
     "service.restart", "service.start", "service.stop", "stack.up", "stack.down",
     "wait", "check.container", "check.log_since_start", "read.qbittorrent_session_port",
 })
+# A `docker: lifecycle` grant (restart-only, no backup floor) runs only these: nothing that recreates a container or edits files.
+LIFECYCLE_STEP_TYPES = frozenset({
+    "service.restart", "service.start", "service.stop",
+    "wait", "check.container", "check.log_since_start", "read.qbittorrent_session_port",
+})
 _MAX_REASON = 300
 _MAX_EVENT_BYTES = 8192
 _SEAL = object()                 # only this module mints a StepAuthorization the command service will accept
@@ -148,6 +153,10 @@ class MissionStepGate:
         if mutating and mission.tier != "repair":
             raise StepRefused(f"a {mission.tier}-tier mission may not run a mutating step")
         grant = mission.grant()
+        if grant.docker == "lifecycle":
+            beyond = [s.type for s in runbook.steps if s.type not in LIFECYCLE_STEP_TYPES]
+            if beyond:
+                raise StepRefused(f"{beyond[0]} is more than a restart-only repair may run")
         if self._authorized_count(mission_id) + len(runbook.steps) > grant.budgets.tool_calls:
             raise StepRefused("the mission's call budget is used up")
         approved = approvals.mission_step_approved(self.ms.store, mission_id)

@@ -316,7 +316,8 @@ class ConsoleApi:
                 actor, title=f"{conv.title[:120]} · {chosen.name}"[:256], goal=plan_mod.goal_text(chosen),
                 scope={"stacks": list(chosen.scope.stacks), "services": list(chosen.scope.services), "hosts": ["local"]},
                 checks=[c.model_dump() for c in chosen.checks], exclusions=[*chosen.exclude, *chosen.will_not_touch][:32],
-                incident_id=self.ms.get_mission(conv.mission_id).incident_id, acknowledged_no_backup=no_backup)
+                incident_id=self.ms.get_mission(conv.mission_id).incident_id, acknowledged_no_backup=no_backup,
+                docker="lifecycle" if chosen.restart_only else "proxy")
         except FlowError as exc:
             if exc.code == "backup_floor" and not no_backup:
                 raise ConsoleApiError("This scope has no recent verified backup, so PE will not run it by default. You can prepare it anyway: "
@@ -486,9 +487,14 @@ class ConsoleApi:
             "operator": operator, "option": option.name, "summary": option.summary,
             "scope": {"stacks": card["scope"]["stacks"], "services": card["scope"]["services"]},
             "warnings": [w["text"] for w in card["warnings"]],
-            "backup": {"covered": bool(card["backup"].get("covered")),
-                       "text": "A recent verified backup covers this scope." if card["backup"].get("covered") else
-                               "No recent verified backup covers this scope, and you are accepting that risk. This needs an elevated approval."},
+            "backup": ({"covered": True, "not_needed": True,
+                        "text": "Not needed: this repair may only start, stop and restart containers, and its own account cannot "
+                                "write anywhere in its stacks."}
+                       if card["docker"] == "lifecycle" and not card["backup"].get("covered")
+                       and not card["backup"].get("acknowledged_no_backup") else
+                       {"covered": bool(card["backup"].get("covered")),
+                        "text": "A recent verified backup covers this scope." if card["backup"].get("covered") else
+                                "No recent verified backup covers this scope, and you are accepting that risk. This needs an elevated approval."}),
             "protected": {"count": card["protected"]["count"], "enforced": card["protected"]["exclusions_enforced"],
                           "advisory": card["protected"]["exclusions_advisory"]},
             "limits": {"minutes": max(1, budgets["wall_s"] // 60), "steps": budgets["tool_calls"]},

@@ -396,6 +396,11 @@ class CheckpointService:
         return planned
 
     def _backup_floor(self, scope: CheckpointScope, grant: Grant) -> bool:
+        if grant.docker == "lifecycle":
+            # Start/stop/restart only. Asked again here, at start: the stack directories may have changed since the proposal.
+            from planet_express.missions.grants import lifecycle_write_reach
+            if lifecycle_write_reach(grant, self.stacks_root, getattr(self, "session_principals", None)) is None:
+                return False
         now, no_backup = self._now(), False
         for path in scope.data_paths:
             status = self.backup.status(path, now=now, recent_s=grant.backup.recent_s)

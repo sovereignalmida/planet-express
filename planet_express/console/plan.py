@@ -88,6 +88,9 @@ class Option(_Strict):
     effort: Short
     scope: OptionScope
     exclude: Annotated[list[StrictStr], Field(max_length=32)] = []      # concrete resource ids (`service:media/gluetun`) the grant must carve out
+    # The option only starts, stops or restarts containers. Confirming it mints a `docker: lifecycle` grant: the proxy then serves
+    # nothing else, so it needs no recent backup. A false claim does not widen anything: it only narrows what the run may do.
+    restart_only: StrictBool = False
     checks: Annotated[list[CheckSpec], Field(min_length=1, max_length=32)]
 
     @model_validator(mode="after")
@@ -240,7 +243,7 @@ def json_schema() -> dict[str, Any]:
     option = {"type": "object", "additionalProperties": False, "required": names, "properties": {
         "name": text, "recommended": {"type": "boolean"}, "summary": text, "changes": {"type": "array", "items": text},
         "will_not_touch": {"type": "array", "items": text}, "risk": risk, "rolls_back_to": text, "effort": text,
-        "scope": scope, "exclude": {"type": "array", "items": text, "maxItems": 32},
+        "scope": scope, "exclude": {"type": "array", "items": text, "maxItems": 32}, "restart_only": {"type": "boolean"},
         "checks": {"type": "array", "items": check, "minItems": 1}}}
     return {"type": "object", "additionalProperties": False, "required": ["known", "unsure", "options"], "properties": {
         "known": {"type": "array", "items": text}, "unsure": {"type": "array", "items": text},
@@ -254,7 +257,9 @@ PLAN_INSTRUCTIONS = (
     "will_not_touch, risk {level low|medium|high, text}, rolls_back_to, effort, scope, exclude (optional) and checks. `scope` is "
     "{stacks: [...], services: [...]}: exactly what the option would touch, using ONLY names listed in INVENTORY.md (services as "
     "<stack>/<service>); anything outside it is off limits to the execution. `exclude` lists resource ids such as service:<stack>/<service> "
-    "that must be carved out even inside the scope. `checks` are how PE will verify the "
+    "that must be carved out even inside the scope. Set `restart_only` true when the option only starts, stops or restarts containers "
+    "(for example `docker compose restart <service>`, not down/up or recreate): PE then allows nothing else, and needs no recent backup "
+    "for it. `checks` are how PE will verify the "
     "option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, no extra "
     "fields):\n{catalogue}\nYou cannot approve a plan, and a plan carries no permissions: the operator confirms an option and PE "
     "applies only what that option says. Do not change anything on the host yourself.")

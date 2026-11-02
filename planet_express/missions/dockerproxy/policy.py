@@ -334,6 +334,13 @@ def _empty(value) -> bool:
     return value in (None, [], {}, "", False, 0)
 
 
+# What a `docker: lifecycle` grant may change: nothing but the running state of its in-scope containers, and only gracefully. No
+# kill (any signal, SIGKILL included), and stop/restart take no `signal` and no grace period under LIFECYCLE_MIN_GRACE_S: an abrupt
+# stop can lose a stateful app's unflushed writes, and a lifecycle grant runs without a backup (Codex review, rc13).
+LIFECYCLE_WRITES = frozenset({"container.start", "container.stop", "container.restart"})
+LIFECYCLE_MIN_GRACE_S = 10
+
+
 class Policy:
     """One per session (or one for the read-only variant, with no scope). Raises `Refusal`; never returns a partial plan."""
 
@@ -341,9 +348,10 @@ class Policy:
                  exec_owner: Callable[[str], str | None] = lambda exec_id: None,
                  json_cap: int = JSON_CAP, archive_cap: int = ARCHIVE_CAP,
                  versions: frozenset[str] = API_VERSIONS, is_socket: Callable[[str], bool] | None = None,
-                 label_allow: Iterable[str] = (), investigate: bool = False):
+                 label_allow: Iterable[str] = (), investigate: bool = False, lifecycle: bool = False):
         if not read_only and scope is None:
             raise ValueError("a scoped policy needs a scope")
+        self.lifecycle = lifecycle
         self.scope, self.inspector, self.read_only, self.investigate = scope, inspector, read_only, investigate and read_only
         self.exec_owner, self.json_cap, self.archive_cap, self.versions = exec_owner, json_cap, archive_cap, versions
         self._is_socket = is_socket or _is_unix_socket
@@ -386,6 +394,8 @@ class Policy:
                 continue
             if self.read_only and not (route.readonly_ok or (self.investigate and route.investigate_ok)):
                 raise Refusal("this proxy is read-only: endpoint not served")
+            if self.lifecycle and route.write and route.name not in LIFECYCLE_WRITES:
+                raise Refusal("this repair may only start, stop and restart containers: endpoint not served")
             if head.version is None and route.name not in ("ping", "version"):
                 raise Refusal("an API version is required")
             return route, found.groupdict()
@@ -398,6 +408,16 @@ class Policy:
             if check is None:
                 raise Refusal("query parameter not served")         # includes every `remote`, `fromSrc`, `fromImage`, `link`
             out[key] = check(value)
+        if self.lifecycle and route.name in ("container.stop", "container.restart"):
+            if "signal" in out:
+                raise Refusal("a restart-only repair stops containers with their own stop signal")
+            if "t" in out:
+                try:
+                    grace = int(out["t"])
+                except ValueError:
+                    raise Refusal("a restart-only repair needs a whole-second grace period") from None
+                if grace < LIFECYCLE_MIN_GRACE_S:
+                    raise Refusal(f"a restart-only repair gives containers at least {LIFECYCLE_MIN_GRACE_S} s to stop")
         if route.name == "container.remove" and out.get("v") in ("1", "true"):
             raise Refusal("removing anonymous volumes is not served")
         if route.name in ("container.archive.get", "container.archive.put") and "path" not in out:
