@@ -135,6 +135,14 @@ def parse(doc: Any, inventory: Any = None) -> Plan:
                 canon(resource)
             except BadResource:
                 raise PlanError(f"option {index + 1}: an exclusion is not a resource id such as service:<stack>/<service>") from None
+        if option.restart_only:
+            # A restart is only done if the container started again during the run: PE adds that to every container check,
+            # and a restart-only option without one proves nothing (rc13 live run, M-11 "completed" with no restart).
+            states = [c for c in option.checks if c.check == "container_state"]
+            if not states:
+                raise PlanError(f"option {index + 1}: a restart-only option needs a container_state check for what it restarts")
+            for check in states:
+                check.params = {**check.params, "started_during_mission": True}
         try:
             parse_plan({"catalogue_v": CATALOGUE_V, "checks": [c.model_dump() for c in option.checks]})
         except PlanInvalid:
@@ -177,12 +185,19 @@ def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -
     return parse(read_doc(workspace, name), inventory)
 
 
+def restart_unbound(option: Option) -> bool:
+    """A restart-only option whose checks would not show that anything restarted (one stored before rc13.2)."""
+    states = [c for c in option.checks if c.check == "container_state"]
+    return option.restart_only and (not states or not all(c.params.get("started_during_mission") is True for c in states))
+
+
 def check_phrase(check: Any) -> str:
     """A check in words (the page has the same phrasing): from PE's catalogue kind and its parameters."""
     params = getattr(check, "params", None) or (check.get("params") if isinstance(check, dict) else None) or {}
     kind = getattr(check, "check", None) or (check.get("check") if isinstance(check, dict) else "a check")
     if kind == "container_state":
-        return f"{params.get('container', 'a container')} is running and stable"
+        restarted = " and was restarted by this run" if params.get("started_during_mission") else ""
+        return f"{params.get('container', 'a container')} is running and stable{restarted}"
     if kind == "http":
         return f"{params.get('url', 'a URL')} answers"
     if kind == "mount_readable":
@@ -258,8 +273,11 @@ PLAN_INSTRUCTIONS = (
     "{stacks: [...], services: [...]}: exactly what the option would touch, using ONLY names listed in INVENTORY.md (services as "
     "<stack>/<service>); anything outside it is off limits to the execution. `exclude` lists resource ids such as service:<stack>/<service> "
     "that must be carved out even inside the scope. Set `restart_only` true when the option only starts, stops or restarts containers "
-    "(for example `docker compose restart <service>`, not down/up or recreate): PE then allows nothing else, and needs no recent backup "
-    "for it. `checks` are how PE will verify the "
+    "and every container in its scope ends up running again (`docker restart <container>`, not down/up or recreate; an option that "
+    "leaves something stopped is an ordinary option): PE then allows nothing else, checks itself that every in-scope service restarted, needs no recent backup for it, and the "
+    "execution cannot read the stack's files, so it restarts containers by name rather than with `docker compose`. A restart-only "
+    "option needs a container_state check for each container it restarts, and ONLY for those: PE adds that the container must have "
+    "restarted during the run, so check anything it leaves alone some other way (http, for example). `checks` are how PE will verify the "
     "option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, no extra "
     "fields):\n{catalogue}\nYou cannot approve a plan, and a plan carries no permissions: the operator confirms an option and PE "
     "applies only what that option says. Do not change anything on the host yourself.")

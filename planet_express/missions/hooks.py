@@ -63,10 +63,15 @@ class HookPolicy:
     protected_paths: Sequence[str] = ()         # absolute paths of protected resources (ask on crossing)
     blocked_failure: Literal["closed", "open"] = "closed"
     other_failure: Literal["closed", "open"] = "open"
+    # The grant is restart-only (docker "lifecycle"): `docker start|stop|restart` IS the approved change, so it is not asked
+    # about (a headless session cannot answer, and the ask refused M-11's restart). The Docker proxy still decides which
+    # containers and how: only in-scope ones, no kill, a minimum stop grace.
+    docker_lifecycle: bool = False
 
     def to_json(self) -> str:
         return json.dumps({"live_trees": list(self.live_trees), "protected_paths": list(self.protected_paths),
-                           "blocked_failure": self.blocked_failure, "other_failure": self.other_failure})
+                           "blocked_failure": self.blocked_failure, "other_failure": self.other_failure,
+                           "docker_lifecycle": self.docker_lifecycle})
 
     @classmethod
     def from_json(cls, text: str) -> "HookPolicy":
@@ -76,7 +81,11 @@ class HookPolicy:
         bf, of = raw.get("blocked_failure", "closed"), raw.get("other_failure", "open")
         if bf not in ("closed", "open") or of not in ("closed", "open"):
             raise ValueError("failure modes are closed or open")
-        return cls(tuple(str(x) for x in raw.get("live_trees", [])), tuple(str(x) for x in raw.get("protected_paths", [])), bf, of)
+        lifecycle = raw.get("docker_lifecycle", False)
+        if not isinstance(lifecycle, bool):
+            raise ValueError("docker_lifecycle is a boolean")
+        return cls(tuple(str(x) for x in raw.get("live_trees", [])), tuple(str(x) for x in raw.get("protected_paths", [])), bf, of,
+                   lifecycle)
 
 
 # ── what is secret / sensitive ────────────────────────────────────────────────────────────────────────
@@ -360,6 +369,33 @@ _IRREVERSIBLE = {"rm", "rmdir", "unlink", "truncate", "kill", "pkill", "killall"
                  "iptables", "ip6tables", "nft", "ufw", "reboot", "shutdown", "poweroff", "halt", "mount", "umount", "swapoff"}
 _SYSTEMCTL_IRREVERSIBLE = {"stop", "disable", "mask", "kill", "reset-failed", "daemon-reload"}
 _DOCKER_IRREVERSIBLE = {"rm", "rmi", "stop", "kill", "down", "prune", "restart", "update", "pause"}
+_DOCKER_LIFECYCLE = {"start", "stop", "restart"}
+
+
+_LIFECYCLE_MIN_GRACE_S = 10      # the Docker proxy's floor for a lifecycle grant (dockerproxy.policy.LIFECYCLE_MIN_GRACE_S)
+
+
+def _lifecycle_call(low: str, words: Sequence[str]) -> bool:
+    """`docker restart X`, `docker container stop X` (and start): the calls a restart-only grant approves. Not compose
+    (it cannot run there), not podman. After the verb only container names and a stop grace of at least the proxy's floor
+    (`-t N`, `--time N`, `--time=N`); anything else (`--signal`, `-t 0`) is still asked about (review, rc13.2)."""
+    if low != "docker" or not words:
+        return False
+    rest = list(words[1:] if words[0] in _DOCKER_LIFECYCLE else words[2:] if words[0] == "container" and words[1:2] and words[1] in _DOCKER_LIFECYCLE else [])
+    names = 0
+    while rest:
+        word = rest.pop(0)
+        if word in ("-t", "--time") or word.startswith("--time="):
+            value = word.partition("=")[2] if "=" in word else (rest.pop(0) if rest else "")
+            if not value.isdigit() or int(value) < _LIFECYCLE_MIN_GRACE_S:
+                return False
+        elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", word):
+            names += 1
+        else:
+            return False
+    return names > 0
+
+
 _SQL = re.compile(r"\b(drop\s+(table|database|schema)|truncate\s+table|delete\s+from)\b", re.IGNORECASE)
 
 
@@ -557,7 +593,8 @@ def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
             if "system" in words and "prune" in words and any(w in ("--volumes", "-a", "--all") for w in words):
                 return Decision("block", "docker", "docker system prune of volumes or images")
             if (words[:1] and words[0] in _DOCKER_IRREVERSIBLE) or (len(words) > 1 and words[1] in _DOCKER_IRREVERSIBLE):
-                ask = ask or Decision("ask", "irreversible", f"{prog} {' '.join(words[:2])[:40]}")
+                if not (policy.docker_lifecycle and _lifecycle_call(low, words)):
+                    ask = ask or Decision("ask", "irreversible", f"{prog} {' '.join(words[:2])[:40]}")
         # ── wipe ──────────────────────────────────────────────────────────────
         if low in _WIPERS or low.startswith("mkfs"):
             return Decision("block", "wipe", f"{prog}: destroys a filesystem or disk")

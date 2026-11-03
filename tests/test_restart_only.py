@@ -86,6 +86,7 @@ def test_a_restart_only_option_is_confirmed_without_a_backup_and_says_why(tmp_pa
         rig.flow.validator = lambda grant, plan: floor_reasons(grant)          # the real floor rule, nothing else
         doc = plan_doc()
         doc["options"][0]["restart_only"] = True
+        doc["options"][0]["checks"] = [{"id": "up", "check": "container_state", "params": {"container": "CASA_APP"}}]
         view = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(doc), 0, "chris")
         grant = rig.st.ms.get_mission(view["mission_id"]).grant()
         assert grant.docker == "lifecycle" and grant.backup.acknowledged_no_backup is False

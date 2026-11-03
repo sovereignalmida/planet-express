@@ -50,8 +50,8 @@ REPAIR_INSTRUCTIONS = (
     "of the scoped files (compose files and the files they reference) and container settings it recorded; other files, data and "
     "host state are NOT covered by it. Do not try to hide, undo or work around a change. Whether you succeeded is decided by verification checks "
     "Core agreed beforehand and runs itself, not by your report: report what you changed and what you found, accurately, "
-    "including anything you could not fix. If something unexpected happens, stop and say so. Finish by submitting one JSON "
-    "result that matches the output schema."
+    "including anything you could not fix, and set work_done to all, some or none of the approved change. If something "
+    "unexpected happens, stop and say so. Finish by submitting one JSON result that matches the output schema."
 )
 
 
@@ -148,6 +148,11 @@ def _scope_lines(mission: Mission) -> str:
         lines.append("protected (never touch): " + _protected(grant.protected.resources))
     if grant.exclusions:
         lines.append("exclusions: " + ", ".join(_exact(v) for v in grant.exclusions))
+    if grant.docker == "lifecycle":
+        # rc13 live run, M-11: the agent tried `docker compose restart`, which needs the stack's files this mode cannot read.
+        lines.append("docker: restart only. You can start, stop and restart the in-scope containers and nothing else. You cannot "
+                     "read the stack's files, so `docker compose` will not work: use `docker restart <container name>` (or start / "
+                     "stop) directly.")
     b = grant.budgets
     lines.append(f"budgets: wall_s={b.wall_s} tool_calls={b.tool_calls} output_bytes={b.output_bytes}")
     return "\n".join(lines)

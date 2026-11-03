@@ -1490,6 +1490,9 @@ class Supervisor:
             self._note(mission.id, {"session_ended": reason, "left_in": mission.status})
             return
         if reason == "result" and result is not None:
+            if result.work_done is not None:
+                # Read by the verifier: the agent's own "not done" stops a pass; "all" decides nothing.
+                self._note(mission.id, {"agent_reported": result.work_done})
             try:
                 transition(self.store, mission.id, "verifying", ACTOR)
             except IllegalTransition as exc:

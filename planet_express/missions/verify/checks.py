@@ -136,6 +136,9 @@ class ContainerStateParams(_P):
     container: StrictStr
     min_uptime_s: Annotated[StrictInt, Field(ge=0, le=3600)] = 10
     observe_s: Annotated[StrictInt, Field(ge=0, le=30)] = 3      # a second look: no restart may happen inside it
+    # The container must have (re)started after the mission began executing: a restart plan is not done just because the
+    # container is still running (rc13 live run, M-11: nothing restarted and "running, stable" passed).
+    started_during_mission: StrictBool = False
     timeout_s: Timeout = 15
     retries: Retries = 0
 
@@ -360,6 +363,7 @@ class CheckEnv:
     provider: Any = None                              # a checkpoint provider: compose_chain / project_name / compose_argv
     broker: Any = None                                # `tools.ToolBroker`: only its read-only `core_read` is used
     mission_id: str = ""
+    executing_since: float | None = None              # when the mission last entered `executing` (the verifier sets it)
     python: str = field(default_factory=lambda: sys.executable)
 
 
@@ -469,6 +473,10 @@ def check_container_state(p: ContainerStateParams, env: CheckEnv, timeout_s: int
     started = _started_epoch(first["State"].get("StartedAt"))
     if started is None:
         return _fail("start time is unreadable")
+    # Both sides are whole seconds (Docker's StartedAt is truncated, the event time is rounded down), so the same second counts
+    # as during: the session cannot restart anything before it exists, and a restart in its first second is real (Codex, rc13.2).
+    if p.started_during_mission and (env.executing_since is None or started < env.executing_since):
+        return _fail("it was not restarted during this mission")
     if env.now() - started < p.min_uptime_s:
         return _fail(f"up for less than {p.min_uptime_s}s")
     if p.observe_s:
@@ -483,6 +491,36 @@ def check_container_state(p: ContainerStateParams, env: CheckEnv, timeout_s: int
                 or second.get("RestartCount") != first.get("RestartCount")):
             return _fail("the container restarted while it was observed")
     return _pass("running, stable" + (", healthy" if isinstance(first["State"].get("Health"), dict) else ""))
+
+
+def check_restarted(stack: str, service: str | None, env: CheckEnv, timeout_s: int = 15) -> Outcome:
+    """A restart-only grant's own bound, independent of the plan's checks (Codex, rc13.2: a plan restarting A and B that checks
+    only A would pass with A alone). Every container of the in-scope service (or of the whole stack when the scope names no
+    service), found by Compose's labels under the project name Compose itself resolves, must be running and must have started
+    during this run. No container found, an unknown project, or an unknown start of the run fails closed."""
+    if env.executing_since is None:
+        return _fail("the start of this run is not known")
+    project = env.provider.project_name(stack) if env.provider is not None else None
+    if not project:
+        return _fail("the compose project is unknown or unreadable")
+    argv = ["docker", "ps", "-aq", "--no-trunc", "--filter", f"label=com.docker.compose.project={project}"]
+    if service is not None:
+        argv += ["--filter", f"label=com.docker.compose.service={service}"]
+    rc, out, _err, trunc = env.run(argv, timeout_s, env.max_output_bytes)
+    ids = [line.strip() for line in out.splitlines() if line.strip()] if rc == 0 and not trunc else None
+    if not ids:
+        return _fail("its containers could not be listed" if ids is None else "it has no containers")
+    for cid in ids:
+        doc = _inspect(env, cid, timeout_s)
+        if doc is None:
+            return _fail("a container could not be inspected")
+        problem = _state_problem(doc)
+        if problem:
+            return _fail(problem)
+        started = _started_epoch(doc["State"].get("StartedAt"))
+        if started is None or started < env.executing_since:
+            return _fail("it was not restarted during this mission")
+    return _pass(f"{len(ids)} container(s) restarted during this run and running")
 
 
 def check_mount_readable(p: MountReadableParams, env: CheckEnv, timeout_s: int) -> Outcome:

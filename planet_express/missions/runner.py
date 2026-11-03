@@ -161,6 +161,14 @@ def _cgroup_mount(root: str) -> str:
         return CGROUP_MOUNT
 
 
+def _hook_policy(cfg, mission):
+    """The session's hook policy: from the site config and THIS mission's grant (its protected set, and whether it is
+    restart-only)."""
+    from dataclasses import replace
+    grant = mission.grant()
+    return replace(policy_for(cfg, grant.protected.resources), docker_lifecycle=grant.docker == "lifecycle")
+
+
 def _protected_gids() -> tuple[int, ...]:
     """The gids a session may never join: root's and the docker group's (a member reaches the daemon without the proxy)."""
     import grp
@@ -396,7 +404,7 @@ def build_mission_runner(
         store, containment, runtime_for, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
         repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
-        hook_policy=lambda mission: policy_for(cfg, mission.grant().protected.resources).to_json(),
+        hook_policy=lambda mission: _hook_policy(cfg, mission).to_json(),
         hook_install=((lambda hook_dir: install_claude_code(hook_dir, cfg.hooks.command))
                       if cfg.hooks.install_claude_code else None),
         hook_argv=claude_code_argv if cfg.hooks.install_claude_code else None,

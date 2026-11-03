@@ -398,6 +398,10 @@ class ConsoleApi:
             raise ConsoleApiError("That plan could not be read.", "conflict") from None
         if plan_mod.plan_hash(plan) != row["plan_hash"]:
             raise ConsoleApiError("That plan does not match what was recorded. Ask the agent for a fresh one.", "conflict")
+        if any(plan_mod.restart_unbound(o) for o in plan.options):
+            # Stored before rc13.2: its restart checks would only ask "is it running" (review, rc13.2). Not silently upgraded.
+            raise ConsoleApiError("That plan was made before an update to how restarts are checked. Ask the agent for a fresh one.",
+                                  "conflict")
         return plan
 
     def _execution(self, conv: Conversation, execution_id: int, status: str) -> dict:

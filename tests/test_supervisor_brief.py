@@ -74,8 +74,8 @@ def test_truncation_is_deterministic_bounded_and_noted(tmp_path):
 
 
 def test_a_single_huge_item_is_cut_not_dropped_and_still_fits(tmp_path):
-    brief = build_brief(mission(tmp_path), [EvidenceItem("big", "é" * 50_000)], [], max_bytes=4096)
-    assert brief.size <= 4096 and brief.truncated and "[truncated]" in brief.text
+    brief = build_brief(mission(tmp_path), [EvidenceItem("big", "é" * 50_000)], [], max_bytes=6144)
+    assert brief.size <= 6144 and brief.truncated and "[truncated]" in brief.text
 
 
 def test_supervisor_brief_and_events_never_contain_the_token(tmp_path):

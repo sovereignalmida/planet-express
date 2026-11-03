@@ -16,7 +16,7 @@ from ..models import Mission, VerificationPlan
 from ..resources import BadResource, canon
 from ..store import MissionStore, grant_resources
 from .baseline import Finding, TooManyFindings, in_scope, new_findings, normalize
-from .checks import CheckEnv, run_check
+from .checks import CheckEnv, Outcome, check_restarted, run_check
 from .plan import (
     CheckResult,
     FindingRef,
@@ -39,6 +39,15 @@ class VerifierDisabled(RuntimeError):
 
 class VerifyRefused(RuntimeError):
     """The mission is not in a state where it can be verified."""
+
+
+def restart_targets(grant) -> list[tuple[str, str | None]]:
+    """What a restart-only grant must have restarted: each named service as itself, and each stack none of whose services is
+    named as a whole stack (Codex, rc13.2). A stack that only holds the named services is not checked whole: "restart prowlarr"
+    names stack media too, and leaving the rest of media alone is the safe direction, not a missed repair."""
+    services = [tuple(s.split("/", 1)) for s in grant.scope.services]
+    named = {stack for stack, _svc in services}
+    return [*services, *((s, None) for s in grant.scope.stacks if s not in named)]
 
 
 class Verifier:
@@ -72,6 +81,7 @@ class Verifier:
         plan_sha: str | None = None
         try:
             plan, reason = self._plan(mission)
+            reported = self._reported_incomplete(mission)
             if plan is not None:
                 plan_sha = plan_hash(plan)
                 checks = self._run_checks(mission, plan)
@@ -81,6 +91,8 @@ class Verifier:
                     reason = f"failed checks: {', '.join(failed)[:200]}"
                 elif not scan.ok or scan.new_in_scope_count:
                     reason = scan_reason
+                elif reported:
+                    reason = f"the repair agent reported that {reported}"
         except Exception as exc:
             log.exception("verification of %s raised", mission_id)
             reason = f"the verifier failed ({type(exc).__name__})"
@@ -110,9 +122,39 @@ class Verifier:
             return None, problems[0][:MAX_REASON]
         return plan, ""
 
+    def _executing_events(self, mission: Mission) -> tuple[float | None, int]:
+        """When this run began (the last `awaiting_decision -> executing`, the start an approval led to) and that event's seq.
+        A tripwire resume re-enters `executing` from `paused_tripwire`; it is the same run, so it does not move the start
+        past a restart the session already made (review, rc13.2)."""
+        since, seq = None, 0
+        for event in self.ms.events(mission.id, kind="state"):
+            try:
+                body = loads_strict(event.body_json)
+            except CanonicalError:
+                continue
+            if isinstance(body, dict) and body.get("to") == "executing" and body.get("from") == "awaiting_decision":
+                since, seq = float(event.at), event.seq
+        return since, seq
+
+    def _reported_incomplete(self, mission: Mission) -> str | None:
+        """The agent's report never makes a mission pass, but its own word that the work was NOT done stops one passing
+        (rc13 live run, M-11: the agent said so and the mission completed). Only the Supervisor's note counts: it is
+        written from the validated result, after the last executing transition."""
+        _since, after = self._executing_events(mission)
+        for event in self.ms.events(mission.id, after_seq=after, kind="note"):
+            if event.actor != "supervisor":
+                continue
+            try:
+                body = loads_strict(event.body_json)
+            except CanonicalError:
+                continue
+            if isinstance(body, dict) and body.get("agent_reported") in ("some", "none"):
+                return "only part of the work was done" if body["agent_reported"] == "some" else "the work was not done"
+        return None
+
     # ── checks ──────────────────────────────────────────────────────────────
     def _run_checks(self, mission: Mission, plan: VerificationPlan) -> list[CheckResult]:
-        env = replace(self.env, mission_id=mission.id)
+        env = replace(self.env, mission_id=mission.id, executing_since=self._executing_events(mission)[0])
         results = []
         for check in plan.checks:
             result = run_check(check, env)
@@ -120,6 +162,20 @@ class Verifier:
             self.ms.append_event(mission.id, "note", ACTOR, {
                 "event": "verify.check", "id": result.id, "check": result.check, "ok": result.ok,
                 "attempts": result.attempts, "detail": result.detail})
+        grant = mission.grant()
+        if grant.docker == "lifecycle":
+            # PE's own bound for a restart-only grant: every in-scope service really restarted, whatever the plan checks.
+            targets = restart_targets(grant)
+            if not targets:
+                targets = [("", None)]                          # nothing named: fails closed below
+            for stack, service in targets:
+                outcome = check_restarted(stack, service, env) if stack else Outcome(False, "the grant names nothing to restart")
+                result = CheckResult(id=f"restarted:{stack}/{service}" if service else f"restarted:{stack}", check="restarted",
+                                     ok=outcome.ok, attempts=1, detail=outcome.detail)
+                results.append(result)
+                self.ms.append_event(mission.id, "note", ACTOR, {
+                    "event": "verify.check", "id": result.id, "check": result.check, "ok": result.ok,
+                    "attempts": result.attempts, "detail": result.detail})
         return results
 
     # ── scan ────────────────────────────────────────────────────────────────

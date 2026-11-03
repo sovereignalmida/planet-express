@@ -36,6 +36,10 @@ class AgentResult(_Strict):
     memory_candidates: Annotated[list[Block], Field(max_length=MAX_ITEMS)] = []
     unknowns: Annotated[list[Block], Field(max_length=MAX_ITEMS)] = []
     confidence: Literal["low", "medium", "high"]
+    # Repair only: whether the agent carried out what it was asked. Never makes a mission pass (Core's checks decide that),
+    # but "some" or "none" stops one passing.
+    work_done: Literal["all", "some", "none"] | None = Field(
+        default=None, description="Repair missions: all, some or none of the approved change was carried out")
 
     @model_validator(mode="after")
     def _bounded_in_total(self) -> "AgentResult":
