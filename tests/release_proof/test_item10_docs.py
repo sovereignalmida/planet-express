@@ -24,7 +24,7 @@ def test_every_launcher_step_is_named_in_the_install_guide():
     names = {s.name for s in launcher_steps(paths)}
     assert {"session-uid-range", "launcher-helper", "launcher-sudoers", "cgroup-tree", "workspace-root",
             "socket-root"} <= names
-    for name in names | {"worker-sudoers"}:
+    for name in names | {"session-access"}:
         assert f"`{name}`" in SECTION, name
 
 

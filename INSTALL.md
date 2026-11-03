@@ -255,30 +255,38 @@ Releases before this one defaulted to 61000-61999, which overlaps systemd's Dyna
 could collide with another service's. A config with `missions.enabled: true` whose range overlaps it is now **refused at load**; it is never rewritten for you,
 and a config with missions off still loads. An account or group already using the range is a failed launcher preflight check
 (not a load error), as is any session that still holds a uid outside the configured range. A config that spelled out
-61000-61999 fails with a message naming the fix. A config that relied on the old default now resolves to 200000-200999, which no longer matches the `launch.conf` setup
+61000-61999 fails with a message naming the fix. A config that relied on the old default now resolves to 200000-200063, which no longer matches the `launch.conf` setup
 wrote: the launcher preflight sees the mismatch and missions refuse to start (fail closed). To move: stop any live mission
 (or let it finish), set the new `session_uid_min`/`session_uid_max`, re-run the setup launcher steps (`session-uid-range`,
-then `launcher-helper`) so the helper and Core agree, and confirm the preflight passes. Do not change the range while a
+then `launcher-helper` and `session-access`) so the helper and Core agree, and confirm the preflight passes. Do not change the range while a
 session holds a uid in the old one.
 
 ### Enabling it
 
 1. **Setup answers.** In the wizard (or an answer file) say yes to mission control. The answers are
-   `missions.enabled`, `session_uid_min`/`session_uid_max` (default 200000-200999: one account-less uid and a private group
-   per session, never a shared worker account; the range must not contain Core's uid, an existing account, or systemd's
-   DynamicUser range 61184-65519), `sock_root`
-   (`/run/planetexpress-sessions`), `cgroup_root`, `workspace_root` and, optionally, `worker_sudo_rules` with
-   `worker_sudo_all_sessions`. The plan lists every step below and its risk; each is reversible.
+   `missions.enabled`, `session_uid_min`/`session_uid_max` (default 200000-200063: one uid and a private group per session,
+   never a shared worker account; the range must not contain Core's uid, an account that is not PE's own, or systemd's
+   DynamicUser range 61184-65519), `session_groups` (default `docker`, `pe-session`, `adm`, `systemd-journal`), `sock_root`
+   (`/run/planetexpress-sessions`), `cgroup_root` and `workspace_root`. The plan lists every step below and its risk; each
+   is reversible.
 2. **Launcher steps** (root, in this order, journalled so undo and repair work): `session-uid-range`, `launcher-helper`
    (`/usr/libexec/planetexpress/pe-launch`, the only code that starts a session), `launcher-sudoers`
    (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `sudoers-readable` (a read-only ACL for
    the Core user on `/etc/sudoers` and `/etc/sudoers.d`, so the Repair gate can check every sudo rule that reaches Core;
    `visudo` drops it from `/etc/sudoers` when it saves, so run `repair` again after editing sudoers; nothing to do when
-   Core runs as root), `cgroup-tree` (a `Delegate=yes` drop-in
-   for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root` and `socket-root`. With
-   `worker_sudo_rules` set, `worker-sudoers` also writes `/etc/sudoers.d/planetexpress-worker`: exact units and actions,
-   never a wildcard, shown to you first. They can be run by hand: `python3 -m planet_express.missions.launcher.setup_steps
-   probe|repair|undo --core-user USER --workspace-root DIR`.
+   Core runs as root), `session-access` (systemd hosts only, below), `cgroup-tree` (a `Delegate=yes` drop-in
+   for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root` and `socket-root`. They can be run by
+   hand: `python3 -m planet_express.missions.launcher.setup_steps probe|repair|undo --core-user USER --workspace-root DIR`.
+
+   **Session access (trust mode).** Every session has real access, as you have at a terminal: the real Docker socket, the
+   host's logs and passwordless sudo. sudo refuses a uid with no account, so `session-access` creates a system group
+   `pe-session` (its gid outside the session range) and, for every uid N in the range, a system account `pe-s<N>` with a
+   private group `pe-s<N>` (gid N, no members), home `/nonexistent`, shell `/usr/sbin/nologin`, a member of `pe-session`.
+   It writes `/etc/sudoers.d/planetexpress-sessions` (root, 0440), checked with `visudo -c` before it is moved into place,
+   containing exactly `%pe-session ALL=(ALL:ALL) NOPASSWD: ALL`. The launcher gives every session the groups in
+   `launch.conf` (`missions.session_groups`) whatever its tier, and no longer sets `no_new_privs` (it would disable sudo).
+   It refuses a group whose gid is 0, Core's own, or inside the session range, and a uid whose account is anything but
+   PE's own `pe-s<N>`. The launcher preflight fails, naming this step, until every uid in the range has its account.
 3. **Config.** Put the same values in `config.yaml` under `missions:` and set `enabled: true`, then restart
    `casa-planetexpress` (Core reads the flag once, at startup; the `Delegate=yes` drop-in also takes effect only at a
    restart). The agent is whatever command you configure under `missions.runtime.argv` (an absolute argv; there is no
@@ -349,7 +357,7 @@ missions:
            "--disallowedTools", "WebFetch,WebSearch"]
   hooks:
     install_claude_code: true
-    command: ["/usr/bin/python3", "/usr/local/lib/planetexpress/pe_hook.py"]
+    command: ["/usr/bin/python3"]       # the interpreter that runs the hook; Core copies the hook itself in at every launch
     root: /var/lib/planetexpress/mission-hooks
 ```
 
@@ -359,9 +367,10 @@ request and prints whether it worked and whether the key reached the session's e
 OpenRouter's own documentation says Claude Code "is only guaranteed to work with the Anthropic first-party provider": route to an
 Anthropic model.
 
-Things to get right: sessions run as their own uids, so the `claude` binary and the hook script must be executable by them (install
-the CLI with `sudo npm install -g @anthropic-ai/claude-code`, and copy `planet_express/missions/hooks.py`, which uses only the
-standard library, to `/usr/local/lib/planetexpress/pe_hook.py`), and `missions.workspace_root` must be outside any home directory
+Things to get right: sessions run as their own uids, so the `claude` binary and the hook interpreter must be executable by them
+(install the CLI with `sudo npm install -g @anthropic-ai/claude-code`). There is no hook script to install: Core copies
+`planet_express/missions/hooks.py` into each session's hook directory as `pe_hook.py` at every launch, so it is always the version
+Core runs (an older config's script path after the interpreter in `hooks.command` is ignored). `missions.workspace_root` must be outside any home directory
 (`/var/lib/planetexpress/mission-workspaces`). `-p` mode denies any tool call that would need a prompt, so the tools it may use are
 named in `--allowedTools`: that is safe only because the boundary is the containment (identity, scoped sudo and Docker proxy,
 tripwire, checkpoint, verification), with the PE hooks as a speed bump on top. `WebFetch` is disallowed because its domain check
@@ -372,9 +381,9 @@ broker sets. Name every model the CLI may request in `models`; a request for any
 
 | Kind | What | Where | Removed by |
 | --- | --- | --- | --- |
-| Accounts | none shared; per-session uids and private groups in `session_uid_min..max` (allocated per session, released when the session is provably empty) | `/etc/passwd` is not edited; the range is reserved, not created | nothing to remove |
+| Accounts | none shared; one system account `pe-s<N>` (private group `pe-s<N>`, no home, no login shell) per uid in `session_uid_min..max`, all in group `pe-session` (allocated per session, released when the session is provably empty) | `/etc/passwd`, `/etc/group` (systemd hosts; MOS has no sudo and needs none) | undo of `session-access`; uninstall leaves the accounts (no login, no sudo once the rule is gone) |
 | Root helper | `pe-launch` and its trust file `launch.conf` | `/usr/libexec/planetexpress/pe-launch`, `/etc/planetexpress-launch/launch.conf` (MOS: under `PE_HOME`) | uninstall / undo (only if it is exactly what setup wrote) |
-| Sudoers | `planetexpress-launch` (Core may run the helper), optional `planetexpress-worker` | `/etc/sudoers.d/` | uninstall / undo; the preflight fails closed on an unmanaged rule that reaches Core |
+| Sudoers | `planetexpress-launch` (Core may run the helper), `planetexpress-sessions` (`%pe-session ALL=(ALL:ALL) NOPASSWD: ALL`) | `/etc/sudoers.d/` | uninstall / undo; the preflight fails closed on an unmanaged rule that reaches Core |
 | Cgroup | delegated `sessions` subtree | systemd drop-in, or MOS `launcher-boot.sh` | uninstall / undo |
 | Sockets | one directory per session with `worker.sock` (the worker's RPC; it can never reach approval or decision methods) and, for a Repair grant with `docker: proxy`, `proxy.sock` (the scope-enforcing Docker API proxy) | `missions.sock_root/<session id>/` (`sock_root` is owned by Core, mode 0711; each session directory is 0750 for that session's private group) | removed when the session ends |
 | State | mission, memory, approval, lease and checkpoint tables (schema 6); checkpoint store; tripwire state; per-mission artifacts and workspaces | the state database, `missions.checkpoint.root`, `missions.workspace_root` | state snapshot restore; uninstall keeps data |

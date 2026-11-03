@@ -2,8 +2,9 @@
 
 `pe_launch.py` is audited alone and imports nothing from this package, so `check_wire` below is a deliberate
 copy of its `check_wire`; `tests/test_launcher_spec.py` runs both over the same corpus and requires identical
-verdicts. The spec NEVER carries a gid, a cgroup root, a uid range or a workspace root: those come from the
-root-owned launch.conf the helper loads itself (section 22.2).
+verdicts. The spec NEVER carries a gid, a group, a cgroup root, a uid range or a workspace root: those come from the
+root-owned launch.conf the helper loads itself (section 22.2). `read_logs` is still accepted on the wire (a Core from before
+trust mode sends it) but is never sent and decides nothing: every session gets launch.conf's session groups.
 """
 
 import json
@@ -80,7 +81,6 @@ class LaunchSpec:
     env: dict[str, str] = field(default_factory=dict)
     token: str = field(default="", repr=False)          # never in a repr, a log or an exception
     sock_dir: bool = False
-    read_logs: bool = False               # ask the helper for the conf's log groups (adm, systemd-journal): host logs readable, nothing else
     state_dir: str | None = None          # `C-<id>`: a conversation's state directory beside the workspaces (see pe_launch.adopt_state_dir)
 
     def to_wire(self, session_id: str) -> bytes:
@@ -88,8 +88,6 @@ class LaunchSpec:
                "env": dict(self.env), "token": self.token, "sock_dir": self.sock_dir}
         if self.state_dir is not None:             # sent only when used: a helper that does not know the key refuses it, fail closed
             obj["state_dir"] = self.state_dir
-        if self.read_logs:                         # likewise sent only when used: an older helper refuses the key, so the flag is opt-in
-            obj["read_logs"] = True
         check_wire(obj)
         data = json.dumps(obj, separators=(",", ":"), allow_nan=False).encode()
         if len(data) > MAX_SPEC_BYTES:

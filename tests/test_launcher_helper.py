@@ -399,6 +399,57 @@ def test_a_group_with_members_is_refused_and_an_empty_one_is_not(monkeypatch):
     helper.check_identity_unused(61005, 61005)
 
 
+def test_pes_own_pe_s_account_is_accepted(monkeypatch):
+    from types import SimpleNamespace as NS
+    fake_db(monkeypatch, users=[NS(pw_name="pe-s61005", pw_uid=61005, pw_gid=61005), NS(pw_name="pe", pw_uid=1000, pw_gid=1000)],
+            groups=[NS(gr_name="pe-s61005", gr_gid=61005, gr_mem=[])])
+    helper.check_identity_unused(61005, 61005)
+
+
+@pytest.mark.parametrize("users, groups, why", [
+    ([("pe-s61005", 61005, 61006)], [("pe-s61005", 61005, [])], "belongs to an account"),      # primary group is not its own
+    ([("pe-s61006", 61005, 61005)], [("pe-s61005", 61005, [])], "belongs to an account"),      # another uid's name
+    ([("pe-s61005", 61005, 61005)], [], "no private group"),                                    # the private group is missing
+    ([("pe-s61005", 61005, 61005)], [("pe-s61005", 61005, ["bob"])], "members"),                # someone shares its group
+    ([("pe-s61005", 61005, 61005)], [("bob", 61005, [])], "private group name"),                # the group is someone else's
+    ([("pe-s61005", 61005, 61005), ("svc", 1001, 61005)], [("pe-s61005", 61005, [])], "primary group"),
+    ([("pe-s61005", 61005, 61005), ("root2", 61005, 0)], [("pe-s61005", 61005, [])], "belongs to an account"),
+])
+def test_a_foreign_or_misshapen_account_is_still_refused(monkeypatch, users, groups, why):
+    from types import SimpleNamespace as NS
+    fake_db(monkeypatch, users=[NS(pw_name=n, pw_uid=u, pw_gid=g) for n, u, g in users],
+            groups=[NS(gr_name=n, gr_gid=g, gr_mem=m) for n, g, m in groups])
+    with pytest.raises(helper.Refused, match=why):
+        helper.check_identity_unused(61005, 61005)
+
+
+def test_every_session_gets_the_conf_groups_whether_or_not_the_spec_sends_read_logs(tmp_path, monkeypatch):
+    """The launch path itself, up to the privilege drop: the groups come from launch.conf for every session."""
+    seen = []
+
+    class Stop(Exception):
+        pass
+
+    def drop(uid, gid, extra_gids=()):
+        seen.append(list(extra_gids))
+        raise Stop
+    cg = tmp_path / "cg-S"
+    cg.mkdir()
+    (cg / "cgroup.procs").write_text("")
+    monkeypatch.setattr(helper, "check_identity_unused", lambda uid, gid: None)
+    monkeypatch.setattr(helper, "check_argv0", lambda argv0: None)
+    monkeypatch.setattr(helper, "open_cwd", lambda spec, conf, uid: os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY))
+    monkeypatch.setattr(helper, "make_cgroup", lambda conf, sid, uid: (str(cg), sid, os.open(str(cg), os.O_RDONLY | os.O_DIRECTORY)))
+    monkeypatch.setattr(helper, "hand_over_workspace", lambda fd, uid, conf: None)
+    monkeypatch.setattr(helper, "session_gids", lambda conf: [998, 4])
+    monkeypatch.setattr(helper, "drop_privileges", drop)
+    conf = good_conf(tmp_path, log_groups=["docker", "adm"])
+    for spec in (good_spec(), good_spec(read_logs=True), good_spec(read_logs=False)):
+        with pytest.raises(Stop):
+            helper.launch(json.dumps(spec).encode(), conf)
+    assert seen == [[998, 4]] * 3
+
+
 def test_the_helpers_own_umask_does_not_depend_on_the_caller(tmp_path):
     text = HELPER_PATH.read_text()
     assert "os.umask(0o022)" in text and "os.fchmod(dir_fd, 0o755)" in text      # cgroup directory modes are explicit

@@ -114,8 +114,10 @@ def test_duplicate_keys_and_json_constants_are_refused_by_the_helper():
         helper.parse_json(b"[" * 100000)
 
 
-def test_read_logs_is_on_the_wire_only_when_it_is_asked_for():
+def test_read_logs_is_never_sent_but_still_accepted_on_the_wire():
     plain = json.loads(LaunchSpec(uid=61001, cwd="/w/S-1", argv=("/bin/true",), token="t" * 32).to_wire("S-1"))
-    asked = json.loads(LaunchSpec(uid=61001, cwd="/w/S-1", argv=("/bin/true",), token="t" * 32, read_logs=True).to_wire("S-1"))
-    assert "read_logs" not in plain        # an older helper refuses the key, so a session that does not ask never sends it
-    assert asked["read_logs"] is True
+    assert "read_logs" not in plain        # every session gets launch.conf's groups: there is no flag to send
+    with pytest.raises(TypeError):
+        LaunchSpec(uid=61001, cwd="/w/S-1", argv=("/bin/true",), token="t" * 32, read_logs=True)
+    old = dict(plain, read_logs=True)      # what a Core from before trust mode sends: still a valid spec on both sides
+    assert check_wire(old) is old and helper.check_wire(old) is old

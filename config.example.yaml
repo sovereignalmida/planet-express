@@ -175,7 +175,7 @@ multi_host:
 #     models: ["claude-sonnet-4-5"] # the only model ids a mission may request
 #   hooks:                          # required by the Console: PE's settings must be the only ones the agent reads
 #     install_claude_code: true
-#     command: ["/usr/bin/python3", "/usr/local/lib/planetexpress/pe_hook.py"]
+#     command: ["/usr/bin/python3"]  # the interpreter; Core copies the hook into each session's hook dir at every launch
 #     root: /var/lib/planetexpress/mission-hooks
 #   console:                        # the Operator Console (off by default): conversations with a PE-aware agent. Needs model_broker and hooks above
 #     enabled: false
@@ -184,8 +184,9 @@ multi_host:
 #     token_budget: 150000                # per conversation (a chat turn is about 3,000 tokens, a plan about 13,000)
 #     max_open: 10                        # open conversations; each keeps one session uid for its whole life
 #     archive_after_days: 3               # an idle conversation is archived: its state directory is emptied and its uid freed
-#   session_uid_min: 200000         # one uid and private group per session; not Core's uid, not systemd DynamicUser's 61184-65519, no existing account
-#   session_uid_max: 200999
+#   session_uid_min: 200000         # one uid, private group and pe-s<N> account per session; not Core's uid, not systemd DynamicUser's 61184-65519
+#   session_uid_max: 200063
+#   session_groups: [docker, pe-session, adm, systemd-journal]   # every session's groups: the real Docker socket, sudo, the logs
 #   sock_root: /run/planetexpress-sessions
 #   cgroup_root: /sys/fs/cgroup/system.slice/casa-planetexpress.service/sessions   # MOS: the tree launcher-boot.sh makes
 #   workspace_root: /var/lib/planetexpress/mission-workspaces

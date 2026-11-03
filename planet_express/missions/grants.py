@@ -80,7 +80,7 @@ LIFECYCLE_WALK_LIMIT = 50_000      # entries looked at per grant before the answ
 @dataclass(frozen=True)
 class SessionPrincipals:
     """Every identity a session process can hold: a uid in the launcher's range, the private gid of the same number, and the
-    configured log groups (missions.read_log_groups)."""
+    configured session groups (missions.session_groups)."""
     uid_min: int
     uid_max: int
     gids: frozenset[int] = frozenset()

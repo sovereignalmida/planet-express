@@ -492,14 +492,7 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
             "uid_min": m.session_uid_min, "uid_max": m.session_uid_max, "sock_root": m.sock_root,
             "cgroup_root": m.cgroup_root, "workspace_root": m.workspace_root or f"{p['state']}/mission-workspaces",
             **(mos_launcher_paths(p["home"]) if mos else {}),
-            **({"log_groups": list(m.read_log_groups)} if m.read_log_groups else {}),     # only when used: plan ids without it do not move
-            **({"worker_sudo_rules": [{"unit": r.unit, "actions": list(r.actions)} for r in m.worker_sudo_rules],
-                "worker_sudo_all_sessions": m.worker_sudo_all_sessions}
-               if m.worker_sudo_rules and not mos else {}),
-            # No rules named but an earlier setup left its generated file: the plan takes it away (clearing the rules must
-            # not leave the old grants in force). The scan decides; nothing is removed that the scan did not see.
-            **({"worker_sudoers_reconcile": True}
-               if not m.worker_sudo_rules and not mos and b.present("/etc/sudoers.d/planetexpress-worker") else {})}
+            **({"log_groups": list(m.session_groups)} if m.session_groups else {})}     # launch.conf's session groups
 
 
 def _launcher_paths(params: dict):
@@ -507,9 +500,6 @@ def _launcher_paths(params: dict):
     from the host when a step runs, so nothing shown here depends on them."""
     from planet_express.missions.launcher.setup_steps import Paths
     extra = {k: params[k] for k in ("boot_script", "conf", "helper_store") if k in params}
-    extra["worker_sudo_rules"] = tuple((r["unit"], tuple(r["actions"])) for r in params.get("worker_sudo_rules", ()))
-    extra["reconcile_worker_sudoers"] = bool(params.get("worker_sudoers_reconcile"))
-    extra["worker_sudo_all_sessions"] = bool(params.get("worker_sudo_all_sessions"))
     extra["log_groups"] = tuple(params.get("log_groups", ()))
     return Paths(core_uid=0, core_gid=0, core_user=params["core_user"], flavour=params["flavour"],
                  uid_min=params["uid_min"], uid_max=params["uid_max"], sock_root=params["sock_root"],
@@ -545,16 +535,15 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         HELPER_PATH,
         SUDOERS_PATH,
     )
-    from planet_express.missions.launcher.setup_steps import LauncherSudoers
+    from planet_express.missions.launcher.setup_steps import LauncherSudoers, SessionAccess
     params = _launcher_params(b, p)
     paths = _launcher_paths(params)
     mos = paths.flavour == "mos"
     steps = {s.name: s for s in _launcher_step_objects(params)}
     conf_path = paths.conf
-    for sudo_step in ("launcher-sudoers", "worker-sudoers"):
-        if sudo_step in steps and steps[sudo_step].unsafe():
-            b.blocked.append(f"Mission control cannot be set up: {steps[sudo_step].unsafe()}.")
-            return
+    if "launcher-sudoers" in steps and steps["launcher-sudoers"].unsafe():
+        b.blocked.append(f"Mission control cannot be set up: {steps['launcher-sudoers'].unsafe()}.")
+        return
     # The helper trusts launch.conf and itself only under root-owned directories nobody else can write. launch.conf has
     # a directory of its own (/etc/planetexpress-launch; on MOS under the data pool), so a fresh install no longer
     # collides with the service-owned config directory. This stays as the guard for a plan that nevertheless makes a
@@ -592,8 +581,9 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
     text = {
         "session-uid-range": ("Reserve the session uid range", conf_path, "R2", b.text(
             f"Writes {conf_path} (root, 0600, in {os.path.dirname(conf_path)}, a directory of its own: root, 0755): the uids {shown} reserved for mission sessions, Core's own uid and gid "
-            f"(read when this runs), and the cgroup, workspace and socket roots. Refuses if any account or group already "
-            f"uses a number in {shown}.")),
+            f"(read when this runs), the cgroup, workspace and socket roots, and the groups every session gets "
+            f"({', '.join(params.get('log_groups') or ()) or 'none'}). Refuses if any account or group other than PE's own "
+            f"pe-s<N> ones already uses a number in {shown}.")),
         "launcher-helper": ("Install the session launcher", HELPER_PATH, "R3", b.text(
             f"Installs {HELPER_PATH} (root, 0755) from pe_launch.py, the one program that starts a session as one of "
             f"those uids. Its directory chain must be root-owned and not writable by others, or setup stops.")),
@@ -605,14 +595,13 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         "launcher-sudoers": ("Let Core start sessions through the launcher", SUDOERS_PATH, "R3", {
             "type": "file", "path": SUDOERS_PATH, "mode": "0440", "owner": "root:root", "if_exists": "replace",
             "content": LauncherSudoers(paths).wanted().decode()}),
-        "worker-sudoers": (("Give Repair sessions their sudo ceiling", paths.worker_sudoers, "R3", {
-            "type": "file", "path": paths.worker_sudoers, "mode": "0440", "owner": "root:root", "if_exists": "replace",
-            "content": steps["worker-sudoers"].wanted().decode() if "worker-sudoers" in steps else ""})
-                           if not params.get("worker_sudoers_reconcile") else
-                           ("Take away the stale worker sudoers", paths.worker_sudoers, "R3", b.text(
-                               f"{paths.worker_sudoers} was generated by an earlier setup and holds sudo rules the configuration no "
-                               "longer names (missions.worker_sudo_rules is empty). Removes it, only if it is exactly what the "
-                               "generator writes; a private record lets undo put it back."))),
+        "session-access": ("Give mission sessions their accounts and sudo", paths.session_sudoers, "R3", b.text(
+            f"Trust mode: every mission session gets full access, as you have at a terminal. Creates the system group "
+            f"pe-session and one system account per session uid (pe-s{params['uid_min']}..pe-s{params['uid_max']}, each with a "
+            f"private group of the same number, no home, no login shell, a member of pe-session), because sudo refuses a uid "
+            f"with no account. Writes {paths.session_sudoers} (root, 0440), checked with visudo -c before it is moved into "
+            f"place, containing exactly: {SessionAccess(paths).wanted().decode().strip()}. Undo removes exactly what this "
+            "made; it refuses if any of it has changed since.")),
         "sudoers-readable": ("Let Core read the sudo rules", "/etc/sudoers", "R2", b.text(
             f"Adds a read-only ACL entry for {params['core_user']} to /etc/sudoers and every file in /etc/sudoers.d, and a "
             "default entry on the directory so a file added later inherits it. Before a Repair mission starts, Core checks "
@@ -645,7 +634,7 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         f"there (missions.enabled: true, session_uid_min/max {shown}, sock_root {params['sock_root']}, cgroup_root "
         f"{params['cgroup_root']}, workspace_root {params['workspace_root']}"
         + (f", launch_conf {conf_path}" if mos else "")
-        + (f", read_log_groups {params['log_groups']} (it must match launch.conf or startup preflight fails)" if params.get("log_groups") else "") + "); launch.conf is written from these answers "
+        + (f", session_groups {params['log_groups']} (it must match launch.conf or startup preflight fails)" if params.get("log_groups") else "") + "); launch.conf is written from these answers "
         "and the helper refuses a request that disagrees with it.")
     if mos:
         b.warnings.append(f"On MOS the sessions cgroup is recreated at every boot by {params['boot_script']}, which the "
@@ -715,12 +704,9 @@ def _will_not_touch(b: _Builder, p: dict) -> None:
             b.not_touched.append("No sudoers grant is written: Planet Express gets no privileged commands.")
 
     if _missions_on(a):
-        extra_sudo = bool(a.missions.worker_sudo_rules) and systemd
-        b.not_touched.append(("Mission control gets exactly two sudoers files: the launcher rule (the launcher program and nothing "
-                              "else) and the generated worker ceiling (exact `systemctl start|stop|restart <unit>` lines, shown in "
-                              "full above); no other sudoers file is touched." if extra_sudo else
-                              "Mission control gets exactly one sudo rule, for the launcher program and nothing else; no other "
-                              "sudoers file is touched.") if systemd else
+        b.not_touched.append("Mission control gets exactly two sudoers files: the launcher rule (Core may run the launcher "
+                             "program and nothing else) and the session sudo rule (every mission session has full sudo, as shown "
+                             "above); no other sudoers file is touched." if systemd else
                              "No sudoers file is created for mission control: MOS has no sudo.")
     for path in (p["env"], p["dash_env"]):
         if b.present(path):

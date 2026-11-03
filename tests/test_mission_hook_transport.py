@@ -13,7 +13,7 @@ from supervisor_fakes import Rig, update
 from planet_express.missions import supervisor as sup_mod
 from planet_express.missions.hooks import HOOK_LOG_NAME, HookPolicy
 
-POLICY = HookPolicy(live_trees=("/srv/live",), protected_paths=("/mnt/data",), blocked_failure="open")
+POLICY = HookPolicy(blocked_failure="open", stacks_root="/srv/stacks", pe_paths=("/opt/pe/config.yaml",))
 
 
 BIG = {"tool_calls": 100000, "output_bytes": 10**9}
@@ -47,19 +47,19 @@ def test_without_a_hook_policy_nothing_is_added_to_the_environment(tmp_path):
     assert "PE_HOOK_POLICY" not in env and "PE_HOOK_LOG" not in env
 
 
-def test_the_claude_code_settings_run_this_module_before_and_after_every_tool_call(tmp_path):
+def test_the_claude_code_settings_run_the_per_launch_copy_before_and_after_every_tool_call(tmp_path):
     from planet_express.missions.hooks import claude_code_settings, install_claude_code
-    command = ["/opt/pe/venv/bin/python", "-m", "planet_express.missions.hooks"]
-    settings = claude_code_settings(command)
+    settings = claude_code_settings(["/opt/pe/venv/bin/python", "/h/pe_hook.py"])
     assert settings["hooks"]["PreToolUse"][0]["matcher"] == "*"
-    assert settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "/opt/pe/venv/bin/python -m planet_express.missions.hooks pre"
+    assert settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "/opt/pe/venv/bin/python /h/pe_hook.py pre"
     assert settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"].endswith(" post")
     tricky = claude_code_settings(["/opt/my dir/python", "-m", "x;rm"])
     assert "'/opt/my dir/python'" in tricky["hooks"]["PreToolUse"][0]["hooks"][0]["command"]     # quoted, never re-split
-    env = install_claude_code(tmp_path, command)
-    assert json.loads((tmp_path / "settings.json").read_text()) == settings
+    env = install_claude_code(tmp_path, ["/opt/pe/venv/bin/python", "-m", "planet_express.missions.hooks"])
+    assert json.loads((tmp_path / "settings.json").read_text()) == claude_code_settings(
+        ["/opt/pe/venv/bin/python", str(tmp_path / "pe_hook.py")])           # the interpreter from config, the copy as the script
     assert env == {"CLAUDE_CONFIG_DIR": str(tmp_path)}
-    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["pe_hook.py", "settings.json"]
 
 
 COMMAND = ["/opt/pe/python", "-m", "planet_express.missions.hooks"]
@@ -89,8 +89,8 @@ def test_the_hook_settings_live_in_a_core_owned_directory_outside_the_workspace_
     assert settings.stat().st_uid == os.getuid()                                          # Core's, not a session's
 
 
-def test_changed_or_missing_settings_are_a_session_fault_that_ends_the_session(tmp_path):
-    for tamper in ("edit", "delete", "replace-by-symlink"):
+def test_changed_or_missing_settings_or_hook_script_are_a_session_fault_that_ends_the_session(tmp_path):
+    for tamper in ("edit", "delete", "replace-by-symlink", "edit-script", "delete-script"):
         rig = Rig(tmp_path / tamper, behaviours=[{"script": [update()] * 9}])
         root = tmp_path / tamper / "hooks"
         root.mkdir(parents=True)
@@ -100,10 +100,16 @@ def test_changed_or_missing_settings_are_a_session_fault_that_ends_the_session(t
         settings = root / sid / "settings.json"
         rig.sup.poll(rig.mid)
         assert rig.status() == "investigating"                                            # intact: nothing happens
+        script = root / sid / "pe_hook.py"
+        assert script.exists()
         if tamper == "edit":
             settings.write_text('{"hooks": {}}\n')
         elif tamper == "delete":
             settings.unlink()
+        elif tamper == "edit-script":
+            script.write_text("import sys; sys.exit(0)\n")                   # a hook that allows everything
+        elif tamper == "delete-script":
+            script.unlink()
         else:
             real = settings.with_name("real.json")
             real.write_text(settings.read_text())
@@ -154,7 +160,7 @@ def test_a_failed_install_stops_the_start_and_leaves_nothing_launched(tmp_path):
     assert broken.status() == "needs_operator" and broken.cont.spawns(broken.session_ids()[0]) == []
 
 
-def test_the_config_requires_a_command_and_a_root_to_install_and_the_runner_installs_only_when_asked(tmp_path):
+def test_the_config_requires_a_root_to_install_the_command_defaults_and_the_runner_installs_only_when_asked(tmp_path):
     import pytest
     from missions_helpers import make_store
 
@@ -162,7 +168,9 @@ def test_the_config_requires_a_command_and_a_root_to_install_and_the_runner_inst
     from planet_express.missions.containment import FakeContainment
     from planet_express.missions.runner import build_mission_runner
     with pytest.raises(ValueError):
-        MissionsConfig(enabled=True, hooks={"install_claude_code": True})
+        MissionsConfig(enabled=True, hooks={"install_claude_code": True})                           # no root: the session could edit it
+    assert MissionsConfig(hooks={"root": "/h", "install_claude_code": True}).hooks.command == ["/usr/bin/python3"]
+    assert MissionsConfig(hooks={"command": []}).hooks.command == ["/usr/bin/python3"]         # empty (an older file): the default
     with pytest.raises(ValueError):
         MissionsConfig(enabled=True, hooks={"install_claude_code": True, "command": COMMAND})       # no root: the session could edit it
     with pytest.raises(ValueError):
@@ -307,7 +315,7 @@ def e_actor(rig):
 # ── a policy too large for the environment travels as a Core-owned file (G4 final review) ───────────────────────────
 
 def big_policy():
-    return HookPolicy(live_trees=("/srv/live",), protected_paths=tuple(f"/mnt/data/volumes/{n:064x}" for n in range(80)), blocked_failure="open")
+    return HookPolicy(blocked_failure="open", pe_paths=tuple(f"/mnt/data/volumes/{n:064x}" for n in range(80)))
 
 
 def test_a_policy_over_the_launcher_limit_goes_in_a_core_owned_file(tmp_path):
@@ -381,8 +389,8 @@ def test_the_hook_cli_reads_the_policy_file_and_blocks_when_it_cannot(tmp_path):
         err = io.StringIO()
         return hooks.main([which], stdin=io.StringIO(payload), stderr=err, environ=environ), err.getvalue()
     code, _ = run({"PE_HOOK_POLICY_FILE": str(path)})
-    assert code in (0, 2)                                                  # judged by the file's policy (which protects that path)
-    # A policy file that was NAMED but cannot be loaded must block: falling back to the empty default would drop every protected path.
+    assert code == 0                                                       # judged by the file's policy: reading a PE path is allowed
+    # A policy file that was NAMED but cannot be loaded must block: falling back to the empty default would drop PE's own paths.
     for bad in ("not json", ""):
         path.write_text(bad)
         code, err = run({"PE_HOOK_POLICY_FILE": str(path)})

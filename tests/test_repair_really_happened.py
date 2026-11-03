@@ -74,42 +74,25 @@ def test_the_planner_is_told_to_restart_by_name():
     assert "docker restart <container>" in plan_mod.PLAN_INSTRUCTIONS and "docker compose restart" not in plan_mod.PLAN_INSTRUCTIONS
 
 
-# ── the hook lets the approved restart through ──────────────────────────────────────────────────────
-
-LIFECYCLE = HookPolicy(docker_lifecycle=True)
-
+# ── the hook lets the restart through (trust mode: there is no ask, for any grant) ────────────────────
 
 @pytest.mark.parametrize("command", ["docker restart CASA_PROWLARR", "docker container restart CASA_PROWLARR",
-                                     "docker stop -t 30 app", "docker start app && docker ps", "docker restart --time=20 a b"])
-def test_under_a_restart_only_grant_lifecycle_calls_are_not_asked(command):
-    assert classify("Bash", {"command": command}, LIFECYCLE).verdict == "allow"
+                                     "docker stop -t 30 app", "docker start app && docker ps", "docker restart --time=20 a b",
+                                     "docker kill app", "docker rm -f app", "docker compose restart app", "docker restart -t 0 app",
+                                     "docker restart $(docker ps -q)", "sudo docker restart app", "docker update --restart=no app"])
+def test_restarts_and_other_container_lifecycle_calls_are_allowed_whatever_the_grant(command):
+    assert classify("Bash", {"command": command}, HookPolicy()).verdict == "allow"
 
 
-@pytest.mark.parametrize("command", ["docker kill app", "docker rm -f app", "docker compose restart app",
-                                     "docker restart $(docker ps -q)", "podman restart app", "docker update --restart=no app"])
-def test_everything_else_irreversible_is_still_asked_or_blocked(command):
-    assert classify("Bash", {"command": command}, LIFECYCLE).verdict in ("ask", "block")
-
-
-def test_without_a_restart_only_grant_a_restart_is_still_asked():
-    assert classify("Bash", {"command": "docker restart app"}, HookPolicy()).verdict == "ask"
-
-
-def test_the_flag_survives_the_trip_through_the_environment():
-    assert HookPolicy.from_json(LIFECYCLE.to_json()).docker_lifecycle is True
-    assert HookPolicy.from_json(json.dumps({"live_trees": []})).docker_lifecycle is False
-    with pytest.raises(ValueError):
-        HookPolicy.from_json(json.dumps({"docker_lifecycle": "yes"}))
-
-
-def test_the_runner_builds_it_from_the_missions_grant():
+def test_an_old_policy_with_the_lifecycle_flag_still_loads_and_the_runner_policy_does_not_depend_on_the_grant(tmp_path):
     from types import SimpleNamespace
 
     from planet_express.missions.runner import _hook_policy
-    cfg = SimpleNamespace(live_trees=(), hooks=None)
-    for docker, want in (("lifecycle", True), ("proxy", False)):
-        grant = Grant.model_validate({"tier": "repair", "docker": docker})
-        assert _hook_policy(cfg, SimpleNamespace(grant=lambda g=grant: g)).docker_lifecycle is want
+    assert HookPolicy.from_json(json.dumps({"docker_lifecycle": True, "live_trees": []})) == HookPolicy()
+    cfg = SimpleNamespace(hooks=None)
+    store = SimpleNamespace(path=tmp_path / "casa.db")
+    policy = _hook_policy(cfg, store, "/srv/stacks")
+    assert policy.stacks_root == "/srv/stacks" and str(tmp_path / "casa.db") in policy.pe_paths
 
 
 # ── the brief says how ──────────────────────────────────────────────────────────────────────────────
@@ -173,18 +156,6 @@ def test_the_result_schema_allows_it_and_rejects_anything_else():
 
 
 # ── review fixes ────────────────────────────────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("command", ["docker stop --signal KILL app", "docker stop -s KILL app", "docker restart -t 0 app",
-                                     "docker restart --time 5 app", "docker restart --time=abc app", "docker restart -t", "docker restart"])
-def test_a_kill_signal_or_short_grace_is_still_asked(command):
-    assert classify("Bash", {"command": command}, LIFECYCLE).verdict in ("ask", "block")
-
-
-def test_the_hooks_grace_floor_is_the_proxys():
-    from planet_express.missions import hooks
-    from planet_express.missions.dockerproxy import policy
-    assert hooks._LIFECYCLE_MIN_GRACE_S == policy.LIFECYCLE_MIN_GRACE_S
-
 
 def test_a_restart_in_the_first_second_of_the_run_counts():
     """Codex, rc13.2: both times are whole seconds, so the same second must count as during the run."""

@@ -24,8 +24,8 @@ from planet_express.setup.steps import CATALOGUE
 from planet_express.setup.undo import undo as _undo
 
 REPO = str(Path(__file__).resolve().parent.parent)
-NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "sudoers-readable", "cgroup-tree", "workspace-root",
-         "socket-root"]
+NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access", "sudoers-readable", "cgroup-tree",
+         "workspace-root", "socket-root"]
 MOS_NAMES = ["session-uid-range", "launcher-helper", "helper-store", "cgroup-tree", "workspace-root", "socket-root"]
 ON = {"enabled": True}
 
@@ -53,11 +53,11 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged. Re-pinned again in slice 7b: the config file setup renders now carries
-    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed. All three re-pinned for the model broker: the config file setup renders now carries the `missions.model_broker` defaults (enabled: false); no step changed. MOS re-pinned after the v3 hotfix merge: the post-start.sh hook body (part of the plan) now runs in a background subshell; the full-tier id moved with systemd/casa-stacks.service.template (PR #15 widened the stack start-up budget). Re-pinned for the Console: the config file setup renders now carries the `missions.console` defaults (enabled: false); no step changed. Re-pinned for investigation access: the rendered config carries `missions.read_log_groups: []`; no step changed.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "27a2d685c4b6a5e2"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "b4326c52f750172f"
+    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed. All three re-pinned for the model broker: the config file setup renders now carries the `missions.model_broker` defaults (enabled: false); no step changed. MOS re-pinned after the v3 hotfix merge: the post-start.sh hook body (part of the plan) now runs in a background subshell; the full-tier id moved with systemd/casa-stacks.service.template (PR #15 widened the stack start-up budget). Re-pinned for the Console: the config file setup renders now carries the `missions.console` defaults (enabled: false); no step changed. Re-pinned for investigation access: the rendered config carries `missions.read_log_groups: []`; no step changed. Re-pinned for trust mode: the rendered config carries `missions.session_groups` (the default four), the 64-uid default range and `hooks.command: [/usr/bin/python3]`; no step changed; the uninstall id is unchanged.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "34bd54877cd4819e"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "c5441717b1386a60"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "9a882f1445ab8c2f"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "68e3fe19e950b6d6"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
@@ -101,7 +101,7 @@ def test_the_dynamic_user_overlap_is_refused_only_when_missions_are_on():
 
 
 # -- the plan --------------------------------------------------------------------------------------------------
-def test_on_systemd_the_plan_gains_the_six_named_reversible_root_steps_in_order():
+def test_on_systemd_the_plan_gains_the_named_reversible_root_steps_in_order():
     p = plan(mreport(), answers(missions=ON))
     assert p.applicable, p.blocked
     steps = launcher(p)
@@ -192,17 +192,19 @@ def test_the_plan_preview_shows_the_generated_sudoers_text():
     assert "env_reset, !setenv, !env_editor" in text and sudoers.preview["mode"] == "0440"
 
 
-def test_the_log_groups_reach_launch_conf_and_a_plan_without_them_writes_none():
-    plain = plan(mreport(), answers(missions=ON))
-    with_logs = plan(mreport(), answers(missions={**ON, "read_log_groups": ["adm", "systemd-journal"]}))
-    assert plain.to_public()["plan_id"] != with_logs.to_public()["plan_id"]
-    assert not launcher(plain)[0].params.get("log_groups") and launcher(with_logs)[0].params["log_groups"] == ["adm", "systemd-journal"]
+def test_the_session_groups_reach_launch_conf_and_default_to_the_trust_mode_four():
     from planet_express.setup.plan import _launcher_paths
-    written = _launcher_paths(launcher(with_logs)[0].params).launch_conf().render()
-    assert '"adm"' in written and '"systemd-journal"' in written
-    assert "log_groups" not in _launcher_paths(launcher(plain)[0].params).launch_conf().render()
+    plain = plan(mreport(), answers(missions=ON))
+    assert launcher(plain)[0].params["log_groups"] == ["docker", "pe-session", "adm", "systemd-journal"]
+    written = json.loads(_launcher_paths(launcher(plain)[0].params).launch_conf().render())
+    assert written["log_groups"] == ["docker", "pe-session", "adm", "systemd-journal"]
+    chosen = plan(mreport(), answers(missions={**ON, "session_groups": ["docker", "pe-session"]}))
+    assert chosen.to_public()["plan_id"] != plain.to_public()["plan_id"]
+    assert launcher(chosen)[0].params["log_groups"] == ["docker", "pe-session"]
+    old = plan(mreport(), answers(missions={**ON, "read_log_groups": ["adm", "systemd-journal"]}))     # the deprecated name
+    assert launcher(old)[0].params["log_groups"] == launcher(plain)[0].params["log_groups"]
     with pytest.raises(Exception):
-        answers(missions={**ON, "read_log_groups": ["docker"]})
+        answers(missions={**ON, "session_groups": ["not a group"]})
 
 
 def test_every_launcher_preview_says_what_will_be_written_and_where():
@@ -210,7 +212,10 @@ def test_every_launcher_preview_says_what_will_be_written_and_where():
     for s in by.values():
         assert s.preview["type"] in ("file", "text") and s.preview["path"]
         assert s.preview.get("content") or s.preview["text"]
-    assert "200000-200999" in by["session-uid-range"].preview["text"]
+    assert "200000-200063" in by["session-uid-range"].preview["text"]
+    access = by["session-access"].preview
+    assert access["path"] == "/etc/sudoers.d/planetexpress-sessions" and "%pe-session ALL=(ALL:ALL) NOPASSWD: ALL" in access["text"]
+    assert "pe-s200000..pe-s200063" in access["text"] and "visudo" in access["text"]
     assert by["session-uid-range"].preview["path"] == "/etc/planetexpress-launch/launch.conf"
     assert "Delegate=yes" in by["cgroup-tree"].preview["content"]
     assert by["workspace-root"].preview["type"] == "text" and "/opt/pe/state/mission-workspaces" in by["workspace-root"].preview["text"]
@@ -436,7 +441,7 @@ def test_a_blocked_step_stops_the_apply_with_the_reason_and_writes_nothing_after
     p = paths(tree)
     Path(p.passwd).write_text(Path(p.passwd).read_text() + "stray:x:61005:61005::/:/bin/false\n")
     result = run("apply", install_plan(p), p, tmp_path)
-    assert result.status == "stopped" and result.step == "s01" and "61000-61999" in result.reason
+    assert result.status == "stopped" and result.step == "s01" and "61000-61009" in result.reason
     assert not Path(p.conf).exists() and not Path(p.helper).exists()
 
 
@@ -744,61 +749,22 @@ def test_the_cli_derives_the_mos_paths_from_pe_home_with_the_plans_function_and_
     assert "helper-store" not in [s.name for s in launcher_steps(ubuntu_paths)]
 
 
-# -- the worker sudoers: clearing the rules takes the old file away (review finding) ------------------------------
-WORKER = "/etc/sudoers.d/planetexpress-worker"
-RULE_ON = {"enabled": True, "worker_sudo_all_sessions": True,
-           "worker_sudo_rules": [{"unit": "plex.service", "actions": ["restart"]}]}
-
-
-def test_with_rules_the_plan_shows_the_exact_generated_file():
-    from planet_express.missions.sudo_gen import render
-    p = plan(mreport(), answers(missions=RULE_ON))
-    assert p.applicable, p.blocked
-    worker = [s for s in launcher(p) if s.target == "worker-sudoers"]
-    assert len(worker) == 1 and worker[0].preview["path"] == WORKER and worker[0].risk == "R3"
-    assert worker[0].preview["content"].encode() == render([("plex.service", ("restart",))], uid_min=200000, uid_max=200999)
-    assert [s.target for s in launcher(p)].index("worker-sudoers") == NAMES.index("launcher-sudoers") + 1
-
-
-def test_without_rules_and_without_an_old_file_there_is_no_worker_step():
+# -- session access (trust mode): accounts, group and the one sudoers rule, through the plan's handlers ---------------
+def test_the_worker_sudo_answers_are_gone():
+    with pytest.raises(ValidationError):
+        answers(missions={"enabled": True, "worker_sudo_rules": [{"unit": "plex.service", "actions": ["restart"]}]})
     assert "worker-sudoers" not in [s.target for s in launcher(plan(mreport(), answers(missions=ON)))]
 
 
-def test_without_rules_but_with_an_old_generated_file_the_plan_takes_it_away_and_so_does_uninstall():
-    held = mreport(files={WORKER: "# generated earlier\n"})
-    p = plan(held, answers(missions=ON))
-    assert p.applicable, p.blocked
-    worker = [s for s in launcher(p) if s.target == "worker-sudoers"]
-    assert len(worker) == 1 and worker[0].params["worker_sudoers_reconcile"] is True and "stale" in worker[0].title.lower()
-    live = mreport(files={**{k: v for k, v in LIVE_FILES.items()}, WORKER: "# generated earlier\n"})
-    gone = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe", missions=ON))
-    assert "worker-sudoers" in [s.target for s in removals(gone)]
-
-
-def test_apply_installs_the_worker_sudoers_and_a_cleared_config_removes_it_again_and_undo_restores_it(tree, tmp_path):
-    import hashlib
-    rule = [{"unit": "plex.service", "actions": ["restart"]}]
-    target = str(tree / "etc" / "sudoers.d" / "pe-worker")
-    p = paths(tree, worker_sudoers=target, worker_sudo_rules=(("plex.service", ("restart",)),), worker_sudo_all_sessions=True)
-    names = ["session-uid-range", "launcher-helper", "launcher-sudoers", "worker-sudoers", "sudoers-readable", "cgroup-tree", "workspace-root",
-             "socket-root"]
-    first = make_plan([step(i, "launcher.step", n, name=n, **params_for(p), worker_sudo_rules=rule, worker_sudo_all_sessions=True)
-                       for i, n in enumerate(names, 1)])
-    assert run("apply", first, p, tmp_path).status == "done"
-    written = Path(target).read_bytes()
-    assert b"PE_WORKER_CMDS = /usr/bin/systemctl restart plex.service" in written and oct(os.lstat(target).st_mode & 0o777) == "0o440"
-    cleared = paths(tree, worker_sudoers=target, worker_sudo_rules=(), reconcile_worker_sudoers=True)
-    second = make_plan([step(1, "launcher.step", "worker-sudoers", name="worker-sudoers", **params_for(cleared),
-                             worker_sudoers_reconcile=True, expected_sha256=hashlib.sha256(written).hexdigest())])
-    result = run("apply", second, cleared, tmp_path, name="j2")
-    assert result.status == "done", result.reason
-    assert not Path(target).exists()                                         # the old grants are no longer in force
-    assert run("undo", second, cleared, tmp_path, name="j2").status == "done" and Path(target).read_bytes() == written
-    gone = make_plan([step(1, "launcher.remove", "worker-sudoers", name="worker-sudoers", **params_for(cleared),
-                           worker_sudoers_reconcile=True)])
-    assert run("apply", gone, cleared, tmp_path, name="j3").status == "done" and not Path(target).exists()
-
-
-def test_rules_without_the_acknowledgement_block_the_plan_with_the_reason():
-    p = plan(mreport(), answers(missions={"enabled": True, "worker_sudo_rules": [{"unit": "plex.service", "actions": ["restart"]}]}))
-    assert not p.applicable and any("EVERY session uid" in b for b in p.blocked)
+def test_apply_creates_the_session_accounts_and_rule_and_undo_takes_exactly_them_away(tree, tmp_path):
+    p = paths(tree)
+    passwd, group = Path(p.passwd).read_text(), Path(p.group).read_text()
+    plan_ = install_plan(p)
+    assert run("apply", plan_, p, tmp_path).status == "done"
+    assert Path(p.session_sudoers).read_bytes() == b"%pe-session ALL=(ALL:ALL) NOPASSWD: ALL\n"
+    assert oct(os.lstat(p.session_sudoers).st_mode & 0o777) == "0o440"
+    users = {line.split(":")[0]: line.split(":") for line in Path(p.passwd).read_text().splitlines()}
+    assert all(users[f"pe-s{n}"][2:4] == [str(n), str(n)] for n in range(p.uid_min, p.uid_max + 1))
+    assert run("undo", plan_, p, tmp_path).status == "done"
+    assert Path(p.passwd).read_text() == passwd and Path(p.group).read_text() == group
+    assert not Path(p.session_sudoers).exists()

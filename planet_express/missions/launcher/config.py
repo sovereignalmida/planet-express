@@ -15,10 +15,14 @@ CONF_PATH = "/etc/planetexpress-launch/launch.conf"   # a root-owned directory o
 HELPER_PATH = "/usr/libexec/planetexpress/pe-launch"
 SUDOERS_PATH = "/etc/sudoers.d/planetexpress-launch"
 SYSTEMD_DYNAMIC_UIDS = (61184, 65519)  # systemd DynamicUser= allocates here; a session uid in it could be another service's
-DEFAULT_UID_RANGE = (200000, 200999)   # clear of systemd's DynamicUser range and of normal accounts: the ONE default
+# Clear of systemd's DynamicUser range and of normal accounts: the ONE default. 64 uids (trust mode): setup makes a `pe-s<N>`
+# account for every one of them (sudo refuses a uid with no account), so the range is no bigger than sessions need.
+DEFAULT_UID_RANGE = (200000, 200063)
 DEFAULT_PIDS_MAX = 512
-MAX_LOG_GROUPS = 4
-LOG_GROUPS_ALLOWED = frozenset({"adm", "systemd-journal"})   # pe_launch.py holds the same list: an allowlist, tests keep them equal
+MAX_LOG_GROUPS = 8                     # pe_launch.py holds the same bound
+SESSION_GROUP = "pe-session"           # the group the sessions' one sudoers rule names; every `pe-s<N>` account is a member
+SESSION_SUDOERS_PATH = "/etc/sudoers.d/planetexpress-sessions"
+GROUP_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}\$?")   # pe_launch.GROUP_NAME, the same pattern
 
 
 def mos_conf_path(home: str) -> str:
@@ -65,7 +69,10 @@ class LaunchConf:
     sock_root: str
     pids_max: int = DEFAULT_PIDS_MAX
     version: int = 1
-    log_groups: tuple[str, ...] = ()      # groups a log-reading session gets (adm, systemd-journal); absent from the file when empty
+    # The SESSION groups (file key `log_groups`, kept so the format is stable): every session's supplementary groups, e.g.
+    # docker, pe-session, adm, systemd-journal. Absent from the file when empty. The helper refuses one whose gid is 0, Core's,
+    # or inside the session range when it resolves it; nothing here can resolve names for the host the file is written on.
+    log_groups: tuple[str, ...] = ()
 
     def __post_init__(self):
         for name in ("uid_min", "uid_max", "core_uid", "core_gid", "pids_max"):
@@ -83,8 +90,8 @@ class LaunchConf:
         if len(set(paths)) != 3:
             raise ConfError("cgroup_root, workspace_root and sock_root must differ")
         if (not isinstance(self.log_groups, tuple) or len(self.log_groups) > MAX_LOG_GROUPS or len(set(self.log_groups)) != len(self.log_groups)
-                or not all(g in LOG_GROUPS_ALLOWED for g in self.log_groups)):
-            raise ConfError("log_groups may only name groups that read logs and nothing else: adm, systemd-journal")
+                or not all(isinstance(g, str) and GROUP_NAME.fullmatch(g) for g in self.log_groups)):
+            raise ConfError(f"log_groups must be at most {MAX_LOG_GROUPS} distinct plain group names")
 
     @property
     def probe_uid(self) -> int:
@@ -130,4 +137,4 @@ def load(path: str = CONF_PATH) -> LaunchConf:
         os.close(fd)
 
 
-__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "SYSTEMD_DYNAMIC_UIDS", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "mos_launcher_paths", "ancestor_problem", "ConfError", "LaunchConf", "load"]
+__all__ = ["CONF_PATH", "DEFAULT_UID_RANGE", "SESSION_GROUP", "SESSION_SUDOERS_PATH", "SYSTEMD_DYNAMIC_UIDS", "HELPER_PATH", "SUDOERS_PATH", "mos_conf_path", "mos_helper_store_path", "mos_launcher_paths", "ancestor_problem", "ConfError", "LaunchConf", "load"]

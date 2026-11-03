@@ -50,7 +50,7 @@ from . import approvals, artifacts, leases, recovery
 from .brief import DEFAULT_MAX_BYTES, EvidenceItem, build_brief
 from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
-from .hooks import HOOK_LOG_NAME, MAX_POLICY_FILE_BYTES
+from .hooks import HOOK_LOG_NAME, HOOK_SCRIPT_NAME, MAX_POLICY_FILE_BYTES
 from .launcher.spec import SESSION_ID, STATE_DIR, LaunchSpec
 from .models import Mission
 from .runtime import (
@@ -194,6 +194,7 @@ class _Run:
     hook_log_fault: bool = False              # a shrunk or vanished log has been reported once
     hook_dir: Path | None = None              # the Core-owned directory holding this session's hook settings
     hook_sha: str | None = None               # sha256 of settings.json at launch: it is checked at every poll
+    script_sha: str | None = None             # sha256 of the per-launch pe_hook.py copy, when one was installed: checked likewise
     policy_sha: str | None = None             # sha256 of policy.json when the policy was too large for the environment
 
 
@@ -296,12 +297,11 @@ class Supervisor:
                  hook_policy: Callable[[Mission], str] | None = None,
                  hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None,
                  hook_argv: Callable[[Sequence[str], Path], Sequence[str]] | None = None, model_broker: Any = None,
-                 read_logs: bool = False, host_lock: Any = None):
+                 host_lock: Any = None):
         self.store = store
         # v3's host-mutation lock (casa_farnsworth.PipelineState), or None. A Repair start waits while a v3 change holds it;
         # the Docker proxy takes it for each mission write.
         self.host_lock = host_lock
-        self.read_logs = read_logs                    # Observe/Propose sessions are launched with the host's log groups (launch.conf names them)
         self.hook_install = hook_install              # Path -> writes the runtime's hook settings into that (Core-owned) directory
         self.hook_argv = hook_argv                    # (argv, hook dir) -> the argv the session is launched with (settings forced)
         self.hook_root = Path(hook_root) if hook_root else None    # Core-owned, session-readable, never session-writable
@@ -697,6 +697,9 @@ class Supervisor:
             settings = hook_dir / "settings.json"
             settings.chmod(0o644)
             run.hook_sha = hashlib.sha256(settings.read_bytes()).hexdigest()
+            script = hook_dir / HOOK_SCRIPT_NAME
+            if script.exists():                       # the hook itself, copied at this launch: a changed copy is a changed hook
+                run.script_sha = hashlib.sha256(script.read_bytes()).hexdigest()
         def spawn(argv: Sequence[str], env: dict[str, str] | None = None, cwd: str | None = None,
                   extra_fds: tuple[int, ...] = (), state_dir: str | None = None) -> int:
             if extra_fds:
@@ -745,8 +748,7 @@ class Supervisor:
                     raise ContainmentError("the runtime's settings are to be forced but there is no Core-owned hook directory")
                 argv = self.hook_argv(argv, run.hook_dir)
             spec = LaunchSpec(uid=cs.session_uid, cwd=cwd or str(workspace), argv=tuple(argv), env=full_env,
-                              token=token, sock_dir=self.socket_provider is not None, state_dir=state_dir,
-                              read_logs=self.read_logs and grant.tier in ("observe", "propose"))
+                              token=token, sock_dir=self.socket_provider is not None, state_dir=state_dir)
             launched = self.containment.launch(cs.session_id, spec)
             if launched != cs:
                 raise ContainmentError("the launcher started a different session than the one requested")
@@ -884,7 +886,7 @@ class Supervisor:
     def _hook_settings_intact(self, run: _Run) -> bool:
         if run.hook_dir is None:
             return True
-        for name, want in (("settings.json", run.hook_sha), ("policy.json", run.policy_sha)):
+        for name, want in (("settings.json", run.hook_sha), ("policy.json", run.policy_sha), (HOOK_SCRIPT_NAME, run.script_sha)):
             if want is None:
                 continue
             try:

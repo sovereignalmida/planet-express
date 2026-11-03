@@ -75,7 +75,8 @@ def test_load_refuses_a_symlink_and_a_group_writable_file(tmp_path):
 
 def test_launcher_settings_have_safe_defaults():
     cfg = MissionsConfig()
-    assert (cfg.launcher, cfg.session_uid_min, cfg.session_uid_max) == ("auto", 200000, 200999)
+    assert (cfg.launcher, cfg.session_uid_min, cfg.session_uid_max) == ("auto", 200000, 200063)     # 64 uids: one account each
+    assert cfg.session_groups == ["docker", "pe-session", "adm", "systemd-journal"]
     assert cfg.sock_root == "/run/planetexpress-sessions" and cfg.enabled is False
 
 
@@ -141,7 +142,7 @@ def test_a_bad_workspace_root_is_a_config_error():
             MissionsConfig(workspace_root=bad)
 
 
-# ── log groups: what a session that reads logs is started with ───────────────────────────────────
+# ── session groups: what EVERY session is started with (launch.conf key `log_groups`) ──────────────
 
 def test_an_empty_log_group_list_is_not_written_so_an_older_helper_still_accepts_the_file():
     assert "log_groups" not in json.loads(conf().render())
@@ -150,14 +151,13 @@ def test_an_empty_log_group_list_is_not_written_so_an_older_helper_still_accepts
     assert LaunchConf.parse(with_groups.render()) == with_groups
 
 
-@pytest.mark.parametrize("bad", [("root",), ("docker",), ("sudo",), ("incus-admin",), ("podman",), ("Adm",), ("adm", "adm"),
-                                 ("adm", "systemd-journal", "syslog"), ("",)])
-def test_any_group_that_is_not_a_log_reader_is_refused_by_every_side(tmp_path, bad):
+@pytest.mark.parametrize("bad", [("adm", "adm"), ("",), ("a b",), ("x:y",), ("-lead",), tuple(f"g{i}" for i in range(9)), (5,)])
+def test_a_malformed_group_list_is_refused_by_every_side(tmp_path, bad):
     from config_schema import MissionsConfig
     with pytest.raises(ConfError):
         conf(log_groups=bad)
     with pytest.raises(ValueError):
-        MissionsConfig(read_log_groups=list(bad))
+        MissionsConfig(session_groups=list(bad))
     raw = json.loads(conf().render())
     raw["log_groups"] = list(bad)
     path = tmp_path / "launch.conf"
@@ -168,16 +168,40 @@ def test_any_group_that_is_not_a_log_reader_is_refused_by_every_side(tmp_path, b
         helper.load_conf(str(path), trusted_uid=os.geteuid(), below=str(tmp_path))
 
 
-def test_the_three_allowlists_are_the_same():
-    from config_schema import LOG_READER_GROUPS
+@pytest.mark.parametrize("names", [("docker",), ("docker", "pe-session", "adm", "systemd-journal"), ("incus-admin", "sudo"),
+                                   tuple(f"g{i}" for i in range(8))])
+def test_any_plain_group_name_is_accepted_there_is_no_allowlist(tmp_path, names):
+    from config_schema import MissionsConfig
+    assert conf(log_groups=names).log_groups == names
+    assert MissionsConfig(session_groups=list(names)).session_groups == list(names)
+    raw = json.loads(conf().render())
+    raw["log_groups"] = list(names)
+    path = tmp_path / "launch.conf"
+    path.write_text(json.dumps(raw))
+    path.chmod(0o600)
+    tmp_path.chmod(0o755)
+    assert helper.load_conf(str(path), trusted_uid=os.geteuid(), below=str(tmp_path))["log_groups"] == list(names)
+
+
+def test_the_bounds_and_patterns_are_the_same_on_both_sides():
     from planet_express.missions.launcher import config as core
-    assert core.LOG_GROUPS_ALLOWED == helper.LOG_GROUPS_ALLOWED == LOG_READER_GROUPS == {"adm", "systemd-journal"}
-    assert core.MAX_LOG_GROUPS == helper.MAX_LOG_GROUPS
+    assert core.MAX_LOG_GROUPS == helper.MAX_LOG_GROUPS == 8
+    assert core.GROUP_NAME.pattern == helper.GROUP_NAME.pattern
+    assert not hasattr(core, "LOG_GROUPS_ALLOWED") and not hasattr(helper, "LOG_GROUPS_ALLOWED")
 
 
-def test_the_log_gids_are_the_conf_groups_that_exist_and_never_gid_0_core_or_the_session_range(monkeypatch):
+def test_read_log_groups_is_a_deprecated_alias_that_never_gives_fewer_groups_than_the_default():
+    from config_schema import DEFAULT_SESSION_GROUPS, MissionsConfig
+    assert MissionsConfig(read_log_groups=[]).session_groups == list(DEFAULT_SESSION_GROUPS)
+    assert MissionsConfig(read_log_groups=["adm", "extra"]).session_groups == [*DEFAULT_SESSION_GROUPS, "extra"]
+    with pytest.raises(ValueError, match="only session_groups"):
+        MissionsConfig(read_log_groups=["adm"], session_groups=["adm"])
+    assert "read_log_groups" not in MissionsConfig(read_log_groups=["adm"]).model_dump()
+
+
+def test_the_session_gids_are_the_conf_groups_that_exist_and_never_gid_0_core_or_the_session_range(monkeypatch):
     import grp
-    table = {"adm": 4, "systemd-journal": 999, "rooty": 0, "coreg": 777, "insession": 61500}
+    table = {"adm": 4, "systemd-journal": 999, "docker": 998, "rooty": 0, "coreg": 777, "insession": 61500}
 
     class G:
         def __init__(self, gid):
@@ -190,14 +214,14 @@ def test_the_log_gids_are_the_conf_groups_that_exist_and_never_gid_0_core_or_the
 
     monkeypatch.setattr(grp, "getgrnam", getgrnam)
     base = {"core_gid": 777, "uid_min": 61000, "uid_max": 61999}
-    assert helper.log_gids({**base, "log_groups": ["adm", "missing", "systemd-journal"]}) == [4, 999]
-    assert helper.log_gids(base) == []
+    assert helper.session_gids({**base, "log_groups": ["docker", "adm", "missing", "systemd-journal"]}) == [998, 4, 999]
+    assert helper.session_gids(base) == []
     for name in ("rooty", "coreg", "insession"):
         with pytest.raises(helper.Refused):
-            helper.log_gids({**base, "log_groups": [name]})
+            helper.session_gids({**base, "log_groups": [name]})
 
 
-def test_drop_privileges_keeps_only_the_asked_groups(monkeypatch):
+def test_drop_privileges_keeps_only_the_asked_groups_and_never_sets_no_new_privs(monkeypatch):
     calls = {}
     state = {"groups": []}
     monkeypatch.setattr(helper.os, "setgroups", lambda g: (calls.__setitem__("groups", list(g)), state.__setitem__("groups", list(g))))
@@ -212,6 +236,7 @@ def test_drop_privileges_keeps_only_the_asked_groups(monkeypatch):
 
     class Libc:
         def prctl(self, *a):
+            calls.setdefault("prctl", []).append(a)
             return 0
 
     monkeypatch.setattr(helper.os, "setuid", no_root)
@@ -223,3 +248,31 @@ def test_drop_privileges_keeps_only_the_asked_groups(monkeypatch):
     monkeypatch.setattr(helper.os, "getgroups", lambda: [4, 999, 0])      # something extra survived: not dropped
     with pytest.raises(helper.Refused):
         helper.drop_privileges(61001, 61001, [4, 999])
+    assert "prctl" not in calls                          # no no_new_privs: it would disable sudo (trust mode)
+    assert not hasattr(helper, "_PR_SET_NO_NEW_PRIVS")
+
+
+def test_drop_privileges_still_refuses_when_root_can_be_regained(monkeypatch):
+    monkeypatch.setattr(helper.os, "setgroups", lambda g: None)
+    monkeypatch.setattr(helper.os, "setresgid", lambda *a: None)
+    monkeypatch.setattr(helper.os, "setresuid", lambda *a: None)
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (61001,) * 3)
+    monkeypatch.setattr(helper.os, "getresgid", lambda: (61001,) * 3)
+    monkeypatch.setattr(helper.os, "getgroups", lambda: [])
+    monkeypatch.setattr(helper.os, "setuid", lambda uid: None)          # setuid(0) "worked": root was not dropped
+    with pytest.raises(helper.Refused, match="root regained"):
+        helper.drop_privileges(61001, 61001)
+    monkeypatch.setattr(helper.os, "getresuid", lambda: (61001, 61001, 0))
+    with pytest.raises(helper.Refused, match="identity"):
+        helper.drop_privileges(61001, 61001)
+
+
+def test_the_runner_preflight_asks_for_the_session_groups_and_on_a_sudo_host_for_the_accounts(monkeypatch, tmp_path):
+    from planet_express.missions import runner
+    seen = {}
+    monkeypatch.setattr(runner, "run_preflight", lambda containment, **kw: seen.update(kw))
+    cfg = MissionsConfig(session_groups=["docker", "pe-session"])
+    runner.make_preflight(cfg, object(), tmp_path, euid=1000, has_sudo=True)()
+    assert seen["log_groups"] == ("docker", "pe-session") and seen["require_accounts"] is True
+    runner.make_preflight(cfg, object(), tmp_path, euid=0, has_sudo=False)()       # MOS: no sudo, no accounts needed
+    assert seen["require_accounts"] is False

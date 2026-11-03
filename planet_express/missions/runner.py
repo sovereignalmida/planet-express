@@ -161,12 +161,19 @@ def _cgroup_mount(root: str) -> str:
         return CGROUP_MOUNT
 
 
-def _hook_policy(cfg, mission):
-    """The session's hook policy: from the site config and THIS mission's grant (its protected set, and whether it is
-    restart-only)."""
-    from dataclasses import replace
-    grant = mission.grant()
-    return replace(policy_for(cfg, grant.protected.resources), docker_lifecycle=grant.docker == "lifecycle")
+def _pe_paths(store: Store) -> tuple[str, ...]:
+    """The paths of THIS install that are PE itself, for the hook's "changing PE" block: the config file Core loaded
+    ($CASA_CONFIG, as config.py resolves it; read here rather than imported so building a runner never loads a config) and the
+    state database (its -wal/-shm siblings are matched by the hook). The hook root is added by `policy_for`."""
+    config_file = os.environ.get("CASA_CONFIG", "/etc/planetexpress/config.yaml")
+    db = getattr(store, "path", None)
+    return tuple(str(Path(p).absolute()) for p in (config_file, db) if p)
+
+
+def _hook_policy(cfg, store: Store, stacks_root: str | None):
+    """The sessions' hook policy (trust mode): the same for every mission. The hard blocks need only the failure modes, the
+    stacks root and PE's own paths; the grant's protected set is recorded elsewhere, never enforced here."""
+    return policy_for(cfg, stacks_root=stacks_root, pe_paths=_pe_paths(store))
 
 
 def _protected_gids() -> tuple[int, ...]:
@@ -272,15 +279,23 @@ def held_session_uids(store: Store) -> list[int]:
                                            "WHERE session_uid IS NOT NULL AND uid_released_at IS NULL")]
 
 
-def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None, held_uids=None) -> Callable[[], PreflightReport]:
+SUDO_BIN = "/usr/bin/sudo"
+
+
+def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: int | None = None, held_uids=None,
+                   has_sudo: bool | None = None) -> Callable[[], PreflightReport]:
+    """The launcher preflight for this config. On a host with sudo every session uid must have its `pe-s<N>` account (sudo
+    refuses a uid without one, and trust mode gives every session sudo); MOS has no sudo, so there the range only has to be
+    free of foreign accounts. The probe is launched as every session is and must hold exactly `missions.session_groups`."""
     strategy = choose_strategy(cfg.launcher, os.geteuid() if euid is None else euid)
     low, high = cfg.session_uid_min, cfg.session_uid_max
+    require_accounts = os.path.exists(SUDO_BIN) if has_sudo is None else has_sudo
 
     def run() -> PreflightReport:
         return run_preflight(
             containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
             probe_uid=high, helper=HELPER_PATH, conf=cfg.launch_conf, uid_range=(low, high), sudo=strategy == "sudo",
-            check_reach=True, held_uids=held_uids, log_groups=tuple(cfg.read_log_groups))
+            check_reach=True, held_uids=held_uids, log_groups=tuple(cfg.session_groups), require_accounts=require_accounts)
     return run
 
 
@@ -400,16 +415,16 @@ def build_mission_runner(
         if console_runtime is None:
             raise ValueError("this is a Console conversation and the Console is off (missions.console.enabled)")
         return console_runtime
+    hook_policy_json = _hook_policy(cfg, store, stacks_root).to_json()
     supervisor = Supervisor(
         store, containment, runtime_for, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
         repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
-        hook_policy=lambda mission: _hook_policy(cfg, mission).to_json(),
+        hook_policy=lambda mission: hook_policy_json,
         hook_install=((lambda hook_dir: install_claude_code(hook_dir, cfg.hooks.command))
                       if cfg.hooks.install_claude_code else None),
         hook_argv=claude_code_argv if cfg.hooks.install_claude_code else None,
-        hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None, model_broker=model_broker,
-        read_logs=bool(cfg.read_log_groups), host_lock=host_lock)
+        hook_root=Path(cfg.hooks.root) if cfg.hooks.root else None, model_broker=model_broker, host_lock=host_lock)
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir,
                                                        held_uids=lambda: held_session_uids(store))

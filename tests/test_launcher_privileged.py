@@ -42,7 +42,7 @@ TEST_CG = CGROUP2 / "pe-launcher-test"
 SESSIONS = TEST_CG / "sessions"
 WS = "/var/lib/pe-launcher-test/ws"
 SOCKS = "/run/pe-launcher-test-socks"
-RANGE = (61000, 61999)
+RANGE = (61000, 61009)          # small: on a systemd host setup's session-access step makes a pe-s<N> account per uid
 
 
 def sh(*argv, check=True):
@@ -168,20 +168,32 @@ def test_core_is_what_this_strategy_says_it_is(host):
     assert who["euid"] == host.core_uid and (host.strategy == "direct" or who["groups"] == [])
 
 
-def test_the_session_runs_as_its_own_uid_and_gid_with_no_groups_and_no_new_privs(host):
+def _conf_gids():
+    import grp
+    out = []
+    for name in ("adm",):                                   # the fixture's launch.conf groups
+        try:
+            out.append(grp.getgrnam(name).gr_gid)
+        except KeyError:
+            pass
+    return sorted(out)
+
+
+def test_the_session_runs_as_its_own_uid_and_gid_with_the_conf_groups_and_without_no_new_privs(host):
     code = ("import json,os\nprint(json.dumps({'ids':[os.getresuid(),os.getresgid(),os.getgroups()],"
             "'nnp':[l for l in open('/proc/self/status') if l.startswith('NoNewPrivs')][0].split()[1],"
             "'sid':os.getsid(0)==os.getpid(),'cwd':os.getcwd()}),flush=True)\nimport time;time.sleep(300)")
     sid, got = host.launch(py(code))
     try:
         seen = first_json(host, sid)
-        assert seen["ids"] == [[UIDS[0]] * 3, [UIDS[0]] * 3, []] and seen["nnp"] == "1" and seen["sid"] is True
+        assert seen["ids"][:2] == [[UIDS[0]] * 3, [UIDS[0]] * 3] and sorted(seen["ids"][2]) == _conf_gids()
+        assert seen["nnp"] == "0" and seen["sid"] is True          # trust mode: no no_new_privs, so sudo works
         assert seen["cwd"] == host.cwd(sid) and got["session_uid"] == UIDS[0]
     finally:
         host.finish(sid)
 
 
-def test_a_session_that_asks_for_the_log_groups_gets_exactly_those_and_no_others(host):
+def test_every_session_gets_exactly_the_conf_groups_whether_or_not_it_sends_read_logs(host):
     import grp
     try:
         adm = grp.getgrnam("adm").gr_gid
@@ -195,9 +207,9 @@ def test_a_session_that_asks_for_the_log_groups_gets_exactly_those_and_no_others
         assert seen["groups"] == [adm] and seen["gid"] == [UIDS[0]] * 3
     finally:
         host.finish(sid)
-    sid, _ = host.launch(py(code))                           # the same host, a session that does not ask: no groups, as ever
+    sid, _ = host.launch(py(code))                           # the flag decides nothing: the same groups
     try:
-        assert first_json(host, sid)["groups"] == []
+        assert first_json(host, sid)["groups"] == [adm]
     finally:
         host.finish(sid)
 

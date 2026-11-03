@@ -13,6 +13,7 @@ from planet_express.missions.launcher.setup_steps import (
     MemoryJournal,
     Paths,
     StepError,
+    StepRefused,
     launcher_steps,
     probe_all,
     repair_all,
@@ -25,7 +26,7 @@ ME, MY_GID = os.geteuid(), os.getegid()
 
 def paths(tmp_path, **over):
     tmp_path.chmod(0o755)
-    base = dict(core_uid=ME, core_gid=MY_GID, core_user="pe", uid_min=61000, uid_max=61999,
+    base = dict(core_uid=ME, core_gid=MY_GID, core_user="pe", uid_min=61000, uid_max=61009,
                 cgroup_root=str(tmp_path / "cg" / "sessions"), workspace_root=str(tmp_path / "var" / "ws"),
                 sock_root=str(tmp_path / "run" / "socks"), helper=str(tmp_path / "usr" / "libexec" / "pe" / "pe-launch"),
                 conf=str(tmp_path / "etc" / "pe" / "launch.conf"), sudoers=str(tmp_path / "etc" / "sudoers.d" / "pe"),
@@ -33,9 +34,11 @@ def paths(tmp_path, **over):
                 boot_script=str(tmp_path / "data" / "launcher-boot.sh"), interpreter="/usr/bin/python3",
                 owner_uid=ME, owner_gid=MY_GID, below=str(tmp_path), passwd=str(tmp_path / "passwd"), check_delegation=False,
                 group=str(tmp_path / "group"), run=visudo_ok, sudoers_main=str(tmp_path / "etc" / "sudoers"),
-                sudoers_dir=str(tmp_path / "etc" / "sudoers.d"))
+                sudoers_dir=str(tmp_path / "etc" / "sudoers.d"),
+                session_sudoers=str(tmp_path / "etc" / "sudoers.d" / "planetexpress-sessions"))
     base.update(over)
     ACLS.clear()
+    DB.update(passwd=base["passwd"], group=base["group"])
     (tmp_path / "etc" / "sudoers.d").mkdir(parents=True, exist_ok=True)
     (tmp_path / "etc" / "sudoers.d").chmod(0o755)
     (tmp_path / "etc").chmod(0o755)
@@ -68,9 +71,64 @@ def fake_acl(argv):
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
 
+DB: dict[str, str] = {}                                    # the throwaway passwd and group files the fake account tools edit
+
+
+def _rows(kind):
+    return [line.split(":") for line in Path(DB[kind]).read_text().splitlines() if line]
+
+
+def _write(kind, rows):
+    Path(DB[kind]).write_text("".join(":".join(r) + "\n" for r in rows))
+
+
+def fake_accounts(argv):
+    """groupadd/useradd/usermod/gpasswd/userdel/groupdel over the throwaway files, as the real tools behave for the argv
+    SessionAccess runs (a `--system` group takes the next free gid from 990 down)."""
+    tool, args = os.path.basename(argv[0]), argv[1:]
+    groups, users = _rows("group"), _rows("passwd")
+    name = args[-1]
+    if tool == "groupadd":
+        if any(g[0] == name for g in groups):
+            return subprocess.CompletedProcess(argv, 9, b"", b"group exists")
+        gid = args[args.index("--gid") + 1] if "--gid" in args else str(min([990] + [int(g[2]) - 1 for g in groups if 100 < int(g[2]) <= 990]))
+        _write("group", groups + [[name, "x", gid, ""]])
+    elif tool == "useradd":
+        opt = dict(zip(args[:-1:2], args[1:-1:2])) if "--system" not in args else dict(zip(args[1:-1:2], args[2:-1:2]))
+        no_home = [a for a in args if a != "--no-create-home"]
+        opt = dict(zip(no_home[1:-1:2], no_home[2:-1:2]))
+        _write("passwd", users + [[name, "x", opt["--uid"], opt["--gid"], "", opt["--home-dir"], opt["--shell"]]])
+        for g in groups:
+            if g[0] == opt["--groups"]:
+                g[3] = ",".join([m for m in g[3].split(",") if m] + [name])
+        _write("group", groups)
+    elif tool in ("usermod", "gpasswd"):
+        member, group = (name, args[args.index("--groups") + 1]) if tool == "usermod" else (args[1], args[2])
+        for g in groups:
+            if g[0] == group:
+                now = [m for m in g[3].split(",") if m and m != member]
+                g[3] = ",".join(now + ([member] if tool == "usermod" else []))
+        _write("group", groups)
+    elif tool == "userdel":
+        _write("passwd", [u for u in users if u[0] != name])
+        for g in groups:
+            g[3] = ",".join(m for m in g[3].split(",") if m and m != name)
+        _write("group", groups)
+    elif tool == "groupdel":
+        _write("group", [g for g in groups if g[0] != name])
+    fake_accounts.calls.append(argv)
+    return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+
+fake_accounts.calls = []
+ACCOUNT_TOOLS = ("groupadd", "useradd", "usermod", "gpasswd", "userdel", "groupdel")
+
+
 def visudo_ok(argv, **kw):
     if argv[0].endswith(("getfacl", "setfacl")):
         return fake_acl(argv)
+    if os.path.basename(argv[0]) in ACCOUNT_TOOLS:
+        return fake_accounts(argv)
     visudo_ok.calls.append(argv)
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
@@ -90,13 +148,14 @@ def by_name(steps):
 
 def test_the_steps_are_named_in_dependency_order(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path))]
-    assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "sudoers-readable", "cgroup-tree",
-                     "workspace-root", "socket-root"]
+    assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access", "sudoers-readable",
+                     "cgroup-tree", "workspace-root", "socket-root"]
 
 
 def test_mos_has_no_sudoers_step(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path, flavour="mos"))]
-    assert "launcher-sudoers" not in names and "sudoers-readable" not in names and "cgroup-tree" in names
+    assert "launcher-sudoers" not in names and "sudoers-readable" not in names and "session-access" not in names
+    assert "cgroup-tree" in names
 
 
 # ── probe, repair, probe ────────────────────────────────────────────────────
@@ -138,7 +197,7 @@ def test_the_conf_setup_writes_is_the_conf_the_helper_accepts(tmp_path):
     p = paths(tmp_path)
     repair_all(launcher_steps(p), MemoryJournal())
     conf = load_helper().load_conf(p.conf, trusted_uid=ME, below=str(tmp_path))
-    assert (conf["uid_min"], conf["uid_max"], conf["core_uid"]) == (61000, 61999, ME)
+    assert (conf["uid_min"], conf["uid_max"], conf["core_uid"]) == (61000, 61009, ME)
     assert conf["cgroup_root"] == p.cgroup_root and conf["workspace_root"] == p.workspace_root
     assert LaunchConf.parse(Path(p.conf).read_text()) == p.launch_conf()
 
@@ -230,7 +289,7 @@ def test_a_helper_with_the_wrong_mode_is_not_satisfied(tmp_path):
 
 def test_the_uid_range_refuses_one_that_collides_with_an_account(tmp_path):
     p = paths(tmp_path)
-    Path(p.passwd).write_text("root:x:0:0::/:/bin/sh\nsvc:x:61500:61500::/:/bin/sh\n")
+    Path(p.passwd).write_text("root:x:0:0::/:/bin/sh\nsvc:x:61005:61005::/:/bin/sh\n")
     state = by_name(launcher_steps(p))["session-uid-range"].probe()
     assert state.blocked and "svc" in state.detail
     Path(p.passwd).write_text("root:x:0:0::/:/bin/sh\n")
@@ -249,7 +308,7 @@ def test_an_impossible_range_is_blocked_not_written(tmp_path):
     p = paths(tmp_path, uid_min=61000, uid_max=61000)
     state = by_name(launcher_steps(p))["session-uid-range"].probe()
     assert not state.ok
-    p2 = paths(tmp_path, core_uid=61500)
+    p2 = paths(tmp_path, core_uid=61005)
     assert by_name(launcher_steps(p2))["session-uid-range"].probe().blocked
 
 
@@ -370,7 +429,7 @@ def test_undo_leaves_a_directory_it_did_not_create(tmp_path):
 
 def test_repair_stops_at_the_first_step_that_cannot_proceed(tmp_path):
     p = paths(tmp_path)
-    Path(p.passwd).write_text("svc:x:61500:61500::/:/bin/sh\n")
+    Path(p.passwd).write_text("svc:x:61005:61005::/:/bin/sh\n")
     result = repair_all(launcher_steps(p), MemoryJournal())
     assert list(result) == ["session-uid-range"] and result["session-uid-range"].startswith("FAILED")
     assert not Path(p.helper).exists()
@@ -419,6 +478,8 @@ def test_the_systemd_step_runs_daemon_reload_and_is_pending_until_the_cgroup_is_
     def run(argv, **kw):
         if argv[0].endswith(("getfacl", "setfacl")):
             return fake_acl(argv)
+        if os.path.basename(argv[0]) in ACCOUNT_TOOLS:
+            return fake_accounts(argv)
         calls.append(argv)
         return subprocess.CompletedProcess(argv, 0, b"", b"")
     p = paths(tmp_path, check_delegation=True, run=run, cgroup_root=str(tmp_path / "svc" / "sessions"))
@@ -754,3 +815,145 @@ def test_sudoers_readable_will_not_touch_a_file_that_already_has_acls_it_did_not
     with pytest.raises(StepError):
         step.repair(MemoryJournal())
     assert ACLS[(p.sudoers_main, False)] == entries
+
+
+# ── session access (trust mode): accounts, the pe-session group and the one sudoers rule ────────────
+
+def access(p):
+    return by_name(launcher_steps(p))["session-access"]
+
+
+def table(path):
+    return {line.split(":")[0]: line.split(":") for line in Path(path).read_text().splitlines() if line}
+
+
+def test_session_access_probe_reads_only_and_names_what_is_missing(tmp_path):
+    p = paths(tmp_path)
+    before = (Path(p.passwd).read_text(), Path(p.group).read_text())
+    fake_accounts.calls.clear()
+    state = access(p).probe()
+    assert not state.ok and not state.blocked and "pe-session" in state.detail and "10 session account(s)" in state.detail
+    assert "sudoers rule" in state.detail
+    assert fake_accounts.calls == [] and (Path(p.passwd).read_text(), Path(p.group).read_text()) == before
+
+
+def test_session_access_repair_makes_the_accounts_group_and_rule_and_is_idempotent(tmp_path):
+    p = paths(tmp_path)
+    journal = MemoryJournal()
+    access(p).repair(journal)
+    users, groups = table(p.passwd), table(p.group)
+    for n in range(p.uid_min, p.uid_max + 1):
+        u = users[f"pe-s{n}"]
+        assert u[2:4] == [str(n), str(n)] and u[5:7] == ["/nonexistent", "/usr/sbin/nologin"]
+        assert groups[f"pe-s{n}"][2:4] == [str(n), ""]                           # private group, no members
+    session = groups["pe-session"]
+    assert not p.uid_min <= int(session[2]) <= p.uid_max and int(session[2]) > 0
+    assert set(session[3].split(",")) == {f"pe-s{n}" for n in range(p.uid_min, p.uid_max + 1)}
+    assert Path(p.session_sudoers).read_bytes() == b"%pe-session ALL=(ALL:ALL) NOPASSWD: ALL\n"
+    assert oct(Path(p.session_sudoers).stat().st_mode & 0o777) == "0o440"
+    assert not [s for s in Path(p.session_sudoers).parent.iterdir() if s.name.startswith(".")]      # no staging file left
+    assert all(not any(c in a for c in ";|&$`") for argv in fake_accounts.calls for a in argv)       # argv, never a shell
+    assert access(p).probe().ok
+    fake_accounts.calls.clear()
+    assert repair_all([access(p)], MemoryJournal()) == {"session-access": "already in place"} and fake_accounts.calls == []
+    ev = journal.evidence("session-access")
+    assert ev["created_group"] is True and ev["created_users"] == list(range(p.uid_min, p.uid_max + 1)) and ev["sha256"]
+
+
+def test_the_helper_and_the_preflight_accept_exactly_the_accounts_session_access_makes(tmp_path, monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from planet_express.missions.launcher.preflight import PreflightReport, check_range_free
+    p = paths(tmp_path)
+    access(p).repair(MemoryJournal())
+    users = [NS(pw_name=r[0], pw_uid=int(r[2]), pw_gid=int(r[3])) for r in table(p.passwd).values()]
+    groups = [NS(gr_name=r[0], gr_gid=int(r[2]), gr_mem=[m for m in r[3].split(",") if m]) for r in table(p.group).values()]
+    report = PreflightReport("sudo")
+    assert check_range_free(report, p.uid_min, p.uid_max, getpwall=lambda: users, getgrall=lambda: groups, require_accounts=True)
+    helper = load_helper()
+
+    class Pwd:
+        getpwall = staticmethod(lambda: users)
+
+        @staticmethod
+        def getpwuid(uid):
+            return next(u for u in users if u.pw_uid == uid) if any(u.pw_uid == uid for u in users) else (_ for _ in ()).throw(KeyError(uid))
+
+    class Grp:
+        @staticmethod
+        def getgrgid(gid):
+            for g in groups:
+                if g.gr_gid == gid:
+                    return g
+            raise KeyError(gid)
+    monkeypatch.setattr(helper, "pwd", Pwd)
+    monkeypatch.setattr(helper, "grp", Grp)
+    for n in range(p.uid_min, p.uid_max + 1):
+        helper.check_identity_unused(n, n)
+
+
+def test_a_foreign_account_or_group_in_the_range_blocks_session_access_and_nothing_is_changed(tmp_path):
+    for passwd, group, hit in (("svc:x:61003:61003::/:/bin/sh\n", "", "svc"),
+                               ("pe-s61003:x:61003:61003::/home/x:/bin/bash\n", "pe-s61003:x:61003:\n", "pe-s61003"),
+                               ("", "pe-s61004:x:61004:bob\n", "pe-s61004"),
+                               ("", "pe-session:x:61002:\n", "pe-session")):
+        p = paths(tmp_path)
+        Path(p.passwd).write_text(Path(p.passwd).read_text() + passwd)
+        Path(p.group).write_text(Path(p.group).read_text() + group)
+        before = (Path(p.passwd).read_text(), Path(p.group).read_text())
+        state = access(p).probe()
+        assert state.blocked and hit in state.detail, (passwd, group, state.detail)
+        with pytest.raises(StepError):
+            access(p).repair(MemoryJournal())
+        assert (Path(p.passwd).read_text(), Path(p.group).read_text()) == before and not Path(p.session_sudoers).exists()
+
+
+def test_session_access_undo_removes_exactly_what_it_made_and_refuses_once_it_changed(tmp_path):
+    p = paths(tmp_path)
+    before = (Path(p.passwd).read_text(), Path(p.group).read_text())
+    journal = MemoryJournal()
+    access(p).repair(journal)
+    access(p).undo(journal, journal.evidence("session-access"))
+    assert (Path(p.passwd).read_text(), Path(p.group).read_text()) == before and not Path(p.session_sudoers).exists()
+    journal = MemoryJournal()
+    access(p).repair(journal)
+    Path(p.session_sudoers).chmod(0o640)
+    Path(p.session_sudoers).write_text("%pe-session ALL=(ALL:ALL) NOPASSWD: ALL\nbob ALL=(ALL) NOPASSWD: ALL\n")
+    with pytest.raises(StepRefused):
+        access(p).undo(journal, journal.evidence("session-access"))
+    assert "pe-s61000" in table(p.passwd)                                     # nothing was reverted over the change
+
+
+def test_session_access_undo_keeps_a_sudoers_file_it_replaced_and_a_member_someone_else_added(tmp_path):
+    p = paths(tmp_path)
+    Path(p.session_sudoers).write_text("# an older file\n")
+    journal = MemoryJournal()
+    access(p).repair(journal)
+    access(p).undo(journal, journal.evidence("session-access"))
+    assert Path(p.session_sudoers).read_text() == "# an older file\n"         # what was there before is put back
+    journal = MemoryJournal()
+    access(p).repair(journal)
+    groups = Path(p.group).read_text().replace(",pe-s61009\n", ",pe-s61009,bob\n")
+    Path(p.group).write_text(groups)
+    with pytest.raises(StepRefused, match="pe-session"):
+        access(p).undo(journal, journal.evidence("session-access"))
+
+
+def test_visudo_rejecting_the_session_rule_installs_nothing(tmp_path):
+    def run(argv, **kw):
+        if os.path.basename(argv[0]) in ACCOUNT_TOOLS:
+            return fake_accounts(argv)
+        return visudo_bad(argv)
+    p = paths(tmp_path, run=run)
+    with pytest.raises(StepError, match="visudo"):
+        access(p).repair(MemoryJournal())
+    assert not Path(p.session_sudoers).exists()
+    assert not [s for s in Path(p.session_sudoers).parent.iterdir() if s.name.startswith(".")]
+
+
+def test_the_session_uid_range_step_accepts_pes_own_accounts_but_not_a_lookalike(tmp_path):
+    p = paths(tmp_path)
+    access(p).repair(MemoryJournal())
+    assert not by_name(launcher_steps(p))["session-uid-range"].probe().blocked
+    Path(p.passwd).write_text(Path(p.passwd).read_text() + "pe-s61020:x:61001:61001::/:/bin/sh\n")
+    assert by_name(launcher_steps(p))["session-uid-range"].probe().blocked

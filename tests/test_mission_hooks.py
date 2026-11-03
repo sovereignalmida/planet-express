@@ -1,8 +1,10 @@
-"""The hook layer (contract 12): blocked classes, ask classes, the configured failure modes, and the point that matters most:
-the hooks are a speed bump, and the real protections hold with no hook at all."""
+"""The hook layer (contract 12, trust mode): the short hard-block list, everything else allowed, the configured failure modes,
+the per-launch copy of the hook script, and the point that matters most: the hooks are a speed bump, and what answers for a
+session is the record, the checkpoint and verification."""
 import io
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -15,7 +17,9 @@ os.environ.setdefault("CASA_CONFIG", str(Path(__file__).resolve().parent.parent 
 from planet_express.missions import hooks
 from planet_express.missions.hooks import HookPolicy, HookRunner, classify
 
-POLICY = HookPolicy(live_trees=("/srv/live/app",), protected_paths=("/srv/stacks/media/config", "/mnt/data"))
+POLICY = HookPolicy(stacks_root="/home/u/stacks", pe_paths=("/opt/pe/config.yaml", "/var/lib/pe-state/casa.db",
+                                                             "/srv/pe-hooks"))
+BLOCKER = "docker volume prune -f"                     # a command on the hard-block list, for the record and CLI tests
 
 
 def bash(command, cwd="/work/ws"):
@@ -27,129 +31,95 @@ def verdict(command, cwd="/work/ws"):
     return d.verdict, d.cls
 
 
-# ── blocked classes, enforced whatever the runtime would have allowed ───────────────────────────────
+# ── the hard-block list, the WHOLE list ─────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("command", [
-    "cat .env", "cat /srv/stacks/media/.env", "less ~/.ssh/id_rsa", "grep -r token /etc/planetexpress/config.yaml",
-    "cat /etc/shadow", "cp /srv/x/.env /tmp/x", "head -n3 secrets.json", "base64 /home/u/.aws/credentials",
-    "printenv", "env", "printenv ANTHROPIC_API_KEY", "export -p", "cat /proc/self/environ", "tar czf x.tgz .env",
-    "echo hi && cat .env.production", "FOO=1 cat .env", "sudo cat /etc/shadow", "cat < .env", "cat .git-credentials",
+    "mkfs.ext4 /dev/sdb1", "mkfs -t xfs /dev/sdc", "wipefs -a /dev/sda", "dd if=/dev/zero of=/dev/sda bs=1M",
+    "dd if=img.iso of=/dev/nvme0n1", "rm -rf /", "rm -rf /etc", "rm -fr /home/", "rm -r /var/lib/docker", "rm -rf /boot",
+    "rm -rf /usr", "rm -rf /etc/*", "rm -rf --no-preserve-root /", "rm -rf /home/u/stacks", "rm -rf /home/u/stacks/*",
+    "cd / && rm -rf etc", "sudo rm -rf /", "sudo -n rm -rf /var/lib/docker", "env X=1 rm -rf /usr",
+    "printf x | xargs -0 rm -rf /etc", "sh -c 'rm -rf /etc'", "bash -lc \"sudo wipefs -a /dev/sdb\"",
 ])
-def test_reading_secret_stores_and_env_contents_is_blocked(command):
-    assert verdict(command) == ("block", "secret")
+def test_wiping_a_filesystem_or_disk_is_blocked(command):
+    cwd = "/" if command.startswith("cd /") else "/work/ws"
+    if command.startswith("cd /"):
+        command = "rm -rf etc"
+    assert verdict(command, cwd) == ("block", "wipe"), command
 
 
-def test_env_example_and_a_listing_are_not_secret_reads():
-    assert verdict("cat .env.example")[0] == "allow"
-    assert verdict("ls -la .env")[0] == "allow"                 # a name is not the contents
+@pytest.mark.parametrize("command", [
+    "docker volume rm media_db", "docker volume prune -f", "docker system prune -a", "docker system prune --volumes",
+    "docker image prune -a", "docker compose down -v", "docker compose -f x.yml down --volumes", "docker-compose down -v",
+    "sudo docker volume prune", "sudo -u root docker system prune --all -f", "podman volume rm x",
+])
+def test_deleting_docker_data_is_blocked(command):
+    assert verdict(command) == ("block", "docker"), command
 
 
-@pytest.mark.parametrize("tool, args", [("Read", {"file_path": "/srv/stacks/media/.env"}),
-                                        ("Read", {"file_path": "/home/u/.ssh/id_ed25519"}),
-                                        ("Read", {"file_path": "/etc/shadow"}),
-                                        ("Grep", {"pattern": "x", "path": "/etc/planetexpress/config.yaml"}),
-                                        ("Glob", {"pattern": "**/.env"})])
-def test_the_read_tools_are_screened_too(tool, args):
+@pytest.mark.parametrize("command", [
+    "cat /etc/planetexpress/planetexpress.env", "sudo cat /etc/planetexpress.d/../planetexpress/x", "less /run/planetexpress/t",
+    "cat /proc/1234/environ", "strings /proc/self/environ", "tr '\\0' '\\n' < /proc/1/environ", "env", "printenv",
+    "printenv ANTHROPIC_BASE_URL", "export -p", "declare", "set", "sudo env", "grep -r key /etc/planetexpress",
+    "find /etc/planetexpress -type f -exec cat {} +",
+])
+def test_reading_pes_own_secrets_is_blocked(command):
+    assert verdict(command) == ("block", "secret"), command
+
+
+@pytest.mark.parametrize("command", [
+    "echo x >> /opt/pe/config.yaml", "sed -i s/a/b/ /opt/pe/config.yaml", "sudo tee /etc/sudoers.d/planetexpress-sessions",
+    "sudo rm /etc/sudoers.d/planetexpress-launch", "visudo -f /etc/sudoers.d/planetexpress-sessions",
+    "sudoedit /etc/sudoers.d/planetexpress-launch", "cp evil.py /var/lib/planetexpress/mission-hooks/S-1/pe_hook.py",
+    "rm -rf /srv/pe-hooks/S-1", "sqlite3 /var/lib/pe-state/casa.db 'delete from mission_events'",
+    "rm /var/lib/pe-state/casa.db-wal", "sqlite3 /var/lib/planetexpress/casa.db .dump", "sudo install x /usr/local/lib/planetexpress/x",
+    "sudo cp x /usr/libexec/planetexpress/pe-launch", "mv /etc/planetexpress-launch/launch.conf /tmp/",
+    "python3 -c 'open(\"/etc/planetexpress/x\",\"w\")'",
+])
+def test_changing_pe_itself_is_blocked(command):
+    assert verdict(command)[0] == "block" and verdict(command)[1] in ("pe", "secret"), command
+
+
+@pytest.mark.parametrize("tool, args, cls", [
+    ("Read", {"file_path": "/etc/planetexpress/planetexpress.env"}, "secret"),
+    ("Grep", {"pattern": "KEY", "path": "/run/planetexpress"}, "secret"),
+    ("Glob", {"pattern": "/etc/planetexpress/*"}, "secret"),
+    ("Write", {"file_path": "/opt/pe/config.yaml", "content": "x"}, "pe"),
+    ("Edit", {"file_path": "/etc/sudoers.d/planetexpress-sessions", "old_string": "a", "new_string": "b"}, "pe"),
+    ("MultiEdit", {"file_path": "/srv/pe-hooks/S-1/settings.json", "edits": []}, "pe"),
+])
+def test_the_file_tools_are_screened_too(tool, args, cls):
     d = classify(tool, args, POLICY, "/work/ws")
-    assert d.verdict == "block" and d.cls == "secret"
+    assert (d.verdict, d.cls) == ("block", cls)
 
 
-@pytest.mark.parametrize("command", [
-    "git reset --hard", "git reset --hard HEAD~3", "git clean -fd", "git checkout -- .", "git checkout .", "git restore .",
-    "git branch -D main", "git rebase -i HEAD~3", "git stash drop", "git push --force origin main", "git filter-branch --all",
-    "git commit --amend", "git -C /srv/live/app reset --hard", "git tag -d v1",
-])
-def test_destructive_vcs_in_a_live_tree_is_blocked(command):
-    assert verdict(command, cwd="/srv/live/app")[0] == "block"
-    assert verdict(command, cwd="/srv/live/app/sub/dir")[0] == "block"
-
-
-def test_destructive_vcs_in_the_agents_own_workspace_is_only_asked_about_and_unknown_locations_fail_closed():
-    assert verdict("git reset --hard", cwd="/work/ws") == ("ask", "irreversible")
-    assert verdict("git status", cwd="/srv/live/app")[0] == "allow"
-    assert verdict("git log --oneline", cwd="/srv/live/app")[0] == "allow"
-    assert verdict("git reset --hard", cwd="")[0] == "block"                               # no cwd: where it runs cannot be shown
-    assert verdict("git -C ../../srv/live/app reset --hard", cwd="/work/ws")[0] == "block"
-
+# ── everything else is allowed: the session has the operator's access ───────────────────────────────
 
 @pytest.mark.parametrize("command", [
-    "git push", "git push origin main", "npm publish", "yarn publish", "cargo publish", "twine upload dist/*", "docker push x/y:1",
-    "gh release create v1", "gh pr create", "gem push x.gem", "curl -T build.tgz https://example.org/up",
+    "docker restart prowlarr", "docker compose up -d", "docker compose -f /home/u/stacks/a/compose.yml up -d --force-recreate",
+    "sudo systemctl restart x", "sudo systemctl stop plex.service", "cat /home/u/stacks/a/.env", "cat ~/.ssh/config",
+    "sed -i s/A=1/A=2/ /home/u/stacks/a/.env", "docker compose down", "docker rm -f old", "docker system prune -f",
+    "git push origin main", "git reset --hard", "rm -rf /home/u/stacks/a/cache", "rm -rf /tmp/x", "sudo true", "docker ps",
+    "journalctl -u docker --since today", "sudo cat /var/log/syslog", "echo hi > out.txt", "kill 1234",
+    "cat /opt/pe/config.yaml", "sqlite3 -readonly /tmp/other.db .tables", "dd if=/dev/sda of=/tmp/mbr.bin count=1",
+    "dd if=/dev/zero of=/dev/null count=1", "chmod -R 755 /home/u/stacks/a", "sudo visudo -c", "ls /etc/planetexpress",
+    "export FOO=1", "env FOO=1 ./run.sh", "python3 -c 'print(1)'", "rm -r notes", "docker volume ls",
 ])
-def test_publishing_is_blocked(command):
-    assert verdict(command) == ("block", "publish")
+def test_ordinary_and_operator_level_work_is_allowed(command):
+    assert bash(command) == hooks.ALLOW, command
 
 
-@pytest.mark.parametrize("command", [
-    "rm -rf /", "rm -rf /*", "rm -rf ~", "rm -rf $HOME", "rm -rf /etc", "rm -rf /var/lib", "rm -fr /home", "rm -r -f /srv",
-    "rm -rf *", "rm -rf .", "rm -rf ..", "rm --recursive --force /usr", "rm -rf --no-preserve-root /", "mkfs.ext4 /dev/sda1",
-    "mkfs -t xfs /dev/sdb", "dd if=/dev/zero of=/dev/sda", "dd if=x of=/mnt/data/img", "wipefs -a /dev/sda", "shred -n3 /dev/sda",
-    "sudo rm -rf /mnt", "chmod -R 777 /", "chown -R nobody /etc", "find / -delete", "ls && rm -rf /etc",
-])
-def test_broad_rm_and_the_mkfs_dd_class_are_blocked(command):
-    assert verdict(command)[0] == "block"
-
-
-def test_a_narrow_rm_is_asked_about_not_blocked():
-    assert verdict("rm -rf /work/ws/build/cache") == ("ask", "irreversible")
-    assert verdict("rm notes.txt") == ("ask", "irreversible")
-
-
-@pytest.mark.parametrize("command", [
-    "docker volume rm media_data", "docker volume prune", "docker volume prune -f", "docker system prune -a",
-    "docker system prune --volumes", "docker image prune -a", "docker image prune --all -f", "docker compose down -v",
-    "docker-compose down --volumes", "podman volume rm x", "docker compose down --volumes --remove-orphans",
-])
-def test_destructive_docker_is_blocked(command):
-    assert verdict(command) == ("block", "docker")
-
-
-@pytest.mark.parametrize("command", [
-    "visudo", "echo 'x ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/x", "tee /etc/sudoers.d/99 < rule", "sed -i s/a/b/ /etc/sudoers",
-    "cp rule /etc/sudoers.d/rule", "mv /tmp/x /etc/docker/daemon.json", "echo '{}' > /etc/docker/daemon.json",
-    "sed -i 's/a/b/' /etc/docker/daemon.json", "python3 -c 'x' /etc/docker/daemon.json", "cat /etc/sudoers",
-])
-def test_edits_of_sudoers_and_daemon_json_are_blocked(command):
-    assert verdict(command) == ("block", "config")
-
-
-@pytest.mark.parametrize("tool", ["Write", "Edit", "MultiEdit"])
-def test_the_edit_tools_cannot_touch_sudoers_or_daemon_json(tool):
-    for path in ("/etc/sudoers", "/etc/sudoers.d/90-x", "/etc/docker/daemon.json", "/etc/docker/../docker/daemon.json"):
-        assert classify(tool, {"file_path": path}, POLICY, "/work/ws").verdict == "block"
-
-
-# ── ask classes ────────────────────────────────────────────────────────────────────────────────────
-
-def test_crossing_into_a_protected_resource_asks():
-    assert verdict("ls /srv/stacks/media/config") == ("ask", "protected")
-    assert verdict("cat /mnt/data/library/index.db") == ("ask", "protected")
-    assert verdict("echo x > /mnt/data/y") == ("ask", "protected")
-    d = classify("Edit", {"file_path": "/srv/stacks/media/config/app.yml"}, POLICY, "/work/ws")
-    assert (d.verdict, d.cls) == ("ask", "protected")
-    assert classify("Edit", {"file_path": "/work/ws/notes.md"}, POLICY, "/work/ws").verdict == "allow"
-
-
-@pytest.mark.parametrize("command", [
-    "systemctl stop nginx", "systemctl disable x", "docker rm web", "docker stop web", "kill -9 4242", "truncate -s0 a.log",
-    "psql -c 'DROP TABLE users'", "mysql -e 'delete from t'", "iptables -F", "crontab -r",
-])
-def test_irreversible_looking_operations_ask(command):
-    assert verdict(command) == ("ask", "irreversible")
-
-
-@pytest.mark.parametrize("command", ["ls -la", "git status", "docker ps", "docker compose ps", "cat README.md", "pytest -q",
-                                      "curl -s http://localhost:8080/health", "echo hi > out.txt 2>&1", "grep -rn todo src"])
-def test_ordinary_work_is_allowed(command):
-    d = bash(command)
-    assert d.verdict in ("allow", "ask") and d.cls != "secret" and d.verdict != "block"
+def test_there_is_no_ask_verdict_anywhere():
+    import inspect
+    source = inspect.getsource(hooks)
+    assert '"ask"' not in source and "permissionDecision" not in source
+    assert hooks.BLOCKED_CLASSES == ("wipe", "docker", "secret", "pe")
 
 
 def test_a_pipeline_is_judged_by_its_worst_segment():
     assert verdict("ls && docker volume rm x && echo done")[0] == "block"
-    assert verdict("echo a; cat .env; echo b")[0] == "block"
-    assert verdict("true || git push")[0] == "block"
-    assert verdict("echo $(cat .env)")[0] == "block"
+    assert verdict("echo a; cat /etc/planetexpress/k; echo b")[0] == "block"
+    assert verdict("true || sudo rm -rf /")[0] == "block"
+    assert verdict("echo $(printenv)")[0] == "block"
 
 
 # ── failure modes ──────────────────────────────────────────────────────────────────────────────────
@@ -161,7 +131,7 @@ def run(raw, policy=POLICY):
 
 
 def test_a_broken_input_that_might_be_a_blocked_class_fails_closed_by_default():
-    d, posted, _ = run('{"tool_name": "Bash", "tool_input": {"command": 7}, "note": "cat .env"}')
+    d, posted, _ = run('{"tool_name": "Bash", "tool_input": {"command": 7}, "note": "printenv"}')
     assert d.verdict == "block" and d.cls == "failure" and "closed" in d.reason
     d, _, _ = run("not json at all")
     assert d.verdict == "block" and d.cls == "failure"                                      # unreadable: might be anything
@@ -193,28 +163,39 @@ def test_a_classifier_that_raises_goes_through_the_same_failure_modes(monkeypatc
     def boom(*a, **k):
         raise RuntimeError("classifier bug")
     monkeypatch.setattr(hooks, "classify", boom)
-    assert run({"tool_name": "Bash", "tool_input": {"command": "git push"}})[0].verdict == "block"
+    assert run({"tool_name": "Bash", "tool_input": {"command": "docker ps"}})[0].verdict == "block"      # a shell call: might be anything
     assert run({"tool_name": "Write", "tool_input": {"file_path": "/work/ws/a"}})[0].verdict == "allow"
 
 
-def test_the_policy_rejects_unknown_failure_modes():
+def test_the_policy_rejects_unknown_failure_modes_and_round_trips():
     with pytest.raises(ValueError):
         HookPolicy.from_json('{"blocked_failure": "maybe"}')
-    assert HookPolicy.from_json(HookPolicy(("/a",), ("/b",), "open", "closed").to_json()) == HookPolicy(("/a",), ("/b",), "open", "closed")
+    policy = HookPolicy("open", "closed", "/s", ("/a", "/b"))
+    assert HookPolicy.from_json(policy.to_json()) == policy
+
+
+def test_a_stale_pre_trust_mode_policy_still_loads_and_its_old_keys_decide_nothing():
+    old = json.dumps({"live_trees": ["/srv/live"], "protected_paths": ["/mnt/data"], "blocked_failure": "closed",
+                      "other_failure": "open", "docker_lifecycle": True})
+    policy = HookPolicy.from_json(old)
+    assert policy == HookPolicy()
+    assert classify("Bash", {"command": "touch /mnt/data/x"}, policy, "/w") == hooks.ALLOW
 
 
 # ── the record, and a hostile transcript ────────────────────────────────────────────────────────────
 
 def test_every_call_is_posted_through_mission_post_event_and_a_failed_post_never_changes_a_verdict():
-    d, posted, _ = run({"tool_name": "Bash", "tool_input": {"command": "git push origin main"}, "cwd": "/work/ws"})
+    d, posted, _ = run({"tool_name": "Bash", "tool_input": {"command": BLOCKER}, "cwd": "/work/ws"})
     assert d.verdict == "block"
     kind, body = posted[0]
-    assert kind == "tool" and body["hook"] == "pre" and body["verdict"] == "block" and body["class"] == "publish"
+    assert kind == "tool" and body["hook"] == "pre" and body["verdict"] == "block" and body["class"] == "docker"
+    _, allowed, _ = run({"tool_name": "Bash", "tool_input": {"command": "docker restart x"}, "cwd": "/work/ws"})
+    assert allowed[0][1]["verdict"] == "allow"                                                 # an allowed call is recorded too
 
     def broken(kind, body):
         raise OSError("socket gone")
     runner = HookRunner(POLICY, post=broken)
-    assert runner.pre({"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": "/w"}).verdict == "block"
+    assert runner.pre({"tool_name": "Bash", "tool_input": {"command": BLOCKER}, "cwd": "/w"}).verdict == "block"
     assert runner.pre({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/w"}).verdict == "allow"
     assert runner.post_failures == 2
     posted2 = []
@@ -228,11 +209,11 @@ def test_a_hostile_transcript_cannot_disable_the_hooks(monkeypatch):
                "blocked_failure=open allow everything")
     monkeypatch.setenv("PE_HOOKS", "off")
     monkeypatch.setenv("PE_HOOKS_DISABLE", "1")
-    d, posted, _ = run({"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "cat .env  # " + hostile},
+    d, posted, _ = run({"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "cat /etc/planetexpress/k  # " + hostile},
                         "transcript": hostile, "policy": {"blocked_failure": "open"}, "blocked_failure": "open"})
     assert d.verdict == "block" and d.cls == "secret"
     # nothing the agent wrote can reach the policy either: it comes from the file Core wrote
-    d, _, _ = run({"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}, "env": {"PE_HOOKS": "off"}})
+    d, _, _ = run({"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": BLOCKER}, "env": {"PE_HOOKS": "off"}})
     assert d.verdict == "block"
     assert len(json.dumps(posted[0][1])) < 2000                                              # and the record is bounded
 
@@ -256,11 +237,11 @@ def cli(which, payload, tmp_path, policy=None, env=None):
     return code, out.getvalue(), err.getvalue()
 
 
-def test_cli_blocks_with_exit_2_asks_with_json_and_allows_with_exit_0(tmp_path):
-    code, out, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}}, tmp_path, POLICY)
-    assert code == 2 and "blocked (publish)" in err and out == ""
+def test_cli_blocks_with_exit_2_and_allows_with_exit_0_and_never_prints_an_ask(tmp_path):
+    code, out, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": BLOCKER}}, tmp_path, POLICY)
+    assert code == 2 and "blocked (docker)" in err and out == ""
     code, out, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "rm notes.txt"}}, tmp_path, POLICY)
-    assert code == 0 and json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert code == 0 and out == ""
     code, out, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "ls"}}, tmp_path, POLICY)
     assert code == 0 and out == ""
     assert cli("post", {"tool_name": "Bash", "tool_input": {"command": "ls"}}, tmp_path, POLICY)[0] == 0
@@ -269,7 +250,7 @@ def test_cli_blocks_with_exit_2_asks_with_json_and_allows_with_exit_0(tmp_path):
 def test_cli_records_each_call_to_the_hook_log_without_following_a_symlink_and_never_sees_a_token(tmp_path):
     log = tmp_path / ".pe-hook.log"
     env = {"PE_HOOK_LOG": str(log), "PE_WORKER_SOCKET": "/run/w.sock"}
-    cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}}, tmp_path, POLICY, env)
+    cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": BLOCKER}}, tmp_path, POLICY, env)
     cli("post", {"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_response": {}}, tmp_path, POLICY, env)
     lines = [json.loads(x) for x in log.read_text().splitlines()]
     assert [x["kind"] for x in lines] == ["tool", "note"] and lines[0]["data"]["verdict"] == "block"
@@ -277,13 +258,13 @@ def test_cli_records_each_call_to_the_hook_log_without_following_a_symlink_and_n
     target = tmp_path / "victim"
     link = tmp_path / "linked.log"
     link.symlink_to(target)
-    code, _, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}}, tmp_path, POLICY,
+    code, _, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": BLOCKER}}, tmp_path, POLICY,
                        {"PE_HOOK_LOG": str(link)})
     assert code == 2 and "could not be recorded" in err and not target.exists()       # the decision stands; nothing was followed
 
 
 def test_cli_with_an_unreadable_policy_uses_the_closed_default_and_the_environment_cannot_switch_it_off(tmp_path):
-    code, _, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": "git push"}}, tmp_path, None,
+    code, _, err = cli("pre", {"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": BLOCKER}}, tmp_path, None,
                        env={"PE_HOOKS": "off", "PE_HOOKS_DISABLE": "1"})
     assert code == 2
     code, _, _ = cli("pre", {"tool_name": "Bash", "tool_input": {"command": 7}, "x": "rm -rf /"}, tmp_path, None)
@@ -324,9 +305,42 @@ def test_the_hook_decision_has_no_input_but_the_call_and_the_policy():
     assert "os.environ" not in source and "getenv" not in source and "transcript" not in source
 
 
-def test_policy_for_builds_from_config_and_protected_resources():
+def test_policy_for_builds_from_config_and_ignores_the_protected_set():
     from types import SimpleNamespace
-    cfg = SimpleNamespace(live_trees=["/srv/live/app"], hooks=SimpleNamespace(blocked_failure="open", other_failure="closed"))
-    policy = hooks.policy_for(cfg, ["host:local/path:/mnt/data", "host:local/service:media/traefik", "host:local/mount:/mnt/pool"])
-    assert policy.live_trees == ("/srv/live/app",) and policy.protected_paths == ("/mnt/data", "/mnt/pool")
-    assert (policy.blocked_failure, policy.other_failure) == ("open", "closed")
+    cfg = SimpleNamespace(hooks=SimpleNamespace(blocked_failure="open", other_failure="closed", root="/srv/pe-hooks"))
+    policy = hooks.policy_for(cfg, ["host:local/path:/mnt/data"], stacks_root="/home/u/stacks",
+                              pe_paths=("/opt/pe/config.yaml", "/var/lib/pe/casa.db"))
+    assert (policy.blocked_failure, policy.other_failure, policy.stacks_root) == ("open", "closed", "/home/u/stacks")
+    assert policy.pe_paths == ("/opt/pe/config.yaml", "/var/lib/pe/casa.db", "/srv/pe-hooks")
+    assert "/mnt/data" not in policy.to_json()
+
+
+# ── the per-launch copy: Core copies this module into the hook directory and the runtime runs that copy ─────
+
+def test_install_copies_the_hook_module_as_pe_hook_py_and_settings_run_that_copy(tmp_path):
+    env = hooks.install_claude_code(tmp_path, ["/usr/bin/python3", "/usr/local/lib/planetexpress/pe_hook.py"])
+    script = tmp_path / "pe_hook.py"
+    assert env == {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+    assert script.read_bytes() == Path(hooks.__file__).read_bytes() and oct(script.stat().st_mode & 0o777) == "0o644"
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    pre = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    assert pre == f"/usr/bin/python3 {script} pre"                  # the configured script path is ignored: the copy runs
+    assert settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"] == f"/usr/bin/python3 {script} post"
+    assert not list(tmp_path.glob(".*tmp"))
+    hooks.install_claude_code(tmp_path / "x" if (tmp_path / "x").mkdir() is None else None)     # the default interpreter
+    assert "/usr/bin/python3 " in (tmp_path / "x" / "settings.json").read_text()
+    with pytest.raises(ValueError):
+        hooks.install_claude_code(tmp_path, ["python3"])
+
+
+def test_the_copied_hook_runs_standalone_with_only_the_standard_library(tmp_path):
+    hooks.install_claude_code(tmp_path, [sys.executable])
+    script = str(tmp_path / "pe_hook.py")
+
+    def call(command):
+        payload = json.dumps({"tool_name": "Bash", "cwd": "/w", "tool_input": {"command": command}})
+        return subprocess.run([sys.executable, "-I", script, "pre"], input=payload, capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin", "PE_HOOK_POLICY": POLICY.to_json()}, cwd=str(tmp_path), timeout=30)
+    blocked = call("sudo docker volume prune")
+    assert blocked.returncode == 2 and "blocked (docker)" in blocked.stderr
+    assert call("docker restart prowlarr").returncode == 0

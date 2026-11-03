@@ -19,7 +19,7 @@ from pydantic import (
     model_validator,
 )
 
-from config_schema import MissionsConfig, WorkerSudoRuleConfig, uid_range_problem
+from config_schema import MissionsConfig, uid_range_problem
 from planet_express.setup.steps import AbsPath, Name
 
 _MISSIONS_DEFAULTS = MissionsConfig()      # the one source of the defaults, so config, Core and setup cannot drift
@@ -106,16 +106,26 @@ class MissionsAnswers(_Strict):
     sock_root: AbsPath = _MISSIONS_DEFAULTS.sock_root
     cgroup_root: AbsPath = _MISSIONS_DEFAULTS.cgroup_root
     workspace_root: AbsPath | None = None      # unset: `mission-workspaces` in the state directory, as Core defaults it
-    worker_sudo_rules: list[WorkerSudoRuleConfig] = []   # the worker tier's sudo ceiling; empty: no worker sudoers file
-    worker_sudo_all_sessions: bool = False               # required to generate it: every session uid gets the ceiling
-    read_log_groups: list[str] = []                      # adm, systemd-journal: what an Observe/Propose session reads the host's logs with
+    # The groups every session gets (trust mode: docker, pe-session for sudo, adm and systemd-journal for logs), written into
+    # launch.conf. The worker sudo ceiling answers are gone: trust mode has one session sudoers rule, always.
+    session_groups: list[str] = list(_MISSIONS_DEFAULTS.session_groups)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _deprecated_read_log_groups(cls, data):
+        """`read_log_groups` is the old name, mapped exactly as the config maps it (MissionsConfig)."""
+        if isinstance(data, dict) and "read_log_groups" in data:
+            data = dict(data)
+            mapped = MissionsConfig.model_validate({k: data.pop(k) for k in ("read_log_groups", "session_groups") if k in data})
+            data["session_groups"] = mapped.session_groups
+        return data
 
     @model_validator(mode="after")
     def _as_the_config_would_accept_it(self):
         try:
             MissionsConfig(enabled=False, session_uid_min=self.session_uid_min, session_uid_max=self.session_uid_max,
                            sock_root=self.sock_root, cgroup_root=self.cgroup_root, workspace_root=self.workspace_root,
-                           read_log_groups=self.read_log_groups)
+                           session_groups=self.session_groups)
         except ValidationError as exc:
             raise ValueError(str(exc.errors()[0]["msg"]).removeprefix("Value error, ")) from None
         if self.enabled:

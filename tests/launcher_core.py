@@ -57,7 +57,7 @@ class CoreOps:
             if not os.path.isdir(path):
                 os.mkdir(path, 0o700)
         spec = LaunchSpec(uid=uid, cwd=cwd, argv=tuple(argv), env=env or {"PATH": "/usr/bin:/bin"}, token=token,
-                          sock_dir=sock_dir, state_dir=state_dir, read_logs=read_logs)
+                          sock_dir=sock_dir, state_dir=state_dir)          # read_logs: accepted, ignored (trust mode)
         cs = self.c.launch(session_id, spec)
         self.sessions[session_id] = cs
         return {"session_id": cs.session_id, "kind": cs.kind, "cgroup_path": cs.cgroup_path,

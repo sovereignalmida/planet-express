@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from planet_express.missions.launcher.config import (
     DEFAULT_UID_RANGE as _DEFAULT_UID_RANGE,
+    GROUP_NAME as _GROUP_NAME,
+    MAX_LOG_GROUPS as _MAX_SESSION_GROUPS,
     SYSTEMD_DYNAMIC_UIDS as _SYSTEMD_DYNAMIC_UIDS,
 )
 
@@ -290,7 +292,8 @@ _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
 _SECRETISH = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", re.IGNORECASE)
 MOUNTINFO_PATH = "/proc/self/mountinfo"      # tests point this at a fake mount table
 _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
-LOG_READER_GROUPS = frozenset({"adm", "systemd-journal"})     # the launcher holds the same allowlist (tests keep them equal)
+# Trust mode (docs/designs/v4-trust-mode.md): the real Docker socket, sudo through the one session rule, and the host's logs.
+DEFAULT_SESSION_GROUPS = ("docker", "pe-session", "adm", "systemd-journal")
 
 
 class MissionRuntimeConfig(BaseModel):
@@ -511,10 +514,11 @@ class MissionHooksConfig(BaseModel):
 
     blocked_failure: Literal["closed", "open"] = "closed"      # input that might be a blocked class: block (closed) or allow
     other_failure: Literal["closed", "open"] = "open"          # anything else: allow with a loud event (open) or block (closed)
-    # Installing the hooks into the agent runtime is runtime-specific. With `install_claude_code` Core writes Claude Code's
-    # hook settings into each session workspace before launch, running `command` (an absolute argv that starts
-    # `planet_express.missions.hooks`, readable by the session uid). Off by default; on without a command is refused.
-    command: list[str] = []
+    # Installing the hooks into the agent runtime is runtime-specific. With `install_claude_code` Core copies the hook module
+    # into each session's hook directory (`pe_hook.py`) at every launch and writes Claude Code's hook settings to run it with
+    # `command[0]`, the interpreter (absolute). Anything after command[0] (an older config's script path or `-m` module) is
+    # accepted and ignored: the per-launch copy is what runs, so it can never be stale. Empty means the default.
+    command: list[str] = ["/usr/bin/python3"]
     install_claude_code: bool = False
     # A directory Core owns and a session can read but never write (root:root or Core's user, 0755), outside every session
     # workspace: each session gets `<root>/<session id>/settings.json` there, and its hash is checked at every poll.
@@ -522,10 +526,10 @@ class MissionHooksConfig(BaseModel):
 
     @model_validator(mode="after")
     def _install_needs_a_command(self) -> "MissionHooksConfig":
-        if self.command and (not self.command[0].startswith("/") or any(not a or "\0" in a for a in self.command)):
-            raise ValueError("missions.hooks.command must start with an absolute program path and have no empty or NUL items")
-        if self.install_claude_code and not self.command:
-            raise ValueError("missions.hooks.install_claude_code needs missions.hooks.command")
+        if not self.command:
+            self.command = ["/usr/bin/python3"]
+        if not self.command[0].startswith("/") or any(not a or "\0" in a for a in self.command):
+            raise ValueError("missions.hooks.command must start with an absolute interpreter path and have no empty or NUL items")
         if self.root is not None and (not self.root.startswith("/") or "\0" in self.root or posixpath.normpath(self.root) != self.root
                                       or self.root == "/"):
             raise ValueError("missions.hooks.root must be a normalised absolute path")
@@ -660,11 +664,12 @@ class MissionsConfig(BaseModel):
     # per-grant group), so it grants the ceiling to Observe/Propose and rules-less Repair sessions too. Fail closed: the file is
     # not generated, planned or treated as managed unless the operator acknowledges that here.
     worker_sudo_all_sessions: bool = False
-    # Host groups an Observe or Propose session (the Console too) is started with, so it can read the host's logs the way the
-    # operator can: `adm` (/var/log) and `systemd-journal` (journalctl). Only those two are accepted (the launcher holds the
-    # same allowlist): read access and nothing else. The root-owned launch.conf is written from this list at setup, and a
-    # helper installed before this existed refuses the flag: reinstall it first. Empty: sessions get no groups, as before.
-    read_log_groups: list[str] = []
+    # The supplementary groups EVERY session is started with, whatever its tier (trust mode): `docker` (the real socket),
+    # `pe-session` (the one sudoers rule setup writes), `adm` (/var/log) and `systemd-journal` (journalctl). Any group name;
+    # the launcher refuses one whose gid is 0, Core's own, or inside the session uid range. The root-owned launch.conf is
+    # written from this list at setup (file key `log_groups`), and preflight fails unless its probe holds exactly these
+    # (those the host has). `read_log_groups` is the deprecated name, still accepted (see `_deprecated_read_log_groups`).
+    session_groups: list[str] = list(DEFAULT_SESSION_GROUPS)
     # Brokered tools: tool name -> {name: base url}, and secret ref -> the NAME of a Core environment variable that
     # holds the key. The keys themselves live only in Core's environment, never in this file or a session.
     tool_sites: dict[str, dict[str, str]] = {}
@@ -730,11 +735,29 @@ class MissionsConfig(BaseModel):
                 raise ValueError("entries must be non-empty strings of at most 512 characters")
         return items
 
-    @field_validator("read_log_groups")
+    @model_validator(mode="before")
     @classmethod
-    def _read_log_groups(cls, names: list[str]) -> list[str]:
-        if len(set(names)) != len(names) or not set(names) <= LOG_READER_GROUPS:
-            raise ValueError("missions.read_log_groups may only name groups that read logs and nothing else: adm, systemd-journal")
+    def _deprecated_read_log_groups(cls, data):
+        """`read_log_groups` (before trust mode: the log groups an Observe/Propose session got, only adm and systemd-journal)
+        maps onto `session_groups`. It could only ever name groups the new default already holds, and setup rendered it as an
+        empty list, so a file that still says it gets the default plus anything it named, never fewer groups than trust mode
+        needs. Naming both is refused: one of them would be silently ignored."""
+        if isinstance(data, dict) and "read_log_groups" in data:
+            data = dict(data)
+            old = data.pop("read_log_groups")
+            if "session_groups" in data:
+                raise ValueError("missions.read_log_groups is the old name of missions.session_groups: set only session_groups")
+            if not isinstance(old, list) or not all(isinstance(g, str) for g in old):
+                raise ValueError("missions.read_log_groups must be a list of group names")
+            data["session_groups"] = list(dict.fromkeys([*DEFAULT_SESSION_GROUPS, *old]))
+        return data
+
+    @field_validator("session_groups")
+    @classmethod
+    def _session_groups(cls, names: list[str]) -> list[str]:
+        if (len(set(names)) != len(names) or len(names) > _MAX_SESSION_GROUPS
+                or not all(_GROUP_NAME.fullmatch(n) for n in names)):
+            raise ValueError(f"missions.session_groups must be at most {_MAX_SESSION_GROUPS} distinct plain group names")
         return names
 
     @field_validator("worker_user")

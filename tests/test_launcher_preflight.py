@@ -568,6 +568,33 @@ def test_an_account_or_group_in_the_range_fails_the_host(tmp_path, users, groups
     assert not report.ok and hit in report.reason
 
 
+def test_pe_s_accounts_are_pes_own_and_fine_and_a_lookalike_is_not(tmp_path):
+    c, launcher, helper, conf, ws = tree(tmp_path)
+    users = [acct("pe-s61000", 61000, 61000), acct("pe-s61001", 61001, 61001)]
+    groups = [grp_entry("pe-s61000", 61000), grp_entry("pe-s61001", 61001), grp_entry("pe-session", 990)]
+    assert preflight(tmp_path, c, helper, conf, ws, getpwall=lambda: users, getgrall=lambda: groups).ok
+    for bad_users, bad_groups, hit in (
+            ([acct("pe-s61000", 61000, 61001)], [], "user pe-s61000"),         # primary group is not its own
+            ([acct("pe-s61001", 61000, 61000)], [], "user pe-s61001"),         # the name of another uid
+            ([], [SimpleNamespace(gr_name="pe-s61000", gr_gid=61000, gr_mem=["bob"])], "group pe-s61000 (has members)")):
+        report = preflight(tmp_path, c, helper, conf, ws, getpwall=lambda: bad_users, getgrall=lambda: bad_groups)
+        assert not report.ok and hit in report.reason
+
+
+def test_a_host_with_sudo_needs_every_pe_s_account_and_says_to_run_setup():
+    from planet_express.missions.launcher.preflight import check_range_free
+    users = [acct(f"pe-s{n}", n, n) for n in range(61000, 61004)]
+    groups = [grp_entry(f"pe-s{n}", n) for n in range(61000, 61004)]
+    report = PreflightReport("sudo")
+    assert check_range_free(report, 61000, 61003, getpwall=lambda: users, getgrall=lambda: groups, require_accounts=True)
+    report = PreflightReport("sudo")
+    assert not check_range_free(report, 61000, 61004, getpwall=lambda: users, getgrall=lambda: groups, require_accounts=True)
+    assert "every session uid has its pe-s<uid> account" in report.reason and "Run setup" in report.reason
+    assert "61004" in report.reason
+    report = PreflightReport("direct")                       # MOS (no sudo): an account-less range is fine, as before
+    assert check_range_free(report, 61000, 61004, getpwall=lambda: [], getgrall=lambda: [])
+
+
 def test_accounts_just_outside_the_range_are_fine(tmp_path):
     c, launcher, helper, conf, ws = tree(tmp_path)
     users = [acct("a", 60999, 60999), acct("b", 62000, 62000), acct("root", 0, 0)]
@@ -621,7 +648,7 @@ def test_a_workspace_under_a_private_directory_is_reported_as_unreachable(tmp_pa
     assert "missions.workspace_root" in report.render()
 
 
-def test_a_probe_that_asked_for_log_groups_must_hold_exactly_those_and_one_that_did_not_must_hold_none():
+def test_the_probe_must_hold_exactly_the_configured_session_groups_that_exist():
     def judged(groups, log_gids):
         report = PreflightReport("direct")
         seen = json.loads(json.dumps(GOOD_SEEN))

@@ -1,10 +1,11 @@
 """Setup steps for the session launcher (contract 22.5): each named, each with a probe, a repair and an undo.
 
-    session-uid-range   launch.conf: the reserved uid range (and Core's identity), checked free of accounts
+    session-uid-range   launch.conf: the reserved uid range (and Core's identity), checked free of accounts not PE's own
     launcher-helper     the root-owned pe-launch under a root-owned, non-symlink chain
     helper-store        (MOS) its persistent copy under the data pool, installed at every boot by the boot script
     launcher-sudoers    Ubuntu only: `Core ALL=(root) NOPASSWD: pe-launch ""`, checked with visudo
-    worker-sudoers      Ubuntu only, when missions.worker_sudo_rules names any: the generated worker-tier sudo ceiling
+    session-access      Ubuntu only (trust mode): group `pe-session`, a `pe-s<N>` system account per session uid, and the
+                        one session sudoers rule `%pe-session ALL=(ALL:ALL) NOPASSWD: ALL`, checked with visudo
     cgroup-tree         systemd: a Delegate=yes drop-in; MOS: a boot script on the data pool
     workspace-root      where each session's own directory is made (Core owned, traversable)
     socket-root         the per-session socket directories' parent (Core owned, 0711)
@@ -17,7 +18,8 @@ check/act/verify/inverse discipline); `launcher_steps()` is the one place a plan
 `python -m ...launcher.setup_steps`) takes them from. Removal (uninstall) takes away only what is byte-for-byte what
 setup would write and only a directory that is empty; undoing a removal puts it back.
 
-Nothing here executes a shell. `visudo -c` is the one external program, run as argv with a minimal environment.
+Nothing here executes a shell. `visudo -c`, and `groupadd`/`useradd`/`usermod`/`userdel`/`groupdel` for the session
+accounts, are run as argv with a minimal environment.
 """
 
 import hashlib
@@ -36,6 +38,8 @@ from planet_express.missions.launcher.config import (
     CONF_PATH,
     DEFAULT_PIDS_MAX,
     HELPER_PATH,
+    SESSION_GROUP,
+    SESSION_SUDOERS_PATH,
     SUDOERS_PATH,
     ConfError,
     LaunchConf,
@@ -88,10 +92,14 @@ class Paths:
     conf: str = CONF_PATH
     helper_store: str = ""                        # MOS only: the persistent copy the boot script installs from
     sudoers: str = SUDOERS_PATH
-    worker_sudoers: str = "/etc/sudoers.d/planetexpress-worker"
-    worker_sudo_rules: tuple = ()                 # ((unit, (action, ...)), ...): the host-wide ceiling; empty means no file
-    worker_sudo_all_sessions: bool = False        # acknowledged: the file names every session uid (fail closed without it)
-    reconcile_worker_sudoers: bool = False        # no rules, but an earlier setup's generated file is on the host: take it away
+    session_sudoers: str = SESSION_SUDOERS_PATH   # the one rule that gives every session sudo (trust mode)
+    session_group: str = SESSION_GROUP
+    groupadd: str = "/usr/sbin/groupadd"
+    useradd: str = "/usr/sbin/useradd"
+    usermod: str = "/usr/sbin/usermod"
+    userdel: str = "/usr/sbin/userdel"
+    groupdel: str = "/usr/sbin/groupdel"
+    gpasswd: str = "/usr/bin/gpasswd"
     unit_dropin: str = UNIT_DROPIN
     boot_script: str = "/mnt/data/pe/launcher-boot.sh"
     interpreter: str = "/usr/bin/python3"
@@ -114,11 +122,8 @@ class Paths:
     @classmethod
     def from_missions(cls, missions, *, state_dir: str, **kw) -> "Paths":
         """Build from the `missions` section of Core's config so the two sides share one set of values."""
-        rules = tuple((r.unit, tuple(r.actions)) for r in getattr(missions, "worker_sudo_rules", ()))
         return cls(uid_min=missions.session_uid_min, uid_max=missions.session_uid_max, cgroup_root=missions.cgroup_root,
-                   sock_root=missions.sock_root, worker_sudo_rules=rules,
-                   log_groups=tuple(getattr(missions, "read_log_groups", ())),
-                   worker_sudo_all_sessions=bool(getattr(missions, "worker_sudo_all_sessions", False)),
+                   sock_root=missions.sock_root, log_groups=tuple(missions.session_groups),
                    workspace_root=missions.workspace_root or os.path.join(state_dir, "mission-workspaces"), **kw)
 
     def launch_conf(self) -> LaunchConf:
@@ -420,8 +425,10 @@ class SessionUidRange(Step):
     name = "session-uid-range"
 
     def _collisions(self) -> list[str]:
-        """Accounts and groups that already use a number in the range: a passwd entry by uid OR by primary gid, a group
-        by gid (the helper and the preflight refuse each of these, so setup must not report success over one)."""
+        """Accounts and groups that already use a number in the range and are not PE's own: a passwd entry by uid OR by
+        primary gid, a group by gid (the helper and the preflight refuse each of these, so setup must not report success
+        over one). PE's own are what `session-access` makes: user `pe-s<N>` with uid and primary gid N, group `pe-s<N>` with
+        gid N and no members."""
         out = []
         lo, hi = self.p.uid_min, self.p.uid_max
         for path, kind, fields_to_check in ((self.p.passwd, "user", (2, 3)), (self.p.group, "group", (2,))):
@@ -433,7 +440,7 @@ class SessionUidRange(Step):
                 fields = line.split(":")
                 numbers = [int(fields[i]) for i in fields_to_check if len(fields) > i and fields[i].isdigit()]
                 hit = [n for n in numbers if lo <= n <= hi]
-                if hit:
+                if hit and not _pe_entry(kind, fields):
                     out.append(f"{kind} {fields[0]} ({hit[0]})")
         return out
 
@@ -677,96 +684,273 @@ class LauncherSudoers(Step):
         return detail
 
 
-class WorkerSudoers(LauncherSudoers):
-    """The generated sudoers file for the worker tier (`planet_express/missions/sudo_gen.py`): the host-wide ceiling of what a
-    Repair session may do as root, exact `systemctl <action> <unit>` argv and nothing else. Same discipline as the launcher's
-    rule (visudo -c on a staging file, root 0440, read-back, journaled previous content, undo and uninstall remove exactly
-    the generator's output). It applies when the config names rules, and also, to take it away again, when it names none
-    but the host still holds a file an earlier setup generated (`reconcile_worker_sudoers`, set by the plan from its scan):
-    clearing the rules must not leave the old grants in force."""
-    name = "worker-sudoers"
+SESSION_SUDOERS_RULE = b"%pe-session ALL=(ALL:ALL) NOPASSWD: ALL\n"
+SESSION_HOME = "/nonexistent"
+SESSION_SHELL = "/usr/sbin/nologin"
+
+
+def account_name(uid: int) -> str:
+    """Setup's account (and private group) for session uid N. pe_launch.ACCOUNT_PREFIX is the same prefix."""
+    return f"{pe_launch.ACCOUNT_PREFIX}{uid}"
+
+
+def _pe_entry(kind: str, fields: list[str]) -> bool:
+    """Is this /etc/passwd ("user") or /etc/group ("group") line exactly one `session-access` makes? A user `pe-s<N>` with
+    uid N and primary gid N; a group `pe-s<N>` with gid N and no members. The helper accepts exactly these (and nothing else)."""
+    if len(fields) < 4 or not fields[2].isdigit():
+        return False
+    number = int(fields[2])
+    if fields[0] != account_name(number):
+        return False
+    if kind == "user":
+        return fields[3] == fields[2]
+    return not fields[3].strip()
+
+
+def _db(path: str) -> list[list[str]]:
+    """The colon-separated lines of /etc/passwd or /etc/group (missing file: none). A symlink or other kind raises StepError."""
+    data = read_regular(path)
+    return [line.split(":") for line in (data or b"").decode("utf-8", errors="replace").splitlines() if line and not line.startswith("#")]
+
+
+class SessionAccess(Step):
+    """Trust mode (docs/designs/v4-trust-mode.md): every session gets real access, and sudo is one of the ways in. sudo refuses
+    a uid with no account, so every session uid N in the configured range gets a system account `pe-s<N>` (primary group
+    `pe-s<N>`, gid N, no members; home /nonexistent; shell /usr/sbin/nologin: nobody logs in as it) that is a member of the
+    system group `pe-session`, whose gid is outside the range. `/etc/sudoers.d/planetexpress-sessions` holds exactly
+    `%pe-session ALL=(ALL:ALL) NOPASSWD: ALL` (root 0440, `visudo -cf` on a staging copy before it is moved into place). The
+    launcher gives every session the `pe-session` group explicitly (launch.conf's session groups), so the rule matches
+    whichever way sudo reads a session's groups. Same discipline as the others: the probe reads only (the passwd and group
+    files, the sudoers file); repair journals each account or group BEFORE it is made, so a crash leaves nothing unrecorded;
+    undo removes exactly what it made, and refuses if any of it has changed since. An account or group in the range that is not
+    shaped as PE's own is never adopted or changed: the step is blocked and names it. Removal (uninstall) takes away the
+    sudoers rule only; the accounts stay (no login, no home, no sudo once the rule is gone) and setup says so."""
+    name = "session-access"
+    ubuntu_only = True            # MOS has no sudo, and Core runs sessions there as root with no account needed
 
     @property
     def target(self) -> str:
-        return self.p.worker_sudoers
-
-    def applies(self) -> bool:
-        return super().applies() and (bool(self.p.worker_sudo_rules) or self.p.reconcile_worker_sudoers)
+        return self.p.session_sudoers
 
     def wanted(self) -> bytes:
-        from planet_express.missions.sudo_gen import render
-        return render(self.p.worker_sudo_rules, uid_min=self.p.uid_min, uid_max=self.p.uid_max, systemctl=self.p.systemctl) or b""
+        return SESSION_SUDOERS_RULE          # exactly the one rule: the side-door check compares these bytes
 
-    def unsafe(self) -> str | None:
-        from planet_express.missions.sudo_gen import SudoGenError, render
-        if self.p.worker_sudo_rules and not self.p.worker_sudo_all_sessions:
-            return ("the worker sudoers would grant its rules to EVERY session uid (Observe, Propose and rules-less Repair "
-                    "sessions included, because the launcher cannot yet add a per-grant group); set "
-                    "missions.worker_sudo_all_sessions: true to accept that, or clear missions.worker_sudo_rules")
+    def owned_file(self):
+        return self.target, self.wanted(), 0o440
+
+    def _run(self, argv: list[str]) -> None:
+        result = self.p.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=60, env=_RUN_ENV, check=False)
+        if result.returncode != 0:
+            raise StepError(f"{os.path.basename(argv[0])} failed: "
+                            f"{(result.stderr or b'').decode(errors='replace').strip()[:200] or f'exit {result.returncode}'}")
+
+    def _visudo_ok(self, path: str) -> bool:
         try:
-            render(self.p.worker_sudo_rules, uid_min=self.p.uid_min, uid_max=self.p.uid_max, systemctl=self.p.systemctl)
-        except SudoGenError as exc:
-            return f"the worker sudo rules cannot be generated: {exc}"
-        return None
+            result = self.p.run([self.p.visudo, "-c", "-f", path], stdin=subprocess.DEVNULL, capture_output=True,
+                                timeout=30, env=_RUN_ENV, check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
 
-    def _generated(self) -> bytes | None:
-        """The file's bytes if it exists and is exactly generator output, else None."""
-        from planet_express.missions.sudo_gen import is_generated
-        current = read_regular(self.target)
-        return current if current is not None and is_generated(current, self.p.systemctl) else None
+    def _state(self) -> tuple[list[str], dict]:
+        """(why it is blocked, what is missing): reads the passwd and group files only. Blocked: a group or account that is
+        not shaped as PE's own where PE's must go, a `pe-session` group with a gid it must not have, a sudoers file that is
+        not a plain file. Missing: the group, accounts, private groups or memberships setup makes, and the rule."""
+        p = self.p
+        lo, hi = p.uid_min, p.uid_max
+        users, groups = _db(p.passwd), _db(p.group)
+        blocked: list[str] = []
+        session = next((g for g in groups if g and g[0] == p.session_group), None)
+        members: set[str] = set()
+        if session is not None:
+            gid = int(session[2]) if len(session) > 2 and session[2].isdigit() else -1
+            if gid <= 0 or lo <= gid <= hi or gid == p.core_gid:
+                blocked.append(f"group {p.session_group} has gid {session[2] if len(session) > 2 else '?'}, which is root's, "
+                               f"Core's or inside the session range {lo}-{hi}")
+            members = {m for m in (session[3] if len(session) > 3 else "").split(",") if m}
+        by_uid = {int(u[2]): u for u in users if len(u) > 3 and u[2].isdigit() and lo <= int(u[2]) <= hi}
+        by_gid = {int(g[2]): g for g in groups if len(g) > 3 and g[2].isdigit() and lo <= int(g[2]) <= hi}
+        names_user = {u[0]: u for u in users}
+        names_group = {g[0]: g for g in groups}
+        missing_users, missing_groups, missing_members = [], [], []
+        for n in range(lo, hi + 1):
+            name = account_name(n)
+            user, group = by_uid.get(n), by_gid.get(n)
+            if group is None and name in names_group:
+                blocked.append(f"group {name} exists with another gid")
+            elif group is not None and not _pe_entry("group", group):
+                blocked.append(f"group {group[0]} ({n}) is not PE's own")
+            elif group is None:
+                missing_groups.append(n)
+            if user is None and name in names_user:
+                blocked.append(f"user {name} exists with another uid")
+            elif user is not None and not (_pe_entry("user", user) and user[5:7] == [SESSION_HOME, SESSION_SHELL]):
+                blocked.append(f"user {user[0]} ({n}) is not PE's own")
+            elif user is None:
+                missing_users.append(n)
+            elif name not in members:
+                missing_members.append(n)
+        blocked += [f"user {u[0]} has primary gid {u[3]} in the session range" for u in users
+                    if len(u) > 3 and u[3].isdigit() and lo <= int(u[3]) <= hi and int(u[3]) not in by_uid]
+        try:
+            current = read_regular(self.target)
+        except StepError as exc:
+            blocked.append(str(exc))
+            current = None
+        sudoers = "ok"
+        if current is None:
+            sudoers = "absent"
+        elif current != self.wanted():
+            sudoers = "differs"
+        else:
+            info = os.lstat(self.target)
+            if info.st_uid != p.owner_uid or info.st_gid != p.owner_gid or stat.S_IMODE(info.st_mode) != 0o440:
+                sudoers = "mode"
+        return blocked, {"group": session is None, "groups": missing_groups, "users": missing_users,
+                         "members": missing_members, "sudoers": sudoers}
+
+    @staticmethod
+    def _describe(missing: dict) -> str:
+        parts = []
+        if missing["group"]:
+            parts.append("group pe-session")
+        if missing["users"] or missing["groups"]:
+            parts.append(f"{len(set(missing['users']) | set(missing['groups']))} session account(s)")
+        if missing["members"]:
+            parts.append(f"{len(missing['members'])} pe-session membership(s)")
+        if missing["sudoers"] != "ok":
+            parts.append({"absent": "the session sudoers rule", "differs": "the session sudoers rule (it differs)",
+                          "mode": "the session sudoers rule's owner/mode (root 0440)"}[missing["sudoers"]])
+        return ", ".join(parts)
 
     def probe(self) -> Probe:
-        if self.p.worker_sudo_rules:
-            return super().probe()
+        if self.p.session_group != SESSION_GROUP:
+            return Probe(False, f"the session group must be {SESSION_GROUP}: the sudoers rule names it", blocked=True)
         try:
-            stale = self._generated()
-        except StepError as exc:
-            return Probe(False, str(exc), blocked=True)
-        if stale is not None:
-            return Probe(False, f"{self.target} holds sudo rules the configuration no longer names")
-        return Probe(True, "no generated worker sudoers on the host")
+            blocked, missing = self._state()
+        except (StepError, OSError) as exc:
+            return Probe(False, f"cannot read the account databases: {exc}", blocked=True)
+        if blocked:
+            return Probe(False, "; ".join(blocked[:3]) + ". Setup will not change accounts or groups it did not make", blocked=True)
+        todo = self._describe(missing)
+        if todo:
+            return Probe(False, f"missing: {todo}")
+        if not self._visudo_ok(self.target):
+            return Probe(False, "visudo -c rejects the session sudoers rule", blocked=True)
+        return Probe(True, f"pe-s{self.p.uid_min}..pe-s{self.p.uid_max} in {SESSION_GROUP}; {self.target}")
 
     def repair(self, journal) -> dict:
-        if self.p.worker_sudo_rules:
-            return super().repair(journal)
-        path, _why = self.removal()
-        if path is None:
+        state = self.probe()
+        if state.ok:
             return {}
-        previous = read_regular(path)
-        evidence = {"removed": True, "previous": _text(previous), "previous_sha256": sha256(previous), "sha256": None,
-                    "created_dirs": []}
-        journal.append("evidence", step=self.name, data=evidence)
-        os.unlink(path)
+        if state.blocked:
+            raise StepError(state.detail)
+        p = self.p
+        _blocked, missing = self._state()
+        # Each account, group or membership is journaled as made BEFORE the command runs, so a crash in between can never
+        # leave one that undo does not know about (undo skips what does not exist, and checks the shape of what does).
+        made = {"created_group": False, "created_groups": [], "created_users": [], "added_members": [],
+                "sha256": None, "previous": None, "created_dirs": []}
+
+        def record() -> None:
+            journal.append("evidence", step=self.name, data={k: (list(v) if isinstance(v, list) else v) for k, v in made.items()})
+        if missing["group"]:
+            made["created_group"] = True
+            record()
+            self._run([p.groupadd, "--system", p.session_group])
+            if self._state()[0]:
+                raise StepError(f"groupadd made {p.session_group} with a gid the sessions cannot use; undo removes it")
+        for n in missing["groups"]:
+            made["created_groups"].append(n)
+            record()
+            self._run([p.groupadd, "--gid", str(n), account_name(n)])
+        for n in missing["users"]:
+            made["created_users"].append(n)
+            record()
+            self._run([p.useradd, "--system", "--uid", str(n), "--gid", str(n), "--groups", p.session_group,
+                       "--home-dir", SESSION_HOME, "--no-create-home", "--shell", SESSION_SHELL, account_name(n)])
+        for n in missing["members"]:
+            made["added_members"].append(n)
+            record()
+            self._run([p.usermod, "--append", "--groups", p.session_group, account_name(n)])
+        if missing["sudoers"] != "ok":
+            wanted, previous = self.wanted(), read_regular(self.target)
+            staging = os.path.join(os.path.dirname(self.target), f".{os.path.basename(self.target)}.check")
+            write_atomic(staging, wanted, 0o440, p.owner_uid, p.owner_gid)
+            try:
+                if not self._visudo_ok(staging):
+                    raise StepError("visudo -c rejects the session sudoers rule; it was not installed")
+            finally:
+                try:
+                    os.unlink(staging)       # dot-prefixed, which sudo ignores, but never left behind
+                except FileNotFoundError:
+                    pass
+            made["previous"], made["sha256"] = _text(previous), sha256(wanted)
+            record()
+            write_atomic(self.target, wanted, 0o440, p.owner_uid, p.owner_gid)
+        record()
         if not self.probe().ok:
-            raise StepError("the stale worker sudoers was removed but the host still holds one")
-        return evidence
+            raise StepError("the session accounts and sudoers rule were set up but do not read back as intended")
+        return dict(made)
+
+    def _still_ours(self, evidence: dict) -> list[str]:
+        """What setup made that is no longer exactly what it made (undo then changes nothing)."""
+        users, groups = _db(self.p.passwd), _db(self.p.group)
+        user_by = {u[0]: u for u in users}
+        group_by = {g[0]: g for g in groups}
+        moved = []
+        for n in evidence.get("created_users") or []:
+            u = user_by.get(account_name(n))
+            if u is not None and not (_pe_entry("user", u) and int(u[2]) == n):
+                moved.append(f"user {account_name(n)}")
+        for n in evidence.get("created_groups") or []:
+            g = group_by.get(account_name(n))
+            if g is not None and not (len(g) > 2 and g[2] == str(n)):
+                moved.append(f"group {account_name(n)}")
+        if evidence.get("created_group"):
+            g = group_by.get(self.p.session_group)
+            ours = {account_name(n) for n in [*(evidence.get("created_users") or []), *(evidence.get("added_members") or [])]}
+            if g is not None and {m for m in (g[3] if len(g) > 3 else "").split(",") if m} - ours:
+                moved.append(f"group {self.p.session_group} (it has members setup did not add)")
+        return moved
 
     def undo(self, journal, evidence: dict) -> str:
-        if not evidence.get("removed"):
-            return super().undo(journal, evidence)
-        if os.path.lexists(self.target):
-            raise StepRefused(f"{self.target} exists again since setup removed it; nothing was restored")
-        write_atomic(self.target, evidence["previous"].encode(), 0o440, self.p.owner_uid, self.p.owner_gid)
-        return f"{self.target}: restored"
+        p = self.p
+        moved = self._still_ours(evidence)
+        wrote = evidence.get("sha256")
+        current = read_regular(self.target)
+        if wrote and current is not None and sha256(current) != wrote:
+            moved.append(self.target)
+        if moved:
+            raise StepRefused(f"{', '.join(moved[:3])} changed after setup made it; nothing was reverted")
+        done = []
+        if wrote and current is not None:
+            os.unlink(self.target)
+            done.append(f"{self.target}: removed")
+            if evidence.get("previous") is not None:
+                write_atomic(self.target, evidence["previous"].encode(), 0o440, p.owner_uid, p.owner_gid)
+                done.append("(the previous file was restored)")
+        names_user = {u[0] for u in _db(p.passwd)}
+        for n in evidence.get("added_members") or []:
+            if account_name(n) in names_user:
+                self._run([p.gpasswd, "--delete", account_name(n), p.session_group])
+        removed_users = [n for n in evidence.get("created_users") or [] if account_name(n) in names_user]
+        for n in removed_users:
+            self._run([p.userdel, account_name(n)])
+        names_group = {g[0] for g in _db(p.group)}     # read again: userdel may have taken a same-named primary group with it
+        removed_groups = [n for n in evidence.get("created_groups") or [] if account_name(n) in names_group]
+        for n in removed_groups:
+            self._run([p.groupdel, account_name(n)])
+        if evidence.get("created_group") and p.session_group in names_group:
+            self._run([p.groupdel, p.session_group])
+            done.append(f"group {p.session_group} removed")
+        if removed_users or removed_groups:
+            done.append(f"{len(removed_users)} account(s) and {len(removed_groups)} private group(s) removed")
+        return "; ".join(done) or "nothing to undo"
 
     def removal(self) -> tuple[str | None, str]:
-        """The generator's own output is removable whatever rules it held; anything else stays."""
-        current = read_regular(self.target)
-        if current is None:
-            return None, f"{self.target}: already absent"
-        if self._generated() is None:
-            return None, f"{self.target}: left in place, it is not what setup writes"
-        return self.target, ""
-
-    def remove(self, journal) -> str:
-        path, why = self.removal()
-        if path is None:
-            return why
-        previous = read_regular(path)
-        journal.append("evidence", step=self.name, data={"removed": {"kind": "file", "path": path, "mode": 0o440,
-                                                                      "content": previous.decode("utf-8")}})
-        os.unlink(path)
-        return f"{path}: removed"
+        path, why = super().removal()
+        return path, why + ("" if path else "; the pe-s<N> accounts are left in place (no login, no home)")
 
 
 # ── 4. the cgroup tree ─────────────────────────────────────────────────────────────────────────────
@@ -1199,7 +1383,7 @@ class SudoersReadable(Step):
 
 def launcher_steps(paths: Paths) -> list[Step]:
     """The steps in dependency order, minus those that do not apply on this host's flavour."""
-    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), WorkerSudoers(paths),
+    steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), SessionAccess(paths),
              SudoersReadable(paths), CgroupTree(paths), WorkspaceRoot(paths), SocketRoot(paths)]
     return [s for s in steps if s.applies()]
 
@@ -1288,7 +1472,8 @@ def cli_paths(args, core_uid: int, core_gid: int) -> Paths:
     extra = mos_launcher_paths(args.pe_home) if args.flavour == "mos" else {}
     return Paths(core_uid=core_uid, core_gid=core_gid, core_user=args.core_user, flavour=args.flavour,
                  workspace_root=args.workspace_root, cgroup_root=args.cgroup_root, sock_root=args.sock_root,
-                 uid_min=args.uid_min, uid_max=args.uid_max, log_groups=tuple(getattr(args, "log_group", None) or ()), **extra)
+                 uid_min=args.uid_min, uid_max=args.uid_max,
+                 log_groups=tuple(getattr(args, "session_group", None) or _DEFAULTS.session_groups), **extra)
 
 
 def main(argv: list[str] | None = None) -> int:               # pragma: no cover -- a thin CLI over the above
@@ -1308,8 +1493,9 @@ def main(argv: list[str] | None = None) -> int:               # pragma: no cover
     parser.add_argument("--sock-root", default=_DEFAULTS.sock_root, help="missions.sock_root")
     parser.add_argument("--uid-min", type=int, default=_DEFAULTS.session_uid_min)
     parser.add_argument("--uid-max", type=int, default=_DEFAULTS.session_uid_max)
-    parser.add_argument("--log-group", action="append", help="missions.read_log_groups: a group an Observe/Propose session may read "
-                        "the host's logs through (repeat; e.g. adm, systemd-journal). Must match config.yaml")
+    parser.add_argument("--session-group", "--log-group", dest="session_group", action="append",
+                        help="missions.session_groups: a supplementary group every session gets (repeat; default "
+                        f"{', '.join(_DEFAULTS.session_groups)}). Must match config.yaml")
     args = parser.parse_args(argv)
     account = pwd.getpwnam(args.core_user)
     paths = cli_paths(args, account.pw_uid, account.pw_gid)

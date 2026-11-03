@@ -6,7 +6,7 @@ be audited without the rest of the project. It is installed as a root-owned file
 non-symlink directory chain and run either by `sudo -n` (Ubuntu, unprivileged Core) or directly (MOS, Core is
 root). It takes NO arguments (the sudoers rule forbids any) and reads ONE JSON spec on stdin:
 
-    {session_id, worker_uid, cwd, argv, env, token, sock_dir?, state_dir?}
+    {session_id, worker_uid, cwd, argv, env, token, sock_dir?, state_dir?, read_logs? (accepted, ignored)}
 
 Everything that decides authority comes from the root-owned launch.conf, never from the spec: the uid range,
 the gid (always equal to the uid), the cgroup root, the workspace root, the socket root, the Core identity.
@@ -16,7 +16,8 @@ What it does, in order (any failure before the cgroup join removes what it made)
   1. interpret nothing from the environment: clear it, rebuild a minimal one, ignore PYTHON* (the shebang is
      `-I -S`), refuse to run as non-root, refuse an argv, check its own path and the config's ancestors;
   2. validate the spec (shape, bounds) and then against the config (uid range, not Core, not root, cwd under the
-     workspace root and not a symlink, owned by Core or by that uid, argv[0] an absolute executable file);
+     workspace root and not a symlink, owned by Core or by that uid, argv[0] an absolute executable file; the uid has no
+     account, or exactly PE's own `pe-s<uid>` account);
   3. create `<cgroup_root>/<session_id>` (must not exist) on a cgroup2 mount, give Core the control files
      (cgroup.procs, cgroup.freeze, cgroup.kill), set pids.max; hand the workspace to the session uid;
      optionally take over the per-session socket directory Core already made and filled (chown to the session);
@@ -24,8 +25,9 @@ What it does, in order (any failure before the cgroup join removes what it made)
      never its contents), so state a session writes there survives for the next session run as the same uid. The cwd
      must then be the session's own workspace. Adoption is the last step before the cgroup join;
   4. token pipe -> fd 3; fd 0 /dev/null; fds 1 and 2 stay the merged output pipe Core holds; nothing else;
-  5. join the cgroup, setgroups([] or the conf's log groups, only when the spec asks), setgid, setuid, verify root cannot be regained, no_new_privs, setsid,
-     reset rlimits and signals, fchdir to the already-verified cwd;
+  5. join the cgroup, setgroups(the conf's session groups, for every session), setgid, setuid, verify root cannot be
+     regained, setsid, reset rlimits and signals, fchdir to the already-verified cwd. `no_new_privs` is NOT set (trust mode,
+     docs/designs/v4-trust-mode.md): it would disable sudo, and a session's sudo is the operator's approved choice;
   6. write ONE framed status line (`PE-LAUNCH-STATUS {json}`) as the first line of the merged output, then execve
      exactly argv with exactly the spec env. The exec'd pid is not tracked; the cgroup is.
 """
@@ -51,7 +53,6 @@ CGROUP2_SUPER_MAGIC = 0x63677270
 TIMEOUT_S = 10          # shorter than Core's wait (strategies.LAUNCH_TIMEOUT_S): a helper Core gave up on is already dead
 MAX_SPEC_BYTES = 60_000
 MAX_WORKSPACE_ENTRIES = 64
-_PR_SET_NO_NEW_PRIVS = 38
 
 SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -65,11 +66,13 @@ SPEC_REQUIRED = SPEC_KEYS - {"sock_dir", "state_dir", "read_logs"}
 CONF_KEYS = frozenset({"version", "uid_min", "uid_max", "core_uid", "core_gid", "cgroup_root",
                        "workspace_root", "sock_root", "pids_max"})
 CONF_OPTIONAL = frozenset({"log_groups"})
-# The only groups a log-reading session may be given: they read the host's logs and carry nothing else. The root-owned conf
-# names some of these, never the spec (a spec can only ask for "the log groups"). An allowlist, not a list of groups to avoid:
-# any other group (docker, incus-admin, podman, ...) can be control, and nobody can enumerate those.
-LOG_GROUPS_ALLOWED = frozenset({"adm", "systemd-journal"})
-MAX_LOG_GROUPS = 4
+# `log_groups` is the file key (kept so the format is stable) for what are now the SESSION groups: the supplementary groups
+# every session is started with (trust mode: docker for the real socket, pe-session for sudo, adm and systemd-journal for logs).
+# Only the root-owned conf names them, never the spec. Any group name is accepted except one that resolves to gid 0, Core's
+# own gid, or a gid inside the session range (`session_gids`): those would make a session root, Core, or another session.
+GROUP_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}\$?")
+MAX_LOG_GROUPS = 8
+ACCOUNT_PREFIX = "pe-s"      # setup's account for session uid N is `pe-s<N>` with private group `pe-s<N>` (gid N)
 
 
 class Refused(Exception):
@@ -207,14 +210,14 @@ def load_conf(path=CONF_PATH, *, trusted_uid=0, below="/"):
         raise Refused("conf paths")
     groups = conf.get("log_groups", [])
     if (not isinstance(groups, list) or len(groups) > MAX_LOG_GROUPS or len(set(groups)) != len(groups)
-            or not all(isinstance(g, str) and g in LOG_GROUPS_ALLOWED for g in groups)):
+            or not all(isinstance(g, str) and GROUP_NAME.fullmatch(g) for g in groups)):
         raise Refused("conf log_groups")
     return conf
 
 
-def log_gids(conf):
-    """The gids of the conf's log groups that exist on this host (a group that is absent is skipped: not every host has
-    every group). Refused: gid 0, Core's own group, any gid in the session range, or a group with an unexpected primary use."""
+def session_gids(conf):
+    """The gids of the conf's session groups that exist on this host (a group that is absent is skipped: not every host has
+    every group). Refused: gid 0, Core's own group, or any gid in the session range (a session's own private gid, or another's)."""
     out = []
     for name in conf.get("log_groups", []):
         try:
@@ -222,7 +225,7 @@ def log_gids(conf):
         except KeyError:
             continue
         if gid == 0 or gid == conf["core_gid"] or conf["uid_min"] <= gid <= conf["uid_max"]:
-            raise Refused("log group gid")
+            raise Refused("session group gid")
         out.append(gid)
     return out
 
@@ -272,22 +275,34 @@ def validate(spec, conf):
 
 
 def check_identity_unused(uid, gid):
-    """The reserved range must belong to no account at all: no passwd entry for the uid, no account (any uid) whose
-    primary group is this gid, and a group of that number with no members. A same-numbered private group is not an
-    excuse: an account in the range would share the session's identity, files and socket."""
+    """The session uid belongs to nobody but PE. Accepted: no account at all for the uid (the old reserved-range rule), or
+    exactly PE's own account, which setup makes because sudo refuses a uid with no passwd entry: named `pe-s<uid>`, primary
+    group gid `uid`, and that group named `pe-s<uid>` with no members. Refused: any other account with this uid, any other
+    account whose primary group is this gid, and a group of this number that has members (or, for PE's account, another
+    name). An account that is not PE's would share the session's identity, files and socket."""
+    name = ACCOUNT_PREFIX + str(uid)
+    entries = pwd.getpwall()
+    owners = [entry for entry in entries if entry.pw_uid == uid]
     try:
-        pwd.getpwuid(uid)
+        owners.append(pwd.getpwuid(uid))           # the lookup sudo itself makes (NSS beyond /etc/passwd included)
     except KeyError:
         pass
-    else:
-        raise Refused("uid belongs to an account")
-    if any(entry.pw_gid == gid for entry in pwd.getpwall()):
+    for entry in owners:
+        if entry.pw_name != name or entry.pw_gid != gid:
+            raise Refused("uid belongs to an account")
+    pe_owned = bool(owners)
+    if any(entry.pw_gid == gid and not (pe_owned and entry.pw_uid == uid) for entry in entries):
         raise Refused("gid is an account's primary group")
     try:
-        if grp.getgrgid(gid).gr_mem:
-            raise Refused("group has members")
+        group = grp.getgrgid(gid)
     except KeyError:
-        pass
+        if pe_owned:
+            raise Refused("account has no private group") from None
+        return
+    if group.gr_mem:
+        raise Refused("group has members")
+    if pe_owned and group.gr_name != name:
+        raise Refused("private group name")
 
 
 def open_cwd(spec, conf, uid):
@@ -494,7 +509,9 @@ def arrange_fds(token_fd, out_fd=1):
 
 
 def drop_privileges(uid, gid, extra_gids=()):
-    """`extra_gids` is empty for every session except one the spec asked to read logs for (see `log_gids`)."""
+    """`extra_gids` are the conf's session groups (see `session_gids`), the same for every session. No `no_new_privs`: it
+    would disable sudo (trust mode). What stays is that this process cannot regain root by setuid(0) and that the identity
+    is exactly what was asked for; sudo is a separate, logged path the operator chose to give sessions."""
     os.setgroups(list(extra_gids))
     os.setresgid(gid, gid, gid)
     os.setresuid(uid, uid, uid)
@@ -507,9 +524,6 @@ def drop_privileges(uid, gid, extra_gids=()):
         pass
     else:
         raise Refused("root regained")
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
-        raise Refused("no_new_privs")
 
 
 def new_session():
@@ -570,7 +584,9 @@ def launch(raw, conf):
     os.write(procs_fd, b"0")                   # "0" means the writing process itself
     os.close(procs_fd)
     os.close(cg_fd)
-    drop_privileges(uid, gid, log_gids(conf) if spec.get("read_logs") else ())
+    # Every session gets the conf's groups whatever its tier; the spec's `read_logs` is still accepted (an older Core sends it)
+    # but no longer decides anything.
+    drop_privileges(uid, gid, session_gids(conf))
     reset_process_state()
     os.fchdir(cwd_fd)
     status = {"ok": True, "session_id": sid, "uid": uid, "gid": gid, "cgroup": cgroup_path}

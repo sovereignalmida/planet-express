@@ -14,7 +14,7 @@ Step 1 is the launcher preflight (the same one the daemon runs before it starts 
 helper and its config, sudoers, then a throwaway session started through `pe-launch` whose own process proves it
 cannot write the cgroup files, while Core freezes it (confirming `frozen 1`), thaws it, kills it and removes it.
 Step 2 launches a real process tree as a session uid (a leader, a plain child and a double-fork/setsid escaper) and
-proves every member is in the cgroup, runs as that uid with no_new_privs, that Core can freeze and kill the whole
+proves every member is in the cgroup, runs as that uid without no_new_privs (trust mode: sudo must work), that Core can freeze and kill the whole
 tree, and that the cgroup empties. Exit status 0 only if the preflight passed and every check passed.
 
 It touches only `<cgroup-root>/PREFLIGHT-*` and `<cgroup-root>/REHEARSAL-*` (and the matching workspace and socket
@@ -128,7 +128,7 @@ def main():
         members = containment.pids(cs)
         checks["tree_has_at_least_3_members"] = len(members) >= 3
         checks["all_run_as_session_uid"] = all(status_field(p, "Uid") == str(args.uid_min) for p in members)
-        checks["all_no_new_privs"] = bool(members) and all(status_field(p, "NoNewPrivs") == "1" for p in members)
+        checks["no_new_privs_not_set"] = bool(members) and all(status_field(p, "NoNewPrivs") == "0" for p in members)   # trust mode: sudo works
         checks["not_empty_while_running"] = not containment.is_empty(cs)
         containment.freeze(cs)
         checks["frozen"] = "frozen 1" in Path(cs.cgroup_path, "cgroup.events").read_text()

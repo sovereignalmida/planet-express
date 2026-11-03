@@ -122,17 +122,49 @@ def _trusted(report: PreflightReport, name: str, path: str, trusted_uid: int, be
     return report.add(name, True, path)
 
 
-def check_range_free(report: PreflightReport, low: int, high: int, *, getpwall=None, getgrall=None) -> bool:
-    """No account and no group (by uid, primary gid or gid) lives in the session range: such an account would share a
-    session's identity, files and socket. Reads the same databases the helper reads."""
+def _pe_account(name: str, number: int) -> bool:
+    return name == f"{pe_launch.ACCOUNT_PREFIX}{number}"
+
+
+def check_range_free(report: PreflightReport, low: int, high: int, *, getpwall=None, getgrall=None,
+                     require_accounts: bool = False) -> bool:
+    """The session range belongs to PE alone: every account and group in it (by uid, primary gid or gid) is PE's own
+    `pe-s<N>` one (account uid N, primary gid N; group gid N, no members), as the helper requires at every launch. Anything
+    else would share a session's identity, files and socket. With `require_accounts` (a host that has sudo: trust mode gives
+    sessions sudo, and sudo refuses a uid with no account) every uid in the range must also HAVE its account and group, or
+    the check fails naming the setup step that makes them. Reads the same databases the helper reads."""
     import grp
     import pwd
     users = (getpwall or pwd.getpwall)()
     groups = (getgrall or grp.getgrall)()
-    taken = sorted({f"user {u.pw_name}" for u in users if low <= u.pw_uid <= high or low <= u.pw_gid <= high}
-                   | {f"group {g.gr_name}" for g in groups if low <= g.gr_gid <= high})
-    return report.add("no account or group uses the session uid range", not taken,
-                      ", ".join(taken[:3]) if taken else f"{low}-{high}")
+    taken: set[str] = set()
+    accounts, private = set(), set()
+    for u in users:
+        if not (low <= u.pw_uid <= high or low <= u.pw_gid <= high):
+            continue
+        if low <= u.pw_uid <= high and u.pw_gid == u.pw_uid and _pe_account(u.pw_name, u.pw_uid):
+            accounts.add(u.pw_uid)
+        else:
+            taken.add(f"user {u.pw_name}")
+    for g in groups:
+        if not low <= g.gr_gid <= high:
+            continue
+        members = getattr(g, "gr_mem", None) or []
+        if _pe_account(g.gr_name, g.gr_gid) and not members:
+            private.add(g.gr_gid)
+        else:
+            taken.add(f"group {g.gr_name}" + (" (has members)" if members else ""))
+    first = report.add("only PE's own accounts and groups use the session uid range", not taken,
+                       ", ".join(sorted(taken)[:3]) if taken else f"{low}-{high}")
+    if not require_accounts:
+        return first
+    missing = [n for n in range(low, high + 1) if n not in accounts or n not in private]
+    second = report.add(
+        "every session uid has its pe-s<uid> account", not missing,
+        (f"{len(missing)} of {high - low + 1} uids have no account or private group (first: {missing[0]}); sudo refuses a uid "
+         "with no account, so a session could not use it. Run setup (the session-access launcher step) to create them")
+        if missing else f"pe-s{low}..pe-s{high}")
+    return first and second
 
 
 def check_no_stale_uids(report: PreflightReport, low: int, high: int, held: "list[int]") -> bool:
@@ -194,7 +226,7 @@ def _read_json_line(fd: int, timeout_s: float) -> dict | None:
 
 
 def log_group_gids(names) -> list[int]:
-    """The gids of the configured log groups that exist on this host (the helper skips an absent one the same way)."""
+    """The gids of the configured session groups that exist on this host (the helper skips an absent one the same way)."""
     import grp
     out = []
     for name in names:
@@ -207,16 +239,18 @@ def log_group_gids(names) -> list[int]:
 
 def judge_probe(report: PreflightReport, seen: dict | None, uid: int, *, sock_dir: bool,
                 log_gids: list[int] | None = None) -> None:
-    """What the probe process (running as the throwaway uid) reported about its own powers. `log_gids` is None when sessions are
-    not set up to read logs (they must then have no supplementary group at all) and the gids the helper must have given
-    otherwise: a helper or launch.conf that disagrees with `missions.read_log_groups` fails here, not on the first real session."""
+    """What the probe process (running as the throwaway uid) reported about its own powers. `log_gids` are the gids of the
+    configured session groups that exist on this host (`missions.session_groups`; empty or None: no supplementary group at
+    all). Every session gets exactly those, so the probe must hold exactly those: a helper or launch.conf that disagrees with
+    the config (an older helper that still wants a flag, a stale conf) fails here, not on the first real session."""
     if seen is None:
         report.add("probe session ran", False, "it reported nothing")
         return
     ids = seen.get("ids") or [[], [], None]
     want = sorted(log_gids or [])
     report.add("session identity", ids[0] == [uid] * 3 and ids[1] == [uid] * 3 and sorted(ids[2] or []) == want and isinstance(ids[2], list),
-               (f"uid/gid {uid}, " + (f"log groups {want} only" if want else "no supplementary groups")) if ids[0] == [uid] * 3 else f"ran as {ids}")
+               (f"uid/gid {uid}, " + (f"session groups {want} exactly (got {sorted(ids[2] or [])})" if want
+                                       else "no supplementary groups")) if ids[0] == [uid] * 3 else f"ran as {ids}")
     denied = seen.get("denied") or {}
     for name in ("cgroup.procs", "cgroup.freeze", "cgroup.kill", "parent cgroup.procs", "grandparent cgroup.procs"):
         value = denied.get(name)
@@ -319,7 +353,6 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
             probe_sock = sock.directory
         spec = LaunchSpec(
             uid=probe_uid, cwd=workspace, env={"PATH": "/usr/bin:/bin"}, token=token, sock_dir=bool(sock_root),
-            read_logs=bool(log_groups),          # the probe asks exactly as a real Observe/Propose session will
             argv=(python, "-I", "-c", PROBE_SCRIPT, cgroup, parent, os.path.dirname(parent), probe_sock, workspace))
         try:
             cs = containment.launch(sid, spec)
@@ -327,8 +360,10 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
             report.add("launch a throwaway session through the helper", False, str(exc))
             return
         report.add("launch a throwaway session through the helper", True, f"uid {probe_uid}")
+        # The probe is launched exactly as every real session is (no flag decides its groups), so it must hold exactly the
+        # configured groups this host has.
         judge_probe(report, _read_json_line(containment.output_fd(cs), wait_s), probe_uid, sock_dir=bool(sock_root),
-                    log_gids=log_group_gids(log_groups) if log_groups else None)
+                    log_gids=log_group_gids(log_groups))
         # Core must be able to SEE a session's processes to ever prove a uid unused: a /proc mounted hidepid would
         # make `uid_in_use` read false while they run, so the probe checks it while the session is alive.
         report.add("Core sees the running session's processes in /proc", containment.uid_in_use(probe_uid))
@@ -366,14 +401,16 @@ def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root:
                   helper: str, conf: str, python: str = "/usr/bin/python3", trusted_uid: int = 0, below: str = "/",
                   uid_range: tuple[int, int] | None = None, sudo: bool = False, check_reach: bool = False,
                   run=subprocess.run, getpwall=None, getgrall=None, held_uids=None,
-                  log_groups: tuple[str, ...] = ()) -> PreflightReport:
+                  log_groups: tuple[str, ...] = (), require_accounts: bool = False) -> PreflightReport:
+    """`log_groups` are the session groups (`missions.session_groups`); `require_accounts` makes a missing `pe-s<N>` account a
+    failure (a host with sudo: see `check_range_free`)."""
     report = PreflightReport(strategy)
     if uid_range is not None:
         low, high = uid_range
         report.add("session uid range", 0 < low < high and probe_uid == high
                    and not low <= os.geteuid() <= high, f"{low}-{high}, probe uid {probe_uid}")
     if uid_range is not None:
-        check_range_free(report, *uid_range, getpwall=getpwall, getgrall=getgrall)
+        check_range_free(report, *uid_range, getpwall=getpwall, getgrall=getgrall, require_accounts=require_accounts)
         if held_uids is not None:
             check_no_stale_uids(report, *uid_range, list(held_uids()))
     if not check_installation(report, helper=helper, conf=conf, trusted_uid=trusted_uid, below=below):

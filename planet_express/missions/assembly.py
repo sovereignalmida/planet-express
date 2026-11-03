@@ -111,13 +111,14 @@ def discover_inventory(stacks_root: str) -> Inventory:
 
 
 def session_principals(cfg: Any) -> "SessionPrincipals | None":
-    """The identities a session can hold (the launcher's uid range, the same-numbered private gids, the log groups it may be
-    given). None when a log group cannot be resolved: what a session could write is then not known, and nothing is waived."""
+    """The identities a session can hold (the launcher's uid range, the same-numbered private gids, the session groups every
+    session is given). None when a group cannot be resolved: what a session could write is then not known, and nothing is
+    waived. (Stage 4 of trust mode removes the restart-only grant this serves.)"""
     import grp
 
     from .grants import SessionPrincipals
     gids = set()
-    for name in getattr(cfg, "read_log_groups", ()) or ():
+    for name in getattr(cfg, "session_groups", ()) or ():
         try:
             gids.add(grp.getgrnam(name).gr_gid)
         except KeyError:
@@ -203,20 +204,17 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
 
 def managed_sudoers(cfg: Any, core_user: str) -> dict[str, bytes]:
     """Sudoers path -> the exact bytes setup's generators write there: the side-door check treats these, and only these, as
-    managed (a byte of difference is an unmanaged rule). The launcher rule is Core's own; the worker file is the generated
-    ceiling (absent when no rules are configured)."""
-    from .launcher.setup_steps import LauncherSudoers, Paths, WorkerSudoers
+    managed (a byte of difference is an unmanaged rule). The launcher rule is Core's own; the session rule is trust mode's one
+    `%pe-session` line (setup's `session-access` step). Stage 4 of trust mode replaces the side-door check this feeds."""
+    from .launcher.setup_steps import LauncherSudoers, Paths, SessionAccess
     paths = Paths(core_uid=0, core_gid=0, workspace_root="", core_user=core_user, uid_min=cfg.session_uid_min,
-                  uid_max=cfg.session_uid_max,
-                  worker_sudo_rules=tuple((r.unit, tuple(r.actions)) for r in cfg.worker_sudo_rules),
-                  worker_sudo_all_sessions=cfg.worker_sudo_all_sessions)
+                  uid_max=cfg.session_uid_max)
     managed: dict[str, bytes] = {}
     launcher = LauncherSudoers(paths)
     if not launcher.unsafe():
         managed[paths.sudoers] = launcher.wanted()
-    worker = WorkerSudoers(paths)
-    if worker.applies() and not worker.unsafe():
-        managed[paths.worker_sudoers] = worker.wanted()
+    session = SessionAccess(paths)
+    managed[session.target] = session.wanted()
     return managed
 
 

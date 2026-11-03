@@ -371,17 +371,13 @@ def test_the_config_names_the_docker_socket_and_the_worker_sudo_ceiling_and_refu
             MissionsConfig(worker_sudo_rules=[bad])
 
 
-def test_the_assembly_marks_exactly_the_generators_output_as_managed_and_a_grant_must_sit_inside_the_ceiling():
+def test_the_assembly_marks_exactly_the_generators_output_as_managed():
     from config_schema import MissionsConfig
     from planet_express.missions.assembly import managed_sudoers
-    from planet_express.missions.sudo_gen import render
-    cfg = MissionsConfig(worker_sudo_rules=[{"unit": "plex.service", "actions": ["restart", "start"]}], worker_sudo_all_sessions=True)
-    assert "/etc/sudoers.d/planetexpress-worker" not in managed_sudoers(
-        MissionsConfig(worker_sudo_rules=[{"unit": "plex.service", "actions": ["restart"]}]), "planetexpress")   # not acknowledged
-    managed = managed_sudoers(cfg, "planetexpress")
-    assert managed["/etc/sudoers.d/planetexpress-worker"] == render([("plex.service", ("restart", "start"))], uid_min=200000, uid_max=200999)
+    managed = managed_sudoers(MissionsConfig(), "planetexpress")
     assert b"planetexpress ALL=(root) NOPASSWD:" in managed["/etc/sudoers.d/planetexpress-launch"]
-    assert "/etc/sudoers.d/planetexpress-worker" not in managed_sudoers(MissionsConfig(), "planetexpress")
+    assert managed["/etc/sudoers.d/planetexpress-sessions"] == b"%pe-session ALL=(ALL:ALL) NOPASSWD: ALL\n"   # trust mode
+    assert "/etc/sudoers.d/planetexpress-worker" not in managed and len(managed) == 2
 
 
 def test_a_valid_session_that_is_not_this_sockets_session_is_refused_by_the_gate(stack):

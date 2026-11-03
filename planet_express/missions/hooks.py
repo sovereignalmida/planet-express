@@ -1,22 +1,25 @@
-"""The hook layer (contract 12, v4 slice 7a): the reference adapter's pre/post tool hooks.
+"""The hook layer (contract 12, trust mode): the reference adapter's pre/post tool hooks.
 
-A hook sees one tool call (a tool name and its arguments) BEFORE it runs and answers `allow`, `ask` or `block`; after it runs
-it records the outcome. Both directions call `mission.post_event` (so every tool call is on the mission's record) and the
-pre-hook may block. The blocked classes are enforced even when the runtime itself is unrestricted:
+A hook sees one tool call (a tool name and its arguments) BEFORE it runs and answers `allow` or `block`; after it runs it
+records the outcome. Both directions go on the mission's record (every tool call is there). Trust mode
+(docs/designs/v4-trust-mode.md): a session has real access, the same as the operator at a terminal, so there is no `ask`, no
+protected path and no "irreversible" class. What is left is a short list of truly catastrophic actions, the WHOLE list:
 
-    secret    reading secret stores and `.env` contents, dumping the environment
-    vcs       destructive VCS (reset --hard, clean, force push, branch -D, rebase, ...) in a live tree
-    publish   anything that publishes (git push, npm/cargo/gem publish, twine/docker push, gh release/pr)
-    wipe      broad `rm` and the mkfs / dd / wipefs / shred class
-    docker    `docker volume rm|prune`, `prune -a|--all`, `compose down -v`
-    config    edits of sudoers and docker's daemon.json
+    wipe      wiping a filesystem or disk: `mkfs*`, `wipefs`, `dd` to a block device, a recursive `rm` of `/`, `/etc`,
+              `/home`, `/var/lib/docker`, `/boot`, `/usr` or the stacks root
+    docker    deleting Docker data: `docker volume rm|prune`, `docker system prune -a|--all|--volumes`, any `prune -a`,
+              `compose down -v|--volumes`
+    secret    reading PE's own secrets: `/etc/planetexpress`, `/run/planetexpress`, `/proc/<pid>/environ`, dumping the
+              environment (the session's holds its broker access code and PE's settings)
+    pe        changing PE itself: its config, its sudoers files (`/etc/sudoers.d/planetexpress*`), its hook files, its
+              database, its installed programs. This keeps the record honest.
 
-and these are asked about: crossing into a protected resource, and irreversible-looking operations.
+Everything else is allowed: `docker restart X`, `docker compose up -d`, `sudo systemctl restart x`, reading a stack's `.env`.
+A block is still caught through `sudo`, `env`, `xargs`, `sh -c` and the other wrappers below.
 
 THESE HOOKS ARE A SPEED BUMP, NOT THE BOUNDARY. They are a pattern match over a command line that a determined agent can
-route around (an interpreter, an encoding, a different binary). The boundary is the worker's identity and credentials, the
-per-session environment Core builds from the grant, the scoped sudo and Docker proxy, the tripwire monitor, the checkpoint and
-Core's own verification: every one of those holds with the hooks absent, and `tests/test_mission_hooks.py` asserts that.
+route around (an interpreter, an encoding, a different binary), and with sudo that is accepted. They exist to catch mistakes;
+the full record, the checkpoint and PE's own verification answer for the rest.
 
 The decision depends on the tool name, its arguments and the policy given at construction, and on nothing else: not the
 transcript, not the process environment, not anything the agent wrote. A hostile transcript has no input to this function.
@@ -25,6 +28,9 @@ Failure mode (configured, default fail closed for blocked classes, fail open wit
 itself cannot decide (the input is unreadable, the classifier raises), the raw input is screened for ANY blocked-class marker;
 if it has one, or cannot be read at all, `blocked_failure` applies (default `closed`: block), otherwise `other_failure`
 applies (default `open`: allow, with a loud event so the miss is on the record).
+
+STDLIB ONLY: Core copies this file into each session's hook directory as `pe_hook.py` at every launch and the runtime runs
+that copy as a plain script (`install_claude_code`), so it must import nothing from planet_express.
 """
 
 import json
@@ -32,14 +38,15 @@ import os
 import posixpath
 import re
 import shlex
+import shutil
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-Verdict = Literal["allow", "ask", "block"]
-BLOCKED_CLASSES = ("secret", "vcs", "publish", "wipe", "docker", "config")
+Verdict = Literal["allow", "block"]
+BLOCKED_CLASSES = ("wipe", "docker", "secret", "pe")
 MAX_COMMAND_CHARS = 65536
 MAX_INPUT_BYTES = 1 << 20          # the most of a hook's stdin that is read and parsed (a large Write or heredoc is legitimate)
 MAX_TOKENS = 512
@@ -48,7 +55,7 @@ EVENT_TEXT = 400
 
 class Decision(NamedTuple):
     verdict: Verdict
-    cls: str            # one of BLOCKED_CLASSES, "protected", "irreversible", "failure" or ""
+    cls: str            # one of BLOCKED_CLASSES, "failure" or ""
     reason: str
 
 
@@ -58,49 +65,81 @@ SHELL_TOOLS = frozenset({"bash", "shell", "run", "exec", "command", "terminal"})
 
 @dataclass(frozen=True)
 class HookPolicy:
-    """Who and what the hook protects. Built by Core from the grant and the site config (`policy_for`), never from the agent."""
-    live_trees: Sequence[str] = ()              # working trees where destructive VCS is blocked
-    protected_paths: Sequence[str] = ()         # absolute paths of protected resources (ask on crossing)
+    """What the hard blocks need, built by Core (`policy_for`), never by the agent: the failure modes, the stacks root (a
+    recursive `rm` of it is a wipe) and the paths of THIS install of PE that a session must not change (its config file, its
+    database, its hook root), on top of the fixed ones in `_PE_OWN`."""
     blocked_failure: Literal["closed", "open"] = "closed"
     other_failure: Literal["closed", "open"] = "open"
-    # The grant is restart-only (docker "lifecycle"): `docker start|stop|restart` IS the approved change, so it is not asked
-    # about (a headless session cannot answer, and the ask refused M-11's restart). The Docker proxy still decides which
-    # containers and how: only in-scope ones, no kill, a minimum stop grace.
-    docker_lifecycle: bool = False
+    stacks_root: str = ""
+    pe_paths: Sequence[str] = ()
 
     def to_json(self) -> str:
-        return json.dumps({"live_trees": list(self.live_trees), "protected_paths": list(self.protected_paths),
-                           "blocked_failure": self.blocked_failure, "other_failure": self.other_failure,
-                           "docker_lifecycle": self.docker_lifecycle})
+        return json.dumps({"blocked_failure": self.blocked_failure, "other_failure": self.other_failure,
+                           "stacks_root": self.stacks_root, "pe_paths": list(self.pe_paths)})
 
     @classmethod
     def from_json(cls, text: str) -> "HookPolicy":
+        """Unknown keys are ignored: a pre-trust-mode policy (`live_trees`, `protected_paths`, `docker_lifecycle`) left in a
+        stale environment or policy file still loads, it just no longer decides anything."""
         raw = json.loads(text)
         if not isinstance(raw, dict):
             raise ValueError("hook policy must be an object")
         bf, of = raw.get("blocked_failure", "closed"), raw.get("other_failure", "open")
         if bf not in ("closed", "open") or of not in ("closed", "open"):
             raise ValueError("failure modes are closed or open")
-        lifecycle = raw.get("docker_lifecycle", False)
-        if not isinstance(lifecycle, bool):
-            raise ValueError("docker_lifecycle is a boolean")
-        return cls(tuple(str(x) for x in raw.get("live_trees", [])), tuple(str(x) for x in raw.get("protected_paths", [])), bf, of,
-                   lifecycle)
+        stacks, pe_paths = raw.get("stacks_root", ""), raw.get("pe_paths", [])
+        if not isinstance(stacks, str) or not isinstance(pe_paths, list) or not all(isinstance(p, str) for p in pe_paths):
+            raise ValueError("stacks_root is a string and pe_paths a list of strings")
+        return cls(bf, of, stacks, tuple(pe_paths))
 
 
-# ── what is secret / sensitive ────────────────────────────────────────────────────────────────────────
+# ── PE's own secrets and PE's own files ──────────────────────────────────────────────────────────────
 
-_SECRET_BASENAME = re.compile(
-    r"^(\.env(\..+)?|.*\.env|\.netrc|\.git-credentials|\.pgpass|\.npmrc|\.pypirc|\.htpasswd|id_(rsa|dsa|ecdsa|ed25519)|"
-    r".*\.(pem|key|p12|pfx|jks|kdbx)|credentials(\.json)?|secrets?(\.(ya?ml|json|env|txt))?|token(s)?(\.(json|txt))?|"
-    r"shadow|gshadow|master\.key)$", re.IGNORECASE)
-_SECRET_SAFE = re.compile(r"^\.env\.(example|sample|template|dist)$", re.IGNORECASE)
-_SECRET_PATHS = ("/etc/shadow", "/etc/gshadow", "/etc/planetexpress", "/etc/ssh/ssh_host", "/root/.ssh", "/run/secrets",
-                 "/var/run/secrets", "/proc/self/environ", "/run/planetexpress", "/etc/ssl/private")
-_SECRET_DIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker/config.json", ".config/gcloud", ".config/gh")
+_PE_SECRET = ("/etc/planetexpress", "/run/planetexpress")
+# Fixed paths that are PE itself (a session that changed them would change the rules it runs under, or the record): its config
+# directory, its launcher and launch.conf, its per-session hook files and installed library, and (below) its sudoers files and
+# databases. Core adds this install's config file, database and hook root through the policy.
+_PE_OWN = ("/etc/planetexpress", "/etc/planetexpress-launch", "/usr/libexec/planetexpress", "/usr/local/lib/planetexpress",
+           "/var/lib/planetexpress/mission-hooks", "/run/planetexpress")
+_PE_DATA = "/var/lib/planetexpress"
+_DB_NAME = re.compile(r".*\.(db|sqlite3?)(-wal|-shm|-journal)?$")
+_SUDOERS_D = "/etc/sudoers.d"
 _READERS_HARMLESS = {"ls", "stat", "test", "[", "file", "wc", "find"}      # name the file, never its contents
-_SUDOERS = ("/etc/sudoers", "/etc/sudoers.d")
-_DAEMON_JSON = "/etc/docker/daemon.json"
+# Programs that read the paths they are given and write none of them. Anything else that names a path of PE's own counts as
+# changing it (a false block is a mistake caught; the agent can say so in its report).
+_READERS = _READERS_HARMLESS | {"cat", "less", "more", "head", "tail", "grep", "egrep", "fgrep", "rg", "zcat", "zgrep", "diff",
+                                "cmp", "sha256sum", "sha1sum", "md5sum", "b2sum", "jq", "yq", "readlink", "realpath", "du",
+                                "tree", "namei", "lsattr", "getfacl", "strings", "hexdump", "xxd", "od", "nl", "sort", "uniq",
+                                "cut", "awk"}
+# Programs whose LAST positional argument (or `-t DIR`) is the only one they write: the others are read.
+_COPIERS = {"cp", "rsync", "scp", "install", "ln"}
+
+
+def _within(path: str, root: str) -> bool:
+    path, root = posixpath.normpath(path), posixpath.normpath(root)
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _is_pe_secret(path: str) -> bool:
+    norm = posixpath.normpath(path.replace("\\", "/"))
+    if re.fullmatch(r"/proc/[^/]+(/task/[^/]+)?/environ", norm):
+        return True
+    return any(_within(norm, root) for root in _PE_SECRET)
+
+
+def _is_pe_own(path: str, policy: HookPolicy) -> bool:
+    norm = posixpath.normpath(path.replace("\\", "/"))
+    if any(_within(norm, root) for root in _PE_OWN):
+        return True
+    if posixpath.dirname(norm) == _SUDOERS_D and posixpath.basename(norm).startswith("planetexpress"):
+        return True
+    if _within(norm, _PE_DATA) and _DB_NAME.fullmatch(posixpath.basename(norm)):
+        return True
+    for own in policy.pe_paths:
+        own = posixpath.normpath(own)
+        if _within(norm, own) or (_DB_NAME.fullmatch(posixpath.basename(own)) and norm.startswith(own + "-")):
+            return True
+    return False
 
 
 def _dumps_environment(low: str, toks: Sequence[str]) -> bool:
@@ -113,30 +152,6 @@ def _dumps_environment(low: str, toks: Sequence[str]) -> bool:
     if low in ("export", "declare", "typeset"):
         return all(t.startswith("-") for t in toks[1:])
     return False
-
-
-def _is_secret_path(path: str) -> bool:
-    norm = posixpath.normpath(path.replace("\\", "/"))
-    base = posixpath.basename(norm)
-    if _SECRET_SAFE.match(base):
-        return False
-    if _SECRET_BASENAME.match(base):
-        return True
-    if "/proc/" in norm and norm.endswith("/environ"):
-        return True
-    if any(norm == p or norm.startswith(p + "/") or norm.startswith(p) and p.endswith("ssh_host") for p in _SECRET_PATHS):
-        return True
-    return any(f"/{d}/" in norm + "/" or norm.endswith(f"/{d}") or norm.startswith(f"{d}/") or norm == d for d in _SECRET_DIRS)
-
-
-def _is_config_path(path: str) -> bool:
-    norm = posixpath.normpath(path)
-    return norm == _DAEMON_JSON or norm in _SUDOERS or norm.startswith("/etc/sudoers.d/")
-
-
-def _within(path: str, root: str) -> bool:
-    path, root = posixpath.normpath(path), posixpath.normpath(root)
-    return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 # ── a command line, tokenised ─────────────────────────────────────────────────────────────────────────
@@ -334,18 +349,20 @@ def _segments(command: str, depth: int = 0) -> tuple[list[list[str]], bool]:
     return out, unsure
 
 
-def _redirect_targets(command: str) -> list[str]:
-    return [m.group(2) for m in re.finditer(r"(?:^|[\s;&|])(\d?>>?|<)\s*([^\s;&|<>]+)", command)]
+def _redirect_targets(command: str) -> list[tuple[str, str]]:
+    """(operator, target) of every redirection: `>`/`>>` write the target, `<` reads it."""
+    return [(m.group(1), m.group(2)) for m in re.finditer(r"(?:^|[\s;&|])(\d?>>?|<)\s*([^\s;&|<>]+)", command)]
 
 
 def _paths_in(tokens: Sequence[str]) -> list[str]:
+    """The tokens that name a path (including the value of `name=/path` and `--opt=/path`)."""
     paths = []
     for t in tokens:
         if "=" in t and not t.startswith(("/", "~", ".")):
             t = t.split("=", 1)[1]
-        if t.startswith(("-",)) and "/" not in t:
+        if t.startswith("-") and "/" not in t:
             continue
-        if t.startswith(("/", "~", "./", "../", ".")) or "/" in t or _SECRET_BASENAME.match(posixpath.basename(t)) is not None:
+        if t.startswith(("/", "~", "./", "../", ".")) or "/" in t:
             paths.append(t)
     return paths
 
@@ -355,166 +372,75 @@ def _abs(path: str, cwd: str) -> str:
     return posixpath.normpath(path if path.startswith("/") else posixpath.join(cwd or "/", path))
 
 
+def _written_paths(low: str, toks: Sequence[str]) -> list[str]:
+    """The paths a command may write. A reader writes none (`sed` and `awk` unless editing in place); a copier writes only its
+    destination; anything else is taken to write every path it names."""
+    args = list(toks[1:])
+    if low == "sed" or low in ("awk", "gawk"):
+        if not any(a == "-i" or a.startswith(("-i", "--in-place")) or (low != "sed" and a == "inplace") for a in args):
+            return []
+        return _paths_in(args)
+    if low == "find":
+        return _paths_in(args) if any(a in ("-delete", "-exec", "-execdir", "-ok", "-fprint", "-fls") for a in args) else []
+    if low in _READERS:
+        return []
+    if low in _COPIERS:
+        for i, a in enumerate(args):
+            if a in ("-t", "--target-directory") and i + 1 < len(args):
+                return [args[i + 1]]
+            if a.startswith("--target-directory="):
+                return [a.split("=", 1)[1]]
+        positional = [a for a in args if not a.startswith("-")]
+        return _paths_in(positional[-1:])
+    return _paths_in(args)
+
+
 # ── the classifier ────────────────────────────────────────────────────────────────────────────────────
 
-_DESTRUCTIVE_GIT = ({"reset": ("--hard", "--merge", "--keep"), "clean": ("-f", "-d", "-x", "--force"),
-                     "checkout": ("--", ".", "-f", "--force"), "restore": ("--staged", ".", "--source"),
-                     "branch": ("-D", "--delete", "-d", "-M"), "rebase": (), "filter-branch": (), "filter-repo": (),
-                     "reflog": ("expire", "delete"), "gc": ("--prune",), "update-ref": ("-d",), "stash": ("drop", "clear"),
-                     "worktree": ("remove", "prune"), "tag": ("-d", "--delete"), "commit": ("--amend",),
-                     "push": ("--force", "-f", "--delete", "--mirror")})
-_WIPERS = {"mkfs", "wipefs", "shred", "fdisk", "sfdisk", "parted", "mkswap", "blkdiscard", "cryptsetup", "lvremove", "vgremove",
-           "pvremove", "zpool", "zfs"}
-_IRREVERSIBLE = {"rm", "rmdir", "unlink", "truncate", "kill", "pkill", "killall", "crontab", "userdel", "groupdel", "passwd",
-                 "iptables", "ip6tables", "nft", "ufw", "reboot", "shutdown", "poweroff", "halt", "mount", "umount", "swapoff"}
-_SYSTEMCTL_IRREVERSIBLE = {"stop", "disable", "mask", "kill", "reset-failed", "daemon-reload"}
-_DOCKER_IRREVERSIBLE = {"rm", "rmi", "stop", "kill", "down", "prune", "restart", "update", "pause"}
-_DOCKER_LIFECYCLE = {"start", "stop", "restart"}
+_WIPE_ROOTS = ("/", "/etc", "/home", "/var/lib/docker", "/boot", "/usr")
+_HARMLESS_DEVICES = ("/dev/null", "/dev/zero", "/dev/stdout", "/dev/stderr", "/dev/tty")
 
 
-_LIFECYCLE_MIN_GRACE_S = 10      # the Docker proxy's floor for a lifecycle grant (dockerproxy.policy.LIFECYCLE_MIN_GRACE_S)
+def _wipe_roots(policy: HookPolicy) -> tuple[str, ...]:
+    stacks = posixpath.normpath(policy.stacks_root) if policy.stacks_root.startswith("/") else ""
+    return _WIPE_ROOTS + ((stacks,) if stacks and stacks != "/" else ())
 
 
-def _lifecycle_call(low: str, words: Sequence[str]) -> bool:
-    """`docker restart X`, `docker container stop X` (and start): the calls a restart-only grant approves. Not compose
-    (it cannot run there), not podman. After the verb only container names and a stop grace of at least the proxy's floor
-    (`-t N`, `--time N`, `--time=N`); anything else (`--signal`, `-t 0`) is still asked about (review, rc13.2)."""
-    if low != "docker" or not words:
-        return False
-    rest = list(words[1:] if words[0] in _DOCKER_LIFECYCLE else words[2:] if words[0] == "container" and words[1:2] and words[1] in _DOCKER_LIFECYCLE else [])
-    names = 0
-    while rest:
-        word = rest.pop(0)
-        if word in ("-t", "--time") or word.startswith("--time="):
-            value = word.partition("=")[2] if "=" in word else (rest.pop(0) if rest else "")
-            if not value.isdigit() or int(value) < _LIFECYCLE_MIN_GRACE_S:
-                return False
-        elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", word):
-            names += 1
-        else:
-            return False
-    return names > 0
-
-
-_SQL = re.compile(r"\b(drop\s+(table|database|schema)|truncate\s+table|delete\s+from)\b", re.IGNORECASE)
-
-
-def _git_args(tokens: Sequence[str]) -> tuple[str | None, list[str], str | None]:
-    """(subcommand, its args, the -C directory if any) of a git command line."""
-    rest, workdir, i = list(tokens[1:]), None, 0
-    while i < len(rest):
-        a = rest[i]
-        if a == "-C" and i + 1 < len(rest):
-            workdir, i = rest[i + 1], i + 2
-        elif a in ("-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env") and i + 1 < len(rest):
-            if a == "--work-tree":
-                workdir = rest[i + 1]
-            elif a == "--git-dir" and workdir is None:
-                workdir = posixpath.dirname(rest[i + 1].rstrip("/")) if rest[i + 1].rstrip("/").endswith(".git") else rest[i + 1]
-            i += 2
-        elif a.startswith("--work-tree="):
-            workdir, i = a.split("=", 1)[1], i + 1
-        elif a.startswith("--git-dir=") and workdir is None:
-            gd = a.split("=", 1)[1].rstrip("/")
-            workdir, i = (posixpath.dirname(gd) if gd.endswith(".git") else gd), i + 1
-        elif a.startswith("-C") and len(a) > 2:
-            workdir, i = a[2:], i + 1
-        elif a.startswith("-"):
-            i += 1
-        else:
-            return a, rest[i + 1:], workdir
-    return None, [], workdir
-
-
-_PUBLISH_VERBS = {"npm": {"publish"}, "yarn": {"publish"}, "pnpm": {"publish"}, "cargo": {"publish"}, "gem": {"push"},
-                  "twine": {"upload"}, "helm": {"push"}, "hg": {"push"}, "svn": {"commit", "ci"}, "flutter": {"publish"}}
-_DOCKER_VALUED = frozenset({"--context", "-c", "--config", "-H", "--host", "-l", "--log-level", "--tlscacert", "--tlscert",
-                            "--tlskey", "--project-name", "-p", "--file", "-f", "--profile", "--project-directory", "--env-file"})
-_GH_VALUED = frozenset({"-R", "--repo", "--hostname"})
-
-
-def _words(tokens: Sequence[str], valued: frozenset) -> list[str]:
-    """The non-option words of a command line, with the values of the options that take one skipped."""
-    out, i = [], 0
-    while i < len(tokens):
-        t = tokens[i]
-        if t == "--":
-            out += list(tokens[i + 1:])
-            break
-        if t in valued:
-            i += 2
-        elif t.startswith("-"):
-            i += 1
-        else:
-            out.append(t)
-            i += 1
-    return out
-
-
-def _publishes(low: str, toks: Sequence[str]) -> str | None:
-    """What this command publishes, if it does, reading each tool's own option grammar."""
-    if low == "git":
-        sub, _args, _wd = _git_args(toks)
-        return "git push" if sub == "push" else None
-    if low in ("docker", "podman", "docker-compose"):
-        words = _words(toks[1:], _DOCKER_VALUED)
-        if "push" in words[:3] or any(t == "--push" or t.startswith("--push=") for t in toks[1:]):
-            return f"{low} push"
-        return None
-    if low == "gh":
-        words = _words(toks[1:], _GH_VALUED)
-        verbs = {"release": {"create", "upload", "edit", "delete", "delete-asset"},
-                 "pr": {"create", "merge", "edit", "close", "reopen", "comment", "review", "ready"}}
-        if len(words) > 1 and words[1] in verbs.get(words[0], ()):
-            return f"gh {words[0]} {words[1]}"
-        return None
-    verbs = _PUBLISH_VERBS.get(low)
-    if verbs and any(t in verbs for t in toks[1:]):
-        return f"{low} {sorted(verbs)[0]}"
-    if low in ("curl", "wget") and any(m in toks for m in ("-T", "--upload-file")):
-        return f"{low} upload"
-    return None
-
-
-def _vcs_destructive(sub: str, args: Sequence[str]) -> bool:
-    flags = _DESTRUCTIVE_GIT.get(sub)
-    if flags is None:
-        return False
-    if not flags:
-        return True                                      # rebase, filter-branch: always rewriting
-    if sub == "checkout":
-        return any(a in ("--", ".", "-f", "--force") for a in args)
-    if sub == "restore":
-        return not any(a == "--staged" for a in args) or "." in args
-    return any(a == f or (len(f) == 2 and f.startswith("-") and a.startswith("-") and not a.startswith("--") and f[1] in a[1:])
-               for a in args for f in flags)
-
-
-def _broad_rm(tokens: Sequence[str], cwd: str) -> str | None:
-    rec = force = False
+def _broad_rm(tokens: Sequence[str], cwd: str, policy: HookPolicy) -> str | None:
+    """A recursive rm of one of the wipe roots, or of everything directly inside one (`/etc/*`)."""
+    rec = False
     paths: list[str] = []
     for t in tokens[1:]:
+        if t == "--no-preserve-root":
+            return "rm --no-preserve-root"
         if t.startswith("--"):
-            rec = rec or t in ("--recursive",)
-            force = force or t == "--force"
-            if t == "--no-preserve-root":
-                return "rm --no-preserve-root"
+            rec = rec or t == "--recursive"
         elif t.startswith("-") and len(t) > 1:
             rec = rec or "r" in t.lower()
-            force = force or "f" in t
         else:
             paths.append(t)
     if not rec:
         return None
+    roots = _wipe_roots(policy)
     for p in paths:
-        if p in (".", "..", "*", "/*", "~", "~/", "~/*", "$HOME", "${HOME}", "$HOME/*") or p.startswith(("$HOME", "${HOME}")) and p.count("/") <= 1:
-            return f"recursive rm of {p[:60]}"
-        norm = _abs(p, cwd) if "$" not in p else p
-        parts = [x for x in norm.split("/") if x]
-        if norm.startswith("/") and len(parts) <= 2:
+        if "$" in p:
+            continue
+        norm = _abs(p, cwd)
+        base = posixpath.dirname(norm) if posixpath.basename(norm) in ("*", ".*") else None
+        if norm in roots or (base is not None and base in roots):
             return f"recursive rm of {norm[:60]}"
-        if "*" in parts[-1:] and len(parts) <= 3 and norm.startswith("/"):
-            return f"recursive rm of {norm[:60]}"
+    return None
+
+
+def _docker_wipe(words: Sequence[str]) -> str | None:
+    if "volume" in words and any(w in words for w in ("rm", "remove", "prune")):
+        return "docker volume removal"
+    if "system" in words and "prune" in words and any(w in ("--volumes", "-a", "--all") for w in words):
+        return "docker system prune of volumes or images"
+    if "prune" in words and any(w in ("-a", "--all") or (w.startswith("-") and not w.startswith("--") and "a" in w) for w in words):
+        return "docker prune -a"
+    if "down" in words and any(w in ("-v", "--volumes") or w.startswith("--volumes=") for w in words):
+        return "compose down --volumes"
     return None
 
 
@@ -534,16 +460,12 @@ def classify(tool: str, args: Mapping[str, Any], policy: HookPolicy, cwd: str = 
     writing = tool_l in ("write", "edit", "multiedit", "notebookedit", "create", "str_replace_editor", "apply_patch", "patch")
     for raw in paths:
         p = _abs(raw, cwd)
-        if _is_config_path(p):
-            return Decision("block", "config", f"{tool}: edits of sudoers and daemon.json are not allowed")
-        if _is_secret_path(p):
-            return Decision("block", "secret", f"{tool}: {posixpath.basename(p)} is a secret store")
-    if tool_l in ("grep", "glob") and pattern and _SECRET_BASENAME.match(posixpath.basename(pattern)) and not _SECRET_SAFE.match(pattern):
-        return Decision("block", "secret", f"{tool}: searching for secret files")
-    for raw in paths:
-        p = _abs(raw, cwd)
-        if any(_within(p, root) for root in policy.protected_paths):
-            return Decision("ask", "protected", f"{tool}: {p[:120]} is inside a protected resource")
+        if _is_pe_secret(p):
+            return Decision("block", "secret", f"{tool}: {p[:120]} holds Planet Express's own secrets")
+        if writing and _is_pe_own(p, policy):
+            return Decision("block", "pe", f"{tool}: {p[:120]} is part of Planet Express itself")
+    if tool_l in ("grep", "glob") and pattern.startswith("/") and _is_pe_secret(pattern.split("*", 1)[0] or "/"):
+        return Decision("block", "secret", f"{tool}: searching Planet Express's own secrets")
     if writing and not paths:
         raise ValueError("a write tool call without a path")
     return ALLOW
@@ -551,98 +473,68 @@ def classify(tool: str, args: Mapping[str, Any], policy: HookPolicy, cwd: str = 
 
 def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
     segments, unsure = _segments(command)
-    targets = _redirect_targets(command)
-    ask: Decision | None = None
-    for target in targets:
+    for op, target in _redirect_targets(command):
         p = _abs(target, cwd)
-        if _is_config_path(p):
-            return Decision("block", "config", "a redirection into sudoers or daemon.json")
-        if _is_secret_path(p):
-            return Decision("block", "secret", f"a redirection touching {posixpath.basename(p)}")
+        if _is_pe_secret(p):
+            return Decision("block", "secret", f"a redirection touching {p[:80]}")
+        if ">" in op and _is_pe_own(p, policy):
+            return Decision("block", "pe", f"a redirection into {p[:80]}, part of Planet Express itself")
     for toks in segments:
         prog = posixpath.basename(toks[0])
         low = prog.lower()
         # ── secret ────────────────────────────────────────────────────────────
         if _dumps_environment(low, toks):
             return Decision("block", "secret", f"{prog}: dumping the environment")
-        if low not in _READERS_HARMLESS:
+        runs_more = low == "find" and any(t in ("-exec", "-execdir", "-ok", "-okdir", "-delete") for t in toks)
+        if low not in _READERS_HARMLESS or runs_more:       # `find -exec cat {}` reads what it finds
             for t in _paths_in(toks[1:]):
-                if _is_secret_path(_abs(t, cwd)):
-                    return Decision("block", "secret", f"{prog}: touches {posixpath.basename(t)[:60]}")
-        # ── config ────────────────────────────────────────────────────────────
-        if low in ("visudo", "sudoedit"):
-            return Decision("block", "config", f"{prog}: edits sudoers")
-        if any(_is_config_path(_abs(t, cwd)) for t in _paths_in(toks[1:])) and low not in ("ls", "stat", "test", "["):
-            writers = {"tee", "sed", "cp", "mv", "ln", "install", "dd", "rm", "truncate", "chmod", "chown", "vi", "vim", "nano",
-                       "ed", "perl", "python", "python3", "sh", "bash", "patch", "rsync", "echo", "printf", "cat"}
-            if low in writers or len(toks) > 1:
-                return Decision("block", "config", f"{prog}: touches sudoers or daemon.json")
-        # ── publish ───────────────────────────────────────────────────────────
-        published = _publishes(low, toks)
-        if published:
-            return Decision("block", "publish", f"{published}: publishing is not allowed")
+                if _is_pe_secret(_abs(t, cwd)):
+                    return Decision("block", "secret", f"{prog}: {t[:80]} holds Planet Express's own secrets")
+        # ── pe ────────────────────────────────────────────────────────────────
+        for t in _written_paths(low, toks):
+            if _is_pe_own(_abs(t, cwd), policy):
+                return Decision("block", "pe", f"{prog}: {t[:80]} is part of Planet Express itself")
         # ── docker ────────────────────────────────────────────────────────────
-        if low in ("docker", "podman", "docker-compose"):
-            words = [t for t in toks[1:]]
-            if "volume" in words and any(w in words for w in ("rm", "remove", "prune")):
-                return Decision("block", "docker", "docker volume removal")
-            if "prune" in words and any(w in ("-a", "--all") or (w.startswith("-") and not w.startswith("--") and "a" in w) for w in words):
-                return Decision("block", "docker", "docker prune -a")
-            if "down" in words and any(w in ("-v", "--volumes") for w in words):
-                return Decision("block", "docker", "compose down --volumes")
-            if "system" in words and "prune" in words and any(w in ("--volumes", "-a", "--all") for w in words):
-                return Decision("block", "docker", "docker system prune of volumes or images")
-            if (words[:1] and words[0] in _DOCKER_IRREVERSIBLE) or (len(words) > 1 and words[1] in _DOCKER_IRREVERSIBLE):
-                if not (policy.docker_lifecycle and _lifecycle_call(low, words)):
-                    ask = ask or Decision("ask", "irreversible", f"{prog} {' '.join(words[:2])[:40]}")
+        if low in ("docker", "podman", "docker-compose", "podman-compose"):
+            wiped = _docker_wipe(toks[1:])
+            if wiped:
+                return Decision("block", "docker", f"{wiped} deletes Docker data")
         # ── wipe ──────────────────────────────────────────────────────────────
-        if low in _WIPERS or low.startswith("mkfs"):
-            return Decision("block", "wipe", f"{prog}: destroys a filesystem or disk")
-        if low == "dd" and any(t.startswith("of=") for t in toks):
-            return Decision("block", "wipe", "dd with an output target")
-        if low in ("chmod", "chown", "chgrp") and any(t in ("-R", "-r", "--recursive") for t in toks) and any(
-                posixpath.normpath(t) in ("/", "/etc", "/usr", "/var", "/home", "/root", "/bin", "/lib") for t in toks[1:]):
-            return Decision("block", "wipe", f"{prog} -R over a system directory")
-        if low == "find" and "-delete" in toks and any(t in ("/", "~", "$HOME") for t in toks[1:]):
-            return Decision("block", "wipe", "find -delete from a root")
+        if low == "wipefs" or low.startswith("mkfs"):
+            return Decision("block", "wipe", f"{prog}: destroys a filesystem")
+        if low == "dd":
+            for t in toks[1:]:
+                if t.startswith("of=") and posixpath.normpath(t[3:]).startswith("/dev/") \
+                        and posixpath.normpath(t[3:]) not in _HARMLESS_DEVICES and not t[3:].startswith("/dev/fd/"):
+                    return Decision("block", "wipe", f"dd to the device {t[3:][:40]}")
         if low == "rm":
-            broad = _broad_rm(toks, cwd)
+            broad = _broad_rm(toks, cwd, policy)
             if broad:
                 return Decision("block", "wipe", broad)
-        # ── vcs ───────────────────────────────────────────────────────────────
-        if low == "git":
-            gsub, gargs, workdir = _git_args(toks)
-            if gsub and _vcs_destructive(gsub, gargs):
-                where = _abs(workdir, cwd) if workdir else cwd
-                if not where or any(_within(where, tree) for tree in policy.live_trees) or any(
-                        _within(_abs(a, where), tree) for a in gargs if a.startswith(("/", ".")) for tree in policy.live_trees):
-                    return Decision("block", "vcs", f"git {gsub}: destructive VCS in a live tree")
-                ask = ask or Decision("ask", "irreversible", f"git {gsub} rewrites history in {where[:60]}")
-        # ── ask classes ───────────────────────────────────────────────────────
-        if low in _IRREVERSIBLE or (low == "systemctl" and any(t in _SYSTEMCTL_IRREVERSIBLE for t in toks[1:])):
-            ask = ask or Decision("ask", "irreversible", f"{prog} {' '.join(toks[1:3])[:40]}")
-        for t in _paths_in(toks[1:]):
-            if any(_within(_abs(t, cwd), root) for root in policy.protected_paths):
-                ask = Decision("ask", "protected", f"{prog}: {t[:100]} is inside a protected resource")
-                break
-    if _SQL.search(command):
-        ask = ask or Decision("ask", "irreversible", "a destructive SQL statement")
-    if any(t for t in targets) and not ask:
-        for target in targets:
-            if any(_within(_abs(target, cwd), root) for root in policy.protected_paths):
-                ask = Decision("ask", "protected", "a redirection into a protected resource")
-    if ask is None and re.search(r"(^|[^>])>\s*[^\s>&|]", command) and "/dev/null" not in command and "2>&1" not in command:
-        ask = Decision("ask", "irreversible", "a redirection that may truncate a file")
-    if ask is None and unsure and _MARKERS.search(command):
-        ask = Decision("ask", "irreversible", "a command this hook could not fully parse names a blocked-class word")
-    return ask or ALLOW
+    if unsure:
+        # Code this hook does not read (an inline interpreter, a shell nested past the depth, an option it does not know) that
+        # names something on the hard-block list is blocked: the list is short and catastrophic, so a mistake hidden in an
+        # unreadable line must not reach it. Anything else it cannot read is allowed, and recorded like every call.
+        if _PE_MARKERS.search(command) or any(own and own in command for own in policy.pe_paths):
+            return Decision("block", "pe", "a command this hook could not fully read names Planet Express's own files")
+        if _DOCKER_MARKERS.search(command):
+            return Decision("block", "docker", "a command this hook could not fully read would delete Docker data")
+        if _WIPE_MARKERS.search(command):
+            return Decision("block", "wipe", "a command this hook could not fully read would wipe a filesystem or disk")
+    return ALLOW
 
 
 # ── the runner: failure modes and the record ──────────────────────────────────────────────────────────
 
+_PE_MARKERS = re.compile(r"(/etc/planetexpress|/run/planetexpress|/environ\b|sudoers\.d/planetexpress|mission-hooks|"
+                         r"/usr/local/lib/planetexpress|/usr/libexec/planetexpress)", re.IGNORECASE)
+_DOCKER_MARKERS = re.compile(r"\bvolume\s+(rm|remove|prune)\b|\bsystem\s+prune\b[^;&|\n]*(--volumes|--all|\s-\w*a)|\bprune\s+(-\w*a|--all)|\bdown\s+(-v|--volumes)\b")
+_WIPE_MARKERS = re.compile(r"""\bmkfs|\bwipefs\b|\bof=/dev/(?!null|zero|std|tty|fd)|"""
+                           r"""\brm\s+-\w*[rR]\w*\s+(--\S+\s+)*/([\s*'"`);]|$|etc|home|usr|boot|var/lib/docker)|"""
+                           r"""rmtree\(\s*['"]/(etc|home|usr|boot|var/lib/docker)?['"/]""")
 _MARKERS = re.compile(
-    r"(\.env|shadow|id_rsa|\.pem|\.ssh|secret|credential|environ|printenv|\brm\b|mkfs|\bdd\b|wipefs|shred|\bgit\b|publish|"
-    r"\bpush\b|upload|prune|volume|compose|sudoers|visudo|daemon\.json|passwd|token|\bgh\b)", re.IGNORECASE)
+    r"(planetexpress|environ|printenv|\benv\b|\bset\b|export|declare|mkfs|wipefs|\bdd\b|\brm\b|prune|volume|\bdown\b|sudoers|"
+    r"mission-hooks)", re.IGNORECASE)
 
 
 @dataclass
@@ -740,18 +632,16 @@ def _outcome(raw: Any) -> str:
 
 # ── Core's side: the policy a session's hooks are given ───────────────────────────────────────────────
 
-def policy_for(cfg: Any, protected_resources: Sequence[str] = (), *, stacks_root: str | None = None) -> HookPolicy:
-    """From `missions.*` config and the protected set. Protected resources that are paths or mounts become `ask` roots."""
-    paths: list[str] = []
-    for resource in protected_resources:
-        _host, _sep, rest = resource.partition("/")
-        kind, _s, name = rest.partition(":") if rest else ("", "", "")
-        if kind in ("path", "mount") and name.startswith("/"):
-            paths.append(name)
+def policy_for(cfg: Any, protected_resources: Sequence[str] = (), *, stacks_root: str | None = None,
+               pe_paths: Sequence[str] = ()) -> HookPolicy:
+    """From `missions.hooks.*`, the stacks root and the paths of this PE install (its config file, database, hook root).
+    `protected_resources` is accepted for older callers and ignored: in trust mode the protected set is recorded, never
+    enforced by the hook."""
     hooks = getattr(cfg, "hooks", None)
-    return HookPolicy(live_trees=tuple(cfg.live_trees), protected_paths=tuple(paths),
-                      blocked_failure=getattr(hooks, "blocked_failure", "closed"),
-                      other_failure=getattr(hooks, "other_failure", "open"))
+    own = [p for p in (*pe_paths, getattr(hooks, "root", None) or "") if isinstance(p, str) and p.startswith("/")]
+    return HookPolicy(blocked_failure=getattr(hooks, "blocked_failure", "closed"),
+                      other_failure=getattr(hooks, "other_failure", "open"),
+                      stacks_root=stacks_root or "", pe_paths=tuple(dict.fromkeys(own)))
 
 
 # ── the CLI the runtime's hook configuration invokes ──────────────────────────────────────────────────
@@ -766,11 +656,11 @@ MAX_LOG_LINE = 4096
 
 
 def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Mapping[str, str] | None = None) -> int:
-    """`python -m planet_express.missions.hooks pre|post`: reads the runtime's hook JSON on stdin. Exit 0 allows (printing a
-    JSON permission decision for `ask`), exit 2 blocks with the reason on stderr. The policy is the JSON in PE_HOOK_POLICY,
-    which Core put in the environment the runtime was started with, and the hook command itself is installed by settings.json
-    in a Core-owned directory the session cannot write (its hash is checked at every poll, and a changed or missing file
-    kills the session). Nothing in the input can switch the hook off, and a missing or unreadable policy falls back to the
+    """`<python> <hook dir>/pe_hook.py pre|post` (or `python -m planet_express.missions.hooks`): reads the runtime's hook JSON on
+    stdin. Exit 0 allows, exit 2 blocks with the reason on stderr. The policy is the JSON in PE_HOOK_POLICY, which Core put in
+    the environment the runtime was started with, and the hook command and this script are installed in a Core-owned
+    directory the session cannot write (their hashes are checked at every poll, and a changed or missing file kills the
+    session). Nothing in the input can switch the hook off, and a missing or unreadable policy falls back to the
     default one, which fails closed for blocked classes. A hook is still only a speed bump: a session can simply not call it. The session token never reaches a hook: calls are
     recorded to PE_HOOK_LOG, which Core reads (bounded, as untrusted data) and appends to the mission's events."""
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -783,7 +673,7 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
         return 2
     if environ.get(POLICY_FILE_ENV):
         # Core pointed this session at a policy file (it was too large for the environment). If that file cannot be read or
-        # parsed, falling back to the default policy would silently drop every protected path, so the call is blocked instead.
+        # parsed, falling back to the default policy would silently drop this install's own paths, so the call is blocked.
         try:
             with open(environ[POLICY_FILE_ENV], "rb") as handle:
                 raw_policy = handle.read(MAX_POLICY_FILE_BYTES + 1)
@@ -816,17 +706,18 @@ def main(argv: Sequence[str] | None = None, stdin=None, stderr=None, environ: Ma
     if decision.verdict == "block":
         print(f"pe-hook: blocked ({decision.cls}): {decision.reason}", file=stderr)
         return 2
-    if decision.verdict == "ask":
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask",
-                                                 "permissionDecisionReason": f"pe-hook: {decision.reason}"}}))
-    elif decision.cls == "failure":
+    if decision.cls == "failure":
         print(f"pe-hook: {decision.reason}", file=stderr)
     return 0
 
 
+HOOK_SCRIPT_NAME = "pe_hook.py"
+DEFAULT_INTERPRETER = "/usr/bin/python3"
+
+
 def claude_code_settings(command: Sequence[str]) -> dict:
-    """The Claude Code `hooks` settings that run this module before and after every tool call. `command` is the absolute argv
-    that starts it, e.g. ["/opt/pe/venv/bin/python", "-m", "planet_express.missions.hooks"]."""
+    """The Claude Code `hooks` settings that run the hook before and after every tool call. `command` is the absolute argv
+    that starts it, e.g. ["/usr/bin/python3", "<hook dir>/pe_hook.py"]."""
     base = " ".join(shlex.quote(part) for part in command)
 
     def entry(which: str) -> list[dict]:
@@ -834,14 +725,25 @@ def claude_code_settings(command: Sequence[str]) -> dict:
     return {"hooks": {"PreToolUse": entry("pre"), "PostToolUse": entry("post")}}
 
 
-def install_claude_code(hook_dir: Path, command: Sequence[str]) -> dict[str, str]:
-    """Write the hook settings into `hook_dir` before the session launches, and return the environment that makes the runtime
-    read them (CLAUDE_CONFIG_DIR). `hook_dir` is a per-session directory that CORE owns, outside the session's workspace:
-    the session can read settings.json (0644 in a 0755 directory) and can neither edit nor delete it, and the Supervisor
-    checks its hash at every poll. Only the append-only hook log stays in the workspace, as untrusted data. A failure raises:
-    a mission configured to run under hooks does not start without them."""
+def install_claude_code(hook_dir: Path, command: Sequence[str] = (DEFAULT_INTERPRETER,)) -> dict[str, str]:
+    """Copy THIS file into `hook_dir` as `pe_hook.py` and write the hook settings that run it, before the session launches;
+    return the environment that makes the runtime read them (CLAUDE_CONFIG_DIR). A copy made at every launch is the hook this
+    Core runs, so it can never be stale (a hand-installed copy once was). `command[0]` is the interpreter
+    (`missions.hooks.command`, default /usr/bin/python3); anything after it (an older config's script path or `-m` module) is
+    ignored in favour of the copy. `hook_dir` is a per-session directory that CORE owns, outside the session's workspace: the
+    session can read settings.json and pe_hook.py (0644 in a 0755 directory) and can neither edit nor delete them, and the
+    Supervisor checks both hashes at every poll. Only the append-only hook log stays in the workspace, as untrusted data. A
+    failure raises: a mission configured to run under hooks does not start without them."""
+    interpreter = (list(command) or [DEFAULT_INTERPRETER])[0]
+    if not interpreter.startswith("/"):
+        raise ValueError("the hook interpreter must be an absolute path")
+    script = Path(hook_dir) / HOOK_SCRIPT_NAME
+    temp = script.with_name(f".{HOOK_SCRIPT_NAME}.tmp")
+    shutil.copyfile(Path(__file__).resolve(), temp)
+    temp.chmod(0o644)
+    os.replace(temp, script)
     target = Path(hook_dir) / "settings.json"
-    target.write_text(json.dumps(claude_code_settings(command), indent=2) + "\n", encoding="utf-8")
+    target.write_text(json.dumps(claude_code_settings([interpreter, str(script)]), indent=2) + "\n", encoding="utf-8")
     target.chmod(0o644)
     return {"CLAUDE_CONFIG_DIR": str(hook_dir)}
 
@@ -895,8 +797,8 @@ def _log_poster(environ: Mapping[str, str]) -> Callable[[str, dict], Any] | None
     return post
 
 
-__all__ = ["ALLOW", "BLOCKED_CLASSES", "Decision", "HookPolicy", "HookRunner", "claude_code_argv", "claude_code_settings", "classify",
-           "install_claude_code", "main", "policy_for"]
+__all__ = ["ALLOW", "BLOCKED_CLASSES", "HOOK_SCRIPT_NAME", "Decision", "HookPolicy", "HookRunner", "claude_code_argv",
+           "claude_code_settings", "classify", "install_claude_code", "main", "policy_for"]
 
 if __name__ == "__main__":
     raise SystemExit(main())
