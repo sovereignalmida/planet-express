@@ -274,16 +274,6 @@ def test_cli_with_an_unreadable_policy_uses_the_closed_default_and_the_environme
 
 # ── the hooks are a speed bump: the boundary holds with no hook at all ──────────────────────────────
 
-def test_with_no_hook_installed_the_tripwire_still_pauses_a_protected_change(tmp_path):
-    from tripwire_fakes import go_executing, make_rig, status, touch
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    # a command every hook would have blocked, simply carried out: nothing in this test ever calls the hook layer
-    touch(rig.fs / "etc" / "hosts", "10.0.0.1 evil\n")
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire"
-
-
 def test_with_no_hook_installed_the_session_environment_still_holds_no_credentials(tmp_path):
     from planet_express.missions.grants import build_session_env
     from planet_express.missions.models import Grant

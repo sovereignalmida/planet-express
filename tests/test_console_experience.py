@@ -62,7 +62,7 @@ def test_a_launcher_that_is_not_ready_is_said_rather_than_silent(rig):
 
 def test_repairs_that_are_not_available_are_said_rather_than_silent(rig):
     mid = authorised(rig)
-    rig.st.sup.tripwire = None                           # mutating_ready is now false
+    rig.st.sup.verifier = None                           # mutating_ready is now false
     rig.st.sup.tick()
     assert "Repair missions are not available" in ex_mod.start_waiting(rig.st.ms, rig.st.ms.get_mission(mid))
 
@@ -106,15 +106,15 @@ def test_a_wait_after_a_failed_attempt_is_said_again(rig):
 
 
 def test_a_start_that_fails_after_its_checkpoint_still_says_why(rig):
-    """Codex, rc13: a refused tripwire baseline leaves the mission awaiting_decision with a checkpoint already taken."""
+    """Codex, rc13: a start that fails after its checkpoint (the launch) leaves the mission awaiting_decision with a checkpoint taken."""
     mid = authorised(rig)
     with rig.st.store._write() as conn:
         conn.execute("UPDATE missions SET checkpoint_id='cp-1' WHERE id=?", (mid,))
     rig.st.ms.append_event(mid, "note", "supervisor", {"checkpoint_taken": "cp-1"})
-    rig.st.ms.append_event(mid, "note", "supervisor", {"baseline_refused": "OSError", "why": "x"})
+    rig.st.ms.append_event(mid, "note", "supervisor", {"start_failed": "OSError"})
     mission = rig.st.ms.get_mission(mid)
     waiting = ex_mod.start_waiting(rig.st.ms, mission)
-    assert "tripwire" in waiting
+    assert "the last start attempt failed (OSError)" in waiting
     labels = [(s["label"], s["state"]) for s in ex_mod.timeline(mission, "operator:chris", waiting)]
     assert labels[1] == ("Checkpoint taken", "done") and labels[2] == ("Waiting to start", "now")
     rig.st.ms.append_event(mid, "note", "supervisor", {"checkpoint_taken": "cp-2"})

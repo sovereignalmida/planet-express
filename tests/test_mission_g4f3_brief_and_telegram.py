@@ -21,7 +21,7 @@ def stack(tmp_path):
     made = []
 
     def make(**kw):
-        st = build(tmp_path, start_monitor=False, **kw)
+        st = build(tmp_path, **kw)
         made.append(st)
         return st
     yield make

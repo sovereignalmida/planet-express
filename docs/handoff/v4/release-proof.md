@@ -12,7 +12,7 @@ on a disposable host), **PENDING** (needs a human or a host run that has not hap
 | --- | --- | --- |
 | 1 | AUTOMATED | `tests/release_proof/test_item01_defaults.py::test_the_schema_default_and_the_shipped_example_config_have_missions_off`, `tests/release_proof/test_item01_defaults.py::test_no_v3_test_file_has_been_deleted_or_renamed_since_v3_next`; the v3 suites run in the full suite |
 | 2 | AUTOMATED + HOST | `tests/release_proof/test_item02_checkpoint_and_side_doors.py`; host: `tests/test_checkpoint_privileged.py`, `tests/test_launcher_privileged.py` (2026-10-20, see below) |
-| 3 | AUTOMATED + HOST | `tests/release_proof/test_item03_tripwire.py::test_a_planted_change_pauses_within_the_published_bound_and_offers_rollback`; host: `tests/test_tripwire_privileged.py` |
+| 3 | DONE | Retired by trust mode (`docs/designs/v4-trust-mode.md`, step 3): the tripwire is removed; rollback is `tests/test_mission_repair_flow.py::test_rollback_from_recovery_required_restores_the_checkpoint_and_ends_rolled_back` |
 | 4 | AUTOMATED | `tests/release_proof/test_item04_no_protected_credentials.py` |
 | 5 | AUTOMATED | `tests/release_proof/test_item05_secrets_and_hostile_text.py` |
 | 6 | AUTOMATED | `tests/release_proof/test_item06_crash_classification.py` |
@@ -24,18 +24,17 @@ on a disposable host), **PENDING** (needs a human or a host run that has not hap
 ## Notes per item
 
 1. v3 regression suites are the existing tests; this slice changes none of them. Missions are off in the schema default and
-   in `config.example.yaml`; every mission and memory RPC answers `disabled`; a disabled supervisor, checkpoint service and
-   tripwire monitor start nothing. A test also fails if a v3 test file is deleted or renamed since `v3-next` (skipped
+   in `config.example.yaml`; every mission and memory RPC answers `disabled`; a disabled supervisor and checkpoint service
+   start nothing. A test also fails if a v3 test file is deleted or renamed since `v3-next` (skipped
    where git or the ref is absent).
 2. Checkpoint: byte, mode and container-fact restore; refusal when the host moved on after the session or the end state was
    not captured; backup floor refuses unverifiable, absent and stale. Side doors (docker group, session range containing
    Core, Docker TCP in config and as a live listener, unmanaged or hand-edited sudoers, unreadable inputs, a crashing step)
    each fail the gate. The privileged runs (real uids, cgroups, ACLs, sockets) were recorded on the MOS and Ubuntu test VMs
    on 2026-10-20 (`docs/handoff/v4/STATE.md`).
-3. All five named domains (ingress, DNS file, credential file, firewall, data-volume shrink) are planted under a fake
-   clock whose scan consumes its whole 10 s deadline; the measured latency equals interval plus deadline and must not
-   exceed the 30 s bound; the pause event carries an available rollback only after a durable post-capture, and a rollback
-   restores the checkpointed files. A real-time smoke test lives in `tests/test_tripwire_monitor.py`.
+3. Retired by trust mode (step 3, 2026-11-03): the tripwire monitor, its pause and the operator's pause, resume and take-over
+   are deleted. What it protected is now answered by the checkpoint, the full record, PE's own verification and the
+   operator's rollback, which is built directly on the checkpoint service and tested in `tests/test_mission_repair_flow.py`.
 4. The operator's environment is full of DNS, ingress, router and backup secrets; none reaches an ungranted session's
    environment, readable paths, launch spec or persisted state; the DNS write tool is refused without the credential and
    even with it (write tools stay gated); a grant cannot name an unregistered credential.

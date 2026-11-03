@@ -12,7 +12,6 @@ import pytest
 from checkpoint_fakes import make_env
 from missions_helpers import make_store
 from supervisor_fakes import Rig
-from tripwire_fakes import make_rig
 
 from config_schema import MissionsConfig
 from planet_express.application.mission_service import MissionService
@@ -45,12 +44,6 @@ def test_a_disabled_supervisor_starts_nothing_and_a_disabled_checkpoint_runs_no_
     with pytest.raises(CheckpointDisabled):
         env.svc.create(env.mission.id, env.scope)
     assert env.docker.calls == []
-
-
-def test_a_disabled_install_starts_no_monitor_thread(tmp_path):
-    rig = make_rig(tmp_path, enabled=False)
-    assert rig.monitor.start() is None
-    assert not any(t.name == "tripwire-monitor" for t in threading.enumerate())
 
 
 def test_no_v3_test_file_has_been_deleted_or_renamed_since_v3_next():

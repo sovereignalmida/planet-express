@@ -150,7 +150,7 @@ def lease_count(store):
 
 
 @pytest.mark.parametrize("path", [("cancelled",), ("verifying", "failed"), ("failed",),
-                                  ("paused_tripwire", "rolled_back")])
+                                  ("rollback_pending", "rolled_back")])
 def test_terminal_transition_frees_leases_and_session(tmp_path, path):
     store, ms, m, sid = started(tmp_path)
     other = new_mission(ms)
@@ -179,7 +179,7 @@ def test_terminal_transition_releases_suspect_leases_too(tmp_path):
 
 def test_non_terminal_transition_keeps_leases(tmp_path):
     store, ms, m, _ = started(tmp_path)
-    transition(store, m.id, "paused_tripwire", "core")
+    transition(store, m.id, "needs_operator", "core")
     assert lease_count(store) == 1 and ms.live_session(m.id) is not None
 
 

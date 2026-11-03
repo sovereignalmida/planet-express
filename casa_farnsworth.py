@@ -1940,14 +1940,14 @@ def handle_message(
                 "/mission_card `<id>` — A repair mission's approval card\n"
                 "/approve `<id>` `<hash8>` — Approve the next step of a card (never an elevated one)\n"
                 "/deny `<id>` `<hash8>` — Deny and close a repair mission\n"
-                "/resume `M-<n>`, /rollback `M-<n>`, /takeover `M-<n>` — Act on a tripwire pause (or roll back a mission)"
+                "/rollback `M-<n>` — Roll a repair mission back to its checkpoint"
             )
             if missions.console_telegram is not None:
                 help_text += (
                     "\n/ask `<question>` — Start a Console conversation; answers and plans come back here\n"
                     "/reply `[id]` `<text>`, /threads, /plan `[id]` — Follow up, list, show the plan\n"
                     "/confirm `<id>` `<A|B|C>` `<plan8>`, /authorise `<id>` `<hash8>`, /withdraw `<id>` — Confirm a plan option (never an elevated one)\n"
-                    "/run `<id>` `pause|resume|rollback|takeover`, /close `<id>` — Control the run, close the conversation"
+                    "/run `<id>` `rollback`, /close `<id>` — Roll the run back, close the conversation"
                 )
         notifier.notify(help_text)
 
@@ -2075,7 +2075,7 @@ def _repair_wiring():
 
 
 def _is_mission_rollback(text: str, missions: MissionService | None) -> bool:
-    """`/rollback M-<n>` belongs to MissionService (a tripwire pause or a finished repair mission), never to the v3
+    """`/rollback M-<n>` belongs to MissionService (a repair mission that needs the operator), never to the v3
     `/rollback <execution_id>` handler: the two id shapes cannot be confused (an execution id is 12 hex digits)."""
     parts = text.split()
     return (missions is not None and missions.enabled() and len(parts) == 2

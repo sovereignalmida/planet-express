@@ -11,7 +11,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from repair_fakes import build
-from verify_fakes import media_down  # noqa: F401  (keeps the fake-host import path warm)
+from verify_fakes import (
+    media_down,  # noqa: F401  (keeps the fake-host import path warm)
+)
 
 from planet_express.application.mission_service import MissionError, MissionService
 from planet_express.integrations.rpc import RpcError
@@ -27,7 +29,7 @@ def stack(tmp_path):
     made = []
 
     def make(**kw):
-        st = build(tmp_path, start_monitor=False, **kw)
+        st = build(tmp_path, **kw)
         made.append(st)
         return st
     yield make
@@ -241,25 +243,32 @@ def test_the_flow_itself_refuses_a_non_operator_actor(stack):
     assert not approvals_rows(st, mid)
 
 
-def test_the_rpc_derives_the_actor_for_every_decision_and_tripwire_action(stack):
+def test_the_rpc_derives_the_actor_for_every_decision_and_the_rollback(stack):
     st = stack()
     mid = st.propose()["mission_id"]
     _, handlers = service(st)
     h = st.flow.card(mid)["grant_hash"]
     ok = call(handlers, "mission.approve", mission_id=mid, operator="alice", phase="grant", grant_hash=h)
     assert "error" not in ok and approvals_rows(st, mid)[0]["operator"] == "operator:alice"
-    for method in ("mission.resume", "mission.takeover", "mission.rollback"):
-        for forged in ({"actor": "operator:root"}, {"ack_actor": "x"}):
-            assert call(handlers, method, mission_id=mid, operator="alice", **forged)["error"] == "bad_request"
+    for forged in ({"actor": "operator:root"}, {"ack_actor": "x"}):
+        assert call(handlers, "mission.rollback", mission_id=mid, operator="alice", **forged)["error"] == "bad_request"
     assert call(handlers, "mission.rollback", mission_id=mid, operator="alice", ack_drift=True)["error"] != "bad_request"
+
+
+def test_the_pause_resume_and_take_over_rpcs_are_gone(stack):
+    """Trust mode removed them with the tripwire: the RPC table has no such method (an unknown method, not a refusal)."""
+    st = stack()
+    _, handlers = service(st)
+    assert not {"mission.resume", "mission.takeover", "mission.pause"} & set(handlers)
+    assert "/resume" not in MissionService.TELEGRAM_COMMANDS and "/takeover" not in MissionService.TELEGRAM_COMMANDS
 
 
 def test_every_new_rpc_answers_disabled_before_it_looks_at_params_and_unavailable_without_a_flow(stack):
     st = stack()
     off = MissionService(st.store, enabled=lambda: False)
     handlers = off.handlers()
-    for method in ("mission.approval_card", "mission.propose_repair", "mission.approve", "mission.deny", "mission.resume",
-                   "mission.rollback", "mission.takeover", "standing.create", "standing.supersede", "standing.revoke",
+    for method in ("mission.approval_card", "mission.propose_repair", "mission.approve", "mission.deny",
+                   "mission.rollback", "standing.create", "standing.supersede", "standing.revoke",
                    "standing.list"):
         assert call(handlers, method, junk=1)["error"] == "disabled", method
     on = MissionService(st.store, enabled=lambda: True)               # no flow attached

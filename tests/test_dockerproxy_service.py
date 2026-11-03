@@ -19,7 +19,6 @@ from dockerproxy_fakes import FakeDaemon, request
 from launcher_support import good_conf, load_helper
 from repair_fakes import build, update
 from supervisor_fakes import Rig
-from tripwire_fakes import touch
 
 from planet_express.integrations.rpc import PeerCred
 from planet_express.missions import leases
@@ -30,9 +29,6 @@ from planet_express.missions.dockerproxy.service import (
 )
 from planet_express.missions.dockerproxy.upstream import Upstream
 from planet_express.missions.runner import SessionSockets
-from planet_express.missions.supervisor import (
-    ResumeRefused as SupervisorResumeRefused,
-)
 from planet_express.missions.worker_rpc import WorkerAuthenticator
 
 
@@ -294,35 +290,7 @@ def test_scope_comes_from_the_approved_grant_not_from_the_request(stack):
     assert [w["target"].split("/")[3] for w in st.daemon.writes()] == ["b" * 64]
 
 
-# ── pause and resume ────────────────────────────────────────────────────────────────────────────────
-
-def test_resume_acceptance_a_tripwire_pause_closes_the_proxy_and_a_resume_reopens_it_before_thawing(stack):
-    st = stack()
-    mid, sid, token, path, _ = go(st)
-    assert restart(path, token)[0] == 204
-    touch(st.rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
-    st.monitor.scan_once()
-    assert st.status(mid) == "paused_tripwire" and st.svc.is_paused(mid)
-    for method, target in (("GET", "/containers/json"), ("POST", "/containers/qbittorrent/restart"), ("GET", "/_ping")):
-        assert request(path, method, target, token=token)[0] == 503             # the socket is kept; every request is refused
-    assert os.path.exists(path) and len(st.daemon.writes()) == 1
-    st.flow.resume("operator:alice", mid)
-    assert st.status(mid) == "executing" and not st.svc.is_paused(mid)
-    assert not st.cont._groups[sid].frozen
-    assert restart(path, token)[0] == 204 and len(st.daemon.writes()) == 2      # the same socket, re-authorised
-
-
-def test_a_resume_the_approval_no_longer_covers_leaves_the_proxy_closed(stack):
-    st = stack()
-    mid, sid, token, path, _ = go(st)
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    with sqlite3.connect(st.store.path) as conn:
-        conn.execute("DELETE FROM mission_approvals WHERE mission_id=?", (mid,))
-    with pytest.raises(SupervisorResumeRefused):
-        st.sup.resume(mid, "operator:alice")
-    assert st.svc.is_paused(mid) and request(path, "GET", "/containers/json", token=token)[0] == 503
-
+# ── pause and resume (the proxy's own switch; the tripwire that drove it is gone, stage 4 removes the proxy) ────────────────────────────────────────────────────────────────────────────────
 
 def test_resume_itself_refuses_a_changed_grant_and_a_missing_session(stack):
     st = stack()
@@ -403,10 +371,9 @@ def test_a_valid_session_that_is_not_this_sockets_session_is_refused_by_the_gate
     assert ok.authenticate(PeerCred(1, 2, 3), 5) is None
 
 
-def test_the_daemon_wiring_builds_the_proxy_before_the_controls_so_a_tripwire_pause_reaches_it(tmp_path, monkeypatch):
-    """Review finding: the service must exist when `build_repair_controls` captures the revoke callback."""
+def test_the_daemon_wiring_builds_the_proxy_before_the_controls_and_hands_it_to_them(tmp_path, monkeypatch):
+    """Review finding: the service must exist when `build_repair_controls` is assembled."""
     from config_schema import MissionsConfig
-
     from planet_express.core.store import Store
     from planet_express.missions import assembly
     from planet_express.missions.runner import build_mission_runner
@@ -437,7 +404,7 @@ def test_a_pause_that_arrives_while_the_session_is_launching_is_not_cleared_by_t
 
     def racing_start(self):
         real_start(self)
-        st.svc.pause(mid)                                    # the tripwire fires between the bind and the end of the launch
+        st.svc.pause(mid)                                    # a pause arrives between the bind and the end of the launch
     monkeypatch.setattr(service_mod.ProxyServer, "start", racing_start)
     st.sup.tick()
     sid = st.runtimes[0].context.session.session_id
@@ -456,15 +423,10 @@ def test_a_pause_left_over_from_an_earlier_session_does_not_close_a_fresh_one(st
     assert not st.svc.is_paused(mid)
 
 
-def test_a_failed_resume_and_a_tool_abuse_freeze_both_close_the_proxy(stack):
+def test_a_tool_abuse_freeze_closes_the_proxy(stack):
     from types import SimpleNamespace
     st = stack()
     mid, sid, token, path, _ = go(st)
-    run = st.sup._runs[mid]
-    assert not st.svc.is_paused(mid)
-    st.sup._pause_again(mid, run, "operator:alice", "boom")
-    assert st.svc.is_paused(mid) and restart(path, token)[0] == 503
-    st.svc._paused.clear()                                   # (the mission itself stays paused_tripwire: writes would be refused anyway)
     assert not st.svc.is_paused(mid)
     st.sup.freeze_for_tool_abuse(SimpleNamespace(mission_id=mid, id=sid))
     assert st.svc.is_paused(mid) and restart(path, token)[0] == 503
@@ -505,10 +467,12 @@ def test_a_card_whose_container_check_failed_says_so_instead_of_staying_silent(s
 
 
 def test_the_assembled_view_inspects_the_daemon_and_reports_what_the_proxy_would_refuse(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     from dockerproxy_fakes import CONTAINERS
+
     from planet_express.missions.assembly import host_root_view
     from planet_express.missions.protected import ProtectedSet
-    from types import SimpleNamespace
     d = tempfile.mkdtemp(prefix="dpv")
     daemon = FakeDaemon(os.path.join(d, "d.sock"))
     try:

@@ -865,7 +865,7 @@ def test_a_daemon_older_than_the_floor_gets_a_controlled_refusal_not_a_500(env):
         ro.stop()
 
 
-def test_a_created_container_id_is_recorded_before_the_answer_so_the_tripwire_can_trust_it(proxy):
+def test_a_created_container_id_is_recorded_before_the_answer(proxy):
     body = (b'{"Image":"alpine:3","Labels":{"com.docker.compose.project":"media",'
             b'"com.docker.compose.service":"qbittorrent"},"Cmd":["a"]}')
     status, _, data = proxy.req("POST", "/containers/create", body=body)

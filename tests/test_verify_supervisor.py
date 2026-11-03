@@ -96,10 +96,10 @@ def test_a_pause_during_verification_is_left_alone(tmp_path):
     sup = supervisor(rig, slow)
     sup.verify_and_close(rig.mid)
     assert slow.started.wait(5)
-    with sqlite3.connect(rig.store.path) as conn:                         # e.g. a tripwire pause moved it
-        conn.execute("UPDATE missions SET status='paused_tripwire' WHERE id=?", (rig.mid,))
+    with sqlite3.connect(rig.store.path) as conn:                         # e.g. a cancel held it for the operator
+        conn.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (rig.mid,))
     slow.release.set()
-    assert sup._verifying[rig.mid].result(10) == "paused_tripwire"
+    assert sup._verifying[rig.mid].result(10) == "needs_operator"
     assert outcome(rig) is None
 
 

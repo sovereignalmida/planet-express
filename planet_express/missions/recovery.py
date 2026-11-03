@@ -27,7 +27,7 @@ log = logging.getLogger("planetexpress.missions.recovery")
 TRUSTED_ACTORS = frozenset({"core", "supervisor"})
 RESTORABLE = ("image_id", "command", "env_hash", "mounts", "networks", "labels", "restart_policy", "health")
 PHASES = ("investigation", "execution", "verification")
-# Only a crash in these states may be routed to `verifying`. A mission that is rolling back, paused by a tripwire, waiting
+# Only a crash in these states may be routed to `verifying`. A mission that is rolling back, waiting
 # for an operator or still investigating is never promoted toward completion by a classification.
 VERIFY_FROM = frozenset({"executing", "recovery_required", "verifying"})
 MUTATING = ("repair", "change", "critical")
@@ -99,7 +99,7 @@ class HostState:
 def collect_host_state(checkpoint_service: Any, manifest: Mapping[str, Any]) -> HostState:
     """Read every file and service the manifest covers, through the S5 service and its provider. A read that fails
     makes the whole state unreadable. Ports and the mount table are NOT compared: they move without anyone changing
-    anything, and the tripwire collectors judge them while a session runs."""
+    anything, so they would report a change no session made."""
     problems: list[str] = []
     files: dict[str, str | None] = {}
     for entry in manifest.get("files", []):
@@ -228,7 +228,7 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
     grant: Grant = mission.grant()
     if checkpoint is None or host_state is None:
         return Classification("recovery_required", "there is no checkpoint or no host reading to compare with", phase,
-                              next_state="needs_operator", offers=("take_over", "cancel"), partially_applied=True,
+                              next_state="needs_operator", offers=("cancel",), partially_applied=True,
                               refused_replays=unknown)
     if matches_checkpoint(host_state, checkpoint):
         return Classification("needs_operator", "the checkpointed files and services are as the checkpoint recorded them: nothing they cover was changed (other files and data are not checked)", phase,
@@ -236,7 +236,7 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
     if matches_expectation(host_state, end_expectation(mission)):
         if mission.status not in VERIFY_FROM:
             return Classification("needs_operator", f"the host matches the expected end state but the mission is "
-                                  f"{mission.status}: an operator decides", phase, offers=("take_over", "cancel"),
+                                  f"{mission.status}: an operator decides", phase, offers=("cancel",),
                                   partially_applied=True, refused_replays=unknown)
         return Classification("verifying", "the host matches the end state the approved plan expects", phase,
                               partially_applied=False, refused_replays=unknown)
@@ -245,7 +245,7 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
     rollback = grant.on_verify_fail == "rollback"
     return Classification("recovery_required", reason, phase,
                           next_state="rollback_pending" if rollback else "needs_operator",
-                          offers=("rollback", "take_over", "cancel"), partially_applied=True,
+                          offers=("rollback", "cancel"), partially_applied=True,
                           refused_replays=unknown)
 
 

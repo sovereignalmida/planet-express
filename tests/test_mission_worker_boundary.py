@@ -15,7 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from repair_fakes import build, update
-from test_missions_worker_rpc import TOKEN, Backend, Sessions, ask, env  # noqa: F401  (the fixture and its helpers)
+from test_missions_worker_rpc import (  # noqa: F401  (the fixture and its helpers)
+    TOKEN,
+    Backend,
+    Sessions,
+    ask,
+    env,
+)
 
 from planet_express.application.mission_service import MissionService
 from planet_express.integrations.rpc import RpcError, RpcServer, call
@@ -33,7 +39,7 @@ OPERATOR_ONLY = (
     "approval.decide", "approval.get", "approval.list_recent", "execution.abort", "execution.rollback", "config.get",
     "config.apply", "config.validate", "canary.settle", "auth.record_success", "checkpoint.restore", "checkpoint.create",
     "checkpoint.capture_post", "restore.apply", "standing.create", "standing.supersede", "standing.revoke", "standing.list",
-    "mission.approve", "mission.deny", "mission.resume", "mission.rollback", "mission.takeover", "mission.approval_card",
+    "mission.approve", "mission.deny", "mission.rollback", "mission.approval_card",
     "mission.propose_repair", "mission.create", "mission.cancel", "mission.list", "mission.get", "mission.events",
     "mission.from_incident", "memory.confirm", "memory.deprecate", "memory.candidates", "action.request", "proposal.create",
 )
@@ -60,9 +66,12 @@ def test_a_worker_calling_any_operator_method_gets_unknown_method_and_an_outside
 
 
 def test_an_operator_handler_table_cannot_be_loaded_onto_the_worker_server(env):  # noqa: F811
-    from planet_express.missions.worker_rpc import WorkerAuthenticator, build_worker_server
+    from planet_express.missions.worker_rpc import (
+        WorkerAuthenticator,
+        build_worker_server,
+    )
     operator = MissionService(None, enabled=False).handlers()
-    for name in ("mission.approve", "standing.create", "mission.rollback", "mission.resume"):
+    for name in ("mission.approve", "standing.create", "mission.rollback", "mission.cancel"):
         with pytest.raises(ValueError):
             build_worker_server("/tmp/never.sock", Backend(), WorkerAuthenticator(None, resolve=Sessions().resolve),
                                 group=None, handlers={name: operator[name]})

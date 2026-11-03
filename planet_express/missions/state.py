@@ -15,6 +15,9 @@ NON_TERMINAL = frozenset({
     "draft", "queued", "investigating", "awaiting_decision", "executing", "verifying", "blocked",
     "needs_operator", "recovery_required", "paused_tripwire", "rollback_pending",
 })
+# Kept only so a row written before trust mode removed the tripwire still loads: no edge leads INTO it any more, and
+# `Supervisor.recover()` moves any such row to `recovery_required` at startup.
+LEGACY_STATES = frozenset({"paused_tripwire"})
 # Edges only an operator may take (the contract leaves needs_operator exits undefined: see the slice report).
 OPERATOR_EXITS = frozenset({"investigating", "awaiting_decision", "executing", "verifying", "rollback_pending"})
 # States that only exist because something may have been executed: observe and propose never get there.
@@ -28,9 +31,9 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "investigating": frozenset({"awaiting_decision", "completed", "failed"}),
     # `investigating` is the operator's follow-up on a finished observe/propose mission (a Console turn): see transition_in_txn.
     "awaiting_decision": frozenset({"executing", "completed", "failed", "investigating"}),
-    "executing": frozenset({"verifying", "paused_tripwire", "rollback_pending", "failed"}),
+    "executing": frozenset({"verifying", "rollback_pending", "failed"}),
     "verifying": frozenset({"completed", "failed", "rollback_pending"}),
-    "paused_tripwire": frozenset({"executing", "rolled_back", "rollback_pending"}),
+    "paused_tripwire": frozenset(),          # legacy: out only (to recovery_required, via _ANY), never back to executing
     "rollback_pending": frozenset({"rolled_back"}),
     "blocked": frozenset({"queued", "awaiting_decision"}),
     "recovery_required": frozenset({
@@ -41,6 +44,7 @@ for _state in NON_TERMINAL:
     TRANSITIONS[_state] = frozenset((TRANSITIONS.get(_state, frozenset()) | _ANY) - {_state})
 for _state in TERMINAL:
     TRANSITIONS[_state] = frozenset()
+TRANSITIONS = {_state: edges - LEGACY_STATES for _state, edges in TRANSITIONS.items()}
 
 
 class IllegalTransition(RuntimeError):

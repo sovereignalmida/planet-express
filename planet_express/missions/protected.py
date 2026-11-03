@@ -151,5 +151,32 @@ def build_protected(*, site: Sequence[str], discovery: Discovery, overrides: Seq
                         explicit=tuple(sorted(set(extra) & resources)))
 
 
+def build_protected_set(cfg, *, stacks_root: str, storage_mounts=(), volumes=(), ingress=(), dns=(),
+                        credentials=(), backup=(), record: Callable[[dict], None] | None = None) -> ProtectedSet:
+    """The site's protected set from `missions.*` config: the built-in defaults, what setup discovered, and
+    `missions.protected`. (Lived beside the tripwire monitor until trust mode removed it; stage 4 removes the set itself.)"""
+    discovery = Discovery(
+        stacks_root=stacks_root, storage_mounts=tuple(storage_mounts), volumes=tuple(volumes), ingress=tuple(ingress),
+        dns=tuple(dns), credentials=tuple(credentials), backup=tuple(backup), package_paths=tuple(cfg.package_paths),
+        live_trees=tuple(cfg.live_trees), cross_host=tuple((c.name, c.path) for c in cfg.cross_host))
+    overrides = [ProtectedOverride(o.resource, o.reason, o.operator, o.at) for o in cfg.protected_overrides]
+    if overrides and record is None:
+        # Taking a resource out of the protected set is a decision that must leave a durable record, or it is not allowed.
+        raise ValueError("missions.protected_overrides need a record sink: refusing to apply them unrecorded")
+    return build_protected(site=cfg.protected, discovery=discovery, overrides=overrides, record=record)
+
+
+def protected_override_recorder(store) -> Callable[[dict], None]:
+    """The durable sink for protected-set overrides: one `mission.protected_override` row in the system event log (reason
+    and operator included, redacted), written before the set is used."""
+    from planet_express.core.redact import redact
+
+    def record(entry: dict) -> None:
+        store.record_event("mission.protected_override", resource=redact(str(entry["override"]))[:512],
+                           reason=redact(str(entry["reason"]))[:512], operator=redact(str(entry["operator"]))[:128],
+                           at=int(entry["at"]))
+    return record
+
+
 __all__ = ["DEFAULT_PROTECTED", "REQUIRED_DOMAINS", "Discovery", "OverrideRefused", "ProtectedOverride",
-           "ProtectedSet", "build_protected"]
+           "ProtectedSet", "build_protected", "build_protected_set", "protected_override_recorder"]

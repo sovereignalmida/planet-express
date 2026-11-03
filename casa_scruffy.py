@@ -933,9 +933,7 @@ _MISSION_NOTICES = {
     "disabled": "Missions are disabled on this host.",
     "approved": "Approval recorded.",
     "denied": "Mission denied and closed.",
-    "resumed": "Mission resumed.",
     "rolled_back": "Rollback finished. Check the mission status below.",
-    "taken_over": "The worker was stopped. The host is yours.",
     "stale": "That card was out of date. Read it again before deciding.",
     "elevation_required": "That approval needs an elevated session. Elevate with your passphrase, then try again.",
     "refused": "That could not be done now. The event stream says why.",
@@ -1074,11 +1072,10 @@ def register_console_pages(app, core) -> None:
 
     @app.post("/api/console/<conversation_id>/run/<action>")
     def console_run_action(conversation_id, action):
-        if action not in ("pause", "resume", "rollback", "takeover"):
+        if action != "rollback":                             # trust mode: pause, resume and take-over are gone
             abort(404)
-        params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "execution_id": int_field("execution_id", 1), "action": action}
-        if action == "rollback":
-            params["ack_drift"] = request.form.get("ack_drift") == "1"
+        params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "execution_id": int_field("execution_id", 1), "action": action,
+                  "ack_drift": request.form.get("ack_drift") == "1"}
         return jsonify(core("console.execution_action", params))
 
     app.add_url_rule("/api/console/<conversation_id>/interrupt", "console_interrupt", action("console.interrupt"), methods=["POST"])
@@ -1145,7 +1142,7 @@ def register_mission_pages(app, core) -> None:
             refuse(error)
         card = None
         if mission["tier"] not in ("observe", "propose") and mission["status"] in (
-                "awaiting_decision", "paused_tripwire", "needs_operator", "recovery_required", "rollback_pending"):
+                "awaiting_decision", "needs_operator", "recovery_required", "rollback_pending"):
             try:
                 card = core("mission.approval_card", {"mission_id": mission_id})
             except RpcError:
@@ -1183,18 +1180,10 @@ def register_mission_pages(app, core) -> None:
         return mission_action(mission_id, "mission.deny",
                               lambda elevated: {"grant_hash": request.form.get("grant_hash", "")}, "denied")
 
-    @app.post("/missions/<mission_id>/resume")
-    def mission_resume(mission_id):
-        return mission_action(mission_id, "mission.resume", lambda elevated: {}, "resumed")
-
     @app.post("/missions/<mission_id>/rollback")
     def mission_rollback(mission_id):
         return mission_action(mission_id, "mission.rollback",
                               lambda elevated: {"ack_drift": request.form.get("ack_drift") == "1"}, "rolled_back")
-
-    @app.post("/missions/<mission_id>/takeover")
-    def mission_takeover(mission_id):
-        return mission_action(mission_id, "mission.takeover", lambda elevated: {}, "taken_over")
 
     @app.get("/missions/standing")
     def standing_page():

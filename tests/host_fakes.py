@@ -1,5 +1,5 @@
-"""A fake host and a ready-made executing mission for the tripwire tests. Files are real (under a tmp fs_root);
-Docker, `ss`, the mount table and the firewall are scripted."""
+"""A fake host and a ready-made executing Repair mission (it served the tripwire tests until trust mode removed the tripwire).
+Files are real (under a tmp fs_root); Docker, `ss`, the mount table and the firewall are scripted."""
 import json
 import os
 import sys
@@ -17,8 +17,6 @@ from planet_express.missions.grants import with_site_protected
 from planet_express.missions.launcher.spec import LaunchSpec
 from planet_express.missions.models import Grant
 from planet_express.missions.protected import Discovery, build_protected
-from planet_express.missions.tripwire import ScanEnv, Scanner, TripwireMonitor
-from planet_express.missions.tripwire.signals import volume_paths
 
 
 def doc(name, *, project=None, service=None, image="sha256:aaa", labels=None, mounts=(), networks=("media_default",)):
@@ -85,7 +83,7 @@ class Rig:
     pass
 
 
-def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_tree=False, enabled=True, site_extra=()):
+def make_rig(tmp_path, *, grant_over=None, with_tree=False, site_extra=()):
     rig = Rig()
     rig.host = Host()
     fs = tmp_path / "root"
@@ -142,22 +140,12 @@ def make_rig(tmp_path, *, grant_over=None, monitor_kw=None, scan_kw=None, with_t
                                         runtime="fake")
     rig.mission = env.ms.set_verification_plan(rig.mission.id, DEFAULT_PLAN)
     env.mission = rig.mission
-    scan_env = ScanEnv(runner=rig.host.runner, bounded=rig.host.bounded, read_mounts=rig.host.read_mounts, protected=rig.protected,
-                       fs_root=str(fs), volume_paths=volume_paths(rig.protected), clock=env.clock)
-    rig.scan_env = scan_env
-    rig.scanner = Scanner(scan_env, signal_timeout_s=(scan_kw or {}).get("signal_timeout_s", 3.0),
-                          deadline_s=(scan_kw or {}).get("deadline_s", 10.0), clock=env.clock)
     rig.cont = FakeContainment()
-    kw = dict(missions=env.ms, containment=rig.cont, checkpoint=env.svc, scanner=rig.scanner,
-              state_dir=str(tmp_path / "tripwire"), enabled=lambda: enabled, stacks_root=str(env.stacks),
-              interval_s=15, clock=env.clock)
-    kw.update(monitor_kw or {})
-    rig.monitor = TripwireMonitor(**kw)
     rig.revoked = []
     return rig
 
 
-def go_executing(rig, *, checkpoint=True, baseline=True):
+def go_executing(rig, *, checkpoint=True):
     env, m = rig.env, rig.mission
     advance_to(env.ms, m.id, "queued", "investigating", "awaiting_decision")
     record_approval(env.store, m.id, "grant", m.grant_hash, "approve", "operator:me")
@@ -166,20 +154,11 @@ def go_executing(rig, *, checkpoint=True, baseline=True):
     env.ms.start_session(m.id, kind="local_cgroup", token_hash=token(), session_ttl_s=3600, lease_ttl_s=600,
                          cgroup_path=rig.cont.cgroup_path("S-1"), session_uid=60001, session_id="S-1", state="live")
     rig.cs = rig.cont.launch("S-1", LaunchSpec(uid=60001, cwd="/tmp", argv=("/bin/true",)))
-    if baseline:
-        rig.monitor.begin(m.id)
     return env.ms.get_mission(m.id)
 
 
 def status(rig):
     return rig.env.ms.get_mission(rig.mission.id).status
-
-
-def paused_event(rig):
-    for e in reversed(rig.env.ms.events(rig.mission.id)):
-        if e.kind == "tripwire" and json.loads(e.body_json).get("event") == "tripwire.paused":
-            return json.loads(e.body_json)
-    return None
 
 
 def frozen(rig):

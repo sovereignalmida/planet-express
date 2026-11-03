@@ -53,7 +53,7 @@ def ready(st, mid):
 # ── creating, listing, revoking, versions ────────────────────────────────────────────────────────────
 
 def test_create_list_revoke(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     made = make_standing(st, window_spec={"deny": ["backup"]})
     assert made["id"] == "SG-1-v1" and made["state"] == "active" and made["created_by"] == "operator:alice"
     assert made["window"] == {"deny": ["13:00-14:00"], "allow": None}               # the name was resolved when it was created
@@ -68,7 +68,7 @@ def test_create_list_revoke(stack):
 
 
 def test_creating_one_needs_an_elevated_session_and_limits_apply(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     with pytest.raises(FlowError) as exc:
         make_standing(st, elevated=False)
     assert exc.value.code == "elevation_required"
@@ -87,7 +87,7 @@ def test_creating_one_needs_an_elevated_session_and_limits_apply(stack):
 
 
 def test_a_new_version_replaces_the_old_one_and_the_old_one_stops_starting_missions(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     v2 = st.flow.standing_supersede("operator:alice", "SG-1-v1", scope=SCOPE, ttl_s=7200, elevated=True)
     assert v2["id"] == "SG-1-v2" and v2["version"] == 2
@@ -129,7 +129,7 @@ def test_the_standing_path_never_needs_or_creates_an_operator_row(stack):
 
 
 def test_an_unattended_start_needs_an_incident(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     with pytest.raises(FlowError) as exc:
         st.flow.start_under_standing("SG-1-v1", title="t", goal="g", scope=SCOPE,
@@ -150,32 +150,32 @@ def refused(st, made, *words):
 
 
 def test_out_of_scope_refuses_and_raises_a_decision_card(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st, scope={"stacks": ["photos"], "hosts": ["local"]})
     refused(st, unattended(st, "SG-1-v1"), "scope exceeds")
 
 
 def test_expired_refuses(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st, ttl=3600)
     st.clock.t += 3601
     refused(st, unattended(st, "SG-1-v1"), "expired")
 
 
 def test_revoked_refuses(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     st.flow.standing_revoke("operator:alice", "SG-1-v1")
     refused(st, unattended(st, "SG-1-v1"), "revoked")
 
 
 def test_unknown_standing_grant_refuses(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     refused(st, unattended(st, "SG-7-v1"), "does not exist")
 
 
 def test_a_denied_window_refuses_and_the_clock_decides(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st, ttl=86400, window_spec={"deny": ["backup"]})                  # 13:00-14:00 UTC
     refused(st, unattended(st, "SG-1-v1"), "denied window")
     st.clock.t += 3600                                                             # 14:46: outside it
@@ -183,7 +183,7 @@ def test_a_denied_window_refuses_and_the_clock_decides(stack):
 
 
 def test_broad_sudo_raw_docker_and_no_backup_refuse_and_raise_a_card(stack):
-    st = stack(start_monitor=False, covered=False)
+    st = stack(covered=False)
     make_standing(st)
     refused(st, unattended(st, "SG-1-v1", n=1, sudo={"mode": "broad"}, docker="raw"), "broad_sudo")
     refused(st, unattended(st, "SG-1-v1", n=2, acknowledged_no_backup=True), "no_backup")
@@ -191,8 +191,9 @@ def test_broad_sudo_raw_docker_and_no_backup_refuse_and_raise_a_card(stack):
 
 def test_a_standing_grant_cannot_be_made_for_change_or_critical_and_a_change_mission_never_matches_one(stack):
     from missions_helpers import advance_to, new_mission
+
     from planet_express.missions.models import Grant
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     incident = add_incident(st.store, "f" * 12)
     m = new_mission(st.ms, Grant.model_validate({"tier": "change", "scope": {"stacks": ["media"]}}),
@@ -220,7 +221,7 @@ def test_expiry_and_revoke_stop_an_unattended_mission_that_has_not_started_yet(s
 
 
 def test_the_standing_row_is_judged_again_on_every_transition_into_executing(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     mid = unattended(st, "SG-1-v1")["mission_id"]
     st.flow.standing_revoke("operator:alice", "SG-1-v1")
@@ -282,7 +283,7 @@ CHECKS = [{"id": "default", "check": "http", "params": {"url": "http://localhost
 
 def test_a_failed_supersede_leaves_the_old_version_active_and_never_two_active(stack):
     import sqlite3
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     with sqlite3.connect(st.store.path) as conn:                 # the new version's id is already taken: the insert fails
         conn.execute("INSERT INTO standing_grants (id, scope_json, tier, window_json, created_by, created_at, expires_at, version) "
@@ -294,7 +295,7 @@ def test_a_failed_supersede_leaves_the_old_version_active_and_never_two_active(s
 
 
 def test_an_unattended_start_cannot_carry_credentials_or_sudo_rules_the_standing_grant_did_not_name(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)                                                     # no ceilings: nothing extra is allowed
     rule = {"mode": "scoped", "rules": [{"unit": "web.service", "actions": ["restart"]}]}
     refused(st, unattended(st, "SG-1-v1", n=1, credentials=["tool:arr.queue_item"]), "credentials")
@@ -303,7 +304,7 @@ def test_an_unattended_start_cannot_carry_credentials_or_sudo_rules_the_standing
 
 
 def test_ceilings_allow_exactly_what_they_name(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     st.flow.standing_create("operator:alice", scope=SCOPE, ttl_s=3600, elevated=True, ceilings={
         "credentials": ["tool:arr.queue_item"], "sudo_units": ["web.service"],
         "budgets": {"wall_s": 900, "tool_calls": 50, "output_bytes": 1_000_000, "retries": 1}, "exclusions": ["network"]})
@@ -322,7 +323,7 @@ def test_ceilings_allow_exactly_what_they_name(stack):
 
 
 def test_default_budget_ceiling_is_the_models_defaults_and_bad_ceilings_are_refused(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     refused(st, unattended(st, "SG-1-v1", n=1, budgets={"wall_s": 7200}), "budgets")
     with pytest.raises(FlowError):
@@ -333,8 +334,9 @@ def test_default_budget_ceiling_is_the_models_defaults_and_bad_ceilings_are_refu
 
 def test_a_supersede_cannot_resurrect_a_grant_that_was_revoked_after_it_was_read(stack):
     import sqlite3
+
     from planet_express.missions.store import StandingGrantInactive
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     st.flow.standing_revoke("operator:bob", "SG-1-v1")                    # the other operator's revoke landed first
     with pytest.raises(StandingGrantInactive):
@@ -352,7 +354,7 @@ def test_a_supersede_cannot_resurrect_a_grant_that_was_revoked_after_it_was_read
 
 
 def test_standing_ids_are_allocated_with_a_retry_when_two_creates_race(stack, monkeypatch):
-    st = stack(start_monitor=False)
+    st = stack()
     real = st.flow.ms.create_standing_grant
     seen = []
 
@@ -399,7 +401,7 @@ def test_the_rpc_takes_a_standing_id_but_never_an_actor_and_names_it_in_the_expe
 
 
 def test_nobody_can_pass_core_as_the_actor_to_skip_the_operator_requirement(stack):
-    st = stack(start_monitor=False)
+    st = stack()
     make_standing(st)
     spec = {"title": "t", "goal": "g", "scope": SCOPE, "incident_id": add_incident(st.store, "b" * 12), "checks": CHECKS}
     for kw in ({}, {"standing_grant_id": "SG-1-v1"}):                                       # only start_under_standing may speak as core

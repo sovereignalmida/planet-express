@@ -294,6 +294,8 @@ MOUNTINFO_PATH = "/proc/self/mountinfo"      # tests point this at a fake mount 
 _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 # Trust mode (docs/designs/v4-trust-mode.md): the real Docker socket, sudo through the one session rule, and the host's logs.
 DEFAULT_SESSION_GROUPS = ("docker", "pe-session", "adm", "systemd-journal")
+# missions.* keys the tripwire read before trust mode removed it: accepted in an old config.yaml and ignored.
+RETIRED_TRIPWIRE_KEYS = frozenset({"tripwire_interval_s", "tripwire_investigating_interval_s", "tripwire_accept_blind"})
 
 
 class MissionRuntimeConfig(BaseModel):
@@ -471,7 +473,7 @@ class WorkerSudoRuleConfig(BaseModel):
 
 class CrossHostSystemConfig(BaseModel):
     """A cross-host system the operator names as protected (NAS exports, edge proxy, router, DNS provider). `path` is a
-    readable copy of its configuration, when there is one; without it the tripwire cannot watch it and says so."""
+    readable copy of its configuration, when there is one."""
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -634,14 +636,8 @@ class MissionsConfig(BaseModel):
     # Named time windows for standing grants (`window.deny: [backup]` resolves here when the grant is created). Each entry is
     # `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]` (see missions/window.py).
     windows: dict[str, list[str]] = {}
-    # Tripwires (slice 6). The pause SLA (interval + 10 s scan deadline + freeze + write <= 30 s) holds up to 15 s.
-    tripwire_interval_s: int = Field(default=15, ge=1, le=15)
-    tripwire_investigating_interval_s: int = Field(default=60, ge=15, le=600)
     # Protected domains: ADDITIONS to the built-in default set, as concrete resource ids (contract 2.3). The default set
     # cannot be emptied from here: removing one needs a recorded override.
-    # Protected resources Core may be unable to READ (it only stats them): the tripwire is blind to their content, and a
-    # mission refuses to start over one unless it is named here. Concrete resource ids, e.g. host:local/path:/etc/shadow.
-    tripwire_accept_blind: list[str] = []
     protected: list[str] = []
     protected_overrides: list[ProtectedOverrideConfig] = []
     # Domains this host genuinely lacks, or whose evidence Core cannot read. Discovery that cannot establish a required domain
@@ -727,13 +723,23 @@ class MissionsConfig(BaseModel):
                 raise ValueError("missions.tool_secret_env maps a lowercase secret ref to an environment variable name")
         return refs
 
-    @field_validator("protected", "live_trees", "package_paths", "tripwire_accept_blind")
+    @field_validator("protected", "live_trees", "package_paths")
     @classmethod
     def _plain_list(cls, items: list[str]) -> list[str]:
         for item in items:
             if not item or len(item) > 512 or "\0" in item:
                 raise ValueError("entries must be non-empty strings of at most 512 characters")
         return items
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired_tripwire_settings(cls, data):
+        """Trust mode removed the tripwire (stage 3), and with it `tripwire_interval_s`, `tripwire_investigating_interval_s` and
+        `tripwire_accept_blind`. A config.yaml written before then (the live host's has an `accept_blind` list) still loads: the
+        keys are accepted and ignored, whatever they hold, because nothing reads them any more and refusing would stop Core."""
+        if isinstance(data, dict) and any(k in data for k in RETIRED_TRIPWIRE_KEYS):
+            data = {k: v for k, v in data.items() if k not in RETIRED_TRIPWIRE_KEYS}
+        return data
 
     @model_validator(mode="before")
     @classmethod

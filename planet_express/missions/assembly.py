@@ -5,8 +5,6 @@
 
     CheckpointService   root `<state>/checkpoints` (or missions.checkpoint.root), backup freshness from
                         missions.checkpoint.backup_sources, a baseline provider that normalises Leela's full scan
-    TripwireMonitor     over the protected set, the checkpoint service and the containment; closing the brokered tool endpoints
-                        (and, with slice 7b, the session's Docker proxy) when it pauses a session
     Verifier            Core-run verification over the same scan
     repair gate         the side-door report (worker identity, no Docker TCP, only generator-managed sudoers)
 
@@ -31,7 +29,6 @@ from .models import Budgets, Grant, VerificationPlan
 from .store import MissionStore
 from .sudo_gen import outside_ceiling
 from .tools import default_registry
-from .tripwire.build import build_tripwire
 from .verify.baseline import normalize
 from .verify.runner import verifier_from_config
 
@@ -55,7 +52,6 @@ class RepairWiring:
 @dataclass
 class RepairControls:
     checkpoint: CheckpointService
-    tripwire: Any
     verifier: Any
     repair_gate: Callable[[], Any]
     protected: Any
@@ -142,20 +138,6 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
     principals = session_principals(cfg)
     checkpoint.session_principals = principals            # a restart-only grant's backup waiver is asked again at start
 
-    def revoke(mission_id: str) -> None:
-        """The monitor's pause closes every capability endpoint the session holds."""
-        if broker is not None:
-            broker.revoke(mission_id)
-        if proxy is not None:
-            proxy.pause(mission_id)
-        if model_broker is not None:
-            model_broker.pause(mission_id)
-
-    tripwire = build_tripwire(cfg, missions=ms, containment=containment, checkpoint=checkpoint, provider=wiring.provider,
-                              stacks_root=stacks_root, state_dir=str(state_dir / "tripwire"), protected=protected,
-                              enabled=enabled, revoke_endpoints=revoke)
-    if tripwire is None:
-        raise RuntimeError("the tripwire monitor was not built")
     verifier = verifier_from_config(cfg, missions=ms, checkpoint=checkpoint, provider=wiring.provider, broker=broker,
                                     scan=wiring.scan, stacks_root=stacks_root, enabled=enabled)
 
@@ -196,7 +178,7 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         return {"covered": bool(states) and all(x["state"] == "ok" for x in states), "state": worst,
                 "acknowledged_no_backup": grant.backup.acknowledged_no_backup, "paths": states[:16]}
 
-    controls = RepairControls(checkpoint=checkpoint, tripwire=tripwire, verifier=verifier, repair_gate=gate, protected=protected,
+    controls = RepairControls(checkpoint=checkpoint, verifier=verifier, repair_gate=gate, protected=protected,
                               backup_status=backup_status, validator=validator, inventory=inventory)
     controls.host_root_view = host_root_view(cfg, controls, stacks_root)
     return controls

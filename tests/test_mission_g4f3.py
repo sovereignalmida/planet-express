@@ -9,8 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from repair_fakes import build, update
-from tripwire_fakes import touch
+from repair_fakes import build
 
 from planet_express.missions import leases
 from planet_express.missions import supervisor as sup_mod
@@ -22,7 +21,6 @@ def stack(tmp_path):
     made = []
 
     def make(**kw):
-        kw.setdefault("start_monitor", False)
         st = build(tmp_path, **kw)
         made.append(st)
         return st
@@ -50,7 +48,6 @@ def last_heartbeat(st, mission_id):
 
 def test_a_lease_conflict_waits_and_spends_no_checkpoint(stack):
     st = stack()
-    st.rig.monitor.start()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
     other = st.propose()["mission_id"]
@@ -69,7 +66,6 @@ def test_a_lease_conflict_waits_and_spends_no_checkpoint(stack):
 
 def test_a_lease_wait_is_bounded_and_then_goes_to_the_operator(stack):
     st = stack()
-    st.rig.monitor.start()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
     other = st.propose()["mission_id"]
@@ -83,7 +79,6 @@ def test_a_lease_wait_is_bounded_and_then_goes_to_the_operator(stack):
 
 def test_a_failed_start_after_the_early_lease_gives_the_lease_back(stack):
     st = stack()
-    st.rig.monitor.start()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
     st.env.svc.baseline_provider = lambda: (_ for _ in ()).throw(RuntimeError("scan failed"))
@@ -94,7 +89,6 @@ def test_a_failed_start_after_the_early_lease_gives_the_lease_back(stack):
 
 def test_no_free_uid_is_a_wait_not_a_failed_start(stack, monkeypatch):
     st = stack()
-    st.rig.monitor.start()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
 
@@ -133,7 +127,6 @@ def test_the_helper_thread_refreshes_live_leases_during_a_start(stack):
 
 def test_a_checkpoint_longer_than_the_lease_ttl_does_not_lose_the_early_lease(stack):
     st = stack()
-    st.rig.monitor.start()
     st.sup.heartbeat_interval_s = 0.01
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
@@ -148,47 +141,6 @@ def test_a_checkpoint_longer_than_the_lease_ttl_does_not_lose_the_early_lease(st
         return original(mission_id, scope)
     st.env.svc.create = slow
     assert st.drive(mid) == "completed"
-
-
-# ── #17 a failed resume does not lose the baseline that tripped ──────────────────────────────────────
-
-def test_a_failed_resume_keeps_the_original_baseline(stack):
-    st = stack(behaviours=[{"script": [update()] * 6}], with_proxy=True)
-    st.rig.monitor.start()
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    original = st.monitor.state.read(mid, "baseline.json")
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    assert st.status(mid) == "paused_tripwire"
-
-    def boom(mission_id, grant_hash):
-        raise RuntimeError("proxy down")
-    real = st.proxy.resume
-    st.proxy.resume = boom
-    with pytest.raises(sup_mod.ResumeRefused):
-        st.sup.resume(mid, "operator:alice")
-    assert st.status(mid) == "paused_tripwire"
-    assert st.monitor.state.read(mid, "baseline.json") == original
-    assert st.monitor.state.read(mid, "baseline.prev.json") is None
-    st.proxy.resume = real
-    st.sup.resume(mid, "operator:alice")
-    after = st.monitor.state.read(mid, "baseline.json")
-    assert after != original and st.monitor.state.read(mid, "baseline.prev.json") is None
-
-
-def test_a_stale_set_aside_baseline_is_not_kept_when_there_is_nothing_to_set_aside(stack):
-    st = stack(behaviours=[{"script": [update()] * 6}], with_proxy=True)
-    st.rig.monitor.start()
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    st.monitor.state.write(mid, "baseline.prev.json", {"v": 1, "stale": True})
-    st.monitor.state.remove(mid, "baseline.json")                     # nothing readable to set aside
-    st.monitor.begin(mid, keep_previous=True)
-    assert st.monitor.state.read(mid, "baseline.prev.json") is None
-    assert st.monitor.restore_previous_baseline(mid) is False
 
 
 # ── #18 a passing preflight is not cached forever ────────────────────────────────────────────────────
@@ -215,7 +167,6 @@ def test_a_passing_preflight_is_proven_again(stack):
 
 def test_every_repair_start_re_proves_the_launcher(stack):
     st = stack()
-    st.rig.monitor.start()
     state = {}
     st.sup.preflight_fn = _preflight(state)
     mid = st.propose()["mission_id"]
@@ -237,5 +188,4 @@ def test_a_pre_start_lease_left_by_a_crash_is_released_at_recovery(stack):
     assert lease_count(st) > 0
     st.sup.recover()
     assert lease_count(st) == 0
-    st.rig.monitor.start()
     assert st.drive(mid) == "completed"                          # and the mission can start normally afterwards

@@ -111,7 +111,7 @@ const VIEW = { execution_id: 4, mission_id: "M-9", grant_hash: "a".repeat(64), f
 const EXEC = { id: 4, option: 0, name: "Recreate", fingerprint: "aaaaaaaa", status: { text: "Working", level: "ok" }, finished: false,
   timeline: [{ label: "Authorised", state: "done", meta: "chris" }, { label: "Checkpoint taken", state: "done", meta: "so it can be rolled back" },
              { label: "Carrying out the plan", state: "now", meta: "" }, { label: "PE checks it worked", state: "todo", meta: "PE's own checks" }],
-  pause: null, verification: null, controls: { pause: true, resume: false, rollback: false, takeover: true } };
+  verification: null, controls: { rollback: false } };
 const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "operator", state: "open", turns: 1, status: { text: "Needs your call", level: "warn", group: "Needs you" },
                                verdict: { h: "Waiting for your choice between 2 options", p: "Recommended: Recreate. Nothing has been changed." } },
   budget: { used_pct: 24, tokens_used: 24000, token_budget: 100000, tokens_left: 76000, state: "ok" }, running: false, composer: { mode: "idle", reason: null },
@@ -313,26 +313,23 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.ok(requests.some(r => r[0].endsWith("/confirm/withdraw") && r[2].includes("execution_id=4")));
     assert.strictEqual(doc.getElementById("con-sheet").children.length, 0);
   });
-  await atest("a run shows its timeline in PE's words and a Pause only while it is running", async () => {
+  await atest("a run shows its timeline in PE's words, and no Pause or Take over (trust mode removed them)", async () => {
     FEED.plan = null; FEED.execution = JSON.parse(JSON.stringify(EXEC)); await page.loadFeed();
     const thread = walk(doc.getElementById("con-thread"));
     const run = thread.find(n => n.className.startsWith("pe-run"));
     assert.ok(run && run.textContent.includes("RUN · OPTION A · Recreate") && run.textContent.includes("WORKING") && run.textContent.includes("grant aaaaaaaa"));
     assert.deepStrictEqual(walk(run).filter(n => n.className.startsWith("pe-marker")).map(n => n.className.split(" ")[1] || ""), ["done", "done", "active", ""]);
-    assert.ok(thread.some(n => n.tag === "button" && n.textContent === "Pause"));
+    assert.ok(!thread.some(n => n.tag === "button" && ["Pause", "Resume", "Take over"].includes(n.textContent)));
     await page.loadFeed();
   });
-  await atest("a tripwire pause is an alert with what changed and the three controls; rolling back takes two clicks", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Paused: something unexpected changed", level: "crit" },
-      pause: { by_operator: false, cause: "firewall", changes: ["host:local/path:/etc/hosts: modified"], more: 0, rollback_available: true, checkpoint: "ck-1", who: null },
-      controls: { pause: false, resume: true, rollback: true, takeover: true } };
+  await atest("a run that needs the operator offers the rollback, and rolling back takes two clicks", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you: PE isn't sure what state this is in", level: "crit" },
+      controls: { rollback: true } };
     await page.loadFeed();
     const thread = walk(doc.getElementById("con-thread"));
-    const tw = thread.find(n => n.className === "pe-tripwire");
-    assert.strictEqual(tw.attrs.role, "alert");
-    assert.ok(tw.textContent.includes("PE PAUSED THE RUN") && tw.textContent.includes("/etc/hosts") && tw.textContent.includes("checkpoint ck-1"));
-    const labels = walk(tw).filter(n => n.tag === "button").map(n => n.textContent);
-    assert.deepStrictEqual(labels, ["Resume", "Roll back to the checkpoint", "Take over"]);
+    assert.ok(!thread.some(n => n.className === "pe-tripwire"));
+    const labels = thread.filter(n => n.tag === "button").map(n => n.textContent);
+    assert.ok(labels.includes("Roll back to the checkpoint") && !labels.includes("Resume") && !labels.includes("Take over"), labels.join("|"));
     const before = requests.filter(r => r[0].includes("/run/rollback")).length;
     const roll = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Roll back"));
     roll().fire("click");
@@ -340,25 +337,9 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     roll().fire("click"); for (let i = 0; i < 4; i++) await new Promise(r => setImmediate(r));
     assert.ok(requests.some(r => r[0].endsWith("/run/rollback") && r[2].includes("execution_id=4")));
   });
-  await atest("a pause by the operator is not drawn as a tripwire alert", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Paused by you", level: "warn" }, controls: { pause: false, resume: true, rollback: true, takeover: true },
-      pause: { by_operator: true, cause: "operator", changes: [], more: 0, rollback_available: true, checkpoint: "ck-1", who: "operator:chris" } };
-    await page.loadFeed();
-    const thread = walk(doc.getElementById("con-thread"));
-    assert.ok(!thread.some(n => n.className === "pe-tripwire") && thread.some(n => n.textContent.includes("Paused by you.")));
-  });
-  await atest("an operator pause shows what changed since the last scan before Resume is offered", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Paused by you", level: "warn" }, controls: { pause: false, resume: true, rollback: true, takeover: true },
-      pause: { by_operator: true, cause: "operator", changes: ["host:local/path:/etc/hosts: modified"], more: 2, rollback_available: true, checkpoint: "ck-1", who: "operator:chris" } };
-    await page.loadFeed();
-    const block = walk(doc.getElementById("con-thread")).find(n => n.className === "pe-con-pause");
-    assert.ok(block.textContent.includes("Changed since PE last looked: host:local/path:/etc/hosts: modified · +2 more"));
-    const order = block.children.map(c => c.className.split(" ")[0] + ":" + c.textContent.slice(0, 7));
-    assert.ok(order.findIndex(t => t.includes("Changed")) > -1 && order.findIndex(t => t.includes("Changed")) < order.length - 1, order.join("|"));   // the buttons come after the warning
-  });
   await atest("PE's verification is labelled as PE's, marks each check, and a could-not-check is its own state", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you: PE isn't sure what state this is in", level: "crit" }, finished: false, pause: null,
-      controls: { pause: false, resume: false, rollback: true, takeover: false },
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you: PE isn't sure what state this is in", level: "crit" }, finished: false,
+      controls: { rollback: true },
       verification: { headline: "1 of 3 failed: qbittorrent is running and stable", level: "high", by_pe: true, checks: [
         { state: "pass", label: "sonarr is running and stable", evidence: "ok" }, { state: "could_not_check", label: "the media project has all its services", evidence: "bad params" },
         { state: "fail", label: "qbittorrent is running and stable", evidence: "restarting " + EVIL }] } };
@@ -373,16 +354,16 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
   const settle = async (n = 5) => { for (let i = 0; i < n; i++) await new Promise(r => setImmediate(r)); };
   const reply = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
   const rollButtons = () => walk(doc.getElementById("con-thread")).filter(n => n.tag === "button").map(n => n.textContent);
-  await atest("a run that needs the operator but has no pause or verification still offers its controls", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, pause: null, verification: null,
-      controls: { pause: false, resume: false, rollback: true, takeover: true } };
+  await atest("a run that needs the operator but has no verification still offers its rollback", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, verification: null,
+      controls: { rollback: true } };
     await page.loadFeed();
     const labels = rollButtons();
-    assert.ok(labels.includes("Roll back to the checkpoint") && labels.includes("Take over"), labels.join("|"));
+    assert.ok(labels.includes("Roll back to the checkpoint") && !labels.includes("Take over"), labels.join("|"));
   });
   await atest("a refused rollback offers an explicit second choice, and only that choice sends ack_drift", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, pause: null, verification: null,
-      controls: { pause: false, resume: false, rollback: true, takeover: true } };
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, verification: null,
+      controls: { rollback: true } };
     await page.loadFeed();
     win.__override = url => url.endsWith("/run/rollback") ? reply({ done: "rollback", status: "Needs you", restore: "refused", reason: "files changed after the checkpoint" }) : null;
     const roll = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Roll back to the checkpoint"));
@@ -398,7 +379,7 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     win.__override = null;
   });
   await atest("an armed rollback does not follow the operator into another conversation", async () => {
-    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), pause: null, verification: null, controls: { pause: false, resume: false, rollback: true, takeover: true } };
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), verification: null, controls: { rollback: true } };
     await page.loadFeed();
     walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent === "Roll back to the checkpoint").fire("click");
     assert.ok(rollButtons().some(t => t.includes("Click again")));

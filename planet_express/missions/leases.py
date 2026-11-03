@@ -257,7 +257,7 @@ def claim_reason(store: Store) -> str | None:
     non-mission change while this is not None (a suspect lease still counts: its holder may still be running).
 
     One exception: a mission in `needs_operator` with no session that could still be running has handed the host to the
-    operator (a take-over, a held cancel, a failed run). Its leases still fence other missions out, but they do not stop
+    operator (a held cancel, a failed run). Its leases still fence other missions out, but they do not stop
     the operator's own tools: blocking Actions, config apply and update rollbacks until the mission is closed would leave
     the operator nothing to fix the host with, and safe-prune would stop silently."""
     with store._connect() as conn:

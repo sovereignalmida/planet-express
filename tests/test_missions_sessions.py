@@ -246,7 +246,7 @@ def test_leases_cover_the_configured_alias_and_the_resolved_root_of_the_stacks_d
     link = tmp_path / "stacks"
     link.symlink_to(real)
     grant = repair_grant(scope={"stacks": ["media"], "hosts": ["local"]})
-    # the checkpoint service knows only the resolved root; the tripwire knows the configured one: both are passed
+    # the resolved root and the configured one (a symlink to it) are both passed: either may be how the session names it
     out = stack_lease_paths(grant, (str(real), str(link)))
     assert sorted(out["host:local/stack:media"]) == sorted([f"host:local/path:{real}/media", f"host:local/path:{link}/media"])
 

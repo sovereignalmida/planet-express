@@ -16,15 +16,19 @@ from planet_express.missions.checkpoint import CheckpointCorrupt, CheckpointErro
 from planet_express.missions.supervisor import Supervisor
 from planet_express.missions.verify.baseline import (
     MAX_FINDINGS,
-    TooManyFindings,
     UNSCOPED,
+    TooManyFindings,
     baseline_document,
     in_scope,
     new_findings,
     normalize,
 )
 from planet_express.missions.verify.checks import HttpResponse
-from planet_express.missions.verify.runner import Verifier, VerifierDisabled, VerifyRefused
+from planet_express.missions.verify.runner import (
+    Verifier,
+    VerifierDisabled,
+    VerifyRefused,
+)
 
 MEDIA = ["host:local/stack:media"]
 
@@ -389,7 +393,7 @@ def test_core_read_needs_the_grant_to_name_the_tool(tmp_path):
         broker.core_read(rig.mid, "t.write", {})
 
 
-def test_core_read_is_closed_by_a_tripwire_pause_and_to_non_verifying_missions(tmp_path):
+def test_core_read_is_closed_by_a_revoked_endpoint_and_to_non_verifying_missions(tmp_path):
     from planet_express.missions.tools import ToolRefused
     rig, broker = broker_rig(tmp_path, ["tool:t.read"])
     broker.revoke(rig.mid)

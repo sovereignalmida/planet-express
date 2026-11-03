@@ -1,4 +1,4 @@
-"""How a confirmed plan's Repair mission reads in a conversation: plain-language status, a short timeline, what a pause was about, and PE's own
+"""How a confirmed plan's Repair mission reads in a conversation: plain-language status, a short timeline, and PE's own
 verification (never the agent's account of itself). Pure functions over the mission and its stored records; the words are PE's, written from state
 and counts. A check that could not be run is shown as such and is never counted as a pass."""
 import json
@@ -12,22 +12,22 @@ from planet_express.missions.verify.plan import CheckResult, parse_result
 REPAIR_STATUS = {
     "awaiting_decision": ("Starting", "ok"), "queued": ("Starting", "ok"), "investigating": ("Starting", "ok"),
     "executing": ("Working", "ok"), "verifying": ("Checking it worked", "ok"), "completed": ("Done and verified", "ok"),
-    "paused_tripwire": ("Paused: something unexpected changed", "crit"), "rollback_pending": ("Rolling back", "warn"),
+    # paused_tripwire: a row from before trust mode removed the tripwire; startup recovery moves it to recovery_required.
+    "paused_tripwire": ("Needs you: PE isn't sure what state this is in", "crit"), "rollback_pending": ("Rolling back", "warn"),
     "rolled_back": ("Rolled back", "warn"), "failed": ("Didn't work", "high"), "cancelled": ("Scrapped", "none"),
     "needs_operator": ("Needs you: PE isn't sure what state this is in", "crit"),
     "recovery_required": ("Needs you: PE isn't sure what state this is in", "crit"), "blocked": ("Waiting", "warn"),
 }
 CONTROLS = {                      # which operator actions each state offers (the supervisor still decides whether it can)
-    "pause": ("executing",), "resume": ("paused_tripwire",), "rollback": ("paused_tripwire", "needs_operator", "recovery_required"),
-    "takeover": ("paused_tripwire", "executing", "recovery_required"),
+    # Trust mode: no pause, resume or take-over; cancel is the stop. rollback_pending is where a restore PE refused (drift) waits, so the
+    # operator's explicit "roll back anyway" has a button.
+    "rollback": ("needs_operator", "recovery_required", "rollback_pending"),
 }
 ACTIONS = tuple(CONTROLS)
 TERMINALISH = ("completed", "failed", "rolled_back", "cancelled")
 
 
-def repair_status(mission: Mission, paused_by: str | None = None) -> tuple[str, str]:
-    if mission.status == "paused_tripwire" and paused_by:
-        return "Paused by you", "warn"
+def repair_status(mission: Mission) -> tuple[str, str]:
     return REPAIR_STATUS.get(mission.status, ("Working", "ok"))
 
 
@@ -68,18 +68,6 @@ def verification_view(mission: Mission) -> dict[str, Any] | None:
             "scan_note": (result.scan.error if result.scan is not None and result.scan.error else None)}
 
 
-def pause_view(card: dict | None) -> dict[str, Any] | None:
-    """What a pause was about, from the tripwire's recorded card: who or what paused it, what changed, whether a rollback is on offer."""
-    if not card:
-        return None
-    by_operator = card.get("cause") == "operator"
-    changes = [f"{c.get('resource', '?')}: {c.get('kind', 'changed')}" for c in (card.get("changes") or [])[:6]]
-    rollback = card.get("rollback") or {}
-    return {"by_operator": by_operator, "cause": str(card.get("cause", ""))[:40], "changes": changes, "more": int(card.get("truncated") or 0),
-            "rollback_available": bool(rollback.get("available")), "checkpoint": rollback.get("checkpoint"),
-            "who": (card.get("errors") or {}).get("by") if by_operator else None}
-
-
 def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
     """How a conversation reads while a confirmed plan is running or needs attention: derived from the run, so an active repair is never hidden
     behind 'Result ready'. None when the run needs no say in the conversation's status."""
@@ -87,10 +75,7 @@ def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
     if live and status in ("awaiting_decision", "queued", "investigating", "executing", "verifying", "rollback_pending"):
         return {"text": "Working on the plan", "level": "ok", "group": "Working",
                 "verdict": {"h": "Carrying out the confirmed plan", "p": "PE is supervising it and will check it worked."}}
-    if status == "paused_tripwire":
-        return {"text": "Run paused", "level": "crit", "group": "Needs you",
-                "verdict": {"h": "The run is paused", "p": "Look at the run below for what you can do next."}}
-    if status in ("needs_operator", "recovery_required", "failed"):
+    if status in ("needs_operator", "recovery_required", "paused_tripwire", "failed"):
         return {"text": "Run needs you", "level": "crit" if status != "failed" else "high", "group": "Needs you",
                 "verdict": {"h": "The run didn't finish cleanly" if status != "failed" else "The run didn't pass PE's checks",
                             "p": "Look at the run below for what you can do next."}}
@@ -104,7 +89,7 @@ def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
 
 
 SUPERVISOR = "supervisor"           # missions.supervisor.ACTOR: only its own notes say why a start is waiting
-_WAIT_KEYS = ("start_waiting", "start_failed", "checkpoint_refused", "baseline_refused", "checkpoint_taken")
+_WAIT_KEYS = ("start_waiting", "start_failed", "checkpoint_refused", "checkpoint_taken")
 
 
 def start_waiting(ms: Any, mission: Mission) -> str | None:
@@ -129,21 +114,17 @@ def start_waiting(ms: Any, mission: Mission) -> str | None:
             return str(body["start_waiting"])[:300]
         if key == "start_failed":
             return f"the last start attempt failed ({str(body['start_failed'])[:80]}); PE tries again shortly"
-        if key == "checkpoint_refused":
-            return f"no checkpoint could be taken: {str(body.get('why') or body['checkpoint_refused'])[:240]}"
-        return "the tripwire's picture of the host could not be taken; PE tries again shortly"
+        return f"no checkpoint could be taken: {str(body.get('why') or body['checkpoint_refused'])[:240]}"
     return None
 
 
 def timeline(mission: Mission, authorised_by: str | None, waiting: str | None = None) -> list[dict[str, str]]:
     status = mission.status
-    bad = status in ("failed", "rolled_back", "rollback_pending", "needs_operator", "recovery_required", "cancelled")
+    bad = status in ("failed", "rolled_back", "rollback_pending", "needs_operator", "recovery_required", "paused_tripwire", "cancelled")
     # A failed verification ends in needs_operator, rollback_pending or rolled_back (on_verify_fail), not only in `failed`.
     checked_and_failed = bool(mission.verification_result_json) and status in ("failed", "needs_operator", "rollback_pending", "rolled_back", "recovery_required")
     checkpoint = "done" if mission.checkpoint_id else ("now" if status in ("awaiting_decision", "queued") else "todo")
-    if status == "paused_tripwire":
-        run = "paused"
-    elif status == "executing":
+    if status == "executing":
         run = "now"
     elif status in ("verifying", "completed"):
         run = "done"
@@ -157,7 +138,7 @@ def timeline(mission: Mission, authorised_by: str | None, waiting: str | None = 
     return [{"label": "Authorised", "state": "done", "meta": (authorised_by or "").removeprefix("operator:")},
             ({"label": "Waiting to start", "state": "now", "meta": waiting} if waiting and not mission.checkpoint_id else
              {"label": "Checkpoint taken", "state": checkpoint, "meta": "so it can be rolled back"}),
-            # A start that fails after its checkpoint (the tripwire baseline, the launch) waits at the next step instead.
+            # A start that fails after its checkpoint (the launch) waits at the next step instead.
             ({"label": "Waiting to start", "state": "now", "meta": waiting} if waiting and mission.checkpoint_id else
              {"label": "Carrying out the plan", "state": run, "meta": ""}),
             {"label": "PE checks it worked", "state": check, "meta": "PE's own checks, not the agent's say-so"}]
@@ -167,4 +148,4 @@ def controls(mission: Mission) -> dict[str, bool]:
     return {name: mission.status in states for name, states in CONTROLS.items()}
 
 
-__all__ = ["ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "conversation_status", "pause_view", "repair_status", "timeline", "verification_view"]
+__all__ = ["ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "conversation_status", "repair_status", "timeline", "verification_view"]

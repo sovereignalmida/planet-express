@@ -254,18 +254,22 @@ def test_stale_and_elevation_refusals_reach_the_operator_in_words(web):
 def test_the_run_controls_post_the_action_as_the_signed_in_operator_and_unknown_actions_do_not_exist(web):
     client, core, _ = web
     base = f"/api/console/{CID}/run"
-    assert client.post(base + "/pause", data={"execution_id": "4"}).status_code == 400                  # CSRF
+    assert client.post(base + "/rollback", data={"execution_id": "4"}).status_code == 400               # CSRF
     t = token(client)
-    for action in ("pause", "resume", "takeover"):
-        assert client.post(f"{base}/{action}", data={"csrf_token": t, "execution_id": "4", "operator": "mallory"}).status_code == 200
-        assert core.calls[-1] == ("console.execution_action", {"conversation_id": CID, "operator": "alice", "execution_id": 4, "action": action})
+    assert client.post(f"{base}/rollback", data={"csrf_token": t, "execution_id": "4", "operator": "mallory"}).status_code == 200
+    assert core.calls[-1] == ("console.execution_action", {"conversation_id": CID, "operator": "alice", "execution_id": 4,
+                                                            "action": "rollback", "ack_drift": False})
+    n = len(core.calls)
+    for gone in ("pause", "resume", "takeover"):                                  # trust mode removed them with the tripwire
+        assert client.post(f"{base}/{gone}", data={"csrf_token": t, "execution_id": "4"}).status_code == 404
+    assert len(core.calls) == n
     client.post(f"{base}/rollback", data={"csrf_token": t, "execution_id": "4", "ack_drift": "1"})
     assert core.calls[-1][1]["ack_drift"] is True and core.calls[-1][1]["action"] == "rollback"
     client.post(f"{base}/rollback", data={"csrf_token": t, "execution_id": "4"})
     assert core.calls[-1][1]["ack_drift"] is False
     n = len(core.calls)
     assert client.post(f"{base}/explode", data={"csrf_token": t, "execution_id": "4"}).status_code == 404
-    assert client.post(f"{base}/pause", data={"csrf_token": t, "execution_id": "x"}).status_code == 400
+    assert client.post(f"{base}/rollback", data={"csrf_token": t, "execution_id": "x"}).status_code == 400
     assert len(core.calls) == n
 
 

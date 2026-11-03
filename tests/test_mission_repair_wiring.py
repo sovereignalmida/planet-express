@@ -49,13 +49,13 @@ def cfg(**over):
 def test_everything_is_built_together_and_passed_to_the_supervisor_and_the_runner(tmp_path):
     store, _ = make_store(tmp_path)
     stacks = stacks_tree(tmp_path)
+    # An old config's tripwire_accept_blind is accepted and ignored: trust mode removed the tripwire, nothing reads it.
     runner = build_mission_runner(store, cfg(tripwire_accept_blind=["host:local/path:/etc/shadow"]),
                                   containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks))
     sup, controls = runner.supervisor, runner.controls
-    assert sup.checkpoint is controls.checkpoint and sup.tripwire is controls.tripwire and sup.verifier is controls.verifier
-    assert sup.repair_gate is controls.repair_gate and runner.tripwire is controls.tripwire     # the runner supervises the monitor
-    assert sup.mutating_ready
-    assert controls.tripwire.accept_blind == frozenset({"host:local/path:/etc/shadow"})         # tripwire_accept_blind is plumbed
+    assert sup.checkpoint is controls.checkpoint and sup.verifier is controls.verifier
+    assert sup.repair_gate is controls.repair_gate
+    assert sup.mutating_ready and not hasattr(controls, "tripwire") and not hasattr(runner, "tripwire")
     assert str(controls.checkpoint.store.root) == str(Path(store.path).parent / "checkpoints")  # the default root
     assert runner.startup == [controls.checkpoint.startup_scan]
     # the baseline provider is a real normaliser over the scan: a failing scan means no checkpoint
@@ -111,19 +111,18 @@ def test_the_side_door_gate_is_built_from_the_real_probes_and_fails_closed_witho
     assert report.checks and all(hasattr(c, "ok") for c in report.checks)
 
 
-def test_the_monitor_is_started_by_the_runner_and_a_repair_start_needs_it_running(tmp_path):
+def test_the_runner_starts_and_stops_with_repair_wired_and_no_monitor_thread(tmp_path):
+    import threading
     store, _ = make_store(tmp_path)
     stacks = stacks_tree(tmp_path)
     runner = build_mission_runner(store, cfg(), containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks),
                                   interval_s=0.05)
-    monitor = runner.controls.tripwire
-    assert not monitor.running
     runner.start()
     try:
-        assert monitor.running and runner._thread is not None
+        assert runner._thread is not None
+        assert not [t for t in threading.enumerate() if "tripwire" in t.name.lower()]
     finally:
         runner.stop()
-    assert not monitor.running
 
 
 def test_missions_disabled_constructs_nothing(tmp_path):
@@ -147,11 +146,11 @@ def test_a_control_that_cannot_be_built_leaves_the_host_without_repair_but_with_
     stacks = stacks_tree(tmp_path)
 
     def broken(*a, **k):
-        raise OSError("cannot create the monitor state directory")
-    monkeypatch.setattr(assembly, "build_tripwire", broken)
+        raise OSError("cannot create the verifier")
+    monkeypatch.setattr(assembly, "verifier_from_config", broken)
     runner = build_mission_runner(store, cfg(), containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks))
     assert runner is not None                       # observe/propose still run
-    assert runner.controls is None and runner.tripwire is None and not runner.supervisor.mutating_ready
+    assert runner.controls is None and not runner.supervisor.mutating_ready
     assert runner.supervisor.checkpoint is None and runner.supervisor.verifier is None      # all or none: no partial safety net
     assert build_approval_flow(store, cfg(), runner, runner.controls) is None
 
@@ -183,6 +182,7 @@ def test_the_built_validator_refuses_what_is_not_in_the_inventory_or_is_protecte
 
 def test_the_brokered_write_gate_opens_only_for_an_executing_approved_repair_mission(tmp_path):
     from missions_helpers import advance_to, new_mission
+
     from planet_express.missions.approvals import record_approval
     store, _ = make_store(tmp_path)
     from planet_express.missions.store import MissionStore
@@ -195,8 +195,8 @@ def test_the_brokered_write_gate_opens_only_for_an_executing_approved_repair_mis
     assert gate(m.id, "arr.queue_item", {}) is False                    # approved but not executing
     advance_to(ms, m.id, "executing", actor="core")
     assert gate(m.id, "arr.queue_item", {}) is True
-    advance_to(ms, m.id, "paused_tripwire", actor="core")
-    assert gate(m.id, "arr.queue_item", {}) is False                    # a paused mission's tools stay closed
+    advance_to(ms, m.id, "needs_operator", actor="core")
+    assert gate(m.id, "arr.queue_item", {}) is False                    # a mission handed to the operator has its tools closed
 
 
 def test_the_daemon_helper_builds_the_wiring_only_when_missions_are_enabled(monkeypatch, tmp_path):
@@ -213,7 +213,7 @@ def test_the_daemon_helper_builds_the_wiring_only_when_missions_are_enabled(monk
     assert isinstance(farnsworth._repair_wiring().provider, SystemdCheckpointProvider)
 
 
-def test_a_runner_started_without_a_monitor_still_runs_observe_and_propose(tmp_path):
+def test_a_runner_without_the_repair_wiring_still_runs_observe_and_propose(tmp_path):
     store, _ = make_store(tmp_path)
     runner = build_mission_runner(store, cfg(), containment=FakeContainment())
-    assert isinstance(runner, MissionRunner) and runner.tripwire is None and not runner.supervisor.mutating_ready
+    assert isinstance(runner, MissionRunner) and runner.controls is None and not runner.supervisor.mutating_ready

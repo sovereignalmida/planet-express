@@ -29,7 +29,7 @@ def card(**over):
             "sudo": {"mode": "broad", "rules": []}, "docker": "proxy", "credentials": [], "window": {"deny": [], "allow": None},
             "required": [{"phase": "grant", "bound": H, "elevated": False, "state": "pending"},
                          {"phase": "broad_sudo", "bound": H, "elevated": True, "state": "pending"}],
-            "ready": False, "tripwire": None}
+            "ready": False}
     base.update(over)
     return base
 
@@ -65,18 +65,22 @@ def test_no_card_for_an_observe_mission_or_when_the_card_is_unavailable(web):
     assert page and "APPROVE" not in page                              # controls are hidden, the mission is still readable
 
 
-def test_a_paused_mission_shows_the_tripwire_card_with_resume_rollback_and_takeover(web):
-    client, core, _ = repair(web, status="paused_tripwire", warnings=[], required=[],
-                             tripwire={"cause": "protected", "frozen": True, "changes": [{"resource": "path:/etc/hosts"}],
-                                       "rollback": {"available": True}})
+@pytest.mark.parametrize("status", ["needs_operator", "recovery_required", "rollback_pending"])
+def test_a_mission_that_needs_the_operator_offers_rollback_and_cancel_and_nothing_else(web, status):
+    client, core, _ = repair(web, status=status, warnings=[], required=[])
     page = client.get("/missions/M-2").get_data(as_text=True)
-    assert "TRIPWIRE PAUSE" in page and "protected" in page and "session frozen" in page
-    for action in ("resume", "rollback", "takeover"):
-        assert f'action="/missions/M-2/{action}"' in page
-    assert 'action="/missions/M-2/cancel"' in page
+    assert 'action="/missions/M-2/rollback"' in page and 'name="ack_drift"' in page and 'action="/missions/M-2/cancel"' in page
+    assert "/resume" not in page and "/takeover" not in page and "TRIPWIRE" not in page
 
 
-@pytest.mark.parametrize("action", ["approve", "deny", "resume", "rollback", "takeover"])
+def test_the_resume_and_takeover_routes_are_gone(web):
+    client, core, _ = web
+    for action in ("resume", "takeover"):
+        assert client.post(f"/missions/M-2/{action}", data={"csrf_token": token(client)}).status_code == 404
+    assert not {"mission.resume", "mission.takeover"} & set(core.methods())
+
+
+@pytest.mark.parametrize("action", ["approve", "deny", "rollback"])
 def test_every_action_needs_csrf_and_a_signed_in_session(web, action):
     client, core, now = web
     assert client.post(f"/missions/M-2/{action}").status_code == 400
@@ -124,19 +128,15 @@ def test_a_malformed_value_is_a_400_not_a_call_through(web):
     assert r.status_code == 400
 
 
-def test_deny_resume_rollback_takeover_pass_only_the_session_operator(web):
+def test_deny_and_rollback_pass_only_the_session_operator(web):
     client, core, _ = repair(web)
-    core.results.update({"mission.deny": {}, "mission.resume": {}, "mission.rollback": {}, "mission.takeover": {}})
+    core.results.update({"mission.deny": {}, "mission.rollback": {}})
     t = token(client)
     client.post("/missions/M-2/deny", data={"csrf_token": t, "grant_hash": H, "operator": "bob"})
-    client.post("/missions/M-2/resume", data={"csrf_token": t, "operator": "bob"})
     client.post("/missions/M-2/rollback", data={"csrf_token": t, "ack_drift": "1", "operator": "bob"})
-    client.post("/missions/M-2/takeover", data={"csrf_token": t})
-    sent = {m: p for m, p in core.calls if m in ("mission.deny", "mission.resume", "mission.rollback", "mission.takeover")}
+    sent = {m: p for m, p in core.calls if m in ("mission.deny", "mission.rollback")}
     assert sent["mission.deny"] == {"mission_id": "M-2", "operator": "alice", "grant_hash": H}
-    assert sent["mission.resume"] == {"mission_id": "M-2", "operator": "alice"}
     assert sent["mission.rollback"] == {"mission_id": "M-2", "operator": "alice", "ack_drift": True}
-    assert sent["mission.takeover"] == {"mission_id": "M-2", "operator": "alice"}
 
 
 # ── standing grants ──────────────────────────────────────────────────────────────────────────────────

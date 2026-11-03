@@ -23,9 +23,9 @@ from planet_express.missions.discovery import (
     discover_protected_inputs,
     parse_mountinfo,
 )
+from planet_express.missions.protected import build_protected_set
 from planet_express.missions.resources import canon, classify
 from planet_express.missions.runner import build_mission_runner
-from planet_express.missions.tripwire.build import build_protected_set
 
 MOUNTINFO = (
     "22 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
@@ -155,17 +155,15 @@ def test_protected_absent_rejects_unknown_domains():
         MissionsConfig(protected_absent=["firewall"])
 
 
-def test_a_discovered_volume_is_protected_and_protected_wins_in_the_tripwire_and_the_proxy_scope(tmp_path):
+def test_a_discovered_volume_is_protected_and_protected_wins_in_the_proxy_scope(tmp_path):
     from planet_express.missions.dockerproxy.policy import Scope
     from planet_express.missions.models import Grant
-    from planet_express.missions.tripwire.signals import volume_paths
     root = stacks(tmp_path)
     got = run(tmp_path, Host(volumes={"pg": "/var/lib/docker/volumes/pg/_data"}), root=root)
     ps = build_protected_set(MissionsConfig(), stacks_root=root, **got.kwargs())
     inside = canon("path:/var/lib/docker/volumes/pg/_data/base/1")
     assert ps.covers(inside)
     assert classify(inside, [canon("path:/var/lib/docker")], ps.resources) == "protected"
-    assert ("host:local/path:/var/lib/docker/volumes/pg/_data", "/var/lib/docker/volumes/pg/_data") in volume_paths(ps)
     scope = Scope.from_grant(Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"]}}),
                              protected=ps.resources, stacks_root=root)
     assert scope.classify(inside) == "protected"
@@ -201,7 +199,7 @@ def test_a_discovery_failure_withholds_repair_controls_and_records_why(tmp_path,
     runner = build_mission_runner(store, cfg(), containment=FakeContainment(), stacks_root=root,
                                   repair_wiring=wiring(root), discovery=lambda c, **k: found)
     assert runner is not None and runner.controls is None
-    assert runner.supervisor.repair_gate is None and runner.supervisor.tripwire is None
+    assert runner.supervisor.repair_gate is None and runner.supervisor.checkpoint is None
     assert "ingress" in caplog.text
     events = [e for e in store.list_events() if e["kind"] == "mission.protected_discovery_incomplete"]
     assert events and "ingress" in json.dumps(events[0]["payload"])

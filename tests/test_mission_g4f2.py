@@ -20,7 +20,7 @@ def stack(tmp_path):
     made = []
 
     def make(**kw):
-        st = build(tmp_path, start_monitor=False, **kw)
+        st = build(tmp_path, **kw)
         made.append(st)
         return st
     yield make
@@ -131,14 +131,6 @@ def test_the_card_says_which_exclusions_are_hard(stack):
     assert prot["exclusions_enforced"] == ["host:local/service:media/qbit"] and prot["exclusions_advisory"] == ["network"]
 
 
-def test_tripwire_classifies_an_excluded_resource_as_protected(tmp_path):
-    from tripwire_fakes import make_rig
-    rig = make_rig(tmp_path, grant_over={"exclusions": [EXCLUDED]})
-    ctx = rig.monitor._ctx(rig.mission.grant())
-    assert ctx.cls("host:local/service:media/qbit") == "protected"
-    assert ctx.cls("host:local/service:media/other") == "in_scope"
-
-
 def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
     from planet_express.missions.dockerproxy.policy import Scope
     g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"]}, "exclusions": [EXCLUDED]})
@@ -147,86 +139,22 @@ def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
     assert scope.classify("host:local/service:media/other") == "in_scope"
 
 
-def test_expiry_and_wall_budget_do_not_drift_over_repeated_pauses_and_a_pause_ended_outside_resume(tmp_path):
-    from repair_fakes import build, update
-    from tripwire_fakes import touch
+# ── #6 stopping the runner: no new starts, then the sessions proven gone ─────────────────────────────
 
-    from planet_express.missions.state import transition
-    st = build(tmp_path, behaviours=[{"script": [update()] * 400}])
-    try:
-        mid = st.propose(budgets={"wall_s": 1800})["mission_id"]
-        st.approve_all(mid)
-        st.sup.tick()
-        sid = st.runtimes[0].context.session.session_id
-        first = st.ms.get_session(sid)["expires_at"]
-        run = st.sup._runs[mid]
-        started = run.started_at
-
-        def advance(seconds, step=20):
-            for _ in range(seconds // step):
-                st.clock.t += step
-                st.sup.tick()
-        advance(100)
-        for n in range(2):
-            touch(st.rig.fs / "etc" / "hosts", f"10.0.0.{n} changed\n")
-            st.monitor.scan_once()
-            assert st.status(mid) == "paused_tripwire"
-            advance(200)
-            if n == 0:
-                st.flow.resume("operator:alice", mid)
-            else:                                            # the pause ends by a plain transition, not resume()
-                transition(st.store, mid, "executing", "operator:alice")
-                st.clock.t += 17
-                st.sup.tick()
-            assert st.status(mid) == "executing"
-            advance(100)
-        assert run.paused_at is None and run.pause_extended_to is None
-        shift = run.started_at - started
-        gained = st.ms.get_session(sid)["expires_at"] - first
-        assert 360 <= shift <= 440 and abs(gained - shift) <= 40       # both moved by (about) the two pauses
-    finally:
-        st.close()
-
-
-# ── #6 stopping the runner: no new starts, sessions proven gone, only then the tripwire ──────────────
-
-def test_runner_stop_halts_the_tripwire_only_after_the_sessions_are_gone():
-    from types import SimpleNamespace
-
-    from planet_express.missions.runner import MissionRunner
-    calls = []
-    sup = SimpleNamespace(docker_proxy=None, shutdown=lambda: calls.append("sessions_gone"))
-    trip = SimpleNamespace(stop=lambda: calls.append("tripwire_stop"))
-    runner = MissionRunner(sup, None, tripwire=trip)
-    runner._stop.set = lambda real=runner._stop.set: (calls.append("no_new_starts"), real())[1]
-    runner.stop()
-    assert calls == ["no_new_starts", "sessions_gone", "tripwire_stop"]
-
-
-def test_runner_stop_quiesces_the_tripwire_and_closes_the_supervisor_to_starts_first():
+def test_runner_stop_closes_the_supervisor_to_starts_before_the_sessions_are_killed():
     from types import SimpleNamespace
 
     from planet_express.missions.runner import MissionRunner
     calls = []
     sup = SimpleNamespace(docker_proxy=None, begin_shutdown=lambda: calls.append("no_starts"),
                           shutdown=lambda: calls.append("sessions_gone"))
-    trip = SimpleNamespace(quiesce=lambda: calls.append("quiesce"), stop=lambda: calls.append("tripwire_stop"))
-    MissionRunner(sup, None, tripwire=trip).stop()
-    assert calls == ["no_starts", "quiesce", "sessions_gone", "tripwire_stop"]
-
-
-def test_a_quiesced_tripwire_does_not_freeze_a_session_that_is_being_killed(tmp_path):
-    from tripwire_fakes import frozen, go_executing, make_rig, status, touch
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    rig.monitor.quiesce()
-    touch(rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
-    rig.monitor.scan_once()
-    assert status(rig) == "executing" and not frozen(rig)
+    MissionRunner(sup, None).stop()
+    assert calls == ["no_starts", "sessions_gone"]
 
 
 def test_a_supervisor_that_is_shutting_down_refuses_every_start(tmp_path):
     from repair_fakes import build
+
     from planet_express.missions.supervisor import RepairNotReady
     st = build(tmp_path)
     try:
@@ -237,67 +165,6 @@ def test_a_supervisor_that_is_shutting_down_refuses_every_start(tmp_path):
             st.sup.start(mid)
         st.sup.tick()
         assert st.status(mid) == "awaiting_decision" and st.runtimes == []
-    finally:
-        st.close()
-
-
-def test_runner_stop_keeps_the_tripwire_on_if_a_session_was_not_proven_gone():
-    from types import SimpleNamespace
-
-    from planet_express.missions.runner import MissionRunner
-    calls = []
-    sup = SimpleNamespace(docker_proxy=None, shutdown=lambda: calls.append("shutdown"), tracked_sessions=1)
-    trip = SimpleNamespace(quiesce=lambda: calls.append("quiesce"), unquiesce=lambda: calls.append("unquiesce"),
-                           stop=lambda: calls.append("stop"))
-    MissionRunner(sup, None, tripwire=trip).stop()
-    assert calls == ["quiesce", "shutdown", "unquiesce"]
-
-
-def test_runner_stop_still_stops_the_tripwire_if_the_supervisor_shutdown_fails():
-    from types import SimpleNamespace
-
-    from planet_express.missions.runner import MissionRunner
-    calls = []
-
-    def boom():
-        raise RuntimeError("x")
-    runner = MissionRunner(SimpleNamespace(docker_proxy=None, shutdown=boom), None,
-                           tripwire=SimpleNamespace(stop=lambda: calls.append("tripwire_stop")))
-    with pytest.raises(RuntimeError):
-        runner.stop()
-    assert calls == ["tripwire_stop"]
-
-
-# ── #7 a tripwire pause is not session time: the session's expiry moves with the wall budget ──────────
-
-def test_a_session_still_resolves_after_a_long_tripwire_pause_is_resumed(tmp_path):
-    from repair_fakes import build, update
-    from tripwire_fakes import touch
-    st = build(tmp_path, behaviours=[{"script": [update()] * 400}])
-    try:
-        mid = st.propose(budgets={"wall_s": 1800})["mission_id"]
-        st.approve_all(mid)
-        st.sup.tick()
-        session_id = st.runtimes[0].context.session.session_id
-        first = st.ms.get_session(session_id)["expires_at"]
-
-        def advance(seconds, step=20):
-            for _ in range(seconds // step):
-                st.clock.t += step
-                st.sup.tick()
-        advance(1500)                                                # most of the wall budget is used before the pause
-        touch(st.rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
-        st.monitor.scan_once()
-        assert st.status(mid) == "paused_tripwire"
-        advance(900)                                                 # 15 minutes paused: past wall_s + pad in real time
-        assert st.clock.t > first
-        st.flow.resume("operator:alice", mid)
-        assert st.status(mid) == "executing"
-        row = st.ms.get_session(session_id)
-        assert row["expires_at"] > st.clock.t and row["revoked_at"] is None
-        assert row["expires_at"] >= first + 850                      # extended by the paused duration
-        st.sup.tick()
-        assert st.status(mid) == "executing" and st.ms.live_session(mid) is not None
     finally:
         st.close()
 
@@ -329,13 +196,12 @@ def test_an_excluded_child_does_not_block_its_in_scope_parent():
 
 
 def test_every_consumer_gets_protection_from_the_one_helper():
-    """The invariant is structural: the three consumers call Grant.effective_protection and none reads the raw fields."""
+    """The invariant is structural: the consumers call Grant.effective_protection and none reads the raw fields."""
     import inspect
 
     from planet_express.missions import tools
     from planet_express.missions.dockerproxy import policy
-    from planet_express.missions.tripwire import monitor
-    for module in (tools, policy, monitor):
+    for module in (tools, policy):
         src = inspect.getsource(module)
         assert "effective_protection(" in src, module.__name__
         assert "grant.protected.resources" not in src and "grant.exclusions" not in src, module.__name__
@@ -387,199 +253,10 @@ def test_begin_shutdown_waits_for_a_start_that_is_already_launching(tmp_path):
         assert not done.wait(0.5)                    # the quiesce/kill sequence cannot begin under a start in flight
         release.set()
         starter.join(10)
-        assert done.wait(10) and mid in st.sup._runs  # the run is registered, so shutdown() will kill it while watched
+        assert done.wait(10) and mid in st.sup._runs  # the run is registered, so shutdown() will kill it
         stopper.join(10)
     finally:
         st.close()
-
-
-# ── #4 a container's own labels are not evidence of scope ────────────────────────────────────────────
-
-def test_a_spoofed_in_scope_label_on_a_new_container_pauses_and_a_proxy_created_one_does_not(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    rig.host.containers["media-evil-1"] = doc("media-evil-1", project="media", service="evil")      # labelled in scope
-    assert rig.monitor.scan_once()[rig.mission.id] == "out_of_scope"
-    assert status(rig) == "paused_tripwire"
-
-
-def test_a_container_the_proxy_recorded_as_created_by_this_mission_is_allowed(tmp_path):
-    from tripwire_fakes import doc, frozen, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    made = doc("media-new-1", project="media", service="new")
-    rig.host.containers["media-new-1"] = made
-    rig.env.ms.append_event(rig.mission.id, "tool", "docker-proxy", {"event": "docker.created", "created_id": made["Id"]})
-    assert rig.monitor.scan_once()[rig.mission.id] == "ok"
-    assert status(rig) == "executing" and not frozen(rig)
-
-
-def _proxy_event(rig, body, actor="docker-proxy"):
-    rig.env.ms.append_event(rig.mission.id, "tool", actor, body)
-
-
-def test_a_container_seen_while_a_proxy_create_is_in_flight_waits_for_its_record(tmp_path):
-    from tripwire_fakes import doc, frozen, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1", "name": "media-new-1", "targets": []})
-    made = doc("media-new-1", project="media", service="new")
-    rig.host.containers["media-new-1"] = made
-    assert rig.monitor.scan_once()[rig.mission.id] == "ok"             # the record has not landed yet: no verdict, no freeze
-    assert status(rig) == "executing" and not frozen(rig)
-    _proxy_event(rig, {"event": "docker.created", "created_id": made["Id"], "nonce": "n1"})
-    assert rig.monitor.scan_once()[rig.mission.id] == "ok" and status(rig) == "executing"
-
-
-def test_a_create_in_flight_defers_only_the_announced_container_not_an_unrelated_one(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1", "name": "media-new-1", "targets": []})
-    rig.host.containers["media-evil-1"] = doc("media-evil-1", project="media", service="evil")      # not the one announced
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire"
-
-
-def test_an_unnamed_create_is_matched_by_its_announced_service(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1", "name": "", "targets": ["host:local/service:media/new"]})
-    rig.host.containers["abc"] = doc("abc", project="media", service="new")
-    assert rig.monitor.scan_once()[rig.mission.id] == "ok" and status(rig) == "executing"
-
-
-def test_an_intent_that_never_finishes_stops_protecting_an_unknown_container(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    _proxy_event(rig, {"event": "docker.create_begin", "nonce": "n1"})
-    rig.host.containers["media-evil-1"] = doc("media-evil-1", project="media", service="evil")
-    rig.env.clock.t += 500
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire"
-
-
-def test_only_the_proxys_own_records_vouch_for_a_container(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    made = doc("media-evil-1", project="media", service="evil")
-    rig.host.containers["media-evil-1"] = made
-    _proxy_event(rig, {"event": "docker.created", "created_id": made["Id"]}, actor="session")
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire"
-
-
-def test_the_proxy_log_is_read_incrementally(tmp_path):
-    from tripwire_fakes import go_executing, make_rig
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    _proxy_event(rig, {"event": "docker.created", "created_id": "a" * 64, "nonce": "n"})
-    first = rig.monitor._proxy_state(rig.mission.id)
-    seen = rig.monitor._proxy_seen[rig.mission.id][0]
-    assert first[0] == frozenset({"a" * 64}) and seen > 0
-    assert rig.env.ms.proxy_creates_since(rig.mission.id, seen)[0] == []
-
-
-def test_the_cursor_advances_past_events_that_are_not_proxy_creates(tmp_path):
-    from tripwire_fakes import go_executing, make_rig
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    for i in range(5):
-        rig.env.ms.append_event(rig.mission.id, "note", "core", {"i": i})
-    rig.monitor._proxy_state(rig.mission.id)
-    seen = rig.monitor._proxy_seen[rig.mission.id][0]
-    events, high = rig.env.ms.proxy_creates_since(rig.mission.id, 0)
-    assert events == [] and seen == high and seen >= 5               # nothing is reread next scan
-
-
-def test_quiesce_waits_for_a_pause_that_is_already_freezing(tmp_path):
-    import threading
-
-    from tripwire_fakes import go_executing, make_rig
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    inside, release = threading.Event(), threading.Event()
-    real = rig.monitor._pause_locked
-
-    def slow(*a, **k):
-        inside.set()
-        assert release.wait(10)
-        return real(*a, **k)
-    rig.monitor._pause_locked = slow
-    pauser = threading.Thread(target=rig.monitor._pause, args=(rig.mission, "x", [], {}, None))
-    pauser.start()
-    assert inside.wait(10)
-    done = threading.Event()
-    quiescer = threading.Thread(target=lambda: (rig.monitor.quiesce(), done.set()))
-    quiescer.start()
-    assert not done.wait(0.4)                         # quiesce cannot return while a freeze is in progress
-    release.set()
-    pauser.join(10)
-    assert done.wait(10)
-    quiescer.join(10)
-
-
-def test_a_container_named_like_an_excluded_one_with_spoofed_labels_is_reported_protected(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, paused_event
-    rig = make_rig(tmp_path, grant_over={"exclusions": ["container:media-vault-1"]})
-    go_executing(rig)
-    rig.host.containers["media-vault-1"] = doc("media-vault-1", project="media", service="innocent")
-    rig.monitor.scan_once()
-    assert paused_event(rig)["cause"] == "protected"
-
-
-def test_another_missions_creation_does_not_vouch_for_this_one(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    made = doc("media-new-1", project="media", service="new")
-    rig.host.containers["media-new-1"] = made
-    assert made["Id"] not in rig.monitor._proxy_state(rig.mission.id)[0]
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire"
-
-
-def test_a_change_under_an_excluded_path_outside_the_protected_set_pauses(tmp_path):
-    from tripwire_fakes import go_executing, make_rig, paused_event, status, touch
-    rig = make_rig(tmp_path, grant_over={"exclusions": ["path:/srv/private"]})
-    touch(rig.fs / "srv" / "private", "secret v1\n")
-    go_executing(rig)
-    assert rig.monitor.scan_once()[rig.mission.id] == "ok"
-    touch(rig.fs / "srv" / "private", "secret v2\n")
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire" and paused_event(rig)["cause"] == "protected"
-
-
-def test_another_grants_excluded_path_does_not_pause_this_mission(tmp_path):
-    from planet_express.missions.tripwire.diff import DiffContext, diff_snapshots
-    ctx = DiffContext(scope=("host:local/stack:media",), protected=())
-    base = {"files": {"host:local/path:/etc/hosts": "a"}}
-    cur = {"files": {"host:local/path:/etc/hosts": "a", "host:local/path:/srv/other": "x"}}
-    assert diff_snapshots(base, cur, ctx) == []
-
-
-def test_a_same_name_replacement_container_needs_a_proxy_record(tmp_path):
-    from tripwire_fakes import go_executing, make_rig, status
-    rig = make_rig(tmp_path)
-    go_executing(rig)
-    rig.host.containers["media-qbit-1"]["Id"] = "e" * 64                # deleted and recreated outside the proxy, same labels
-    rig.monitor.scan_once()
-    assert status(rig) == "paused_tripwire"
-
-
-def test_changes_to_an_established_excluded_container_are_protected_whatever_its_labels_say(tmp_path):
-    from tripwire_fakes import doc, go_executing, make_rig, paused_event
-    rig = make_rig(tmp_path, grant_over={"exclusions": ["container:media-vault-1"]})
-    rig.host.containers["media-vault-1"] = doc("media-vault-1", project="media", service="innocent")
-    go_executing(rig)
-    rig.host.containers["media-vault-1"]["Image"] = "sha256:changed"
-    rig.monitor.scan_once()
-    ev = paused_event(rig)
-    assert ev["cause"] == "protected" and any(c["kind"] == "image_changed" and c["verdict"] == "protected" for c in ev["changes"])
 
 
 def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
@@ -599,7 +276,6 @@ def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
 
 def test_the_schema_default_is_the_launchers_one_default_range():
     from config_schema import MissionsConfig
-
     from planet_express.missions.launcher.config import DEFAULT_UID_RANGE
     cfg = MissionsConfig()
     assert (cfg.session_uid_min, cfg.session_uid_max) == DEFAULT_UID_RANGE
@@ -630,7 +306,10 @@ def test_a_range_just_outside_it_is_accepted_when_enabled(low, high):
 def test_preflight_catches_an_account_in_the_range_and_an_unreadable_passwd():
     from types import SimpleNamespace
 
-    from planet_express.missions.launcher.preflight import PreflightReport, check_range_free
+    from planet_express.missions.launcher.preflight import (
+        PreflightReport,
+        check_range_free,
+    )
     users = lambda: [SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_name="a"),      # noqa: E731
                      SimpleNamespace(pw_uid=200500, pw_gid=200500, pw_name="stray")]
     report = PreflightReport("x")
@@ -639,7 +318,10 @@ def test_preflight_catches_an_account_in_the_range_and_an_unreadable_passwd():
 
 
 def test_preflight_refuses_sessions_left_in_the_old_range():
-    from planet_express.missions.launcher.preflight import PreflightReport, check_no_stale_uids
+    from planet_express.missions.launcher.preflight import (
+        PreflightReport,
+        check_no_stale_uids,
+    )
     report = PreflightReport("x")
     assert not check_no_stale_uids(report, 200000, 200999, [61003, 200001])
     assert "61003" in report.checks[-1].detail and "finish or cancel" in report.checks[-1].detail

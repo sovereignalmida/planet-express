@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repair-mission rehearsal (v4 release proof item 7): drives the REAL checkpoint service, tripwire monitor, verifier,
+"""Repair-mission rehearsal (v4 release proof item 7): drives the REAL checkpoint service, verifier,
 approval flow and supervisor against REAL Docker, on a disposable host, with a synthetic compose project. Prints one JSON record
 (steps, timings, check results) and exits non-zero on any failure.
 
@@ -21,9 +21,8 @@ Scenario "canary" (release proof 7b): a failed canary (a bad config change recre
 
 The agent is a deterministic command (this same file, subcommand `agent`): no LLM, no network. It reaches Docker ONLY through
 a real per-mission `DockerProxyService` (real Upstream to the host socket, real Policy/Scope from the mission's grant, real
-recording of creates into the store, which is what the tripwire reads); its DOCKER_HOST is that proxy socket, and the agent
-refuses to run against anything else. What it exercises: the checkpoint service (real compose provider), the tripwire monitor
-(real Docker/ss/file scans), the verifier (real checks), the approval flow, the supervisor and the proxy. Every call the proxy
+recording of creates into the store); its DOCKER_HOST is that proxy socket, and the agent
+refuses to run against anything else. What it exercises: the checkpoint service (real compose provider), the verifier (real checks), the approval flow, the supervisor and the proxy. Every call the proxy
 refuses is listed in the record under "proxy" (a finding, never something to work around). What it does NOT exercise, and says
 so in the record under "not_exercised": the cgroup launcher and session uids (scripts/mission_containment_rehearsal.py); the
 agent here runs as root in a process group, and the proxy's gate recognises it by that group.
@@ -443,7 +442,7 @@ def release_missions(rec: Recorder, label: str, mids: Sequence[str], *, status_o
                      cancel: Callable[[str, str], None], tick: Callable[[], None], sleep: Callable[[float], None] = time.sleep,
                      terminal: Sequence[str] = ("completed", "failed", "rolled_back", "cancelled"), timeout_s: float = 30) -> bool:
     """End a scenario cleanly: any of its missions that is not terminal is cancelled through the supervisor's real cancel path
-    (session killed, leases and proxy socket released, tripwire stopped). Recorded as `<label>:released` with every final
+    (session killed, leases and proxy socket released). Recorded as `<label>:released` with every final
     status. Never raises: a mission that cannot be ended is a failed step, and the next scenario must not start on top of it."""
     errors: list[str] = []
     raw_status = status_of
@@ -512,9 +511,9 @@ class Rig:
             DockerProxyService,
         )
         from planet_express.missions.launcher.preflight import Check, PreflightReport
+        from planet_express.missions.protected import build_protected_set
         from planet_express.missions.store import MissionStore
         from planet_express.missions.supervisor import Supervisor
-        from planet_express.missions.tripwire.build import build_protected_set
 
         self.args, self.work, self.stacks = args, work, str(stacks)
         db = work / "state" / "pe.db"
@@ -523,7 +522,7 @@ class Rig:
         self.store = Store(db)
         self.store.init()
         self.ms = MissionStore(self.store)
-        self.cfg = MissionsConfig(enabled=True, tripwire_interval_s=5, verify={"exec_allowlist": ["wget"]},
+        self.cfg = MissionsConfig(enabled=True, verify={"exec_allowlist": ["wget"]},
                                   checkpoint={"root": str(work / "checkpoints")}, workspace_root=str(work / "ws"),
                                   runtime={"argv": [sys.executable, "-I", str(SELF)]})
         self.containment = ProcessContainment()
@@ -531,7 +530,7 @@ class Rig:
         wiring = RepairWiring(provider=provider, scan=lambda: project_scan(PROJECT), core_user=args.core_user)
         protected = build_protected_set(self.cfg, stacks_root=self.stacks)
         # The agent's only road to Docker: the daemon's own per-session proxy (real Upstream to the host socket, real Policy and
-        # Scope from the mission's grant, real recording of creates). Built BEFORE the controls so the tripwire's pause reaches it.
+        # Scope from the mission's grant, real recording of creates). Built before the controls, which take it.
         sock_root = work / "sock"
         sock_root.mkdir(parents=True, exist_ok=True)
         self.proxy = DockerProxyService(self.store, authenticator=RehearsalAuthenticator(self.store, self.containment),
@@ -561,24 +560,20 @@ class Rig:
                                   env_allow=list(AGENT_ENV_ALLOW))
         self.sup = Supervisor(self.store, self.containment, factory, enabled=lambda: True, artifact_dir=work / "artifacts",
                               workspace_dir=work / "ws", repair_gate=gate, verifier=self.controls.verifier,
-                              checkpoint=self.controls.checkpoint, tripwire=self.controls.tripwire, docker_proxy=self.proxy,
+                              checkpoint=self.controls.checkpoint, docker_proxy=self.proxy,
                               socket_provider=ProxySockets(str(sock_root), self.proxy))
         self.flow = ApprovalFlow(self.store, supervisor=self.sup, validator=self.controls.validator,
                                  backup_status=self.controls.backup_status, protected=lambda: self.controls.protected,
                                  runtime="command")
         self.controls.checkpoint.startup_scan()
-        self.controls.tripwire.start()
         self._stop = threading.Event()
 
     def close(self) -> None:
         self._stop.set()
         try:
-            self.controls.tripwire.stop()
+            self.sup.shutdown()
         finally:
-            try:
-                self.sup.shutdown()
-            finally:
-                self.proxy.shutdown()
+            self.proxy.shutdown()
 
     def release(self, rec: Recorder, label: str) -> bool:
         """End the scenario: cancel any mission of it that is not terminal so nothing carries leases into the next one."""
@@ -636,8 +631,7 @@ def scenario_namespace(rig: "Rig", rec: Recorder, stack_dir: Path) -> None:
     rec.step("namespace:baseline", {"gateway", "app1", "app2", "web"} <= set(before), containers=sorted(before))
     mid = rig.run_mission("namespace", rec, title="rehearsal: recreate the gateway and its dependents",
                           scope={"stacks": [PROJECT], "hosts": ["local"]}, on_verify_fail="needs_operator",
-                          until=("completed", "needs_operator", "rollback_pending", "recovery_required", "failed",
-                                 "paused_tripwire"))
+                          until=("completed", "needs_operator", "rollback_pending", "recovery_required", "failed"))
     after = container_ids()
     changed = {s for s in ("gateway", "app1", "app2") if before.get(s) != after.get(s)}
     rec.step("namespace:all-rebound", mid is not None and rig.status(mid) == "completed"
@@ -651,8 +645,7 @@ def scenario_canary(rig: "Rig", rec: Recorder, stack_dir: Path) -> None:
     original = compose.read_text()
     mid = rig.run_mission("canary-bad", rec, title="rehearsal: canary configuration change",
                           scope={"stacks": [PROJECT], "hosts": ["local"]}, on_verify_fail="rollback",
-                          until=("rollback_pending", "completed", "needs_operator", "recovery_required", "failed",
-                                 "paused_tripwire"))
+                          until=("rollback_pending", "completed", "needs_operator", "recovery_required", "failed"))
     if mid is None:
         return
     if not rec.step("canary:failed-as-planned", rig.status(mid) == "rollback_pending", status=rig.status(mid)):
@@ -669,8 +662,7 @@ def scenario_canary(rig: "Rig", rec: Recorder, stack_dir: Path) -> None:
     before_correction = container_ids()
     mid2 = rig.run_mission("canary-fix", rec, title="rehearsal: bounded configuration correction",
                            scope={"services": [f"{PROJECT}/web"], "hosts": ["local"]}, on_verify_fail="needs_operator",
-                           until=("completed", "needs_operator", "rollback_pending", "recovery_required", "failed",
-                                  "paused_tripwire"))
+                           until=("completed", "needs_operator", "rollback_pending", "recovery_required", "failed"))
     after = container_ids()
     others = {s for s in ("gateway", "app1", "app2") if s in before_correction and before_correction[s] != after.get(s)}
     rec.step("canary:only-web-recreated", mid2 is not None and rig.status(mid2) == "completed" and not others,

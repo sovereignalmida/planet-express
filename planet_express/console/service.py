@@ -186,7 +186,6 @@ class ConsoleService:
     def _report_executions(self) -> None:
         """Tell the thread, once each, how a confirmed plan's run is going. The words are PE's, from the mission's state and PE's own verification."""
         from planet_express.console import execution as ex_mod
-        from planet_express.missions.tripwire.monitor import pause_card
         for ex in self.console.live_executions():
             mission = self.ms.get_mission(ex["mission_id"])
             conv_id, status = ex["conversation_id"], mission.status
@@ -197,13 +196,6 @@ class ConsoleService:
                     self.console.mark_reported(ex["id"], key)
             if status == "executing":
                 say("executing", "PE took a checkpoint and is carrying out the plan.")
-            elif status == "paused_tripwire":
-                view = ex_mod.pause_view(pause_card(self.ms, mission.id))
-                if view and view["by_operator"]:
-                    say(f"paused:{mission.updated_at}", "The run is paused. Resume it, roll back to the checkpoint, or take over.")
-                else:
-                    what = "; ".join(view["changes"][:3]) if view and view["changes"] else "something outside the plan changed"
-                    say(f"paused:{mission.updated_at}", f"PE paused the run: {what}. Nothing else has been done. Resume, roll back, or take over.")
             elif status == "verifying":
                 say("verifying", "The plan has been carried out. PE is checking it worked.")
             elif status == "completed":
@@ -216,7 +208,7 @@ class ConsoleService:
                 verification = ex_mod.verification_view(mission)
                 text, _ = ex_mod.repair_status(mission)
                 tail = f" {verification['headline']}." if verification else ""
-                offered = [label for name, label in (("rollback", "roll back"), ("takeover", "take over")) if ex_mod.controls(mission)[name]]
+                offered = ["roll back"] if ex_mod.controls(mission)["rollback"] else []
                 if status in ("needs_operator", "recovery_required"):
                     offered.append("ask the agent to keep working on it")
                 next_steps = f" Look at the run above; you can {', '.join(offered[:-1])}{' or ' if len(offered) > 1 else ''}{offered[-1]}." if offered else ""

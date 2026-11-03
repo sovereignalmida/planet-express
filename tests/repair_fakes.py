@@ -1,4 +1,4 @@
-"""A whole Repair stack over fakes (slice 7a): the tripwire fake host, a real checkpoint service and Verifier, a Supervisor with
+"""A whole Repair stack over fakes (slice 7a): the fake host, a real checkpoint service and Verifier, a Supervisor with
 the controls wired, and the approval flow. Nothing here touches the host."""
 import sys
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from host_fakes import make_rig
 from supervisor_fakes import GOOD_RESULT, FakeRuntime, update
-from tripwire_fakes import make_rig
 from verify_fakes import FakeRun, check_env, snapshot
 
 from planet_express.missions.approval_flow import ApprovalFlow
@@ -28,7 +28,7 @@ def gate_report(ok: bool = True) -> PreflightReport:
 
 
 class FakeProxy:
-    """Stands in for slice 7b's per-session Docker proxy: closed by a tripwire pause, reopened by a resume."""
+    """Stands in for slice 7b's per-session Docker proxy: closed by the tool-abuse guard."""
 
     def __init__(self):
         self.open: dict[str, str | None] = {}
@@ -47,13 +47,13 @@ class Stack:
     pass
 
 
-def build(tmp_path, *, behaviours=None, gate=True, start_monitor=True, with_proxy=False, covered=True, grant_over=None):
-    """Returns a Stack. `stack.propose()` makes an approved-able Repair mission through the real flow; `stack.run()` drives the
-    supervisor until nothing more happens. Stop the monitor with `stack.close()`."""
-    rig = make_rig(tmp_path, monitor_kw={"interval_s": 3600, "investigating_interval_s": 3600}, grant_over=grant_over)
+def build(tmp_path, *, behaviours=None, gate=True, with_proxy=False, covered=True, grant_over=None):
+    """Returns a Stack. `stack.propose()` makes an approved-able Repair mission through the real flow; `stack.drive()` drives the
+    supervisor until nothing more happens. Stop the verify pool with `stack.close()`."""
+    rig = make_rig(tmp_path, grant_over=grant_over)
     env = rig.env
     st = Stack()
-    st.rig, st.env, st.ms, st.store, st.clock, st.cont, st.monitor = rig, env, env.ms, env.store, env.clock, rig.cont, rig.monitor
+    st.rig, st.env, st.ms, st.store, st.clock, st.cont = rig, env, env.ms, env.store, env.clock, rig.cont
     st.base = snapshot()
     st.fresh = snapshot()
     env.svc.baseline_provider = lambda: normalize(st.base)
@@ -63,9 +63,6 @@ def build(tmp_path, *, behaviours=None, gate=True, start_monitor=True, with_prox
     st.behaviours = list(behaviours or [{"script": [update("finished")]}])
     st.runtimes = []
     st.proxy = FakeProxy() if with_proxy else None
-    if st.proxy is not None:
-        original = rig.monitor.revoke_endpoints
-        rig.monitor.revoke_endpoints = lambda mid: (original(mid), st.proxy.pause(mid))
 
     def factory(mission):
         runtime = FakeRuntime(st.cont, **(st.behaviours.pop(0) if st.behaviours else {}))
@@ -74,12 +71,10 @@ def build(tmp_path, *, behaviours=None, gate=True, start_monitor=True, with_prox
 
     st.sup = Supervisor(env.store, st.cont, factory, env.clock, enabled=True, artifact_dir=tmp_path / "artifacts",
                         workspace_dir=tmp_path / "ws", repair_gate=(lambda: gate_report(gate)), verifier=st.verifier,
-                        checkpoint=env.svc, tripwire=rig.monitor, docker_proxy=st.proxy)
+                        checkpoint=env.svc, docker_proxy=st.proxy)
     st.flow = ApprovalFlow(env.store, supervisor=st.sup, validator=lambda grant, plan: [],
                            backup_status=lambda grant: {"covered": covered, "state": "ok" if covered else "stale"},
                            protected=lambda: rig.protected, runtime="fake")
-    if start_monitor:
-        rig.monitor.start()
 
     def propose(**kw):
         spec = {"title": "restart media", "goal": "bring media back", "scope": SCOPE, "checks": CHECKS}
@@ -104,7 +99,6 @@ def build(tmp_path, *, behaviours=None, gate=True, start_monitor=True, with_prox
         return status(mission_id)
 
     def close():
-        rig.monitor.stop()
         st.sup._shutting_down = True
         if st.sup._verify_pool is not None:
             st.sup._verify_pool.shutdown(wait=True)

@@ -43,7 +43,7 @@ def started_repair(st):
 def new_supervisor(st, factory=None):
     return Supervisor(st.store, st.cont, factory, st.clock, enabled=True, artifact_dir=st.sup.artifact_dir,
                       workspace_dir=st.sup.workspace_dir, repair_gate=st.sup.repair_gate, verifier=st.verifier,
-                      checkpoint=st.env.svc, tripwire=st.monitor)
+                      checkpoint=st.env.svc)
 
 
 # ── investigation ───────────────────────────────────────────────────────────────────────────────────

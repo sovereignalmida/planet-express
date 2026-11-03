@@ -46,7 +46,7 @@ def test_pending_items_are_listed_as_open_with_what_is_missing():
 
 
 def test_each_automated_module_carries_its_item_number_and_quotes_the_item():
-    for n in (1, 2, 3, 4, 5, 6, 8, 10):
+    for n in (1, 2, 4, 5, 6, 8, 10):                  # item 3 (the tripwire) was retired by trust mode
         matches = sorted((ROOT / "tests/release_proof").glob(f"test_item{n:02d}_*.py"))
         assert len(matches) == 1, n
         assert f"Release proof item {n}:" in matches[0].read_text().split('"""')[1]

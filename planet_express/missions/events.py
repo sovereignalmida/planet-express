@@ -7,7 +7,7 @@ from typing import Any, get_args
 
 from planet_express.core.redact import REDACTED, redact
 
-from .models import EventKind
+from .models import LEGACY_EVENT_KINDS, EventKind
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -36,7 +36,7 @@ def redact_value(value: Any) -> Any:
 def insert_event(conn: sqlite3.Connection, mission_id: str, kind: str, actor: str,
                  body: dict[str, Any], now: int) -> int:
     # Reject what read-back would refuse: one malformed row would make events() fail for the mission forever.
-    if kind not in get_args(EventKind):
+    if kind not in get_args(EventKind) or kind in LEGACY_EVENT_KINDS:
         raise ValueError(f"unknown event kind {kind!r}")
     if not isinstance(actor, str) or not 1 <= len(actor) <= 128:
         raise ValueError("event actor must be 1-128 characters")

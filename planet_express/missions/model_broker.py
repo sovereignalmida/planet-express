@@ -221,7 +221,7 @@ class ModelBroker:
                 pass
 
     def pause(self, mission_id: str) -> None:
-        """The tripwire (or the tool-abuse guard) closes the session's endpoints: no request starts, a request already with the
+        """The tool-abuse guard closes the session's endpoints: no request starts, a request already with the
         vendor is cut at once, and a stream still reaching the agent stops, until `resume`."""
         with self._lock:
             self._paused.add(mission_id)

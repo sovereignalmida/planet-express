@@ -124,8 +124,8 @@ class Verifier:
 
     def _executing_events(self, mission: Mission) -> tuple[float | None, int]:
         """When this run began (the last `awaiting_decision -> executing`, the start an approval led to) and that event's seq.
-        A tripwire resume re-enters `executing` from `paused_tripwire`; it is the same run, so it does not move the start
-        past a restart the session already made (review, rc13.2)."""
+        Only that edge counts: a re-entry from anywhere else (an operator's exit from `needs_operator`, recovery) is the same
+        run, so it does not move the start past a restart the session already made (review, rc13.2)."""
         since, seq = None, 0
         for event in self.ms.events(mission.id, kind="state"):
             try:

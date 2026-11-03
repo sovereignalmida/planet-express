@@ -192,7 +192,7 @@ class CheckpointStore:
 
     # ── post manifest and drift ─────────────────────────────────────────────
     def write_post(self, checkpoint_id: str, post: dict[str, Any]) -> None:
-        """Atomic replace: the latest post-change manifest wins (it is retaken at each tripwire pause)."""
+        """Atomic replace: the latest post-change manifest wins (it is retaken before each rollback)."""
         directory = self.dir_for(checkpoint_id)
         temp = directory / f".{POST}.tmp"
         if temp.exists():

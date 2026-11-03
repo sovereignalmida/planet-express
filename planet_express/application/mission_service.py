@@ -4,7 +4,7 @@ Everything an operator can do to a mission or a memory card through the dashboar
 through here. It reads, creates Observe/Propose missions, asks for a cancel and confirms or deprecates memory cards. It has no
 worker-facing code and never touches the execution engine, policy or the host-mutation lock. Since slice 7a it also
 fronts the approval flow (`missions.approval_flow.ApprovalFlow`): the card, approve/deny bound to the grant hash,
-standing grants and the operator's actions on a tripwire card. The flow is attached by the daemon; without it those
+standing grants and the operator's rollback of a Repair mission. The flow is attached by the daemon; without it those
 methods answer "unavailable". Elevated approvals need `elevated: true`, which only the dashboard sends and only from an
 authenticated elevated session; Telegram never can.
 
@@ -75,7 +75,7 @@ CONVERSATION_ID_RE = re.compile(r"[0-9a-f]{16}")
 _OPERATOR = re.compile(r"[a-z0-9_.-]{1,32}")
 _PREFERRED_ORDER = (
     "draft", "queued", "investigating", "awaiting_decision", "blocked", "needs_operator", "executing", "verifying",
-    "paused_tripwire", "recovery_required", "rollback_pending", "completed", "failed", "rolled_back", "cancelled")
+    "recovery_required", "rollback_pending", "completed", "failed", "rolled_back", "cancelled")
 # Board order: the preferred order, then any status the model gains later, so a new status shows up on its own.
 STATUS_ORDER = _PREFERRED_ORDER + tuple(x for x in get_args(Status) if x not in _PREFERRED_ORDER)
 _STATUSES = frozenset(STATUS_ORDER)
@@ -592,14 +592,8 @@ class MissionService:
     def deny_mission(self, mission_id: str, *, operator: str, grant_hash: str) -> dict:
         return self._flowed(lambda f: f.deny(_actor(operator), mission_id, grant_hash))
 
-    def resume_mission(self, mission_id: str, *, operator: str) -> dict:
-        return self._flowed(lambda f: f.resume(_actor(operator), mission_id))
-
     def rollback_mission(self, mission_id: str, *, operator: str, ack_drift: bool = False) -> dict:
         return self._flowed(lambda f: f.roll_back(_actor(operator), mission_id, ack_drift=ack_drift))
-
-    def takeover_mission(self, mission_id: str, *, operator: str) -> dict:
-        return self._flowed(lambda f: f.take_over(_actor(operator), mission_id))
 
     def standing_create(self, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
                         elevated: bool = False, ceilings: dict | None = None) -> dict:
@@ -713,17 +707,9 @@ class MissionService:
             v = _params(p, {**mid, **op, **grant_hash})
             return self.deny_mission(v["mission_id"], operator=v["operator"], grant_hash=v["grant_hash"])
 
-        def resume(p):
-            v = _params(p, {**mid, **op})
-            return self.resume_mission(v["mission_id"], operator=v["operator"])
-
         def rollback(p):
             v = _params(p, {**mid, **op}, {"ack_drift": _bool})
             return self.rollback_mission(v["mission_id"], operator=v["operator"], ack_drift=v.get("ack_drift", False))
-
-        def takeover(p):
-            v = _params(p, {**mid, **op})
-            return self.takeover_mission(v["mission_id"], operator=v["operator"])
 
         def standing_create(p):
             v = _params(p, {**op, **scope_t}, {"window": _dict, "ceilings": _dict, **elev})
@@ -744,8 +730,7 @@ class MissionService:
             return self.standing_list(**_params(p, {}, {"include_inactive": _bool}))
 
         table = {"mission.approval_card": card_, "mission.propose_repair": propose_repair, "mission.approve": approve,
-                 "mission.deny": deny, "mission.resume": resume, "mission.rollback": rollback,
-                 "mission.takeover": takeover, "standing.create": standing_create,
+                 "mission.deny": deny, "mission.rollback": rollback, "standing.create": standing_create,
                  "standing.supersede": standing_supersede, "standing.revoke": standing_revoke,
                  "standing.list": standing_list,
                  "mission.list": list_, "mission.get": get, "mission.events": events, "mission.create": create,
@@ -828,7 +813,7 @@ class MissionService:
             return api().confirm_withdraw(v["conversation_id"], v["execution_id"], v["operator"])
 
         def execution_action(p):
-            v = _params(p, {**conv, **op, **execution, "action": _choice("pause", "resume", "rollback", "takeover")}, {"ack_drift": _bool})
+            v = _params(p, {**conv, **op, **execution, "action": _choice("rollback")}, {"ack_drift": _bool})
             return api().execution_action(v["conversation_id"], v["execution_id"], v["action"], v["operator"], ack_drift=v.get("ack_drift", False))
 
         table = {"console.status": status, "console.list": list_, "console.feed": feed, "console.create": create, "console.post": post,
@@ -840,12 +825,12 @@ class MissionService:
 
     # ── Telegram ────────────────────────────────────────────────────────────
     TELEGRAM_COMMANDS = frozenset({"/missions", "/mission", "/cancel_mission", "/mission_card", "/approve", "/deny",
-                                  "/resume", "/rollback", "/takeover"} | CONSOLE_COMMANDS)
+                                  "/rollback"} | CONSOLE_COMMANDS)
     _CONSOLE_COMMANDS = CONSOLE_COMMANDS
     # Approval-flow commands. The operator is the Telegram sender (never a parameter), no command here can be elevated, and
     # /approve is bound to the first 8 hex digits of the grant hash printed on the card, so it cannot approve a card that
     # changed after it was read.
-    _FLOW_COMMANDS = frozenset({"/mission_card", "/approve", "/deny", "/resume", "/rollback", "/takeover"})
+    _FLOW_COMMANDS = frozenset({"/mission_card", "/approve", "/deny", "/rollback"})
 
     def telegram(self, text: str, operator: str) -> str:
         """Answer /missions, /mission <id> and /cancel_mission <id> in plain text. The caller has already
@@ -908,12 +893,8 @@ class MissionService:
                 left = [r["phase"] for r in out["required"] if r["state"] == "pending"]
                 return (f"{mission_id}: {pending[0]['phase']} approved." +
                         (f" Still needed (dashboard): {', '.join(left)}." if left else " It will start shortly."))
-            if cmd == "/resume":
-                return f"{mission_id}: resumed ({self.resume_mission(mission_id, operator=operator)['status']})."
-            if cmd == "/rollback":
-                out = self.rollback_mission(mission_id, operator=operator)
-                return f"{mission_id}: rollback {out['restore']}; the mission is {out['status']}."
-            return f"{mission_id}: taken over ({self.takeover_mission(mission_id, operator=operator)['status']})."
+            out = self.rollback_mission(mission_id, operator=operator)                  # /rollback
+            return f"{mission_id}: rollback {out['restore']}; the mission is {out['status']}."
         except MissionError as exc:
             return f"{exc}" if exc.code != "not_found" else f"No such mission: {mission_id}"
 

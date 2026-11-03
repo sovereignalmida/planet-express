@@ -1,4 +1,4 @@
-"""Canonical resource ids and containment (contract 2.3), shared by grants, protected domains and tripwires.
+"""Canonical resource ids and containment (contract 2.3), shared by grants, protected domains, tools and the Docker proxy.
 
     host:<h>/stack:<s>   host:<h>/service:<s>/<svc>   host:<h>/mount:<abs>   host:<h>/path:<abs>
     host:<h>/unit:<name> host:<h>/container:<name>    host:<h>/network:<name> host:<h>/system:<name>

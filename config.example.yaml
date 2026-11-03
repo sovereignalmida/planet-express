@@ -191,7 +191,6 @@ multi_host:
 #   cgroup_root: /sys/fs/cgroup/system.slice/casa-planetexpress.service/sessions   # MOS: the tree launcher-boot.sh makes
 #   workspace_root: /var/lib/planetexpress/mission-workspaces
 #   launch_conf: /etc/planetexpress-launch/launch.conf   # MOS: under PE_HOME on the data pool
-#   tripwire_interval_s: 15         # at most 15: the pause bound is interval + 10 s scan + freeze + write <= 30 s
 #   verify:
 #     exec_allowlist: []            # binaries a verification exec_probe may run inside a container; empty: unavailable
 #   checkpoint:

@@ -34,19 +34,20 @@ def test_table_covers_contract_edges():
     must = {("draft", "queued"), ("queued", "investigating"), ("investigating", "awaiting_decision"),
             ("awaiting_decision", "executing"), ("executing", "verifying"), ("verifying", "completed"),
             ("investigating", "completed"), ("awaiting_decision", "completed"),
-            ("executing", "paused_tripwire"), ("paused_tripwire", "executing"),
-            ("paused_tripwire", "rolled_back"), ("paused_tripwire", "needs_operator"),
+            ("paused_tripwire", "needs_operator"), ("paused_tripwire", "recovery_required"),
             ("executing", "rollback_pending"), ("verifying", "rollback_pending"),
             ("verifying", "needs_operator"), ("rollback_pending", "rolled_back"),
             ("rollback_pending", "needs_operator"), ("blocked", "queued"), ("blocked", "awaiting_decision"),
-            ("blocked", "cancelled"), ("paused_tripwire", "rollback_pending"),
-            ("recovery_required", "rollback_pending")}
+            ("blocked", "cancelled"), ("recovery_required", "rollback_pending")}
     must |= {("recovery_required", t) for t in
              ("investigating", "executing", "verifying", "rolled_back", "needs_operator")}
     must |= {(s, t) for s in NON_TERMINAL for t in ("cancelled", "blocked", "needs_operator", "recovery_required")
              if s != t}
     for edge in must:
         assert is_legal(*edge), edge
+    # trust mode: the tripwire's state is legacy (old rows only); nothing enters it and it never goes back to executing
+    assert not any(is_legal(s, "paused_tripwire") for s in STATES)
+    assert not is_legal("paused_tripwire", "executing")
 
 
 def test_terminal_states_have_no_exits_and_no_self_edges():

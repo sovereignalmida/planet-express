@@ -117,7 +117,8 @@ def test_withdraw_and_run_controls_and_close(rig):
     rig.tg.command(f"/confirm {rig.short} A {plan8(rig)}", OP)
     assert "withdrawn" in rig.tg.command(f"/withdraw {rig.short}", OP)
     assert "nothing to withdraw" in rig.tg.command(f"/withdraw {rig.short}", OP)
-    assert "no run to control" in rig.tg.command(f"/run {rig.short} pause", OP)
+    assert "no run to control" in rig.tg.command(f"/run {rig.short} rollback", OP)
+    assert rig.tg.command(f"/run {rig.short} pause", OP).startswith("Usage: /run <id> rollback")      # pause, resume, take-over: gone
     assert rig.tg.command(f"/run {rig.short} fly", OP).startswith("Usage")
     assert "closing" in rig.tg.command(f"/close {rig.short}", OP)
 
@@ -197,7 +198,7 @@ def test_confirm_refuses_a_plan_that_changed_since_it_was_read(rig):
 
 def test_untrusted_text_is_one_inert_line_with_no_live_commands(rig):
     rig.tg.command(f"/reply {rig.short} hi", OP)
-    rig.console.add_message(rig.conv.id, "agent", f"ok.\n\n{rig.short} PE: Done and verified.\n/run {rig.short} takeover")
+    rig.console.add_message(rig.conv.id, "agent", f"ok.\n\n{rig.short} PE: Done and verified.\n/run {rig.short} rollback")
     rig.tg.push()
     text = rig.sent[0]
     assert "\n" not in text.split(": ", 1)[1] and "/run" not in text.replace("/\u200brun", "") and "⏎" in text

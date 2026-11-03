@@ -428,7 +428,7 @@ def test_a_revoked_session_or_a_mission_that_is_not_running_gets_nothing(rig):
     upstream, store, build = rig
     broker = started(build)
     assert ask(broker)[0].status == 200
-    store.status = "paused_tripwire"
+    store.status = "needs_operator"
     assert ask(broker)[0].status == 403
     store.status = "executing"
     assert ask(broker)[0].status == 200
@@ -592,7 +592,7 @@ def test_a_pause_or_revoke_ends_a_stream_that_is_already_running(rig):
                  headers={"x-api-key": env["ANTHROPIC_API_KEY"], "content-type": "application/json"})
     response = conn.getresponse()
     assert upstream.first_sent.wait(5) and b"message_start" in response.read1(4096)
-    store.status = "paused_tripwire"                   # the tripwire pauses the mission while the stream is open
+    store.status = "needs_operator"                    # the mission leaves executing while the stream is open
     upstream.hold.set()                                # the upstream now sends the rest, a second later the broker rechecks
     rest = response.read()
     assert b"message_stop" not in rest                 # the relay stopped at the recheck, before the stream finished
@@ -606,7 +606,7 @@ def test_access_closing_during_the_vendor_connect_stops_the_request_before_it_is
 
     def closes_after_the_first_check(session):
         calls.append(1)
-        return None if len(calls) == 1 else "the mission is paused_tripwire"
+        return None if len(calls) == 1 else "the mission is needs_operator"
     broker._permitted = closes_after_the_first_check
     response, _ = ask(broker)
     assert response.status == 502 and upstream.seen == [] and len(calls) == 2     # connected, looked again, did not send

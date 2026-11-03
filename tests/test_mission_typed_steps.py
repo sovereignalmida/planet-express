@@ -133,9 +133,9 @@ def test_a_wrong_or_revoked_session_is_refused(rig):
     refused(rig, book(restart()), "no live session")
 
 
-def test_a_paused_mission_is_refused(rig):
+def test_a_mission_handed_to_the_operator_is_refused(rig):
     from planet_express.missions.state import transition
-    transition(rig.store, rig.mission.id, "paused_tripwire", "tripwire")
+    transition(rig.store, rig.mission.id, "needs_operator", "core")
     refused(rig, book(restart()), "not executing")
 
 

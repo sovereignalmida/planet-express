@@ -46,7 +46,7 @@ VIEW = {"execution_id": 4, "mission_id": "M-9", "grant_hash": "9f3a1c22" + "0" *
         "protected": {"count": 7, "enforced": ["service:media/gluetun"], "advisory": ["the gateway", "any data volume"]}, "limits": {"minutes": 30, "steps": 200},
         "checks": ["qbittorrent is running and stable", "http://qbittorrent:8080/ answers"], "on_verify_fail": "needs_operator", "needs_elevation": False, "phases": ["grant"]}
 TIMELINE = [{"label": "Authorised", "state": "done", "meta": "alex"}, {"label": "Checkpoint taken", "state": "done", "meta": "so it can be rolled back"},
-            {"label": "Carrying out the plan", "state": "paused", "meta": ""}, {"label": "PE checks it worked", "state": "todo", "meta": "PE's own checks, not the agent's say-so"}]
+            {"label": "Carrying out the plan", "state": "now", "meta": ""}, {"label": "PE checks it worked", "state": "todo", "meta": "PE's own checks, not the agent's say-so"}]
 
 
 def feed(cid):
@@ -65,20 +65,18 @@ def feed(cid):
                 "running": True, "composer": {"mode": "busy", "reason": "Working. Your message waits for this turn to finish, or press Stop to interrupt it."},
                 "messages": [{**ops[0], "text": "Why is the media stack slow right now?"}], "events": EVENTS[:4] + [{"seq": 7, "at": 1, "turn": 1, "type": "delta", "text": "The disk latency on the NAS mount looks high; checking whether"}], "plan": None}
     if cid in (D, E):
-        paused = cid == D
-        run = {"id": 4, "option": 0, "name": "Recreate the dependents", "fingerprint": "9F3A1C22", "finished": not paused,
-               "status": {"text": "Paused: something unexpected changed", "level": "crit"} if paused else {"text": "Needs you: PE isn't sure what state this is in", "level": "crit"},
-               "timeline": TIMELINE if paused else [{**t, "state": "done"} for t in TIMELINE[:2]] + [{**TIMELINE[2], "state": "done"}, {**TIMELINE[3], "state": "bad"}],
-               "pause": {"by_operator": False, "cause": "firewall", "changes": ["host:local/path:/etc/traefik/dynamic.yml: modified"], "more": 0, "rollback_available": True,
-                         "checkpoint": "ck-2026-10-26-14:02", "who": None} if paused else None,
-               "controls": {"pause": False, "resume": paused, "rollback": True, "takeover": True},
-               "verification": None if paused else {"headline": "1 of 3 failed: qbittorrent is running and stable", "level": "high", "by_pe": True, "checks": [
+        working = cid == D
+        run = {"id": 4, "option": 0, "name": "Recreate the dependents", "fingerprint": "9F3A1C22", "finished": False,
+               "status": {"text": "Working", "level": "ok"} if working else {"text": "Needs you: PE isn't sure what state this is in", "level": "crit"},
+               "timeline": TIMELINE if working else [{**t, "state": "done"} for t in TIMELINE[:2]] + [{**TIMELINE[2], "state": "done"}, {**TIMELINE[3], "state": "bad"}],
+               "controls": {"rollback": not working},
+               "verification": None if working else {"headline": "1 of 3 failed: qbittorrent is running and stable", "level": "high", "by_pe": True, "checks": [
                    {"state": "pass", "label": "sonarr is running and stable", "evidence": "running for 94s, no restarts"},
                    {"state": "could_not_check", "label": "the media project has all its services", "evidence": "timed out"},
                    {"state": "fail", "label": "qbittorrent is running and stable", "evidence": "restarted 3 times in the last minute"}]}}
         return {**base, "conversation": {"id": cid, "title": "Download apps lost internet after the reboot", "origin": "operator", "state": "open", "turns": 1,
-                "status": {"text": "Working" if paused else "Didn't work", "level": "crit", "group": "Needs you"},
-                "verdict": {"h": "Paused: something unexpected changed" if paused else "The run didn't pass PE's checks", "p": "PE froze the run before anything else happened." if paused else "1 of 3 checks failed."}},
+                "status": {"text": "Working on the plan", "level": "ok", "group": "Working"} if working else {"text": "Didn't work", "level": "crit", "group": "Needs you"},
+                "verdict": {"h": "Carrying out the confirmed plan", "p": "PE is supervising it and will check it worked."} if working else {"h": "The run didn't pass PE's checks", "p": "1 of 3 checks failed."}},
                 "running": False, "messages": ops + [{"seq": 2, "role": "agent", "turn": 1, "at": 2, "text": AGENT, "by": None},
                 {"seq": 3, "role": "system", "turn": 1, "at": 3, "text": "Authorised by alex: option A (Recreate the dependents). PE will take a checkpoint, carry it out under supervision, then check it worked. Grant 9f3a1c22.", "by": None}],
                 "events": EVENTS, "plan": None, "execution": run}

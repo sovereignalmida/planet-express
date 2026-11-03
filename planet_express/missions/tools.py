@@ -6,8 +6,8 @@ output. The key lives only in Core's configuration: it is never in the session e
 response. Every call (and every refusal) is recorded as a `tool` event.
 
 Gates, in order, all fail closed with the same uniform refusal to the caller (the reason goes in the event):
-    the session's mission exists and is `investigating` or `executing`, and its endpoints are not revoked (a paused
-    mission has none) -> the grant names the tool as `tool:<name>` -> the tool is a read (write tools stay gated until
+    the session's mission exists and is `investigating` or `executing`, and its endpoints are not revoked (a session
+    frozen by the tool-abuse guard has none) -> the grant names the tool as `tool:<name>` -> the tool is a read (write tools stay gated until
     slice 7) -> params parse strictly -> every scope field is inside the grant's scope and not protected -> the tool-call
     budget has room -> the secret resolves.
 Adding a tool is a reviewed capability (listed in CLAUDE.md's v4 surface).
@@ -233,7 +233,7 @@ class ToolBroker:
         self._mission_locks: dict[str, threading.Lock] = {}
         self._usage_cache: dict[str, dict[str, Any]] = {}      # mission id -> what this broker has recorded (see `_usage`)
 
-    # ── endpoint switch (the tripwire pause closes it; resume opens it) ─────
+    # ── endpoint switch (the tool-abuse guard closes it) ────────────────────
     def revoke(self, mission_id: str) -> None:
         with self._lock:
             self._revoked.add(mission_id)
@@ -267,7 +267,7 @@ class ToolBroker:
         """A READ-ONLY tool call made by Core itself for a verification `query` check (slice 8). It is not a session
         call: no session token and no use of the session's call budget (events are `tool.verify`, which the tally does not
         add up). Everything else is the SAME gate a session call passes (`_gate`): the grant must name `tool:<name>`, the
-        endpoint switch must be open (a tripwire pause closes it), the scope fields must be inside the grant and clear of
+        endpoint switch must be open (the tool-abuse guard closes it), the scope fields must be inside the grant and clear of
         protected resources. On top of that the mission must be `verifying` and the tool must be `risk == "read"`. Any
         refusal raises ToolRefused or _BadParams to the caller, who fails the check."""
         mission, tool, _grant, parsed = self._gate(mission_id, name, params, states=("verifying",), read_only=True)
@@ -295,7 +295,7 @@ class ToolBroker:
     def _gate(self, mission_id: str, name: str, params: dict, *, states: tuple[str, ...],
               read_only: bool) -> tuple[Any, Tool, Grant, BaseModel]:
         """The one gate both a session call (`_invoke`) and a Core verification read (`core_read`) pass, so the two
-        cannot drift: mission live in `states`, endpoints not closed by a tripwire pause, tool known, named in the grant,
+        cannot drift: mission live in `states`, endpoints not closed by the tool-abuse guard, tool known, named in the grant,
         write tools gated, params parse, scope inside the grant."""
         try:
             mission = self.ms.get_mission(mission_id)

@@ -295,8 +295,8 @@ class CheckpointService:
     def retire_unused(self, mission_id: str) -> str | None:
         """Forget a checkpoint no session ever ran under, so the next start takes a fresh one.
 
-        A start that fails after the checkpoint is taken but before any session row exists (the checkpoint itself, a blind
-        tripwire baseline) leaves the mission waiting in `awaiting_decision` with that checkpoint attached. Retried hours later,
+        A start that fails after the checkpoint is taken but before any session row exists (a refusal after the checkpoint, a
+        lease or lock wait) leaves the mission waiting in `awaiting_decision` with that checkpoint attached. Retried hours later,
         after the operator has edited compose files, it would describe a host that no longer exists: a rollback would overwrite
         the operator's edits and verification would compare against a stale scan. (A failure after the session row is inserted,
         such as a launcher error, is not covered: the mission has had a session.)
@@ -550,7 +550,7 @@ class CheckpointService:
             return None, None, str(exc), None
 
     def manifest(self, checkpoint_id: str) -> dict[str, Any]:
-        """The committed, immutable manifest (read-only: tripwires compare their baseline against it)."""
+        """The committed, immutable manifest (read-only: recovery and cancel compare the host against it)."""
         self._require_enabled()
         return self._manifest(checkpoint_id)
 

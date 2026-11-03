@@ -23,9 +23,9 @@ ID_RE = re.compile(r"[0-9a-f]{6,16}")
 MAX_PUSH = 1500                       # characters of one pushed message; the page has the rest
 MAX_PUSH_TOTAL = 3500                 # of one Telegram message
 MAX_CARD = 3500                       # of a confirmation or plan card (Telegram's own limit is 4096)
-ACTIONS = ("pause", "resume", "rollback", "takeover")
+ACTIONS = ("rollback",)
 HELP = ("Console: /ask <question> · /reply [id] <text> · /threads · /plan [id] · /confirm <id> <A|B|C> <plan8> · /authorise <id> <hash8> · "
-        "/withdraw <id> · /run <id> pause|resume|rollback|takeover · /close <id>")
+        "/withdraw <id> · /run <id> rollback · /close <id>")
 
 
 class ConsoleTelegram:
@@ -134,7 +134,7 @@ class ConsoleTelegram:
                  f"what it does: {_plain(view['summary'], 300)}",
                  *(f"!! {_plain(w, 200)}" for w in view["warnings"][:4]),
                  f"scope: {_clip(scope, 400)}", f"backup: {view['backup']['text']}", f"will not touch: {view['protected']['count']} protected resources",
-                 f"limits: {view['limits']['minutes']} min, {view['limits']['steps']} steps; PE pauses if anything outside the scope changes",
+                 f"limits: {view['limits']['minutes']} min, {view['limits']['steps']} steps; PE checks it worked and can roll it back",
                  "PE will check: " + _clip("; ".join(view["checks"]), 800)]
         return _clip("\n".join(lines), MAX_CARD)
 
@@ -162,7 +162,7 @@ class ConsoleTelegram:
     def _run(self, conv: Conversation, tail: str, operator: str) -> str:
         action = tail.strip().lower()
         if action not in ACTIONS:
-            raise _Usage("Usage: /run <id> pause|resume|rollback|takeover")
+            raise _Usage("Usage: /run <id> rollback")
         runs = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
         if not runs:
             raise _Usage(f"{conv.id[:8]}: no run to control.")

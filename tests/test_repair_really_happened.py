@@ -165,10 +165,10 @@ def test_a_restart_in_the_first_second_of_the_run_counts():
     assert fresh(env, float(_started_epoch(started(60)))).ok
 
 
-def test_a_tripwire_resume_does_not_move_the_start_of_the_run(stack):
+def test_a_re_entry_into_executing_from_elsewhere_does_not_move_the_start_of_the_run(stack):
     st = stack(behaviours=[{"script": [update("finished")], "result": GOOD_RESULT}])
     mid = st.propose()["mission_id"]
-    for to, frm, at in (("executing", "awaiting_decision", 100), ("executing", "paused_tripwire", 900)):
+    for to, frm, at in (("executing", "awaiting_decision", 100), ("executing", "needs_operator", 900)):
         with st.store._write() as conn:
             conn.execute("INSERT INTO mission_events (mission_id, at, kind, actor, body_json) VALUES (?, ?, 'state', 'supervisor', ?)",
                          (mid, at, json.dumps({"from": frm, "to": to})))

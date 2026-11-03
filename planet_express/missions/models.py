@@ -21,10 +21,12 @@ Tier = Literal["observe", "propose", "repair", "change", "critical"]
 Status = Literal[
     "draft", "queued", "investigating", "awaiting_decision", "executing", "verifying",
     "completed", "failed", "rolled_back", "cancelled", "blocked", "needs_operator",
-    "recovery_required", "paused_tripwire", "rollback_pending",
+    "recovery_required", "paused_tripwire", "rollback_pending",      # paused_tripwire: legacy rows only (see state.LEGACY_STATES)
 ]
 Origin = Literal["incident", "operator", "maintenance", "system", "import"]
 EventKind = Literal["state", "tool", "diff", "tripwire", "decision", "artifact", "note", "takeover"]
+# Event kinds only rows written before trust mode removed the tripwire carry: still readable, never written again.
+LEGACY_EVENT_KINDS = frozenset({"tripwire", "takeover"})
 SessionKind = Literal["local_cgroup", "local_uid", "remote_tunnel"]
 
 # Strict scalars: a float such as 1.0 is refused instead of coerced, so canonical JSON never sees one.
@@ -172,7 +174,7 @@ class Grant(_Strict):
     def effective_protection(self, protected: "Iterable[str]" = ()) -> "Protection":
         """THE one place a consumer learns what is off limits for this grant: the site's protected set, the grant's own
         protected resources (both canonical; a malformed one raises BadResource) and, separately, its enforced exclusions
-        (which carve out only the excluded resource and its descendants). Tripwire, tool broker and Docker proxy all call
+        (which carve out only the excluded resource and its descendants). The tool broker and Docker proxy both call
         this; none reads `protected.resources` or `exclusions` itself."""
         prot = tuple(dict.fromkeys(canon(r) for r in (*protected, *self.protected.resources)))
         return Protection(prot, self.enforced_exclusions())

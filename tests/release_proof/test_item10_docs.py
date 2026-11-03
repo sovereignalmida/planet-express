@@ -49,7 +49,7 @@ def test_the_example_configs_missions_block_is_valid_when_uncommented():
     doc = yaml.safe_load("\n".join(block))["missions"]
     doc["enabled"] = False                       # enabling also needs a real cgroup v2 mount; the keys are what is checked
     cfg = MissionsConfig.model_validate(doc)
-    assert cfg.runtime.argv and cfg.session_uid_min == 200000 and cfg.tripwire_interval_s == 15
+    assert cfg.runtime.argv and cfg.session_uid_min == 200000
     assert cfg.verify.exec_allowlist == [] and cfg.checkpoint.backup_sources == []
     # The documented Console block must be enable-able as written (its model has to be one the sample broker allows).
     doc["console"]["enabled"] = True

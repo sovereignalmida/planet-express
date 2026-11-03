@@ -1,11 +1,9 @@
-"""A confirmed plan's run as the conversation shows it: plain status, timeline, a pause's reason and the operator's controls, PE's own verification
+"""A confirmed plan's run as the conversation shows it: plain status, timeline, the operator's rollback, PE's own verification
 (a check that could not be run is its own result and never a pass), and each progress line posted into the thread exactly once."""
 import json
 
 import pytest
-from repair_fakes import update
 from test_console_confirm import Rig as ConfirmRig, plan_doc
-from tripwire_fakes import touch
 from verify_fakes import media_down
 
 from planet_express.console import execution as ex_mod
@@ -36,7 +34,7 @@ def rig(tmp_path):
 def test_a_run_reads_starting_then_working_then_done_and_verified_with_pes_checks_listed(rig):
     view = rig.start_run()
     first = rig.feed()["execution"]
-    assert first["status"] == {"text": "Starting", "level": "ok"} and first["controls"] == {"pause": False, "resume": False, "rollback": False, "takeover": False}
+    assert first["status"] == {"text": "Starting", "level": "ok"} and first["controls"] == {"rollback": False}
     assert [s["state"] for s in first["timeline"]] == ["done", "now", "todo", "todo"] and first["timeline"][0]["meta"] == "chris"
     assert first["fingerprint"] == view["fingerprint"] and first["name"] == "Restart media" and first["verification"] is None
     assert rig.st.drive(view["mission_id"]) == "completed"
@@ -108,105 +106,67 @@ def test_the_verification_headline_counts_could_not_check_separately():
     assert ex_mod.verification_view(mission) is None                       # a result for another grant is worth nothing
 
 
-def test_an_operator_pause_and_resume_work_from_the_conversation_and_are_recorded_in_the_thread(tmp_path):
-    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
-    try:
-        view = rig.start_run()
-        rig.st.sup.tick()
-        assert rig.st.status(view["mission_id"]) == "executing"
-        assert rig.feed()["execution"]["controls"]["pause"] is True
-        done = rig.api.execution_action(rig.conv.id, view["execution_id"], "pause", "chris")
-        assert done["done"] == "pause" and rig.st.status(view["mission_id"]) == "paused_tripwire"
-        paused = rig.feed()["execution"]
-        assert paused["status"] == {"text": "Paused by you", "level": "warn"} and paused["pause"]["by_operator"] is True and paused["pause"]["who"] == "operator:chris"
-        assert paused["controls"] == {"pause": False, "resume": True, "rollback": True, "takeover": True}
-        assert paused["pause"]["rollback_available"] is True and [s["state"] for s in paused["timeline"]][2] == "paused"
-        assert "chris paused the run." in rig.thread()
-        rig.service.tick()
-        assert any(t.startswith("The run is paused.") for t in rig.thread())
-        rig.api.execution_action(rig.conv.id, view["execution_id"], "resume", "chris")
-        assert rig.st.status(view["mission_id"]) == "executing" and rig.feed()["execution"]["status"]["text"] == "Working"
-    finally:
-        rig.close()
-
-
-def test_a_tripwire_pause_is_shown_with_what_changed_and_never_as_the_operators(tmp_path):
-    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
-    try:
-        view = rig.start_run()
-        rig.st.sup.tick()
-        touch(rig.st.rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
-        rig.st.monitor.scan_once()
-        paused = rig.feed()["execution"]
-        assert paused["status"] == {"text": "Paused: something unexpected changed", "level": "crit"}
-        assert paused["pause"]["by_operator"] is False and paused["pause"]["changes"] and paused["controls"]["resume"] is True
-        rig.service.tick()
-        assert any(t.startswith("PE paused the run:") for t in rig.thread())
-        rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
-        assert rig.st.status(view["mission_id"]) != "paused_tripwire"
-    finally:
-        rig.close()
-
-
-def test_take_over_stops_the_agent_and_says_plainly_that_pe_checks_nothing_until_asked(tmp_path):
-    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
-    try:
-        view = rig.start_run()
-        rig.st.sup.tick()
-        rig.api.execution_action(rig.conv.id, view["execution_id"], "takeover", "chris")
-        assert any("took over" in t and "PE checks nothing until you roll back" in t for t in rig.thread())
-    finally:
-        rig.close()
+def test_pause_resume_and_take_over_are_not_actions_any_more(rig):
+    """Trust mode removed them with the tripwire: the Console offers no such control and refuses the words as not an action."""
+    view = rig.start_run()
+    rig.st.sup.tick()
+    assert set(rig.feed()["execution"]["controls"]) == {"rollback"} and "pause" not in rig.feed()["execution"]
+    for gone in ("pause", "resume", "takeover"):
+        with pytest.raises(ConsoleApiError) as err:
+            rig.api.execution_action(rig.conv.id, view["execution_id"], gone, "chris")
+        assert err.value.code == "bad_request"
 
 
 def test_actions_are_refused_when_the_run_is_not_in_a_state_that_allows_them_and_for_other_conversations_runs(rig):
     view = rig.start_run()
     with pytest.raises(ConsoleApiError) as err:
-        rig.api.execution_action(rig.conv.id, view["execution_id"], "resume", "chris")             # not paused
+        rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")           # nothing to roll back yet
     assert err.value.code in ("conflict", "bad_request")
     with pytest.raises(ConsoleApiError) as err:
         rig.api.execution_action(rig.conv.id, view["execution_id"], "explode", "chris")
     assert err.value.code == "bad_request"
     other = rig.service.create("chris", "another")
     with pytest.raises(ConsoleApiError) as err:
-        rig.api.execution_action(other.id, view["execution_id"], "pause", "chris")
+        rig.api.execution_action(other.id, view["execution_id"], "rollback", "chris")
     assert err.value.code == "not_found"
     with pytest.raises(ConsoleApiError) as err:
-        rig.api.execution_action(rig.conv.id, 9999, "pause", "chris")
+        rig.api.execution_action(rig.conv.id, 9999, "rollback", "chris")
     assert err.value.code == "not_found"
 
 
 def test_the_controls_follow_the_state_table():
     from types import SimpleNamespace
-    for status, expected in (("executing", {"pause", "takeover"}), ("paused_tripwire", {"resume", "rollback", "takeover"}),
-                             ("needs_operator", {"rollback"}), ("verifying", set()), ("completed", set()), ("awaiting_decision", set())):
+    for status, expected in (("executing", set()), ("paused_tripwire", set()), ("needs_operator", {"rollback"}),
+                             ("recovery_required", {"rollback"}), ("rollback_pending", {"rollback"}),
+                             ("verifying", set()), ("completed", set()), ("awaiting_decision", set())):
         got = {k for k, v in ex_mod.controls(SimpleNamespace(status=status)).items() if v}
         assert got == expected, status
 
 
-def test_a_rollback_reports_what_the_restore_did_so_a_refusal_is_never_a_silent_success(tmp_path):
-    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
+def test_a_rollback_from_the_conversation_restores_the_checkpoint_and_reports_what_the_restore_did(tmp_path):
+    rig = Rig(tmp_path)
     try:
         view = rig.start_run()
-        rig.st.sup.tick()
-        rig.api.execution_action(rig.conv.id, view["execution_id"], "pause", "chris")
+        compose = rig.st.env.compose
+        original = compose.read_text()
+        rig.st.fresh = media_down()
+        rig.st.drive(view["mission_id"])
+        assert rig.st.status(view["mission_id"]) == "needs_operator" and rig.feed()["execution"]["controls"]["rollback"] is True
+        compose.write_text(original + "# the run changed this\n")
         out = rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
-        assert out["done"] == "rollback" and out["restore"] in ("done", "refused", "failed", "unknown") and isinstance(out["reason"], str)
+        assert out["done"] == "rollback" and out["restore"] == "done" and isinstance(out["reason"], str)
+        assert rig.st.status(view["mission_id"]) == "rolled_back" and compose.read_text() == original
+        assert "chris asked PE to roll back to the checkpoint." in rig.thread()
     finally:
         rig.close()
 
 
-def test_an_operator_pause_shows_what_changed_since_the_last_scan_so_a_resume_cannot_hide_it(tmp_path):
-    rig = Rig(tmp_path, behaviours=[{"script": [update("finished")]}, {"script": [update()] * 8}])
-    try:
-        view = rig.start_run()
-        rig.st.sup.tick()
-        touch(rig.st.rig.fs / "etc" / "hosts", "10.0.0.1 changed between scans\n")                       # no scan has run since
-        rig.api.execution_action(rig.conv.id, view["execution_id"], "pause", "chris")
-        paused = rig.feed()["execution"]["pause"]
-        assert paused["by_operator"] is True and any("/etc/hosts" in c for c in paused["changes"])
-    finally:
-        rig.close()
+def test_a_legacy_paused_row_reads_as_needing_the_operator_never_as_a_pause():
+    from types import SimpleNamespace
+    mission = SimpleNamespace(status="paused_tripwire", checkpoint_id="ck", verification_result_json=None)
+    assert ex_mod.repair_status(mission) == ("Needs you: PE isn't sure what state this is in", "crit")
+    assert ex_mod.conversation_status(mission, False)["group"] == "Needs you"
+    assert "paused" not in {s["state"] for s in ex_mod.timeline(mission, None)}
 
 
 def test_a_failed_verification_marks_the_check_step_not_the_run_step_whatever_state_it_ends_in():

@@ -1,5 +1,5 @@
 """The approval flow (v4 slice 7a): proposing a Repair mission, the approval card, approve and deny bound to the grant hash,
-standing grants, and the operator's actions on a tripwire card.
+standing grants, and the operator's rollback of a Repair mission.
 
 Everything here takes an ACTOR that the caller built from the authenticated dashboard or Telegram identity
 (`operator:<name>`); there is no parameter anywhere that lets a request name its own actor. Approval is proven only by a
@@ -139,7 +139,7 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
         "protected": {"resources": [_clip(r, 200) for r in grant.protected.resources[:64]],
                       "count": len(grant.protected.resources),
                       "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]],
-                      # a resource-id exclusion is a hard carve-out (tripwire, tools and the Docker proxy treat it as
+                      # a resource-id exclusion is a hard carve-out (tools and the Docker proxy treat it as
                       # protected); any other exclusion is a note to the agent that nothing can enforce
                       "exclusions_enforced": [_clip(x, 160) for x in grant.enforced_exclusions()[:32]],
                       "exclusions_advisory": [_clip(x, 120) for x in grant.advisory_exclusions()[:32]]},
@@ -198,11 +198,6 @@ class ApprovalFlow:
             raise FlowError("only a mission that can execute has an approval card", "conflict")
         out = build_card(self.store, mission, backup=self._backup_view(mission.grant()))
         out["warnings"] = self._host_root_warnings(mission.grant()) + out["warnings"]       # the first thing an operator reads
-        try:
-            from .tripwire.monitor import pause_card
-            out["tripwire"] = pause_card(self.ms, mission_id) if mission.status == "paused_tripwire" else None
-        except Exception:                           # noqa: BLE001
-            out["tripwire"] = None
         return out
 
     def _host_root_warnings(self, grant: Grant) -> list[dict[str, str]]:
@@ -396,44 +391,31 @@ class ApprovalFlow:
         self._audit("mission.denied", mission=mission_id, operator=actor)
         return {"mission_id": mission_id, "status": "cancelled"}
 
-    # ── tripwire card actions ───────────────────────────────────────────────
+    # ── operator actions on a Repair mission (trust mode keeps only rollback; pause, resume and take-over are gone) ──
     def _supervisor(self) -> Any:
         if self.supervisor is None:
             raise FlowError("Repair missions are not running on this host", "unavailable")
         return self.supervisor
 
-    def _tripwire_action(self, name: str, mission_id: str, actor: str, **kw: Any) -> Any:
+    def _operator_action(self, name: str, mission_id: str, actor: str, **kw: Any) -> Any:
         from .supervisor import ResumeRefused
-        from .tripwire.monitor import RollbackRefused
         actor = require_actor(actor)
         sup = self._supervisor()
         self._mission(mission_id)
         try:
             out = getattr(sup, name)(mission_id, actor, **kw)
-        except (ResumeRefused, RollbackRefused) as exc:
+        except ResumeRefused as exc:
             raise FlowError(_clip(exc, 300), "conflict") from None
         except IllegalTransition as exc:
             raise FlowError(_clip(exc, 300), "conflict") from None
         self._audit(f"mission.{name}", mission=mission_id, operator=actor)
         return out
 
-    def pause(self, actor: str, mission_id: str) -> dict[str, Any]:
-        self._tripwire_action("pause", mission_id, actor)
-        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}
-
-    def resume(self, actor: str, mission_id: str) -> dict[str, Any]:
-        self._tripwire_action("resume", mission_id, actor)
-        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}
-
     def roll_back(self, actor: str, mission_id: str, *, ack_drift: bool = False) -> dict[str, Any]:
-        report = self._tripwire_action("roll_back", mission_id, actor, ack_drift=ack_drift)
+        report = self._operator_action("roll_back", mission_id, actor, ack_drift=ack_drift)
         return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status,
                 "restore": _clip(getattr(report, "status", "unknown"), 40),
                 "reason": _clip(getattr(report, "reason", "") or "", 200)}
-
-    def take_over(self, actor: str, mission_id: str) -> dict[str, Any]:
-        self._tripwire_action("take_over", mission_id, actor)
-        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}
 
     # ── standing grants ─────────────────────────────────────────────────────
     def _window(self, raw: dict | None) -> dict | None:

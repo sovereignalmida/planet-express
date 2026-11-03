@@ -1,5 +1,5 @@
-"""A Repair mission end to end over fakes (slice 7a): approval -> checkpoint -> session -> tripwire -> post capture ->
-Core verification -> a state decided by Core, never by the agent."""
+"""A Repair mission end to end over fakes (slice 7a): approval -> checkpoint -> session -> post capture -> Core verification ->
+a state decided by Core, never by the agent. Trust mode removed the tripwire: nothing pauses a run; rollback is the operator's."""
 import json
 import sys
 from pathlib import Path
@@ -10,11 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from repair_fakes import GOOD_RESULT, build, update
-from tripwire_fakes import touch
 from verify_fakes import media_down
 
 from planet_express.missions import supervisor as sup_mod
-from planet_express.missions.supervisor import RepairNotReady, RepairRefused, ResumeRefused, UnsupportedTier
+from planet_express.missions.supervisor import RepairRefused, ResumeRefused, UnsupportedTier
 
 
 @pytest.fixture
@@ -52,10 +51,10 @@ def test_an_approved_repair_runs_to_completion_through_core_verification(stack):
     assert st.drive(mid) == "completed"
     mission = st.ms.get_mission(mid)
     assert mission.checkpoint_id and mission.outcome == "completed"
-    # the order Core promises: checkpoint, baseline, session, post capture, verification, completion
+    # the order Core promises: checkpoint, session, post capture, verification, completion
     names = [b.get("event") for k, a, b in events(st, mid)]
-    assert names.index("checkpoint.created") < names.index("tripwire.baseline") < names.index("checkpoint.post_captured") \
-        < names.index("verify.result")
+    assert names.index("checkpoint.created") < names.index("checkpoint.post_captured") < names.index("verify.result")
+    assert not [k for k, a, b in events(st, mid) if k in ("tripwire", "takeover")]         # trust mode: no tripwire, no baseline
     assert states(st, mid)[-4:] == ["awaiting_decision", "executing", "verifying", "completed"]
     assert not st.cont.exists(st.runtimes[0].context.session.session_id)      # the session's cgroup is gone
     assert st.ms.live_session(mid) is None
@@ -123,123 +122,6 @@ def test_the_actor_is_never_core_for_an_acknowledged_drift_restore(stack):
         st.sup.roll_back(mid, "worker", ack_drift=True)
 
 
-def test_a_tripwire_pause_raises_a_card_and_roll_back_restores(stack):
-    st = stack(behaviours=[{"script": [update(), update(), update("finished")]}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    assert st.status(mid) == "executing"
-    compose = st.env.compose
-    original = compose.read_text()
-    compose.write_text(original + "# the agent edited this\n")
-    touch(st.rig.fs / "etc" / "hosts", "10.0.0.1 evil\n")          # a protected change
-    st.monitor.scan_once()
-    assert st.status(mid) == "paused_tripwire"
-    card = st.flow.card(mid)
-    assert card["tripwire"]["cause"] in ("protected", "out_of_scope") and card["tripwire"]["rollback"]["available"]
-    session = st.ms.get_mission(mid) and st.runtimes[0].context.session
-    assert st.cont._groups[session.session_id].frozen
-    st.sup.tick()                                                  # a paused mission's session is left alone, not killed
-    assert st.status(mid) == "paused_tripwire" and st.cont.exists(session.session_id)
-    out = st.flow.roll_back("operator:alice", mid)
-    assert out["status"] == "rolled_back" and compose.read_text() == original
-    st.sup.tick()
-    assert st.ms.live_session(mid) is None
-
-
-def test_resume_reopens_the_broker_and_the_proxy_after_reauthorising_and_then_thaws(stack):
-    from planet_express.missions.tools import ToolBroker, ToolSite, default_registry
-    st = stack(behaviours=[{"script": [update()] * 6}], with_proxy=True)
-    broker = ToolBroker(default_registry(), missions=st.ms, secrets=lambda r: "k", sites={"x": ToolSite()},
-                        stacks_root=str(st.env.stacks))
-    st.sup.tool_broker = broker
-    original = st.monitor.revoke_endpoints
-    st.monitor.revoke_endpoints = lambda mid: (broker.revoke(mid), original(mid))
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    grant_hash = st.ms.get_mission(mid).grant_hash
-    touch(st.rig.fs / "etc" / "hosts", "10.0.0.1 changed\n")
-    st.monitor.scan_once()
-    assert st.status(mid) == "paused_tripwire" and mid in broker._revoked and not st.proxy.usable(mid, grant_hash)
-    session = st.runtimes[0].context.session
-    st.flow.resume("operator:alice", mid)
-    assert st.status(mid) == "executing" and mid not in broker._revoked
-    assert st.proxy.usable(mid, grant_hash)                                  # a resumed Repair worker can still use its proxy
-    assert not st.cont._groups[session.session_id].frozen                    # thawed last
-    assert noted(st, mid, "mission.resumed")
-    st.monitor.scan_once()
-    assert st.status(mid) == "executing"                                     # the reviewed state is the new baseline
-
-
-def test_a_resume_whose_proxy_cannot_be_reopened_stays_paused_frozen_and_closed(stack):
-    st = stack(behaviours=[{"script": [update()] * 4}], with_proxy=True)
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    session = st.runtimes[0].context.session
-
-    def boom(mission_id, grant_hash):
-        raise RuntimeError("proxy down")
-    st.proxy.resume = boom
-    with pytest.raises(ResumeRefused):
-        st.sup.resume(mid, "operator:alice")
-    assert st.status(mid) == "paused_tripwire" and st.cont._groups[session.session_id].frozen
-
-
-def test_resume_is_refused_when_the_approval_no_longer_covers_the_grant(stack):
-    import sqlite3
-    st = stack(behaviours=[{"script": [update()] * 4}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    with sqlite3.connect(st.store.path) as conn:
-        conn.execute("DELETE FROM mission_approvals WHERE mission_id=?", (mid,))
-    with pytest.raises(ResumeRefused, match="approval"):
-        st.sup.resume(mid, "operator:alice")
-    assert st.status(mid) == "paused_tripwire"
-
-
-def test_a_resume_needs_a_supervised_session_so_a_core_restart_refuses_it(stack):
-    st = stack(behaviours=[{"script": [update()] * 4}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    st.sup._runs.clear()                                                    # as after a restart
-    with pytest.raises(ResumeRefused, match="restart"):
-        st.sup.resume(mid, "operator:alice")
-
-
-def test_take_over_stops_the_worker_and_hands_the_host_to_the_operator(stack):
-    st = stack(behaviours=[{"script": [update()] * 4}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    session = st.runtimes[0].context.session
-    st.flow.take_over("operator:alice", mid)
-    assert st.status(mid) == "needs_operator" and not st.cont.exists(session.session_id)
-    assert any(k == "takeover" and a == "operator:alice" for k, a, b in events(st, mid))
-
-
-def test_cancel_works_on_a_paused_mission(stack):
-    st = stack(behaviours=[{"script": [update()] * 4}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    st.sup.cancel(mid, "operator:alice")
-    assert st.status(mid) == "cancelled" and st.ms.live_session(mid) is None
-
-
 def test_cancelling_a_session_that_already_changed_the_host_holds_the_mission_for_the_operator(stack):
     st = stack(behaviours=[{"script": [update()] * 6}])
     mid = st.propose()["mission_id"]
@@ -251,7 +133,7 @@ def test_cancelling_a_session_that_already_changed_the_host_holds_the_mission_fo
     mission = st.ms.get_mission(mid)
     assert mission.status == "needs_operator" and mission.outcome_flags == "partially_applied"      # never straight to cancelled
     held = noted(st, mid, "cancel.held")
-    assert held and held[0]["offers"] == ["rollback", "take_over"]
+    assert held and held[0]["offers"] == ["rollback"]
     assert mission.cancel_requested_by == "operator:alice"                                            # the cancel is on the record
     assert st.ms.live_session(mid) is None
     st.sup.tick()
@@ -301,65 +183,7 @@ def test_a_requested_cancel_of_a_mission_whose_host_matches_the_checkpoint_close
     assert st.status(mid) == "cancelled"
 
 
-def test_wall_clock_does_not_run_while_a_mission_is_paused(stack):
-    st = stack(behaviours=[{"script": [update()] * 10}])
-    mid = st.propose(budgets={"wall_s": 100})["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    st.clock.t += 30
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    for _ in range(40):                                                     # paused for 800 s, the supervisor ticking on
-        st.clock.t += 20
-        st.sup.tick()
-    assert st.status(mid) == "paused_tripwire"
-    st.flow.resume("operator:alice", mid)
-    st.sup.tick()
-    assert st.status(mid) == "executing"                                    # the pause was not session time
-
-
 # ── the start gates ─────────────────────────────────────────────────────────────────────────────────
-
-def test_a_repair_launch_is_refused_while_the_monitor_is_not_running(stack):
-    st = stack(start_monitor=False)
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    with pytest.raises(RepairNotReady, match="monitor"):
-        st.sup.start(mid)
-    st.sup.tick()
-    assert st.status(mid) == "awaiting_decision" and st.runtimes == []
-    waiting = [b for k, a, b in events(st, mid) if "start_waiting" in b]
-    assert len(waiting) == 1 and "monitor" in waiting[0]["start_waiting"]       # noted once, not every tick
-    st.monitor.start()
-    assert st.drive(mid) == "completed"
-
-
-def test_a_dead_monitor_thread_is_restarted_by_the_runner_loop_and_pauses_executing_missions(stack):
-    from planet_express.missions.runner import MissionRunner
-    st = stack(behaviours=[{"script": [update()] * 6}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    assert st.status(mid) == "executing" and st.monitor.running
-    st.monitor.stop()
-    st.monitor._thread.join(5)
-    st.monitor._stop.clear()                                               # a thread that died without being stopped
-    assert not st.monitor.running
-    runner = MissionRunner(st.sup, None, 0.05, tripwire=st.monitor)
-    runner._thread = None
-    import threading
-    t = threading.Thread(target=runner._loop, daemon=True)
-    t.start()
-    for _ in range(100):
-        if st.monitor.running:
-            break
-        threading.Event().wait(0.05)
-    runner._stop.set()
-    t.join(5)
-    assert st.monitor.running
-    assert st.status(mid) == "paused_tripwire"                              # nothing was watching: everything executing paused
-
 
 def test_the_side_door_gate_still_refuses_and_the_mission_waits(stack):
     st = stack(gate=False)
@@ -376,7 +200,7 @@ def test_without_the_controls_wired_a_repair_start_is_still_unsupported(stack):
     st = stack()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
-    st.sup.tripwire = None
+    st.sup.verifier = None
     with pytest.raises(UnsupportedTier):
         st.sup.start(mid)
 
@@ -393,15 +217,6 @@ def test_no_baseline_or_backup_means_no_checkpoint_and_no_session(stack):
     for _ in range(sup_mod.START_ATTEMPTS):
         st.sup.tick()
     assert st.status(mid) == "needs_operator" and st.runtimes == []
-
-
-def test_a_baseline_the_tripwire_cannot_read_stops_the_start(stack):
-    st = stack()
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.monitor.scanner.scan = lambda: type("R", (), {"ok": False, "errors": {"ports": "x"}, "snapshot": {}})()
-    st.sup.tick()
-    assert st.status(mid) == "awaiting_decision" and st.runtimes == []
 
 
 def test_an_approval_for_one_mission_starts_only_that_mission(stack):
@@ -460,7 +275,7 @@ def test_a_restart_at_each_phase_classifies_from_the_host_and_never_replays(stac
     assert st.status(mid) == "executing"
     survivor = st.sup.__class__(st.store, st.cont, lambda m: st.runtimes.append("restarted") or None, st.clock, enabled=True,
                                 artifact_dir=st.sup.artifact_dir, workspace_dir=st.sup.workspace_dir,
-                                repair_gate=st.sup.repair_gate, verifier=st.verifier, checkpoint=st.env.svc, tripwire=st.monitor)
+                                repair_gate=st.sup.repair_gate, verifier=st.verifier, checkpoint=st.env.svc)
     survivor.recover()
     for _ in range(3):
         survivor.poll_all()
@@ -477,22 +292,10 @@ def test_a_restart_during_verification_verifies_again_and_completes_only_through
     assert st.status(mid) == "verifying" and st.ms.live_session(mid) is None
     fresh = st.sup.__class__(st.store, st.cont, None, st.clock, enabled=True, artifact_dir=st.sup.artifact_dir,
                              workspace_dir=st.sup.workspace_dir, repair_gate=st.sup.repair_gate, verifier=st.verifier,
-                             checkpoint=st.env.svc, tripwire=st.monitor)
+                             checkpoint=st.env.svc)
     fresh.recover()
     fresh._verifying[mid].result(10)
     assert st.status(mid) == "completed"
-
-
-def test_a_paused_mission_is_left_to_the_monitor_by_the_supervisors_recovery(stack):
-    st = stack(behaviours=[{"script": [update()] * 4}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    touch(st.rig.fs / "etc" / "hosts", "x\n")
-    st.monitor.scan_once()
-    st.sup._runs.clear()
-    assert st.sup.recover() == []
-    assert st.status(mid) == "paused_tripwire"
 
 
 def test_the_session_end_always_captures_post_after_it_is_provably_dead(stack):
@@ -508,9 +311,10 @@ def test_the_session_end_always_captures_post_after_it_is_provably_dead(stack):
 
 
 def test_missions_disabled_constructs_and_starts_nothing(tmp_path):
-    from planet_express.missions.runner import build_mission_runner
-    from config_schema import MissionsConfig
     from missions_helpers import make_store
+
+    from config_schema import MissionsConfig
+    from planet_express.missions.runner import build_mission_runner
     store, _ = make_store(tmp_path)
     assert build_mission_runner(store, MissionsConfig(enabled=False, runtime={"argv": ["/usr/bin/agent"]}),
                                 repair_wiring=object(), stacks_root=str(tmp_path)) is None
@@ -556,7 +360,7 @@ def test_a_restore_that_raises_hands_the_mission_to_the_operator_instead_of_leav
     st.env.svc.restore = purged
     st.flow.roll_back("operator:alice", mid)
     assert st.status(mid) == "needs_operator"                                 # defined state, not rollback_pending forever
-    incomplete = [b for k, a, b in events(st, mid) if b.get("event") == "tripwire.rollback_incomplete"]
+    incomplete = [b for k, a, b in events(st, mid) if b.get("event") == "mission.rollback_incomplete"]
     assert incomplete and "CheckpointNotFound" in incomplete[-1]["reason"]
     assert st.ms.live_session(mid) is None
 
@@ -576,22 +380,25 @@ def test_a_post_change_capture_failure_refuses_without_changing_the_mission(stac
     assert st.status(mid) == "rollback_pending"                               # unchanged: the operator can try again
 
 
+def fail_launch(st):
+    """The start gets as far as its checkpoint, then the launch fails: no session (until `del st.sup._launch`)."""
+    def boom(mission, *a, **k):
+        raise RuntimeError("the launch failed")
+    st.sup._launch = boom
+
+
 def test_a_retried_start_takes_a_fresh_checkpoint_when_the_first_start_launched_no_session(stack):
     import hashlib
     st = stack()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
-    real_begin = st.monitor.begin
-
-    def blind(mission_id, **kw):
-        raise RuntimeError("the baseline could not be captured")
-    st.monitor.begin = blind
+    fail_launch(st)
     st.sup.tick()                                                    # a checkpoint is taken, then the start fails: no session
     first = st.ms.get_mission(mid).checkpoint_id
     assert first and st.ms.live_session(mid) is None and not st.runtimes
     edited = st.env.compose.read_text() + "# the operator edited this while the mission waited\n"
     st.env.compose.write_text(edited)
-    st.monitor.begin = real_begin
+    del st.sup._launch
     st.sup.tick()
     second = st.ms.get_mission(mid).checkpoint_id
     assert second and second != first                                # the stale picture was retired, not reused
@@ -622,7 +429,7 @@ def test_retire_unused_only_acts_on_a_mission_still_waiting_for_its_decision(sta
     st = stack(behaviours=[{"script": [update(), update("finished")]}])
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
-    st.monitor.begin = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("blind"))
+    fail_launch(st)
     st.sup.tick()                                                    # checkpoint taken, start failed, no session
     first = st.ms.get_mission(mid).checkpoint_id
     assert first and st.status(mid) == "awaiting_decision"
@@ -635,11 +442,10 @@ def test_a_stale_checkpoint_that_cannot_be_retired_defers_the_start_instead_of_b
     st = stack(behaviours=[{"script": [update(), update("finished")]}])
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
-    real_begin = st.monitor.begin
-    st.monitor.begin = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("blind"))
+    fail_launch(st)
     st.sup.tick()
     first = st.ms.get_mission(mid).checkpoint_id
-    st.monitor.begin = real_begin
+    del st.sup._launch
     st.env.compose.write_text(st.env.compose.read_text() + "# edited while the mission waited\n")
     real_remove = st.env.svc.store.remove
 
@@ -655,70 +461,155 @@ def test_a_stale_checkpoint_that_cannot_be_retired_defers_the_start_instead_of_b
     assert st.ms.get_mission(mid).checkpoint_id not in (None, first) and st.ms.live_session(mid) is not None
 
 
-# ── the operator's Pause (the Console's interject) ───────────────────────────────────────────────
+# ── trust mode: rollback built on the checkpoint service, no pause, resume or take-over ─────────────────
 
-def test_an_operator_pause_freezes_the_run_exactly_as_a_tripwire_pause_does_and_resume_reopens_it(stack):
-    st = stack(behaviours=[{"script": [update()] * 8}], with_proxy=True)
+def crashed_with_changes(st, mid):
+    """A Repair run whose session crashed after editing a checkpointed file: recovery_required (or needs_operator), no session."""
+    st.sup.tick()
+    assert st.status(mid) == "executing"
+    original = st.env.compose.read_text()
+    st.env.compose.write_text(original + "# half applied\n")
+    st.cont.crash(st.runtimes[0].context.session.session_id)
+    st.sup.tick()
+    return original
+
+
+def test_a_repair_starts_with_no_tripwire_wired(stack):
+    st = stack(behaviours=[{"script": [update()] * 4}])
+    assert not hasattr(st.sup, "tripwire") and st.sup.mutating_ready              # checkpoint and verifier are the whole set
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
     st.sup.tick()
-    assert st.status(mid) == "executing"
+    assert st.status(mid) == "executing" and st.ms.get_mission(mid).checkpoint_id
+    assert not [b for k, a, b in events(st, mid) if "baseline_refused" in b or str(b.get("event", "")).startswith("tripwire.")]
+
+
+def test_nothing_can_enter_the_retired_paused_state():
+    from planet_express.missions.state import TRANSITIONS, is_legal
+    assert not any("paused_tripwire" in edges for edges in TRANSITIONS.values())
+    assert not is_legal("paused_tripwire", "executing")
+    assert is_legal("paused_tripwire", "recovery_required") and is_legal("paused_tripwire", "cancelled")
+
+
+def test_a_tripwire_or_takeover_event_can_no_longer_be_written_but_an_old_one_still_reads(stack):
+    from planet_express.missions.events import insert_event
+    st = stack()
+    mid = st.propose()["mission_id"]
+    with st.store._write() as conn:
+        for kind in ("tripwire", "takeover"):
+            with pytest.raises(ValueError, match="unknown event kind"):
+                insert_event(conn, mid, kind, "core", {}, 1)
+        conn.execute("INSERT INTO mission_events (mission_id, at, kind, actor, body_json, redaction_applied) "
+                     "VALUES (?, 1, 'tripwire', 'tripwire', '{\"event\": \"tripwire.paused\"}', 1)", (mid,))
+    assert [e.kind for e in st.ms.events(mid)][-1] == "tripwire"                  # a pre-trust-mode row still loads
+
+
+def test_the_pause_resume_and_take_over_controls_are_gone(stack):
+    st = stack()
+    for name in ("pause", "resume", "take_over"):
+        assert not hasattr(st.sup, name) and not hasattr(st.flow, name)
+
+
+def test_rollback_from_recovery_required_restores_the_checkpoint_and_ends_rolled_back(stack):
+    st = stack(behaviours=[{"script": [update()] * 4}], grant_over=None)
+    mid = st.propose(on_verify_fail="needs_operator")["mission_id"]
+    st.approve_all(mid)
+    original = crashed_with_changes(st, mid)
+    assert st.status(mid) in ("recovery_required", "needs_operator") and st.ms.live_session(mid) is None
+    with st.store._write() as conn:                                     # pin the state under test, whichever the classifier chose
+        conn.execute("UPDATE missions SET status='recovery_required' WHERE id=?", (mid,))
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["status"] == "rolled_back" and out["restore"] == "done" and st.env.compose.read_text() == original
+    assert states(st, mid)[-2:] == ["rollback_pending", "rolled_back"]
+    assert all(a == "operator:alice" for k, a, b in events(st, mid) if b.get("event", "").startswith("checkpoint.restore"))
+
+
+def test_rollback_from_needs_operator_restores_the_checkpoint_and_ends_rolled_back(stack):
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    original = st.env.compose.read_text()
+    st.env.compose.write_text(original + "# half applied\n")
+    st.sup.cancel(mid, "operator:alice")                                  # held for the operator: needs_operator
+    assert st.status(mid) == "needs_operator"
+    out = st.sup.roll_back(mid, "operator:alice")
+    assert out.ok and st.status(mid) == "rolled_back" and st.env.compose.read_text() == original
+    assert st.ms.live_session(mid) is None
+
+
+def test_rollback_kills_a_leftover_session_first_and_refuses_while_one_is_supervised(stack):
+    st = stack(behaviours=[{"script": [update()] * 8}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    with st.store._write() as conn:                                       # as if something moved it on while the session ran
+        conn.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (mid,))
+    with pytest.raises(ResumeRefused, match="cancel it first"):
+        st.sup.roll_back(mid, "operator:alice")                           # a supervised session is still running
     session = st.runtimes[0].context.session
-    grant_hash = st.ms.get_mission(mid).grant_hash
-    assert st.flow.pause("operator:alice", mid)["status"] == "paused_tripwire"
-    assert st.cont._groups[session.session_id].frozen and not st.proxy.usable(mid, grant_hash)         # frozen, endpoints closed
-    pause = [b for k, a, b in events(st, mid) if b.get("event") == "tripwire.paused"][-1]
-    assert pause["cause"] == "operator" and pause["errors"] == {"by": "operator:alice"} and pause["changes"] == []
-    assert pause["rollback"]["available"] is True                                                    # the same card: roll back is offered
-    st.flow.resume("operator:alice", mid)
-    assert st.status(mid) == "executing" and st.proxy.usable(mid, grant_hash) and not st.cont._groups[session.session_id].frozen
+    st.sup._runs.clear()                                                  # as after a Core restart: the cgroup is left behind
+    assert st.cont.exists(session.session_id) and not st.cont.is_empty(session)
+    st.sup.roll_back(mid, "operator:alice")
+    assert st.cont.is_empty(session) and st.status(mid) == "rolled_back"
 
 
-def test_an_operator_pause_can_be_followed_by_a_rollback(stack):
+def test_a_failed_restore_hands_the_mission_to_the_operator_with_a_summary(stack):
+    from planet_express.missions.checkpoint import RestoreReport
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+    st.env.svc.restore = lambda cid, **kw: RestoreReport(status="failed", written=[str(st.env.compose)], reason="disk full")
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["restore"] == "failed" and st.status(mid) == "needs_operator"     # handed over, not left in rollback_pending
+    incomplete = noted(st, mid, "mission.rollback_incomplete")
+    assert incomplete and incomplete[-1]["reason"] == "disk full" and incomplete[-1]["summary"]["partial"] is True
+    assert incomplete[-1]["summary"]["written"] == [str(st.env.compose)]
+
+
+def test_a_restore_refused_for_drift_waits_for_the_operators_explicit_overwrite(stack):
+    from planet_express.missions.checkpoint import RestoreReport
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+    real = st.env.svc.restore
+    st.env.svc.restore = lambda cid, **kw: (real(cid, **kw) if kw.get("ack_drift")
+                                            else RestoreReport(status="refused", drifted=[{"path": "x"}], reason="files changed"))
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["restore"] == "refused" and st.status(mid) == "rollback_pending"   # nothing written: the operator decides
+    assert not noted(st, mid, "mission.rollback_incomplete")
+    assert st.flow.roll_back("operator:alice", mid, ack_drift=True)["status"] == "rolled_back"
+
+
+def test_a_paused_tripwire_row_from_before_trust_mode_is_recovered_as_recovery_required(stack):
     st = stack(behaviours=[{"script": [update()] * 8}])
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
     st.sup.tick()
-    st.flow.pause("operator:alice", mid)
-    assert st.flow.roll_back("operator:alice", mid)["status"] in ("rolled_back", "needs_operator")
-    assert st.status(mid) != "paused_tripwire"
+    session = st.runtimes[0].context.session
+    st.cont.freeze(session)                                               # the old monitor froze it
+    with st.store._write() as conn:
+        conn.execute("UPDATE missions SET status='paused_tripwire' WHERE id=?", (mid,))
+    st.sup._runs.clear()                                                  # a Core restart onto the new code
+    st.sup.recover()
+    assert st.status(mid) == "recovery_required"
+    assert noted(st, mid, "mission.legacy_pause_recovered")
+    assert st.cont.is_empty(session) and st.ms.live_session(mid) is None   # its frozen session is killed and proven gone
+    original = st.env.compose.read_text()
+    st.env.compose.write_text(original + "# what the paused run had done\n")
+    assert st.flow.roll_back("operator:alice", mid)["status"] == "rolled_back" and st.env.compose.read_text() == original
 
 
-def test_only_an_operator_may_pause_and_only_an_executing_mission_with_a_supervised_session(stack):
-    from planet_express.missions.approval_flow import FlowError
-    st = stack(behaviours=[{"script": [update()] * 8}])
+def test_a_paused_tripwire_row_does_not_break_the_list_views(stack):
+    from planet_express.application.mission_service import MissionService
+    st = stack()
     mid = st.propose()["mission_id"]
-    with pytest.raises(FlowError):
-        st.flow.pause("core", mid)                                                  # not an operator
-    with pytest.raises(FlowError, match="executing|awaiting"):
-        st.flow.pause("operator:alice", mid)                                        # not running yet
-    st.approve_all(mid)
-    st.sup.tick()
-    st.sup._runs.clear()                                                            # a Core restart: no supervised session
-    with pytest.raises(FlowError, match="no supervised session"):
-        st.flow.pause("operator:alice", mid)
-    assert st.status(mid) == "executing"
-
-
-def test_a_pause_is_refused_while_the_tripwire_monitor_is_not_running(stack):
-    from planet_express.missions.approval_flow import FlowError
-    st = stack(behaviours=[{"script": [update()] * 8}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    st.monitor.stop()
-    with pytest.raises(FlowError, match="monitor is not running"):
-        st.flow.pause("operator:alice", mid)
-    assert st.status(mid) == "executing"
-
-
-def test_pausing_twice_or_after_the_run_finished_is_refused_in_words(stack):
-    from planet_express.missions.approval_flow import FlowError
-    st = stack(behaviours=[{"script": [update()] * 8}])
-    mid = st.propose()["mission_id"]
-    st.approve_all(mid)
-    st.sup.tick()
-    st.flow.pause("operator:alice", mid)
-    with pytest.raises(FlowError, match="executing"):
-        st.flow.pause("operator:alice", mid)
-    assert st.monitor.pause_for_operator(mid, "operator:alice") is False             # the monitor itself only pauses an executing mission
+    with st.store._write() as conn:
+        conn.execute("UPDATE missions SET status='paused_tripwire' WHERE id=?", (mid,))
+    svc = MissionService(st.store, enabled=lambda: True)
+    assert any(m["id"] == mid for m in svc.list_missions()["missions"])
+    assert svc.get_mission(mid)["status"] == "paused_tripwire"

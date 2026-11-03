@@ -257,7 +257,7 @@ class ConsoleApi:
         return {"scrapped": True}
 
     def execution_action(self, conversation_id: str, execution_id: int, action: str, operator: str, *, ack_drift: bool = False) -> dict:
-        """The operator's controls on a running plan: pause, resume, roll back, take over. Each goes through the same approval-flow action the Work log
+        """The operator's control on a run that needs them: roll back (trust mode removed pause, resume and take-over). It goes through the same approval-flow action the Work log
         uses (as the signed-in operator); the supervisor decides whether it can be done now. Nothing here is available to the agent."""
         conv = self._conversation(conversation_id)
         ex = self.console.execution(execution_id)
@@ -267,27 +267,15 @@ class ConsoleApi:
             raise ConsoleApiError("that is not an action", "bad_request")
         flow = self._require_flow()
         actor = f"operator:{operator}"
-        restore: dict = {}
         try:
-            if action == "pause":
-                flow.pause(actor, ex["mission_id"])
-            elif action == "resume":
-                flow.resume(actor, ex["mission_id"])
-            elif action == "rollback":
-                restore = flow.roll_back(actor, ex["mission_id"], ack_drift=ack_drift)
-            else:
-                flow.take_over(actor, ex["mission_id"])
+            restore = flow.roll_back(actor, ex["mission_id"], ack_drift=ack_drift)      # the one action
         except FlowError as exc:
             raise self._flow_error(exc) from None
-        said = {"pause": "paused the run", "resume": "resumed the run", "rollback": "asked PE to roll back to the checkpoint",
-                "takeover": "took over: the agent was stopped and the host is theirs. PE checks nothing until you roll back or start a new plan."}[action]
-        self.console.add_message(conv.id, "system", f"{operator} {said}.", actor=actor)
-        out = {"done": action, "status": self._execution_view(conv)["status"]["text"]}
-        if action == "rollback":
-            # A restore PE refused (typically because files changed after the checkpoint) is reported, so the page can offer the explicit
-            # "roll back anyway" the operator must choose; PE never assumes it.
-            out.update(restore=str(restore.get("restore", "unknown"))[:20], reason=str(restore.get("reason", ""))[:200])
-        return out
+        self.console.add_message(conv.id, "system", f"{operator} asked PE to roll back to the checkpoint.", actor=actor)
+        # A restore PE refused (typically because files changed after the checkpoint) is reported, so the page can offer the explicit
+        # "roll back anyway" the operator must choose; PE never assumes it.
+        return {"done": action, "status": self._execution_view(conv)["status"]["text"],
+                "restore": str(restore.get("restore", "unknown"))[:20], "reason": str(restore.get("reason", ""))[:200]}
 
     # ── confirming a plan option: propose the repair, show the approval card, authorise bound to its hash ──────────
     def confirm_prepare(self, conversation_id: str, plan_id: int, option: int, operator: str, no_backup: bool = False) -> dict:
@@ -437,18 +425,14 @@ class ConsoleApi:
         return True
 
     def _execution_view(self, conv: Conversation) -> dict | None:
-        """The latest confirmed plan's run, live from its Repair mission: plain status, a short timeline, what a pause was about, PE's verification
+        """The latest confirmed plan's run, live from its Repair mission: plain status, a short timeline, PE's verification
         and which controls apply now. Computed from state at every feed, so it is never stale and never the agent's account."""
         shown = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
         if not shown:
             return None
         ex = shown[-1]
         mission = self.ms.get_mission(ex["mission_id"])
-        pause = None
-        if mission.status == "paused_tripwire":
-            from planet_express.missions.tripwire.monitor import pause_card
-            pause = execution_mod.pause_view(pause_card(self.ms, mission.id))
-        text, level = execution_mod.repair_status(mission, pause["who"] if pause and pause["by_operator"] else None)
+        text, level = execution_mod.repair_status(mission)
         waiting = execution_mod.start_waiting(self.ms, mission)
         if waiting:
             text, level = "Waiting to start", "warn"
@@ -460,7 +444,7 @@ class ConsoleApi:
             except (ValueError, KeyError, IndexError):
                 name = ""
         return {"id": ex["id"], "option": ex["option_index"], "name": name, "fingerprint": ex["grant_hash"][:8], "status": {"text": text, "level": level},
-                "timeline": execution_mod.timeline(mission, ex["authorised_by"], waiting), "pause": pause,
+                "timeline": execution_mod.timeline(mission, ex["authorised_by"], waiting),
                 "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission),
                 "finished": mission.status in execution_mod.TERMINALISH}
 

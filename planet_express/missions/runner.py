@@ -55,12 +55,11 @@ POLL_INTERVAL_S = 2.0
 
 class MissionRunner:
     def __init__(self, supervisor: Supervisor, worker_server=None, interval_s: float = POLL_INTERVAL_S,
-                 prepare: Callable[[], object] | None = None, tripwire=None, startup: list[Callable[[], object]] | None = None):
+                 prepare: Callable[[], object] | None = None, startup: list[Callable[[], object]] | None = None):
         self.supervisor = supervisor
         self.startup = list(startup or [])      # e.g. the checkpoint store's startup scan; each is isolated and logged
         self.controls = None                    # `assembly.RepairControls` when the daemon wired the Repair tier
         self.console = None                     # `console.service.ConsoleService` when missions.console is enabled
-        self.tripwire = tripwire          # `tripwire.TripwireMonitor` or None; it has its own thread and failure isolation
         self.prepare = prepare            # host preparation (Core's half of the cgroup layout), before anything runs
         self.worker_server = worker_server
         self.interval_s = interval_s
@@ -87,12 +86,6 @@ class MissionRunner:
             recovered = self.supervisor.recover()
             if recovered:
                 log.warning("Reconciled %d in-flight mission(s) at startup", len(recovered))
-            if self.tripwire is not None:
-                # Re-freeze every paused session and finish a pause that was begun but not recorded, then watch.
-                acted = self.tripwire.recover()
-                if acted:
-                    log.warning("Tripwire: %d paused mission(s) re-frozen at startup", len(acted))
-                self.tripwire.start()
         except Exception:
             self._stop_server()
             raise
@@ -105,11 +98,6 @@ class MissionRunner:
                 self.supervisor.tick()
             except Exception:
                 log.exception("mission runner tick failed")
-            if self.tripwire is not None:
-                try:
-                    self.tripwire.ensure_running()        # a dead monitor thread pauses everything and restarts
-                except Exception:
-                    log.exception("tripwire monitor check failed")
             self._stop.wait(self.interval_s)
 
     def _stop_server(self) -> None:
@@ -120,12 +108,9 @@ class MissionRunner:
                 log.exception("worker socket did not stop cleanly")
 
     def stop(self) -> None:
-        """Order matters: stop accepting starts, kill the sessions and prove them gone, and only THEN stop the tripwire. A
-        session that is still running while nothing watches the host is exactly the window the tripwire exists to close."""
+        """Order matters: stop accepting starts, then kill the sessions and prove them gone, and only then close the brokers."""
         self._stop.set()                                  # no new starts: the loop is the only thing that starts sessions
         getattr(self.supervisor, "begin_shutdown", lambda: None)()
-        if self.tripwire is not None:
-            getattr(self.tripwire, "quiesce", lambda: None)()      # no pause/freeze of a session that is being killed
         if self._thread is not None:
             self._thread.join(timeout=30)
         try:
@@ -142,14 +127,6 @@ class MissionRunner:
                     broker_shutdown()
                 except Exception:                                # noqa: BLE001
                     log.exception("the model broker did not shut down cleanly")
-            if self.tripwire is not None:
-                if getattr(self.supervisor, "tracked_sessions", 0):
-                    # A session could not be killed or proven empty: it is still on the host. Keep watching (and pausing)
-                    # rather than stop the one thing that would notice what it does.
-                    log.error("%d session(s) not proven gone at shutdown: the tripwire stays on", self.supervisor.tracked_sessions)
-                    getattr(self.tripwire, "unquiesce", lambda: None)()
-                else:
-                    self.tripwire.stop()
 
 
 def _cgroup_mount(root: str) -> str:
@@ -303,7 +280,7 @@ def build_mission_runner(
     store: Store, cfg, *, containment: SessionContainment | None = None,
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
-    stacks_root: str | None = None, tool_broker=None, tripwire=None, repair_gate=None, env_policy=None, verifier=None,
+    stacks_root: str | None = None, tool_broker=None, repair_gate=None, env_policy=None, verifier=None,
     repair_wiring=None, docker_proxy=None, checkpoint=None, discovery=None, model_broker=None, host_lock=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
@@ -332,11 +309,11 @@ def build_mission_runner(
     found = DiscoveredInputs()
     if stacks_root is not None and (tool_broker is None or env_policy is None or repair_wiring is not None):
         # Slice 6 controls that need only the store and the config: the brokered tools (keys stay in Core's environment)
-        # and the grant-to-environment policy. The tripwire monitor and the side-door gate need the checkpoint service
-        # and the host's sudoers generator output, which the daemon supplies with slice 7 (`tripwire=`, `repair_gate=`).
+        # and the grant-to-environment policy. The side-door gate needs the checkpoint service and the host's sudoers
+        # generator output, which the daemon supplies with slice 7 (`repair_gate=`).
         from planet_express.missions.grants import make_env_policy
         from planet_express.missions.tools import broker_from_config, default_registry
-        from planet_express.missions.tripwire.build import (
+        from planet_express.missions.protected import (
             build_protected_set,
             protected_override_recorder,
         )
@@ -358,8 +335,7 @@ def build_mission_runner(
     authenticator = WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)) if real else None
     if docker_proxy is None and real and stacks_root is not None:
         # Built whether or not Repair is available: Observe and Propose sessions read the Docker host through it (read-only), and a host whose
-        # protected-set discovery is incomplete still investigates. Repair sessions only start where the repair wiring exists. Built BEFORE the controls: the tripwire's pause closes the proxy through the callback `build_repair_controls` captures,
-        # so the service has to exist when that is assembled (a pause that never reached the proxy would leave it open).
+        # protected-set discovery is incomplete still investigates. Repair sessions only start where the repair wiring exists.
         from planet_express.missions.dockerproxy.service import DockerProxyService
         docker_proxy = DockerProxyService(
             store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
@@ -367,7 +343,7 @@ def build_mission_runner(
             protected_gids=_protected_gids(), label_allow=cfg.docker_label_allow, host_lock=host_lock)
     controls = None
     if repair_wiring is not None and protected is not None and found.failures:
-        # G4-F1: a required protected domain could not be established, so the tripwire and the proxy would be partly blind.
+        # G4-F1: a required protected domain could not be established, so the proxy would be partly blind.
         # Observe and Propose still run; Repair needs the whole safety net.
         reasons = "; ".join(f"{d}: {w}" for d, w in sorted(found.failures.items()))
         log.warning("Repair missions are not available: protected-set discovery incomplete (%s)", reasons)
@@ -377,7 +353,7 @@ def build_mission_runner(
         except Exception as exc:
             log.warning("could not record the discovery failure: %s", exc)
     elif repair_wiring is not None and protected is not None:
-        # Slice 7a: the checkpoint service, tripwire monitor, verifier and side-door gate, all or none. A failure to build any of
+        # Slice 7a: the checkpoint service, verifier and side-door gate, all or none. A failure to build any of
         # them leaves the host without Repair capability (observe/propose still run); it never yields a partial safety net.
         from planet_express.missions.assembly import build_repair_controls
         try:
@@ -388,8 +364,7 @@ def build_mission_runner(
         except Exception as exc:
             log.warning("Repair missions are not available: %s: %s", type(exc).__name__, exc)
         else:
-            tripwire, verifier, repair_gate, checkpoint = (controls.tripwire, controls.verifier, controls.repair_gate,
-                                                           controls.checkpoint)
+            verifier, repair_gate, checkpoint = controls.verifier, controls.repair_gate, controls.checkpoint
             if tool_broker is not None and tool_broker.write_gate is None:
                 from planet_express.missions.assembly import mission_write_gate
                 tool_broker.write_gate = mission_write_gate(store)
@@ -419,7 +394,7 @@ def build_mission_runner(
     supervisor = Supervisor(
         store, containment, runtime_for, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
-        repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, tripwire=tripwire, docker_proxy=docker_proxy,
+        repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, docker_proxy=docker_proxy,
         hook_policy=lambda mission: hook_policy_json,
         hook_install=((lambda hook_dir: install_claude_code(hook_dir, cfg.hooks.command))
                       if cfg.hooks.install_claude_code else None),
@@ -435,7 +410,7 @@ def build_mission_runner(
         supervisor.preflight_fn = preflight
         supervisor.socket_provider = socket_provider
     prepare = (lambda: ensure_tree(cfg.cgroup_root)) if real else None
-    runner = MissionRunner(supervisor, None, interval_s, prepare, tripwire=tripwire,
+    runner = MissionRunner(supervisor, None, interval_s, prepare,
                            startup=[checkpoint.startup_scan] if checkpoint is not None else [])
     runner.controls = controls
     if console_store is not None:

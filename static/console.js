@@ -366,7 +366,7 @@
       return card;
     }
 
-    // ── a confirmed plan's run: timeline, a pause's reason, PE's verification ──
+    // ── a confirmed plan's run: timeline, PE's verification, the rollback ──
     async function runAction(name, x, ackDrift) {
       const armKey = ackDrift ? "drift" : name;
       if ((name === "rollback") && !state.armed[armKey]) { state.armed = { [armKey]: true }; state.sig.thread = ""; renderThread(); return; }
@@ -382,8 +382,8 @@
     }
     function runButtons(x, names) {
       const wrap = el("div", "pe-tripwire-btns");
-      const labels = { pause: "Pause", resume: "Resume", rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint", takeover: "Take over" };
-      const cls = { pause: "pe-btn warn sm", resume: "pe-btn", rollback: "pe-btn warn", takeover: "pe-btn accent" };
+      const labels = { rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint" };
+      const cls = { rollback: "pe-btn warn" };
       for (const n of names) {
         if (!x.controls[n]) continue;
         const b = el("button", cls[n], labels[n]); b.type = "button";
@@ -398,45 +398,24 @@
       }
       return wrap;
     }
-    const MARK = { done: ["done", "✓"], now: ["active", ""], paused: ["paused", "II"], bad: ["failed", "✕"], todo: ["", ""] };
+    const MARK = { done: ["done", "✓"], now: ["active", ""], bad: ["failed", "✕"], todo: ["", ""] };
     function runBlock(x) {
-      const paused = x.pause !== null && x.pause !== undefined;
-      const box = el("div", "pe-run" + (paused && !x.pause.by_operator ? " is-paused" : ""));
+      const box = el("div", "pe-run");
       const badge = el("span", "pe-badge " + ({ ok: "ok", warn: "warn", high: "high", crit: "crit", none: "none" }[x.status.level] || "none"), x.status.text.toUpperCase());
       const head = add(el("div", "pe-run-head"), el("span", "pe-led " + (x.status.level === "ok" ? "ok" : x.status.level === "none" ? "" : x.status.level)),
                        el("h3", "", "RUN · OPTION " + String.fromCharCode(65 + x.option) + (x.name ? " · " + x.name : "")), badge, el("div", "pe-spacer"),
                        el("span", "pe-label pe-con-hash", "grant " + x.fingerprint));
-      if (x.controls.pause) { const pause = runButtons(x, ["pause"]).children[0]; if (pause) head.appendChild(pause); }
       add(box, head);
       const rail = el("div", "pe-rail");
       x.timeline.forEach((step, i) => {
         const m = MARK[step.state] || MARK.todo;
-        const row = el("div", "pe-rail-item" + (step.state === "done" ? " is-done" : step.state === "todo" ? " is-pending" : step.state === "paused" ? " is-paused" : ""));
+        const row = el("div", "pe-rail-item" + (step.state === "done" ? " is-done" : step.state === "todo" ? " is-pending" : ""));
         const marker = el("span", "pe-marker " + m[0], m[1]);
         const gutter = add(el("div", "pe-rail-gutter"), marker, i < x.timeline.length - 1 ? el("span", "pe-rail-line" + (step.state === "done" ? " done" : "")) : null);
         add(row, gutter, add(el("div"), el("div", "pe-rail-text", step.label), step.meta ? el("div", "pe-rail-meta", step.meta) : null));
         rail.appendChild(row);
       });
       return add(box, rail);
-    }
-    function tripwireBlock(x) {
-      const p = x.pause;
-      if (p.by_operator) {
-        const note = add(el("div", "pe-takeover"), el("span", "pe-led warn"), add(el("span"), el("b", "", "Paused by you. "), document.createTextNode("The run is frozen. Resume it, roll back to the checkpoint, or take over.")));
-        const out = add(el("div", "pe-con-pause"), note);
-        if (p.changes.length) {       // what changed since PE's last scan, found while freezing: shown before Resume is offered, because a resume re-baselines
-          const seen = el("div", "pe-note high", "Changed since PE last looked: " + p.changes.join(" · ") + (p.more ? " · +" + p.more + " more" : "")); seen.setAttribute("role", "alert");
-          out.appendChild(seen);
-        }
-        return add(out, runButtons(x, ["resume", "rollback", "takeover"]));
-      }
-      const box = el("div", "pe-tripwire"); box.setAttribute("role", "alert");
-      add(box, add(el("div", "pe-tripwire-head"), el("span", "pe-led crit"), el("h3", "", "Something outside the plan changed"), el("div", "pe-spacer"), el("span", "pe-badge crit", "PE PAUSED THE RUN")),
-          el("p", "", "PE froze the run before anything else happened. Nothing further has been done."));
-      const facts = el("div", "pe-con-tw-facts");
-      add(facts, add(el("div"), el("span", "pe-label", "ROLLBACK"), el("div", "pe-value", p.rollback_available ? "Available" + (p.checkpoint ? " · checkpoint " + p.checkpoint : "") : "Not available")),
-          add(el("div"), el("span", "pe-label", "WHAT CHANGED"), el("div", "pe-value", p.changes.length ? p.changes.join(" · ") + (p.more ? " · +" + p.more + " more" : "") : "Not recorded")));
-      return add(box, facts, runButtons(x, ["resume", "rollback", "takeover"]));
     }
     function verifyBlock(x) {
       const v = x.verification;
@@ -456,7 +435,7 @@
         const keep = el("button", "pe-btn accent", "Keep working on it"); keep.type = "button";
         keep.addEventListener("click", () => { refs.text.value = "Keep working on it: "; autosize(); refs.text.focus(); });
         const actions = el("div", "pe-plan-actions");
-        add(actions, runButtons(x, ["rollback", "takeover"]), keep);
+        add(actions, runButtons(x, ["rollback"]), keep);
         box.appendChild(actions);
       }
       return box;
@@ -515,12 +494,11 @@
     }
     function executionBlocks(x) {
       const out = [runBlock(x)];
-      if (x.pause) out.push(tripwireBlock(x));
       if (x.verification) out.push(verifyBlock(x));
-      // A run that needs the operator but has neither a pause nor a verification to hang the buttons on (after a take-over, a restart, a refused
-      // rollback) still gets its controls: the thread must never say "you can roll back" with nothing to click.
-      if (!x.pause && !x.verification && (x.controls.resume || x.controls.rollback || x.controls.takeover)) {
-        out.push(add(el("div", "pe-con-pause"), runButtons(x, ["resume", "rollback", "takeover"])));
+      // A run that needs the operator but has no verification to hang the button on (a restart, a refused rollback) still gets its control:
+      // the thread must never say "you can roll back" with nothing to click.
+      if (!x.verification && x.controls.rollback) {
+        out.push(add(el("div", "pe-con-pause"), runButtons(x, ["rollback"])));
       }
       return out;
     }
@@ -587,7 +565,7 @@
         (v.protected.advisory.length ? " · " + v.protected.advisory.join(" · ") : "");
       const rows = el("div", "pe-auth");
       add(rows, row("SCOPE", scope), row("BACKUP", (v.backup.covered ? "" : "Not covered. ") + v.backup.text, !v.backup.covered), row("WILL NOT TOUCH", wont),
-          row("LIMITS", v.limits.minutes + " min · " + v.limits.steps + " steps. PE pauses if anything outside this scope changes."),
+          row("LIMITS", v.limits.minutes + " min · " + v.limits.steps + " steps. PE checks it worked and can roll it back."),
           row("PE WILL CHECK", v.checks.join(" · ")), row("ROLLBACK", "PE takes a checkpoint just before it starts; you can roll back to it from here."));
       const who = add(el("div", "pe-attrib"), el("span", "pe-who", v.operator.slice(0, 2).toUpperCase()),
                       add(el("div"), el("div", "pe-attrib-name", "Logged as " + v.operator), add(el("div", "pe-attrib-meta"), document.createTextNode("operator · you approve "), el("span", "pe-fp", v.fingerprint))));

@@ -1,4 +1,4 @@
-"""Confirming a plan option end to end over a real approval flow, supervisor, tripwire and verifier (the Repair test fakes): the repair is proposed from
+"""Confirming a plan option end to end over a real approval flow, supervisor, checkpoint and verifier (the Repair test fakes): the repair is proposed from
 the validated option, the operator authorises exactly the grant fingerprint they saw, and nothing that is stale, expired or out of scope runs."""
 import pytest
 from repair_fakes import build, update
@@ -256,8 +256,8 @@ def test_the_conversation_status_follows_an_active_repair_not_the_last_answer(ri
     assert rig.st.drive(view["mission_id"]) == "completed"
     done = ex_mod.conversation_status(rig.st.ms.get_mission(view["mission_id"]), live=False)
     assert done["text"] == "Done and verified" and done["group"] == "Recent"
-    paused = ex_mod.conversation_status(type("M", (), {"status": "paused_tripwire"})(), live=True)
-    assert paused["group"] == "Needs you" and paused["level"] == "crit"
+    held = ex_mod.conversation_status(type("M", (), {"status": "recovery_required"})(), live=True)
+    assert held["group"] == "Needs you" and held["level"] == "crit"
 
 
 def test_authorising_without_the_elevation_a_later_phase_needs_approves_nothing(tmp_path):
