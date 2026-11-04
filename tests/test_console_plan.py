@@ -289,3 +289,28 @@ def test_the_prompt_and_schema_list_only_this_hosts_checks():
     assert "Not available on this host, so never use: exec_probe, project_complete, query" in text
     kinds = plan_mod.json_schema(host)["properties"]["options"]["items"]["properties"]["checks"]["items"]["properties"]["check"]["enum"]
     assert kinds == host.kinds() and "exec_probe" not in kinds
+
+
+def test_a_check_without_an_id_is_given_one_instead_of_refusing_the_plan():
+    """Live rc14.1 (M-23, M-24): every plan was refused with "options.0.checks.0.id: missing", so Authorise never appeared."""
+    from planet_express.console import plan as plan_mod
+    doc = good()
+    doc["options"][0]["checks"] = [{k: v for k, v in CHECK.items() if k != "id"},
+                                   {k: v for k, v in CHECK.items() if k != "id"}]
+    parsed = plan_mod.parse(doc)
+    ids = [c.id for c in parsed.options[0].checks]
+    assert all(ids) and len(set(ids)) == len(ids)
+
+
+def test_the_instructions_spell_out_a_checks_shape():
+    from planet_express.console.plan import instructions
+    assert '"id"' in instructions() and '"params"' in instructions()
+
+
+def test_an_unhashable_check_id_is_an_ordinary_refusal():
+    """Codex, hotfix: an id that is a list or object must be refused as invalid, never crash parse()."""
+    from planet_express.console import plan as plan_mod
+    doc = good()
+    doc["options"][0]["checks"] = [{**CHECK, "id": ["x"]}, {k: v for k, v in CHECK.items() if k != "id"}]
+    with pytest.raises(plan_mod.PlanError):
+        plan_mod.parse(doc)

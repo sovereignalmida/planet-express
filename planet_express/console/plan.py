@@ -112,13 +112,40 @@ class Plan(_Strict):
 _KNOWN_FIELDS = frozenset(name for model in (Plan, Option, Risk, CheckSpec, OptionScope) for name in model.model_fields)
 
 
+def _with_check_ids(doc: Any) -> Any:
+    """A check with no `id` gets one (`<kind>-<n>`, or `check-<n>`) instead of refusing the whole plan: live rc14.1, a planner left
+    the id out of every plan and the operator never got an Authorise button. The id only names the check on the card and in the
+    record; nothing else about the check is changed or widened. Anything that is not the expected shape is left for validation."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("options"), list):
+        return doc
+    out = dict(doc)
+    out["options"] = []
+    for option in doc["options"]:
+        if isinstance(option, dict) and isinstance(option.get("checks"), list):
+            option = dict(option)
+            checks, used = [], {c.get("id") for c in option["checks"] if isinstance(c, dict)}
+            for n, check in enumerate(option["checks"], 1):
+                if isinstance(check, dict) and "id" not in check:
+                    kind = check.get("check")
+                    base = kind if isinstance(kind, str) and _NAME.fullmatch(kind) else "check"
+                    candidate = f"{base}-{n}"
+                    while candidate in used:
+                        candidate += "x"
+                    used.add(candidate)
+                    check = {"id": candidate, **check}
+                checks.append(check)
+            option["checks"] = checks
+        out["options"].append(option)
+    return out
+
+
 def parse(doc: Any, inventory: Any = None, available: Any = None) -> Plan:
     """Validate a decoded plan: the shape, then every option's scope against the host's inventory (when one is given) and its exclusions as
     resource ids, then every option's checks against the catalogue and (when `available`, a `verify.checks.Availability`, is given)
     against what this host can actually run: a check that could only fail at verification never reaches Confirm. Raises PlanError
     (never echoing the agent's text)."""
     try:
-        plan = Plan.model_validate(doc)
+        plan = Plan.model_validate(_with_check_ids(doc))
     except ValidationError as exc:
         first = exc.errors()[0]
         # A field NAME in the path is the agent's text when the field is an extra one: only names the contract defines are echoed.
@@ -282,7 +309,8 @@ PLAN_INSTRUCTIONS = (
     "<stack>/<service>). PE leases it, so no other run works on it at the same time, and checkpoints its compose files before the "
     "run. `exclude` lists resource ids such as service:<stack>/<service> the run is told to leave alone. The run that carries out "
     "a confirmed option has full access to this host (docker, sudo), as the operator has at a terminal. `checks` are how PE will "
-    "verify the option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, "
+    "verify the option worked. Each check is an object {\"id\": a short name such as \"sonarr-up\", \"check\": one of the kinds "
+    "below, \"params\": {...}}, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, "
     "no extra fields):\n{catalogue}\nWhen the fix is a restart, add a container_state check for each container it restarts with "
     "`started_during_mission: true`: PE then checks that the container really started again during the run, not only that it is "
     "running. You cannot approve a plan: the operator confirms an option, and only then is it carried out. Investigate as much as "
