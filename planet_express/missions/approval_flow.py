@@ -24,6 +24,7 @@ from .canonical import CanonicalError, loads_strict
 from .events import insert_event
 from .models import (
     LEGACY_GRANT_TEXT,
+    LEGACY_STANDING_TEXT,
     Budgets,
     Grant,
     GrantScope,
@@ -31,6 +32,7 @@ from .models import (
     StandingCeilings,
     VerificationPlan,
     is_legacy_grant,
+    is_legacy_standing,
 )
 from .state import IllegalTransition, MissionNotFound, transition, transition_in_txn
 from .store import MissionStore, StandingGrantInactive
@@ -463,9 +465,11 @@ class ApprovalFlow:
             row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (grant_id,)).fetchone()
         now = int(self.store._clock())
         scope = loads_strict(row["scope_json"])
+        legacy = is_legacy_standing(scope)
         ceilings = scope.pop("ceilings", None)
         state = "revoked" if row["revoked_at"] is not None else ("expired" if row["expires_at"] <= now else "active")
         return {"id": row["id"], "version": row["version"], "tier": row["tier"], "state": state,
+                "legacy": legacy, "legacy_text": (LEGACY_STANDING_TEXT[0].upper() + LEGACY_STANDING_TEXT[1:]) if legacy else None,
                 "scope": scope, "ceilings": ceilings, "window": loads_strict(row["window_json"]) if row["window_json"] else None,
                 "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],
                 "revoked_at": row["revoked_at"]}

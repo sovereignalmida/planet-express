@@ -46,6 +46,12 @@ LEGACY_SCOPE_KEYS = frozenset({"paths", "mounts"})
 LEGACY_CEILING_KEYS = frozenset({"sudo_units", "exclusions"})
 LEGACY_GRANT_TEXT = ("this was approved before PE's trust-mode update changed what an approval covers, so it will not run. "
                      "Close it and confirm the plan again.")
+# A failed Repair that closes `failed` because the checkpoint shows nothing changed. Only the checkpointed files and service settings
+# are known: anything else the session did with its full access is in its record, not in this claim.
+NOTHING_CHECKPOINTED_FLAG = "nothing_checkpointed_changed"
+NOTHING_CHECKPOINTED_TEXT = "verification failed and nothing the checkpoint covers changed"
+LEGACY_STANDING_TEXT = ("this standing grant was approved before PE's trust-mode update changed what an approval covers, so it no "
+                        "longer applies. Revoke it and make a new one.")
 
 
 class _Strict(BaseModel):
@@ -138,6 +144,20 @@ def is_legacy_grant(text: str) -> bool:
         return False
     scope = doc.get("scope")
     return bool(LEGACY_GRANT_KEYS & set(doc)) or (isinstance(scope, dict) and bool(LEGACY_SCOPE_KEYS & set(scope)))
+
+
+def is_legacy_standing(scope_json: Any) -> bool:
+    """A stored standing grant's scope document written before trust mode: it names a scope key (paths, mounts) or a ceiling key
+    (sudo_units, exclusions) that update removed. `GrantScope.load`/`StandingCeilings.load` drop those keys, so without this check
+    a standing grant approved for a narrow sudo rule would silently cover an unattended full-access run."""
+    try:
+        doc = loads_strict(scope_json) if isinstance(scope_json, str) else scope_json
+    except Exception:                       # noqa: BLE001 - unreadable is not "legacy"; the strict reader says what is wrong
+        return False
+    if not isinstance(doc, dict):
+        return False
+    ceilings = doc.get("ceilings")
+    return bool(LEGACY_SCOPE_KEYS & set(doc)) or (isinstance(ceilings, dict) and bool(LEGACY_CEILING_KEYS & set(ceilings)))
 
 
 CheckName = Literal[

@@ -171,6 +171,26 @@ def test_a_legacy_paused_row_reads_as_needing_the_operator_never_as_a_pause():
     assert "paused" not in {s["state"] for s in ex_mod.timeline(mission, None)}
 
 
+def test_a_run_closed_because_nothing_snapshotted_changed_says_only_that(rig):
+    """The checkpoint covers some files and service settings, not the whole host: the card never claims nothing changed."""
+    try:
+        view = rig.start_run()
+        rig.st.fresh = media_down()
+        assert rig.st.drive(view["mission_id"]) == "failed"
+        status = rig.feed()["execution"]["status"]
+        assert status == {"text": "Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did",
+                          "level": "high"}
+        assert "nothing on the host" not in rig.thread()
+    finally:
+        rig.close()
+
+
+def test_any_other_failed_run_still_reads_didnt_work():
+    from types import SimpleNamespace
+    assert ex_mod.repair_status(SimpleNamespace(status="failed", outcome_flags=None)) == ("Didn't work", "high")
+    assert ex_mod.repair_status(SimpleNamespace(status="failed", outcome_flags="partially_applied")) == ("Didn't work", "high")
+
+
 def test_a_failed_verification_marks_the_check_step_not_the_run_step_whatever_state_it_ends_in():
     mission = type("M", (), {"status": "needs_operator", "checkpoint_id": "ck", "verification_result_json": "{}"})()
     states = {s["label"]: s["state"] for s in ex_mod.timeline(mission, "operator:chris")}

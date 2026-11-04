@@ -15,6 +15,7 @@ from planet_express.core.store import Store
 from .canonical import CanonicalError, loads_strict, sha256_hex
 from .models import (
     LEGACY_GRANT_TEXT,
+    LEGACY_STANDING_TEXT,
     PHASE_RE,
     Budgets,
     Grant,
@@ -23,6 +24,7 @@ from .models import (
     StandingGrant,
     VerificationPlan,
     is_legacy_grant,
+    is_legacy_standing,
 )
 from .verify.plan import binding_problems
 from .window import allowed as window_allowed
@@ -181,6 +183,9 @@ def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, no
         reasons.append("standing grant is revoked")
     if row["expires_at"] <= now:
         reasons.append("standing grant is expired")
+    if is_legacy_standing(row["scope_json"]):
+        # Approved for less than a trust-mode session gets (a named sudo rule, exclusions, paths): it must not stretch to cover it.
+        return [*reasons, LEGACY_STANDING_TEXT]
     try:
         raw_scope = loads_strict(row["scope_json"])
         ceilings = StandingCeilings.load(raw_scope.pop("ceilings", None) or {})

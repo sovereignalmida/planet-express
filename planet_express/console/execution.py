@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from planet_express.console import plan as plan_mod
-from planet_express.missions.models import Mission
+from planet_express.missions.models import NOTHING_CHECKPOINTED_FLAG, Mission
 from planet_express.missions.verify.plan import CheckResult, parse_result
 
 # internal state -> (what the operator sees, level). The design brief's vocabulary; internal names never reach the page.
@@ -27,7 +27,17 @@ ACTIONS = tuple(CONTROLS)
 TERMINALISH = ("completed", "failed", "rolled_back", "cancelled")
 
 
+# A failed Repair closed because nothing its checkpoint covers changed: only that is known, never "nothing changed".
+NOTHING_SNAPSHOTTED_STATUS = ("Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did", "high")
+
+
+def _closed_nothing_checkpointed(mission: Mission) -> bool:
+    return mission.status == "failed" and getattr(mission, "outcome_flags", None) == NOTHING_CHECKPOINTED_FLAG
+
+
 def repair_status(mission: Mission) -> tuple[str, str]:
+    if _closed_nothing_checkpointed(mission):
+        return NOTHING_SNAPSHOTTED_STATUS
     return REPAIR_STATUS.get(mission.status, ("Working", "ok"))
 
 
@@ -78,7 +88,8 @@ def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
     if status in ("needs_operator", "recovery_required", "paused_tripwire", "failed"):
         return {"text": "Run needs you", "level": "crit" if status != "failed" else "high", "group": "Needs you",
                 "verdict": {"h": "The run didn't finish cleanly" if status != "failed" else "The run didn't pass PE's checks",
-                            "p": "Look at the run below for what you can do next."}}
+                            "p": ("Nothing PE snapshotted was changed; check the run's record for anything else it did."
+                                  if _closed_nothing_checkpointed(mission) else "Look at the run below for what you can do next.")}}
     if status == "completed":
         return {"text": "Done and verified", "level": "ok", "group": "Recent",
                 "verdict": {"h": "The plan was carried out and verified", "p": "PE's own checks passed."}}
@@ -148,4 +159,4 @@ def controls(mission: Mission) -> dict[str, bool]:
     return {name: mission.status in states for name, states in CONTROLS.items()}
 
 
-__all__ = ["ACTIONS", "CONTROLS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "conversation_status", "repair_status", "timeline", "verification_view"]
+__all__ = ["ACTIONS", "CONTROLS", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "conversation_status", "repair_status", "timeline", "verification_view"]

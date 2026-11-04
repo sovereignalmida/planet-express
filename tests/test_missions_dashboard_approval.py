@@ -155,6 +155,17 @@ def test_the_standing_page_lists_and_offers_revoke_and_create(web):
     assert core.calls[-1] == ("standing.list", {"include_inactive": True})
 
 
+def test_the_standing_page_says_a_pre_upgrade_standing_grant_no_longer_applies(web):
+    client, core, _ = web
+    text = "This standing grant was approved before PE's trust-mode update changed what an approval covers, so it no longer applies."
+    core.results["standing.list"] = {"standing_grants": [{**GRANT, "legacy": True, "legacy_text": text}]}
+    page = client.get("/missions/standing").get_data(as_text=True)
+    assert "MADE BEFORE AN UPDATE" in page and "no longer applies" in page
+    assert 'action="/missions/standing/SG-1-v1/revoke"' in page                 # and it can still be revoked
+    core.results["standing.list"] = {"standing_grants": [GRANT]}
+    assert "MADE BEFORE AN UPDATE" not in client.get("/missions/standing").get_data(as_text=True)
+
+
 def test_the_standing_page_says_so_when_it_is_unavailable(web):
     client, core, _ = web
     core.errors["standing.list"] = "unavailable"

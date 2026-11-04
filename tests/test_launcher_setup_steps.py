@@ -927,6 +927,81 @@ def test_session_access_undo_removes_exactly_what_it_made_and_refuses_once_it_ch
     assert "pe-s61000" in table(p.passwd)                                     # nothing was reverted over the change
 
 
+def _failing_once_at(p, tool, name):
+    """`p.run`, except that the first `tool ... name` call fails (as a real useradd can, half-way through the range)."""
+    real, state = p.run, {"failed": False}
+
+    def run(argv, **kw):
+        if not state["failed"] and os.path.basename(argv[0]) == tool and argv[-1] == name:
+            state["failed"] = True
+            return subprocess.CompletedProcess(argv, 1, b"", b"useradd: cannot lock /etc/passwd")
+        return real(argv, **kw)
+    return run
+
+
+def test_a_failed_then_retried_session_access_repair_keeps_every_earlier_attempts_evidence_so_undo_removes_all_of_it(tmp_path):
+    from planet_express.missions.launcher.setup_steps import evidence_for
+    p = paths(tmp_path)
+    before = (Path(p.passwd).read_text(), Path(p.group).read_text())
+    p.run = _failing_once_at(p, "useradd", "pe-s61005")
+    journal = MemoryJournal()
+    with pytest.raises(StepError):
+        access(p).repair(journal)                     # attempt 1: the group, every private group, pe-s61000..61004, then it fails
+    assert "pe-session" in table(p.group) and "pe-s61004" in table(p.passwd) and "pe-s61005" not in table(p.passwd)
+    access(p).repair(journal)                         # attempt 2 finishes: pe-s61005..61009 and the sudoers rule
+    assert access(p).probe().ok
+    last = [e["data"] for e in journal.events if e["type"] == "evidence"][-1]
+    for merged in (last, journal.evidence("session-access"), evidence_for(journal, "session-access")):
+        assert merged["created_group"] is True and merged["sha256"]
+        assert merged["created_users"] == list(range(p.uid_min, p.uid_max + 1))       # both attempts', not only the last one's
+        assert merged["created_groups"] == list(range(p.uid_min, p.uid_max + 1))
+    access(p).undo(journal, journal.evidence("session-access"))
+    assert (Path(p.passwd).read_text(), Path(p.group).read_text()) == before and not Path(p.session_sudoers).exists()
+
+
+def test_a_retry_after_the_sudoers_rule_was_written_keeps_its_sha_and_the_file_it_replaced(tmp_path):
+    p = paths(tmp_path)
+    Path(p.session_sudoers).write_text("# an older file\n")
+    journal = MemoryJournal()
+    step = access(p)
+    real_probe, calls = step.probe, {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        return real_probe() if calls["n"] == 1 else type(real_probe())(False, "does not read back")
+    step.probe = flaky
+    with pytest.raises(StepError):
+        step.repair(journal)                          # attempt 1 made everything, the rule among it, then its read-back failed
+    groups = _rows("group")                           # a membership went missing meanwhile: attempt 2 has something to do
+    for g in groups:
+        if g[0] == "pe-session":
+            g[3] = ",".join(m for m in g[3].split(",") if m != "pe-s61003")
+    _write("group", groups)
+    access(p).repair(journal)                         # attempt 2 re-adds the member only; the rule is already right
+    ev = journal.evidence("session-access")
+    assert ev["sha256"] and ev["previous"] == "# an older file\n" and ev["created_group"] is True
+    access(p).undo(journal, ev)
+    assert Path(p.session_sudoers).read_text() == "# an older file\n"          # the pre-setup file is back
+    assert not any(n.startswith("pe-s") for n in table(p.passwd)) and "pe-session" not in table(p.group)
+
+
+def test_the_plan_journal_adapter_hands_a_retried_launcher_step_its_earlier_evidence():
+    from types import SimpleNamespace as NS
+
+    from planet_express.missions.launcher.setup_steps import evidence_entries
+    from planet_express.setup.handlers import _JournalAdapter
+    entries = [{"created_group": True, "created_users": [61000]}, {"created_users": [61000, 61001]}]
+    adapter = _JournalAdapter(NS(prior_evidence=lambda: list(entries), evidence=lambda **kw: None))
+    assert evidence_entries(adapter, "session-access") == entries
+    seeded = by_name(launcher_steps(paths_for_seed()))["session-access"]._seed(entries)
+    assert seeded["created_group"] is True and seeded["created_users"] == [61000, 61001]
+
+
+def paths_for_seed():
+    import tempfile
+    return paths(Path(tempfile.mkdtemp()))
+
+
 def test_session_access_undo_keeps_a_sudoers_file_it_replaced_and_a_member_someone_else_added(tmp_path):
     p = paths(tmp_path)
     Path(p.session_sudoers).write_text("# an older file\n")

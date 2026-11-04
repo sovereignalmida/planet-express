@@ -69,6 +69,7 @@
   <dl class="mc-facts">
     {% if m.result.outcome %}<dt>OUTCOME</dt><dd class="mc-pre">{{ m.result.outcome }}</dd>{% endif %}
     {% if m.result.flags %}<dt>FLAGS</dt><dd>{{ m.result.flags }}</dd>{% endif %}
+    {% if m.result.flags == 'nothing_checkpointed_changed' %}<dt>MEANING</dt><dd>Didn't work: nothing PE snapshotted was changed. Check the run's record for anything else it did.</dd>{% endif %}
     {% if m.result.verification %}<dt>VERIFICATION</dt><dd class="mc-pre">{{ m.result.verification | tojson(indent=1) }}</dd>{% endif %}
   </dl>
   {% else %}<p class="muted-body">No result yet.</p>{% endif %}

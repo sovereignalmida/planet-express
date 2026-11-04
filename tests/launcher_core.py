@@ -157,7 +157,6 @@ class CoreOps:
         from planet_express.core.store import Store
         from planet_express.missions.grants import build_session_env
         from planet_express.missions.model_broker import BrokerLimits, ModelBroker
-        from planet_express.missions.protected import ProtectedSet
         from planet_express.missions.runner import SessionSockets, _cgroup_mount
         from planet_express.missions.store import MissionStore
         from planet_express.missions.supervisor import Supervisor
@@ -176,7 +175,7 @@ class CoreOps:
         def env_policy(grant, mission_id, workspace, env):
             # the production policy's effect: HOME is forced to the workspace and anything named like a token is dropped
             return dict(build_session_env(grant, mission_id=mission_id, workspace=workspace, worker_socket="/nonexistent", stacks_root=None,
-                                          protected=ProtectedSet(host="local", resources=(), domains={}), base_env=env, known_tools=[]).env)
+                                          base_env=env, known_tools=[]).env)
         runtime = ConsoleRuntime(self.c, console, cfg, worker_socket="/nonexistent/worker.sock", env_policy=env_policy, broker=broker)
         sup = Supervisor(store, self.c, lambda mission: runtime, time.time, enabled=True, workspace_dir=P(workspace_dir),
                          artifact_dir=P(tempfile.mkdtemp(prefix="pe-console-art-")), model_broker=broker)

@@ -39,12 +39,20 @@ def verdict(command, cwd="/work/ws"):
     "rm -rf /usr", "rm -rf /etc/*", "rm -rf --no-preserve-root /", "rm -rf /home/u/stacks", "rm -rf /home/u/stacks/*",
     "cd / && rm -rf etc", "sudo rm -rf /", "sudo -n rm -rf /var/lib/docker", "env X=1 rm -rf /usr",
     "printf x | xargs -0 rm -rf /etc", "sh -c 'rm -rf /etc'", "bash -lc \"sudo wipefs -a /dev/sdb\"",
+    # normpath keeps exactly two leading slashes; on Linux `//`, `///` and `/` are all the root
+    "rm -rf //", "rm -rf ///", "rm -rf //etc", "rm -rf ///usr/", "rm -rf //etc/*", "sudo rm -rf //", "sudo -n rm -rf ///etc",
+    "sudo -- rm -rf //var/lib/docker", "rm -rf //home/u/stacks", "dd if=/dev/zero of=//dev/sda",
 ])
 def test_wiping_a_filesystem_or_disk_is_blocked(command):
     cwd = "/" if command.startswith("cd /") else "/work/ws"
     if command.startswith("cd /"):
         command = "rm -rf etc"
     assert verdict(command, cwd) == ("block", "wipe"), command
+
+
+@pytest.mark.parametrize("command", ["cat //etc/planetexpress/planetexpress.env", "sudo cat ///run/planetexpress/t"])
+def test_a_doubled_leading_slash_does_not_hide_pe_secrets(command):
+    assert verdict(command)[1] == "secret", command
 
 
 @pytest.mark.parametrize("command", [

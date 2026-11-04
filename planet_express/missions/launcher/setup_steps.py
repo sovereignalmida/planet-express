@@ -849,8 +849,9 @@ class SessionAccess(Step):
         _blocked, missing = self._state()
         # Each account, group or membership is journaled as made BEFORE the command runs, so a crash in between can never
         # leave one that undo does not know about (undo skips what does not exist, and checks the shape of what does).
-        made = {"created_group": False, "created_groups": [], "created_users": [], "added_members": [],
-                "sha256": None, "previous": None, "created_dirs": []}
+        # A retry after a failed attempt starts from what the earlier attempts made, so every evidence record (and so whatever
+        # merge reads them back: the last record wins) still names everything setup made and undo removes all of it.
+        made = self._seed(evidence_entries(journal, self.name))
 
         def record() -> None:
             journal.append("evidence", step=self.name, data={k: (list(v) if isinstance(v, list) else v) for k, v in made.items()})
@@ -861,16 +862,19 @@ class SessionAccess(Step):
             if self._state()[0]:
                 raise StepError(f"groupadd made {p.session_group} with a gid the sessions cannot use; undo removes it")
         for n in missing["groups"]:
-            made["created_groups"].append(n)
+            if n not in made["created_groups"]:          # journaled before an earlier attempt's command failed
+                made["created_groups"].append(n)
             record()
             self._run([p.groupadd, "--gid", str(n), account_name(n)])
         for n in missing["users"]:
-            made["created_users"].append(n)
+            if n not in made["created_users"]:          # journaled before an earlier attempt's command failed
+                made["created_users"].append(n)
             record()
             self._run([p.useradd, "--system", "--uid", str(n), "--gid", str(n), "--groups", p.session_group,
                        "--home-dir", SESSION_HOME, "--no-create-home", "--shell", SESSION_SHELL, account_name(n)])
         for n in missing["members"]:
-            made["added_members"].append(n)
+            if n not in made["added_members"]:          # journaled before an earlier attempt's command failed
+                made["added_members"].append(n)
             record()
             self._run([p.usermod, "--append", "--groups", p.session_group, account_name(n)])
         if missing["sudoers"] != "ok":
@@ -885,13 +889,33 @@ class SessionAccess(Step):
                     os.unlink(staging)       # dot-prefixed, which sudo ignores, but never left behind
                 except FileNotFoundError:
                     pass
-            made["previous"], made["sha256"] = _text(previous), sha256(wanted)
+            if made["sha256"] is None:       # an earlier attempt that wrote it already holds what was there before setup
+                made["previous"] = _text(previous)
+            made["sha256"] = sha256(wanted)
             record()
             write_atomic(self.target, wanted, 0o440, p.owner_uid, p.owner_gid)
         record()
         if not self.probe().ok:
             raise StepError("the session accounts and sudoers rule were set up but do not read back as intended")
         return dict(made)
+
+    @staticmethod
+    def _seed(entries: list[dict]) -> dict:
+        """Everything earlier attempts of this step journaled: lists unioned in order, booleans OR'd, the sudoers sha256 (and the
+        file it replaced) kept from whichever attempt wrote it."""
+        made: dict = {"created_group": False, "created_groups": [], "created_users": [], "added_members": [],
+                      "sha256": None, "previous": None, "created_dirs": []}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            made["created_group"] = made["created_group"] or bool(entry.get("created_group"))
+            for key in ("created_groups", "created_users", "added_members", "created_dirs"):
+                for item in entry.get(key) or []:
+                    if item not in made[key]:
+                        made[key].append(item)
+            if entry.get("sha256") and made["sha256"] is None:
+                made["sha256"], made["previous"] = entry["sha256"], entry.get("previous")
+        return made
 
     def _still_ours(self, evidence: dict) -> list[str]:
         """What setup made that is no longer exactly what it made (undo then changes nothing)."""
@@ -1475,6 +1499,19 @@ class MemoryJournal:
             if event["type"] == "evidence" and event.get("step") == step:
                 merged.update(event["data"])
         return merged
+
+
+def evidence_entries(journal, step: str) -> list[dict]:
+    """Every evidence record a step journaled, oldest first (`MemoryJournal`, the plan's journal adapter, or the setup `Journal`).
+    A journal that cannot say gives none: the step then starts from nothing, as before."""
+    if hasattr(journal, "evidence_entries"):
+        return list(journal.evidence_entries(step))
+    if isinstance(journal, MemoryJournal):
+        return [e["data"] for e in journal.events if e["type"] == "evidence" and e.get("step") == step]
+    if hasattr(journal, "steps"):
+        record = journal.steps().get(step)
+        return list(record.evidence) if record else []
+    return []
 
 
 def evidence_for(journal, step: str) -> dict:

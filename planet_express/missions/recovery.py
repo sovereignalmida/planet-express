@@ -1,7 +1,8 @@
 """Crash classification (contract 11, brief 14.8): after any crash Core reads HOST STATE and decides; it never asks the
 runtime and never believes the agent's own events.
 
-    state == checkpoint            -> needs_operator, offering resume (an automatic restart only for Observe/Propose)
+    state == checkpoint            -> needs_operator, offering cancel (trust mode has no resume; an automatic restart only
+                                      for Observe/Propose; nothing it covers changed, so there is nothing to roll back)
     state matches the end expected -> verifying (verification is read-only, so running it again is safe)
     anything else, or unreadable   -> recovery_required, then needs_operator or rollback_pending
 
@@ -232,7 +233,7 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
                               refused_replays=unknown)
     if matches_checkpoint(host_state, checkpoint):
         return Classification("needs_operator", "the checkpointed files and services are as the checkpoint recorded them: nothing they cover was changed (other files and data are not checked)", phase,
-                              offers=("resume", "cancel"), refused_replays=unknown)
+                              offers=("cancel",), refused_replays=unknown)      # trust mode has no resume; nothing to roll back
     if matches_expectation(host_state, end_expectation(mission)):
         if mission.status not in VERIFY_FROM:
             return Classification("needs_operator", f"the host matches the expected end state but the mission is "

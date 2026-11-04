@@ -12,7 +12,8 @@ and the mission is approved.
 A Repair mission waits in `awaiting_decision` for its approval rows. When the one execution predicate holds, `start()` takes the
 checkpoint (refused without a scan baseline) and only then issues the session (which takes the mission into `executing`). Trust
 mode: the session has full access to the host (the real Docker socket, sudo); no gate, proxy or backup floor stands in front of it.
-A Repair whose verification fails while its checkpoint shows nothing changed closes as `failed`, which releases its leases.
+A Repair whose verification fails while nothing the checkpoint covers changed closes as `failed`, which releases its leases (only the
+checkpointed files and service settings are known unchanged: the closing note and the status say exactly that, never "nothing changed").
 Trust mode (stage 3) removed the tripwire: nothing watches or pauses a running session; the checkpoint, the full record, PE's own
 verification and the operator's rollback are what answer for what it did. When the session is provably dead the post-change manifest is captured, and the end of the session
 is decided from host state: a result goes to verification, anything else is classified by `recovery` and never replayed.
@@ -55,7 +56,13 @@ from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
 from .hooks import HOOK_LOG_NAME, HOOK_SCRIPT_NAME, MAX_POLICY_FILE_BYTES
 from .launcher.spec import SESSION_ID, STATE_DIR, LaunchSpec
-from .models import LEGACY_GRANT_TEXT, Mission, is_legacy_grant
+from .models import (
+    LEGACY_GRANT_TEXT,
+    NOTHING_CHECKPOINTED_FLAG,
+    NOTHING_CHECKPOINTED_TEXT,
+    Mission,
+    is_legacy_grant,
+)
 from .runtime import (
     RUNTIME_EVENT_KINDS,
     AgentResult,
@@ -106,11 +113,32 @@ def cleanup_id(session_id: str) -> str:
     return CLEANUP_PREFIX + hashlib.sha256(session_id.encode()).hexdigest()[:40]
 
 
-# The session may have removed its own write permission on a directory it made, so restore the owner's access first
-# (chmod does not follow symlinks), then delete. The workspace path is a positional parameter, never part of the script.
-# Both discard their output: the launcher's merged output pipe is never read for a cleanup session, and a full pipe would block find.
-CLEANUP_SCRIPT = ('chmod -R u+rwX -- "$1" >/dev/null 2>&1; exec ' + CLEANUP_FIND
+CLEANUP_SUDO = "/usr/bin/sudo"
+
+
+# Positional parameters, never script text: $1 the workspace, $2 the session uid, $3 sudo. A session with sudo or docker can
+# leave root-owned files in its workspace, which its own uid cannot delete. Then (and only then: something in it is not owned by
+# the uid) the cleanup session, which holds the pe-session group like every session, deletes the tree's contents AS ROOT with
+# `sudo -n find <ws> -xdev -mindepth 1 -delete`: GNU find never follows a symlink (its default `-P`), never crosses into a
+# mount the session left behind (`-xdev`), and unlinks a hard link's name, never the file it shares an inode with. Ownership is
+# deliberately NOT handed back with chown: a hard link the session made to a host file (/etc/shadow) would be chowned with it,
+# and uutils' `chown -h` (Ubuntu's default chown) follows a symlink it was told not to. A workspace that is itself a symlink is
+# refused outright. Without sudo (MOS; Core as root) the `sudo -n` simply fails and the rest is as before: the owner's access is
+# restored (the session may have removed its own write permission on a directory it made; chmod does not follow symlinks) and
+# everything is deleted as the uid. Every command discards its output: the launcher's merged output pipe is never read for a
+# cleanup session, and a full pipe would block find.
+CLEANUP_SCRIPT = ('[ -L "$1" ] && exit 1; '
+                  'if [ -n "$(' + CLEANUP_FIND + ' "$1" -xdev ! -user "$2" -print -quit 2>/dev/null)" ]; then '
+                  '"$3" -n ' + CLEANUP_FIND + ' "$1" -xdev -mindepth 1 -delete </dev/null >/dev/null 2>&1; fi; '
+                  'chmod -R u+rwX -- "$1" >/dev/null 2>&1; exec ' + CLEANUP_FIND
                   + ' "$1" -xdev -mindepth 1 -delete >/dev/null 2>&1')       # nobody drains the session's output: never let it fill
+
+
+def cleanup_argv(workspace: Path, uid: int) -> tuple[str, ...]:
+    """The cleanup session's argv: the script, then its parameters (the workspace, the uid as a number, sudo)."""
+    return (CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace), str(int(uid)), CLEANUP_SUDO)
+
+
 CLEANUP_WALL_S = 60.0          # a cleanup session that has not finished by then is killed and tried again
 CLEANUP_RETRY_S = 300.0        # after a failed cleanup, wait this long before launching another for the same session
 HOOK_POLICY_ENV_MAX = 3500    # above this the hook policy travels as a file (the launcher caps an environment value at 4096)
@@ -1214,7 +1242,8 @@ class Supervisor:
         keyed by `session_id`: the session's id or `C-<id>`) is gone and no process runs as its uid, so the uid may be released.
 
         A session can leave directories Core cannot remove (the agent CLI makes its cache directory 0700, owned by the
-        session uid). Core never gets more power to delete them; instead the uid that owns them deletes them. A short cleanup
+        session uid), or root-owned ones (a session with sudo or docker). Core never gets more power to delete them; instead the
+        uid that owns them deletes them, and what root left there is deleted by that same session with `sudo -n` (see CLEANUP_SCRIPT). A short cleanup
         session, same uid, is launched from an empty scratch directory (the launcher refuses a workspace holding anything
         but regular files, so the old one cannot be its cwd), restores the owner's access, then runs
         `find <workspace> -mindepth 1 -delete`. Core then removes the empty directory. The uid stays held until all of that
@@ -1269,7 +1298,7 @@ class Supervisor:
                 return False
             try:
                 scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
-                spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=(CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)),
+                spec = LaunchSpec(uid=uid, cwd=str(scratch), argv=cleanup_argv(workspace, uid),
                                   env={"PATH": "/usr/bin:/bin"}, token=secrets.token_urlsafe(32), sock_dir=False)
                 self.containment.launch(cleaner_id, spec)
                 self._cleaners[cleaner_id] = (now, uid)
@@ -1476,8 +1505,10 @@ class Supervisor:
         if failed_check and target == "needs_operator" and self._nothing_changed(mission):
             # Nothing to roll back and nothing for the operator to untangle: close it, so its leases stop holding the next run.
             # (A grant that asked for a rollback on failure still goes to rollback_pending: that is the operator's own choice.)
-            target, flags = "failed", None
-            summary = {**summary, "closed_failed": "verification failed and nothing on the host changed"}
+            # It says only what is known: the checkpointed files and service settings are as they were. The session had full
+            # access, so whatever else it did is in its record; the flag lets the Console say so.
+            target, flags = "failed", NOTHING_CHECKPOINTED_FLAG
+            summary = {**summary, "closed_failed": NOTHING_CHECKPOINTED_TEXT}
         with self._lock_for(mission_id):
             if self._shutting_down:
                 # The daemon is stopping: this result is dropped (nothing committed), the mission stays `verifying`
@@ -1502,7 +1533,7 @@ class Supervisor:
             final = self.ms.get_mission(mission_id).status
             if final == "failed":
                 recovery.close_open_intents(self.ms, mission_id, "not_applied", actor=ACTOR)
-                self.ms.set_outcome(mission_id, "failed", None, ACTOR)
+                self.ms.set_outcome(mission_id, "failed", flags if flags == NOTHING_CHECKPOINTED_FLAG else None, ACTOR)
             if final in ("completed", "needs_operator", "rollback_pending"):
                 # The label is the state the mission actually ended in, never the one we intended.
                 if final == "completed":
@@ -1513,9 +1544,9 @@ class Supervisor:
             return final
 
     def _nothing_changed(self, mission: Mission) -> bool:
-        """A failed Repair may close as `failed` (releasing its leases) only when it provably left the host as it found it: no
-        session is alive, the post-change manifest of THIS checkpoint lists no changed file, and the files and service settings
-        the checkpoint covers still match it now. Anything missing or unreadable is "something may have changed"."""
+        """A failed Repair may close as `failed` (releasing its leases) only when it provably left what its checkpoint covers as it
+        found it: no session is alive, the post-change manifest of THIS checkpoint lists no changed file, and the files and service
+        settings the checkpoint covers still match it now. That is all it knows: not that nothing else on the host changed. Anything missing or unreadable is "something may have changed"."""
         if (not mission.checkpoint_id or self.checkpoint is None or mission.id in self._runs
                 or self.ms.live_session(mission.id) is not None):
             return False

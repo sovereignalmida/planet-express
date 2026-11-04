@@ -86,10 +86,10 @@ def test_a_changed_service_or_unreadable_state_is_not_the_checkpoint(tmp_path):
 
 # ── three phases x three cases ──────────────────────────────────────────────
 @pytest.mark.parametrize("status", ["investigating", "executing", "verifying"])
-def test_unchanged_from_checkpoint_needs_the_operator_and_offers_resume(tmp_path, status):
+def test_unchanged_from_checkpoint_needs_the_operator_and_offers_only_cancel(tmp_path, status):
     rig = make(tmp_path)
     c = classify(mission_in(rig, status), host(rig), rig.manifest, rig.ms.events(rig.mid))
-    assert c.state == "needs_operator" and "resume" in c.offers and c.auto_restart is False
+    assert c.state == "needs_operator" and c.offers == ("cancel",) and c.auto_restart is False      # trust mode: no resume
     assert c.phase == PHASES[status] and not c.partially_applied
 
 

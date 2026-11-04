@@ -44,18 +44,18 @@ What a second reviewer should attend to, v3 and v4 together:
   quiet re-scan from `end_mutation`/`transition`), and the AdGuard exception to the network guard
   (`allow_guarded_update`, `resolve_target`, and the automatic-run exclusion in `policy.py`). Any
   change to either gets the second review.
-- **v4 surface (when built):** the checkpoint/restore service; the tripwire monitor and protected
-  domains; the grant schema, its hash binding and the grant-to-credential/environment builder;
-  standing grants (their scope, expiry, and that they never cover Change/Critical); the worker
-  identity, privilege tiers and the per-principal RPC method allowlist (the worker must never reach
-  approval/decision methods); per-resource leases and fencing; the session supervisor's crash
-  classification; redaction before persistence; memory quarantine (candidates are never injected
-  into a session until operator-confirmed).
-- **Slice 6 as built:** `missions/grants.py` (validation, grant-to-env builder), `missions/protected.py` (default protected
-  set; override recording), `missions/resources.py` (containment, protected-wins), `missions/tripwire/` (signals, diff,
-  monitor), `missions/launcher/side_doors.py` (worker identity, Docker TCP, sudoers), and `missions/tools.py`. Brokered tools
-  (`tool.invoke`, a reviewed capability, each addition gets the second review): `traefik.read`, `compose.dry_run`,
-  `app.health_get`, `arr.queue_item` (read); `dns.rewrite` (write, gated until slice 7).
+- **v4 trust mode (rc14, `docs/designs/v4-trust-mode.md`):** sessions have real access (docker group, passwordless sudo
+  through the `pe-s<N>` accounts and `pe-session`, logs). That is the operator's decision; don't flag it. What the review
+  guards instead: the hash-bound approval and `Grant.load` / `is_legacy_grant` (an old approval never runs); the
+  checkpoint/restore service and `Supervisor.roll_back`; PE-run verification and the close-as-failed path when nothing
+  changed (`Supervisor._nothing_changed`); the hook's hard-block list and its per-launch copy; the root launcher
+  (`pe_launch.py` identity and group checks) and setup's `session-access` step; standing grants (scope, expiry, never
+  Change/Critical); the per-principal RPC method allowlist (the worker must never reach approval/decision methods);
+  leases and fencing (`leases.conflict_words`); the supervisor's crash classification; redaction before persistence;
+  memory quarantine (candidates are never injected into a session until operator-confirmed).
+- **Still as built:** `missions/grants.py` (validation, grant-to-env builder: secrets out of the session env) and
+  `missions/tools.py`. Brokered tools (`tool.invoke`, each addition gets the second review): `traefik.read`,
+  `compose.dry_run`, `app.health_get`, `arr.queue_item` (read); `dns.rewrite` (write).
 - **Model broker:** `missions/model_broker.py` (the real model API key lives in Core only; a session holds a per-session access code and a loopback base URL; path, model, size, request and token limits; revocation; no body is logged), `missions.model_broker` in `config_schema.py` and its wiring in `missions/runner.py` (`SessionSockets`, the env policy's secret scan). The one place a credential is handled on behalf of a session: any change gets the second review.
 - **Independent verification:** a mission completes only when PE's own pre-agreed checks pass,
   never on an agent's assertion.

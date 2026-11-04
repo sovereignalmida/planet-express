@@ -230,7 +230,7 @@ def test_an_archive_whose_state_directory_core_cannot_remove_uses_a_cleanup_sess
         assert rig.console.get(conv.id).state == "archiving" and rig.ms.reserved_uid(conv.mission_id) == 60000     # the uid is still held
         assert rig.cont.exists(cleanup_id(conv.state_dir))
         spawn = rig.cont.spawns(cleanup_id(conv.state_dir))[0]
-        assert spawn["uid"] == 60000 and spawn["argv"][-1] == str(rig.root / conv.state_dir) and spawn["state_dir"] is None
+        assert spawn["uid"] == 60000 and spawn["argv"][4:] == [str(rig.root / conv.state_dir), "60000", "/usr/bin/sudo"] and spawn["state_dir"] is None
         stuck.chmod(0o700)                                                        # what the cleanup session does as the owner
         rig.cont.crash(cleanup_id(conv.state_dir))
         rig.sup.tick()

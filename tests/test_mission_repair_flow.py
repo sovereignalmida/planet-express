@@ -77,7 +77,7 @@ def test_a_session_that_claims_success_but_fails_verification_never_completes(st
 
 
 def test_a_failed_verification_that_changed_nothing_closes_failed_and_releases_its_leases(stack):
-    """Trust mode, stage 5: with nothing on the host changed there is nothing to roll back, so the mission does not hold its leases
+    """Trust mode, stage 5: with nothing the checkpoint covers changed there is nothing to roll back, so the mission does not hold its leases
     waiting for the operator: it closes `failed` and the next run on the same stack can start."""
     st = stack()
     mid = st.propose()["mission_id"]
@@ -86,10 +86,16 @@ def test_a_failed_verification_that_changed_nothing_closes_failed_and_releases_i
     st.run_log.script.clear()
     assert st.drive(mid) == "failed"
     mission = st.ms.get_mission(mid)
-    assert mission.outcome == "failed" and mission.outcome_flags is None
+    assert mission.outcome == "failed" and mission.outcome_flags == "nothing_checkpointed_changed"
     assert noted(st, mid, "checkpoint.post_captured")[-1]["changed"] == []
     closed = noted(st, mid, "verify.closed")[-1]
-    assert closed["closed_failed"] == "verification failed and nothing on the host changed"
+    # Only what the checkpoint covers is known to be unchanged: never "nothing on the host changed".
+    assert closed["closed_failed"] == "verification failed and nothing the checkpoint covers changed"
+    from planet_express.console.execution import conversation_status, repair_status
+    text, level = repair_status(mission)
+    assert text == "Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did"
+    assert level == "high" and "nothing on the host" not in text
+    assert "anything else it did" in conversation_status(mission, live=False)["verdict"]["p"]
     assert [b for k, a, b in events(st, mid) if k == "state" and b.get("to") == "failed"][0]["from"] == "verifying"
     with st.store._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM mission_leases WHERE mission_id=?", (mid,)).fetchone()[0] == 0
@@ -274,7 +280,7 @@ def test_a_crash_with_nothing_applied_is_classified_needs_operator_offering_resu
     st.sup.tick()
     assert st.status(mid) == "needs_operator"
     c = noted(st, mid, "recovery.classified")[0]
-    assert c["offers"] == ["resume", "cancel"] and "replay" not in c["offers"]
+    assert c["offers"] == ["cancel"] and "replay" not in c["offers"]        # trust mode: no resume
     assert len(c["refused_replays"]) == 1                                  # the execution intent whose effect is unknown
     assert len(st.runtimes) == 1                                           # no automatic restart of a mutating session
 

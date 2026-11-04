@@ -115,20 +115,27 @@ _READERS = _READERS_HARMLESS | {"cat", "less", "more", "head", "tail", "grep", "
 _COPIERS = {"cp", "rsync", "scp", "install", "ln"}
 
 
+def _norm(path: str) -> str:
+    """posixpath.normpath, then the leading slashes collapsed to one: POSIX lets normpath keep exactly two (`//etc`), but on
+    Linux `//`, `///` and `/` are all the root, so `rm -rf //` must compare as `/`."""
+    norm = posixpath.normpath(path)
+    return "/" + norm.lstrip("/") if norm.startswith("//") else norm
+
+
 def _within(path: str, root: str) -> bool:
-    path, root = posixpath.normpath(path), posixpath.normpath(root)
+    path, root = _norm(path), _norm(root)
     return path == root or path.startswith(root.rstrip("/") + "/")
 
 
 def _is_pe_secret(path: str) -> bool:
-    norm = posixpath.normpath(path.replace("\\", "/"))
+    norm = _norm(path.replace("\\", "/"))
     if re.fullmatch(r"/proc/[^/]+(/task/[^/]+)?/environ", norm):
         return True
     return any(_within(norm, root) for root in _PE_SECRET)
 
 
 def _is_pe_own(path: str, policy: HookPolicy) -> bool:
-    norm = posixpath.normpath(path.replace("\\", "/"))
+    norm = _norm(path.replace("\\", "/"))
     if any(_within(norm, root) for root in _PE_OWN):
         return True
     if posixpath.dirname(norm) == _SUDOERS_D and posixpath.basename(norm).startswith("planetexpress"):
@@ -136,7 +143,7 @@ def _is_pe_own(path: str, policy: HookPolicy) -> bool:
     if _within(norm, _PE_DATA) and _DB_NAME.fullmatch(posixpath.basename(norm)):
         return True
     for own in policy.pe_paths:
-        own = posixpath.normpath(own)
+        own = _norm(own)
         if _within(norm, own) or (_DB_NAME.fullmatch(posixpath.basename(own)) and norm.startswith(own + "-")):
             return True
     return False
@@ -369,7 +376,7 @@ def _paths_in(tokens: Sequence[str]) -> list[str]:
 
 def _abs(path: str, cwd: str) -> str:
     path = os.path.expanduser(path) if path.startswith("~") else path
-    return posixpath.normpath(path if path.startswith("/") else posixpath.join(cwd or "/", path))
+    return _norm(path if path.startswith("/") else posixpath.join(cwd or "/", path))
 
 
 def _written_paths(low: str, toks: Sequence[str]) -> list[str]:
@@ -402,7 +409,7 @@ _HARMLESS_DEVICES = ("/dev/null", "/dev/zero", "/dev/stdout", "/dev/stderr", "/d
 
 
 def _wipe_roots(policy: HookPolicy) -> tuple[str, ...]:
-    stacks = posixpath.normpath(policy.stacks_root) if policy.stacks_root.startswith("/") else ""
+    stacks = _norm(policy.stacks_root) if policy.stacks_root.startswith("/") else ""
     return _WIPE_ROOTS + ((stacks,) if stacks and stacks != "/" else ())
 
 
@@ -504,8 +511,8 @@ def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
             return Decision("block", "wipe", f"{prog}: destroys a filesystem")
         if low == "dd":
             for t in toks[1:]:
-                if t.startswith("of=") and posixpath.normpath(t[3:]).startswith("/dev/") \
-                        and posixpath.normpath(t[3:]) not in _HARMLESS_DEVICES and not t[3:].startswith("/dev/fd/"):
+                if t.startswith("of=") and _norm(t[3:]).startswith("/dev/") \
+                        and _norm(t[3:]) not in _HARMLESS_DEVICES and not t[3:].startswith("/dev/fd/"):
                     return Decision("block", "wipe", f"dd to the device {t[3:][:40]}")
         if low == "rm":
             broad = _broad_rm(toks, cwd, policy)

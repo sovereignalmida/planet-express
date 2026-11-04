@@ -1661,6 +1661,10 @@ class _JournalAdapter:
         if type_ == "evidence":
             self._ctx.evidence(**data["data"])
 
+    def evidence_entries(self, _step: str) -> list[dict]:
+        """What this plan step journaled on earlier attempts (a retried repair starts from it, so undo still sees all of it)."""
+        return self._ctx.prior_evidence()
+
 
 class _LauncherHandler:
     def __init__(self, paths_for=None):

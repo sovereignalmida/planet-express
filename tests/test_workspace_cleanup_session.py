@@ -13,7 +13,9 @@ from planet_express.missions.supervisor import (
     CLEANUP_RETRY_S,
     CLEANUP_SCRIPT,
     CLEANUP_SH,
+    CLEANUP_SUDO,
     CLEANUP_WALL_S,
+    cleanup_argv,
     cleanup_id,
 )
 
@@ -54,7 +56,8 @@ def test_a_workspace_core_cannot_remove_keeps_the_uid_held_and_starts_a_cleanup_
     assert rig.sup.sweep_uids() == 0
     spawn = rig.cont.spawns(cleanup_id(sid))[0]
     workspace = rig.sup.workspace_dir / sid
-    assert spawn["argv"] == [CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace)]     # the path is a parameter, not script text
+    assert spawn["argv"] == [CLEANUP_SH, "-c", CLEANUP_SCRIPT, "sh", str(workspace), str(row["session_uid"]), CLEANUP_SUDO]
+    assert list(cleanup_argv(workspace, row["session_uid"])) == spawn["argv"]          # the path and uid are parameters, not script text
     assert str(workspace) not in CLEANUP_SCRIPT and "chmod -R u+rwX" in CLEANUP_SCRIPT
     assert spawn["uid"] == row["session_uid"] and spawn["sock_dir"] is False
     assert spawn["cwd"] == str(rig.sup.workspace_dir / (cleanup_id(sid)))    # an empty scratch directory, never the old workspace
@@ -198,7 +201,67 @@ def test_shutdown_that_begins_after_the_first_check_stops_the_cleanup_session_fr
 
 
 def test_the_cleanup_script_discards_its_output_so_a_full_pipe_cannot_block_find():
-    assert CLEANUP_SCRIPT.count(">/dev/null 2>&1") == 2
+    assert CLEANUP_SCRIPT.count(">/dev/null 2>&1") == 3 and "</dev/null >/dev/null 2>&1; fi" in CLEANUP_SCRIPT
+
+
+# ── root-owned leftovers (trust mode: a session has sudo and docker) ───────────────────────────────────────────────
+
+def _run_cleanup(workspace, uid, tmp_path):
+    """Run the real script with a stand-in sudo that only records its argv (nothing here may become root)."""
+    import subprocess
+    log = tmp_path / "sudo.log"
+    fake = tmp_path / "fake-sudo"
+    fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" >> {log}\n')
+    fake.chmod(0o755)
+    argv = list(cleanup_argv(workspace, uid))
+    argv[-1] = str(fake)
+    result = subprocess.run(argv, capture_output=True, timeout=30, check=False)
+    return result, (log.read_text().splitlines() if log.exists() else None)
+
+
+def test_the_cleanup_script_deletes_as_root_with_sudo_when_something_is_not_owned_by_the_uid(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "sub" / "f").write_text("x")
+    other_uid = os.getuid() + 1                         # every entry here is "not owned by the session uid" for the script
+    result, sudo_argv = _run_cleanup(workspace, other_uid, tmp_path)
+    assert result.returncode == 0
+    # find -P (never follows a symlink), -xdev (never crosses a mount), -delete (a hard link's name, never its inode's owner):
+    # no chown, which would hand a hard-linked host file to the uid
+    assert sudo_argv == ["-n", "/usr/bin/find", str(workspace), "-xdev", "-mindepth", "1", "-delete"]
+    assert "chown" not in CLEANUP_SCRIPT
+    assert workspace.exists() and os.listdir(workspace) == []                                # then the usual chmod/find -delete ran
+
+
+def test_the_cleanup_script_does_not_call_sudo_when_the_uid_owns_everything(tmp_path):
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "sub" / "f").write_text("x")
+    (workspace / "sub").chmod(0o500)
+    result, sudo_argv = _run_cleanup(workspace, os.getuid(), tmp_path)
+    assert result.returncode == 0 and sudo_argv is None
+    assert os.listdir(workspace) == []
+
+
+def test_the_cleanup_script_refuses_a_workspace_that_is_a_symlink(tmp_path):
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "keep").write_text("x")
+    workspace = tmp_path / "ws"
+    workspace.symlink_to(real)
+    result, sudo_argv = _run_cleanup(workspace, os.getuid() + 1, tmp_path)
+    assert result.returncode != 0 and sudo_argv is None
+    assert (real / "keep").exists()
+
+
+def test_without_sudo_the_cleanup_script_still_deletes_what_the_uid_owns(tmp_path):
+    import subprocess
+    workspace = tmp_path / "ws"
+    (workspace / "a").mkdir(parents=True)
+    argv = list(cleanup_argv(workspace, os.getuid() + 1))
+    argv[-1] = str(tmp_path / "no-such-sudo")             # MOS: there is no sudo; the failed call changes nothing else
+    assert subprocess.run(argv, capture_output=True, timeout=30, check=False).returncode == 0
+    assert os.listdir(workspace) == []
 
 
 def test_a_kill_or_cleanup_that_raises_is_logged_and_retried_not_fatal(tmp_path):

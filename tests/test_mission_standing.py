@@ -310,13 +310,36 @@ def test_ceilings_allow_exactly_what_they_name(stack):
     refused(st, unattended(st, "SG-1-v1", n=4, **{**ok, "budgets": {"wall_s": 901}}), "budgets")
 
 
-def test_a_standing_grant_stored_before_trust_mode_still_reads(stack):
+LEGACY_SCOPES = {
+    "everything": '{"ceilings":{"budgets":null,"credentials":[],"exclusions":[],"sudo_units":[]},'
+                  '"hosts":["local"],"mounts":[],"paths":[],"services":[],"stacks":["media"]}',
+    "paths only": '{"hosts":["local"],"paths":["/srv"],"services":[],"stacks":["media"]}',
+    "sudo_units only": '{"ceilings":{"budgets":null,"credentials":[],"sudo_units":["web.service"]},'
+                       '"hosts":["local"],"services":[],"stacks":["media"]}',
+    "exclusions only": '{"ceilings":{"credentials":[],"exclusions":["network"]},"hosts":["local"],"services":[],"stacks":["media"]}',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(LEGACY_SCOPES))
+def test_a_standing_grant_stored_before_trust_mode_reads_but_never_starts_an_unattended_run(stack, shape):
+    """Approved for a named sudo rule, exclusions or paths, it must not stretch to cover a full-access trust-mode session."""
+    from planet_express.missions.models import LEGACY_STANDING_TEXT
     st = stack()
     make_standing(st)
     with st.store._write() as conn:
-        conn.execute("UPDATE standing_grants SET scope_json=? WHERE id='SG-1-v1'", (
-            '{"ceilings":{"budgets":null,"credentials":[],"exclusions":[],"sudo_units":[]},'
-            '"hosts":["local"],"mounts":[],"paths":[],"services":[],"stacks":["media"]}',))
+        conn.execute("UPDATE standing_grants SET scope_json=? WHERE id='SG-1-v1'", (LEGACY_SCOPES[shape],))
+    refused(st, unattended(st, "SG-1-v1", n=1), "trust-mode update")
+    row = st.flow._standing_row("SG-1-v1")                               # it still reads, and the page says why it is dead
+    assert row["state"] == "active" and row["legacy"] is True
+    assert row["legacy_text"].lower() == LEGACY_STANDING_TEXT.lower() and "Revoke it and make a new one" in row["legacy_text"]
+    st.flow.standing_revoke("operator:alice", "SG-1-v1")                 # and it can be revoked
+    assert st.flow._standing_row("SG-1-v1")["state"] == "revoked"
+
+
+def test_a_standing_grant_made_after_trust_mode_is_not_legacy(stack):
+    st = stack()
+    make_standing(st)
+    assert st.flow._standing_row("SG-1-v1")["legacy"] is False and st.flow._standing_row("SG-1-v1")["legacy_text"] is None
     assert unattended(st, "SG-1-v1", n=1)["unattended"]
 
 

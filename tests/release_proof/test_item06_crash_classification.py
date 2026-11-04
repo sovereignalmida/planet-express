@@ -80,7 +80,7 @@ def test_a_crash_during_execution_with_nothing_applied_is_resumable_and_not_rest
     st.sup.tick()
     assert st.status(mid) == "needs_operator"
     c = notes(st, mid, "recovery.classified")[0]
-    assert c["offers"] == ["resume", "cancel"] and "replay" not in c["offers"]
+    assert c["offers"] == ["cancel"] and "replay" not in c["offers"]        # trust mode: no resume
     assert len(c["refused_replays"]) == 1                    # the intent whose effect is unknown is named, not repeated
     assert len(st.runtimes) == 1
 
