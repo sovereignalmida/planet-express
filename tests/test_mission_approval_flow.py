@@ -62,27 +62,24 @@ def approvals_rows(st, mid):
 
 # ── the card ─────────────────────────────────────────────────────────────────────────────────────────
 
-def test_the_card_shows_scope_tier_exclusions_budgets_plan_sudo_and_backup(stack):
+def test_the_card_shows_scope_tier_budgets_plan_and_full_access(stack):
     st = stack()
-    mid = st.propose(exclusions=["network", "persistent-data"], budgets={"wall_s": 900})["mission_id"]
+    mid = st.propose(budgets={"wall_s": 900})["mission_id"]
     card = st.flow.card(mid)
     assert card["tier"] == "repair" and card["scope"]["stacks"] == ["media"]
-    assert card["protected"]["count"] > 0 and card["protected"]["exclusions"] == ["network", "persistent-data"]
     assert card["budgets"]["wall_s"] == 900
     assert [c["id"] for c in card["verification"]["checks"]] == ["default"]
-    assert card["sudo"]["mode"] == "scoped" and card["docker"] == "proxy"
-    assert card["backup"]["covered"] is True and card["warnings"] == [] and not card["ready"]
+    assert [w["kind"] for w in card["warnings"]] == ["full_access"] and "FULL ACCESS" in card["warnings"][0]["text"]
+    assert not {"sudo", "docker", "backup", "protected"} & set(card) and not card["ready"]
+    assert [r["phase"] for r in card["required"]] == ["grant"]
     assert card["grant_hash"] == st.ms.get_mission(mid).grant_hash
 
 
-def test_broad_sudo_raw_docker_and_no_backup_are_at_the_top_and_need_elevated_rows(stack):
-    st = stack(covered=False)
-    mid = st.propose(sudo={"mode": "broad"}, docker="raw", acknowledged_no_backup=True)["mission_id"]
-    card = st.flow.card(mid)
-    assert [w["kind"] for w in card["warnings"]] == ["broad_sudo", "docker_raw", "no_backup"]
-    phases = {r["phase"]: r["elevated"] for r in card["required"]}
-    assert phases == {"grant": False, "broad_sudo": True, "no_backup": True}
-    assert card["backup"]["covered"] is False and card["backup"]["acknowledged_no_backup"] is True
+def test_the_removed_access_fields_cannot_be_proposed(stack):
+    st = stack()
+    for extra in ({"sudo": {"mode": "broad"}}, {"docker": "raw"}, {"acknowledged_no_backup": True}, {"exclusions": ["x"]}):
+        with pytest.raises(TypeError):
+            st.propose(**extra)
 
 
 def test_an_observe_mission_has_no_card(stack):
@@ -118,7 +115,7 @@ def test_editing_any_grant_field_after_approval_means_not_approved(stack):
     body = mission.grant().model_dump(mode="json")
     for field, value in (("budgets", {**body["budgets"], "wall_s": body["budgets"]["wall_s"] + 1}),
                          ("scope", {**body["scope"], "stacks": ["media", "photos"]}),
-                         ("exclusions", ["x"]), ("docker", "proxy"), ("credentials", ["tool:x"]),
+                         ("credentials", ["tool:x"]),
                          ("on_verify_fail", "rollback")):
         changed = Grant.model_validate({**body, field: value})
         if changed.hash() == mission.grant_hash:
@@ -185,32 +182,16 @@ def test_only_a_mission_awaiting_a_decision_can_be_approved(stack):
 
 # ── elevated approvals ───────────────────────────────────────────────────────────────────────────────
 
-def test_elevated_rows_need_an_elevated_session_and_every_one_of_them(stack):
-    st = stack(covered=False)
-    mid = st.propose(sudo={"mode": "broad"}, docker="raw", acknowledged_no_backup=True)["mission_id"]
+def test_the_phases_only_an_old_grant_needed_are_never_asked_for(stack):
+    st = stack()
+    mid = st.propose()["mission_id"]
     h = st.flow.card(mid)["grant_hash"]
-    st.flow.approve("operator:alice", mid, "grant", h)
-    assert not predicate(st, mid)
     for phase in ("broad_sudo", "no_backup"):
-        with pytest.raises(FlowError) as exc:
-            st.flow.approve("operator:alice", mid, phase, h, elevated=False)
-        assert exc.value.code == "elevation_required"
-    st.flow.approve("operator:alice", mid, "broad_sudo", h, elevated=True)
-    assert not predicate(st, mid)                                    # broad sudo alone is not enough: no_backup is missing
-    st.flow.approve("operator:alice", mid, "no_backup", h, elevated=True)
-    assert predicate(st, mid)
-    assert [r["elevated"] for r in approvals_rows(st, mid) if r["phase"] != "grant"] == [1, 1]
-
-
-def test_elevated_is_strictly_a_true_boolean(stack):
-    st = stack(covered=False)
-    mid = st.propose(sudo={"mode": "broad"}, docker="raw")["mission_id"]
-    h = st.flow.card(mid)["grant_hash"]
-    with pytest.raises(FlowError):
-        st.flow.approve("operator:alice", mid, "broad_sudo", h, elevated="yes")      # truthy is not elevated
+        with pytest.raises(FlowError):
+            st.flow.approve("operator:alice", mid, phase, h, elevated=True)
     _, handlers = service(st)
-    assert call(handlers, "mission.approve", mission_id=mid, operator="alice", phase="broad_sudo", grant_hash=h,
-                elevated="true")["error"] == "bad_request"
+    assert call(handlers, "mission.approve", mission_id=mid, operator="alice", phase="grant", grant_hash=h,
+                elevated="true")["error"] == "bad_request"                     # elevated is still strictly a boolean
 
 
 # ── the actor comes from the authenticated identity ──────────────────────────────────────────────────
@@ -283,9 +264,8 @@ def test_propose_repair_over_rpc_validates_before_anyone_is_asked(stack):
             "checks": [{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}]}
     made = call(handlers, "mission.propose_repair", **base)
     assert made["status"] == "awaiting_decision" and made["grant_hash"]
-    restart_only = call(handlers, "mission.propose_repair", **{**base, "docker": "lifecycle"})       # rc13: restart-only repairs
-    assert restart_only["status"] == "awaiting_decision" and st.ms.get_mission(restart_only["mission_id"]).grant().docker == "lifecycle"
-    assert call(handlers, "mission.propose_repair", **{**base, "docker": "anything"})["error"] == "bad_request"
+    for gone in ({"docker": "lifecycle"}, {"sudo": {"mode": "broad"}}, {"acknowledged_no_backup": True}, {"exclusions": ["x"]}):
+        assert call(handlers, "mission.propose_repair", **{**base, **gone})["error"] == "bad_request", gone   # trust mode removed them
     assert call(handlers, "mission.propose_repair", **{**base, "checks": []})["error"] == "bad_request"
     assert call(handlers, "mission.propose_repair", **{**base, "checks": [{"id": "x", "check": "shell", "params": {}}]})["error"] == "bad_request"
     st.flow.validator = lambda grant, plan: ["scope stack 'secrets' is not in the discovered inventory"]
@@ -329,17 +309,6 @@ def test_telegram_shows_the_card_and_approves_only_with_the_hash_it_displayed(st
     assert "Usage" in svc.telegram(f"/approve {mid}", "tg.42")
     assert "approved" in svc.telegram(f"/approve {mid} {h8}", "tg.42")
     assert approvals_rows(st, mid)[0]["operator"] == "operator:tg.42" and predicate(st, mid)
-
-
-def test_telegram_can_never_give_an_elevated_approval(stack):
-    st = stack(covered=False)
-    mid = st.propose(sudo={"mode": "broad"}, docker="raw")["mission_id"]
-    svc, _ = service(st)
-    h8 = st.flow.card(mid)["grant_hash"][:8]
-    assert "approved" in svc.telegram(f"/approve {mid} {h8}", "tg.42")            # the plain grant row
-    reply = svc.telegram(f"/approve {mid} {h8}", "tg.42")
-    assert "elevated dashboard session" in reply
-    assert not predicate(st, mid) and [r["phase"] for r in approvals_rows(st, mid)] == ["grant"]
 
 
 def test_telegram_deny_and_unidentifiable_operator(stack):

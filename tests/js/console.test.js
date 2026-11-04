@@ -105,8 +105,8 @@ const PLAN = { known: ["gateway healthy " + EVIL], unsure: ["start order"], opti
     rolls_back_to: "the checkpoint", effort: "2 min", checks: [{ id: "u", check: "container_state", params: { container: "gluetun" } }] },
   { name: "Restart", recommended: false, summary: "s", changes: ["g"], will_not_touch: ["d"], risk: { level: "high", text: "bad" }, rolls_back_to: "r", effort: "1 min", checks: [] }] };
 const VIEW = { execution_id: 4, mission_id: "M-9", grant_hash: "a".repeat(64), fingerprint: "aaaaaaaa", operator: "chris", option: "Recreate " + EVIL, summary: "s",
-  scope: { stacks: ["media"], services: ["media/qbittorrent"] }, warnings: ["BACKUP NOTE " + EVIL], backup: { covered: true, text: "A recent verified backup covers this scope." },
-  protected: { count: 7, enforced: ["service:media/gluetun"], advisory: ["the gateway"] }, limits: { minutes: 15, steps: 200 }, checks: ["qbittorrent is running and stable"],
+  scope: { stacks: ["media"], services: ["media/qbittorrent"] }, warnings: ["LEGACY NOTE " + EVIL], access: "Full access to this host " + EVIL,
+  will_not_touch: ["service:media/gluetun", "the gateway"], limits: { minutes: 15, steps: 200 }, checks: ["qbittorrent is running and stable"],
   on_verify_fail: "needs_operator", needs_elevation: false, phases: ["grant"] };
 const EXEC = { id: 4, option: 0, name: "Recreate", fingerprint: "aaaaaaaa", status: { text: "Working", level: "ok" }, finished: false,
   timeline: [{ label: "Authorised", state: "done", meta: "chris" }, { label: "Checkpoint taken", state: "done", meta: "so it can be rolled back" },
@@ -118,7 +118,7 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
   messages: [{ seq: 1, role: "operator", turn: null, at: 1, text: "why? " + EVIL, by: "chris" }, { seq: 2, role: "agent", turn: 1, at: 2, text: "It is **the gateway**.\n\n- " + EVIL, by: null },
              { seq: 3, role: "system", turn: 1, at: 3, text: "note " + EVIL, by: null }],
   last_message: 3, events: [{ seq: 5, at: 1, turn: 1, type: "call", kind: "ran", name: "Bash", detail: EVIL }, { seq: 6, at: 1, turn: 1, type: "result", name: "Bash", excerpt: EVIL, failed: false }], last_event: 6,
-  turn_starts: [4], context: { evidence: { incident: EVIL, turns: 1, budget_used_pct: 24 }, scope: { kind: "read_only", stacks: [EVIL], services: [], paths: [], protected: 2 },
+  turn_starts: [4], context: { evidence: { incident: EVIL, turns: 1, budget_used_pct: 24 }, scope: { kind: "read_only", stacks: [EVIL], services: [] },
     limits: { token_budget: 100000, minutes: 30, steps: 200 }, record: { events: 9, checkpoint: false, runs: 0 } }, plan: { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }, status: { enabled: true, proposal_only: false } };
 
 (async () => {
@@ -216,7 +216,7 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     const tabs = ctx.children[0].children;
     assert.deepStrictEqual(tabs.map(t => t.textContent), ["Evidence", "Scope", "Limits", "Record"]);
     tabs[1].fire("click");
-    assert.ok(ctx.textContent.includes("nothing: read-only") && ctx.textContent.includes(EVIL) && ctx.textContent.includes("Protected"));
+    assert.ok(ctx.textContent.includes("nothing: read-only") && ctx.textContent.includes(EVIL) && !ctx.textContent.includes("Protected"));
     ctx.children[0].children[3].fire("click");
     assert.ok(ctx.textContent.includes("Events") && ctx.textContent.includes("9"));
   });
@@ -386,18 +386,15 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     page.select("0123456789abcdef", false); await settle(6);
     assert.ok(!rollButtons().some(t => t.includes("Click again")), rollButtons().join("|"));
   });
-  await atest("a scope with no backup asks first, and only the explicit choice prepares it with no_backup", async () => {
+  await atest("the confirm sheet says the run has full access and lists what it will not touch, as text", async () => {
     FEED.execution = null; FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; await page.loadFeed();
-    win.__override = (url) => url.endsWith("/confirm/prepare") && !win.__ok ? reply({ error: "This scope has no recent verified backup.", code: "no_backup" }, 409) : null;
     walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Confirm option")).fire("click"); await settle();
-    const ask = walk(doc.getElementById("con-sheet"));
-    assert.ok(ask.some(n => n.textContent.includes("NO RECENT BACKUP")) && ask.some(n => n.textContent.includes("no recent verified backup")));
+    const sheet = walk(doc.getElementById("con-sheet"));
+    assert.ok(sheet.some(n => n.textContent === "ACCESS") && sheet.some(n => n.textContent.includes("Full access to this host " + EVIL)));
+    assert.ok(sheet.some(n => n.textContent.includes("service:media/gluetun · the gateway")));
+    assert.ok(!sheet.some(n => n.textContent === "BACKUP" || n.textContent.includes("NO RECENT BACKUP")));
     assert.ok(!requests.filter(r => r[0].endsWith("/confirm/prepare")).some(r => r[2].includes("no_backup")));
-    win.__ok = true;
-    ask.find(n => n.tag === "button" && n.textContent.startsWith("Prepare it anyway")).fire("click"); await settle();
-    assert.ok(requests.some(r => r[0].endsWith("/confirm/prepare") && r[2].includes("no_backup=1")));
-    walk(doc.getElementById("con-sheet")).find(n => n.tag === "button" && n.textContent === "Back to the plan").fire("click"); await settle();
-    win.__override = null; win.__ok = false;
+    sheet.find(n => n.tag === "button" && n.textContent === "Back to the plan").fire("click"); await settle();
   });
   await atest("while an authorisation is in flight the sheet cannot be dismissed and nothing is withdrawn", async () => {
     FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; FEED.execution = null; await page.loadFeed();

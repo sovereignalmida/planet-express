@@ -13,7 +13,7 @@ from repair_fakes import GOOD_RESULT, build, update
 from verify_fakes import media_down
 
 from planet_express.missions import supervisor as sup_mod
-from planet_express.missions.supervisor import RepairRefused, ResumeRefused, UnsupportedTier
+from planet_express.missions.supervisor import ResumeRefused, UnsupportedTier
 
 
 @pytest.fixture
@@ -61,9 +61,11 @@ def test_an_approved_repair_runs_to_completion_through_core_verification(stack):
 
 
 def test_a_session_that_claims_success_but_fails_verification_never_completes(stack):
-    st = stack()
+    st = stack(behaviours=[{"script": [update()] * 3 + [update("finished")]}])
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
+    st.sup.tick()                                   # started: the checkpoint is taken
+    st.env.compose.write_text(st.env.compose.read_text() + "# the session changed this\n")
     st.fresh = media_down()                         # the checks pass but a NEW finding appears in scope: not repaired
     st.run_log.script.clear()
     assert st.drive(mid) in ("needs_operator", "rollback_pending")
@@ -71,6 +73,26 @@ def test_a_session_that_claims_success_but_fails_verification_never_completes(st
     assert mission.status == "needs_operator" and mission.outcome == "needs_operator"
     assert mission.outcome_flags == "partially_applied"
     assert noted(st, mid, "verify.result")[0]["status"] == "failed"
+    assert noted(st, mid, "checkpoint.post_captured")[-1]["changed"], "something changed, so it waits for the operator"
+
+
+def test_a_failed_verification_that_changed_nothing_closes_failed_and_releases_its_leases(stack):
+    """Trust mode, stage 5: with nothing on the host changed there is nothing to roll back, so the mission does not hold its leases
+    waiting for the operator: it closes `failed` and the next run on the same stack can start."""
+    st = stack()
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    st.run_log.script.clear()
+    assert st.drive(mid) == "failed"
+    mission = st.ms.get_mission(mid)
+    assert mission.outcome == "failed" and mission.outcome_flags is None
+    assert noted(st, mid, "checkpoint.post_captured")[-1]["changed"] == []
+    closed = noted(st, mid, "verify.closed")[-1]
+    assert closed["closed_failed"] == "verification failed and nothing on the host changed"
+    assert [b for k, a, b in events(st, mid) if k == "state" and b.get("to") == "failed"][0]["from"] == "verifying"
+    with st.store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM mission_leases WHERE mission_id=?", (mid,)).fetchone()[0] == 0
 
 
 def test_on_verify_fail_rollback_goes_to_rollback_pending(stack):
@@ -185,15 +207,20 @@ def test_a_requested_cancel_of_a_mission_whose_host_matches_the_checkpoint_close
 
 # ── the start gates ─────────────────────────────────────────────────────────────────────────────────
 
-def test_the_side_door_gate_still_refuses_and_the_mission_waits(stack):
-    st = stack(gate=False)
+def test_a_repair_starts_with_no_proxy_gate_protected_set_or_backup(stack):
+    """Trust mode: nothing stands between an approved Repair and its session but the checkpoint and the verifier."""
+    st = stack()
+    for gone in ("repair_gate", "docker_proxy"):
+        assert not hasattr(st.sup, gone)
     mid = st.propose()["mission_id"]
+    grant = st.ms.get_mission(mid).grant().model_dump(mode="json")
+    assert not {"docker", "sudo", "protected", "backup", "exclusions"} & set(grant)
     st.approve_all(mid)
-    with pytest.raises(RepairRefused, match="2375"):
-        st.sup.start(mid)
     st.sup.tick()
-    st.sup.tick()
-    assert st.status(mid) == "awaiting_decision" and st.runtimes == []
+    assert st.status(mid) in ("executing", "verifying", "completed") and len(st.runtimes) == 1
+    assert "executing" in states(st, mid)
+    created = noted(st, mid, "checkpoint.created")[0]
+    assert "no_backup" not in created
 
 
 def test_without_the_controls_wired_a_repair_start_is_still_unsupported(stack):
@@ -205,7 +232,7 @@ def test_without_the_controls_wired_a_repair_start_is_still_unsupported(stack):
         st.sup.start(mid)
 
 
-def test_no_baseline_or_backup_means_no_checkpoint_and_no_session(stack):
+def test_no_baseline_means_no_checkpoint_and_no_session(stack):
     st = stack()
     mid = st.propose()["mission_id"]
     st.approve_all(mid)
@@ -275,7 +302,7 @@ def test_a_restart_at_each_phase_classifies_from_the_host_and_never_replays(stac
     assert st.status(mid) == "executing"
     survivor = st.sup.__class__(st.store, st.cont, lambda m: st.runtimes.append("restarted") or None, st.clock, enabled=True,
                                 artifact_dir=st.sup.artifact_dir, workspace_dir=st.sup.workspace_dir,
-                                repair_gate=st.sup.repair_gate, verifier=st.verifier, checkpoint=st.env.svc)
+                                verifier=st.verifier, checkpoint=st.env.svc)
     survivor.recover()
     for _ in range(3):
         survivor.poll_all()
@@ -291,7 +318,7 @@ def test_a_restart_during_verification_verifies_again_and_completes_only_through
     st.sup.tick()
     assert st.status(mid) == "verifying" and st.ms.live_session(mid) is None
     fresh = st.sup.__class__(st.store, st.cont, None, st.clock, enabled=True, artifact_dir=st.sup.artifact_dir,
-                             workspace_dir=st.sup.workspace_dir, repair_gate=st.sup.repair_gate, verifier=st.verifier,
+                             workspace_dir=st.sup.workspace_dir, verifier=st.verifier,
                              checkpoint=st.env.svc)
     fresh.recover()
     fresh._verifying[mid].result(10)

@@ -1683,7 +1683,7 @@ class _LauncherHandler:
     def _step(self, ctx):
         from planet_express.missions.launcher.setup_steps import launcher_steps
         name = ctx.step.params["name"]
-        for candidate in launcher_steps(self._paths_for(ctx)):
+        for candidate in launcher_steps(self._paths_for(ctx), include_retired=True):      # an older plan's step can still be undone
             if candidate.name == name:
                 return candidate
         raise StepFailure(f"{name} does not apply on a {ctx.step.params['flavour']} host")

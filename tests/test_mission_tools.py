@@ -18,7 +18,6 @@ from planet_express.missions.grants import (
     scan_session_env,
 )
 from planet_express.missions.models import Grant
-from planet_express.missions.protected import Discovery, build_protected
 from planet_express.missions.store import MissionStore
 from planet_express.missions.tools import (
     Tool,
@@ -64,9 +63,7 @@ class Runner:
 def setup(tmp_path, creds=("tool:arr.queue_item",), status="investigating", **grant_over):
     store, clock = make_store(tmp_path)
     ms = MissionStore(store)
-    prot = build_protected(site=["service:media/traefik"], discovery=Discovery(stacks_root=STACKS))
-    body = {"tier": "propose", "scope": {"stacks": ["media"], "hosts": ["local"]}, "credentials": list(creds),
-            "protected": {"resources": list(prot.resources)}}
+    body = {"tier": "propose", "scope": {"stacks": ["media"], "hosts": ["local"]}, "credentials": list(creds)}
     body.update(grant_over)
     m = new_mission(ms, Grant.model_validate(body))
     advance_to(ms, m.id, "queued", "investigating")
@@ -76,7 +73,7 @@ def setup(tmp_path, creds=("tool:arr.queue_item",), status="investigating", **gr
              "app.health_get": ToolSite(urls={"media/qbit": "http://qbit.lan:8080", "media/traefik": "http://t.lan"}),
              "dns.rewrite": ToolSite(urls={"primary": "http://adguard.lan:3000"})}
     broker = ToolBroker(default_registry(), missions=ms, secrets=SECRETS.get, http=http, runner=runner, sites=sites,
-                        stacks_root=str(tmp_path / "stacks"), protected=prot.resources)
+                        stacks_root=str(tmp_path / "stacks"))
     (tmp_path / "stacks" / "media").mkdir(parents=True)
     (tmp_path / "stacks" / "media" / "docker-compose.yml").write_text("services: {}\n")
     return ms, m, broker, Sess("S-1", m.id), http, runner
@@ -148,8 +145,7 @@ def test_scope_fields_are_checked_against_the_grant(tmp_path):
         broker.invoke(sess, "compose.dry_run", {"stack": "photos"})
     assert exc.value.code == "unauthorized"
     assert broker.invoke(sess, "app.health_get", {"service": "media/qbit"})["ok"]
-    with pytest.raises(RpcError):
-        broker.invoke(sess, "app.health_get", {"service": "media/traefik"})       # protected wins
+    assert broker.invoke(sess, "app.health_get", {"service": "media/traefik"})["ok"]       # trust mode: nothing in scope is protected
     with pytest.raises(RpcError):
         broker.invoke(sess, "app.health_get", {"service": "other/db"})
     with pytest.raises(RpcError):
@@ -239,9 +235,8 @@ def test_no_secret_is_in_the_session_env_cwd_readable_files_or_broker_responses(
     ws = tmp_path / "ws"
     ws.mkdir()
     grant = m.grant()
-    prot = build_protected(site=[], discovery=Discovery(stacks_root=str(stacks)))
     base = {"PATH": "/bin", **{f"{k.upper().replace('-', '_')}_KEY": v for k, v in SECRETS.items()}}
-    se = build_session_env(grant, mission_id=m.id, workspace=str(ws), worker_socket="/run/s.sock", protected=prot,
+    se = build_session_env(grant, mission_id=m.id, workspace=str(ws), worker_socket="/run/s.sock",
                            stacks_root=str(stacks), base_env=base, known_tools=default_registry().names(),
                            secret_values=list(SECRETS.values()))
     out = broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})

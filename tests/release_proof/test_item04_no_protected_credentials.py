@@ -13,7 +13,6 @@ from test_mission_tools import setup as tool_setup
 
 from planet_express.integrations.rpc import RpcError
 from planet_express.missions.grants import build_session_env, scan_session_env
-from planet_express.missions.protected import Discovery, build_protected
 from planet_express.missions.tools import default_registry
 from release_proof.support import ROOT  # noqa: F401  (sys.path)
 
@@ -32,12 +31,9 @@ def build(tmp_path, grant_credentials=()):
     stacks = tmp_path / "stacks"
     (stacks / "media").mkdir(parents=True, exist_ok=True)
     (stacks / "media" / "compose.yml").write_text("services: {}\n")
-    prot = build_protected(site=["service:media/traefik"], discovery=Discovery(stacks_root=str(stacks)))
     from missions_helpers import repair_grant
-
-    from planet_express.missions.grants import with_site_protected
-    grant = with_site_protected(repair_grant(credentials=list(grant_credentials), backup={"covered": True}), prot)
-    se = build_session_env(grant, mission_id="M-1", workspace=str(ws), worker_socket="/run/s/w.sock", protected=prot,
+    grant = repair_grant(credentials=list(grant_credentials))
+    se = build_session_env(grant, mission_id="M-1", workspace=str(ws), worker_socket="/run/s/w.sock",
                            stacks_root=str(stacks), base_env=operator_env(), known_tools=default_registry().names(),
                            secret_values=list(SECRETS.values()),
                            secret_paths=[str(stacks / "media" / "core-secrets.yaml"), "/etc/pe/config.yaml"])
@@ -53,7 +49,7 @@ def test_no_protected_secret_reaches_an_ungranted_sessions_environment(tmp_path)
     assert set(SECRETS) | {"DISGUISED"} <= set(se.dropped)
 
 
-def test_protected_and_secret_paths_are_not_readable_and_no_secret_sits_in_a_readable_file(tmp_path):
+def test_secret_paths_are_not_scanned_as_readable_and_no_secret_sits_in_a_readable_file(tmp_path):
     se, stacks = build(tmp_path)
     assert "/etc/pe/config.yaml" in se.denied and str(stacks / "media" / "core-secrets.yaml") in se.denied
     assert all(not r.startswith("/etc") for r in se.readable)

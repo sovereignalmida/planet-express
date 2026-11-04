@@ -27,9 +27,9 @@ OVERRIDE_NAMES = ("compose.override.yaml", "compose.override.yml", "docker-compo
 COMPOSE_NAMES = (*BASE_NAMES, *OVERRIDE_NAMES, ".env")
 # The facts restore asserts after a recreate (contract §7 "Restorable"): compared exactly.
 RESTORABLE_FIELDS = ("image_id", "command", "env_hash", "mounts", "networks", "labels", "restart_policy", "health")
-# DockerProxyService adds this provenance marker to containers it creates, solely so the proxy re-checks their immutable
-# mount/network properties at start. A Core-owned checkpoint restore recreates directly and deliberately does not add it.
-# It is bookkeeping, not service configuration, so it must not make an otherwise exact restore look incomplete.
+# Before trust mode the per-session Docker proxy added this provenance marker to containers it created. Such containers may still
+# carry it; a checkpoint restore recreates directly and never adds it. It is bookkeeping, not service configuration, so it must
+# not make an otherwise exact restore look incomplete.
 PROXY_CREATED_LABEL = "io.planetexpress.created-by-proxy"
 # Compose rewrites these on every recreate. `config-hash` is among them: measured on Compose v2, a service with
 # `network_mode: service:<other>` gets a different hash after every recreate (the resolved container id is hashed), so it cannot

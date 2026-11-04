@@ -71,27 +71,28 @@ def test_repairs_that_are_not_available_are_said_rather_than_silent(rig):
 
 def test_a_schema_refusal_names_the_field_and_the_problem_without_the_input_or_a_link():
     with pytest.raises(ValueError) as exc:
-        Grant.model_validate({"tier": "repair", "protected": {"resources": ["x"] * 5000}, "docker": "nope"})
+        Grant.model_validate({"tier": "repair", "credentials": ["x"] * 300, "on_verify_fail": "nope"})
     text = plain_error(exc.value)
-    assert text.startswith("protected.resources: List should have at most 4096 items")
-    assert "docker: Input should be" in text
+    assert text.startswith("credentials: List should have at most 256 items")
+    assert "on_verify_fail: Input should be" in text
     for raw in ("input_value", "errors.pydantic.dev", "validation errors for Grant", "type=too_long"):
         assert raw not in text
 
 
 def test_a_model_level_refusal_drops_pydantics_prefix_and_other_errors_are_unchanged():
+    from planet_express.missions.models import VerificationPlan
     with pytest.raises(ValueError) as exc:
-        Grant.model_validate({"tier": "repair", "docker": "lifecycle", "credentials": ["tool:x"]})
-    assert plain_error(exc.value) == "the request: docker: lifecycle carries no sudo rules, paths, mounts or credentials"
+        VerificationPlan.model_validate({"checks": [{"id": "a", "check": "http"}, {"id": "a", "check": "http"}]})
+    assert plain_error(exc.value) == "the request: verification check ids must be unique"
     assert plain_error(RuntimeError("the host is busy")) == "the host is busy"
 
 
 def test_an_invalid_grant_reaches_the_console_in_words(rig):
-    rig.flow.protected = lambda: (_ for _ in ()).throw(ValueError("the site protects 5000 resources, more than the 4096 a grant can carry"))
+    rig.flow.validator = lambda grant, plan: ["scope stack 'ghost' is not in the discovered inventory"]
     from planet_express.console.api import ConsoleApiError
     with pytest.raises(ConsoleApiError) as err:
         rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
-    assert "more than the 4096 a grant can carry" in str(err.value) and "pydantic" not in str(err.value)
+    assert "not in the discovered inventory" in str(err.value) and "pydantic" not in str(err.value)
 
 
 def test_a_wait_after_a_failed_attempt_is_said_again(rig):

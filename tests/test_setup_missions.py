@@ -24,7 +24,8 @@ from planet_express.setup.steps import CATALOGUE
 from planet_express.setup.undo import undo as _undo
 
 REPO = str(Path(__file__).resolve().parent.parent)
-NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access", "sudoers-readable", "cgroup-tree",
+# `sudoers-readable` is retired (trust mode removed the Repair gate it served): new plans leave it out, uninstall still undoes it.
+NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access", "cgroup-tree",
          "workspace-root", "socket-root"]
 MOS_NAMES = ["session-uid-range", "launcher-helper", "helper-store", "cgroup-tree", "workspace-root", "socket-root"]
 ON = {"enabled": True}
@@ -53,11 +54,11 @@ def test_with_missions_off_the_plan_ids_are_exactly_what_they_were_before_the_an
     # Re-pinned (fresh systemd, MOS, full tier) when launch.conf moved to /etc/planetexpress-launch and MOS gained
     # <home>/launch/launch.conf: the scan report the plan id covers now probes those paths. The steps of a missions-off
     # plan are unchanged. The uninstall id is unchanged. Re-pinned again in slice 7b: the config file setup renders now carries
-    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed. All three re-pinned for the model broker: the config file setup renders now carries the `missions.model_broker` defaults (enabled: false); no step changed. MOS re-pinned after the v3 hotfix merge: the post-start.sh hook body (part of the plan) now runs in a background subshell; the full-tier id moved with systemd/casa-stacks.service.template (PR #15 widened the stack start-up budget). Re-pinned for the Console: the config file setup renders now carries the `missions.console` defaults (enabled: false); no step changed. Re-pinned for investigation access: the rendered config carries `missions.read_log_groups: []`; no step changed. Re-pinned for trust mode: the rendered config carries `missions.session_groups` (the default four), the 64-uid default range and `hooks.command: [/usr/bin/python3]`; no step changed; the uninstall id is unchanged. Re-pinned for trust mode step 3: the rendered config no longer carries the retired `tripwire_interval_s`, `tripwire_investigating_interval_s` and `tripwire_accept_blind`; no step changed; the uninstall id is unchanged.
-    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "8d515ebb491ca4fa"
-    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "635566d276b53b54"
+    # the two new missions.* defaults (docker_socket, worker_sudo_rules, worker_sudo_all_sessions, docker_label_allow); no step changed. Re-pinned in G4-F1 for `missions.protected_absent`, and in G4-F2 for the new default session uid range (200000-200999); no step changed. All three re-pinned for the model broker: the config file setup renders now carries the `missions.model_broker` defaults (enabled: false); no step changed. MOS re-pinned after the v3 hotfix merge: the post-start.sh hook body (part of the plan) now runs in a background subshell; the full-tier id moved with systemd/casa-stacks.service.template (PR #15 widened the stack start-up budget). Re-pinned for the Console: the config file setup renders now carries the `missions.console` defaults (enabled: false); no step changed. Re-pinned for investigation access: the rendered config carries `missions.read_log_groups: []`; no step changed. Re-pinned for trust mode: the rendered config carries `missions.session_groups` (the default four), the 64-uid default range and `hooks.command: [/usr/bin/python3]`; no step changed; the uninstall id is unchanged. Re-pinned for trust mode step 3: the rendered config no longer carries the retired `tripwire_interval_s`, `tripwire_investigating_interval_s` and `tripwire_accept_blind`; no step changed; the uninstall id is unchanged. Re-pinned for trust mode step 4: the rendered config no longer carries the retired protected-set, Docker-proxy, worker-sudo and backup-source keys, and new plans no longer include the retired `sudoers-readable` step; the uninstall id is unchanged.
+    assert plan(systemd_report(), answers()).to_public()["plan_id"] == "e88ef1f5d47952b3"
+    assert plan(mos_report(), mos_answers()).to_public()["plan_id"] == "655a91c88e974c98"
     full = answers(tier="full", sudo_units=[{"unit": "x.service"}])
-    assert plan(systemd_report(), full).to_public()["plan_id"] == "b8ba42343ba1081b"
+    assert plan(systemd_report(), full).to_public()["plan_id"] == "e0dad70ff83bb30d"
     live = discover(ubuntu(files=LIVE_FILES), repo_root="/opt/pe")
     uninstall = plan(live, answers(story="uninstall", install_dir="/home/pe/apps/pe"))
     assert uninstall.applicable and uninstall.to_public()["plan_id"] == "62a6ede66c11a511"
@@ -645,7 +646,8 @@ def live_uninstall(**over):
 def test_uninstall_with_missions_on_removes_the_launcher_steps_after_the_services_are_stopped():
     p = live_uninstall(missions=ON)
     assert p.applicable, p.blocked
-    assert [s.target for s in removals(p)] == list(reversed(NAMES))
+    with_retired = [*NAMES[:4], "sudoers-readable", *NAMES[4:]]        # uninstall still takes away what an older plan made
+    assert [s.target for s in removals(p)] == list(reversed(with_retired))
     assert all(s.needs_root and s.reversible for s in removals(p))
     ids = [s.id for s in p.steps]
     stops = [s.id for s in p.steps if s.kind == "service.disable"]

@@ -523,9 +523,9 @@ def _launcher_expectation(b: _Builder, path: str) -> dict | None:
     return {"expected_sha256": digest}
 
 
-def _launcher_step_objects(params: dict) -> list:
+def _launcher_step_objects(params: dict, *, include_retired: bool = False) -> list:
     from planet_express.missions.launcher.setup_steps import launcher_steps
-    return launcher_steps(_launcher_paths(params))
+    return launcher_steps(_launcher_paths(params), include_retired=include_retired)
 
 
 def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> None:
@@ -602,11 +602,6 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
             f"with no account. Writes {paths.session_sudoers} (root, 0440), checked with visudo -c before it is moved into "
             f"place, containing exactly: {SessionAccess(paths).wanted().decode().strip()}. Undo removes exactly what this "
             "made; it refuses if any of it has changed since.")),
-        "sudoers-readable": ("Let Core read the sudo rules", "/etc/sudoers", "R2", b.text(
-            f"Adds a read-only ACL entry for {params['core_user']} to /etc/sudoers and every file in /etc/sudoers.d, and a "
-            "default entry on the directory so a file added later inherits it. Before a Repair mission starts, Core checks "
-            "that no sudo rule it did not write lets it act as root without a password, and it cannot do that without "
-            "reading them. File modes stay 0440; visudo -c is run afterwards. Nothing is done if Core runs as root.")),
         "cgroup-tree": ("Delegate a cgroup to Core" if not mos else "Recreate the sessions cgroup at every boot",
                         cgroup_path, "R3" if mos else "R2", {
             "type": "file", "path": cgroup_path, "mode": "0700" if mos else "0644", "owner": "root:root",
@@ -802,7 +797,7 @@ def _uninstall(b: _Builder) -> None:
         remove("Remove the sudo grant", "/etc/sudoers.d/planetexpress", risk="R3")
     if _missions_on(a):
         params = _launcher_params(b, p)
-        launcher = [s.name for s in _launcher_step_objects(params)]
+        launcher = [s.name for s in _launcher_step_objects(params, include_retired=True)]   # a retired step an older plan made too
         for name in reversed(launcher):
             b.add("launcher.remove", f"Remove {name} (if setup made it)", name, {"name": name, **params},
                   b.text(f"Takes away what the launcher setup made for {name}, only if it is exactly what setup writes "

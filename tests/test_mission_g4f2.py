@@ -113,32 +113,6 @@ def test_a_non_elevated_grant_row_does_not_satisfy_a_critical_mission(stack):
     assert any("elevated" in r and "grant" in r for r in verdict.reasons)
 
 
-# ── #3 exclusions that name a resource are enforced like protected, at every layer ───────────────────
-
-EXCLUDED = "service:media/qbit"
-
-
-def test_a_resource_exclusion_is_enforced_and_a_tag_is_advisory():
-    g = Grant.model_validate({"tier": "repair", "exclusions": [EXCLUDED, "network"]})
-    assert g.enforced_exclusions() == ("host:local/service:media/qbit",)
-    assert g.advisory_exclusions() == ("network",)
-
-
-def test_the_card_says_which_exclusions_are_hard(stack):
-    st = stack()
-    mid = st.propose(exclusions=[EXCLUDED, "network"])["mission_id"]
-    prot = st.flow.card(mid)["protected"]
-    assert prot["exclusions_enforced"] == ["host:local/service:media/qbit"] and prot["exclusions_advisory"] == ["network"]
-
-
-def test_the_proxy_scope_treats_an_excluded_resource_as_protected():
-    from planet_express.missions.dockerproxy.policy import Scope
-    g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"]}, "exclusions": [EXCLUDED]})
-    scope = Scope.from_grant(g, stacks_root="/srv/stacks")
-    assert scope.classify("host:local/service:media/qbit") == "protected"
-    assert scope.classify("host:local/service:media/other") == "in_scope"
-
-
 # ── #6 stopping the runner: no new starts, then the sessions proven gone ─────────────────────────────
 
 def test_runner_stop_closes_the_supervisor_to_starts_before_the_sessions_are_killed():
@@ -169,44 +143,6 @@ def test_a_supervisor_that_is_shutting_down_refuses_every_start(tmp_path):
         st.close()
 
 
-# ── review round: exclusions (#5 hosts, #6 carve-out only, #13 one helper) ──────────────────────────
-
-def test_a_bare_exclusion_is_enforced_on_every_host_in_scope():
-    g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["nas", "local"]},
-                              "exclusions": ["service:media/qbit"]})
-    assert g.enforced_exclusions() == ("host:nas/service:media/qbit", "host:local/service:media/qbit")
-
-
-def test_proxy_scope_on_a_non_local_host_enforces_a_bare_exclusion():
-    from planet_express.missions.dockerproxy.policy import Scope
-    g = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["nas"]},
-                              "exclusions": ["service:media/qbit"]})
-    assert Scope.from_grant(g, stacks_root="/srv/stacks").classify("host:nas/service:media/qbit") == "protected"
-
-
-def test_an_excluded_child_does_not_block_its_in_scope_parent():
-    from planet_express.missions.dockerproxy.policy import Scope
-    g = Grant.model_validate({"tier": "repair", "scope": {"paths": ["/srv/media"]}, "exclusions": ["path:/srv/media/db"]})
-    scope = Scope.from_grant(g, stacks_root="/srv/stacks")
-    assert scope.classify("host:local/path:/srv/media") == "in_scope"
-    assert scope.classify("host:local/path:/srv/media/other") == "in_scope"
-    assert scope.classify("host:local/path:/srv/media/db") == "protected"
-    assert scope.classify("host:local/path:/srv/media/db/x") == "protected"
-    assert scope.classify_path("host:local/path:/srv/media/db/x") == "protected"
-
-
-def test_every_consumer_gets_protection_from_the_one_helper():
-    """The invariant is structural: the consumers call Grant.effective_protection and none reads the raw fields."""
-    import inspect
-
-    from planet_express.missions import tools
-    from planet_express.missions.dockerproxy import policy
-    for module in (tools, policy):
-        src = inspect.getsource(module)
-        assert "effective_protection(" in src, module.__name__
-        assert "grant.protected.resources" not in src and "grant.exclusions" not in src, module.__name__
-
-
 def test_a_start_in_flight_when_shutdown_begins_launches_nothing_and_leaves_no_session(tmp_path):
     from repair_fakes import build
 
@@ -215,12 +151,13 @@ def test_a_start_in_flight_when_shutdown_begins_launches_nothing_and_leaves_no_s
     try:
         mid = st.propose()["mission_id"]
         st.approve_all(mid)
-        real = st.sup.require_repair_preconditions
+        real = st.sup._acquire_early
 
-        def slow_check():                                    # the start has passed its first look at the flag...
-            real()
+        def slow_check(mission):                             # the start has passed its first look at the flag...
+            out = real(mission)
             st.sup.begin_shutdown()                          # ...and shutdown begins before the session is registered
-        st.sup.require_repair_preconditions = slow_check
+            return out
+        st.sup._acquire_early = slow_check
         with pytest.raises(RepairNotReady):
             st.sup.start(mid)
         assert st.runtimes == [] and mid not in st.sup._runs
@@ -237,13 +174,14 @@ def test_begin_shutdown_waits_for_a_start_that_is_already_launching(tmp_path):
         mid = st.propose()["mission_id"]
         st.approve_all(mid)
         inside, release = threading.Event(), threading.Event()
-        real = st.sup.require_repair_preconditions
+        real = st.sup._acquire_early
 
-        def slow_check():
-            real()
+        def slow_check(mission):
+            out = real(mission)
             inside.set()
             assert release.wait(10)
-        st.sup.require_repair_preconditions = slow_check
+            return out
+        st.sup._acquire_early = slow_check
         starter = threading.Thread(target=st.sup.start, args=(mid,))
         starter.start()
         assert inside.wait(10)
@@ -257,19 +195,6 @@ def test_begin_shutdown_waits_for_a_start_that_is_already_launching(tmp_path):
         stopper.join(10)
     finally:
         st.close()
-
-
-def test_the_tool_broker_refuses_an_excluded_resource(tmp_path):
-    from test_mission_tools import setup
-
-    from planet_express.integrations.rpc import RpcError
-    (tmp_path / "a").mkdir()
-    (tmp_path / "b").mkdir()
-    _, _, broker, sess, *_ = setup(tmp_path / "a", creds=("tool:app.health_get",))
-    assert broker.invoke(sess, "app.health_get", {"service": "media/qbit"})["ok"]          # allowed without the exclusion
-    ms, m, broker, sess, http, runner = setup(tmp_path / "b", creds=("tool:app.health_get",), exclusions=[EXCLUDED])
-    with pytest.raises(RpcError):
-        broker.invoke(sess, "app.health_get", {"service": "media/qbit"})
 
 
 # ── #8 the default session uid range is clear of systemd's DynamicUser range ─────────────────────────

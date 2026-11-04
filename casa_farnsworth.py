@@ -2069,9 +2069,7 @@ def _repair_wiring():
     from planet_express.missions.assembly import RepairWiring
     from planet_express.missions.checkpoint import MosCheckpointProvider, SystemdCheckpointProvider
     provider_cls = MosCheckpointProvider if config.HOST_CONTROL_PROVIDER == "mos" else SystemdCheckpointProvider
-    return RepairWiring(provider=provider_cls(config.get_stack_orchestrator()), scan=leela.run_full,
-                        core_user=pwd.getpwuid(os.geteuid()).pw_name,
-                        v3_sudo_allowed=None if config.HOST_CONTROL_PROVIDER == "mos" else bender._sudo_action_allowed)
+    return RepairWiring(provider=provider_cls(config.get_stack_orchestrator()), scan=leela.run_full)
 
 
 def _is_mission_rollback(text: str, missions: MissionService | None) -> bool:

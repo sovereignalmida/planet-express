@@ -19,16 +19,14 @@ H = "a" * 64
 def card(**over):
     base = {"mission_id": "M-2", "title": "restart media", "goal": "g", "status": "awaiting_decision", "tier": "repair",
             "grant_hash": H, "plan_hash": None, "standing_grant_id": None,
-            "warnings": [{"kind": "broad_sudo", "text": "BROAD SUDO: this worker may run any privileged command."}],
-            "backup": {"covered": False, "acknowledged_no_backup": True, "state": "stale"},
+            "warnings": [{"kind": "full_access", "text": "FULL ACCESS: the session runs with your access to this host."}],
             "scope": {"stacks": ["media"], "hosts": ["local"]},
-            "protected": {"resources": [], "count": 3, "exclusions": ["network"]},
             "budgets": {"wall_s": 900, "tool_calls": 100, "output_bytes": 1000, "retries": 1},
             "verification": {"plan_sha256": H, "checks": [{"id": "route", "check": "http", "params": {"url": "http://x/"}}],
                              "on_verify_fail": "rollback"},
-            "sudo": {"mode": "broad", "rules": []}, "docker": "proxy", "credentials": [], "window": {"deny": [], "allow": None},
+            "credentials": [], "window": {"deny": [], "allow": None},
             "required": [{"phase": "grant", "bound": H, "elevated": False, "state": "pending"},
-                         {"phase": "broad_sudo", "bound": H, "elevated": True, "state": "pending"}],
+                         {"phase": "critical:0", "bound": H, "elevated": True, "state": "pending"}],
             "ready": False}
     base.update(over)
     return base
@@ -49,8 +47,8 @@ def test_the_card_is_rendered_with_the_elevated_risks_before_the_scope(web):
     client, core, _ = repair(web)
     page = client.get("/missions/M-2").get_data(as_text=True)
     assert ("mission.approval_card", {"mission_id": "M-2"}) in core.calls
-    assert page.index("BROAD SUDO") < page.index("SCOPE") and "NOT covered" in page and "no-backup acknowledged" in page
-    assert 'action="/missions/M-2/approve"' in page and 'name="phase" value="broad_sudo"' in page
+    assert page.index("FULL ACCESS") < page.index("SCOPE") and "BACKUP" not in page and "SUDO" not in page
+    assert 'action="/missions/M-2/approve"' in page and 'name="phase" value="critical:0"' in page
     assert 'name="grant_hash" value="' + H + '"' in page and "needs elevation" in page
     assert 'action="/missions/M-2/deny"' in page
 
@@ -152,7 +150,7 @@ def test_the_standing_page_lists_and_offers_revoke_and_create(web):
     page = client.get("/missions/standing").get_data(as_text=True)
     assert core.calls[-1] == ("standing.list", {"include_inactive": False})
     assert "SG-1-v1" in page and 'action="/missions/standing/SG-1-v1/revoke"' in page and 'action="/missions/standing"' in page
-    assert "never change, critical, broad sudo or no-backup" in page
+    assert "never change or critical" in page
     client.get("/missions/standing?all=1")
     assert core.calls[-1] == ("standing.list", {"include_inactive": True})
 

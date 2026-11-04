@@ -13,8 +13,8 @@ the history.
 
 - **Mission control, off by default.** An operator can hand a bounded job to a supervised agent session
   (investigate, propose, or repair inside a grant you approve). The safety model for missions is
-  consequence control rather than a typed-step catalogue: a scoped Docker proxy, generated sudo, a
-  checkpoint and restore service, a tripwire monitor over protected domains, per-resource leases, and a
+  trust mode: once you confirm a plan the session has your access (Docker, sudo), wrapped in a checkpoint
+  and restore service, a full record, per-resource leases and a short list of hard blocks, and a
   mission only completes when Planet Express's own pre-agreed checks pass, never on the agent's say-so. Typed
   steps remain the fast path for known repairs. Nothing mission-related runs unless `missions.enabled` is
   true; read [INSTALL.md](INSTALL.md) "Mission control" first. No agent is bundled.
@@ -194,7 +194,7 @@ a real registry, systemd and MOS service installation, and the Telegram bot's li
 rehearsed on throwaway virtual machines before anything is deployed:
 
 - **mission control** has a privileged test suite and a scripted repair rehearsal that run as root on a
-  disposable Ubuntu VM (a real Docker daemon, the scoped proxy, checkpoint and restore, tripwires); the
+  disposable Ubuntu VM (a real Docker daemon, checkpoint and restore); the
   rehearsal found and fixed several races no unit test reached. Neither runs in CI;
 - the **setup wizard** has been run end to end (install, repair, uninstall, undo, reboot) on a fresh
   Ubuntu 24.04 VM and a fresh MOS VM, which found bugs no unit test could (FAT renumbering inodes at every

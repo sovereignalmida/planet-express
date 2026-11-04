@@ -210,7 +210,7 @@
     function ctxRows(x) {
       const list = items => items.length ? items.join(", ") : "none";
       if (state.ctxTab === "scope") return [["Can act on", { run: "the confirmed run", last_run: "nothing: the last run has ended" }[x.scope.kind] || "nothing: read-only"], ["Stacks", list(x.scope.stacks)],
-        ["Services", list(x.scope.services)], ["Paths", list(x.scope.paths)], ["Protected (enforced)", String(x.scope.protected)]];
+        ["Services", list(x.scope.services)]];
       if (state.ctxTab === "limits") return [["Model budget (this conversation)", x.limits.token_budget.toLocaleString() + " tokens"], ["Time" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), x.limits.minutes + " min"], ["Steps" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), String(x.limits.steps)]];
       if (state.ctxTab === "record") return [["Events", String(x.record.events)], ["Runs", String(x.record.runs)], ["Checkpoint", x.record.checkpoint ? "taken" : "none"]];
       return [["Incident", x.evidence.incident || "none"], ["Turns", String(x.evidence.turns)], ["Budget used", x.evidence.budget_used_pct + "%"]];
@@ -504,18 +504,14 @@
     }
 
     // ── the confirm sheet: what exactly is being authorised, bound to a fingerprint ──
-    async function openConfirm(planInfo, index, noBackup) {
+    async function openConfirm(planInfo, index) {
       if (state.preparing || state.sheetBusy) return;                    // a double click prepares once
       state.preparing = true; state.error = null; state.sheetError = null;
       const fields = { plan_id: String(planInfo.id), option: String(index) };
-      if (noBackup) fields.no_backup = "1";
       try {
         state.sheet = await post("/api/console/" + state.selected + "/confirm/prepare", fields);
         state.sheet.index = index; renderSheet();
-      } catch (e) {
-        if (e.code === "no_backup") { state.sheet = { ask: "no_backup", planInfo, index, message: e.message }; renderSheet(); }
-        else fail(e);
-      } finally { state.preparing = false; }
+      } catch (e) { fail(e); } finally { state.preparing = false; }
     }
     async function closeSheet(withdraw) {
       if (state.sheetBusy) return;                                       // authorising: Back, Escape and the scrim wait until it has answered
@@ -538,33 +534,17 @@
         state.sheet = null; state.sheetBusy = false; renderSheet(); state.firstPaint = "bottom"; await loadFeed(); await refreshList();
       } catch (e) { state.sheetBusy = false; state.sheetError = e.message; renderSheet(); }
     }
-    function renderAsk(v) {
-      const scrim = el("div", "pe-sheet-scrim"); scrim.addEventListener("click", () => closeSheet(false));
-      const dialog = el("div", "pe-sheet center"); dialog.setAttribute("role", "dialog"); dialog.setAttribute("aria-modal", "true"); dialog.setAttribute("aria-label", "No recent backup");
-      const go = el("button", "pe-btn warn", "Prepare it anyway (needs elevated approval)"); go.type = "button";
-      go.addEventListener("click", () => { state.sheet = null; renderSheet(); openConfirm(v.planInfo, v.index, true); });
-      const back = el("button", "pe-btn", "Back to the plan"); back.type = "button"; back.addEventListener("click", () => closeSheet(false));
-      add(dialog, el("div", "pe-kicker", "NO RECENT BACKUP"), el("h2", "pe-sheet-h", "PE will not run this by default"), el("p", "", v.message), add(el("div", "pe-sheet-btns"), go, back));
-      add(refs.sheet, scrim, dialog);
-      back.focus();
-      dialog.addEventListener("keydown", ev => {
-        if (ev.key === "Escape") { ev.preventDefault(); closeSheet(false); }
-        else if (ev.key === "Tab") { const ring = [go, back]; const i = ring.indexOf(document.activeElement); ev.preventDefault(); ring[(i + (ev.shiftKey ? ring.length - 1 : 1)) % ring.length].focus(); }
-      });
-    }
     function renderSheet() {
       refs.sheet.replaceChildren();
       const v = state.sheet;
       if (!v) return;
-      if (v.ask) { renderAsk(v); return; }
       const scrim = el("div", "pe-sheet-scrim"); scrim.addEventListener("click", () => closeSheet(true));
       const dialog = el("div", "pe-sheet center"); dialog.setAttribute("role", "dialog"); dialog.setAttribute("aria-modal", "true"); dialog.setAttribute("aria-label", "Confirm");
       const row = (label, value, warn) => add(el("div", "pe-auth-row" + (warn ? " warn" : "")), el("span", "pe-label", label), el("span", "", value));
       const scope = [...v.scope.stacks.map(s => s + " (stack)"), ...v.scope.services].join(" · ") || "nothing";
-      const wont = (v.protected.enforced.length ? v.protected.enforced.join(" · ") + " · " : "") + "protected resources stay protected (" + v.protected.count + ")" +
-        (v.protected.advisory.length ? " · " + v.protected.advisory.join(" · ") : "");
+      const wont = v.will_not_touch.length ? v.will_not_touch.join(" · ") : "nothing listed";
       const rows = el("div", "pe-auth");
-      add(rows, row("SCOPE", scope), row("BACKUP", (v.backup.covered ? "" : "Not covered. ") + v.backup.text, !v.backup.covered), row("WILL NOT TOUCH", wont),
+      add(rows, row("SCOPE", scope), row("ACCESS", v.access, true), row("WILL NOT TOUCH", wont),
           row("LIMITS", v.limits.minutes + " min · " + v.limits.steps + " steps. PE checks it worked and can roll it back."),
           row("PE WILL CHECK", v.checks.join(" · ")), row("ROLLBACK", "PE takes a checkpoint just before it starts; you can roll back to it from here."));
       const who = add(el("div", "pe-attrib"), el("span", "pe-who", v.operator.slice(0, 2).toUpperCase()),

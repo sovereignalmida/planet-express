@@ -63,8 +63,8 @@ NAME_RE, SERVICE_RE = _NAME, _SERVICE
 
 
 class OptionScope(_Strict):
-    """What the option may touch, in the host inventory's own vocabulary: stacks by name, services as `<stack>/<service>`. It is what a grant
-    is made from if the operator confirms, so it is checked against the host's inventory and the protected set, never taken on faith."""
+    """What the option works on, in the host inventory's own vocabulary: stacks by name, services as `<stack>/<service>`. It is what a grant
+    is made from if the operator confirms (its leases and what PE checks), so it is checked against the host's inventory, never taken on faith."""
     stacks: Annotated[list[StrictStr], Field(max_length=8)] = []
     services: Annotated[list[StrictStr], Field(max_length=32)] = []
 
@@ -87,16 +87,13 @@ class Option(_Strict):
     rolls_back_to: Line
     effort: Short
     scope: OptionScope
-    exclude: Annotated[list[StrictStr], Field(max_length=32)] = []      # concrete resource ids (`service:media/gluetun`) the grant must carve out
-    # The option only starts, stops or restarts containers. Confirming it mints a `docker: lifecycle` grant: the proxy then serves
-    # nothing else, so it needs no recent backup. A false claim does not widen anything: it only narrows what the run may do.
-    restart_only: StrictBool = False
+    exclude: Annotated[list[StrictStr], Field(max_length=32)] = []      # resource ids (`service:media/gluetun`) the run is told to leave alone
     checks: Annotated[list[CheckSpec], Field(min_length=1, max_length=32)]
 
     @model_validator(mode="after")
     def _carve_outs_fit_the_grant(self) -> "Option":
         if len(self.exclude) + len(self.will_not_touch) > 32:
-            raise ValueError("an option may list at most 32 things it will not touch and excludes, together")        # all of them reach the grant, none silently dropped
+            raise ValueError("an option may list at most 32 things it will not touch and excludes, together")        # all of them reach the brief, none silently dropped
         return self
 
 
@@ -135,14 +132,6 @@ def parse(doc: Any, inventory: Any = None) -> Plan:
                 canon(resource)
             except BadResource:
                 raise PlanError(f"option {index + 1}: an exclusion is not a resource id such as service:<stack>/<service>") from None
-        if option.restart_only:
-            # A restart is only done if the container started again during the run: PE adds that to every container check,
-            # and a restart-only option without one proves nothing (rc13 live run, M-11 "completed" with no restart).
-            states = [c for c in option.checks if c.check == "container_state"]
-            if not states:
-                raise PlanError(f"option {index + 1}: a restart-only option needs a container_state check for what it restarts")
-            for check in states:
-                check.params = {**check.params, "started_during_mission": True}
         try:
             parse_plan({"catalogue_v": CATALOGUE_V, "checks": [c.model_dump() for c in option.checks]})
         except PlanInvalid:
@@ -185,10 +174,13 @@ def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -
     return parse(read_doc(workspace, name), inventory)
 
 
-def restart_unbound(option: Option) -> bool:
-    """A restart-only option whose checks would not show that anything restarted (one stored before rc13.2)."""
-    states = [c for c in option.checks if c.check == "container_state"]
-    return option.restart_only and (not states or not all(c.params.get("started_during_mission") is True for c in states))
+def stored_before_trust_mode(plan_json: str) -> bool:
+    """A plan stored before trust mode: its options carry `restart_only`, which that update removed (with the restart-only grant)."""
+    try:
+        doc = json.loads(plan_json)
+        return any(isinstance(o, dict) and "restart_only" in o for o in doc.get("options", []))
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def check_phrase(check: Any) -> str:
@@ -216,7 +208,7 @@ def goal_text(option: Option) -> str:
     Built by PE from the validated option, never from free agent prose outside it."""
     lines = [f"Carry out this plan the operator approved: {option.name}.", option.summary, "", "Change only what it says:"]
     lines += [f"- {c}" for c in option.changes]
-    lines += ["", "Do not touch:"] + [f"- {w}" for w in option.will_not_touch]
+    lines += ["", "Do not touch:"] + [f"- {w}" for w in [*option.will_not_touch, *option.exclude]]
     lines += ["", f"Roll back to: {option.rolls_back_to}", "", "PE will check afterwards that:"] + [f"- {check_phrase(c)}" for c in option.checks]
     return "\n".join(lines)[:8000]
 
@@ -258,7 +250,7 @@ def json_schema() -> dict[str, Any]:
     option = {"type": "object", "additionalProperties": False, "required": names, "properties": {
         "name": text, "recommended": {"type": "boolean"}, "summary": text, "changes": {"type": "array", "items": text},
         "will_not_touch": {"type": "array", "items": text}, "risk": risk, "rolls_back_to": text, "effort": text,
-        "scope": scope, "exclude": {"type": "array", "items": text, "maxItems": 32}, "restart_only": {"type": "boolean"},
+        "scope": scope, "exclude": {"type": "array", "items": text, "maxItems": 32},
         "checks": {"type": "array", "items": check, "minItems": 1}}}
     return {"type": "object", "additionalProperties": False, "required": ["known", "unsure", "options"], "properties": {
         "known": {"type": "array", "items": text}, "unsure": {"type": "array", "items": text},
@@ -270,17 +262,15 @@ PLAN_INSTRUCTIONS = (
     "object with `known` (what the evidence shows), `unsure` (what it does not), and 1 to 3 `options`. Exactly one option has "
     "`recommended` true. Each option has: name, recommended, summary (one sentence), changes (services or files it would touch), "
     "will_not_touch, risk {level low|medium|high, text}, rolls_back_to, effort, scope, exclude (optional) and checks. `scope` is "
-    "{stacks: [...], services: [...]}: exactly what the option would touch, using ONLY names listed in INVENTORY.md (services as "
-    "<stack>/<service>); anything outside it is off limits to the execution. `exclude` lists resource ids such as service:<stack>/<service> "
-    "that must be carved out even inside the scope. Set `restart_only` true when the option only starts, stops or restarts containers "
-    "and every container in its scope ends up running again (`docker restart <container>`, not down/up or recreate; an option that "
-    "leaves something stopped is an ordinary option): PE then allows nothing else, checks itself that every in-scope service restarted, needs no recent backup for it, and the "
-    "execution cannot read the stack's files, so it restarts containers by name rather than with `docker compose`. A restart-only "
-    "option needs a container_state check for each container it restarts, and ONLY for those: PE adds that the container must have "
-    "restarted during the run, so check anything it leaves alone some other way (http, for example). `checks` are how PE will verify the "
-    "option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, no extra "
-    "fields):\n{catalogue}\nYou cannot approve a plan, and a plan carries no permissions: the operator confirms an option and PE "
-    "applies only what that option says. Do not change anything on the host yourself.")
+    "{stacks: [...], services: [...]}: what the option works on, using ONLY names listed in INVENTORY.md (services as "
+    "<stack>/<service>). PE leases it, so no other run works on it at the same time, and checkpoints its compose files before the "
+    "run. `exclude` lists resource ids such as service:<stack>/<service> the run is told to leave alone. The run that carries out "
+    "a confirmed option has full access to this host (docker, sudo), as the operator has at a terminal. `checks` are how PE will "
+    "verify the option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, "
+    "no extra fields):\n{catalogue}\nWhen the fix is a restart, add a container_state check for each container it restarts with "
+    "`started_during_mission: true`: PE then checks that the container really started again during the run, not only that it is "
+    "running. You cannot approve a plan: the operator confirms an option, and only then is it carried out. Investigate as much as "
+    "you need, but do not change anything on the host yourself before the operator confirms.")
 
 
 def instructions() -> str:

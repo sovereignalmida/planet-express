@@ -194,7 +194,9 @@ multi_host:
 #   verify:
 #     exec_allowlist: []            # binaries a verification exec_probe may run inside a container; empty: unavailable
 #   checkpoint:
-#     backup_sources: []            # [{path: /mnt/data, marker: /mnt/data/.last-backup}]: the backup floor reads these
-#   protected: []                   # additions to the built-in protected set, e.g. ["service:media/traefik"]
+#     root: /var/lib/planetexpress/checkpoints   # unset: `checkpoints` next to the state database
+#   # Removed by trust mode and ignored if still present: checkpoint.backup_sources, protected, protected_overrides,
+#   # protected_absent, live_trees, cross_host, package_paths, docker_socket, docker_label_allow, docker_proxy_ports,
+#   # worker_sudo_rules, worker_sudo_all_sessions (and the tripwire_* keys).
 #   tool_sites: {}                  # brokered tools: {dns.rewrite: {primary: "http://adguard.lan:3000"}}
 #   tool_secret_env: {}             # secret ref -> the NAME of a Core environment variable holding the key

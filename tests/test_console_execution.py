@@ -64,6 +64,7 @@ def test_a_failed_verification_shows_which_check_failed_and_offers_the_next_step
     rig = Rig(tmp_path)
     try:
         view = rig.start_run()
+        rig.st.sup._nothing_changed = lambda mission: False            # the run changed something: it waits for the operator
         rig.st.fresh = media_down()
         rig.st.drive(view["mission_id"])
         feed = rig.feed()["execution"]
@@ -149,6 +150,7 @@ def test_a_rollback_from_the_conversation_restores_the_checkpoint_and_reports_wh
         view = rig.start_run()
         compose = rig.st.env.compose
         original = compose.read_text()
+        rig.st.sup._nothing_changed = lambda mission: False            # the run changed something: it waits for the operator
         rig.st.fresh = media_down()
         rig.st.drive(view["mission_id"])
         assert rig.st.status(view["mission_id"]) == "needs_operator" and rig.feed()["execution"]["controls"]["rollback"] is True

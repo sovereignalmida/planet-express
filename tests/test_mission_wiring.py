@@ -13,7 +13,6 @@ from missions_helpers import make_store
 
 from config_schema import MissionsConfig
 from planet_express.missions.containment import FakeContainment
-from planet_express.missions.protected import build_protected_set
 from planet_express.missions.runner import MissionRunner
 from planet_express.missions.store import MissionStore
 from planet_express.missions.tools import broker_from_config
@@ -25,12 +24,9 @@ def cfg(**kw):
 
 def test_config_defaults_and_bounds():
     c = MissionsConfig()
-    assert c.protected == [] and c.protected_overrides == [] and c.tool_sites == {}
+    assert c.tool_sites == {} and not hasattr(c, "protected")
     for bad in (dict(tool_sites={"x": {"a": "ftp://h"}}), dict(tool_sites={"x": {"a": "http://u:p@h/"}}),
-                dict(tool_secret_env={"Arr": "ARR"}), dict(tool_secret_env={"arr": "PE_TOKEN"}),
-                dict(protected=[""]), dict(live_trees=["\0"]),
-                dict(cross_host=[{"name": "nas", "path": "relative"}]),
-                dict(protected_overrides=[{"resource": "path:/etc/hosts", "reason": "r", "operator": "chris", "at": 1}])):
+                dict(tool_secret_env={"Arr": "ARR"}), dict(tool_secret_env={"arr": "PE_TOKEN"})):
         with pytest.raises(ValueError):
             MissionsConfig(**bad)
 
@@ -49,32 +45,45 @@ tripwire_accept_blind:
 protected: ["service:media/traefik"]
 """)
     c = MissionsConfig(**old)
-    assert c.enabled and c.protected == ["service:media/traefik"]
+    assert c.enabled and not hasattr(c, "protected")
     assert not any(hasattr(c, k) for k in ("tripwire_interval_s", "tripwire_investigating_interval_s", "tripwire_accept_blind"))
     assert MissionsConfig(tripwire_interval_s=999, tripwire_accept_blind="not even a list").enabled is False   # ignored, not judged
     with pytest.raises(ValueError):
         MissionsConfig(tripwire_typo=1)                                        # only the retired names are let through
 
 
-def test_the_protected_set_from_config_keeps_the_defaults_and_applies_overrides(tmp_path):
-    c = MissionsConfig(protected=["service:media/traefik"], live_trees=["/home/x/repo"],
-                       cross_host=[{"name": "nas", "path": "/etc/exports"}],
-                       protected_overrides=[{"resource": "path:/etc/hosts", "reason": "managed by dhcp",
-                                             "operator": "operator:chris", "at": 3}])
-    seen = []
-    ps = build_protected_set(c, stacks_root="/srv/stacks", record=seen.append)
-    assert "host:local/service:media/traefik" in ps.resources
-    assert "host:local/path:/etc/hosts" not in ps.resources and "host:local/path:/etc/shadow" in ps.resources
-    assert "host:local/system:nas" in ps.resources and ps.live_trees == ("/home/x/repo",)
-    assert seen[0]["operator"] == "operator:chris"
+def test_an_old_config_with_the_retired_strict_settings_still_loads():
+    """Trust mode stage 4 deleted the protected set, the Docker proxy and scoped worker sudo. A config.yaml that still names their
+    keys (the live host's has `protected_absent: [backup]` and checkpoint backup sources) loads: accepted and ignored."""
+    import yaml
+
+    from config_schema import RETIRED_STRICT_KEYS
+    old = yaml.safe_load("""
+enabled: false
+protected: ["service:media/traefik"]
+protected_overrides: [{resource: "path:/etc/hosts", reason: r, operator: "operator:chris", at: 3}]
+protected_absent: [backup]
+live_trees: ["/home/x/repo"]
+cross_host: [{name: nas, path: /etc/exports}]
+package_paths: ["/opt/pkg"]
+docker_socket: /var/run/docker.sock
+docker_label_allow: ["traefik."]
+docker_proxy_ports: [2375]
+worker_sudo_rules: [{unit: plex.service, actions: [restart]}]
+worker_sudo_all_sessions: true
+checkpoint: {backup_sources: [{path: /mnt/data, marker: /mnt/data/.last}]}
+""")
+    c = MissionsConfig(**old)
+    assert not any(hasattr(c, k) for k in RETIRED_STRICT_KEYS) and not hasattr(c.checkpoint, "backup_sources")
+    assert MissionsConfig(protected="not even a list", worker_sudo_rules=7).enabled is False     # ignored, not judged
+    with pytest.raises(ValueError):
+        MissionsConfig(protected_typo=1)
 
 
 def test_disabled_missions_build_nothing_and_start_no_thread(tmp_path):
     store, _ = make_store(tmp_path)
     ms = MissionStore(store)
-    ps = build_protected_set(MissionsConfig(), stacks_root="/s")
     before = threading.active_count()
-    assert ps.resources
     assert broker_from_config(MissionsConfig(enabled=False), missions=ms, stacks_root="/s") is None
     assert threading.active_count() == before
 
@@ -129,8 +138,7 @@ def test_command_runtime_applies_the_env_policy_before_spawning(tmp_path):
     from planet_express.missions.runtime import RunContext
     from planet_express.missions.tools import default_registry
 
-    prot = build_protected_set(MissionsConfig(), stacks_root=str(tmp_path))
-    policy = make_env_policy(protected=prot, stacks_root=str(tmp_path), known_tools=default_registry().names(),
+    policy = make_env_policy(stacks_root=str(tmp_path), known_tools=default_registry().names(),
                              secret_values=lambda: ["super-secret-value-123456"])
     seen = []
     ws = tmp_path / "ws"
@@ -172,34 +180,13 @@ def test_build_mission_runner_wires_the_broker_and_env_policy_and_passes_the_res
     c = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/agent"]},
                        tool_sites={"arr.queue_item": {"sonarr": "http://s.lan:8989"}},
                        tool_secret_env={"arr-api": "ARR_API_KEY"})
-    gate = lambda: None
-    runner = build_mission_runner(store, c, containment=FakeContainment(), stacks_root=str(tmp_path), repair_gate=gate)
+    runner = build_mission_runner(store, c, containment=FakeContainment(), stacks_root=str(tmp_path))
     sup = runner.supervisor
     assert sup.tool_broker is not None and sup.tool_broker.sites["arr.queue_item"].urls == {"sonarr": "http://s.lan:8989"}
-    assert sup.repair_gate is gate and not hasattr(runner, "tripwire")
+    assert not hasattr(sup, "repair_gate") and not hasattr(sup, "docker_proxy") and not hasattr(runner, "tripwire")
     assert sup.runtime_factory(None).env_policy is not None
     bare = build_mission_runner(store, c, containment=FakeContainment())
     assert bare.supervisor.tool_broker is None and bare.supervisor.runtime_factory(None).env_policy is None
-
-
-OVERRIDE = {"resource": "path:/etc/hosts", "reason": "managed by dhcp, password=hunter2", "operator": "operator:chris", "at": 3}
-
-
-def test_overrides_without_a_record_sink_are_refused():
-    with pytest.raises(ValueError, match="record"):
-        build_protected_set(MissionsConfig(protected_overrides=[OVERRIDE]), stacks_root="/s")
-
-
-def test_an_override_through_the_runner_leaves_a_durable_redacted_record(tmp_path, cgroup2_mount):
-    from planet_express.missions.runner import build_mission_runner
-    store, _ = make_store(tmp_path)
-    c = MissionsConfig(enabled=True, runtime={"argv": ["/usr/bin/agent"]}, protected_overrides=[OVERRIDE])
-    build_mission_runner(store, c, containment=FakeContainment(), stacks_root=str(tmp_path))
-    rows = [e for e in store.list_events() if e["kind"] == "mission.protected_override"]
-    assert len(rows) == 1
-    payload = rows[0]["payload"]
-    assert payload["resource"] == "host:local/path:/etc/hosts" and payload["operator"] == "operator:chris"
-    assert "dhcp" in payload["reason"] and "hunter2" not in payload["reason"]
 
 
 def test_no_overrides_means_no_record_and_no_refusal(tmp_path, cgroup2_mount):

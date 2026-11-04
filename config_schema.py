@@ -296,6 +296,14 @@ _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 DEFAULT_SESSION_GROUPS = ("docker", "pe-session", "adm", "systemd-journal")
 # missions.* keys the tripwire read before trust mode removed it: accepted in an old config.yaml and ignored.
 RETIRED_TRIPWIRE_KEYS = frozenset({"tripwire_interval_s", "tripwire_investigating_interval_s", "tripwire_accept_blind"})
+# missions.* keys of the strict model trust mode deleted in stage 4 (the protected set and its discovery, the Docker proxy, the
+# Repair side-door gate, scoped worker sudo): accepted in an old config.yaml and ignored.
+RETIRED_STRICT_KEYS = frozenset({
+    "protected", "protected_overrides", "protected_absent", "live_trees", "cross_host", "package_paths",
+    "docker_proxy_ports", "docker_socket", "docker_label_allow", "worker_sudo_rules", "worker_sudo_all_sessions",
+})
+# missions.checkpoint.* keys of the backup floor trust mode deleted: accepted and ignored.
+RETIRED_CHECKPOINT_KEYS = frozenset({"backup_sources"})
 
 
 class MissionRuntimeConfig(BaseModel):
@@ -417,22 +425,6 @@ class MissionBudgetsConfig(BaseModel):
     retries: int = Field(default=2, ge=0)
 
 
-class CheckpointBackupSource(BaseModel):
-    """A backup the checkpoint floor can ask about: the tree it covers and the file whose mtime is its last
-    verified success."""
-    model_config = ConfigDict(extra="forbid")
-
-    path: str
-    marker: str
-
-    @field_validator("path", "marker")
-    @classmethod
-    def _absolute(cls, value: str) -> str:
-        if not value.startswith("/") or "\0" in value:
-            raise ValueError("checkpoint backup paths must be absolute")
-        return value
-
-
 class CheckpointConfig(BaseModel):
     """Checkpoint limits (v4 slice 5). Sizes are bytes."""
     model_config = ConfigDict(extra="forbid")
@@ -442,7 +434,14 @@ class CheckpointConfig(BaseModel):
     max_total_bytes: int = Field(default=256 * 1024 * 1024, gt=0)
     max_store_bytes: int = Field(default=2 * 1024 * 1024 * 1024, gt=0)
     retention_days: int = Field(default=90, gt=0)
-    backup_sources: list[CheckpointBackupSource] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired_backup_floor(cls, data):
+        """Trust mode removed the backup floor; `backup_sources` in an old config.yaml is accepted and ignored."""
+        if isinstance(data, dict) and any(k in data for k in RETIRED_CHECKPOINT_KEYS):
+            data = {k: v for k, v in data.items() if k not in RETIRED_CHECKPOINT_KEYS}
+        return data
 
     @field_validator("root")
     @classmethod
@@ -450,40 +449,6 @@ class CheckpointConfig(BaseModel):
         if path is not None and (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path
                                  or path == "/"):
             raise ValueError("missions.checkpoint.root must be a normalised absolute path")
-        return path
-
-
-class ProtectedOverrideConfig(BaseModel):
-    """A recorded decision to take one resource out of the built-in protected set (v4 slice 6)."""
-    model_config = ConfigDict(extra="forbid")
-
-    resource: str = Field(min_length=1, max_length=512)
-    reason: str = Field(min_length=1, max_length=512)
-    operator: str = Field(pattern=r"^operator:.+$", max_length=128)
-    at: int = Field(ge=0)
-
-
-class WorkerSudoRuleConfig(BaseModel):
-    """One unit the generated worker sudoers file lets a Repair session start, stop or restart (exact argv, no wildcard)."""
-    model_config = ConfigDict(extra="forbid")
-
-    unit: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.(service|socket|timer|mount|path|target)$")
-    actions: list[Literal["start", "stop", "restart"]] = Field(min_length=1, max_length=3)
-
-
-class CrossHostSystemConfig(BaseModel):
-    """A cross-host system the operator names as protected (NAS exports, edge proxy, router, DNS provider). `path` is a
-    readable copy of its configuration, when there is one."""
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-    path: str | None = None
-
-    @field_validator("path")
-    @classmethod
-    def _path(cls, path: str | None) -> str | None:
-        if path is not None and (not path.startswith("/") or "\0" in path or posixpath.normpath(path) != path):
-            raise ValueError("missions.cross_host path must be a normalised absolute path")
         return path
 
 
@@ -636,30 +601,6 @@ class MissionsConfig(BaseModel):
     # Named time windows for standing grants (`window.deny: [backup]` resolves here when the grant is created). Each entry is
     # `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]` (see missions/window.py).
     windows: dict[str, list[str]] = {}
-    # Protected domains: ADDITIONS to the built-in default set, as concrete resource ids (contract 2.3). The default set
-    # cannot be emptied from here: removing one needs a recorded override.
-    protected: list[str] = []
-    protected_overrides: list[ProtectedOverrideConfig] = []
-    # Domains this host genuinely lacks, or whose evidence Core cannot read. Discovery that cannot establish a required domain
-    # withholds Repair capability; naming the domain here acknowledges it (reported, never removes a built-in default).
-    protected_absent: list[Literal["ingress", "dns", "credentials", "backup", "data_volumes"]] = []
-    live_trees: list[str] = []            # working trees watched for destructive VCS and pushes
-    cross_host: list[CrossHostSystemConfig] = []
-    package_paths: list[str] = []         # extra package-manager state (on MOS, its package paths)
-    docker_proxy_ports: list[int] = []    # ports of an allowlisting Docker socket proxy the operator vouches for
-    # The real Docker daemon's socket, which Core's per-session proxy forwards to (a Repair worker never sees it).
-    docker_socket: str = "/var/run/docker.sock"
-    # Labels a worker may put on a container it creates, besides the compose labels, the proxy's own and those the in-scope
-    # service already carries (carried over unchanged). An entry is an exact key, or a prefix when it ends in `.`. Empty by
-    # default: labels such as `traefik.*`, `com.centurylinklabs.*`, `autoheal*` or `homepage.*` drive other, protected components.
-    docker_label_allow: list[str] = []
-    # The host-wide ceiling of the generated worker sudoers file (contract 15): units and actions, exact argv, never a
-    # wildcard. A grant's own `sudo.rules` must sit inside it. Empty: no worker sudoers file exists.
-    worker_sudo_rules: list[WorkerSudoRuleConfig] = []
-    # The generated file names every session uid, not only sessions whose grant names sudo rules (the launcher cannot yet add a
-    # per-grant group), so it grants the ceiling to Observe/Propose and rules-less Repair sessions too. Fail closed: the file is
-    # not generated, planned or treated as managed unless the operator acknowledges that here.
-    worker_sudo_all_sessions: bool = False
     # The supplementary groups EVERY session is started with, whatever its tier (trust mode): `docker` (the real socket),
     # `pe-session` (the one sudoers rule setup writes), `adm` (/var/log) and `systemd-journal` (journalctl). Any group name;
     # the launcher refuses one whose gid is 0, Core's own, or inside the session uid range. The root-owned launch.conf is
@@ -723,14 +664,6 @@ class MissionsConfig(BaseModel):
                 raise ValueError("missions.tool_secret_env maps a lowercase secret ref to an environment variable name")
         return refs
 
-    @field_validator("protected", "live_trees", "package_paths")
-    @classmethod
-    def _plain_list(cls, items: list[str]) -> list[str]:
-        for item in items:
-            if not item or len(item) > 512 or "\0" in item:
-                raise ValueError("entries must be non-empty strings of at most 512 characters")
-        return items
-
     @model_validator(mode="before")
     @classmethod
     def _retired_tripwire_settings(cls, data):
@@ -739,6 +672,17 @@ class MissionsConfig(BaseModel):
         keys are accepted and ignored, whatever they hold, because nothing reads them any more and refusing would stop Core."""
         if isinstance(data, dict) and any(k in data for k in RETIRED_TRIPWIRE_KEYS):
             data = {k: v for k, v in data.items() if k not in RETIRED_TRIPWIRE_KEYS}
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired_strict_settings(cls, data):
+        """Trust mode stage 4 deleted the protected set (`protected`, `protected_overrides`, `protected_absent`, `live_trees`,
+        `cross_host`, `package_paths`), the Docker proxy (`docker_socket`, `docker_label_allow`, `docker_proxy_ports`) and scoped
+        worker sudo (`worker_sudo_rules`, `worker_sudo_all_sessions`). A config.yaml that still names them (the live host's has
+        `protected_absent`) still loads: they are accepted and ignored, whatever they hold."""
+        if isinstance(data, dict) and any(k in data for k in RETIRED_STRICT_KEYS):
+            data = {k: v for k, v in data.items() if k not in RETIRED_STRICT_KEYS}
         return data
 
     @model_validator(mode="before")

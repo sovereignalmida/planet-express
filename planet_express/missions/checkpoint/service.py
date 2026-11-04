@@ -1,6 +1,6 @@
 """The checkpoint service (contract §7, brief slice 5).
 
-`create` validates scope, enforces the backup floor and the disk guard, then captures files and host facts into
+`create` validates scope and the disk guard, then captures files and host facts into
 the store and records the reference on the mission row. `capture_post` takes the post-change manifest.
 `restore` is compare-and-swap: any file that is not in a state this checkpoint knows (the post-change hash, or
 the original hash when it was already restored) blocks the whole restore and nothing is written, unless an
@@ -31,7 +31,7 @@ from typing import Any
 import yaml
 
 from ..events import insert_event
-from ..models import Grant, Mission
+from ..models import Mission
 from ..state import (
     NON_TERMINAL,
     TERMINAL,
@@ -41,7 +41,6 @@ from ..state import (
 )
 from ..store import MissionStore
 from . import safefs
-from .backup import BackupFreshness
 from .provider import (
     RESTORABLE_FIELDS,
     CheckpointProvider,
@@ -66,12 +65,6 @@ class CheckpointDisabled(CheckpointError):
 
 class ScopeRefused(CheckpointError):
     """The scope contains something Core cannot capture and restore (a grant cannot cover it)."""
-
-
-class BackupFloorError(CheckpointError):
-    def __init__(self, path: str, state: str):
-        super().__init__(f"{path}: backup {state}; refusing without an acknowledged no-backup grant")
-        self.path, self.state = path, state
 
 
 class DiskGuardError(CheckpointError):
@@ -100,14 +93,11 @@ class ScopeChanged(CheckpointError):
 
 
 class CheckpointId(str):
-    """The checkpoint id, carrying the one flag the caller needs: `no_backup` (the grant was acknowledged without
-    a verified backup, so the caller classes the mission Critical; this module never changes a tier)."""
-    no_backup: bool = False
+    """The checkpoint id, carrying what the caller may want to say about it."""
     facts_unavailable: tuple[str, ...] = ()       # stacks whose compose file was not valid YAML: files captured, no service facts
 
-    def __new__(cls, value: str, no_backup: bool = False, facts_unavailable: tuple[str, ...] = ()):
+    def __new__(cls, value: str, facts_unavailable: tuple[str, ...] = ()):
         obj = super().__new__(cls, value)
-        obj.no_backup = no_backup
         obj.facts_unavailable = facts_unavailable
         return obj
 
@@ -129,14 +119,13 @@ class CheckpointScope:
     stacks: tuple[str, ...] = ()
     services: tuple[str, ...] = ()           # "<stack>/<service>"
     files: tuple[str, ...] = ()              # extra absolute file paths to capture
-    data_paths: tuple[str, ...] = ()         # mounts and directories: not captured, the backup floor applies
     units: tuple[str, ...] = ()
 
     @classmethod
     def from_grant_scope(cls, scope: Any, *, units: Sequence[str] = ()) -> "CheckpointScope":
-        files = tuple(p for p in scope.paths if not os.path.isdir(p))
-        dirs = tuple(p for p in scope.paths if os.path.isdir(p))
-        return cls(tuple(scope.stacks), tuple(scope.services), files, (*scope.mounts, *dirs), tuple(units))
+        """A Repair's checkpoint: its stacks' and services' compose files and what they reference, and the container facts.
+        Data volumes are not captured (that is a backup's job, and trust mode does not require one)."""
+        return cls(tuple(scope.stacks), tuple(scope.services), (), tuple(units))
 
 
 @dataclass
@@ -192,7 +181,7 @@ class _Hooks:
 
 class CheckpointService:
     def __init__(self, *, mission_store: MissionStore, root: Path | str, stacks_root: Path | str,
-                 provider: CheckpointProvider, backup: BackupFreshness,
+                 provider: CheckpointProvider,
                  settings: CheckpointSettings | None = None, enabled: Callable[[], bool] | bool = True,
                  trace: Callable[[str, str], None] | None = None, hooks: _Hooks | None = None,
                  baseline_provider: Callable[[], Sequence[Any]] | None = None):
@@ -203,7 +192,6 @@ class CheckpointService:
         self.store = CheckpointStore(root, trace=trace)
         self.stacks_root = safefs.real_root(str(stacks_root))
         self.provider = provider
-        self.backup = backup
         self.settings = settings or CheckpointSettings()
         self._enabled = enabled if callable(enabled) else (lambda: enabled)
         self.hooks = hooks or _Hooks()
@@ -238,9 +226,7 @@ class CheckpointService:
             raise CheckpointExists(f"{mission_id} already has checkpoint {mission.checkpoint_id}")
         if mission.status not in NON_TERMINAL:
             raise CheckpointError(f"{mission_id} is {mission.status}; a checkpoint is for a live mission")
-        grant = Grant.model_validate_json(mission.grant_json)
         planned = self.validate_scope(scope)
-        no_backup = self._backup_floor(scope, grant)
         total = sum(p.meta.size for p in planned)
         if total > self.settings.max_total_bytes:
             raise DiskGuardError(f"scope is {total} bytes; the per-checkpoint limit is {self.settings.max_total_bytes}")
@@ -256,7 +242,7 @@ class CheckpointService:
                 # The scan baseline is taken PER ATTEMPT, so the one committed describes the host the committed
                 # capture saw (a ScopeChanged retry takes a fresh one).
                 baseline_text, baseline_sha, baseline_count = self._take_baseline()
-                manifest = self._capture(checkpoint_id, mission_id, scope, planned, no_backup)
+                manifest = self._capture(checkpoint_id, mission_id, scope, planned)
                 manifest["baseline"] = None
                 if baseline_text is not None:
                     self.store.write_baseline(checkpoint_id, baseline_text.encode("utf-8"))
@@ -284,13 +270,13 @@ class CheckpointService:
                 reserved = True
                 insert_event(conn, mission_id, "note", "core",
                              {"event": "checkpoint.created", "checkpoint": checkpoint_id, "files": len(planned),
-                              "bytes": sum(f["size"] for f in manifest["files"]), "no_backup": no_backup,
+                              "bytes": sum(f["size"] for f in manifest["files"]),
                               "facts_unavailable": manifest["facts_unavailable"],
                               "hashes": {f["path"]: f["sha256"] for f in manifest["files"]}}, now)
         if not reserved:
             self.store.remove(checkpoint_id)
             raise CheckpointExists(f"{mission_id} already has a checkpoint, or is no longer live")
-        return CheckpointId(checkpoint_id, no_backup, tuple(manifest["facts_unavailable"]))
+        return CheckpointId(checkpoint_id, tuple(manifest["facts_unavailable"]))
 
     def retire_unused(self, mission_id: str) -> str | None:
         """Forget a checkpoint no session ever ran under, so the next start takes a fresh one.
@@ -395,24 +381,7 @@ class CheckpointService:
             add(path, None, "file")
         return planned
 
-    def _backup_floor(self, scope: CheckpointScope, grant: Grant) -> bool:
-        if grant.docker == "lifecycle":
-            # Start/stop/restart only. Asked again here, at start: the stack directories may have changed since the proposal.
-            from planet_express.missions.grants import lifecycle_write_reach
-            if lifecycle_write_reach(grant, self.stacks_root, getattr(self, "session_principals", None)) is None:
-                return False
-        now, no_backup = self._now(), False
-        for path in scope.data_paths:
-            status = self.backup.status(path, now=now, recent_s=grant.backup.recent_s)
-            if status.state == "ok":
-                continue
-            if not grant.backup.acknowledged_no_backup:
-                raise BackupFloorError(path, status.state)
-            no_backup = True
-        return no_backup
-
-    def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned],
-                 no_backup: bool) -> dict[str, Any]:
+    def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned]) -> dict[str, Any]:
         files, compose_docs, parsed = [], {}, []
         captured = 0
         store_base = self.store.total_bytes() if self.store.root.exists() else 0
@@ -478,7 +447,7 @@ class CheckpointService:
         except ProviderError as exc:
             raise ScopeRefused(str(exc)) from None
         return {"v": MANIFEST_V, "id": checkpoint_id, "mission_id": mission_id, "created_at": self._now(),
-                "stacks_root": self.stacks_root, "no_backup": no_backup, "files": files, "facts": facts,
+                "stacks_root": self.stacks_root, "files": files, "facts": facts,
                 "facts_unavailable": sorted(unavailable),
                 "scope": {"stacks": list(scope.stacks), "services": list(scope.services),
                           "units": list(scope.units)}}
@@ -915,7 +884,7 @@ def _safe_reason(exc: BaseException) -> str:
 
 
 __all__ = [
-    "BackupFloorError", "CheckpointCorrupt", "CheckpointDisabled", "CheckpointError", "CheckpointExists",
+    "CheckpointCorrupt", "CheckpointDisabled", "CheckpointError", "CheckpointExists",
     "CheckpointId", "CheckpointInUse", "CheckpointNotFound", "CheckpointScope", "CheckpointService",
     "CheckpointSettings", "DiskGuardError", "RestoreReport", "ScopeRefused",
 ]

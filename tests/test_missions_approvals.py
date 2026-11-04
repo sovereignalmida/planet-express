@@ -89,27 +89,11 @@ def test_observe_and_propose_never_satisfy(tmp_path):
         assert not ok(store, m)
 
 
-def test_broad_sudo_needs_elevated_row(tmp_path):
-    grant = repair_grant(sudo={"mode": "broad"})
-    store, _, _, m = setup(tmp_path, grant)
-    record_approval(store, m.id, "grant", m.grant_hash, "approve", "operator:me")
+def test_a_repair_grant_needs_only_its_grant_row(tmp_path):
+    store, _, _, m = setup(tmp_path, repair_grant())
     assert not ok(store, m)
-    record_approval(store, m.id, "broad_sudo", m.grant_hash, "approve", "operator:me", elevated=False)
-    assert not ok(store, m)  # non-elevated broad_sudo does not count
-
-    store, _, _, m = setup(tmp_path / "e", grant)
     record_approval(store, m.id, "grant", m.grant_hash, "approve", "operator:me")
-    record_approval(store, m.id, "broad_sudo", m.grant_hash, "approve", "operator:me", elevated=True)
-    assert ok(store, m)
-
-
-def test_no_backup_needs_elevated_row(tmp_path):
-    grant = repair_grant(backup={"acknowledged_no_backup": True})
-    store, _, _, m = setup(tmp_path, grant)
-    record_approval(store, m.id, "grant", m.grant_hash, "approve", "operator:me")
-    assert not ok(store, m)
-    record_approval(store, m.id, "no_backup", m.grant_hash, "approve", "operator:me", elevated=True)
-    assert ok(store, m)
+    assert ok(store, m)                    # trust mode: no broad_sudo or no_backup row exists to be asked for
 
 
 # ── change/critical plan rows ───────────────────────────────────────────────
@@ -206,16 +190,9 @@ def test_standing_grant_revoked_or_out_of_scope(tmp_path):
     assert not ok(store, missing)
 
 
-def test_standing_grant_refuses_broad_no_backup_and_change(tmp_path):
+def test_standing_grant_refuses_change(tmp_path):
     store, _, ms, _ = setup(tmp_path)
     standing(ms)
-    for grant in (repair_grant(sudo={"mode": "broad"}), repair_grant(backup={"acknowledged_no_backup": True}),
-                  repair_grant(sudo={"mode": "broad"}, docker="raw")):
-        m = new_mission(ms, grant, standing_grant_id="SG-1")
-        # even with every elevated row on file, the standing path refuses
-        record_approval(store, m.id, "broad_sudo", m.grant_hash, "approve", "operator:me", elevated=True)
-        record_approval(store, m.id, "no_backup", m.grant_hash, "approve", "operator:me", elevated=True)
-        assert not ok(store, m)
     m = new_mission(ms, Grant.model_validate({"tier": "change", "scope": {"stacks": ["media"]}}),
                     standing_grant_id="SG-1")
     assert not ok(store, m)

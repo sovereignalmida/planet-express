@@ -299,6 +299,6 @@ def test_the_context_panel_reads_scope_limits_and_record_from_pe_not_the_agent(r
     conv = rig.console.get(made["id"])
     assert ctx["evidence"] == {"incident": None, "turns": 1, "budget_used_pct": min(100, round(100 * conv.tokens_used / conv.token_budget))}
     assert ctx["limits"]["kind"] == "conversation"
-    assert ctx["scope"]["kind"] == "read_only" and ctx["scope"]["services"] == [] and ctx["scope"]["paths"] == []
+    assert ctx["scope"]["kind"] == "read_only" and ctx["scope"]["services"] == [] and "paths" not in ctx["scope"]
     assert ctx["limits"]["token_budget"] == conv.token_budget and ctx["limits"]["minutes"] >= 1
     assert ctx["record"]["events"] > 0 and ctx["record"]["runs"] == 0 and ctx["record"]["checkpoint"] is False

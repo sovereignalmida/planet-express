@@ -9,9 +9,7 @@
 #                                                     # run in place: ONLY when this machine is itself disposable
 #
 # The host needs: Docker with the compose plugin, python3 with this project's requirements (requirements.txt), and
-# nothing running in Docker that you care about (the rehearsal refuses a host with foreign containers). Set
-# PE_REHEARSAL_SKIP_GATE=1 to skip the side-door gate on a VM that has not been through the launcher setup (the record
-# says it was skipped).
+# nothing running in Docker that you care about (the rehearsal refuses a host with foreign containers).
 #
 # Environment: PE_VM_DIR (--vm: where the tree is copied, default /root/pe-rehearsal), PE_PYTHON (default python3),
 # PE_SSH_OPTS (extra ssh options). The JSON record goes to stdout; the exit status is the rehearsal's (0 pass, 1 a step
@@ -28,7 +26,7 @@ while [ $# -gt 0 ]; do
     --here) MODE=here ;;
     --i-know-this-is-disposable) SURE=yes ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -44,7 +42,7 @@ case "$MODE" in
     QUOTED=""
     for a in "$@"; do QUOTED="$QUOTED '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"; done
     # shellcheck disable=SC2086
-    exec ssh ${PE_SSH_OPTS:-} "root@$TARGET" "cd '$DIR' && PE_REHEARSAL_OK=1 PE_REHEARSAL_SKIP_GATE='${PE_REHEARSAL_SKIP_GATE:-}' '${PE_PYTHON:-python3}' scripts/rehearse_repair.py --i-know-this-is-disposable $QUOTED"
+    exec ssh ${PE_SSH_OPTS:-} "root@$TARGET" "cd '$DIR' && PE_REHEARSAL_OK=1 '${PE_PYTHON:-python3}' scripts/rehearse_repair.py --i-know-this-is-disposable $QUOTED"
     ;;
   here)
     [ "$SURE" = yes ] || { echo "refusing: --here needs --i-know-this-is-disposable" >&2; exit 2; }

@@ -277,10 +277,8 @@ def test_cli_with_an_unreadable_policy_uses_the_closed_default_and_the_environme
 def test_with_no_hook_installed_the_session_environment_still_holds_no_credentials(tmp_path):
     from planet_express.missions.grants import build_session_env
     from planet_express.missions.models import Grant
-    from planet_express.missions.protected import Discovery, build_protected
-    protected = build_protected(site=[], discovery=Discovery(stacks_root="/srv/stacks"))
     grant = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media"]}})
-    env = build_session_env(grant, mission_id="M-1", workspace="/work/ws", worker_socket="/run/w.sock", protected=protected,
+    env = build_session_env(grant, mission_id="M-1", workspace="/work/ws", worker_socket="/run/w.sock",
                             stacks_root="/srv/stacks", known_tools=["arr.queue_item"],
                             base_env={"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-secret", "DB_PASSWORD": "hunter2",
                                       "LANG": "C"}, secret_values=["sk-secret"])

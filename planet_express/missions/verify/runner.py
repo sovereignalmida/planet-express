@@ -16,7 +16,7 @@ from ..models import Mission, VerificationPlan
 from ..resources import BadResource, canon
 from ..store import MissionStore, grant_resources
 from .baseline import Finding, TooManyFindings, in_scope, new_findings, normalize
-from .checks import CheckEnv, Outcome, check_restarted, run_check
+from .checks import CheckEnv, run_check
 from .plan import (
     CheckResult,
     FindingRef,
@@ -39,15 +39,6 @@ class VerifierDisabled(RuntimeError):
 
 class VerifyRefused(RuntimeError):
     """The mission is not in a state where it can be verified."""
-
-
-def restart_targets(grant) -> list[tuple[str, str | None]]:
-    """What a restart-only grant must have restarted: each named service as itself, and each stack none of whose services is
-    named as a whole stack (Codex, rc13.2). A stack that only holds the named services is not checked whole: "restart prowlarr"
-    names stack media too, and leaving the rest of media alone is the safe direction, not a missed repair."""
-    services = [tuple(s.split("/", 1)) for s in grant.scope.services]
-    named = {stack for stack, _svc in services}
-    return [*services, *((s, None) for s in grant.scope.stacks if s not in named)]
 
 
 class Verifier:
@@ -162,20 +153,6 @@ class Verifier:
             self.ms.append_event(mission.id, "note", ACTOR, {
                 "event": "verify.check", "id": result.id, "check": result.check, "ok": result.ok,
                 "attempts": result.attempts, "detail": result.detail})
-        grant = mission.grant()
-        if grant.docker == "lifecycle":
-            # PE's own bound for a restart-only grant: every in-scope service really restarted, whatever the plan checks.
-            targets = restart_targets(grant)
-            if not targets:
-                targets = [("", None)]                          # nothing named: fails closed below
-            for stack, service in targets:
-                outcome = check_restarted(stack, service, env) if stack else Outcome(False, "the grant names nothing to restart")
-                result = CheckResult(id=f"restarted:{stack}/{service}" if service else f"restarted:{stack}", check="restarted",
-                                     ok=outcome.ok, attempts=1, detail=outcome.detail)
-                results.append(result)
-                self.ms.append_event(mission.id, "note", ACTOR, {
-                    "event": "verify.check", "id": result.id, "check": result.check, "ok": result.ok,
-                    "attempts": result.attempts, "detail": result.detail})
         return results
 
     # ── scan ────────────────────────────────────────────────────────────────

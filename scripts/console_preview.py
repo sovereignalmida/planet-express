@@ -42,8 +42,8 @@ EVENTS = [{"seq": 1, "at": 1, "turn": 1, "type": "call", "kind": "ran", "name": 
 
 VIEW = {"execution_id": 4, "mission_id": "M-9", "grant_hash": "9f3a1c22" + "0" * 56, "fingerprint": "9F3A1C22", "operator": "alex", "option": "Recreate the dependents",
         "summary": "s", "scope": {"stacks": ["media"], "services": ["media/qbittorrent", "media/sonarr"]}, "warnings": [],
-        "backup": {"covered": True, "text": "A recent verified backup covers this scope."},
-        "protected": {"count": 7, "enforced": ["service:media/gluetun"], "advisory": ["the gateway", "any data volume"]}, "limits": {"minutes": 30, "steps": 200},
+        "access": "Full access to this host (docker, sudo), as you have at a terminal.",
+        "will_not_touch": ["service:media/gluetun", "the gateway", "any data volume"], "limits": {"minutes": 30, "steps": 200},
         "checks": ["qbittorrent is running and stable", "http://qbittorrent:8080/ answers"], "on_verify_fail": "needs_operator", "needs_elevation": False, "phases": ["grant"]}
 TIMELINE = [{"label": "Authorised", "state": "done", "meta": "alex"}, {"label": "Checkpoint taken", "state": "done", "meta": "so it can be rolled back"},
             {"label": "Carrying out the plan", "state": "now", "meta": ""}, {"label": "PE checks it worked", "state": "todo", "meta": "PE's own checks, not the agent's say-so"}]

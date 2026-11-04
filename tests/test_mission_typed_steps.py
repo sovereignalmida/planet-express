@@ -94,18 +94,6 @@ def test_a_step_outside_the_grants_scope_is_refused_and_recorded(rig):
     assert rig.events("step.authorized") == []
 
 
-def test_a_protected_service_inside_the_scope_is_refused(tmp_path):
-    rig = Rig(tmp_path, protected={"resources": ["service:media/sonarr"]})
-    refused(rig, book(restart()), "protected")
-    rig.gate.authorize(rig.mission.id, book(restart(service="radarr")), session_id=rig.session)   # its neighbour is fine
-
-
-def test_the_sites_protected_set_wins_too(rig):
-    gate = MissionStepGate(rig.ms, stacks_root=STACKS_ROOT, protected=["service:media/sonarr"], identities=rig.gate.identities)
-    with pytest.raises(StepRefused, match="protected"):
-        gate.authorize(rig.mission.id, book(restart()), session_id=rig.session)
-
-
 def test_a_binding_that_points_outside_its_stack_cannot_even_be_written():
     step = restart()
     step["binding"] = {**step["binding"], "compose_path": "/etc/elsewhere/docker-compose.yml"}
@@ -164,8 +152,8 @@ def test_only_listed_step_types_may_run(rig):
 def test_a_unit_action_is_not_a_mission_step(tmp_path):
     step = {"type": "unit.action", "params": {"action": "restart", "unit": "casa-stacks.service"},
             "binding": {"unit": "casa-stacks.service"}}
-    rig = Rig(tmp_path, sudo={"mode": "scoped", "rules": [{"unit": "casa-stacks.service", "actions": ["restart"]}]})
-    refused(rig, book(step), "not a step a mission may run")        # even with a sudo rule for it: R3, and not via this path
+    rig = Rig(tmp_path)
+    refused(rig, book(step), "not a step a mission may run")        # R3: the session reaches units itself, with sudo
 
 
 def test_a_mutating_step_needs_the_missions_approval(rig):
@@ -298,8 +286,6 @@ def test_a_check_step_is_tied_to_its_service_and_its_container(rig):
     assert rig.gate.authorize(rig.mission.id, book(check), session_id=rig.session).resources
     rig.identities["media-sonarr-1"] = ("media", "radarr")
     refused(rig, book(check), "container is not media/sonarr")
-    protected = Rig(rig.store.path.parent / "p", protected={"resources": ["service:media/sonarr"]})
-    refused(protected, book(check), "protected")                             # a read of a protected service is refused too
 
 
 def test_a_step_on_a_resource_this_mission_does_not_lease_is_refused(rig):
@@ -342,17 +328,10 @@ def test_a_service_only_grant_runs_a_restart_with_its_check_in_one_runbook(tmp_p
 
 
 def test_a_service_only_grant_does_not_accept_another_file_as_the_compose_file(tmp_path):
-    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]},
-              protected={"resources": [f"path:{actions.compose_file('media')}"]})
+    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]})
     other = restart()
     other["binding"] = {**other["binding"], "compose_path": str(actions.compose_file("media").parent / "other.yml")}
-    refused(rig, book(other), "outside the grant|protected")
-
-
-def test_a_service_only_grant_still_refuses_a_protected_compose_file(tmp_path):
-    rig = Rig(tmp_path, stack_leases=True, scope={"services": ["media/sonarr"], "hosts": ["local"]},
-              protected={"resources": [f"path:{actions.compose_file('media')}"]})
-    refused(rig, book(restart()), "protected")
+    refused(rig, book(other), "outside the grant")
 
 
 def test_an_oversize_record_still_names_what_was_authorized(rig):

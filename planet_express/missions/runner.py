@@ -21,18 +21,12 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from planet_express.core.redact import redact
 from planet_express.core.store import Store
 from planet_express.missions.adapters.command import CommandRuntime
 from planet_express.missions.containment import SessionContainment
 from planet_express.missions.containment_cgroup import (
     CgroupContainment,
     cgroup2_mountpoint,
-)
-from planet_express.missions.discovery import (
-    ACKNOWLEDGEABLE,
-    DiscoveredInputs,
-    discover_protected_inputs,
 )
 from planet_express.missions.hooks import claude_code_argv, install_claude_code, policy_for
 from planet_express.missions.launcher.cgroup_tree import ensure_tree
@@ -116,9 +110,6 @@ class MissionRunner:
         try:
             self._stop_server()
             self.supervisor.shutdown()                    # sessions killed and proven gone (or kept tracked, never dropped)
-            shutdown = getattr(getattr(self.supervisor, "docker_proxy", None), "shutdown", None)
-            if shutdown is not None:
-                shutdown()
         finally:
             # In its own finally: a failure above must never leave a loopback listener spending Core's key for a stopped session.
             broker_shutdown = getattr(getattr(self.supervisor, "model_broker", None), "shutdown", None)
@@ -149,19 +140,8 @@ def _pe_paths(store: Store) -> tuple[str, ...]:
 
 def _hook_policy(cfg, store: Store, stacks_root: str | None):
     """The sessions' hook policy (trust mode): the same for every mission. The hard blocks need only the failure modes, the
-    stacks root and PE's own paths; the grant's protected set is recorded elsewhere, never enforced here."""
+    stacks root and PE's own paths."""
     return policy_for(cfg, stacks_root=stacks_root, pe_paths=_pe_paths(store))
-
-
-def _protected_gids() -> tuple[int, ...]:
-    """The gids a session may never join: root's and the docker group's (a member reaches the daemon without the proxy)."""
-    import grp
-    gids = [0]
-    try:
-        gids.append(grp.getgrnam("docker").gr_gid)
-    except KeyError:
-        pass
-    return tuple(gids)
 
 
 def choose_strategy(mode: str, euid: int) -> str:
@@ -180,7 +160,7 @@ def build_containment(cfg, *, euid: int | None = None) -> CgroupContainment:
 
 def without_broker_key(policy, broker):
     """Whatever else decides a session's environment, the model API key the broker holds never reaches it: by name or by value.
-    Independent of stack discovery, so a config that skips the environment builder is still safe."""
+    Independent of the environment builder, so a config that skips it is still safe."""
     def wrapped(grant, mission_id, workspace, env):
         out = dict(policy(grant, mission_id, workspace, env)) if policy is not None else dict(env)
         secrets = broker.secret_values()
@@ -192,12 +172,10 @@ class SessionSockets(SocketProvider):
     """One worker RpcServer per session, bound in `<sock_root>/<session_id>/`, which Core makes (it owns sock_root).
     The launcher then hands the socket to the session's uid and the directory to the session's private group (0750),
     so only that session can reach it. The server is built with no group: Core cannot chgrp to a uid it is not.
-    With a Docker proxy service, a Repair session whose grant says `docker: proxy` also gets `proxy.sock` in the same
-    directory: bound by Core (0600), handed over by the helper like the worker socket, never chown'd or widened by Core."""
+    Trust mode: a session talks to the real Docker socket through its docker group; there is no per-session proxy here."""
 
-    def __init__(self, sock_root: str, backend, authenticator, build=build_worker_server, proxy=None, model_broker=None):
+    def __init__(self, sock_root: str, backend, authenticator, build=build_worker_server, model_broker=None):
         self.sock_root, self.backend, self.authenticator, self._build = sock_root, backend, authenticator, build
-        self.proxy = proxy
         self.model_broker = model_broker      # the per-session model broker: Core holds the API key, the session an access code
 
     def path(self, session_id: str) -> str:
@@ -214,7 +192,7 @@ class SessionSockets(SocketProvider):
             raise
         stops: list[Callable[[], None]] = [server.stop]
         try:
-            for service in (self.proxy, self.model_broker):
+            for service in (self.model_broker,):
                 if service is not None:
                     stop_service = service.start(cs)
                     if stop_service is not None:
@@ -243,7 +221,7 @@ class SessionSockets(SocketProvider):
 
     def env(self, cs) -> dict[str, str]:
         env: dict[str, str] = {}
-        for service in (self.proxy, self.model_broker):
+        for service in (self.model_broker,):
             if service is not None:
                 env.update(service.env(cs))
         return env
@@ -280,8 +258,8 @@ def build_mission_runner(
     store: Store, cfg, *, containment: SessionContainment | None = None,
     interval_s: float = POLL_INTERVAL_S, enabled: Callable[[], bool] | None = None,
     preflight: Callable[[], PreflightReport] | None = None, socket_provider: SocketProvider | None = None,
-    stacks_root: str | None = None, tool_broker=None, repair_gate=None, env_policy=None, verifier=None,
-    repair_wiring=None, docker_proxy=None, checkpoint=None, discovery=None, model_broker=None, host_lock=None,
+    stacks_root: str | None = None, tool_broker=None, env_policy=None, verifier=None,
+    repair_wiring=None, checkpoint=None, model_broker=None, host_lock=None,
 ) -> MissionRunner | None:
     """None when missions are off or no agent command is configured (nothing could run). `enabled` is the live
     switch the Supervisor consults (the daemon passes the same source `MissionService` reads); it defaults to
@@ -305,66 +283,33 @@ def build_mission_runner(
     if model_broker is not None and not model_broker.secret_values():
         log.error("missions.model_broker is enabled but %s is not set in Core's environment: no mission session can start until it is",
                   cfg.model_broker.key_env)
-    protected = None
-    found = DiscoveredInputs()
-    if stacks_root is not None and (tool_broker is None or env_policy is None or repair_wiring is not None):
-        # Slice 6 controls that need only the store and the config: the brokered tools (keys stay in Core's environment)
-        # and the grant-to-environment policy. The side-door gate needs the checkpoint service and the host's sudoers
-        # generator output, which the daemon supplies with slice 7 (`repair_gate=`).
+    if stacks_root is not None and (tool_broker is None or env_policy is None):
+        # The brokered tools (keys stay in Core's environment) and the grant-to-environment policy, which keeps PE's own secrets
+        # (tool keys, the model key) out of what a session is handed.
         from planet_express.missions.grants import make_env_policy
         from planet_express.missions.tools import broker_from_config, default_registry
-        from planet_express.missions.protected import (
-            build_protected_set,
-            protected_override_recorder,
-        )
-        try:
-            found = (discovery or discover_protected_inputs)(cfg, stacks_root=stacks_root)
-        except Exception as exc:       # discovery must not take mission control down; it does withhold Repair
-            found = DiscoveredInputs(failures={d: f"discovery raised {type(exc).__name__}" for d in ACKNOWLEDGEABLE})
-        protected = build_protected_set(cfg, stacks_root=stacks_root, record=protected_override_recorder(store),
-                                        **found.kwargs())
         if tool_broker is None:
-            tool_broker = broker_from_config(cfg, missions=MissionStore(store), stacks_root=stacks_root,
-                                             protected=protected.resources)
+            tool_broker = broker_from_config(cfg, missions=MissionStore(store), stacks_root=stacks_root)
         if env_policy is None:
             refs = dict(cfg.tool_secret_env)
             env_policy = make_env_policy(
-                protected=protected, stacks_root=stacks_root, known_tools=default_registry().names(),
+                stacks_root=stacks_root, known_tools=default_registry().names(),
                 secret_values=lambda: [v for v in (os.environ.get(var) for var in refs.values()) if v]
                 + (model_broker.secret_values() if model_broker is not None else []))
     authenticator = WorkerAuthenticator(store, mount=_cgroup_mount(cfg.cgroup_root)) if real else None
-    if docker_proxy is None and real and stacks_root is not None:
-        # Built whether or not Repair is available: Observe and Propose sessions read the Docker host through it (read-only), and a host whose
-        # protected-set discovery is incomplete still investigates. Repair sessions only start where the repair wiring exists.
-        from planet_express.missions.dockerproxy.service import DockerProxyService
-        docker_proxy = DockerProxyService(
-            store, authenticator=authenticator, docker_socket=cfg.docker_socket, sock_root=cfg.sock_root,
-            stacks_root=stacks_root, protected=lambda: protected.resources if protected is not None else (),
-            protected_gids=_protected_gids(), label_allow=cfg.docker_label_allow, host_lock=host_lock)
     controls = None
-    if repair_wiring is not None and protected is not None and found.failures:
-        # G4-F1: a required protected domain could not be established, so the proxy would be partly blind.
-        # Observe and Propose still run; Repair needs the whole safety net.
-        reasons = "; ".join(f"{d}: {w}" for d, w in sorted(found.failures.items()))
-        log.warning("Repair missions are not available: protected-set discovery incomplete (%s)", reasons)
-        try:
-            store.record_event("mission.protected_discovery_incomplete", domains=sorted(found.failures),
-                               reason=redact(reasons)[:1024])
-        except Exception as exc:
-            log.warning("could not record the discovery failure: %s", exc)
-    elif repair_wiring is not None and protected is not None:
-        # Slice 7a: the checkpoint service, verifier and side-door gate, all or none. A failure to build any of
-        # them leaves the host without Repair capability (observe/propose still run); it never yields a partial safety net.
+    if repair_wiring is not None and stacks_root is not None:
+        # Slice 7a: the checkpoint service and the verifier, both or neither. A failure to build either leaves the host without
+        # Repair capability (observe/propose still run); it never yields a Repair without a checkpoint or verification.
         from planet_express.missions.assembly import build_repair_controls
         try:
             controls = build_repair_controls(store, cfg, repair_wiring, containment=containment, broker=tool_broker,
-                                             protected=protected, stacks_root=stacks_root,
-                                             enabled=enabled or (lambda: cfg.enabled), proxy=docker_proxy,
+                                             stacks_root=stacks_root, enabled=enabled or (lambda: cfg.enabled),
                                              model_broker=model_broker)
         except Exception as exc:
             log.warning("Repair missions are not available: %s: %s", type(exc).__name__, exc)
         else:
-            verifier, repair_gate, checkpoint = controls.verifier, controls.repair_gate, controls.checkpoint
+            verifier, checkpoint = controls.verifier, controls.checkpoint
             if tool_broker is not None and tool_broker.write_gate is None:
                 from planet_express.missions.assembly import mission_write_gate
                 tool_broker.write_gate = mission_write_gate(store)
@@ -394,7 +339,7 @@ def build_mission_runner(
     supervisor = Supervisor(
         store, containment, runtime_for, enabled=enabled or (lambda: cfg.enabled),
         workspace_dir=Path(cfg.workspace_root) if cfg.workspace_root else None, tool_broker=tool_broker,
-        repair_gate=repair_gate, verifier=verifier, checkpoint=checkpoint, docker_proxy=docker_proxy,
+        verifier=verifier, checkpoint=checkpoint,
         hook_policy=lambda mission: hook_policy_json,
         hook_install=((lambda hook_dir: install_claude_code(hook_dir, cfg.hooks.command))
                       if cfg.hooks.install_claude_code else None),
@@ -403,9 +348,8 @@ def build_mission_runner(
     if real:
         supervisor.preflight_fn = preflight or make_preflight(cfg, containment, supervisor.workspace_dir,
                                                        held_uids=lambda: held_session_uids(store))
-        supervisor.socket_provider = socket_provider or SessionSockets(
-            cfg.sock_root, supervisor, authenticator, proxy=docker_proxy if hasattr(docker_proxy, "start") else None,
-            model_broker=model_broker)
+        supervisor.socket_provider = socket_provider or SessionSockets(cfg.sock_root, supervisor, authenticator,
+                                                                       model_broker=model_broker)
     else:
         supervisor.preflight_fn = preflight
         supervisor.socket_provider = socket_provider

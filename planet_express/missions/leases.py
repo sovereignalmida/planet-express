@@ -243,6 +243,25 @@ def check_fence(store: Store, resource: str, mission_id: str, fence: int) -> Non
         raise StaleFence(f"stale fence {fence} for {resource}")
 
 
+def _thing(resource: str) -> str | None:
+    """`host:local/stack:media` -> `the media stack`; a service or path likewise. None for an id that is not one."""
+    try:
+        r = parse_resource(resource)
+    except ValueError:
+        return None
+    if r.kind in ("stack", "service"):
+        return f"the {r.name} {r.kind}"[:120]
+    return f"{r.name}"[:120]
+
+
+def conflict_words(exc: LeaseConflict) -> str:
+    """Why a start is waiting on another mission's lease, as the operator reads it: which mission holds what, and what to do.
+    A stack or service is named in preference to the directory a stack lease also covers."""
+    named = [rid for rid in (exc.held, exc.resource) if rid.split("/", 1)[-1].startswith(("stack:", "service:"))]
+    thing = _thing(named[0] if named else exc.held) or "what this run needs"
+    return f"{exc.holder} is holding {thing} — cancel or roll it back to continue"
+
+
 def _plain(resource: str) -> str:
     """`host:local/stack:media` -> `media (stack)`, for a sentence an operator reads."""
     try:

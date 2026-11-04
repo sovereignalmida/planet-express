@@ -148,8 +148,11 @@ def by_name(steps):
 
 def test_the_steps_are_named_in_dependency_order(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path))]
-    assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access", "sudoers-readable",
+    assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access",
                      "cgroup-tree", "workspace-root", "socket-root"]
+    # sudoers-readable is retired (trust mode removed the Repair gate it served): new plans leave it out, undo still finds it
+    retired = [s.name for s in launcher_steps(paths(tmp_path), include_retired=True)]
+    assert retired == [*names[:4], "sudoers-readable", *names[4:]]
 
 
 def test_mos_has_no_sudoers_step(tmp_path):

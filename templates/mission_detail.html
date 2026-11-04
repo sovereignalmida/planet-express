@@ -30,13 +30,10 @@
     <span class="panel-head-note">grant {{ card.grant_hash[:8] }}{% if card.standing_grant_id %} · standing {{ card.standing_grant_id }}{% endif %}</span></div>
   {% for w in card.warnings %}<div class="mc-notice" role="alert"><strong>{{ w.kind | upper }}</strong> {{ w.text }}</div>{% endfor %}
   <dl class="mc-facts">
-    <dt>BACKUP</dt><dd>{{ 'covered' if card.backup.covered else 'NOT covered' }}{% if card.backup.acknowledged_no_backup %} · no-backup acknowledged{% endif %}{% if card.backup.state %} · {{ card.backup.state }}{% endif %}</dd>
     <dt>SCOPE</dt><dd class="mc-pre">{{ card.scope | tojson(indent=1) }}</dd>
-    <dt>PROTECTED</dt><dd>{{ card.protected.count }} resources excluded{% if card.protected.exclusions %} · {{ card.protected.exclusions | join(', ') }}{% endif %}</dd>
     <dt>BUDGETS</dt><dd>{{ card.budgets.wall_s }}s · {{ card.budgets.tool_calls }} tool calls · {{ card.budgets.output_bytes }} bytes · {{ card.budgets.retries }} retries</dd>
     <dt>VERIFICATION</dt><dd class="mc-pre">{% for c in card.verification.checks %}{{ c.id }} ({{ c.check }}) {{ c.params | tojson }}
 {% endfor %}on failure: {{ card.verification.on_verify_fail }}</dd>
-    <dt>SUDO</dt><dd>{{ card.sudo.mode }}{% for r in card.sudo.rules %} · {{ r.unit }}: {{ r.actions | join('/') }}{% endfor %} · docker {{ card.docker }}</dd>
     {% if card.credentials %}<dt>TOOLS</dt><dd>{{ card.credentials | join(', ') }}</dd>{% endif %}
   </dl>
   {% if m.status == 'awaiting_decision' %}

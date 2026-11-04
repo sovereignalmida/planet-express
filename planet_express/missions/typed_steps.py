@@ -4,13 +4,13 @@ A mission's agent works with its own tools; a typed step is the fast path for a 
 or down). The step is still a typed step: validated per type, bound to its target, run through the engine.
 What this module adds is the question the v3 policy cannot answer on its own, "may THIS mission run THIS step now?":
 
-1. every target resolves to a canonical resource id, is inside the grant's scope, is not protected (protected wins), and is
-   covered by a lease this mission holds. A binding's container is checked against the daemon's own Compose labels, so it
+1. every target resolves to a canonical resource id, is inside the grant's scope, and is covered by a lease this mission
+   holds. A binding's container is checked against the daemon's own Compose labels, so it
    cannot name a different container than the stack and service it claims;
 2. the mission is `executing`, its session is the live, unexpired, non-revoked one, and the session's fences are current;
 3. the approval covers the step type: only the types in MISSION_STEP_TYPES, at most R2, only from a Repair mission, within the
    grant's call budget. A step with no target (a stack-set, a global prune) is never served, and neither is a unit action (R3:
-   units are reached through the grant's scoped sudo rules, not through a typed step);
+   the session reaches units itself, with sudo);
 4. the check and its inputs are recorded in the mission's events BEFORE the step is handed back for execution, and the outcome
    after it ran.
 
@@ -24,7 +24,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,11 +51,6 @@ _RISK_ORDER = {value: index for index, value in enumerate(("R0", "R1", "R2", "R3
 # under containment) and compose.restore (built by rollback, never proposed).
 MISSION_STEP_TYPES = frozenset({
     "service.restart", "service.start", "service.stop", "stack.up", "stack.down",
-    "wait", "check.container", "check.log_since_start", "read.qbittorrent_session_port",
-})
-# A `docker: lifecycle` grant (restart-only, no backup floor) runs only these: nothing that recreates a container or edits files.
-LIFECYCLE_STEP_TYPES = frozenset({
-    "service.restart", "service.start", "service.stop",
     "wait", "check.container", "check.log_since_start", "read.qbittorrent_session_port",
 })
 _MAX_REASON = 300
@@ -87,11 +82,10 @@ def _host_identities(containers: list[str]) -> dict[str, tuple[str, str]]:
 
 
 class MissionStepGate:
-    def __init__(self, missions: MissionStore, *, stacks_root: str, protected: Collection[str] = (),
+    def __init__(self, missions: MissionStore, *, stacks_root: str,
                  identities: Callable[[list[str]], dict[str, tuple[str, str]]] | None = None):
         self.ms = missions
         self.stacks_root = stacks_root
-        self.protected = tuple(protected)
         self.identities = identities or _host_identities    # container name -> (compose project, service), from the daemon
         self._lock = threading.Lock()                       # the budget is read, then the authorization recorded: one at a time
 
@@ -153,19 +147,14 @@ class MissionStepGate:
         if mutating and mission.tier != "repair":
             raise StepRefused(f"a {mission.tier}-tier mission may not run a mutating step")
         grant = mission.grant()
-        if grant.docker == "lifecycle":
-            beyond = [s.type for s in runbook.steps if s.type not in LIFECYCLE_STEP_TYPES]
-            if beyond:
-                raise StepRefused(f"{beyond[0]} is more than a restart-only repair may run")
         if self._authorized_count(mission_id) + len(runbook.steps) > grant.budgets.tool_calls:
             raise StepRefused("the mission's call budget is used up")
         approved = approvals.mission_step_approved(self.ms.store, mission_id)
         if mutating and not approved:
             raise StepRefused("the mission has no approval for its current grant hash")
-        # 1. every target resolves, is in scope, is not protected, and is leased by this mission
+        # 1. every target resolves, is in scope, and is leased by this mission
         try:
             scope = [canon(r) for r in grant_resources(grant)]
-            prot = grant.effective_protection(self.protected)
         except BadResource:
             raise StepRefused("the grant's resources are malformed") from None
         resources: list[str] = []
@@ -175,17 +164,15 @@ class MissionStepGate:
             targets = self._targets(step, spec)
             primary_ok = False
             for index, rid in enumerate(targets):
-                verdict = classify(rid, scope, prot.protected, stacks_root=self.stacks_root,
-                                   parent_of_protected=(spec.risk != "R0"), excluded=prot.excluded)
+                verdict = classify(rid, scope, (), stacks_root=self.stacks_root)
                 if verdict == "out_of_scope" and index > 0 and primary_ok and self._tied_to(step, rid):
                     # The stack a service belongs to and its own compose file are named by the step's binding. When the
-                    # service itself is in scope they need no wider grant, but protected still wins for them.
-                    verdict = classify(rid, [rid], prot.protected, stacks_root=self.stacks_root,
-                                       parent_of_protected=(spec.risk != "R0"), excluded=prot.excluded)
+                    # service itself is in scope they need no wider grant.
+                    verdict = classify(rid, [rid], (), stacks_root=self.stacks_root)
                 if index == 0:
                     primary_ok = verdict == "in_scope"
                 if verdict != "in_scope":
-                    raise StepRefused(f"{rid[:160]} is {'protected' if verdict == 'protected' else 'outside the grant'}")
+                    raise StepRefused(f"{rid[:160]} is outside the grant")
                 if spec.risk != "R0" and not any(contains(held, rid, stacks_root=self.stacks_root) for held in fences):
                     raise StepRefused(f"{rid[:160]} is not leased by this mission")
                 resources.append(rid)

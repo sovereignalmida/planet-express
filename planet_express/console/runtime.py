@@ -3,8 +3,9 @@ budgets, kill-before-release); this runtime only decides what the process is ask
 
 A turn is ONE contained process per operator message, resumed from the conversation's saved agent state (`--session-id` the first
 time, `--resume <the id the last stream reported>` after). The agent's state (home and config) lives in the conversation's state
-directory beside the workspaces, owned by the conversation's one uid; the session's own workspace is new every turn. The agent is
-read-only (Observe/Propose tier, hooks, no Edit); it may write `plan.json` in its workspace, and PE validates that file. Its
+directory beside the workspaces, owned by the conversation's one uid; the session's own workspace is new every turn. The agent has
+full access (trust mode) but runs at the Observe tier, asked to investigate and propose, not change; it may write `plan.json` in its
+workspace, and PE validates that file. Its
 words are untrusted data: they are redacted and stored, shown to the operator, and never executed or treated as a decision.
 """
 
@@ -34,11 +35,13 @@ MAX_BACKLOG = 10_000                  # events carried between polls while the t
 _DRAIN_PER_CALL = 256 * 1024
 SYSTEM = (
     "You are Planet Express's investigation agent for one operator's Docker Compose homelab. You are PE-aware: BRIEF.md in the current "
-    "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. You investigate "
-    "with your read tools and answer plainly: say what you know, with the evidence behind it, and what you are unsure of. You never "
-    "change the host. When the right response is a change, propose it as a plan the operator can confirm, scrap or modify: read "
-    "PLAN_FORMAT.md for the exact format and write plan.json in the current directory. You cannot approve a plan or widen what it "
-    "says. If you learn something durable about this host, LESSONS_FORMAT.md says how to offer it to the operator to remember. Keep answers "
+    "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. You have full "
+    "access to this host, as the operator has at a terminal (docker, passwordless sudo, the logs; files under the operator's home are "
+    "readable with sudo), and everything you run is recorded. Investigate with whatever helps and answer plainly: say what you know, "
+    "with the evidence behind it, and what you are unsure of. Do not change the host before the operator confirms a plan: when the "
+    "right response is a change, propose it as a plan the operator can confirm, scrap or modify: read PLAN_FORMAT.md for the exact "
+    "format and write plan.json in the current directory. You cannot approve a plan. Never wipe disks, delete Docker volumes or data, "
+    "or touch PE's own config, secrets or database. If you learn something durable about this host, LESSONS_FORMAT.md says how to offer it to the operator to remember. Keep answers "
     "short and specific, and ask when the question is ambiguous.")
 
 

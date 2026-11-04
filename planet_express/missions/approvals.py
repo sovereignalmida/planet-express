@@ -13,7 +13,17 @@ from planet_express.core.redact import redact
 from planet_express.core.store import Store
 
 from .canonical import CanonicalError, loads_strict, sha256_hex
-from .models import PHASE_RE, Budgets, Grant, GrantScope, StandingCeilings, StandingGrant, VerificationPlan
+from .models import (
+    LEGACY_GRANT_TEXT,
+    PHASE_RE,
+    Budgets,
+    Grant,
+    GrantScope,
+    StandingCeilings,
+    StandingGrant,
+    VerificationPlan,
+    is_legacy_grant,
+)
 from .verify.plan import binding_problems
 from .window import allowed as window_allowed
 
@@ -118,7 +128,7 @@ def verification_plan_problems(row: sqlite3.Row) -> list[str]:
     if TIER_RANK.get(row["tier"], 0) < TIER_RANK["repair"]:
         return []
     try:
-        grant = Grant.model_validate(loads_strict(row["grant_json"]))
+        grant = Grant.load(row["grant_json"])
         plan = (VerificationPlan.model_validate(loads_strict(row["verification_plan_json"]))
                 if row["verification_plan_json"] else None)
     except (CanonicalError, ValueError):
@@ -148,7 +158,7 @@ def has_approving_row(conn: sqlite3.Connection, mission_id: str, bound_hash: str
 
 def _scope_within(inner: GrantScope, outer: GrantScope) -> bool:
     return all(set(getattr(inner, f)) <= set(getattr(outer, f))
-               for f in ("stacks", "services", "paths", "mounts", "hosts"))
+               for f in ("stacks", "services", "hosts"))
 
 
 def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, now: int) -> list[str]:
@@ -173,8 +183,8 @@ def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, no
         reasons.append("standing grant is expired")
     try:
         raw_scope = loads_strict(row["scope_json"])
-        ceilings = StandingCeilings.model_validate(raw_scope.pop("ceilings", None) or {})
-        scope = GrantScope.model_validate(raw_scope)
+        ceilings = StandingCeilings.load(raw_scope.pop("ceilings", None) or {})
+        scope = GrantScope.load(raw_scope)
     except (CanonicalError, ValueError, AttributeError):
         return [*reasons, "the standing grant's scope is unreadable"]
     sg = StandingGrant(id=row["id"], scope=scope,
@@ -186,26 +196,14 @@ def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, no
         reasons.append("grant tier exceeds the standing grant tier")
     if not _scope_within(grant.scope, sg.scope):
         reasons.append("grant scope exceeds the standing grant scope")
-    if grant.sudo.mode == "broad" or grant.docker == "raw":
-        reasons.append("standing grants refuse broad_sudo")
-    if grant.backup.acknowledged_no_backup:
-        reasons.append("standing grants refuse no_backup")
-    if grant.docker == "lifecycle" and not grant.backup.covered:
-        reasons.append("standing grants need a covered backup, restart-only included")
     # What the standing grant did not name does not ride along with an unattended start.
     extra = sorted(set(grant.credentials) - set(ceilings.credentials))
     if extra:
         reasons.append(f"credentials the standing grant does not allow: {', '.join(x[:40] for x in extra[:4])}")
-    units = sorted({r.unit for r in grant.sudo.rules} - set(ceilings.sudo_units))
-    if units:
-        reasons.append(f"sudo rules the standing grant does not allow: {', '.join(x[:40] for x in units[:4])}")
     limit = ceilings.budgets or Budgets()
     over = [f for f in ("wall_s", "tool_calls", "output_bytes", "retries") if getattr(grant.budgets, f) > getattr(limit, f)]
     if over:
         reasons.append(f"budgets above the standing grant's ceiling: {', '.join(over)}")
-    missing = sorted(set(ceilings.exclusions) - set(grant.exclusions))
-    if missing:
-        reasons.append(f"exclusions the standing grant requires are missing: {', '.join(x[:40] for x in missing[:4])}")
     return reasons
 
 
@@ -216,8 +214,11 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
         return Verdict(False, ("mission does not exist",))
     if TIER_RANK[m["tier"]] < TIER_RANK["repair"]:
         return Verdict(False, (f"{m['tier']} missions never execute",))
+    if is_legacy_grant(m["grant_json"]):
+        # Approved before trust mode: what was approved (a proxy, scoped sudo, a backup floor) is not what would run now.
+        return Verdict(False, (LEGACY_GRANT_TEXT,))
     try:
-        grant = Grant.model_validate(loads_strict(m["grant_json"]))
+        grant = Grant.load(m["grant_json"])
         grant_hash = sha256_hex(grant.model_dump(mode="json"))
     except (CanonicalError, ValueError) as exc:
         return Verdict(False, (f"grant is invalid: {exc}",))
@@ -234,13 +235,6 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
         if not _approved(conn, mission_id, "grant", grant_hash, grant.tier == "critical"):
             reasons.append("no approval for the current grant hash" if grant.tier != "critical"
                            else "a critical grant needs an elevated grant approval")
-        # (d) elevated rows where the grant demands them
-        if ((grant.sudo.mode == "broad" or grant.docker == "raw")
-                and not _approved(conn, mission_id, "broad_sudo", grant_hash, True)):
-            reasons.append("broad sudo needs an elevated broad_sudo approval")
-        if (grant.backup.acknowledged_no_backup
-                and not _approved(conn, mission_id, "no_backup", grant_hash, True)):
-            reasons.append("no backup needs an elevated no_backup approval")
 
     if TIER_RANK[grant.tier] >= TIER_RANK["change"]:
         reasons += _plan_reasons(conn, m)

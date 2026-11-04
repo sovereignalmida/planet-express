@@ -1,4 +1,4 @@
-"""Checkpoint service (v4 slice 5): round trip, durability, crash safety, CAS, refusals, backup floor,
+"""Checkpoint service (v4 slice 5): round trip, durability, crash safety, CAS, refusals (trust mode removed the backup floor),
 secrets, provider conformance, retention. Real files in a tmp_path; Docker is a scripted fake."""
 import json
 import os
@@ -17,7 +17,6 @@ from checkpoint_fakes import COMPOSE, SECRET, make_env, tree
 from missions_helpers import advance_to
 
 from planet_express.missions.checkpoint import (
-    BackupFloorError,
     CheckpointDisabled,
     CheckpointExists,
     CheckpointInUse,
@@ -53,7 +52,7 @@ def test_round_trip_bytes_mode_owner_and_env(tmp_path):
     extra.chmod(0o755)
     before = tree(env.stacks)
     cid = env.svc.create(env.mission.id, env.scope)
-    assert cid.no_backup is False
+    assert not hasattr(cid, "no_backup") and "no_backup" not in env.svc.store.read_manifest(cid)
     env.compose.write_text("services: {web: {image: evil}}\n")
     env.dotenv.write_text("X=1\n")
     env.dotenv.chmod(0o644)
@@ -383,51 +382,12 @@ def test_one_checkpoint_per_mission(tmp_path):
         env.svc.create(env.mission.id, env.scope)
 
 
-# ── backup floor ────────────────────────────────────────────────────────────
-DATA = "/mnt/data/appdata"
-
-
-def data_scope():
-    return CheckpointScope(stacks=("media",), data_paths=(DATA,))
-
-
-def grant_with(**backup):
-    from missions_helpers import repair_grant
-    return repair_grant(backup=backup)
-
-
-def test_backup_floor_refuses_unverifiable_absent_and_stale(tmp_path):
-    env = make_env(tmp_path)                                         # no sources: unverifiable
-    with pytest.raises(BackupFloorError) as exc:
-        env.svc.create(env.mission.id, data_scope())
-    assert exc.value.state == "unverifiable"
-    env = make_env(tmp_path / "a", sources=[("/elsewhere", "/m")], mtime=lambda p: 1.0)      # configured, not covered
-    with pytest.raises(BackupFloorError) as exc:
-        env.svc.create(env.mission.id, data_scope())
-    assert exc.value.state == "absent"
-    env = make_env(tmp_path / "b", sources=[(DATA, "/m")], mtime=lambda p: 1_000_000 - 90_000)   # older than 86400 s
-    with pytest.raises(BackupFloorError) as exc:
-        env.svc.create(env.mission.id, data_scope())
-    assert exc.value.state == "stale"
-    assert leftovers(env) == []
-
-
-def test_backup_floor_passes_with_fresh_backup_and_flag_stays_false(tmp_path):
-    env = make_env(tmp_path, sources=[("/mnt/data", "/m")], mtime=lambda p: 1_000_000 - 60)
-    cid = env.svc.create(env.mission.id, data_scope())
-    assert cid.no_backup is False and env.svc.store.read_manifest(cid)["no_backup"] is False
-
-
-def test_acknowledged_no_backup_lets_it_through_and_records_flag(tmp_path):
-    env = make_env(tmp_path, grant=grant_with(acknowledged_no_backup=True))
-    cid = env.svc.create(env.mission.id, data_scope())
-    assert cid.no_backup is True and env.svc.store.read_manifest(cid)["no_backup"] is True
-    assert env.ms.get_mission(env.mission.id).tier == "repair"        # this module never changes the tier
-
-
-def test_no_backup_flag_defaults_false():
-    from planet_express.missions.models import Backup
-    assert Backup().acknowledged_no_backup is False
+# ── no backup floor (trust mode) ─────────────────────────────────────────────
+def test_a_repair_checkpoint_is_taken_with_no_backup_configured(tmp_path):
+    env = make_env(tmp_path)                                         # no backup sources at all
+    cid = env.svc.create(env.mission.id, CheckpointScope.from_grant_scope(env.mission.grant().scope))
+    assert env.ms.get_mission(env.mission.id).checkpoint_id == cid
+    assert not any("no_backup" in e.body_json for e in env.ms.events(env.mission.id))
 
 
 # ── secrets ─────────────────────────────────────────────────────────────────

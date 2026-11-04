@@ -10,10 +10,8 @@ from planet_express.missions.checkpoint import (
     CheckpointScope,
     CheckpointService,
     CheckpointSettings,
-    ConfiguredBackupFreshness,
     SystemdCheckpointProvider,
 )
-from planet_express.missions.checkpoint.backup import BackupSource
 from planet_express.missions.store import MissionStore
 
 COMPOSE = "services:\n  web:\n    image: nginx:1.27\n    labels:\n      a: b\n"
@@ -82,8 +80,8 @@ class Env:
     pass
 
 
-def make_env(tmp_path: Path, *, enabled=True, provider_cls=SystemdCheckpointProvider, grant=None, sources=(),
-             settings=None, trace=None, hooks=None, mtime=None) -> Env:
+def make_env(tmp_path: Path, *, enabled=True, provider_cls=SystemdCheckpointProvider, grant=None,
+             settings=None, trace=None, hooks=None) -> Env:
     env = Env()
     env.tmp = tmp_path
     env.store, env.clock = make_store(tmp_path)
@@ -99,11 +97,10 @@ def make_env(tmp_path: Path, *, enabled=True, provider_cls=SystemdCheckpointProv
     env.docker = FakeDocker()
     env.provider = provider_cls(SimpleNamespace(stacks_root=env.stacks), run=env.docker, run_bounded=env.docker.bounded,
                                 read_text=lambda path: (_ for _ in ()).throw(OSError(path)))
-    env.backup = ConfiguredBackupFreshness([BackupSource(p, m) for p, m in sources], mtime=mtime)
     env.root = tmp_path / "state" / "checkpoints"
     env.flag = {"on": enabled}
     env.svc = CheckpointService(mission_store=env.ms, root=env.root, stacks_root=env.stacks, provider=env.provider,
-                                backup=env.backup, settings=settings or CheckpointSettings(),
+                                settings=settings or CheckpointSettings(),
                                 enabled=lambda: env.flag["on"], trace=trace, hooks=hooks)
     env.mission = new_mission(env.ms, grant or repair_grant())
     env.scope = CheckpointScope(stacks=("media",))

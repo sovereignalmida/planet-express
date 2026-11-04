@@ -733,7 +733,7 @@ class SessionAccess(Step):
         return self.p.session_sudoers
 
     def wanted(self) -> bytes:
-        return SESSION_SUDOERS_RULE          # exactly the one rule: the side-door check compares these bytes
+        return SESSION_SUDOERS_RULE          # exactly the one rule
 
     def owned_file(self):
         return self.target, self.wanted(), 0o440
@@ -1207,23 +1207,90 @@ class SocketRoot(_CoreDir):
     mode = 0o711          # Core makes each session's directory below it; the launcher hands that one to the session
 
 
+MAX_INCLUDE_DEPTH = 16
+MAX_SUDOERS_FILES = 512
+
+
+def _sudoers_logical_lines(text: str) -> list[str]:
+    """The non-comment logical lines of a sudoers file (continuations joined). `#include` lines are kept; `#1001 ALL=...` is a
+    rule for uid 1001, not a comment."""
+    out, buffer = [], ""
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.endswith("\\"):
+            buffer += line[:-1] + " "
+            continue
+        buffer += line
+        stripped = buffer.strip()
+        if stripped and not (stripped.startswith("#") and not re.match(r"^#(\d|include)", stripped)):
+            out.append(stripped)
+        buffer = ""
+    return out
+
+
+def sudoers_files(main: str, directory: str) -> list[str]:
+    """Every file sudo would read: the main file, `sudoers.d`, and anything they `@include` / `@includedir`, recursively (a nested
+    include is read, a cycle is cut, a target that cannot be resolved or read raises StepError)."""
+    files: list[str] = []
+    queue: list[tuple[str, int]] = [(main, 0)]
+    dirs: list[tuple[str, int, bool]] = [(directory, 0, False)]       # (dir, depth, named by an include?)
+    seen_dirs: set[str] = set()
+    while queue or dirs:
+        if len(files) > MAX_SUDOERS_FILES:
+            raise StepError("sudoers includes too many files to check")
+        if dirs:
+            here, depth, explicit = dirs.pop(0)
+            if here in seen_dirs:
+                continue
+            if not os.path.isdir(here):
+                if explicit:
+                    raise StepError(f"@includedir {here[:80]} is not a readable directory")
+                continue
+            seen_dirs.add(here)
+            for name in sorted(os.listdir(here)):
+                if "." not in name and not name.endswith("~"):          # sudo itself ignores the others
+                    queue.append((os.path.join(here, name), depth))
+            continue
+        path, depth = queue.pop(0)
+        if path in files:
+            continue
+        if depth > MAX_INCLUDE_DEPTH:
+            raise StepError(f"sudoers includes nest deeper than {MAX_INCLUDE_DEPTH}: {path}")
+        data = read_regular(path)
+        if data is None:
+            raise StepError(f"{path} is absent")
+        files.append(path)
+        for line in _sudoers_logical_lines(data.decode("utf-8", errors="replace")):
+            match = re.match(r"^[@#]include(dir)?\s+(.+)$", line)
+            if not match:
+                continue
+            target = match.group(2).strip().strip('"')
+            if "%" in target:
+                raise StepError(f"{path}: an include with a substitution ({target[:60]}) cannot be checked")
+            if not target.startswith("/"):
+                target = os.path.normpath(os.path.join(os.path.dirname(path), target))
+            if match.group(1):
+                dirs.append((target, depth + 1, True))
+            else:
+                queue.append((target, depth + 1))
+    return files
+
+
 class SudoersReadable(Step):
-    """Core reads every sudoers file, so the Repair gate's `sudoers-managed` check can run as Core. Needed only when Core is not
-    root (an install where Core runs as the operator's own account). A read-only POSIX ACL entry for the Core user on
-    `/etc/sudoers` and each file in `/etc/sudoers.d`, traverse on the directory, and a default entry so a file added later
-    inherits it. Mode bits stay 0440 (sudo and `visudo -c` accept the files); `visudo -c` is run after every change.
-    `visudo` replaces `/etc/sudoers` when it saves, which drops the entry: the gate then fails closed and names this step."""
+    """RETIRED in trust mode (rc14): it let a non-root Core read every sudoers file for the Repair side-door gate, and that gate is
+    gone. New plans no longer include it (`launcher_steps` leaves it out); it stays so a host that applied it can still undo it.
+
+    A read-only POSIX ACL entry for the Core user on `/etc/sudoers` and each file in `/etc/sudoers.d`, traverse on the directory,
+    and a default entry so a file added later inherits it. Mode bits stay 0440; `visudo -c` is run after every change."""
     name = "sudoers-readable"
     ubuntu_only = True
+    retired = True
 
     def _targets(self) -> list[tuple[str, str]]:
-        """Every file the Repair gate will read (the same include walk: `@include`/`@includedir`, recursively) and the
-        directories that hold them. Run as root, so the walk itself can read what it follows."""
-        from planet_express.missions.launcher.side_doors import SideDoorPaths, SudoersManaged     # side_doors imports this module
+        """Every file sudo reads (the include walk: `@include`/`@includedir`, recursively) and the directories that hold them.
+        Run as root, so the walk itself can read what it follows."""
         p = self.p
-        gate = SudoersManaged(SideDoorPaths(core_user=p.core_user, uid_min=p.uid_min, uid_max=p.uid_max,
-                                            sudoers=p.sudoers_main, sudoers_dir=p.sudoers_dir))
-        files = gate._files()
+        files = sudoers_files(p.sudoers_main, p.sudoers_dir)
         dirs = dict.fromkeys([p.sudoers_dir] if os.path.isdir(p.sudoers_dir) else [])
         for path in files:
             dirs[os.path.dirname(path)] = None
@@ -1381,11 +1448,12 @@ class SudoersReadable(Step):
         return f"removed Core's read ACL from {', '.join(removed)}" if removed else "nothing to remove"
 
 
-def launcher_steps(paths: Paths) -> list[Step]:
-    """The steps in dependency order, minus those that do not apply on this host's flavour."""
+def launcher_steps(paths: Paths, *, include_retired: bool = False) -> list[Step]:
+    """The steps in dependency order, minus those that do not apply on this host's flavour. A retired step (`sudoers-readable`) is
+    left out of new plans; `include_retired` finds it again, so a step an older plan applied can still be checked and undone."""
     steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), SessionAccess(paths),
              SudoersReadable(paths), CgroupTree(paths), WorkspaceRoot(paths), SocketRoot(paths)]
-    return [s for s in steps if s.applies()]
+    return [s for s in steps if s.applies() and (include_retired or not getattr(s, "retired", False))]
 
 
 # ── driving them ───────────────────────────────────────────────────────────────────────────────────
@@ -1499,7 +1567,7 @@ def main(argv: list[str] | None = None) -> int:               # pragma: no cover
     args = parser.parse_args(argv)
     account = pwd.getpwnam(args.core_user)
     paths = cli_paths(args, account.pw_uid, account.pw_gid)
-    steps = launcher_steps(paths)
+    steps = launcher_steps(paths, include_retired=args.action == "undo")
     if args.action == "probe":
         for name, state in probe_all(steps).items():
             print(f"{'ok  ' if state.ok else 'TODO'} {name}: {state.detail}")

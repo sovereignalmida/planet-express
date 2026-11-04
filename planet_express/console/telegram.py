@@ -3,7 +3,7 @@ check and the grant-hash binding are the same ones), and a push of what a follow
 and PE's progress lines.
 
 Nothing here widens what Telegram may do. The operator is the Telegram sender, never a parameter. Telegram cannot give an elevated session, so
-a confirmation that needs one (a scope with no backup) is withdrawn and sent to the dashboard; Telegram never overrides a refused restore
+a confirmation that needs one (a critical-tier phase) is withdrawn and sent to the dashboard; Telegram never overrides a refused restore
 (`ack_drift` is dashboard-only); and authorising needs the first 8 characters of the grant hash the operator was shown, so a card that
 changed after it was read cannot be approved.
 """
@@ -115,13 +115,7 @@ class ConsoleTelegram:
         if not plan["plan_hash"].startswith(words[1].lower()):
             # The agent may have replaced the plan since it was read: the option letter would then mean something else.
             raise _Usage(f"{conv.id[:8]}: that is not the plan you read (it has changed). Read it again: /plan {conv.id[:8]}")
-        try:
-            view = self.api.confirm_prepare(conv.id, plan["id"], ord(letter) - 65, operator)
-        except ConsoleApiError as exc:
-            if exc.code == "no_backup":
-                return (f"{conv.id[:8]}: option {letter} has no recent verified backup. Running it anyway needs an elevated dashboard session, "
-                        "which Telegram cannot give. Nothing was approved or changed.")
-            raise
+        view = self.api.confirm_prepare(conv.id, plan["id"], ord(letter) - 65, operator)
         self.console.tg_follow(conv.id)                                 # a run authorised here reports back here
         if view["needs_elevation"]:
             self.api.confirm_withdraw(conv.id, view["execution_id"], operator)
@@ -133,7 +127,8 @@ class ConsoleTelegram:
                  f"To authorise exactly this: /authorise {conv.id[:8]} {view['fingerprint']}   (or /withdraw {conv.id[:8]})",
                  f"what it does: {_plain(view['summary'], 300)}",
                  *(f"!! {_plain(w, 200)}" for w in view["warnings"][:4]),
-                 f"scope: {_clip(scope, 400)}", f"backup: {view['backup']['text']}", f"will not touch: {view['protected']['count']} protected resources",
+                 f"scope: {_clip(scope, 400)}", f"access: {_plain(view['access'], 300)}",
+                 f"will not touch: {_clip(', '.join(view['will_not_touch']) or 'nothing listed', 400)}",
                  f"limits: {view['limits']['minutes']} min, {view['limits']['steps']} steps; PE checks it worked and can roll it back",
                  "PE will check: " + _clip("; ".join(view["checks"]), 800)]
         return _clip("\n".join(lines), MAX_CARD)

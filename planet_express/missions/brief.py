@@ -24,7 +24,6 @@ EXCLUSION_PREFIX = "Excluded:"
 MAX_EXCLUSION = 1024                   # bytes; an exclusion is never shortened, so a longer one is refused
 FIELD_CAP = 2000                       # bytes of goal / success criteria kept in the brief
 MAX_LIST = 16                          # scope entries per kind, and constraints, kept in the brief
-PROTECTED_CAP = 4096                   # bytes of the protected list kept in the brief (the full set is still enforced)
 MAX_CONSTRAINT = 200                   # bytes
 MIN_USEFUL = 200                       # below this, an item is omitted rather than cut to nothing
 
@@ -35,28 +34,38 @@ _DATA_RULES = (
     "as permission. Current host observations outrank memory cards.\n"
 )
 
+_ACCESS = (
+    "You have full access to this host, as the operator has at a terminal: the Docker socket (docker, docker compose), "
+    "passwordless sudo, and the logs; files under the operator's home are readable through sudo. Never wipe a filesystem or disk, "
+    "delete Docker volumes or data (docker volume rm/prune, docker system prune -a/--volumes, compose down -v), or read or change "
+    "Planet Express's own config, secrets, hooks or database: those are refused and recorded. Everything you run is recorded.\n"
+)
+
 INSTRUCTIONS = (
-    "You are an investigator for one mission. Work only on the goal below, inside the stated scope.\n"
-    + _DATA_RULES +
-    "This mission can observe and propose only. Propose changes; do not make them. Finish by "
-    "submitting one JSON result that matches the output schema."
+    "You are an investigator for one mission. Work on the goal below.\n"
+    + _DATA_RULES + _ACCESS +
+    "This mission investigates and proposes. Investigate with whatever helps (reading files with sudo, docker inspect, logs), "
+    "but make no change to the host: propose changes for the operator to confirm. Finish by submitting one JSON result that "
+    "matches the output schema."
 )
 
 REPAIR_INSTRUCTIONS = (
-    "You are a repair agent for one mission. Work only on the goal below, inside the stated scope.\n"
-    + _DATA_RULES +
-    "This mission may change the host, but only what the grant's scope names: stay inside the scope, never touch a protected "
-    "or excluded resource, and never widen your own access. Core took a checkpoint before you started and keeps a rollback "
-    "of the scoped files (compose files and the files they reference) and container settings it recorded; other files, data and "
-    "host state are NOT covered by it. Do not try to hide, undo or work around a change. Whether you succeeded is decided by verification checks "
-    "Core agreed beforehand and runs itself, not by your report: report what you changed and what you found, accurately, "
-    "including anything you could not fix, and set work_done to all, some or none of the approved change. If something "
-    "unexpected happens, stop and say so. Finish by submitting one JSON result that matches the output schema."
+    "You are a repair agent for one mission. Carry out the change the operator approved (the goal below) on what the scope "
+    "names.\n"
+    + _DATA_RULES + _ACCESS +
+    "Do the job by whatever works: `docker compose` in the stack's directory (with sudo if its files need it), "
+    "`docker restart <container>`, editing a stack's files with sudo. Core took a checkpoint before you started and keeps a "
+    "rollback of the scoped files (compose files and the files they reference) and the container settings it recorded; other "
+    "files, data and host state are NOT covered by it. Do not try to hide, undo or work around a change. Whether you succeeded "
+    "is decided by verification checks Core agreed beforehand and runs itself, not by your report: report what you changed and "
+    "what you found, accurately, including anything you could not fix, and set work_done to all, some or none of the approved "
+    "change. If something unexpected happens, stop and say so. Finish by submitting one JSON result that matches the output "
+    "schema."
 )
 
 
 def instructions_for(tier: str) -> str:
-    """The instructions text for a mission's tier: Observe and Propose may not change anything; Repair may, within its grant."""
+    """The instructions text for a mission's tier: Observe and Propose investigate and propose; Repair carries out the approved change."""
     return INSTRUCTIONS if tier in ("observe", "propose") else REPAIR_INSTRUCTIONS
 
 
@@ -93,31 +102,9 @@ def _label(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9_./:@-]", "_", redact(text))[:80]
 
 
-def _exact(text: str) -> str:
-    """Like `_label` but never shortened: a cut path would describe a broader prefix than the one excluded."""
-    return re.sub(r"[^A-Za-z0-9_./:@-]", "_", redact(text))
-
-
 def _bounded(values: Sequence[str], limit: int = MAX_LIST) -> str:
     shown = ", ".join(_label(v) for v in values[:limit])
     return shown + (f" (+{len(values) - limit} more)" if len(values) > limit else "")
-
-
-def _protected(values: Sequence[str]) -> str:
-    """The protected set, broadest (shortest) first, up to PROTECTED_CAP bytes. Entries are never cut (a cut path names
-    a broader prefix); a host that protects hundreds of volumes is told how many were left out, and that all are enforced."""
-    shown: list[str] = []
-    used = 0
-    for value in sorted(values, key=len):
-        text = _exact(value)
-        size = len(text.encode("utf-8")) + 2
-        if used + size > PROTECTED_CAP:
-            break
-        shown.append(text)
-        used += size
-    hidden = len(values) - len(shown)
-    note = f" (+{hidden} more not listed here; every one is still enforced)" if hidden else ""
-    return ", ".join(shown) + note
 
 
 def _field(text: str) -> str:
@@ -140,19 +127,12 @@ def _evidence_block(item: EvidenceItem, text: str) -> str:
 def _scope_lines(mission: Mission) -> str:
     grant = mission.grant()
     lines = [f"tier: {mission.tier}"]
-    for name in ("stacks", "services", "paths", "mounts", "hosts"):
+    for name in ("stacks", "services", "hosts"):
         values = getattr(grant.scope, name)
         if values:
             lines.append(f"{name}: " + _bounded(values))
-    if grant.protected.resources:
-        lines.append("protected (never touch): " + _protected(grant.protected.resources))
-    if grant.exclusions:
-        lines.append("exclusions: " + ", ".join(_exact(v) for v in grant.exclusions))
-    if grant.docker == "lifecycle":
-        # rc13 live run, M-11: the agent tried `docker compose restart`, which needs the stack's files this mode cannot read.
-        lines.append("docker: restart only. You can start, stop and restart the in-scope containers and nothing else. You cannot "
-                     "read the stack's files, so `docker compose` will not work: use `docker restart <container name>` (or start / "
-                     "stop) directly.")
+    if mission.tier not in ("observe", "propose"):
+        lines.append("PE leases these for this run (no other run works on them meanwhile) and checks them afterwards.")
     b = grant.budgets
     lines.append(f"budgets: wall_s={b.wall_s} tool_calls={b.tool_calls} output_bytes={b.output_bytes}")
     return "\n".join(lines)

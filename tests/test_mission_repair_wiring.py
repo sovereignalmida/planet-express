@@ -29,7 +29,7 @@ def wiring(stacks, scan=None):
     docker = FakeDocker()
     provider = SystemdCheckpointProvider(SimpleNamespace(stacks_root=stacks), run=docker, run_bounded=docker.bounded,
                                          read_text=lambda path: (_ for _ in ()).throw(OSError(path)))
-    return RepairWiring(provider=provider, scan=scan or (lambda: snapshot()), core_user="pe")
+    return RepairWiring(provider=provider, scan=scan or (lambda: snapshot()))
 
 
 def stacks_tree(tmp_path):
@@ -50,11 +50,11 @@ def test_everything_is_built_together_and_passed_to_the_supervisor_and_the_runne
     store, _ = make_store(tmp_path)
     stacks = stacks_tree(tmp_path)
     # An old config's tripwire_accept_blind is accepted and ignored: trust mode removed the tripwire, nothing reads it.
-    runner = build_mission_runner(store, cfg(tripwire_accept_blind=["host:local/path:/etc/shadow"]),
+    runner = build_mission_runner(store, cfg(tripwire_accept_blind=["host:local/path:/etc/shadow"], protected_absent=["backup"]),
                                   containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks))
     sup, controls = runner.supervisor, runner.controls
     assert sup.checkpoint is controls.checkpoint and sup.verifier is controls.verifier
-    assert sup.repair_gate is controls.repair_gate
+    assert not hasattr(controls, "repair_gate") and not hasattr(controls, "backup_status") and not hasattr(controls, "protected")
     assert sup.mutating_ready and not hasattr(controls, "tripwire") and not hasattr(runner, "tripwire")
     assert str(controls.checkpoint.store.root) == str(Path(store.path).parent / "checkpoints")  # the default root
     assert runner.startup == [controls.checkpoint.startup_scan]
@@ -63,52 +63,13 @@ def test_everything_is_built_together_and_passed_to_the_supervisor_and_the_runne
     assert sup.tool_broker is None or sup.tool_broker.write_gate is not None
 
 
-def test_the_checkpoint_root_and_backup_sources_come_from_config(tmp_path):
+def test_the_checkpoint_root_comes_from_config_and_old_backup_sources_are_ignored(tmp_path):
     store, _ = make_store(tmp_path)
     stacks = stacks_tree(tmp_path)
     root = tmp_path / "elsewhere" / "cp"
     c = cfg(checkpoint={"root": str(root), "backup_sources": [{"path": stacks, "marker": str(tmp_path / "marker")}]})
     runner = build_mission_runner(store, c, containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks))
-    cp = runner.controls.checkpoint
-    assert str(cp.store.root) == str(root)
-    assert runner.controls.backup_status(_grant(stack="media"))["state"] in ("absent", "unverifiable", "stale")   # the marker is missing
-    (tmp_path / "marker").write_text("x")
-    os.utime(tmp_path / "marker", (999_990, 999_990))                  # ten seconds before the fake clock's now
-    assert runner.controls.backup_status(_grant(stack="media"))["covered"] is True
-
-
-def test_backup_status_reports_the_worst_path_not_the_first(tmp_path):
-    from planet_express.missions.models import Grant
-    store, _ = make_store(tmp_path)
-    stacks = stacks_tree(tmp_path)
-    fresh, old = tmp_path / "fresh.marker", tmp_path / "old.marker"
-    fresh.write_text("x")
-    old.write_text("x")
-    os.utime(fresh, (999_990, 999_990))
-    os.utime(old, (1_000_000 - 90_000, 1_000_000 - 90_000))                 # older than the grant's 24 h floor
-    sources = [{"path": f"{stacks}/media", "marker": str(fresh)}, {"path": f"{stacks}/photos", "marker": str(old)}]
-    runner = build_mission_runner(store, cfg(checkpoint={"backup_sources": sources}), containment=FakeContainment(),
-                                  stacks_root=stacks, repair_wiring=wiring(stacks))
-    both = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["media", "photos"]}})
-    status = runner.controls.backup_status(both)
-    assert status["state"] == "stale" and status["covered"] is False
-    assert sorted(p["state"] for p in status["paths"]) == ["ok", "stale"]
-    reverse = Grant.model_validate({"tier": "repair", "scope": {"stacks": ["photos", "media"]}})
-    assert runner.controls.backup_status(reverse)["state"] == "stale"          # the order of the scope changes nothing
-    assert runner.controls.backup_status(_grant("media"))["state"] == "ok"
-
-
-def _grant(stack="media"):
-    from planet_express.missions.models import Grant
-    return Grant.model_validate({"tier": "repair", "scope": {"stacks": [stack]}})
-
-
-def test_the_side_door_gate_is_built_from_the_real_probes_and_fails_closed_without_generated_sudoers(tmp_path):
-    store, _ = make_store(tmp_path)
-    stacks = stacks_tree(tmp_path)
-    runner = build_mission_runner(store, cfg(), containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks))
-    report = runner.controls.repair_gate()
-    assert report.checks and all(hasattr(c, "ok") for c in report.checks)
+    assert str(runner.controls.checkpoint.store.root) == str(root)
 
 
 def test_the_runner_starts_and_stops_with_repair_wired_and_no_monitor_thread(tmp_path):
@@ -162,22 +123,17 @@ def test_the_inventory_lists_stacks_and_their_services(tmp_path):
     assert inv.hosts == ("local",) and discover_inventory(str(tmp_path / "missing")).stacks == ()
 
 
-def test_the_built_validator_refuses_what_is_not_in_the_inventory_or_is_protected(tmp_path):
+def test_the_built_validator_refuses_what_is_not_in_the_inventory(tmp_path):
     from planet_express.missions.models import Grant, VerificationPlan
     store, _ = make_store(tmp_path)
     stacks = stacks_tree(tmp_path)
     runner = build_mission_runner(store, cfg(), containment=FakeContainment(), stacks_root=stacks, repair_wiring=wiring(stacks))
     plan = VerificationPlan.model_validate({"catalogue_v": 1, "checks": [{"id": "c", "check": "http", "params": {"url": "http://x/"}}]})
-    base = {"tier": "repair", "verification": {"checks": ["c"], "plan_sha256": plan.hash()}, "backup": {"covered": True},
+    base = {"tier": "repair", "verification": {"checks": ["c"], "plan_sha256": plan.hash()},
             "budgets": {"wall_s": 900, "tool_calls": 100, "output_bytes": 100000, "retries": 1}}
-    good = Grant.model_validate({**base, "scope": {"stacks": ["media"]}})
-    from planet_express.missions.grants import with_site_protected
-    good = with_site_protected(good, runner.controls.protected)
-    assert runner.controls.validator(good, plan) == []
-    bad = with_site_protected(Grant.model_validate({**base, "scope": {"stacks": ["nope"]}}), runner.controls.protected)
+    assert runner.controls.validator(Grant.model_validate({**base, "scope": {"stacks": ["media"]}}), plan) == []
+    bad = Grant.model_validate({**base, "scope": {"stacks": ["nope"]}})
     assert any("not in the discovered inventory" in r for r in runner.controls.validator(bad, plan))
-    unprotected = Grant.model_validate({**base, "scope": {"stacks": ["media"]}})
-    assert any("protected" in r for r in runner.controls.validator(unprotected, plan))
 
 
 def test_the_brokered_write_gate_opens_only_for_an_executing_approved_repair_mission(tmp_path):
@@ -208,7 +164,7 @@ def test_the_daemon_helper_builds_the_wiring_only_when_missions_are_enabled(monk
     monkeypatch.setattr(farnsworth.config, "HOST_CONTROL_PROVIDER", "mos")
     from planet_express.missions.checkpoint import MosCheckpointProvider
     w = farnsworth._repair_wiring()
-    assert isinstance(w.provider, MosCheckpointProvider) and w.scan is farnsworth.leela.run_full and w.core_user
+    assert isinstance(w.provider, MosCheckpointProvider) and w.scan is farnsworth.leela.run_full
     monkeypatch.setattr(farnsworth.config, "HOST_CONTROL_PROVIDER", "systemd")
     assert isinstance(farnsworth._repair_wiring().provider, SystemdCheckpointProvider)
 

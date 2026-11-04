@@ -82,7 +82,7 @@ def completion_problems(row: sqlite3.Row) -> list[str]:
     if not row["checkpoint_id"] or result.checkpoint_id != row["checkpoint_id"]:
         problems.append("the verification result is for a different checkpoint")
     try:
-        grant = Grant.model_validate(loads_strict(row["grant_json"]))
+        grant = Grant.load(row["grant_json"])
         plan_sha = sha256_hex(loads_strict(row["verification_plan_json"])) if row["verification_plan_json"] else None
     except (CanonicalError, ValueError):
         return [*problems, "the grant or the verification plan is unreadable"]

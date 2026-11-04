@@ -1,11 +1,12 @@
-"""Canonical resource ids and containment (contract 2.3), shared by grants, protected domains, tools and the Docker proxy.
+"""Canonical resource ids and containment (contract 2.3), shared by grants, leases, typed steps, tools and verification.
 
     host:<h>/stack:<s>   host:<h>/service:<s>/<svc>   host:<h>/mount:<abs>   host:<h>/path:<abs>
     host:<h>/unit:<name> host:<h>/container:<name>    host:<h>/network:<name> host:<h>/system:<name>
     host:<h>/detector:<name>   (a named state detector, equal only to itself)
 
 Containment: `stack:s` contains `service:s/*` (and, given the stacks root, the stack directory); a path or mount
-contains every path and mount below it. `classify` is the one matching rule: protected wins.
+contains every path and mount below it. `classify` is the one matching rule (a protected or excluded resource wins; trust mode
+passes none, so it decides in scope or out of scope).
 """
 
 import posixpath

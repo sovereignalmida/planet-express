@@ -271,12 +271,12 @@ session holds a uid in the old one.
    is reversible.
 2. **Launcher steps** (root, in this order, journalled so undo and repair work): `session-uid-range`, `launcher-helper`
    (`/usr/libexec/planetexpress/pe-launch`, the only code that starts a session), `launcher-sudoers`
-   (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `sudoers-readable` (a read-only ACL for
-   the Core user on `/etc/sudoers` and `/etc/sudoers.d`, so the Repair gate can check every sudo rule that reaches Core;
-   `visudo` drops it from `/etc/sudoers` when it saves, so run `repair` again after editing sudoers; nothing to do when
-   Core runs as root), `session-access` (systemd hosts only, below), `cgroup-tree` (a `Delegate=yes` drop-in
+   (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `session-access` (systemd hosts only,
+   below), `cgroup-tree` (a `Delegate=yes` drop-in
    for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root` and `socket-root`. They can be run by
    hand: `python3 -m planet_express.missions.launcher.setup_steps probe|repair|undo --core-user USER --workspace-root DIR`.
+   An install from before trust mode may also have `sudoers-readable` (a read-only ACL for Core on the sudoers files, for the
+   Repair gate that trust mode removed). New plans no longer make it; `undo` and uninstall still take it away.
 
    **Session access (trust mode).** Every session has real access, as you have at a terminal: the real Docker socket, the
    host's logs and passwordless sudo. sudo refuses a uid with no account, so `session-access` creates a system group
@@ -290,11 +290,13 @@ session holds a uid in the old one.
 3. **Config.** Put the same values in `config.yaml` under `missions:` and set `enabled: true`, then restart
    `casa-planetexpress` (Core reads the flag once, at startup; the `Delegate=yes` drop-in also takes effect only at a
    restart). The agent is whatever command you configure under `missions.runtime.argv` (an absolute argv; there is no
-   bundled agent or required vendor). Other keys, all optional: `budgets`, `checkpoint` (`root`, `backup_sources`,
-   retention), `verify` (`exec_allowlist`: the binaries a verification `exec_probe` may run, empty by default),
-   `tripwire_interval_s` (at most 15), `protected` (additions to the built-in protected set), `live_trees`, `cross_host`,
-   `package_paths`, `windows`, `tool_sites` and `tool_secret_env` (brokered tools), `docker_socket`, `docker_label_allow`
-   and `hooks`. `config.example.yaml` shows the shape.
+   bundled agent or required vendor). Other keys, all optional: `budgets`, `checkpoint` (`root`, retention), `verify`
+   (`exec_allowlist`: the binaries a verification `exec_probe` may run, empty by default), `windows`, `tool_sites` and
+   `tool_secret_env` (brokered tools) and `hooks`. `config.example.yaml` shows the shape. Trust mode removed the protected
+   set, the Docker proxy, scoped worker sudo and the backup floor: `checkpoint.backup_sources`, `protected`,
+   `protected_overrides`, `protected_absent`, `live_trees`, `cross_host`, `package_paths`, `docker_socket`,
+   `docker_label_allow`, `docker_proxy_ports`, `worker_sudo_rules`, `worker_sudo_all_sessions` and the `tripwire_*` keys are
+   accepted in an existing file and ignored.
 4. **Check it.** Before the first Repair mission run the launcher preflight (Core runs it before it starts a session and a failure keeps the
    mission waiting) and `scripts/mission_containment_rehearsal.py` as the Core user; both fail closed. A host that fails them stays
    proposal-only: it never falls back to an unmanaged session. Rehearsals for a fresh host are in
@@ -372,8 +374,9 @@ Things to get right: sessions run as their own uids, so the `claude` binary and 
 `planet_express/missions/hooks.py` into each session's hook directory as `pe_hook.py` at every launch, so it is always the version
 Core runs (an older config's script path after the interpreter in `hooks.command` is ignored). `missions.workspace_root` must be outside any home directory
 (`/var/lib/planetexpress/mission-workspaces`). `-p` mode denies any tool call that would need a prompt, so the tools it may use are
-named in `--allowedTools`: that is safe only because the boundary is the containment (identity, scoped sudo and Docker proxy,
-tripwire, checkpoint, verification), with the PE hooks as a speed bump on top. `WebFetch` is disallowed because its domain check
+named in `--allowedTools`. Trust mode: a session has your access (the Docker socket, sudo, the logs); what answers for it is the
+plan you confirm, the checkpoint, the full record, PE's own verification and rollback, with the PE hooks refusing the short
+hard-block list (wiping disks, deleting Docker data, PE's own secrets and files). `WebFetch` is disallowed because its domain check
 talks to the vendor directly, around the broker. Telemetry, updates and feedback traffic are switched off by the environment the
 broker sets. Name every model the CLI may request in `models`; a request for any other is refused and logged.
 
@@ -385,10 +388,10 @@ broker sets. Name every model the CLI may request in `models`; a request for any
 | Root helper | `pe-launch` and its trust file `launch.conf` | `/usr/libexec/planetexpress/pe-launch`, `/etc/planetexpress-launch/launch.conf` (MOS: under `PE_HOME`) | uninstall / undo (only if it is exactly what setup wrote) |
 | Sudoers | `planetexpress-launch` (Core may run the helper), `planetexpress-sessions` (`%pe-session ALL=(ALL:ALL) NOPASSWD: ALL`) | `/etc/sudoers.d/` | uninstall / undo; the preflight fails closed on an unmanaged rule that reaches Core |
 | Cgroup | delegated `sessions` subtree | systemd drop-in, or MOS `launcher-boot.sh` | uninstall / undo |
-| Sockets | one directory per session with `worker.sock` (the worker's RPC; it can never reach approval or decision methods) and, for a Repair grant with `docker: proxy`, `proxy.sock` (the scope-enforcing Docker API proxy) | `missions.sock_root/<session id>/` (`sock_root` is owned by Core, mode 0711; each session directory is 0750 for that session's private group) | removed when the session ends |
-| State | mission, memory, approval, lease and checkpoint tables (schema 6); checkpoint store; tripwire state; per-mission artifacts and workspaces | the state database, `missions.checkpoint.root`, `missions.workspace_root` | state snapshot restore; uninstall keeps data |
+| Sockets | one directory per session with `worker.sock` (the worker's RPC; it can never reach approval or decision methods); sessions use the host's own Docker socket through the `docker` group | `missions.sock_root/<session id>/` (`sock_root` is owned by Core, mode 0711; each session directory is 0750 for that session's private group) | removed when the session ends |
+| State | mission, memory, approval, lease and checkpoint tables (schema 6); checkpoint store; per-mission artifacts and workspaces | the state database, `missions.checkpoint.root`, `missions.workspace_root` | state snapshot restore; uninstall keeps data |
 | Secrets | none in a session. Brokered tool keys live only in Core's environment, named by `tool_secret_env` (a secret ref to an environment variable NAME, never a value) | Core's environment / `/etc/planetexpress.env` | you |
-| Grants | a hash-bound grant per mission (scope, protected set, budgets, credentials, verification plan, backup floor); approvals bind to the grant's hash, so any change needs a new approval. Standing grants are off by default and never cover Change or Critical, broad sudo or a backup-floor override | the state database | cancel / expiry |
+| Grants | a hash-bound grant per mission (what it works on, budgets, brokered-tool credentials, verification plan); approvals bind to the grant's hash, so any change needs a new approval. An approval made before trust mode is refused, in words, and never runs. Standing grants are off by default and never cover Change or Critical | the state database | cancel / expiry |
 | Boot | MOS `launcher-boot.sh` in the post-start hook; on systemd the unit drop-in only | see above | uninstall / undo |
 
 ### Upgrading to v4

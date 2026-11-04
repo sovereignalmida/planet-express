@@ -99,17 +99,11 @@ def test_confirm_then_authorise_needs_the_hash_that_was_shown_and_the_repair_run
     assert rig.st.drive(execution["mission_id"]) == "completed"
 
 
-def test_a_confirmation_that_needs_elevation_is_withdrawn_and_sent_to_the_dashboard(tmp_path):
-    rig = Rig(tmp_path, covered=False)
-    try:
-        rig.flow.validator = lambda grant, plan: [] if grant.backup.covered or grant.backup.acknowledged_no_backup else [
-            "backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged"]
-        rig.add_plan()
-        out = rig.tg.command(f"/confirm {rig.short} A {plan8(rig)}", OP)
-        assert "no recent verified backup" in out                                                         # Telegram cannot accept that risk
-        assert rig.console.executions(rig.conv.id) == []
-    finally:
-        rig.close()
+def test_the_confirmation_card_says_the_run_has_full_access_and_what_it_will_not_touch(rig):
+    rig.add_plan()
+    out = rig.tg.command(f"/confirm {rig.short} A {plan8(rig)}", OP)
+    assert "access: Full access to this host" in out and "will not touch: the gateway" in out
+    assert "backup" not in out.lower() and "protected resources" not in out
 
 
 def test_withdraw_and_run_controls_and_close(rig):

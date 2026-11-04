@@ -8,7 +8,7 @@ response. Every call (and every refusal) is recorded as a `tool` event.
 Gates, in order, all fail closed with the same uniform refusal to the caller (the reason goes in the event):
     the session's mission exists and is `investigating` or `executing`, and its endpoints are not revoked (a session
     frozen by the tool-abuse guard has none) -> the grant names the tool as `tool:<name>` -> the tool is a read (write tools stay gated until
-    slice 7) -> params parse strictly -> every scope field is inside the grant's scope and not protected -> the tool-call
+    slice 7) -> params parse strictly -> every scope field is inside the grant's scope -> the tool-call
     budget has room -> the secret resolves.
 Adding a tool is a reviewed capability (listed in CLAUDE.md's v4 surface).
 """
@@ -21,7 +21,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -212,7 +212,7 @@ def _clip(text: str, limit: int) -> tuple[str, bool]:
 
 class ToolBroker:
     def __init__(self, registry: ToolRegistry, *, missions: MissionStore, secrets: Callable[[str], str | None],
-                 sites: Mapping[str, ToolSite], stacks_root: str, protected: Collection[str] = (),
+                 sites: Mapping[str, ToolSite], stacks_root: str,
                  http: HttpFn = default_http, runner: Callable[[list[str], int], tuple[int, str, str]] | None = None,
                  write_gate: Callable[[str, str, dict], bool] | None = None, max_output_bytes: int = MAX_OUTPUT_BYTES,
                  refusal_cap: int = REFUSAL_CAP, on_refusal_cap: Callable[[Any], None] | None = None):
@@ -221,7 +221,6 @@ class ToolBroker:
         self.secrets = secrets
         self.sites = dict(sites)
         self.stacks_root = stacks_root
-        self.protected = tuple(protected)
         self.http = http
         self.runner = runner or _default_runner
         self.write_gate = write_gate        # slice 7 supplies it; until then every write tool is refused
@@ -267,8 +266,7 @@ class ToolBroker:
         """A READ-ONLY tool call made by Core itself for a verification `query` check (slice 8). It is not a session
         call: no session token and no use of the session's call budget (events are `tool.verify`, which the tally does not
         add up). Everything else is the SAME gate a session call passes (`_gate`): the grant must name `tool:<name>`, the
-        endpoint switch must be open (the tool-abuse guard closes it), the scope fields must be inside the grant and clear of
-        protected resources. On top of that the mission must be `verifying` and the tool must be `risk == "read"`. Any
+        endpoint switch must be open (the tool-abuse guard closes it), the scope fields must be inside the grant. On top of that the mission must be `verifying` and the tool must be `risk == "read"`. Any
         refusal raises ToolRefused or _BadParams to the caller, who fails the check."""
         mission, tool, _grant, parsed = self._gate(mission_id, name, params, states=("verifying",), read_only=True)
         status, text, truncated = self._call(tool, parsed, name)
@@ -356,7 +354,6 @@ class ToolBroker:
     def _check_scope(self, tool: Tool, parsed: BaseModel, grant: Grant) -> None:
         try:
             scope = [canon(r) for r in grant_resources(grant)]
-            prot = grant.effective_protection(self.protected)
         except BadResource:
             raise ToolRefused("malformed grant resources") from None
         for field_name, kind in tool.scope.items():
@@ -365,9 +362,8 @@ class ToolBroker:
                 resource = canon(f"{kind}:{value}")
             except BadResource:
                 raise _BadParams(field_name) from None
-            if classify(resource, scope, prot.protected, stacks_root=self.stacks_root, parent_of_protected=False,
-                        excluded=prot.excluded) != "in_scope":
-                raise ToolRefused(f"{field_name} is outside the grant's scope or protected")
+            if classify(resource, scope, (), stacks_root=self.stacks_root) != "in_scope":
+                raise ToolRefused(f"{field_name} is outside the grant's scope")
 
     # ── records and budgets ─────────────────────────────────────────────────
     def _record(self, mission_id: str, event: str, name: str, params: dict, **extra: Any) -> None:
@@ -428,7 +424,7 @@ class _SessionRef:
     mission_id: str
 
 
-def broker_from_config(cfg: Any, *, missions: MissionStore, stacks_root: str, protected: Collection[str] = (),
+def broker_from_config(cfg: Any, *, missions: MissionStore, stacks_root: str,
                        environ: Mapping[str, str] | None = None, registry: ToolRegistry | None = None,
                        **kw: Any) -> "ToolBroker | None":
     """A broker over `missions.tool_sites` and `missions.tool_secret_env`; None when missions are off. A secret ref is
@@ -445,7 +441,7 @@ def broker_from_config(cfg: Any, *, missions: MissionStore, stacks_root: str, pr
         return (env.get(var) or None) if var else None
 
     return ToolBroker(registry or default_registry(), missions=missions, secrets=secret, sites=sites,
-                      stacks_root=stacks_root, protected=protected, **kw)
+                      stacks_root=stacks_root, **kw)
 
 
 class _BadParams(Exception):

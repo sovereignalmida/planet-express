@@ -6,7 +6,6 @@ Nothing here starts a session or decides approval: the supervisor and later slic
 `CheckpointService`. When missions are disabled no entry point does anything.
 """
 
-from .backup import BackupFreshness, BackupStatus, ConfiguredBackupFreshness
 from .provider import (
     CheckpointProvider,
     ComposeFile,
@@ -17,7 +16,6 @@ from .provider import (
     SystemdCheckpointProvider,
 )
 from .service import (
-    BackupFloorError,
     CheckpointCorrupt,
     CheckpointDisabled,
     CheckpointError,
@@ -35,10 +33,10 @@ from .service import (
 )
 
 __all__ = [
-    "BackupFloorError", "BackupFreshness", "BackupStatus", "CheckpointCorrupt", "CheckpointDisabled",
+    "CheckpointCorrupt", "CheckpointDisabled",
     "CheckpointError", "CheckpointExists", "CheckpointId", "CheckpointInUse", "CheckpointNotFound",
     "CheckpointProvider", "CheckpointScope", "CheckpointService", "CheckpointSettings", "ComposeFile",
-    "ConfiguredBackupFreshness", "ContainerFacts", "DiskGuardError", "MosCheckpointProvider", "ProviderError",
+    "ContainerFacts", "DiskGuardError", "MosCheckpointProvider", "ProviderError",
     "RecreateResult", "RestoreReport", "ScopeChanged", "ScopeRefused",
     "SystemdCheckpointProvider",
 ]

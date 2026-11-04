@@ -22,14 +22,15 @@ from . import approvals, window
 from .approvals import ApprovalConflict, phase_demands_elevation, record_approval
 from .canonical import CanonicalError, loads_strict
 from .events import insert_event
-from .grants import with_site_protected
 from .models import (
+    LEGACY_GRANT_TEXT,
     Budgets,
     Grant,
     GrantScope,
     Mission,
     StandingCeilings,
     VerificationPlan,
+    is_legacy_grant,
 )
 from .state import IllegalTransition, MissionNotFound, transition, transition_in_txn
 from .store import MissionStore, StandingGrantInactive
@@ -82,10 +83,6 @@ def required_phases(mission: Mission) -> list[dict[str, Any]]:
     authenticated elevated session (the dashboard); Telegram can never give them."""
     grant = mission.grant()
     out = [{"phase": "grant", "bound": mission.grant_hash, "elevated": grant.tier == "critical"}]
-    if grant.sudo.mode == "broad" or grant.docker == "raw":
-        out.append({"phase": "broad_sudo", "bound": mission.grant_hash, "elevated": True})
-    if grant.backup.acknowledged_no_backup:
-        out.append({"phase": "no_backup", "bound": mission.grant_hash, "elevated": True})
     if grant.tier in ("change", "critical") and mission.plan_hash:
         out.append({"phase": "plan", "bound": mission.plan_hash, "elevated": False})
         try:
@@ -108,25 +105,22 @@ def _decisions(store: Store, mission: Mission) -> dict[str, str]:
     return {r["phase"]: r["decision"] for r in rows if r["bound_hash"] in current}
 
 
-def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """The approval card an operator reads before deciding. Elevated risks come FIRST (`warnings`), then what the mission may
-    touch and how it will be judged. Everything is redacted and bounded; nothing here is a secret."""
+ACCESS_TEXT = ("FULL ACCESS: the session runs with your access to this host (the Docker socket, sudo, the logs), as you would "
+               "at a terminal. PE takes a checkpoint first, records everything it does, checks the result itself and can roll "
+               "the checkpointed files back. It refuses only wiping disks, deleting Docker volumes or data, and touching PE's "
+               "own config, secrets and database.")
+
+
+def build_card(store: Store, mission: Mission) -> dict[str, Any]:
+    """The approval card an operator reads before deciding. Elevated risks come FIRST (`warnings`), then what the mission works
+    on and how it will be judged. Everything is redacted and bounded; nothing here is a secret."""
     grant = mission.grant()
     warnings: list[dict[str, str]] = []
-    if grant.sudo.mode == "broad":
-        warnings.append({"kind": "broad_sudo", "text": "BROAD SUDO: this worker may run any privileged command. Needs an elevated approval."})
-    if grant.docker == "raw":
-        warnings.append({"kind": "docker_raw", "text": "RAW DOCKER: the worker talks to the Docker daemon without the scope-enforcing proxy."})
-    if grant.docker == "lifecycle":
-        warnings.append({"kind": "lifecycle", "text": "RESTART ONLY: through Docker and typed steps the worker may only start, stop and "
-                                                      "restart in-scope containers. It skips the backup floor only if its own account "
-                                                      "cannot write in its stacks (checked at proposal and again at start)."})
-    if grant.backup.acknowledged_no_backup:
-        warnings.append({"kind": "no_backup", "text": "NO BACKUP: the scope has no recent verified backup and the grant accepts running without one."})
+    if is_legacy_grant(mission.grant_json):
+        warnings.append({"kind": "legacy", "text": "MADE BEFORE AN UPDATE: " + LEGACY_GRANT_TEXT})
+    warnings.append({"kind": "full_access", "text": ACCESS_TEXT})
     if grant.tier == "critical":
-        warnings.append({"kind": "critical", "text": "CRITICAL tier: may touch protected resources. Every touch needs its own elevated approval."})
-    backup_view = {"covered": grant.backup.covered, "recent_s": grant.backup.recent_s, **(dict(backup) if backup else {}),
-                   "acknowledged_no_backup": grant.backup.acknowledged_no_backup}       # the grant, not a status source, says this
+        warnings.append({"kind": "critical", "text": "CRITICAL tier: every protected touch in its plan needs its own elevated approval."})
     decisions = _decisions(store, mission)
     required = [{**r, "state": decisions.get(r["phase"], "pending")} for r in required_phases(mission)]
     plan_checks, truncated = approvals.plan_view(mission.verification_plan_json)
@@ -134,19 +128,11 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
         "mission_id": mission.id, "title": _clip(mission.title, 256), "goal": _clip(mission.goal),
         "status": mission.status, "tier": grant.tier, "grant_hash": mission.grant_hash,
         "plan_hash": mission.plan_hash, "standing_grant_id": mission.standing_grant_id,
-        "warnings": warnings, "backup": backup_view,
+        "warnings": warnings,
         "scope": grant.scope.model_dump(mode="json"),
-        "protected": {"resources": [_clip(r, 200) for r in grant.protected.resources[:64]],
-                      "count": len(grant.protected.resources),
-                      "exclusions": [_clip(x, 120) for x in grant.exclusions[:32]],
-                      # a resource-id exclusion is a hard carve-out (tools and the Docker proxy treat it as
-                      # protected); any other exclusion is a note to the agent that nothing can enforce
-                      "exclusions_enforced": [_clip(x, 160) for x in grant.enforced_exclusions()[:32]],
-                      "exclusions_advisory": [_clip(x, 120) for x in grant.advisory_exclusions()[:32]]},
         "budgets": grant.budgets.model_dump(mode="json"),
         "verification": {"plan_sha256": grant.verification.plan_sha256, "checks": plan_checks, "truncated": truncated,
                          "on_verify_fail": grant.on_verify_fail},
-        "sudo": grant.sudo.model_dump(mode="json"), "docker": grant.docker,
         "credentials": [_clip(c, 120) for c in grant.credentials[:32]],
         "window": grant.window.model_dump(mode="json"),
         "required": required, "ready": bool(approvals.execution_predicate(store, mission.id)) and not truncated,
@@ -155,20 +141,15 @@ def build_card(store: Store, mission: Mission, *, backup: Mapping[str, Any] | No
 
 class ApprovalFlow:
     def __init__(self, store: Store, *, supervisor: Any = None, validator: GrantValidator | None = None,
-                 backup_status: Callable[[Grant], Mapping[str, Any]] | None = None,
-                 protected: Callable[[], Any] | None = None, budgets: Callable[[], Budgets] | None = None,
-                 named_windows: Callable[[], Mapping[str, Any]] | None = None, runtime: str = "command",
-                 host_root_view: Callable[[Grant], list[dict[str, Any]]] | None = None):
+                 budgets: Callable[[], Budgets] | None = None,
+                 named_windows: Callable[[], Mapping[str, Any]] | None = None, runtime: str = "command"):
         self.store = store
         self.ms = MissionStore(store)
         self.supervisor = supervisor
         self.validator = validator                  # None: no Repair mission can be proposed (nothing could validate it)
-        self.backup_status = backup_status          # Grant -> the checkpoint backup floor's view of the scope
-        self.protected = protected                  # () -> ProtectedSet, copied into every grant
         self.budgets = budgets
         self.named_windows = named_windows or dict
         self.runtime = runtime
-        self.host_root_view = host_root_view        # Grant -> in-scope containers that are host-root-equivalent, with why
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _mission(self, mission_id: str) -> Mission:
@@ -183,48 +164,20 @@ class ApprovalFlow:
         except Exception:                           # noqa: BLE001 - the mission/standing rows are the record; this is a copy
             log.warning("could not write the %s audit event", kind)
 
-    def _backup_view(self, grant: Grant) -> Mapping[str, Any] | None:
-        if self.backup_status is None:
-            return None
-        try:
-            return self.backup_status(grant)
-        except Exception:                           # noqa: BLE001 - an unreadable backup status is shown as unverifiable
-            return {"covered": False, "state": "unverifiable", "acknowledged_no_backup": grant.backup.acknowledged_no_backup}
-
     # ── the card ────────────────────────────────────────────────────────────
     def card(self, mission_id: str) -> dict[str, Any]:
         mission = self._mission(mission_id)
         if mission.tier in ("observe", "propose"):
             raise FlowError("only a mission that can execute has an approval card", "conflict")
-        out = build_card(self.store, mission, backup=self._backup_view(mission.grant()))
-        out["warnings"] = self._host_root_warnings(mission.grant()) + out["warnings"]       # the first thing an operator reads
-        return out
-
-    def _host_root_warnings(self, grant: Grant) -> list[dict[str, str]]:
-        """A Repair worker with Docker access can run code in an in-scope container; if that container is itself host-root
-        (privileged, the Docker socket, a read-write system mount, devices, ...) the grant is host root in practice. The proxy
-        refuses to act on such containers, and the card says which they are so the operator knows what the grant cannot do (or
-        should not scope). A view that cannot be built is itself shown: silence must not read as 'none'."""
-        if self.host_root_view is None or grant.docker not in ("proxy", "lifecycle"):
-            return []
-        try:
-            found = self.host_root_view(grant)
-        except Exception as exc:                        # noqa: BLE001
-            return [{"kind": "host_root_unchecked", "text": f"HOST-ROOT CHECK FAILED ({type(exc).__name__}): in-scope containers "
-                                                           "could not be inspected; do not assume there are none."}]
-        return [{"kind": "host_root_equivalent",
-                 "text": _clip(f"HOST-ROOT-EQUIVALENT in-scope container {item['container']}: " + "; ".join(item["reasons"]), 400)}
-                for item in found[:16]]
+        return build_card(self.store, mission)
 
     # ── proposing ───────────────────────────────────────────────────────────
     def propose_repair(self, actor: str, *, title: str, goal: str, scope: dict, checks: list[dict],
-                       success_criteria: str | None = None, budgets: dict | None = None, sudo: dict | None = None,
-                       docker: str = "proxy", exclusions: list[str] | None = None, credentials: list[str] | None = None,
-                       on_verify_fail: str = "needs_operator", acknowledged_no_backup: bool = False,
-                       incident_id: str | None = None, standing_grant_id: str | None = None,
+                       success_criteria: str | None = None, budgets: dict | None = None, credentials: list[str] | None = None,
+                       on_verify_fail: str = "needs_operator", incident_id: str | None = None, standing_grant_id: str | None = None,
                        _internal: bool = False) -> dict[str, Any]:
         """Create a Repair mission waiting in `awaiting_decision` with its approval card. The grant is validated by Core
-        (scope within the inventory, no protected resource, budgets within site maximums, backup floor) BEFORE anyone is asked.
+        (scope within the inventory, budgets within site maximums, a known verification plan) BEFORE anyone is asked.
         With `standing_grant_id` the unattended path runs (`approvals.evaluate`); a refusal there is NOT an error: the mission
         is made without the standing grant and the card says why, so an operator decides instead."""
         # Two ways to name a standing grant: Core's own automation (`start_under_standing`, actor "core": nobody is asked) and
@@ -238,7 +191,7 @@ class ApprovalFlow:
             require_actor(actor)
         if unattended and not incident_id:
             raise FlowError("a standing grant covers incident-backed missions only", "forbidden")
-        if self.validator is None or self.protected is None:
+        if self.validator is None:
             raise FlowError("Repair missions are not configured on this host", "unavailable")
         try:
             plan = validate_plan(VerificationPlan.model_validate({"catalogue_v": 1, "checks": checks}))
@@ -249,24 +202,17 @@ class ApprovalFlow:
         try:
             default = self.budgets() if self.budgets is not None else Budgets()
             body = {"tier": "repair", "scope": GrantScope.model_validate(scope).model_dump(mode="json"),
-                    "exclusions": list(exclusions or []), "credentials": list(credentials or []),
+                    "credentials": list(credentials or []),
                     "budgets": {**default.model_dump(mode="json"), **(budgets or {})},
-                    "docker": docker, "on_verify_fail": on_verify_fail,
-                    "sudo": sudo or {"mode": "scoped", "rules": []},
+                    "on_verify_fail": on_verify_fail,
                     "verification": {"checks": [c.id for c in plan.checks], "agreed_at": int(self.store._clock()),
-                                     "plan_sha256": plan.hash()},
-                    "backup": {"covered": False, "acknowledged_no_backup": bool(acknowledged_no_backup)}}
+                                     "plan_sha256": plan.hash()}}
             grant = Grant.model_validate(body)
-            covered = bool((self._backup_view(grant) or {}).get("covered", False))
-            grant = Grant.model_validate({**body, "backup": {**body["backup"], "covered": covered}})
-            grant = with_site_protected(grant, self.protected())
         except (ValidationError, ValueError) as exc:
             raise FlowError(f"Invalid grant: {plain_error(exc, 300)}") from None
         reasons = self.validator(grant, plan)
         if reasons:
-            # A grant refused ONLY for the backup floor is the operator's to override (acknowledge no backup, which needs an elevated approval).
-            only_floor = all(r.startswith("backup floor:") for r in reasons)
-            raise FlowError("The grant is not valid: " + "; ".join(_clip(r, 160) for r in reasons[:6]), "backup_floor" if only_floor else "invalid_grant")
+            raise FlowError("The grant is not valid: " + "; ".join(_clip(r, 160) for r in reasons[:6]), "invalid_grant")
         origin = "incident" if incident_id else "operator"
         who = actor
         try:
@@ -341,6 +287,8 @@ class ApprovalFlow:
             raise FlowError("this mission never executes: nothing to approve", "conflict")
         if mission.status != "awaiting_decision":
             raise FlowError(f"Mission is {mission.status}; it can be approved only while awaiting a decision", "conflict")
+        if is_legacy_grant(mission.grant_json):
+            raise FlowError(LEGACY_GRANT_TEXT[0].upper() + LEGACY_GRANT_TEXT[1:], "conflict")
         if approvals.plan_view(mission.verification_plan_json)[1]:
             raise FlowError("The verification plan is too large to show in full, so it cannot be approved", "invalid_grant")
         phases = {r["phase"]: r for r in required_phases(mission)}
@@ -437,7 +385,7 @@ class ApprovalFlow:
             scope_model = GrantScope.model_validate(scope)
         except ValidationError:
             raise FlowError("Invalid scope") from None
-        if not (scope_model.stacks or scope_model.services or scope_model.paths or scope_model.mounts):
+        if not (scope_model.stacks or scope_model.services):
             raise FlowError("A standing grant needs a non-empty scope")
         return scope_model.model_dump(mode="json"), self._window(window_raw), int(self.store._clock()) + ttl_s
 
@@ -446,7 +394,7 @@ class ApprovalFlow:
         if raw is None:
             return None
         try:
-            return StandingCeilings.model_validate(raw).model_dump(mode="json")
+            return StandingCeilings.load(raw).model_dump(mode="json")
         except ValidationError:
             raise FlowError("Invalid ceilings") from None
 

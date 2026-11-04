@@ -13,10 +13,8 @@ from missions_helpers import DEFAULT_PLAN, advance_to, token, with_default_plan
 
 from planet_express.missions.approvals import record_approval
 from planet_express.missions.containment import FakeContainment
-from planet_express.missions.grants import with_site_protected
 from planet_express.missions.launcher.spec import LaunchSpec
 from planet_express.missions.models import Grant
-from planet_express.missions.protected import Discovery, build_protected
 
 
 def doc(name, *, project=None, service=None, image="sha256:aaa", labels=None, mounts=(), networks=("media_default",)):
@@ -83,7 +81,7 @@ class Rig:
     pass
 
 
-def make_rig(tmp_path, *, grant_over=None, with_tree=False, site_extra=()):
+def make_rig(tmp_path, *, grant_over=None, with_tree=False):
     rig = Rig()
     rig.host = Host()
     fs = tmp_path / "root"
@@ -126,15 +124,9 @@ def make_rig(tmp_path, *, grant_over=None, with_tree=False, site_extra=()):
     env = make_env(tmp_path)
     rig.env = env
     rig.host.stacks = str(env.stacks)
-    discovery = Discovery(stacks_root=str(env.stacks), storage_mounts=["/mnt/data"],
-                          volumes=["/var/lib/docker/volumes/media_data/_data", "/var/lib/docker/volumes/vault_data/_data"],
-                          live_trees=["/home/repo"] if with_tree else [],
-                          cross_host=[("nas", "/etc/exports"), ("router", None)])
-    rig.protected = build_protected(site=["service:media/traefik", *site_extra], discovery=discovery)
-    body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]},
-            "verification": {"checks": ["http"]}, "backup": {"covered": True}}
+    body = {"tier": "repair", "scope": {"stacks": ["media"], "hosts": ["local"]}, "verification": {"checks": ["http"]}}
     body.update(grant_over or {})
-    grant = with_site_protected(with_default_plan(Grant.model_validate(body)), rig.protected)
+    grant = with_default_plan(Grant.model_validate(body))
     # replace the S5 draft mission by one carrying this grant
     rig.mission = env.ms.create_mission(title="t", origin="operator", grant=grant, goal="g", success_criteria="s",
                                         runtime="fake")

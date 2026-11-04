@@ -182,13 +182,6 @@ def test_a_denied_window_refuses_and_the_clock_decides(stack):
     assert unattended(st, "SG-1-v1", n=2)["unattended"]
 
 
-def test_broad_sudo_raw_docker_and_no_backup_refuse_and_raise_a_card(stack):
-    st = stack(covered=False)
-    make_standing(st)
-    refused(st, unattended(st, "SG-1-v1", n=1, sudo={"mode": "broad"}, docker="raw"), "broad_sudo")
-    refused(st, unattended(st, "SG-1-v1", n=2, acknowledged_no_backup=True), "no_backup")
-
-
 def test_a_standing_grant_cannot_be_made_for_change_or_critical_and_a_change_mission_never_matches_one(stack):
     from missions_helpers import advance_to, new_mission
 
@@ -294,32 +287,37 @@ def test_a_failed_supersede_leaves_the_old_version_active_and_never_two_active(s
     assert st.flow._standing_row("SG-1-v1")["state"] == "active"            # not revoked: the replacement never happened
 
 
-def test_an_unattended_start_cannot_carry_credentials_or_sudo_rules_the_standing_grant_did_not_name(stack):
+def test_an_unattended_start_cannot_carry_credentials_the_standing_grant_did_not_name(stack):
     st = stack()
     make_standing(st)                                                     # no ceilings: nothing extra is allowed
-    rule = {"mode": "scoped", "rules": [{"unit": "web.service", "actions": ["restart"]}]}
     refused(st, unattended(st, "SG-1-v1", n=1, credentials=["tool:arr.queue_item"]), "credentials")
-    refused(st, unattended(st, "SG-1-v1", n=2, sudo=rule), "sudo rules")
-    assert unattended(st, "SG-1-v1", n=3)["unattended"]                   # without them it is fine
+    assert unattended(st, "SG-1-v1", n=2)["unattended"]                   # without them it is fine
 
 
 def test_ceilings_allow_exactly_what_they_name(stack):
     st = stack()
+    # `sudo_units` and `exclusions` are ceilings trust mode removed: an older caller's are accepted and dropped
     st.flow.standing_create("operator:alice", scope=SCOPE, ttl_s=3600, elevated=True, ceilings={
         "credentials": ["tool:arr.queue_item"], "sudo_units": ["web.service"],
         "budgets": {"wall_s": 900, "tool_calls": 50, "output_bytes": 1_000_000, "retries": 1}, "exclusions": ["network"]})
-    ok = {"credentials": ["tool:arr.queue_item"], "exclusions": ["network", "persistent-data"],
-          "sudo": {"mode": "scoped", "rules": [{"unit": "web.service", "actions": ["restart"]}]},
-          "budgets": {"wall_s": 600, "tool_calls": 50, "output_bytes": 500_000, "retries": 1}}
+    ok = {"credentials": ["tool:arr.queue_item"], "budgets": {"wall_s": 600, "tool_calls": 50, "output_bytes": 500_000, "retries": 1}}
     made = unattended(st, "SG-1-v1", n=1, **ok)
     assert made["unattended"], made
-    assert st.flow._standing_row("SG-1-v1")["ceilings"]["credentials"] == ["tool:arr.queue_item"]
-    assert st.flow._standing_row("SG-1-v1")["scope"] == {"stacks": ["media"], "services": [], "paths": [], "mounts": [], "hosts": ["local"]}
+    row = st.flow._standing_row("SG-1-v1")
+    assert row["ceilings"]["credentials"] == ["tool:arr.queue_item"] and "sudo_units" not in row["ceilings"]
+    assert row["scope"] == {"stacks": ["media"], "services": [], "hosts": ["local"]}
     refused(st, unattended(st, "SG-1-v1", n=2, **{**ok, "credentials": ["tool:arr.queue_item", "tool:other"]}), "credentials")
-    refused(st, unattended(st, "SG-1-v1", n=3, **{**ok, "sudo": {"mode": "scoped", "rules": [
-        {"unit": "db.service", "actions": ["stop"]}]}}), "sudo rules")
     refused(st, unattended(st, "SG-1-v1", n=4, **{**ok, "budgets": {"wall_s": 901}}), "budgets")
-    refused(st, unattended(st, "SG-1-v1", n=5, **{**ok, "exclusions": ["persistent-data"]}), "exclusions")
+
+
+def test_a_standing_grant_stored_before_trust_mode_still_reads(stack):
+    st = stack()
+    make_standing(st)
+    with st.store._write() as conn:
+        conn.execute("UPDATE standing_grants SET scope_json=? WHERE id='SG-1-v1'", (
+            '{"ceilings":{"budgets":null,"credentials":[],"exclusions":[],"sudo_units":[]},'
+            '"hosts":["local"],"mounts":[],"paths":[],"services":[],"stacks":["media"]}',))
+    assert unattended(st, "SG-1-v1", n=1)["unattended"]
 
 
 def test_default_budget_ceiling_is_the_models_defaults_and_bad_ceilings_are_refused(stack):

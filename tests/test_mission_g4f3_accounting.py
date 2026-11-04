@@ -50,7 +50,7 @@ def test_a_second_broker_reads_the_same_tally_from_the_log(tmp_path):
     for _ in range(2):
         broker.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})
     again = ToolBroker(broker.registry, missions=ms, secrets=broker.secrets, sites=broker.sites, http=http,
-                       runner=runner, stacks_root=broker.stacks_root, protected=broker.protected)
+                       runner=runner, stacks_root=broker.stacks_root)
     assert again._usage(m.id)["invoke"] == 2
     with pytest.raises(RpcError):
         again.invoke(sess, "arr.queue_item", {"app": "sonarr", "id": 1})

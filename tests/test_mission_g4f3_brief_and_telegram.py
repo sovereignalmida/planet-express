@@ -57,7 +57,7 @@ def test_a_repair_brief_does_not_say_observe_and_propose_only(stack):
     mid = st.propose()["mission_id"]
     text = build_brief(st.ms.get_mission(mid), [], []).text
     assert "observe and propose only" not in text and INSTRUCTIONS not in text
-    assert "only what the grant's scope names" in text and "verification" in text
+    assert "Carry out the change the operator approved" in text and "verification" in text and "full access" in text
 
 
 def test_observe_and_propose_briefs_keep_their_instructions(tmp_path):

@@ -148,7 +148,7 @@ def test_the_prompt_carries_every_check_kind_with_its_bounds_and_the_schema_list
     kinds = schema["properties"]["options"]["items"]["properties"]["checks"]["items"]["properties"]["check"]["enum"]
     assert kinds == sorted(PARAM_MODELS)
     assert schema["additionalProperties"] is False and schema["properties"]["options"]["maxItems"] == 3
-    assert "cannot approve" in text and "carries no permissions" in text
+    assert "cannot approve" in text and "before the operator confirms" in text
 
 
 def test_a_plan_valid_against_the_generated_json_schema_is_one_pe_accepts():

@@ -1,8 +1,7 @@
 """Strict mission models (contract §2, §4, §10). Hashed models carry ints and strings only."""
 
 import re
-from collections.abc import Iterable
-from typing import Annotated, Literal, NamedTuple
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -14,8 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-from .canonical import canonical_json, sha256_hex
-from .resources import BadResource, canon
+from .canonical import canonical_json, loads_strict, sha256_hex
 
 Tier = Literal["observe", "propose", "repair", "change", "critical"]
 Status = Literal[
@@ -37,52 +35,53 @@ GRANT_JSON_MAX = 262144                  # a stored JSON document, the grant amo
 JsonText = Annotated[StrictStr, Field(max_length=GRANT_JSON_MAX)]
 ResourceId = Annotated[StrictStr, Field(min_length=1, max_length=512)]
 ShortList = Annotated[list[Str], Field(max_length=256)]
-# The site's protected set is copied into every grant, and discovery lists every Docker volume, so it outgrows ShortList on
-# a busy host. Its real bound is the stored grant's size (GRANT_JSON_MAX), which `with_site_protected` checks and explains.
-MAX_PROTECTED = 4096
-ProtectedList = Annotated[list[Str], Field(max_length=MAX_PROTECTED)]
 
+# Approval phases. `broad_sudo` and `no_backup` are only on rows written before trust mode: still readable, never asked for.
 PHASE_RE = re.compile(r"^(grant|plan|broad_sudo|no_backup|critical:\d{1,6})$")
+
+# What trust mode (rc14) took out of a grant. A row stored before then still loads (`Grant.load`): these are dropped, and the
+# grant it gives no longer hashes to the stored hash, so an approval made before the upgrade can never start a run.
+LEGACY_GRANT_KEYS = frozenset({"protected", "exclusions", "sudo", "docker", "backup", "effects"})
+LEGACY_SCOPE_KEYS = frozenset({"paths", "mounts"})
+LEGACY_CEILING_KEYS = frozenset({"sudo_units", "exclusions"})
+LEGACY_GRANT_TEXT = ("this was approved before PE's trust-mode update changed what an approval covers, so it will not run. "
+                     "Close it and confirm the plan again.")
 
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+def _without(doc: Any, keys: frozenset[str]) -> Any:
+    return {k: v for k, v in doc.items() if k not in keys} if isinstance(doc, dict) else doc
+
+
 class GrantScope(_Strict):
+    """What a Repair works on: the stacks and services its leases cover and its verification is about."""
     stacks: ShortList = []
     services: ShortList = []
-    paths: ShortList = []
-    mounts: ShortList = []
     hosts: ShortList = ["local"]
+
+    @classmethod
+    def load(cls, doc: Any) -> "GrantScope":
+        """A stored scope (a mission's or a standing grant's): one from before trust mode may still carry paths and mounts."""
+        return cls.model_validate(_without(doc, LEGACY_SCOPE_KEYS))
 
 
 class StandingCeilings(_Strict):
     """What an unattended start under a standing grant may carry beyond its scope. Everything defaults to nothing: no brokered
-    tools, no sudo rules, and budgets no larger than `Budgets()`'s own defaults."""
+    tools and budgets no larger than `Budgets()`'s own defaults."""
     credentials: ShortList = []              # the `tool:<name>` credentials a mission may name
-    sudo_units: ShortList = []               # the units a scoped sudo rule may name
     budgets: "Budgets | None" = None         # per-field maxima; None means the model defaults
-    exclusions: ShortList = []               # exclusions the mission's grant must carry (a superset is fine)
 
-
-class Protected(_Strict):
-    resources: ProtectedList = []
+    @classmethod
+    def load(cls, doc: Any) -> "StandingCeilings":
+        return cls.model_validate(_without(doc, LEGACY_CEILING_KEYS))
 
 
 class Window(_Strict):
     deny: ShortList = []
     allow: ShortList | None = None
-
-
-class SudoRule(_Strict):
-    unit: Str
-    actions: Annotated[list[Literal["start", "stop", "restart"]], Field(max_length=3)]
-
-
-class Sudo(_Strict):
-    mode: Literal["scoped", "broad"] = "scoped"
-    rules: Annotated[list[SudoRule], Field(max_length=256)] = []
 
 
 class Budgets(_Strict):
@@ -92,53 +91,35 @@ class Budgets(_Strict):
     retries: Annotated[Int, Field(ge=0, le=100)] = 2
 
 
-class ResourceEffect(_Strict):
-    changes: Annotated[Int, Field(ge=0, le=100000)]
-
-
-class Effects(_Strict):
-    max_unexpected_in_scope: Annotated[Int, Field(ge=0, le=100000)] = 3
-    per_resource: dict[Str, ResourceEffect] = {}
-
-
 class GrantVerification(_Strict):
     checks: ShortList = []
     agreed_at: Annotated[Int, Field(ge=0)] = 0
     plan_sha256: Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")] | None = None
 
 
-class Backup(_Strict):
-    covered: StrictBool = False
-    recent_s: Annotated[Int, Field(ge=0)] = 86400
-    acknowledged_no_backup: StrictBool = False
-
-
 class Grant(_Strict):
+    """Trust mode: a grant is the tier, what it works on (for leases and verification), its budgets and the verification plan it is
+    judged by, all hash-bound. The session's access is not in it: every session has full access to the host. `credentials` are the
+    brokered tools (`tool:<name>`) the mission may call."""
     v: Literal[1] = 1
     tier: Tier
     scope: GrantScope = GrantScope()
-    protected: Protected = Protected()
-    exclusions: ShortList = []
     window: Window = Window()
-    sudo: Sudo = Sudo()
     credentials: ShortList = []
     budgets: Budgets = Budgets()
-    effects: Effects = Effects()
     on_verify_fail: Literal["needs_operator", "rollback"] = "needs_operator"
-    # "lifecycle": the proxy serves reads and only start/stop/restart/kill of in-scope containers (a restart-only repair). It
-    # cannot reach data, so it needs no recent backup; it carries no sudo rules, paths, mounts or brokered credentials.
-    docker: Literal["proxy", "raw", "lifecycle"] = "proxy"
     verification: GrantVerification = GrantVerification()
-    backup: Backup = Backup()
 
-    @model_validator(mode="after")
-    def _raw_docker_needs_broad_sudo(self) -> "Grant":
-        if self.docker == "raw" and self.sudo.mode != "broad":
-            raise ValueError("docker: raw requires sudo.mode = broad")
-        if self.docker == "lifecycle" and (self.sudo.mode != "scoped" or self.sudo.rules or self.scope.paths
-                                           or self.scope.mounts or self.credentials):
-            raise ValueError("docker: lifecycle carries no sudo rules, paths, mounts or credentials")
-        return self
+    @classmethod
+    def load(cls, text: str) -> "Grant":
+        """A grant read back from the store. New grants are strict (`model_validate`); a stored one may be from before trust mode,
+        so the fields that update removed are dropped. Whatever else is wrong is still refused."""
+        doc = loads_strict(text) if isinstance(text, str) else text
+        if isinstance(doc, dict):
+            doc = _without(doc, LEGACY_GRANT_KEYS)
+            if isinstance(doc.get("scope"), dict):
+                doc["scope"] = _without(doc["scope"], LEGACY_SCOPE_KEYS)
+        return cls.model_validate(doc)
 
     def canonical(self) -> str:
         return canonical_json(self.model_dump(mode="json"))
@@ -146,43 +127,17 @@ class Grant(_Strict):
     def hash(self) -> str:
         return sha256_hex(self.model_dump(mode="json"))
 
-    def enforced_exclusions(self) -> tuple[str, ...]:
-        """The exclusions that name a concrete resource (`service:media/db`, `path:/srv/x`), canonical, on EVERY host the
-        grant's scope covers (a bare id means that resource on each of them). These are enforced: every layer treats the
-        excluded resource and what is inside it as protected, even inside the grant's scope. Any other exclusion is a
-        free-form tag for the operator and the agent's brief; nothing can enforce it."""
-        out: list[str] = []
-        for item in self.exclusions:
-            try:
-                if item.startswith("host:"):
-                    out.append(canon(item))
-                else:
-                    out += [canon(item, host) for host in (self.scope.hosts or ["local"])]
-            except BadResource:
-                continue
-        return tuple(dict.fromkeys(out))
 
-    def advisory_exclusions(self) -> tuple[str, ...]:
-        out = []
-        for item in self.exclusions:
-            try:
-                canon(item)
-            except BadResource:
-                out.append(item)
-        return tuple(out)
-
-    def effective_protection(self, protected: "Iterable[str]" = ()) -> "Protection":
-        """THE one place a consumer learns what is off limits for this grant: the site's protected set, the grant's own
-        protected resources (both canonical; a malformed one raises BadResource) and, separately, its enforced exclusions
-        (which carve out only the excluded resource and its descendants). The tool broker and Docker proxy both call
-        this; none reads `protected.resources` or `exclusions` itself."""
-        prot = tuple(dict.fromkeys(canon(r) for r in (*protected, *self.protected.resources)))
-        return Protection(prot, self.enforced_exclusions())
-
-
-class Protection(NamedTuple):
-    protected: tuple[str, ...]
-    excluded: tuple[str, ...]
+def is_legacy_grant(text: str) -> bool:
+    """A stored grant written before trust mode (it names a field that update removed)."""
+    try:
+        doc = loads_strict(text)
+    except Exception:                       # noqa: BLE001 - unreadable is not "legacy"; the strict reader says what is wrong
+        return False
+    if not isinstance(doc, dict):
+        return False
+    scope = doc.get("scope")
+    return bool(LEGACY_GRANT_KEYS & set(doc)) or (isinstance(scope, dict) and bool(LEGACY_SCOPE_KEYS & set(scope)))
 
 
 CheckName = Literal[
@@ -243,7 +198,7 @@ class Mission(_Strict):
     schema_ver: Int = 1
 
     def grant(self) -> Grant:
-        return Grant.model_validate_json(self.grant_json)
+        return Grant.load(self.grant_json)
 
 
 class MissionEvent(_Strict):

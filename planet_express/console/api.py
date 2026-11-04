@@ -279,8 +279,9 @@ class ConsoleApi:
 
     # ── confirming a plan option: propose the repair, show the approval card, authorise bound to its hash ──────────
     def confirm_prepare(self, conversation_id: str, plan_id: int, option: int, operator: str, no_backup: bool = False) -> dict:
-        """Step one of Confirm. Makes the Repair mission the option describes (the same grant checks, backup floor and protected set as any
-        Repair mission; nothing here widens them) and returns what the operator is about to authorise. Nothing runs until `confirm_authorise`."""
+        """Step one of Confirm. Makes the Repair mission the option describes (the same grant checks as any Repair mission) and returns what
+        the operator is about to authorise. Nothing runs until `confirm_authorise`. `no_backup` is accepted from an older page and ignored:
+        trust mode has no backup floor."""
         conv = self._conversation(conversation_id)
         if conv.state != "open":
             raise ConsoleApiError("This conversation is closed.", "conflict")
@@ -303,13 +304,9 @@ class ConsoleApi:
             made = flow.propose_repair(
                 actor, title=f"{conv.title[:120]} · {chosen.name}"[:256], goal=plan_mod.goal_text(chosen),
                 scope={"stacks": list(chosen.scope.stacks), "services": list(chosen.scope.services), "hosts": ["local"]},
-                checks=[c.model_dump() for c in chosen.checks], exclusions=[*chosen.exclude, *chosen.will_not_touch][:32],
-                incident_id=self.ms.get_mission(conv.mission_id).incident_id, acknowledged_no_backup=no_backup,
-                docker="lifecycle" if chosen.restart_only else "proxy")
+                checks=[c.model_dump() for c in chosen.checks],
+                incident_id=self.ms.get_mission(conv.mission_id).incident_id)
         except FlowError as exc:
-            if exc.code == "backup_floor" and not no_backup:
-                raise ConsoleApiError("This scope has no recent verified backup, so PE will not run it by default. You can prepare it anyway: "
-                                      "you would be accepting that risk, and it needs an elevated approval.", "no_backup") from None
             raise self._flow_error(exc) from None
         execution_id = self.console.add_execution(conv.id, plan_id, option, made["mission_id"], made["grant_hash"])
         self.console.add_message(conv.id, "system", f"{operator} is reviewing option {chr(65 + option)} ({chosen.name}) for confirmation. Nothing has been changed.",
@@ -334,7 +331,7 @@ class ConsoleApi:
             pending = [r for r in flow.card(mission.id)["required"] if r["state"] == "pending"]
             needs_elevation = any(r["elevated"] or phase_demands_elevation(r["phase"]) for r in pending)
             if needs_elevation and not elevated:
-                # Checked before any phase is approved: approving "grant" and then failing on "no_backup" would leave the run half-approved and stuck.
+                # Checked before any phase is approved: approving one phase and then failing on an elevated one would leave the run half-approved and stuck.
                 raise ConsoleApiError("This needs an elevated session. Elevate, then authorise again; nothing was approved.", "elevation_required")
             for needed in pending:
                 # The grant is bound to the fingerprint the operator saw (checked above), not to whatever the card says now.
@@ -367,7 +364,7 @@ class ConsoleApi:
     @staticmethod
     def _flow_error(exc: FlowError) -> ConsoleApiError:
         code = {"conflict": "conflict", "stale": "stale", "forbidden": "forbidden", "not_found": "not_found", "unavailable": "unavailable",
-                "elevation_required": "elevation_required", "invalid_grant": "bad_request", "backup_floor": "bad_request"}.get(exc.code, "bad_request")
+                "elevation_required": "elevation_required", "invalid_grant": "bad_request"}.get(exc.code, "bad_request")
         return ConsoleApiError(str(exc), code)
 
     def _mission_open(self, mission_id: str) -> bool:
@@ -380,16 +377,16 @@ class ConsoleApi:
         if int(self._clock()) - int(row["created_at"]) > PLAN_TTL_S:
             self.console.set_plan_status(row["id"], "expired")
             raise ConsoleApiError("That plan has expired. Ask the agent for a fresh one.", "conflict")
+        if plan_mod.stored_before_trust_mode(row["plan_json"]):
+            # Stored before trust mode: a restart-only option meant a narrower run than the one that would start now. Not silently upgraded.
+            raise ConsoleApiError("That plan was made before an update to what a confirmed plan may do. Ask the agent for a fresh one.",
+                                  "conflict")
         try:
             plan = plan_mod.Plan.model_validate(json.loads(row["plan_json"]))
         except ValueError:
             raise ConsoleApiError("That plan could not be read.", "conflict") from None
         if plan_mod.plan_hash(plan) != row["plan_hash"]:
             raise ConsoleApiError("That plan does not match what was recorded. Ask the agent for a fresh one.", "conflict")
-        if any(plan_mod.restart_unbound(o) for o in plan.options):
-            # Stored before rc13.2: its restart checks would only ask "is it running" (review, rc13.2). Not silently upgraded.
-            raise ConsoleApiError("That plan was made before an update to how restarts are checked. Ask the agent for a fresh one.",
-                                  "conflict")
         return plan
 
     def _execution(self, conv: Conversation, execution_id: int, status: str) -> dict:
@@ -458,12 +455,10 @@ class ConsoleApi:
         ids = [conv.mission_id] + [r["mission_id"] for r in runs]       # the whole record: the conversation's own mission and every run's
         events = self.ms.activity_count(ids)
         active = bool(runs) and mission.status not in execution_mod.TERMINALISH
-        # Only exclusions that name a concrete resource are enforced; the free-form ones are notes, so they are not counted as protection.
-        protected = len(set(grant.protected.resources) | set(grant.enforced_exclusions()))
         return {
             "evidence": {"incident": own.incident_id, "turns": conv.turns, "budget_used_pct": used_pct},
-            "scope": {"kind": "run" if active else "last_run" if runs else "read_only", "stacks": list(grant.scope.stacks), "services": list(grant.scope.services),
-                      "paths": list(grant.scope.paths), "protected": protected},
+            "scope": {"kind": "run" if active else "last_run" if runs else "read_only", "stacks": list(grant.scope.stacks),
+                      "services": list(grant.scope.services)},
             "limits": {"kind": "run" if runs else "conversation", "token_budget": conv.token_budget, "minutes": max(1, grant.budgets.wall_s // 60), "steps": grant.budgets.tool_calls},
             "record": {"events": events, "checkpoint": mission.checkpoint_id is not None, "runs": len(runs)},
         }
@@ -477,17 +472,10 @@ class ConsoleApi:
             "execution_id": execution_id, "mission_id": mission_id, "grant_hash": card["grant_hash"], "fingerprint": card["grant_hash"][:8],
             "operator": operator, "option": option.name, "summary": option.summary,
             "scope": {"stacks": card["scope"]["stacks"], "services": card["scope"]["services"]},
-            "warnings": [w["text"] for w in card["warnings"]],
-            "backup": ({"covered": True, "not_needed": True,
-                        "text": "Not needed: this repair may only start, stop and restart containers, and its own account cannot "
-                                "write anywhere in its stacks."}
-                       if card["docker"] == "lifecycle" and not card["backup"].get("covered")
-                       and not card["backup"].get("acknowledged_no_backup") else
-                       {"covered": bool(card["backup"].get("covered")),
-                        "text": "A recent verified backup covers this scope." if card["backup"].get("covered") else
-                                "No recent verified backup covers this scope, and you are accepting that risk. This needs an elevated approval."}),
-            "protected": {"count": card["protected"]["count"], "enforced": card["protected"]["exclusions_enforced"],
-                          "advisory": card["protected"]["exclusions_advisory"]},
+            "warnings": [w["text"] for w in card["warnings"] if w["kind"] != "full_access"],
+            "access": "Full access to this host (docker, sudo), as you have at a terminal. It will not wipe disks, delete Docker volumes "
+                      "or data, or touch PE's own config, secrets or database.",
+            "will_not_touch": [*option.will_not_touch, *option.exclude][:32],
             "limits": {"minutes": max(1, budgets["wall_s"] // 60), "steps": budgets["tool_calls"]},
             "checks": [plan_mod.check_phrase(c) for c in option.checks], "on_verify_fail": card["verification"]["on_verify_fail"],
             "needs_elevation": any(r["elevated"] for r in pending), "phases": [r["phase"] for r in pending],

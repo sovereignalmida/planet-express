@@ -110,8 +110,8 @@ def test_oversize_grant_is_refused_and_nothing_written(tmp_path):
     m = new_mission(ms)
     fat = Grant.model_validate({
         "tier": "repair",
-        "scope": {k: ["y" * 500] * 256 for k in ("stacks", "services", "paths", "mounts")},
-        "exclusions": ["z" * 500] * 256, "credentials": ["w" * 500] * 256,
+        "scope": {k: ["y" * 500] * 256 for k in ("stacks", "services", "hosts")},
+        "credentials": ["w" * 500] * 256, "window": {"deny": ["z" * 500] * 256},
     })
     with pytest.raises(ValueError):
         ms.set_grant(m.id, fat)

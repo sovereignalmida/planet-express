@@ -142,8 +142,8 @@ MAX_PROTECTED_SHOWN = 32    # protected resources returned with a mission's gran
 
 
 def _grant_out(raw: str) -> Any:
-    """The stored grant for display. The site's protected set is copied into every grant and can run to hundreds of
-    volume paths, which would push the whole grant past MAX_JSON and hide its scope; it is shortened, with its count."""
+    """The stored grant for display. A grant stored before trust mode carries the site's protected set, which can run to hundreds
+    of volume paths and would push the whole grant past MAX_JSON and hide its scope; it is shortened, with its count."""
     try:
         grant = json.loads(raw)
         resources = grant["protected"]["resources"]
@@ -693,9 +693,9 @@ class MissionService:
         def propose_repair(p):
             return self.propose_repair(**_params(
                 p, {**op, "title": _str(256), "goal": _str(8192), "scope": _dict, "checks": _checks},
-                {"success_criteria": _str(8192), "budgets": _dict, "sudo": _dict, "docker": _choice("proxy", "raw", "lifecycle"),
-                 "exclusions": _tags, "credentials": _tags, "on_verify_fail": _choice("needs_operator", "rollback"),
-                 "acknowledged_no_backup": _bool, "incident_id": _pattern(INCIDENT_ID_RE, "an incident id"),
+                {"success_criteria": _str(8192), "budgets": _dict,
+                 "credentials": _tags, "on_verify_fail": _choice("needs_operator", "rollback"),
+                 "incident_id": _pattern(INCIDENT_ID_RE, "an incident id"),
                  "standing_grant_id": _pattern(STANDING_ID_RE, "a standing grant id")}))
 
         def approve(p):
@@ -934,19 +934,12 @@ def _render_card(card: dict) -> str:
     """The approval card as plain text, elevated risks first. The first 8 characters of the grant hash bind /approve."""
     lines = [f"{card['mission_id']} [{card['status']}/{card['tier']}] {card['title']}"]
     lines += [f"!! {w['text']}" for w in card["warnings"]]
-    b = card["backup"]
-    lines.append(f"backup: {'covered' if b.get('covered') else 'NOT covered'}"
-                 + (" (no-backup acknowledged)" if b.get("acknowledged_no_backup") else ""))
     scope = card["scope"]
     lines.append("scope: " + ", ".join(f"{k}={','.join(v)}" for k, v in scope.items() if v))
-    lines.append(f"protected excluded: {card['protected']['count']} resources")
     bud = card["budgets"]
     lines.append(f"budgets: {bud['wall_s']}s, {bud['tool_calls']} tools, {bud['output_bytes']} bytes, retries {bud['retries']}")
     lines.append("verification: " + (", ".join(f"{c['id']}({c['check']})" for c in card["verification"]["checks"]) or "none")
                  + f"; on failure {card['verification']['on_verify_fail']}")
-    sudo = card["sudo"]
-    lines.append(f"sudo: {sudo['mode']}" + (" " + ", ".join(f"{r['unit']}:{'/'.join(r['actions'])}" for r in sudo["rules"]) if sudo["rules"] else "")
-                 + f"; docker: {card['docker']}")
     lines.append("approvals: " + ", ".join(f"{r['phase']}={r['state']}{'*' if r['elevated'] else ''}" for r in card["required"])
                  + " (* needs the dashboard)")
     lines.append(f"grant hash: {card['grant_hash'][:8]}")

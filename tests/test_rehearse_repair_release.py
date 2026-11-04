@@ -112,15 +112,3 @@ def test_a_prepare_that_cannot_reach_baseline_fails_and_names_why(mod, tmp_path)
     rec = mod.Recorder()
     assert mod.prepare_scenario(rec, "canary", tmp_path, "busybox:1.36", run=lambda a, timeout=120: (1, "boom")) is False
     assert "compose up failed" in rec.steps[-1]["detail"]
-
-
-def test_the_through_proxy_failure_names_the_first_refused_calls(mod):
-    summary = {"writes": 0, "created": 0, "further_refusals_not_recorded": False,
-               "refused": [{"reason": "not served", "route": None, "method": "GET", "path": "/v1.47/version"},
-                           {"reason": "x", "route": "r", "method": "POST", "path": "/p"},
-                           {"reason": "y", "route": "r", "method": "POST", "path": "/q"},
-                           {"reason": "z", "route": "r", "method": "POST", "path": "/s"}]}
-    text = mod.through_proxy_detail(summary)
-    assert "GET /v1.47/version: not served" in text and "POST /p: x" in text and "POST /q: y" in text
-    assert "/s" not in text and "no container create" in text
-    assert "no refused" in mod.through_proxy_detail({"writes": 0, "created": 0, "refused": []})

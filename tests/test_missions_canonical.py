@@ -61,8 +61,7 @@ def test_models_refuse_floats_and_extra_keys():
     with pytest.raises(ValidationError):
         Grant.model_validate({"tier": "godmode"})
     with pytest.raises(ValidationError):
-        Grant.model_validate({"tier": "repair", "docker": "raw"})  # raw needs broad sudo
-    Grant.model_validate({"tier": "repair", "docker": "raw", "sudo": {"mode": "broad"}})
+        Grant.model_validate({"tier": "repair", "docker": "raw", "sudo": {"mode": "broad"}})  # trust mode removed both fields
     with pytest.raises(ValidationError):
         VerificationPlan.model_validate({"checks": [{"id": "a", "check": "http", "params": {"t": 1.5}}]})
 

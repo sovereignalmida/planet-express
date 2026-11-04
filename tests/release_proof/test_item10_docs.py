@@ -30,7 +30,7 @@ def test_every_launcher_step_is_named_in_the_install_guide():
 
 def test_the_guide_covers_each_component_and_the_lifecycle():
     for needle in ("missions.enabled", "session_uid_min", "pe-launch", "launch.conf", "/etc/sudoers.d/planetexpress-launch",
-                   "Delegate=yes", "launcher-boot.sh", "worker.sock", "proxy.sock", "tool_secret_env", "Standing grants",
+                   "Delegate=yes", "launcher-boot.sh", "worker.sock", "tool_secret_env", "Standing grants",
                    "chown root:root /mnt/data", "Upgrading to v4", "Downgrading from v4 to v3", "snapshot restore",
                    "Uninstalling mission control", "scripts/state_snapshot.py restore", "mission_containment_rehearsal.py"):
         assert needle in SECTION, needle
@@ -50,7 +50,7 @@ def test_the_example_configs_missions_block_is_valid_when_uncommented():
     doc["enabled"] = False                       # enabling also needs a real cgroup v2 mount; the keys are what is checked
     cfg = MissionsConfig.model_validate(doc)
     assert cfg.runtime.argv and cfg.session_uid_min == 200000
-    assert cfg.verify.exec_allowlist == [] and cfg.checkpoint.backup_sources == []
+    assert cfg.verify.exec_allowlist == [] and not hasattr(cfg.checkpoint, "backup_sources")      # trust mode: no backup floor
     # The documented Console block must be enable-able as written (its model has to be one the sample broker allows).
     doc["console"]["enabled"] = True
     assert MissionsConfig.model_validate(doc).console.enabled

@@ -1,6 +1,7 @@
 """rc13.1's live Prowlarr restart (M-11) completed with nothing restarted: the hook refused `docker restart` (an "ask" that a
 headless session cannot answer), `docker compose` could not read the stack, the only check was "the container is running",
-and the agent's own "the restart was NOT performed" decided nothing. rc13.2 closes each of those."""
+and the agent's own "the restart was NOT performed" decided nothing. rc13.2 closes each of those. Trust mode removed the
+restart-only grant; a plan may still ask for the restart check (`started_during_mission`), and the agent's "not done" still stops a pass."""
 import json
 import time
 
@@ -45,33 +46,19 @@ def test_an_ordinary_running_check_is_unchanged():
     assert run_check(chk("container_state", container="app"), env).ok
 
 
-# ── a restart-only plan carries that check ──────────────────────────────────────────────────────────
+# ── a plan may carry that check ─────────────────────────────────────────────────────────────────────
 
-def restart_doc(checks):
+def test_a_plan_can_ask_that_the_container_really_restarted_and_the_card_says_so():
     doc = plan_doc()
-    doc["options"][0]["restart_only"] = True
-    doc["options"][0]["checks"] = checks
-    return doc
-
-
-def test_a_restart_only_plan_needs_a_container_check_and_gets_the_fresh_start_bound():
-    with pytest.raises(plan_mod.PlanError, match="needs a container_state check"):
-        plan_mod.parse(restart_doc([{"id": "web", "check": "http", "params": {"url": "http://localhost/"}}]))
-    plan = plan_mod.parse(restart_doc([{"id": "up", "check": "container_state", "params": {"container": "CASA_PROWLARR"}},
-                                       {"id": "web", "check": "http", "params": {"url": "http://localhost/"}}]))
-    up, web = plan.options[0].checks
-    assert up.params["started_during_mission"] is True and "started_during_mission" not in web.params
+    doc["options"][0]["checks"] = [{"id": "up", "check": "container_state",
+                                    "params": {"container": "CASA_PROWLARR", "started_during_mission": True}}]
+    up = plan_mod.parse(doc).options[0].checks[0]
     assert plan_mod.check_phrase(up) == "CASA_PROWLARR is running and stable and was restarted by this run"
 
 
-def test_an_agent_cannot_switch_the_bound_off():
-    plan = plan_mod.parse(restart_doc([{"id": "up", "check": "container_state",
-                                        "params": {"container": "c", "started_during_mission": False}}]))
-    assert plan.options[0].checks[0].params["started_during_mission"] is True
-
-
-def test_the_planner_is_told_to_restart_by_name():
-    assert "docker restart <container>" in plan_mod.PLAN_INSTRUCTIONS and "docker compose restart" not in plan_mod.PLAN_INSTRUCTIONS
+def test_the_planner_is_told_to_add_the_restart_check():
+    text = plan_mod.instructions()
+    assert "started_during_mission: true" in text and "container_state" in text
 
 
 # ── the hook lets the restart through (trust mode: there is no ask, for any grant) ────────────────────
@@ -97,13 +84,14 @@ def test_an_old_policy_with_the_lifecycle_flag_still_loads_and_the_runner_policy
 
 # ── the brief says how ──────────────────────────────────────────────────────────────────────────────
 
-def test_a_restart_only_brief_says_to_restart_by_name_and_asks_for_work_done(tmp_path):
+def test_a_repair_brief_says_it_has_full_access_and_how_to_restart_and_asks_for_work_done(tmp_path):
     from test_supervisor_brief import mission
     m = mission(tmp_path)
-    m = m.model_copy(update={"grant_json": Grant.model_validate(
-        {**json.loads(m.grant_json), "docker": "lifecycle", "sudo": {"mode": "scoped"}}).canonical()})
+    m = m.model_copy(update={"tier": "repair", "grant_json": Grant.model_validate(
+        {**json.loads(m.grant_json), "tier": "repair"}).canonical()})
     text = build_brief(m, [], []).text
-    assert "use `docker restart <container name>`" in text and "work_done" in text
+    assert "full access to this host" in text and "`docker restart <container>`" in text and "work_done" in text
+    assert "protected" not in text.lower()
 
 
 # ── the agent's own "not done" stops a pass ─────────────────────────────────────────────────────────
@@ -121,7 +109,8 @@ def stack(tmp_path):
         st.close()
 
 
-@pytest.mark.parametrize("done, final", [("none", "needs_operator"), ("some", "needs_operator"), ("all", "completed"),
+# Nothing on the host changed in these runs, so a run the agent says it did not finish closes `failed` (stage 5) rather than waiting.
+@pytest.mark.parametrize("done, final", [("none", "failed"), ("some", "failed"), ("all", "completed"),
                                           (None, "completed")])
 def test_the_agents_word_that_it_did_not_finish_stops_a_pass(stack, done, final):
     result = dict(GOOD_RESULT, **({"work_done": done} if done else {}))
@@ -130,9 +119,8 @@ def test_the_agents_word_that_it_did_not_finish_stops_a_pass(stack, done, final)
     st.approve_all(mid)
     assert st.drive(mid) == final
     stored = st.ms.get_mission(mid)
-    if final == "needs_operator":
+    if final == "failed":
         assert "the repair agent reported that" in json.loads(stored.verification_result_json)["reason"]
-        assert stored.outcome_flags == "partially_applied"
 
 
 def test_only_the_supervisors_note_counts(stack):
@@ -176,23 +164,7 @@ def test_a_re_entry_into_executing_from_elsewhere_does_not_move_the_start_of_the
     assert since == 100.0
 
 
-def test_a_restart_only_plan_stored_before_rc13_2_is_refused_not_run(tmp_path):
-    from test_console_confirm import Rig
-
-    from planet_express.console.api import ConsoleApiError
-    rig = Rig(tmp_path)
-    try:
-        doc = restart_doc([{"id": "up", "check": "container_state", "params": {"container": "c"}}])
-        stored = plan_mod.Plan.model_validate(doc)                 # as stored before: no bound on the check
-        assert plan_mod.restart_unbound(stored.options[0])
-        plan_id = rig.console.add_plan(rig.conv.id, 1, plan_mod.canonical(stored), plan_mod.plan_hash(stored))
-        with pytest.raises(ConsoleApiError, match="made before an update"):
-            rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
-    finally:
-        rig.close()
-
-
-# ── PE's own bound: every in-scope service of a restart-only grant restarted ───────────────────────
+# ── check_restarted stays available: every container of a service restarted ───────────────────────
 
 class Provider:
     def __init__(self, project="media"):
@@ -236,49 +208,3 @@ def test_a_stopped_container_fails_the_bound():
     from planet_express.missions.verify.checks import check_restarted
     env, _ = lifecycle_env(["a"], [inspect_json(status="exited", ago=60)])
     assert not check_restarted("media", None, env).ok
-
-
-def lifecycle_stack(stack, *, restarted):
-    st = stack(behaviours=[{"script": [update("finished")], "result": dict(GOOD_RESULT, work_done="all")}])
-    st.verifier.env = st.verifier.env.__class__(**{**st.verifier.env.__dict__, "provider": Provider()})
-    st.run_log.on(["docker", "ps"], (0, "cid1\n", ""))
-    def inspect(argv):
-        from datetime import datetime, timezone
-        # relative to the rig's clock (the run's start is a fake-clock time): just after it, or long before it
-        at = st.clock.t + 5 if restarted else st.clock.t - 86_400
-        code, out, err = inspect_json()
-        doc = json.loads(out)
-        doc[0]["State"]["StartedAt"] = datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.5Z")
-        return code, json.dumps(doc), err
-    st.run_log.on(["docker", "inspect"], inspect)
-    mid = st.flow.propose_repair("operator:me", title="restart prowlarr", goal="restart it", docker="lifecycle",
-                                 scope={"stacks": ["media"], "hosts": ["local"]},
-                                 checks=[{"id": "web", "check": "http", "params": {"url": "http://localhost/"}}])["mission_id"]
-    st.approve_all(mid)
-    return st, mid
-
-
-def test_a_restart_only_mission_whose_service_did_not_restart_does_not_complete(stack):
-    """M-11 again, even with a plan that only checks HTTP and an agent that says it did everything."""
-    st, mid = lifecycle_stack(stack, restarted=False)
-    assert st.drive(mid) == "needs_operator"
-    checks = json.loads(st.ms.get_mission(mid).verification_result_json)["checks"]
-    assert [(c["id"], c["ok"]) for c in checks if c["check"] == "restarted"] == [("restarted:media", False)]
-
-
-def test_a_restart_only_mission_whose_service_restarted_completes(stack):
-    st, mid = lifecycle_stack(stack, restarted=True)
-    assert st.drive(mid) == "completed"
-
-
-
-@pytest.mark.parametrize("scope, want", [
-    ({"stacks": ["media"], "services": ["media/prowlarr"]}, [("media", "prowlarr")]),
-    ({"stacks": ["media", "network"], "services": ["media/prowlarr"]}, [("media", "prowlarr"), ("network", None)]),
-    ({"stacks": ["media"]}, [("media", None)]),
-    ({"services": ["media/a", "media/b"]}, [("media", "a"), ("media", "b")])])
-def test_what_a_restart_only_grant_must_have_restarted(scope, want):
-    """Codex, rc13.2: a stack named without any of its services must not be dropped."""
-    from planet_express.missions.verify.runner import restart_targets
-    grant = Grant.model_validate({"tier": "repair", "docker": "lifecycle", "scope": {**scope, "hosts": ["local"]}})
-    assert restart_targets(grant) == want

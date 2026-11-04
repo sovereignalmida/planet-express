@@ -18,7 +18,6 @@ from .events import insert_event
 from .models import Grant, Mission, MissionEvent, Origin, SessionKind
 from .state import MissionNotFound, transition_in_txn
 
-PROXY_ACTOR = "docker-proxy"          # the only actor whose records may vouch for a container
 
 
 class GrantLocked(RuntimeError):
@@ -38,13 +37,11 @@ class NoFreeUid(RuntimeError):
 
 
 def grant_resources(grant: Grant) -> list[str]:
-    """The lease set a grant implies: every scoped stack, service, mount and path on every host."""
+    """The lease set a grant implies: every scoped stack and service on every host."""
     out: list[str] = []
     for host in grant.scope.hosts:
         out += [f"host:{host}/stack:{s}" for s in grant.scope.stacks]
         out += [f"host:{host}/service:{s}" for s in grant.scope.services]
-        out += [f"host:{host}/mount:{p}" for p in grant.scope.mounts]
-        out += [f"host:{host}/path:{p}" for p in grant.scope.paths]
     return out
 
 
@@ -78,11 +75,6 @@ def stack_lease_paths(grant: Grant, stacks_root: str | Sequence[str] | None) -> 
             out[f"host:{host}/stack:{stack}"] = directories(stack, host)
         for service in grant.scope.services:
             out[f"host:{host}/service:{service}"] = directories(service.split("/", 1)[0], host)
-        for kind, items in (("path", grant.scope.paths), ("mount", grant.scope.mounts)):
-            for item in items:
-                real = os.path.realpath(item)
-                if real != item and real != posixpath.normpath(item):         # a symlink alias: lease where it really points as well
-                    out[f"host:{host}/{kind}:{item}"] = [f"host:{host}/{kind}:{real}"]
     return out
 
 
@@ -216,7 +208,7 @@ class MissionStore:
                 validate_plan(plan)
             except PlanInvalid as exc:
                 raise ValueError(str(exc)) from None
-            grant = Grant.model_validate_json(row["grant_json"])
+            grant = Grant.load(row["grant_json"])
             problems = binding_problems(grant, plan)
             if problems:
                 raise ValueError("; ".join(problems))
@@ -325,7 +317,7 @@ class MissionStore:
             fences: dict[str, int] = {}
             if mutating:
                 # `resources` can only add to the grant's own lease set, never replace it.
-                granted = Grant.model_validate_json(row["grant_json"])
+                granted = Grant.load(row["grant_json"])
                 wanted = grant_resources(granted)
                 wanted += [r for r in (resources or ()) if r not in wanted]
                 if not wanted:

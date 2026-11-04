@@ -166,38 +166,18 @@ def started_mission(store, ms, grant):
     return m
 
 
-def test_a_stack_lease_conflicts_with_a_path_lease_inside_the_stack_directory(tmp_path):
+def test_a_stack_lease_conflicts_with_a_service_of_that_stack_and_leaves_another_stack_alone(tmp_path):
     store, clock = make_store(tmp_path)
     ms = MissionStore(store)
     ms.stacks_root = "/srv/stacks"
     a = started_mission(store, ms, repair_grant(scope={"stacks": ["media"], "hosts": ["local"]}))
-    b = started_mission(store, ms, repair_grant(scope={"paths": ["/srv/stacks/media/config"], "hosts": ["local"]}))
-    ms.start_session(a.id, token_hash=token(1), **KW)
-    with pytest.raises(leases.LeaseConflict):
-        ms.start_session(b.id, token_hash=token(2), **KW)             # the same files, reached by two different names
-    assert ms.live_session(b.id) is None and ms.get_mission(b.id).status == "awaiting_decision"
-
-
-def test_the_conflict_works_the_other_way_round_and_leaves_disjoint_paths_alone(tmp_path):
-    store, clock = make_store(tmp_path)
-    ms = MissionStore(store)
-    ms.stacks_root = "/srv/stacks"
-    b = started_mission(store, ms, repair_grant(scope={"paths": ["/srv/stacks/media/config"], "hosts": ["local"]}))
+    b = started_mission(store, ms, repair_grant(scope={"services": ["media/sonarr"], "hosts": ["local"]}))
     elsewhere = started_mission(store, ms, repair_grant(scope={"stacks": ["photos"], "hosts": ["local"]}))
-    a = started_mission(store, ms, repair_grant(scope={"stacks": ["media"], "hosts": ["local"]}))
-    ms.start_session(b.id, token_hash=token(1), **KW)
+    ms.start_session(a.id, token_hash=token(1), **KW)
     ms.start_session(elsewhere.id, token_hash=token(2), **KW)          # a different stack's directory is unrelated
     with pytest.raises(leases.LeaseConflict):
-        ms.start_session(a.id, token_hash=token(3), **KW)
-
-
-def test_without_a_stacks_root_behaviour_is_unchanged(tmp_path):
-    store, clock = make_store(tmp_path)
-    ms = MissionStore(store)                                            # no stacks_root: the old, narrower behaviour
-    a = started_mission(store, ms, repair_grant(scope={"stacks": ["media"], "hosts": ["local"]}))
-    b = started_mission(store, ms, repair_grant(scope={"paths": ["/srv/stacks/media/config"], "hosts": ["local"]}))
-    ms.start_session(a.id, token_hash=token(1), **KW)
-    ms.start_session(b.id, token_hash=token(2), **KW)
+        ms.start_session(b.id, token_hash=token(3), **KW)             # the same files, reached by two different names
+    assert ms.live_session(b.id) is None and ms.get_mission(b.id).status == "awaiting_decision"
 
 
 def test_stack_lease_paths_are_normalised_for_the_lease_module():
@@ -254,10 +234,10 @@ def test_leases_cover_the_configured_alias_and_the_resolved_root_of_the_stacks_d
     ms = MissionStore(store)
     ms.stacks_roots = (str(real), str(link))
     a = started_mission(store, ms, grant)
-    b = started_mission(store, ms, repair_grant(scope={"paths": [f"{link}/media/config"], "hosts": ["local"]}))
+    b = started_mission(store, ms, repair_grant(scope={"services": ["media/sonarr"], "hosts": ["local"]}))
     ms.start_session(a.id, token_hash=token(1), **KW)
     with pytest.raises(leases.LeaseConflict):
-        ms.start_session(b.id, token_hash=token(2), **KW)             # a path grant written under the alias still collides
+        ms.start_session(b.id, token_hash=token(2), **KW)
 
 
 def test_a_stack_directory_that_is_itself_a_symlink_is_leased_by_its_destination_too(tmp_path):
@@ -275,25 +255,7 @@ def test_a_stack_directory_that_is_itself_a_symlink_is_leased_by_its_destination
     ms = MissionStore(store)
     ms.stacks_roots = (str(root),)
     a = started_mission(store, ms, grant)
-    b = started_mission(store, ms, repair_grant(scope={"paths": [f"{target}/config"], "hosts": ["local"]}))
+    b = started_mission(store, ms, repair_grant(scope={"services": ["media/radarr"], "hosts": ["local"]}))
     ms.start_session(a.id, token_hash=token(1), **KW)
     with pytest.raises(leases.LeaseConflict):
-        ms.start_session(b.id, token_hash=token(2), **KW)             # the same files, reached through the symlink's destination
-
-
-def test_a_path_scope_that_is_a_symlink_alias_is_leased_where_it_really_points(tmp_path):
-    from planet_express.missions.store import stack_lease_paths
-    real = tmp_path / "stacks" / "media"
-    real.mkdir(parents=True)
-    alias = tmp_path / "stacks" / "media-alias"
-    alias.symlink_to(real)
-    out = stack_lease_paths(repair_grant(scope={"paths": [str(alias)], "hosts": ["local"]}), str(tmp_path / "stacks"))
-    assert out[f"host:local/path:{alias}"] == [f"host:local/path:{real}"]
-    store, clock = make_store(tmp_path / "db")
-    ms = MissionStore(store)
-    ms.stacks_roots = (str(tmp_path / "stacks"),)
-    a = started_mission(store, ms, repair_grant(scope={"stacks": ["media"], "hosts": ["local"]}))
-    b = started_mission(store, ms, repair_grant(scope={"paths": [str(alias)], "hosts": ["local"]}))
-    ms.start_session(a.id, token_hash=token(1), **KW)
-    with pytest.raises(leases.LeaseConflict):
-        ms.start_session(b.id, token_hash=token(2), **KW)             # media and media-alias are the same directory
+        ms.start_session(b.id, token_hash=token(2), **KW)             # the same directory, through the symlink's destination

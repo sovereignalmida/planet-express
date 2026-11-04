@@ -3,13 +3,15 @@
 `build_repair_controls` is called by `runner.build_mission_runner` only when missions are enabled and the daemon passes a
 `RepairWiring`. It builds, from `missions.*` config:
 
-    CheckpointService   root `<state>/checkpoints` (or missions.checkpoint.root), backup freshness from
-                        missions.checkpoint.backup_sources, a baseline provider that normalises Leela's full scan
+    CheckpointService   root `<state>/checkpoints` (or missions.checkpoint.root), a baseline provider that normalises Leela's
+                        full scan
     Verifier            Core-run verification over the same scan
-    repair gate         the side-door report (worker identity, no Docker TCP, only generator-managed sudoers)
+    validator           the grant checks (scope within the inventory, budgets within the site's, a known verification plan)
 
-With `missions.enabled` false nothing here is called. A control that cannot be built is a refusal to build ALL of them: a
-partial set would be a Repair mission without a safety net, so the caller falls back to no Repair capability.
+Trust mode (rc14) removed the side-door gate, the backup floor and the protected set: a Repair session has full access to the
+host, and what answers for it is the confirmed plan, the checkpoint, the record and PE's own verification. With
+`missions.enabled` false nothing here is called. A control that cannot be built is a refusal to build ALL of them: a partial set
+would be a Repair mission without a checkpoint or a verifier, so the caller falls back to no Repair capability.
 """
 
 import logging
@@ -22,12 +24,10 @@ from typing import Any
 from planet_express.core.store import Store
 
 from .approval_flow import ApprovalFlow
-from .checkpoint import CheckpointService, CheckpointSettings, ConfiguredBackupFreshness
-from .checkpoint.backup import BackupSource
+from .checkpoint import CheckpointService, CheckpointSettings
 from .grants import Inventory, SiteLimits, validate_grant
 from .models import Budgets, Grant, VerificationPlan
 from .store import MissionStore
-from .sudo_gen import outside_ceiling
 from .tools import default_registry
 from .verify.baseline import normalize
 from .verify.runner import verifier_from_config
@@ -43,22 +43,14 @@ class RepairWiring:
     """What the daemon supplies and Core code cannot derive: the host's checkpoint provider and its scan."""
     provider: Any                                   # a `CheckpointProvider` (Systemd or Mos) over the stacks root
     scan: Callable[[], Mapping[str, Any]]           # `casa_leela.run_full`
-    core_user: str                                  # the account Core runs as (the side-door gate compares against it)
-    # (unit, action) -> declared by config.yaml's v3 `sudo_allowlist`? The side-door gate accepts the v3 setup's exact no-password
-    # `systemctl` rules for Core when they are declared there. None (MOS, or no allowlist): no v3 rule is accepted.
-    v3_sudo_allowed: Callable[[str, str], bool] | None = None
 
 
 @dataclass
 class RepairControls:
     checkpoint: CheckpointService
     verifier: Any
-    repair_gate: Callable[[], Any]
-    protected: Any
-    backup_status: Callable[[Grant], Mapping[str, Any]]
     validator: Callable[[Grant, VerificationPlan], list[str]]
     inventory: Callable[[], Inventory]
-    host_root_view: Callable[[Grant], list[dict[str, Any]]] | None = None
 
 
 def mission_write_gate(store: Store) -> Callable[[str, str, dict], bool]:
@@ -85,7 +77,7 @@ def discover_inventory(stacks_root: str) -> Inventory:
     try:
         entries = sorted(os.scandir(stacks_root), key=lambda e: e.name)
     except OSError:
-        return Inventory(hosts=("local",), stacks=(), services=(), mounts=(), path_roots=(stacks_root,))
+        return Inventory(hosts=("local",), stacks=(), services=())
     for entry in entries:
         if not entry.is_dir(follow_symlinks=False):
             continue
@@ -103,53 +95,19 @@ def discover_inventory(stacks_root: str) -> Inventory:
             found = doc.get("services") if isinstance(doc, dict) else None
             services += [f"{entry.name}/{svc}" for svc in (found if isinstance(found, dict) else {})]
             break
-    return Inventory(hosts=("local",), stacks=tuple(stacks), services=tuple(services), mounts=(), path_roots=(stacks_root,))
+    return Inventory(hosts=("local",), stacks=tuple(stacks), services=tuple(services))
 
 
-def session_principals(cfg: Any) -> "SessionPrincipals | None":
-    """The identities a session can hold (the launcher's uid range, the same-numbered private gids, the session groups every
-    session is given). None when a group cannot be resolved: what a session could write is then not known, and nothing is
-    waived. (Stage 4 of trust mode removes the restart-only grant this serves.)"""
-    import grp
-
-    from .grants import SessionPrincipals
-    gids = set()
-    for name in getattr(cfg, "session_groups", ()) or ():
-        try:
-            gids.add(grp.getgrnam(name).gr_gid)
-        except KeyError:
-            continue                                     # the launcher skips a group the host does not have, too
-        except Exception:                                # noqa: BLE001
-            return None
-    return SessionPrincipals(cfg.session_uid_min, cfg.session_uid_max, frozenset(gids))
-
-
-def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, containment: Any, broker: Any, protected: Any,
-                          stacks_root: str, enabled: Callable[[], bool], proxy: Any = None,
-                          model_broker: Any = None) -> RepairControls:
+def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, containment: Any, broker: Any, stacks_root: str,
+                          enabled: Callable[[], bool], model_broker: Any = None) -> RepairControls:
     ms = MissionStore(store)
     state_dir = Path(store.path).parent
-    sources = [BackupSource(s.path, s.marker) for s in cfg.checkpoint.backup_sources]
-    backup = ConfiguredBackupFreshness(sources)
     checkpoint = CheckpointService(
         mission_store=ms, root=cfg.checkpoint.root or str(state_dir / "checkpoints"), stacks_root=stacks_root,
-        provider=wiring.provider, backup=backup, settings=CheckpointSettings.from_config(cfg.checkpoint), enabled=enabled,
+        provider=wiring.provider, settings=CheckpointSettings.from_config(cfg.checkpoint), enabled=enabled,
         baseline_provider=lambda: normalize(wiring.scan()))
-    principals = session_principals(cfg)
-    checkpoint.session_principals = principals            # a restart-only grant's backup waiver is asked again at start
-
     verifier = verifier_from_config(cfg, missions=ms, checkpoint=checkpoint, provider=wiring.provider, broker=broker,
                                     scan=wiring.scan, stacks_root=stacks_root, enabled=enabled)
-
-    from .launcher.side_doors import SideDoorPaths, repair_gate_report, side_door_steps
-    paths = SideDoorPaths(core_user=wiring.core_user, uid_min=cfg.session_uid_min, uid_max=cfg.session_uid_max,
-                          proxy_ports=tuple(cfg.docker_proxy_ports), managed=managed_sudoers(cfg, wiring.core_user),
-                          v3_allowed=wiring.v3_sudo_allowed)
-    steps = side_door_steps(paths)
-
-    def gate() -> Any:
-        return repair_gate_report(steps)
-
     known_tools = default_registry().names()
     limits = SiteLimits.from_config(cfg.budgets)
 
@@ -157,65 +115,10 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
         return discover_inventory(stacks_root)
 
     def validator(grant: Grant, plan: VerificationPlan) -> list[str]:
-        problems = validate_grant(grant, inventory=inventory(), protected=protected, known_checks={c.id for c in plan.checks},
-                                  known_tools=known_tools, limits=limits, stacks_root=stacks_root, verification_plan=plan,
-                                  session_principals=principals)
-        if grant.sudo.mode == "scoped":              # broad sudo is a separate, elevated approval and is never generated
-            problems += outside_ceiling(cfg.worker_sudo_rules if cfg.worker_sudo_all_sessions else [], grant.sudo.rules)
-        return problems
+        return validate_grant(grant, inventory=inventory(), known_checks={c.id for c in plan.checks}, known_tools=known_tools,
+                              limits=limits, verification_plan=plan)
 
-    def backup_status(grant: Grant) -> Mapping[str, Any]:
-        """The backup floor's view of the grant's scope, for the approval card and the grant's `covered` flag."""
-        now, states = int(store._clock()), []
-        targets = [os.path.join(stacks_root, s) for s in grant.scope.stacks]
-        targets += [os.path.join(stacks_root, s.split("/", 1)[0]) for s in grant.scope.services]
-        targets += list(grant.scope.mounts) + list(grant.scope.paths)
-        for path in dict.fromkeys(targets):
-            st = backup.status(path, now=now, recent_s=grant.backup.recent_s)
-            states.append({"path": path, "state": st.state, "last_success_at": st.last_success_at})
-        rank = {"ok": 0, "stale": 1, "unverifiable": 2, "absent": 3}               # the worst path decides, not the first
-        worst = max((x["state"] for x in states), key=lambda st_: rank.get(st_, 3)) if states else "unverifiable"
-        return {"covered": bool(states) and all(x["state"] == "ok" for x in states), "state": worst,
-                "acknowledged_no_backup": grant.backup.acknowledged_no_backup, "paths": states[:16]}
-
-    controls = RepairControls(checkpoint=checkpoint, verifier=verifier, repair_gate=gate, protected=protected,
-                              backup_status=backup_status, validator=validator, inventory=inventory)
-    controls.host_root_view = host_root_view(cfg, controls, stacks_root)
-    return controls
-
-
-def managed_sudoers(cfg: Any, core_user: str) -> dict[str, bytes]:
-    """Sudoers path -> the exact bytes setup's generators write there: the side-door check treats these, and only these, as
-    managed (a byte of difference is an unmanaged rule). The launcher rule is Core's own; the session rule is trust mode's one
-    `%pe-session` line (setup's `session-access` step). Stage 4 of trust mode replaces the side-door check this feeds."""
-    from .launcher.setup_steps import LauncherSudoers, Paths, SessionAccess
-    paths = Paths(core_uid=0, core_gid=0, workspace_root="", core_user=core_user, uid_min=cfg.session_uid_min,
-                  uid_max=cfg.session_uid_max)
-    managed: dict[str, bytes] = {}
-    launcher = LauncherSudoers(paths)
-    if not launcher.unsafe():
-        managed[paths.sudoers] = launcher.wanted()
-    session = SessionAccess(paths)
-    managed[session.target] = session.wanted()
-    return managed
-
-
-def host_root_view(cfg: Any, controls: "RepairControls", stacks_root: str) -> Callable[[Grant], list[dict[str, Any]]]:
-    """For the approval card: the in-scope containers the proxy would refuse to act on, and why."""
-    from .dockerproxy.policy import Policy, Scope, compose_id
-    from .dockerproxy.upstream import DaemonInspector, Upstream
-    inspector = DaemonInspector(Upstream(cfg.docker_socket, timeout=10))
-
-    def view(grant: Grant) -> list[dict[str, Any]]:
-        scope = Scope.from_grant(grant, protected=tuple(controls.protected.resources), stacks_root=stacks_root)
-        policy = Policy(scope, inspector)
-        def in_scope(labels: Mapping[str, str]) -> bool:
-            sid = compose_id("service", labels, scope.host)
-            return sid is not None and scope.classify(sid) == "in_scope"
-        found = inspector.in_scope_containers(in_scope)
-        return [{"container": info.name or info.id[:12], "reasons": reasons}
-                for info in found if (reasons := policy.hazards(info))]
-    return view
+    return RepairControls(checkpoint=checkpoint, verifier=verifier, validator=validator, inventory=inventory)
 
 
 def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairControls | None, *,
@@ -225,13 +128,11 @@ def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairCon
     if controls is None or runner is None:
         return None
     return ApprovalFlow(
-        store, supervisor=runner.supervisor, validator=controls.validator, backup_status=controls.backup_status,
-        protected=lambda: controls.protected,
+        store, supervisor=runner.supervisor, validator=controls.validator,
         budgets=lambda: Budgets(wall_s=min(cfg.budgets.wall_seconds, 86400 * 7), tool_calls=min(cfg.budgets.tool_calls, 100000),
                                 output_bytes=min(cfg.budgets.output_bytes, 2**40), retries=min(cfg.budgets.retries, 100)),
-        named_windows=lambda: dict(cfg.windows), runtime=runtime,
-        host_root_view=getattr(controls, "host_root_view", None))
+        named_windows=lambda: dict(cfg.windows), runtime=runtime)
 
 
 __all__ = ["RepairControls", "RepairWiring", "build_approval_flow", "build_repair_controls", "discover_inventory",
-           "managed_sudoers", "mission_write_gate"]
+           "mission_write_gate"]

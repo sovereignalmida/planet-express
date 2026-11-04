@@ -1,5 +1,7 @@
 """Confirming a plan option end to end over a real approval flow, supervisor, checkpoint and verifier (the Repair test fakes): the repair is proposed from
 the validated option, the operator authorises exactly the grant fingerprint they saw, and nothing that is stale, expired or out of scope runs."""
+import json
+
 import pytest
 from repair_fakes import build, update
 
@@ -56,12 +58,14 @@ def test_preparing_a_confirmation_proposes_the_repair_and_shows_what_will_be_aut
     assert mission.tier == "repair" and mission.status == "awaiting_decision" and mission.grant_hash == view["grant_hash"]
     assert view["fingerprint"] == view["grant_hash"][:8] and view["operator"] == "chris"
     grant = mission.grant()
-    assert grant.scope.stacks == ["media"] and grant.scope.hosts == ["local"] and grant.scope.paths == [] and grant.sudo.mode == "scoped" and grant.docker == "proxy"
-    assert "service:media/gluetun" in grant.exclusions and "the gateway" in grant.exclusions                  # enforced and advisory exclusions both carried
+    assert grant.scope.stacks == ["media"] and grant.scope.hosts == ["local"]
+    assert not {"docker", "sudo", "protected", "backup", "exclusions"} & set(grant.model_dump())            # trust mode: no access rules
+    assert "service:media/gluetun" in mission.goal and "the gateway" in mission.goal                          # what to leave alone is in the brief
     assert "Restart the media stack's apps." in mission.goal and "PE will check afterwards" in mission.goal and "http://localhost/ answers" in mission.goal
-    assert view["backup"]["covered"] is True and view["phases"] == ["grant"] and view["needs_elevation"] is False
+    assert view["phases"] == ["grant"] and view["needs_elevation"] is False and "backup" not in view and "protected" not in view
+    assert "Full access" in view["access"] and view["will_not_touch"] == ["the gateway", "any data volume", "service:media/gluetun"]
     assert view["scope"] == {"stacks": ["media"], "services": []} and view["checks"] == ["http://localhost/ answers"]
-    assert view["limits"]["minutes"] >= 1 and view["protected"]["count"] > 0
+    assert view["limits"]["minutes"] >= 1
     assert rig.console.plan(plan_id)["status"] == "pending" and rig.st.status(mission.id) == "awaiting_decision"        # nothing has run, nothing is approved
     assert rig.console.execution(view["execution_id"])["status"] == "proposed"
 
@@ -197,20 +201,29 @@ def test_the_execution_belongs_to_its_conversation_and_to_one_status_at_a_time(r
     assert err.value.code == "conflict"
 
 
-def test_a_scope_with_no_recent_backup_is_refused_with_a_typed_code_and_can_be_prepared_only_when_the_operator_accepts_the_risk(tmp_path):
-    rig = Rig(tmp_path, covered=False)
-    try:
-        rig.flow.validator = lambda grant, plan: [] if grant.backup.covered or grant.backup.acknowledged_no_backup else [
-            "backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged"]
-        plan_id = rig.add_plan()
-        with pytest.raises(ConsoleApiError) as err:
-            rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
-        assert err.value.code == "no_backup" and rig.console.executions(rig.conv.id) == []
-        view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris", no_backup=True)
-        assert view["backup"]["covered"] is False and view["needs_elevation"] is True and "accepting that risk" in view["backup"]["text"]
-        assert rig.st.status(view["mission_id"]) == "awaiting_decision"                                         # still nothing approved
-    finally:
-        rig.close()
+def test_there_is_no_backup_floor_and_an_older_pages_no_backup_flag_changes_nothing(rig):
+    plan_id = rig.add_plan()
+    view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris", no_backup=True)
+    assert view["phases"] == ["grant"] and view["needs_elevation"] is False
+    assert rig.st.status(view["mission_id"]) == "awaiting_decision"                                             # still nothing approved
+
+
+def test_a_plan_stored_before_trust_mode_is_refused_in_words(rig):
+    import sqlite3
+    plan_id = rig.add_plan()
+    view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    with sqlite3.connect(rig.st.store.path) as db:                  # what an rc13 plan row looks like: every option says restart_only
+        row = db.execute("SELECT plan_json FROM console_plans WHERE id=?", (plan_id,)).fetchone()
+        doc = json.loads(row[0])
+        for opt in doc["options"]:
+            opt["restart_only"] = True
+        db.execute("UPDATE console_plans SET plan_json=? WHERE id=?", (json.dumps(doc), plan_id))
+    for call in (lambda: rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris"),
+                 lambda: rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")):
+        with pytest.raises(ConsoleApiError, match="made before an update") as err:
+            call()
+        assert err.value.code == "conflict"
+    assert rig.st.status(view["mission_id"]) == "awaiting_decision" and rig.st.runtimes[1:] == []
 
 
 def test_a_run_approved_in_the_work_log_is_never_marked_withdrawn(rig):
@@ -260,39 +273,9 @@ def test_the_conversation_status_follows_an_active_repair_not_the_last_answer(ri
     assert held["group"] == "Needs you" and held["level"] == "crit"
 
 
-def test_authorising_without_the_elevation_a_later_phase_needs_approves_nothing(tmp_path):
-    rig = Rig(tmp_path, covered=False)
-    try:
-        rig.flow.validator = lambda grant, plan: [] if grant.backup.covered or grant.backup.acknowledged_no_backup else [
-            "backup floor: the scope is not covered by a recent backup and no-backup is not acknowledged"]
-        view = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris", no_backup=True)
-        assert view["phases"] == ["grant", "no_backup"]
-        with pytest.raises(ConsoleApiError) as err:
-            rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris", elevated=False)
-        assert err.value.code == "elevation_required"
-        assert all(r["state"] == "pending" for r in rig.flow.card(view["mission_id"])["required"])           # not even the grant phase was approved
-        assert rig.api.confirm_withdraw(rig.conv.id, view["execution_id"], "chris") == {"withdrawn": True}    # so it can still be backed out of
-        again = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris", no_backup=True)
-        done = rig.api.confirm_authorise(rig.conv.id, again["execution_id"], again["grant_hash"], "chris", elevated=True)
-        assert done["authorised"] is True and done["used_elevation"] is True
-    finally:
-        rig.close()
-
-
 def test_an_ordinary_authorisation_reports_that_it_used_no_elevation(rig):
     view = rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
     assert rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris", elevated=True)["used_elevation"] is False
-
-
-def test_a_refusal_for_another_reason_that_mentions_backup_is_not_offered_as_a_missing_backup(tmp_path):
-    rig = Rig(tmp_path)
-    try:
-        rig.flow.validator = lambda grant, plan: ["scope stack 'backups' is not in the discovered inventory", "backup floor: the scope is not covered"]
-        with pytest.raises(ConsoleApiError) as err:
-            rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
-        assert err.value.code == "bad_request"
-    finally:
-        rig.close()
 
 
 def test_a_run_that_finished_does_not_hide_a_newer_plan_waiting_for_a_decision(rig):
@@ -307,16 +290,12 @@ def test_a_run_that_finished_does_not_hide_a_newer_plan_waiting_for_a_decision(r
     assert shown["group"] == "Needs you" and shown["text"] == "Needs your call", shown
 
 
-def test_the_context_panel_follows_the_run_counts_only_enforced_protection_and_says_when_it_has_ended(rig):
+def test_the_context_panel_follows_the_run_and_says_when_it_has_ended(rig):
     plan_id = rig.add_plan(plan_doc(exclude=["service:media/db"]))
     view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
     rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
     before = rig.api.feed(rig.conv.id)["context"]
-    grant = rig.st.ms.get_mission(view["mission_id"]).grant()
-    assert grant.advisory_exclusions(), "the free-form exclusion is only a note"
-    assert before["scope"]["kind"] == "run" and before["scope"]["stacks"] == ["media"]
-    assert before["scope"]["protected"] == len(set(grant.protected.resources) | set(grant.enforced_exclusions()))
-    assert before["scope"]["protected"] < len(grant.protected.resources) + len(grant.exclusions)
+    assert before["scope"] == {"kind": "run", "stacks": ["media"], "services": []}                           # trust mode: no protected count
     assert rig.st.drive(view["mission_id"]) == "completed"
     after = rig.api.feed(rig.conv.id)["context"]
     assert after["scope"]["kind"] == "last_run"                              # an ended run is history, not something the operator can act on

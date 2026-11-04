@@ -11,43 +11,20 @@ from supervisor_fakes import GOOD_RESULT, FakeRuntime, update
 from verify_fakes import FakeRun, check_env, snapshot
 
 from planet_express.missions.approval_flow import ApprovalFlow
-from planet_express.missions.launcher.preflight import Check, PreflightReport
 from planet_express.missions.supervisor import Supervisor
 from planet_express.missions.verify.baseline import normalize
 from planet_express.missions.verify.runner import Verifier
 
 CHECKS = [{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}]
 SCOPE = {"stacks": ["media"], "hosts": ["local"]}
-__all__ = ["GOOD_RESULT", "build", "gate_report", "update"]
-
-
-def gate_report(ok: bool = True) -> PreflightReport:
-    report = PreflightReport("side-doors")
-    report.checks.append(Check("docker-tcp-exposure", ok, "" if ok else "unauthenticated Docker TCP: tcp://0.0.0.0:2375"))
-    return report
-
-
-class FakeProxy:
-    """Stands in for slice 7b's per-session Docker proxy: closed by the tool-abuse guard."""
-
-    def __init__(self):
-        self.open: dict[str, str | None] = {}
-
-    def pause(self, mission_id):
-        self.open[mission_id] = None
-
-    def resume(self, mission_id, grant_hash):
-        self.open[mission_id] = grant_hash
-
-    def usable(self, mission_id, grant_hash):
-        return self.open.get(mission_id) == grant_hash
+__all__ = ["GOOD_RESULT", "build", "update"]
 
 
 class Stack:
     pass
 
 
-def build(tmp_path, *, behaviours=None, gate=True, with_proxy=False, covered=True, grant_over=None):
+def build(tmp_path, *, behaviours=None, grant_over=None):
     """Returns a Stack. `stack.propose()` makes an approved-able Repair mission through the real flow; `stack.drive()` drives the
     supervisor until nothing more happens. Stop the verify pool with `stack.close()`."""
     rig = make_rig(tmp_path, grant_over=grant_over)
@@ -62,7 +39,6 @@ def build(tmp_path, *, behaviours=None, gate=True, with_proxy=False, covered=Tru
                            stacks_root=str(env.stacks), enabled=True, scan_timeout_s=5)
     st.behaviours = list(behaviours or [{"script": [update("finished")]}])
     st.runtimes = []
-    st.proxy = FakeProxy() if with_proxy else None
 
     def factory(mission):
         runtime = FakeRuntime(st.cont, **(st.behaviours.pop(0) if st.behaviours else {}))
@@ -70,11 +46,8 @@ def build(tmp_path, *, behaviours=None, gate=True, with_proxy=False, covered=Tru
         return runtime
 
     st.sup = Supervisor(env.store, st.cont, factory, env.clock, enabled=True, artifact_dir=tmp_path / "artifacts",
-                        workspace_dir=tmp_path / "ws", repair_gate=(lambda: gate_report(gate)), verifier=st.verifier,
-                        checkpoint=env.svc, docker_proxy=st.proxy)
-    st.flow = ApprovalFlow(env.store, supervisor=st.sup, validator=lambda grant, plan: [],
-                           backup_status=lambda grant: {"covered": covered, "state": "ok" if covered else "stale"},
-                           protected=lambda: rig.protected, runtime="fake")
+                        workspace_dir=tmp_path / "ws", verifier=st.verifier, checkpoint=env.svc)
+    st.flow = ApprovalFlow(env.store, supervisor=st.sup, validator=lambda grant, plan: [], runtime="fake")
 
     def propose(**kw):
         spec = {"title": "restart media", "goal": "bring media back", "scope": SCOPE, "checks": CHECKS}

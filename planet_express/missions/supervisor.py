@@ -6,11 +6,13 @@ It owns spawning, the brief, budgets, heartbeats, and the order of operations at
 
 `is_empty()` is the sole "provably dead" predicate. Nothing here requests a terminal (or any other)
 transition on a runtime's say-so, a timeout or a status report. Observe/Propose sessions can never enter
-`executing`; a mutating tier is refused at `start()` unless the daemon wired the checkpoint service and the verifier (slice 7a),
-the side-door gate is closed and the mission is approved.
+`executing`; a mutating tier is refused at `start()` unless the daemon wired the checkpoint service and the verifier (slice 7a)
+and the mission is approved.
 
 A Repair mission waits in `awaiting_decision` for its approval rows. When the one execution predicate holds, `start()` takes the
-checkpoint (refused without a backup or baseline) and only then issues the session (which takes the mission into `executing`).
+checkpoint (refused without a scan baseline) and only then issues the session (which takes the mission into `executing`). Trust
+mode: the session has full access to the host (the real Docker socket, sudo); no gate, proxy or backup floor stands in front of it.
+A Repair whose verification fails while its checkpoint shows nothing changed closes as `failed`, which releases its leases.
 Trust mode (stage 3) removed the tripwire: nothing watches or pauses a running session; the checkpoint, the full record, PE's own
 verification and the operator's rollback are what answer for what it did. When the session is provably dead the post-change manifest is captured, and the end of the session
 is decided from host state: a result goes to verification, anything else is classified by `recovery` and never replayed.
@@ -53,7 +55,7 @@ from .containment import ContainedSession, ContainmentError, SessionContainment
 from .events import insert_event
 from .hooks import HOOK_LOG_NAME, HOOK_SCRIPT_NAME, MAX_POLICY_FILE_BYTES
 from .launcher.spec import SESSION_ID, STATE_DIR, LaunchSpec
-from .models import Mission
+from .models import LEGACY_GRANT_TEXT, Mission, is_legacy_grant
 from .runtime import (
     RUNTIME_EVENT_KINDS,
     AgentResult,
@@ -277,7 +279,7 @@ class SocketProvider:
         raise NotImplementedError
 
     def env(self, cs: ContainedSession) -> dict[str, str]:
-        """Extra environment for the session once its sockets are bound (e.g. `PE_DOCKER_SOCKET`, its own proxy socket)."""
+        """Extra environment for the session once its sockets are bound (the model broker's base URL and access code)."""
         return {}
 
 
@@ -291,25 +293,21 @@ class Supervisor:
                  worker_env: dict[str, str] | None = None, max_brief_bytes: int = DEFAULT_MAX_BYTES,
                  lease_ttl_s: int = LEASE_TTL_S, socket_provider: "SocketProvider | None" = None,
                  preflight: Callable[[], Any] | None = None, tool_broker: Any = None,
-                 repair_gate: Callable[[], Any] | None = None, verifier: Any = None,
-                 checkpoint: Any = None, docker_proxy: Any = None,
+                 verifier: Any = None, checkpoint: Any = None,
                  hook_policy: Callable[[Mission], str] | None = None,
                  hook_install: Callable[[Path], Mapping[str, str] | None] | None = None, hook_root: Path | None = None,
                  hook_argv: Callable[[Sequence[str], Path], Sequence[str]] | None = None, model_broker: Any = None,
                  host_lock: Any = None):
         self.store = store
-        # v3's host-mutation lock (casa_farnsworth.PipelineState), or None. A Repair start waits while a v3 change holds it;
-        # the Docker proxy takes it for each mission write.
+        # v3's host-mutation lock (casa_farnsworth.PipelineState), or None. A Repair start waits while a v3 change holds it.
         self.host_lock = host_lock
         self.hook_install = hook_install              # Path -> writes the runtime's hook settings into that (Core-owned) directory
         self.hook_argv = hook_argv                    # (argv, hook dir) -> the argv the session is launched with (settings forced)
         self.hook_root = Path(hook_root) if hook_root else None    # Core-owned, session-readable, never session-writable
         self.hook_policy = hook_policy                # Mission -> the hook policy JSON put in the session's environment
         self.checkpoint = checkpoint                  # `checkpoint.CheckpointService`; None: no Repair mission can start
-        self.docker_proxy = docker_proxy              # slice 7b: `.pause(mission_id)` on tool abuse; None: nothing to close
-        self.model_broker = model_broker              # the per-session model broker: closed with the proxy
+        self.model_broker = model_broker              # the per-session model broker: paused on tool abuse, closed at shutdown
         self.verifier = verifier                      # `verify.runner.Verifier`; None: a verifying mission goes to the operator
-        self.repair_gate = repair_gate                # side-door report (brief 6.8); None means a repair start is refused
         self.tool_broker = tool_broker                # `missions.tools.ToolBroker`; None: every tool call is refused
         if tool_broker is not None and getattr(tool_broker, "on_refusal_cap", None) is None:
             tool_broker.on_refusal_cap = self.freeze_for_tool_abuse
@@ -429,7 +427,6 @@ class Supervisor:
             raise ProposalOnly(self.preflight_report.reason or "the launcher preflight failed")
         mission = self.ms.get_mission(mission_id)
         if mission.tier not in ("observe", "propose"):
-            self.require_repair_preconditions()
             if mission.tier != "repair" or not self.mutating_ready:
                 raise UnsupportedTier(f"{mission.tier} missions are not run by this supervisor")
             if not self.launcher_ready(reprove=True):         # a mutating session re-proves the launcher every time
@@ -559,13 +556,13 @@ class Supervisor:
             if mission.checkpoint_id is None:
                 from .checkpoint import CheckpointScope
                 grant = mission.grant()
-                scope = CheckpointScope.from_grant_scope(grant.scope, units=tuple(r.unit for r in grant.sudo.rules))
+                scope = CheckpointScope.from_grant_scope(grant.scope)
                 try:
                     created = self.checkpoint.create(mission.id, scope)
-                except Exception as exc:              # noqa: BLE001 - no checkpoint, no mutation (S5: backup floor, baseline)
+                except Exception as exc:              # noqa: BLE001 - no checkpoint, no mutation (S5: the scan baseline)
                     self._note(mission.id, {"checkpoint_refused": type(exc).__name__, "why": str(exc)[:200]})
                     raise RepairRefused(f"no checkpoint could be taken ({type(exc).__name__})") from None
-                self._note(mission.id, {"checkpoint_taken": str(created), "no_backup": bool(getattr(created, "no_backup", False))})
+                self._note(mission.id, {"checkpoint_taken": str(created)})
             self._launch(self.ms.get_mission(mission.id))
         except BaseException:
             if held_early and mission.id not in self._runs:
@@ -585,28 +582,13 @@ class Supervisor:
         try:
             leases.acquire(self.store, wanted, mission.id, self.lease_ttl_s, declared)
         except leases.LeaseConflict as exc:
-            raise StartDeferred(f"waiting for {exc.resource}: leased by {exc.holder}") from None
+            raise StartDeferred(leases.conflict_words(exc)) from None
         return True
 
     def _release_early(self, mission_id: str) -> None:
         with contextlib.suppress(Exception):
             if self.ms.get_mission(mission_id).status == "awaiting_decision":
                 leases.release(self.store, mission_id)
-
-    def require_repair_preconditions(self) -> None:
-        """Brief 6.8: a Repair-tier (or higher) worker starts only if every side door is closed. Asked afresh every time,
-        because a door can open between missions. A gate that is missing, crashes or returns anything but a passing
-        report refuses; Observe and Propose never come here."""
-        if self.repair_gate is None:
-            raise RepairNotReady("the side-door preflight is not configured, so no mutating mission may start")
-        try:
-            report = self.repair_gate()
-            ok = bool(report.ok)
-            reason = None if ok else (report.reason or "a side door is open")
-        except Exception as exc:                   # noqa: BLE001 - a gate that cannot run is a closed gate
-            raise RepairNotReady(f"the side-door preflight could not run ({type(exc).__name__})") from None
-        if not ok:
-            raise RepairNotReady(reason)
 
     def _launch(self, mission: Mission, actor: str = ACTOR) -> None:
         if not self.launcher_ready():          # also on a restart after a crash: proposal-only means no session at all
@@ -629,7 +611,9 @@ class Supervisor:
             with contextlib.suppress(Exception):
                 recovery.journal_done(self.ms, mission.id, intent_id, "not_applied", actor=ACTOR)   # only OUR intent
             # A grant that changed under the start is a refusal (the caller re-reads), not a wait.
-            if isinstance(exc, (leases.LeaseConflict, NoFreeUid, SessionConflict)) and "grant changed" not in str(exc):
+            if isinstance(exc, leases.LeaseConflict):
+                raise StartDeferred(leases.conflict_words(exc)) from None
+            if isinstance(exc, (NoFreeUid, SessionConflict)) and "grant changed" not in str(exc):
                 raise StartDeferred(f"waiting: {type(exc).__name__}: {str(exc)[:200]}") from None
             raise
         run = _Run(mission.id, cs, None, None, cs.session_id, float(self.clock()))
@@ -712,7 +696,7 @@ class Supervisor:
                 if len(policy_text) <= HOOK_POLICY_ENV_MAX:
                     full_env["PE_HOOK_POLICY"] = policy_text
                 else:
-                    # The launcher refuses any environment value over 4096 characters, and a host with many protected paths
+                    # The launcher refuses any environment value over 4096 characters, and a policy with many PE paths
                     # can exceed that. The policy then goes in the Core-owned hook directory (the session can read it and
                     # cannot change it) and its hash is checked at every poll, like settings.json.
                     if run.hook_dir is None:
@@ -762,13 +746,12 @@ class Supervisor:
         budgets = (f"Budgets: {grant.budgets.wall_s}s wall time, {grant.budgets.tool_calls} tool calls, "
                    f"{grant.budgets.output_bytes} output bytes.")
         if mission.tier in ("observe", "propose"):
-            first = f"This mission is {mission.tier}: observe and propose only; make no changes to the host."
+            first = (f"This mission is {mission.tier}: investigate and propose; make no changes to the host before the operator "
+                     "confirms a plan.")
         else:
-            first = (f"This mission is {mission.tier}: you may change only what the grant's scope names, and a verification "
+            first = (f"This mission is {mission.tier}: do the approved change on the work the scope names, and a verification "
                      "plan Core agreed beforehand decides whether you succeeded, not your own report.")
-        out = [first, "Stay inside the scope above; never touch a protected resource.", budgets]
-        out += [f"Excluded: {x}" for x in grant.exclusions]
-        return out
+        return [first, "Never wipe a disk, delete Docker volumes or data, or touch PE's own config, secrets or database.", budgets]
 
     # ── driving a session ───────────────────────────────────────────────────
     def poll_all(self) -> dict[str, str]:
@@ -1473,6 +1456,7 @@ class Supervisor:
         if mission.status != "verifying":
             return mission.status
         target, flags, summary = "needs_operator", None, {"event": "verify.unavailable"}
+        failed_check = False                              # PE's verification ran and did not pass (not: it could not run)
         if self.verifier is not None:
             try:
                 result = self.verifier.run(mission)
@@ -1481,6 +1465,7 @@ class Supervisor:
                 if result.status == "passed":
                     target = "completed"
                 else:
+                    failed_check = True
                     flags = "partially_applied"
                     if mission.grant().on_verify_fail == "rollback" and mission.checkpoint_id:
                         target = "rollback_pending"
@@ -1488,6 +1473,11 @@ class Supervisor:
                 log.exception("verifier for %s raised", mission_id)
                 summary = {"event": "verify.error", "error": type(exc).__name__}
                 flags = "partially_applied"
+        if failed_check and target == "needs_operator" and self._nothing_changed(mission):
+            # Nothing to roll back and nothing for the operator to untangle: close it, so its leases stop holding the next run.
+            # (A grant that asked for a rollback on failure still goes to rollback_pending: that is the operator's own choice.)
+            target, flags = "failed", None
+            summary = {**summary, "closed_failed": "verification failed and nothing on the host changed"}
         with self._lock_for(mission_id):
             if self._shutting_down:
                 # The daemon is stopping: this result is dropped (nothing committed), the mission stays `verifying`
@@ -1510,6 +1500,9 @@ class Supervisor:
                     if self.ms.get_mission(mission_id).status != "verifying":
                         break                              # something else moved it (a cancel): leave it alone
             final = self.ms.get_mission(mission_id).status
+            if final == "failed":
+                recovery.close_open_intents(self.ms, mission_id, "not_applied", actor=ACTOR)
+                self.ms.set_outcome(mission_id, "failed", None, ACTOR)
             if final in ("completed", "needs_operator", "rollback_pending"):
                 # The label is the state the mission actually ended in, never the one we intended.
                 if final == "completed":
@@ -1518,6 +1511,30 @@ class Supervisor:
                     flags = "partially_applied"
                 self.ms.set_outcome(mission_id, final, None if final == "completed" else flags, ACTOR)
             return final
+
+    def _nothing_changed(self, mission: Mission) -> bool:
+        """A failed Repair may close as `failed` (releasing its leases) only when it provably left the host as it found it: no
+        session is alive, the post-change manifest of THIS checkpoint lists no changed file, and the files and service settings
+        the checkpoint covers still match it now. Anything missing or unreadable is "something may have changed"."""
+        if (not mission.checkpoint_id or self.checkpoint is None or mission.id in self._runs
+                or self.ms.live_session(mission.id) is not None):
+            return False
+        post = None
+        for event in reversed(self.ms.events(mission.id)):
+            try:
+                body = json.loads(event.body_json)
+            except ValueError:
+                continue
+            if body.get("event") == "checkpoint.post_captured" and body.get("checkpoint") == mission.checkpoint_id:
+                post = body
+                break
+        if post is None or post.get("changed") != [] or not post.get("files"):
+            return False
+        try:
+            manifest = self.checkpoint.manifest(mission.checkpoint_id)
+            return recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest)
+        except Exception:                                  # noqa: BLE001 - an unreadable host is not "unchanged"
+            return False
 
     # ── the daemon's loop and shutdown ──────────────────────────────────────
     def tick(self) -> None:
@@ -1584,6 +1601,11 @@ class Supervisor:
                 with contextlib.suppress(Exception):
                     self._settle_without_session(mission.id, "cancel")
                 continue
+            if is_legacy_grant(mission.grant_json):
+                # Approved before trust mode: it is never run. Said once, so the run does not sit looking as if it were starting.
+                if self._approved_before_upgrade(mission.id):
+                    self._wait_noted(mission.id, LEGACY_GRANT_TEXT)
+                continue
             if self._defer_pending(mission.id) or not approvals.execution_predicate(self.store, mission.id).ok:
                 continue
             if not ready:
@@ -1600,6 +1622,11 @@ class Supervisor:
                 self._wait_noted(mission.id, str(exc))
             except Exception as exc:                  # noqa: BLE001 - one mission's start never stops the others
                 self._start_failed(mission.id, exc)
+
+    def _approved_before_upgrade(self, mission_id: str) -> bool:
+        with self.store._connect() as conn:
+            return conn.execute("SELECT 1 FROM mission_approvals WHERE mission_id=? AND decision='approve'",
+                                (mission_id,)).fetchone() is not None
 
     def _note_repairs_unavailable(self) -> None:
         """Without the checkpoint and verifier no Repair can start; an authorised one says so instead of looking busy."""
@@ -1893,8 +1920,6 @@ class Supervisor:
         revoke = getattr(self.tool_broker, "revoke", None)
         if revoke is not None:
             revoke(session.mission_id)
-        if self.docker_proxy is not None:
-            self.docker_proxy.pause(session.mission_id)
         if self.model_broker is not None:
             self.model_broker.pause(session.mission_id)
 

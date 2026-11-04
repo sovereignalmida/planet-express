@@ -19,20 +19,17 @@ application probe and a compose-project completeness check.
 Scenario "canary" (release proof 7b): a failed canary (a bad config change recreating `web`) is rolled back by the operator
 (checkpoint restore), then a second mission, approved with a bounded scope, corrects the config and recreates ONLY `web`.
 
-The agent is a deterministic command (this same file, subcommand `agent`): no LLM, no network. It reaches Docker ONLY through
-a real per-mission `DockerProxyService` (real Upstream to the host socket, real Policy/Scope from the mission's grant, real
-recording of creates into the store); its DOCKER_HOST is that proxy socket, and the agent
-refuses to run against anything else. What it exercises: the checkpoint service (real compose provider), the verifier (real checks), the approval flow, the supervisor and the proxy. Every call the proxy
-refuses is listed in the record under "proxy" (a finding, never something to work around). What it does NOT exercise, and says
-so in the record under "not_exercised": the cgroup launcher and session uids (scripts/mission_containment_rehearsal.py); the
-agent here runs as root in a process group, and the proxy's gate recognises it by that group.
+The agent is a deterministic command (this same file, subcommand `agent`): no LLM, no network. Trust mode (rc14): it talks to
+the host's Docker socket directly, as a Repair session does through its docker group. What it exercises: the checkpoint service
+(real compose provider), the verifier (real checks), the approval flow and the supervisor. What it does NOT exercise, and says so
+in the record under "not_exercised": the cgroup launcher and session uids (scripts/mission_containment_rehearsal.py); the agent
+here runs as root in a process group.
 """
 
 import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -47,12 +44,10 @@ SCENARIOS = ("namespace", "canary")
 OPERATOR = "operator:rehearsal"
 MARKER = ".pe-rehearsal-stack"
 NOT_EXERCISED = [
-    ("cgroup launcher and session uids (scripts/mission_containment_rehearsal.py): the agent runs as root in a process "
-     "group, and the proxy recognises it by that group rather than by cgroup and a unique uid"),
-    "socket ownership handed to a session uid by the launcher helper (tests/test_dockerproxy_privileged.py)",
+    "cgroup launcher and session uids (scripts/mission_containment_rehearsal.py): the agent runs as root in a process group",
+    "the docker group and the session sudoers rule a real session gets (the launcher setup's session-access step)",
 ]
-AGENT_ENV_ALLOW = ["PATH", "HOME"]           # DOCKER_HOST is set by the session's proxy socket and nowhere else
-SOCKET_PATH_MAX = 100                        # sun_path is 108 bytes; leave room
+AGENT_ENV_ALLOW = ["PATH", "HOME"]           # the agent reaches the host's Docker socket by its default path
 LEFTOVER = re.compile(r"^[0-9a-f]{12}_" + re.escape(PROJECT) + r"-")
 
 COMPOSE = """\
@@ -90,8 +85,8 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--scenario", choices=("all", *SCENARIOS), default="all")
     parser.add_argument("--workdir", default=None, help="state, stacks and workspaces (default: a new temp directory)")
     parser.add_argument("--image", default=DEFAULT_IMAGE)
-    parser.add_argument("--core-user", default="planetexpress",
-                        help="the account Core runs as on this host: the side-door gate checks sudoers rules that reach it")
+    parser.add_argument("--core-user", default="planetexpress", help="accepted for older callers and ignored (trust mode has no "
+                        "side-door gate)")
     parser.add_argument("--timeout-s", type=int, default=300)
     parser.add_argument("--keep", action="store_true", help="leave the compose project and the workdir in place")
     parser.add_argument("--allow-foreign-containers", action="store_true")
@@ -184,17 +179,6 @@ def verification_checks(scenario: str, project: str = PROJECT) -> list[dict]:
     ]
 
 
-def proxy_docker_host(env: Mapping[str, str]) -> str | None:
-    """DOCKER_HOST if (and only if) it names a session proxy socket: an absolute unix path ending in /proxy.sock."""
-    value = env.get("DOCKER_HOST", "")
-    if not value.startswith("unix:///"):
-        return None
-    path = value[len("unix://"):]
-    if ".." in path.split("/") or os.path.basename(path) != "proxy.sock":
-        return None
-    return value
-
-
 def leftover_ids(rows: Sequence[str]) -> list[str]:
     """Container ids from `<id> <name>` rows whose name is a compose-renamed leftover (`<12 hex>_pe-rehearsal-...`)."""
     out = []
@@ -220,34 +204,6 @@ def networks_left(run: Callable[..., tuple[int, str]] | None = None) -> list[str
     run = run or real_run
     _, out = run(["docker", "network", "ls", "-q", "--filter", f"label=com.docker.compose.project={PROJECT}"])
     return sorted(out.split())
-
-
-def proxy_summary(events: Sequence) -> dict:
-    """What the Docker proxy recorded for a mission: write count, creates it vouched for, and every refused call."""
-    writes = created = 0
-    refused: list[dict] = []
-    more = False
-    for e in events:
-        try:
-            body = json.loads(e.body_json)
-        except (TypeError, ValueError):
-            continue
-        kind = body.get("event") if isinstance(body, dict) else None
-        if kind == "docker.write":
-            writes += 1
-        elif kind == "docker.created":
-            created += 1
-        elif kind == "docker.refused":
-            if body.get("further_refusals_not_recorded"):
-                more = True
-            else:
-                refused.append({k: body.get(k) for k in ("reason", "route", "method", "path")})
-    return {"writes": writes, "created": created, "refused": refused, "further_refusals_not_recorded": more}
-
-
-def went_through_proxy(summary: Mapping) -> bool:
-    """A scenario that recreates containers must have been seen doing so by the proxy, or the agent bypassed it."""
-    return bool(summary.get("writes")) and bool(summary.get("created"))
 
 
 class Recorder:
@@ -316,10 +272,6 @@ def agent_main(ns: argparse.Namespace) -> int:
     compose_file = stack / "docker-compose.yml"
     if ns.project != PROJECT or not (stack / MARKER).is_file():
         print("refusing: not a rehearsal stack directory", file=sys.stderr)
-        return 2
-    if proxy_docker_host(os.environ) is None:
-        print("refusing: DOCKER_HOST is not a session proxy socket (the agent never talks to the host Docker socket)",
-              file=sys.stderr)
         return 2
     steps: list[str] = []
 
@@ -396,7 +348,7 @@ def rehearse_real(args: argparse.Namespace, rec: Recorder) -> None:
         if not rec.step("project-up", up[0] == 0, "docker compose up failed" if up[0] else ""):
             return
         rig = Rig(work, stacks, args)
-        rec.step("controls-built", True, repair_gate="skipped" if rig.gate_skipped else "real")
+        rec.step("controls-built", True)
         for name, run_scenario in (("namespace", scenario_namespace), ("canary", scenario_canary)):
             if args.scenario not in ("all", name):
                 continue
@@ -442,7 +394,7 @@ def release_missions(rec: Recorder, label: str, mids: Sequence[str], *, status_o
                      cancel: Callable[[str, str], None], tick: Callable[[], None], sleep: Callable[[float], None] = time.sleep,
                      terminal: Sequence[str] = ("completed", "failed", "rolled_back", "cancelled"), timeout_s: float = 30) -> bool:
     """End a scenario cleanly: any of its missions that is not terminal is cancelled through the supervisor's real cancel path
-    (session killed, leases and proxy socket released). Recorded as `<label>:released` with every final
+    (session killed, leases released). Recorded as `<label>:released` with every final
     status. Never raises: a mission that cannot be ended is a failed step, and the next scenario must not start on top of it."""
     errors: list[str] = []
     raw_status = status_of
@@ -473,16 +425,6 @@ def release_missions(rec: Recorder, label: str, mids: Sequence[str], *, status_o
     return rec.step(f"{label}:released", not errors, "; ".join(errors), final=final)
 
 
-def through_proxy_detail(summary: Mapping) -> str:
-    """The one-line cause when the proxy saw no container create: the first refused calls, if there were any."""
-    base = "the proxy recorded no container create: the agent did not reach Docker through it"
-    refused = list(summary.get("refused") or [])[:3]
-    if not refused:
-        return f"{base} (no refused calls recorded)"
-    calls = "; ".join(f"{r.get('method')} {r.get('path')}: {r.get('reason')}" for r in refused)
-    return f"{base}; first refused: {calls}"
-
-
 def container_ids(project: str = PROJECT, run: Callable[..., tuple[int, str]] | None = None) -> dict[str, str]:
     _, out = (run or real_run)(["docker", "ps", "-a", "--filter", f"label=com.docker.compose.project={project}", "--format",
                        '{{.ID}} {{.Label "com.docker.compose.service"}}'])
@@ -506,12 +448,6 @@ class Rig:
         from planet_express.missions.approval_flow import ApprovalFlow
         from planet_express.missions.assembly import RepairWiring, build_repair_controls
         from planet_express.missions.checkpoint import SystemdCheckpointProvider
-        from planet_express.missions.dockerproxy.service import (
-            DEFAULT_DOCKER_SOCKET,
-            DockerProxyService,
-        )
-        from planet_express.missions.launcher.preflight import Check, PreflightReport
-        from planet_express.missions.protected import build_protected_set
         from planet_express.missions.store import MissionStore
         from planet_express.missions.supervisor import Supervisor
 
@@ -527,29 +463,9 @@ class Rig:
                                   runtime={"argv": [sys.executable, "-I", str(SELF)]})
         self.containment = ProcessContainment()
         provider = SystemdCheckpointProvider(SimpleNamespace(stacks_root=stacks))
-        wiring = RepairWiring(provider=provider, scan=lambda: project_scan(PROJECT), core_user=args.core_user)
-        protected = build_protected_set(self.cfg, stacks_root=self.stacks)
-        # The agent's only road to Docker: the daemon's own per-session proxy (real Upstream to the host socket, real Policy and
-        # Scope from the mission's grant, real recording of creates). Built before the controls, which take it.
-        sock_root = work / "sock"
-        sock_root.mkdir(parents=True, exist_ok=True)
-        self.proxy = DockerProxyService(self.store, authenticator=RehearsalAuthenticator(self.store, self.containment),
-                                        docker_socket=DEFAULT_DOCKER_SOCKET, sock_root=str(sock_root), stacks_root=self.stacks,
-                                        protected=lambda: protected.resources, protected_gids=(),
-                                        label_allow=self.cfg.docker_label_allow)
+        wiring = RepairWiring(provider=provider, scan=lambda: project_scan(PROJECT))
         self.controls = build_repair_controls(self.store, self.cfg, wiring, containment=self.containment, broker=None,
-                                              protected=protected, stacks_root=self.stacks, enabled=lambda: True,
-                                              proxy=self.proxy)
-        real_gate = self.controls.repair_gate
-        # The side-door gate is a property of the HOST (sudoers, docker group, TCP socket). On a throwaway VM that has not been
-        # through the launcher setup it fails for reasons unrelated to this rehearsal; the operator may skip it knowingly.
-        self.gate_skipped = os.environ.get("PE_REHEARSAL_SKIP_GATE") == "1"
-        if self.gate_skipped:
-            skipped = PreflightReport("skipped")
-            skipped.checks.append(Check("side-doors", True, "skipped by PE_REHEARSAL_SKIP_GATE=1"))
-            gate = lambda: skipped
-        else:
-            gate = real_gate
+                                              stacks_root=self.stacks, enabled=lambda: True)
         self.scenario_of: dict[str, str] = {}
         self.started: list[str] = []                 # missions of the scenario in progress (see release)
         self.next_scenario = "namespace"
@@ -559,21 +475,15 @@ class Rig:
             return CommandRuntime(self.containment, argv=argv, worker_socket=str(work / "unused.sock"),
                                   env_allow=list(AGENT_ENV_ALLOW))
         self.sup = Supervisor(self.store, self.containment, factory, enabled=lambda: True, artifact_dir=work / "artifacts",
-                              workspace_dir=work / "ws", repair_gate=gate, verifier=self.controls.verifier,
-                              checkpoint=self.controls.checkpoint, docker_proxy=self.proxy,
-                              socket_provider=ProxySockets(str(sock_root), self.proxy))
-        self.flow = ApprovalFlow(self.store, supervisor=self.sup, validator=self.controls.validator,
-                                 backup_status=self.controls.backup_status, protected=lambda: self.controls.protected,
-                                 runtime="command")
+                              workspace_dir=work / "ws", verifier=self.controls.verifier,
+                              checkpoint=self.controls.checkpoint)
+        self.flow = ApprovalFlow(self.store, supervisor=self.sup, validator=self.controls.validator, runtime="command")
         self.controls.checkpoint.startup_scan()
         self._stop = threading.Event()
 
     def close(self) -> None:
         self._stop.set()
-        try:
-            self.sup.shutdown()
-        finally:
-            self.proxy.shutdown()
+        self.sup.shutdown()
 
     def release(self, rec: Recorder, label: str) -> bool:
         """End the scenario: cancel any mission of it that is not terminal so nothing carries leases into the next one."""
@@ -596,8 +506,7 @@ class Rig:
                     until: Sequence[str]) -> str | None:
         try:
             made = self.flow.propose_repair(OPERATOR, title=title, goal=title, scope=scope,
-                                            checks=verification_checks(scenario), on_verify_fail=on_verify_fail,
-                                            acknowledged_no_backup=True)
+                                            checks=verification_checks(scenario), on_verify_fail=on_verify_fail)
         except Exception as exc:                                    # noqa: BLE001
             rec.step(f"{scenario}:propose", False, f"{type(exc).__name__}: {str(exc)[:200]}")
             return None
@@ -618,11 +527,6 @@ class Rig:
             tail = [{"kind": e.kind, "actor": e.actor, "body": e.body_json[:300]} for e in self.ms.events(mid)[-12:]]
         rec.step(f"{scenario}:ended", status in until, status=status, verify=results[-1:] or None,
                  **({"events_tail": tail} if tail else {}))
-        summary = proxy_summary(self.ms.events(mid))
-        rec.extra.setdefault("proxy", {})[scenario] = summary
-        seen = went_through_proxy(summary)
-        rec.step(f"{scenario}:through-proxy", seen, "" if seen else through_proxy_detail(summary),
-                 writes=summary["writes"], created=summary["created"], refused=len(summary["refused"]))
         return mid
 
 
@@ -690,63 +594,6 @@ def project_scan(project: str) -> dict:
             "containers": containers, "stack_completeness": [row], "disk": [], "docker_disk": {"rows": []},
             "mounts": {"active_count": 0, "missing": []}, "unraid_exports": {}, "nfs_mount_health": [],
             "vpn_port_forwarding": {}, "system": {}, "backups": {}, "services": {}, "image_candidates": [], "certs": []}
-
-
-class RehearsalAuthenticator:
-    """The proxy gate's authenticator for the rehearsal. The real one binds a session to its cgroup AND unique uid and refuses
-    root; the rehearsal agent is root in a process group, so identity here is: the connecting pid is in the session's process
-    group, and the session row (live, unexpired, bound as the supervisor recorded it) is then resolved by the same
-    `resolve_session_by_id` the daemon uses. Tokens are not accepted (the docker CLI sends none)."""
-
-    def __init__(self, store, containment: "ProcessContainment"):
-        self.store, self.containment = store, containment
-
-    def by_id(self, peer, session_id: str):
-        from planet_express.missions.sessions import resolve_session_by_id
-        from planet_express.missions.store import MissionStore
-        if not self.containment.contains(session_id, peer.pid):
-            return None
-        row = MissionStore(self.store).get_session(session_id)
-        if row is None:
-            return None
-        return resolve_session_by_id(self.store, session_id, peer_cgroup=row["cgroup_path"], peer_uid=row["session_uid"])
-
-    def __call__(self, peer, request) -> None:
-        return None
-
-
-class ProxySockets:
-    """The supervisor's socket provider for the rehearsal: a 0700 directory per session holding the real proxy's `proxy.sock`.
-    There is no worker socket here. A session that would get no proxy socket fails to launch; it never falls back to the host."""
-
-    def __init__(self, sock_root: str, proxy):
-        self.sock_root, self.proxy = sock_root, proxy
-
-    def path(self, session_id: str) -> str:
-        return f"{self.sock_root}/{session_id}/worker.sock"
-
-    def start(self, cs):
-        directory = f"{self.sock_root}/{cs.session_id}"
-        if len(directory) + len("/proxy.sock") > SOCKET_PATH_MAX:
-            raise RuntimeError("the proxy socket path is too long for a unix socket: use a shorter --workdir")
-        os.mkdir(directory, 0o700)
-        try:
-            stop = self.proxy.start(cs)
-            if stop is None:
-                raise RuntimeError("no Docker proxy socket for this session (its grant does not ask for the proxy)")
-        except BaseException:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
-
-        def stopper() -> None:
-            try:
-                stop()
-            finally:
-                shutil.rmtree(directory, ignore_errors=True)
-        return stopper
-
-    def env(self, cs) -> dict[str, str]:
-        return self.proxy.env(cs)
 
 
 class ProcessContainment:

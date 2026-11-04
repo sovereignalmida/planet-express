@@ -240,12 +240,11 @@ def test_collect_refuses_while_the_session_is_not_provably_empty(tmp_path):
 def test_the_real_env_policy_cannot_move_the_agents_home_or_drop_the_output_cap(tmp_path):
     """build_session_env forces HOME to the workspace and drops anything named like a token: the Console's own values go in after it."""
     from planet_express.missions.grants import build_session_env
-    from planet_express.missions.protected import ProtectedSet
     rig = Rig(tmp_path)
 
     def real_policy(grant, mission_id, workspace, env):
         return dict(build_session_env(grant, mission_id=mission_id, workspace=workspace, worker_socket="/run/w.sock", stacks_root=None,
-                                      protected=ProtectedSet(host="local", resources=(), domains={}), base_env=env, known_tools=[]).env)
+                                      base_env=env, known_tools=[]).env)
     rig.runtime.env_policy = real_policy
     _, workspace, _ = rig.start()
     env = rig.spawned[0]["env"]

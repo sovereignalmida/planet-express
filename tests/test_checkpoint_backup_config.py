@@ -1,4 +1,4 @@
-"""Backup freshness states, checkpoint config validation, and the startup scan's unreferenced report."""
+"""Checkpoint config validation (trust mode removed backup freshness and its sources) and the startup scan's unreferenced report."""
 import os
 import sys
 from pathlib import Path
@@ -13,27 +13,7 @@ from checkpoint_fakes import make_env
 from pydantic import ValidationError
 
 from config_schema import CheckpointConfig, MissionsConfig
-from planet_express.missions.checkpoint import ConfiguredBackupFreshness
-from planet_express.missions.checkpoint.backup import BackupSource
 from planet_express.missions.checkpoint.service import CheckpointSettings
-
-
-def freshness(sources, mtime):
-    return ConfiguredBackupFreshness([BackupSource(*s) for s in sources], mtime=mtime)
-
-
-def test_backup_states():
-    now = 1_000_000
-    assert freshness([], lambda p: None).status("/d", now=now, recent_s=100).state == "unverifiable"
-    assert freshness([("/x", "/m")], lambda p: now).status("/d", now=now, recent_s=100).state == "absent"
-    assert freshness([("/d", "/m")], lambda p: None).status("/d/sub", now=now, recent_s=100).state == "unverifiable"
-    assert freshness([("/d", "/m")], lambda p: now - 101).status("/d/sub", now=now, recent_s=100).state == "stale"
-    ok = freshness([("/d", "/m")], lambda p: now - 100).status("/d/sub", now=now, recent_s=100)
-    assert ok.state == "ok" and ok.last_success_at == now - 100
-    # a marker dated in the future is not "recent": it cannot be trusted
-    assert freshness([("/d", "/m")], lambda p: now + 5).status("/d", now=now, recent_s=100).state == "stale"
-    # /data does not cover /database
-    assert freshness([("/data", "/m")], lambda p: now).status("/database", now=now, recent_s=100).state == "absent"
 
 
 def test_config_defaults_and_validation():
@@ -45,8 +25,8 @@ def test_config_defaults_and_validation():
         CheckpointConfig(root="relative")
     with pytest.raises(ValidationError):
         CheckpointConfig(max_file_bytes=0)
-    with pytest.raises(ValidationError):
-        CheckpointConfig(backup_sources=[{"path": "x", "marker": "/m"}])
+    # An old config.yaml's backup sources are accepted and ignored, whatever they hold.
+    assert not hasattr(CheckpointConfig(backup_sources=[{"path": "x", "marker": "/m"}]), "backup_sources")
     assert MissionsConfig().enabled is False
 
 
