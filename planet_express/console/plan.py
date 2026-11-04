@@ -123,7 +123,7 @@ def _with_check_ids(doc: Any) -> Any:
     for option in doc["options"]:
         if isinstance(option, dict) and isinstance(option.get("checks"), list):
             option = dict(option)
-            checks, used = [], {c.get("id") for c in option["checks"] if isinstance(c, dict)}
+            checks, used = [], {c["id"] for c in option["checks"] if isinstance(c, dict) and isinstance(c.get("id"), str)}
             for n, check in enumerate(option["checks"], 1):
                 if isinstance(check, dict) and "id" not in check:
                     kind = check.get("check")
