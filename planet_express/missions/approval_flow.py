@@ -201,6 +201,12 @@ class ApprovalFlow:
             raise FlowError(f"Invalid verification plan: {plain_error(exc, 200)}") from None
         if not plan.checks:
             raise FlowError("A repair mission needs at least one verification check")
+        available = self._check_availability()
+        if available is not None:
+            for check in plan.checks:
+                why = available.problem(check.check, check.params)
+                if why is not None:
+                    raise FlowError(f"A verification check cannot run on this host: {why}")
         try:
             default = self.budgets() if self.budgets is not None else Budgets()
             body = {"tier": "repair", "scope": GrantScope.model_validate(scope).model_dump(mode="json"),
@@ -342,6 +348,14 @@ class ApprovalFlow:
         return {"mission_id": mission_id, "status": "cancelled"}
 
     # ── operator actions on a Repair mission (trust mode keeps only rollback; pause, resume and take-over are gone) ──
+    def _check_availability(self) -> Any:
+        """The checks this host's verifier can run (`verify.checks.Availability`), or None when there is no verifier to ask."""
+        env = getattr(getattr(self.supervisor, "verifier", None), "env", None)
+        if env is None:
+            return None
+        from .verify.checks import CheckEnv, availability
+        return availability(env) if isinstance(env, CheckEnv) else None
+
     def _supervisor(self) -> Any:
         if self.supervisor is None:
             raise FlowError("Repair missions are not running on this host", "unavailable")
@@ -366,6 +380,20 @@ class ApprovalFlow:
         return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status,
                 "restore": _clip(getattr(report, "status", "unknown"), 40),
                 "reason": _clip(getattr(report, "reason", "") or "", 200)}
+
+    def roll_back_start(self, actor: str, mission_id: str, *, ack_drift: bool = False) -> dict[str, Any]:
+        """Start the rollback and return at once (the Console): the restore runs on the supervisor's rollback worker. The same
+        operator checks and refusals as `roll_back`; the outcome is read afterwards from the mission's state and record."""
+        self._operator_action("roll_back_start", mission_id, actor, ack_drift=ack_drift)
+        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status, "restore": "started", "reason": ""}
+
+    def rollback_in_flight(self, mission_id: str) -> bool:
+        """Is a rollback started by `roll_back_start` still running? False where Repair is not running here."""
+        sup = self.supervisor
+        try:
+            return bool(sup is not None and sup.rollback_in_flight(mission_id))
+        except Exception:                                  # noqa: BLE001 - a status read never breaks the page
+            return False
 
     # ── standing grants ─────────────────────────────────────────────────────
     def _window(self, raw: dict | None) -> dict | None:

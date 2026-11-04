@@ -112,9 +112,11 @@ class Plan(_Strict):
 _KNOWN_FIELDS = frozenset(name for model in (Plan, Option, Risk, CheckSpec, OptionScope) for name in model.model_fields)
 
 
-def parse(doc: Any, inventory: Any = None) -> Plan:
+def parse(doc: Any, inventory: Any = None, available: Any = None) -> Plan:
     """Validate a decoded plan: the shape, then every option's scope against the host's inventory (when one is given) and its exclusions as
-    resource ids, then every option's checks against the catalogue. Raises PlanError (never echoing the agent's text)."""
+    resource ids, then every option's checks against the catalogue and (when `available`, a `verify.checks.Availability`, is given)
+    against what this host can actually run: a check that could only fail at verification never reaches Confirm. Raises PlanError
+    (never echoing the agent's text)."""
     try:
         plan = Plan.model_validate(doc)
     except ValidationError as exc:
@@ -137,6 +139,11 @@ def parse(doc: Any, inventory: Any = None) -> Plan:
         except PlanInvalid:
             # PE's catalogue refused a check. Which one, and what it was called, is the agent's text: only the option is named.
             raise PlanError(f"option {index + 1}: a verification check is not one PE can run, or its parameters are out of bounds") from None
+        if available is not None:
+            for check in option.checks:
+                why = available.problem(check.check, check.params)      # the kind is a catalogue name by now; the params are never echoed
+                if why is not None:
+                    raise PlanError(f"option {index + 1}: a verification check cannot run on this host: {why}")
     return plan
 
 
@@ -169,9 +176,9 @@ def read_doc(workspace: str, name: str, limit: int = MAX_PLAN_BYTES, what: str =
         raise PlanError(f"the {what} file is not valid JSON") from None
 
 
-def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None) -> Plan:
+def load_file(workspace: str, *, name: str = PLAN_FILE, inventory: Any = None, available: Any = None) -> Plan:
     """The file method: the agent writes `plan.json` in its workspace; it is read by `read_doc`, then validated."""
-    return parse(read_doc(workspace, name), inventory)
+    return parse(read_doc(workspace, name), inventory, available)
 
 
 def stored_before_trust_mode(plan_json: str) -> bool:
@@ -226,23 +233,32 @@ def plan_hash(plan: Plan) -> str:
 
 # ── generated from the catalogue (never hand-written) ─────────────────────────────────────────────
 
-def catalogue_text() -> str:
-    """Every check kind with its full JSON Schema, bounds and required fields included, for the prompt."""
+def _kinds(available: Any = None) -> list[str]:
+    return available.kinds() if available is not None else sorted(PARAM_MODELS)
+
+
+def catalogue_text(available: Any = None) -> str:
+    """Every check kind this host can run (all of them when `available` is None) with its full JSON Schema, bounds and required
+    fields included, for the prompt. A kind the host cannot run is not offered at all."""
     rows = []
-    for kind in sorted(PARAM_MODELS):
+    for kind in _kinds(available):
         schema = PARAM_MODELS[kind].model_json_schema()
         schema.pop("title", None)
         rows.append(f"  {kind}: {json.dumps(schema, separators=(',', ':'))}")
+    if available is not None and "exec_probe" in _kinds(available):
+        rows.append("  (exec_probe may run only these binaries, as argv[0]: " + ", ".join(sorted(available.exec_allowlist)) + ")")
+    if available is not None and available.unavailable:
+        rows.append("  Not available on this host, so never use: " + ", ".join(sorted(available.unavailable)))
     return "\n".join(rows)
 
 
-def json_schema() -> dict[str, Any]:
+def json_schema(available: Any = None) -> dict[str, Any]:
     """The plan contract as JSON Schema, for `--json-schema`. A real schema matters: a generic object made the model return
     `options` as a JSON string. PE still validates every plan itself with `parse`."""
     text = {"type": "string"}
     risk = {"type": "object", "properties": {"level": {"enum": ["low", "medium", "high"]}, "text": text},
             "required": ["level", "text"], "additionalProperties": False}
-    check = {"type": "object", "properties": {"id": text, "check": {"enum": sorted(PARAM_MODELS)}, "params": {"type": "object"}},
+    check = {"type": "object", "properties": {"id": text, "check": {"enum": _kinds(available)}, "params": {"type": "object"}},
              "required": ["id", "check", "params"], "additionalProperties": False}
     names = ["name", "recommended", "summary", "changes", "will_not_touch", "risk", "rolls_back_to", "effort", "scope", "checks"]
     scope = {"type": "object", "additionalProperties": False, "required": ["stacks", "services"], "properties": {
@@ -273,8 +289,9 @@ PLAN_INSTRUCTIONS = (
     "you need, but do not change anything on the host yourself before the operator confirms.")
 
 
-def instructions() -> str:
-    return PLAN_INSTRUCTIONS.replace("{catalogue}", catalogue_text())
+def instructions(available: Any = None) -> str:
+    """PLAN_FORMAT.md: the check catalogue in it is THIS host's (`available`, a `verify.checks.Availability`; None offers every kind)."""
+    return PLAN_INSTRUCTIONS.replace("{catalogue}", catalogue_text(available))
 
 
 __all__ = ["MAX_PLAN_BYTES", "PLAN_FILE", "Option", "Plan", "PlanError", "canonical", "catalogue_text", "check_phrase", "goal_text",

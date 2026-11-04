@@ -115,7 +115,7 @@ def collect_host_state(checkpoint_service: Any, manifest: Mapping[str, Any]) -> 
         except Exception:                                    # noqa: BLE001 - provider failures are unreadable state
             problems.append(f"{name}: facts unreadable")
             continue
-        services[name] = None if facts is None else {k: v for k, v in facts.to_dict().items() if k in RESTORABLE}
+        services[name] = _comparable(facts)
     units: dict[str, str] = {}
     wanted = list(manifest.get("facts", {}).get("units", {}))
     if wanted:
@@ -124,6 +124,11 @@ def collect_host_state(checkpoint_service: Any, manifest: Mapping[str, Any]) -> 
         except Exception:                                    # noqa: BLE001
             problems.append("units unreadable")
     return HostState(readable=not problems, files=files, services=services, units=units, problems=tuple(problems))
+
+
+def _comparable(facts: Any) -> dict[str, Any] | None:
+    from .checkpoint.provider import comparable_facts
+    return comparable_facts(facts)
 
 
 def matches_checkpoint(host: HostState, manifest: Mapping[str, Any]) -> bool:
@@ -140,10 +145,12 @@ def matches_checkpoint(host: HostState, manifest: Mapping[str, Any]) -> bool:
     for name, facts in manifest.get("facts", {}).get("services", {}).items():
         if name not in host.services:
             return False
-        have = host.services[name]
-        if (facts is None) != (have is None):
+        # Both sides through the same projection the restore uses: a container recreated with the same configuration (new id,
+        # new start time, Compose's per-recreate labels) matches; a container that exists now but did not then does not.
+        have, want = _comparable(host.services[name]), _comparable(facts)
+        if (want is None) != (have is None):
             return False
-        if facts is not None and any(facts.get(k) != have.get(k) for k in RESTORABLE):    # type: ignore[union-attr]
+        if want is not None and any(want.get(k) != have.get(k) for k in RESTORABLE):    # type: ignore[union-attr]
             return False
     for name, digest in manifest.get("facts", {}).get("units", {}).items():
         if host.units.get(name) != digest:

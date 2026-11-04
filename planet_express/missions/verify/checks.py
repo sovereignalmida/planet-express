@@ -724,6 +724,42 @@ def run_check(check: VerificationCheck, env: CheckEnv) -> CheckResult:
     return CheckResult(id=check.id, check=check.check, ok=outcome.ok, attempts=attempts, detail=outcome.detail)
 
 
+# ── which checks this host can run ─────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Availability:
+    """The checks a verification plan may use on THIS host. A plan naming one it cannot run would only fail verification after the run
+    (live M-19: `exec_probe` with an empty exec allowlist), so planners are told only what is available and plans are refused up front."""
+    unavailable: dict[str, str] = field(default_factory=dict)     # kind -> why, in words
+    exec_allowlist: frozenset[str] = frozenset()
+
+    def kinds(self) -> list[str]:
+        return sorted(k for k in PARAM_MODELS if k not in self.unavailable)
+
+    def problem(self, kind: str, params: Any) -> str | None:
+        """Why this check cannot run here, or None. Never echoes the params (they may be agent text)."""
+        if kind in self.unavailable:
+            return f"{kind} is not available on this host ({self.unavailable[kind]})"
+        if kind == "exec_probe":
+            argv = params.get("argv") if isinstance(params, dict) else getattr(params, "argv", None)
+            if not argv or str(argv[0]) not in self.exec_allowlist:
+                return "exec_probe may only run a binary in the operator's exec allowlist"
+        return None
+
+
+def availability(env: CheckEnv) -> Availability:
+    """What the verifier's environment can run: `exec_probe` needs the operator's exec allowlist, `query` the tool broker,
+    `project_complete` the compose provider."""
+    out: dict[str, str] = {}
+    if not env.exec_allowlist:
+        out["exec_probe"] = "missions.verify.exec_allowlist is empty"
+    if env.broker is None:
+        out["query"] = "there is no tool broker"
+    if env.provider is None:
+        out["project_complete"] = "there is no compose provider"
+    return Availability(out, frozenset(env.exec_allowlist))
+
+
 def env_from_config(cfg: Any, *, provider: Any = None, broker: Any = None, run: BoundedRun | None = None) -> CheckEnv:
     """The check environment from `missions.verify` (config_schema.VerifyConfig). The allowlist is the operator's and
     is empty by default, which leaves `exec_probe` unavailable."""

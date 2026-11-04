@@ -226,3 +226,14 @@ def test_a_push_failure_logs_the_exception_type_only(rig, caplog):
     with caplog.at_level("WARNING"):
         rig.tg.push()
     assert "RuntimeError" in caplog.text and "telegram down" not in caplog.text
+
+
+def test_a_rollback_that_has_only_started_says_so_and_never_reads_as_failed(rig):
+    """Review, rc14.1: the Console's rollback now starts in the background ("started"); Telegram used to call that a failure."""
+    rig.add_plan()
+    rig.tg.command(f"/confirm {rig.short} A {plan8(rig)}", OP)
+    fp = rig.console.executions(rig.conv.id)[0]["grant_hash"][:8]
+    rig.tg.command(f"/authorise {rig.short} {fp}", OP)
+    rig.api.execution_action = lambda *a, **k: {"done": "rollback", "status": "Rolling back", "restore": "started"}
+    out = rig.tg.command(f"/run {rig.short} rollback", OP)
+    assert "rollback started" in out and "NOT" not in out

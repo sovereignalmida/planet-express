@@ -96,6 +96,8 @@ PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often
 PREFLIGHT_REPROVE_S = 600     # a passing preflight is proven again this often, and at the start of every Repair session
 START_DEFER_MAX_S = 1800      # a start waiting on a lease or a uid is handed to the operator after this long
 START_DEFER_RETRY_S = 10      # and is asked again no sooner than this
+ROLLBACK_SHUTDOWN_WAIT_S = 120.0   # shutdown waits this long for a rollback that is already running
+ROLLBACK_WORKERS = 2               # Console-started rollbacks run here, never on an HTTP thread
 VERIFY_WORKERS = 2            # verifications run on their own small pool, never on the poll thread
 VERIFY_SHUTDOWN_WAIT_S = 5.0  # shutdown waits at most this long for in-flight verifications
 START_ATTEMPTS = 3            # consecutive failures to even start a queued mission before the operator is told
@@ -373,6 +375,8 @@ class Supervisor:
         self._verify_pool: Any = None
         self._verifying: dict[str, Any] = {}
         self._verify_guard = threading.Lock()
+        self._rollback_pool: Any = None
+        self._rolling_back: dict[str, Any] = {}           # mission id -> the future of a rollback the Console started
         self._shutting_down = False
         self._lifecycle = threading.RLock()
         self._locks: dict[str, threading.RLock] = {}      # one per mission: its start/poll/cancel never interleave
@@ -1084,8 +1088,53 @@ class Supervisor:
         elif report.status != "refused" or report.partial:
             # Written part-way, or done with facts it could not put back: the host is not at the checkpoint and a plain retry
             # is not obviously right. The operator decides, with the summary in front of them.
-            self._hand_over_after_failed_rollback(mission_id, report.reason or "the restore did not complete cleanly", report)
+            why = report.why() if hasattr(report, "why") else report.reason
+            self._hand_over_after_failed_rollback(mission_id, why or "the restore did not complete cleanly", report)
         return report
+
+    def roll_back_start(self, mission_id: str, actor: str, *, ack_drift: bool = False) -> str:
+        """`roll_back` without making the caller wait for it (the Console: a restore can take minutes, and an HTTP request must not
+        hold a thread that long). The same checks are made at once, so a refusal is still immediate; the restore itself then runs on
+        a small rollback worker, under the mission lock, exactly as `roll_back`. While it runs, `rollback_in_flight` is True and a
+        second start is refused. A refusal found on the worker (a session that cannot be proven dead) is recorded as a note.
+        Returns "started"."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        mission = self._repair_mission(mission_id, "needs_operator", "recovery_required", "rollback_pending", "verifying")
+        if self.checkpoint is None or not mission.checkpoint_id:
+            raise ResumeRefused("this mission has no checkpoint to restore")
+        run = self._runs.get(mission_id)
+        if run is not None and run.phase == "running":
+            raise ResumeRefused("the session is still running: cancel it first")
+        with self._verify_guard:
+            if self._shutting_down:
+                raise ResumeRefused("PE is shutting down: roll back after it restarts")
+            future = self._rolling_back.get(mission_id)
+            if future is not None and not future.done():
+                raise ResumeRefused("a rollback of this mission is already running")
+            if self._rollback_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._rollback_pool = ThreadPoolExecutor(max_workers=ROLLBACK_WORKERS, thread_name_prefix="pe-rollback")
+            try:
+                self._rolling_back[mission_id] = self._rollback_pool.submit(self._roll_back_job, mission_id, actor, ack_drift)
+            except RuntimeError:                         # the pool was shut down between the flag check and here
+                raise ResumeRefused("PE is shutting down: roll back after it restarts") from None
+        return "started"
+
+    def rollback_in_flight(self, mission_id: str) -> bool:
+        """A rollback `roll_back_start` began is still running for this mission."""
+        future = self._rolling_back.get(mission_id)
+        return future is not None and not future.done()
+
+    def _roll_back_job(self, mission_id: str, actor: str, ack_drift: bool) -> Any:
+        try:
+            return self.roll_back(mission_id, actor, ack_drift=ack_drift)
+        except Exception as exc:                  # noqa: BLE001 - nobody is waiting on this thread: the outcome must be on record
+            log.warning("mission %s: the rollback could not run", mission_id, exc_info=exc)
+            why = str(exc)[:200] if isinstance(exc, (ResumeRefused, IllegalTransition)) else type(exc).__name__
+            with contextlib.suppress(Exception):
+                self._note(mission_id, {"rollback_not_run": why})
+            return None
 
     def _restore_raised(self, mission_id: str, exc: Exception) -> Any:
         """The restore itself raised (checkpoint not found or corrupt, say). The mission must not stay in `rollback_pending`, which
@@ -1105,8 +1154,10 @@ class Supervisor:
             summary = {
                 "status": report.status, "partial": report.partial, "written": [str(w)[:160] for w in report.written[:20]],
                 "drifted": [json.dumps(d, sort_keys=True)[:200] for d in report.drifted[:10]],
-                "unrestored": [{"service": str(u.get("service", "?"))[:80], "fields": [str(f)[:40] for f in u.get("fields", [])[:10]]}
+                "unrestored": [{"service": str(u.get("service", "?"))[:80], "fields": [str(f)[:40] for f in u.get("fields", [])[:10]],
+                                **({"reason": str(u["reason"])[:200]} if u.get("reason") else {})}
                                for u in report.unrestored[:10]],
+                "actions": {str(k)[:20]: [str(x)[:80] for x in v[:30]] for k, v in (getattr(report, "actions", None) or {}).items()},
                 "meta_skipped": len(report.meta_skipped)}
         else:
             report = RestoreReport(status="failed", reason=reason)
@@ -1415,8 +1466,10 @@ class Supervisor:
         """A cancel asked for through a surface that cannot judge the host (MissionService) is finished here, the same way."""
         for status in ("executing", "verifying", "needs_operator", "recovery_required", "rollback_pending"):
             for mission in self.ms.list_missions(status):
+                # A rollback the Console started holds the mission lock for the whole restore (minutes): waiting for it here would
+                # stall the poll thread, and every other mission with it. The cancel is settled on a later tick (review, rc14.1).
                 if (mission.tier == "repair" and mission.cancel_requested_at is not None and mission.id not in self._runs
-                        and self.ms.live_session(mission.id) is None):
+                        and self.ms.live_session(mission.id) is None and not self.rollback_in_flight(mission.id)):
                     with contextlib.suppress(Exception):
                         with self._lock_for(mission.id):
                             self._settle_repair_cancel(self.ms.get_mission(mission.id))
@@ -1709,6 +1762,23 @@ class Supervisor:
         that cannot be proven empty stays tracked (and its cgroup stays), never silently dropped."""
         with self._lifecycle:                       # a start or cleanup launch already inside its launch registers first
             self._shutting_down = True              # in-flight verification jobs drop their result under the lock
+        with self._verify_guard:
+            # `roll_back_start` checks the flag and creates/submits to the pool under this guard: setting it here too means a start
+            # either finished submitting (and its pool is seen below) or sees the flag and refuses (Codex, rc14.1).
+            self._shutting_down = True
+            rollback_pool = self._rollback_pool
+        if rollback_pool is not None:
+            # A restore not yet begun is dropped (the operator asks again after the restart). One already running is WAITED for, up to
+            # ROLLBACK_SHUTDOWN_WAIT_S: a half-written stack is worse than a finished one. Past that it is logged and left (the restore
+            # is compare-and-swap and safe to run again; the mission stays rollback_pending for the operator).
+            rollback_pool.shutdown(wait=False, cancel_futures=True)
+            deadline = time.monotonic() + ROLLBACK_SHUTDOWN_WAIT_S
+            for mission_id, future in list(self._rolling_back.items()):
+                try:
+                    future.result(max(0.0, deadline - time.monotonic()))
+                except Exception:                           # noqa: BLE001 - cancelled, failed (on record) or still running
+                    if not future.done():
+                        log.warning("mission %s: shutdown did not wait for its rollback to finish", mission_id)
         if self._verify_pool is not None:
             self._verify_pool.shutdown(wait=False, cancel_futures=True)     # a verification is re-run after restart
             deadline = time.monotonic() + VERIFY_SHUTDOWN_WAIT_S

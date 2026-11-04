@@ -646,3 +646,111 @@ def test_a_paused_tripwire_row_does_not_break_the_list_views(stack):
     svc = MissionService(st.store, enabled=lambda: True)
     assert any(m["id"] == mid for m in svc.list_missions()["missions"])
     assert svc.get_mission(mid)["status"] == "paused_tripwire"
+
+
+def test_a_restore_that_left_a_service_unrestored_hands_over_with_compose_s_reason(stack):
+    # Live M-19: `unrestored: [{"fields": ["recreate"], ...}]` with no reason anywhere, and the handover said only "did not complete cleanly".
+    from planet_express.missions.checkpoint import RestoreReport
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+    st.env.svc.restore = lambda cid, **kw: RestoreReport(
+        status="done", written=[str(st.env.compose)], actions={"up": ["media/web"]},
+        unrestored=[{"service": "media/web", "fields": ["up"], "reason": "media: compose up timed out after 150s"}])
+    st.flow.roll_back("operator:alice", mid)
+    assert st.status(mid) == "needs_operator"
+    incomplete = noted(st, mid, "mission.rollback_incomplete")[-1]
+    assert incomplete["reason"] == "media/web: media: compose up timed out after 150s"
+    assert incomplete["summary"]["unrestored"] == [{"service": "media/web", "fields": ["up"], "reason": "media: compose up timed out after 150s"}]
+    assert incomplete["summary"]["actions"] == {"up": ["media/web"]}
+
+
+def test_a_background_rollback_that_cannot_run_is_on_record(stack):
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+
+    def refuse(*a, **kw):
+        raise ResumeRefused("the session is not provably dead")
+    st.sup._stop_session_for_restore = refuse
+    assert st.sup.roll_back_start(mid, "operator:alice") == "started"
+    st.sup._rolling_back[mid].result(timeout=30)
+    assert not st.sup.rollback_in_flight(mid) and st.status(mid) == "rollback_pending"
+    notes = [b for k, a, b in events(st, mid) if "rollback_not_run" in b]
+    assert notes and notes[-1]["rollback_not_run"] == "the session is not provably dead"
+    with pytest.raises(ValueError):
+        st.sup.roll_back_start(mid, "core")                               # an operator decision, as roll_back
+
+
+def test_a_repair_naming_a_check_this_host_cannot_run_is_refused_before_anyone_is_asked(stack):
+    from planet_express.missions.approval_flow import FlowError
+    st = stack()
+    exec_check = {"id": "responds", "check": "exec_probe", "params": {"container": "web", "argv": ["curl", "-sf", "http://localhost/"]}}
+    with pytest.raises(FlowError, match="cannot run on this host: exec_probe is not available"):
+        st.propose(checks=[exec_check])
+
+
+def test_shutdown_waits_for_a_rollback_that_is_already_running(stack):
+    import threading
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+    entered, real = threading.Event(), st.env.svc.restore
+
+    def slow(*a, **kw):
+        entered.set()
+        import time
+        time.sleep(0.5)
+        return real(*a, **kw)
+    st.env.svc.restore = slow
+    st.sup.roll_back_start(mid, "operator:alice")
+    assert entered.wait(10)
+    st.sup.shutdown()
+    assert st.sup._rolling_back[mid].done() and st.status(mid) == "rolled_back"
+
+
+def test_the_tick_does_not_wait_for_a_running_rollback_to_settle_a_pending_cancel(stack):
+    """Review, rc14.1: a Console rollback holds the mission lock for the whole restore; the poll thread must not block on it."""
+    import threading
+    st = stack()
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+    with st.store._write() as conn:
+        conn.execute("UPDATE missions SET cancel_requested_at=1, cancel_requested_by='operator:alice' WHERE id=?", (mid,))
+    release = threading.Event()
+    lock = st.sup._lock_for(mid)
+    lock.acquire()                                       # what a running rollback holds
+    from concurrent.futures import Future
+    running = Future()
+    st.sup._rolling_back[mid] = running                  # not done: a rollback is in flight
+    done = threading.Event()
+    threading.Thread(target=lambda: (st.sup._finish_pending_repair_cancels(), done.set()), daemon=True).start()
+    try:
+        assert done.wait(5), "the tick blocked on the mission lock"
+    finally:
+        running.set_result(None)
+        lock.release()
+        release.set()
+
+
+def test_a_rollback_start_racing_shutdown_is_either_waited_for_or_refused(stack):
+    """Codex, rc14.1: shutdown sets its flag under the same guard roll_back_start submits under."""
+    import inspect
+    st = stack()
+    src = inspect.getsource(type(st.sup).shutdown)
+    assert "with self._verify_guard:" in src and src.index("with self._verify_guard:") < src.index("rollback_pool.shutdown")
+    mid = st.propose(on_verify_fail="rollback")["mission_id"]
+    st.approve_all(mid)
+    st.fresh = media_down()
+    assert st.drive(mid) == "rollback_pending"
+    st.sup.shutdown()
+    with pytest.raises(ResumeRefused, match="shutting down"):
+        st.sup.roll_back_start(mid, "operator:alice")

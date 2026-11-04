@@ -80,13 +80,14 @@ class ConsoleRuntime:
     counts_calls_from_events = True           # the supervisor also counts the calls this runtime reports (`call` events) against the tool budget
 
     def __init__(self, containment, console: ConsoleStore, cfg: MissionConsoleConfig, *, worker_socket: str, env_policy=None,
-                 broker=None, inventory=None):
+                 broker=None, inventory=None, checks=None):
         self.containment = containment            # only for is_empty/kill/output capture: spawning is `context.spawn`
         self.console, self.cfg = console, cfg
         self.worker_socket = str(worker_socket)
         self.env_policy = env_policy              # grant -> environment: the broker's endpoint and code, the hook inputs
         self.broker = broker                      # to lower the turn's token ceiling to the conversation's remainder
         self.inventory = inventory                # () -> the host's stacks and services (None where Repair is not available): a plan's scope is checked against it
+        self.checks = checks                      # () -> `verify.checks.Availability`: the checks this host can run (offered in PLAN_FORMAT.md, enforced on the plan)
         self._runs: dict[str, _Run] = {}
 
     # ── AgentRuntime ──────────────────────────────────────────────────────────────────────
@@ -101,7 +102,8 @@ class ConsoleRuntime:
             raise TurnRefused("there is no message waiting")
         cs, workspace = context.session, Path(context.cwd)
         self._prepare_workspace(workspace, context.brief, message.text, self._inventory_text(),
-                                lessons_mod.LESSONS_INSTRUCTIONS if self.console.memory_ready() else lessons_mod.NO_MEMORY_INSTRUCTIONS)
+                                lessons_mod.LESSONS_INSTRUCTIONS if self.console.memory_ready() else lessons_mod.NO_MEMORY_INSTRUCTIONS,
+                                plan_mod.instructions(self._checks()))
         state = str(workspace.parent / conv.state_dir)
         # The agent's own session id is stored only once the stream has CONFIRMED it (`_record`): a first turn that dies before the CLI
         # saved its transcript must not leave a `--resume` id that does not exist. Until then every turn starts a new one.
@@ -214,7 +216,8 @@ class ConsoleRuntime:
             self.console.add_message(run.conversation_id, "system", "The agent's plan was refused: this host's inventory is not available, so its scope cannot be checked.", turn=run.turn)
             return
         try:
-            plan = plan_mod.load_file(str(run.workspace), inventory=inventory)              # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
+            plan = plan_mod.load_file(str(run.workspace), inventory=inventory,                # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
+                                      available=self._checks())
         except plan_mod.PlanError as exc:
             self.console.add_message(run.conversation_id, "system", f"The agent's plan was refused: {exc}", turn=run.turn)
             return
@@ -272,6 +275,17 @@ class ConsoleRuntime:
         except Exception:                                           # noqa: BLE001 -- an unreadable inventory means no plan can name a scope, never a wider one
             return None
 
+    def _checks(self):
+        """The checks this host can run, or None (every catalogue kind) when no source is wired. A source that fails offers NO kind
+        that needs something optional: an unreadable answer must not widen what a plan may name."""
+        if self.checks is None:
+            return None
+        try:
+            return self.checks()
+        except Exception:                                           # noqa: BLE001
+            from planet_express.missions.verify.checks import Availability
+            return Availability({"exec_probe": "unknown", "query": "unknown", "project_complete": "unknown"})
+
     def _inventory_text(self) -> str:
         inv = self._inventory()
         if inv is None:
@@ -280,10 +294,11 @@ class ConsoleRuntime:
                 + "".join(f"- {s}\n" for s in inv.services))
 
     @staticmethod
-    def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "", lessons_text: str = "") -> None:
+    def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "", lessons_text: str = "",
+                           plan_text: str | None = None) -> None:
         if not stat.S_ISDIR(workspace.lstat().st_mode):             # made by the supervisor; never created or followed here
             raise ValueError("workspace path is not a directory")
-        files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_mod.instructions(), "INVENTORY.md": inventory_text,
+        files = {"BRIEF.md": brief, "PLAN_FORMAT.md": plan_text if plan_text is not None else plan_mod.instructions(), "INVENTORY.md": inventory_text,
                  "LESSONS_FORMAT.md": lessons_text}
         if len(message) > MAX_ARG_PROMPT:
             files["MESSAGE.md"] = clean_text(message)

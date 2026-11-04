@@ -378,6 +378,46 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.ok(requests.some(r => r[0].endsWith("/run/rollback") && r[2].includes("ack_drift=1")));
     win.__override = null;
   });
+  const failedVerification = { headline: "1 of 2 failed: prowlarr can run curl", level: "high", by_pe: true, checks: [
+    { state: "pass", label: "prowlarr is running and stable", evidence: "ok" }, { state: "fail", label: "prowlarr can run curl", evidence: "unavailable" }] };
+  await atest("while a rollback runs, neither Roll back nor Keep working is offered: a Rolling back card is", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Rolling back\u2026", level: "warn" }, finished: false,
+      controls: { rollback: false }, verification: failedVerification, rollback: { state: "running", reason: "" }, rolling_back: true };
+    await page.loadFeed();
+    const labels = rollButtons();
+    assert.ok(!labels.some(t => t.startsWith("Roll back")) && !labels.includes("Keep working on it"), labels.join("|"));
+    const thread = walk(doc.getElementById("con-thread"));
+    const card = thread.find(n => (n.className || "").includes("pe-con-rolling"));
+    assert.ok(card && card.textContent.startsWith("Rolling back") && card.attrs.role === "status");
+  });
+  await atest("a run waiting in rollback_pending offers the rollback but not Keep working", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you: roll back to the checkpoint", level: "crit" }, finished: false,
+      controls: { rollback: true }, verification: failedVerification, rollback: null, rolling_back: true };
+    await page.loadFeed();
+    const labels = rollButtons();
+    assert.ok(labels.includes("Roll back to the checkpoint") && !labels.includes("Keep working on it"), labels.join("|"));
+  });
+  await atest("the rollback starts in the background and its result lands with the next feed", async () => {
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Needs you", level: "crit" }, verification: null,
+      controls: { rollback: true }, rollback: null, rolling_back: false };
+    await page.loadFeed();
+    win.__override = url => url.endsWith("/run/rollback") ? reply({ done: "rollback", status: "Rolling back\u2026", restore: "started", reason: "" }) : null;
+    const roll = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Roll back to the checkpoint"));
+    roll().fire("click"); roll().fire("click"); await settle();
+    win.__override = null;
+    assert.ok(!walk(doc.getElementById("con-thread")).some(n => (n.textContent || "").startsWith("PE did not restore")), "started is not a refusal");
+    // the poll after: refused in the background (drift), read from PE's record
+    FEED.execution = { ...FEED.execution, rollback: { state: "refused", reason: "files changed since the post-change manifest" } };
+    await page.loadFeed();
+    const thread = walk(doc.getElementById("con-thread"));
+    assert.ok(thread.some(n => n.textContent === "PE did not restore: files changed since the post-change manifest"));
+    assert.ok(rollButtons().some(t => t.startsWith("Roll back anyway")));
+    // and a restore that ran but did not finish says why
+    FEED.execution = { ...FEED.execution, controls: { rollback: false }, rollback: { state: "incomplete", reason: "media/sonarr: media: compose up timed out after 150s" } };
+    await page.loadFeed();
+    assert.ok(walk(doc.getElementById("con-thread")).some(n => n.textContent === "The rollback did not complete cleanly: media/sonarr: media: compose up timed out after 150s"));
+    FEED.execution = { ...FEED.execution, rollback: null };
+  });
   await atest("an armed rollback does not follow the operator into another conversation", async () => {
     FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), verification: null, controls: { rollback: true } };
     await page.loadFeed();

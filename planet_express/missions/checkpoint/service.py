@@ -44,9 +44,9 @@ from . import safefs
 from .provider import (
     RESTORABLE_FIELDS,
     CheckpointProvider,
-    ContainerFacts,
     ProviderError,
-    comparable_labels,
+    StackConfig,
+    comparable_facts,
 )
 from .store import CheckpointStore, StoreError
 
@@ -140,6 +140,21 @@ class RestoreReport:
     observational: dict[str, Any] = field(default_factory=dict)          # reported, never asserted
     reason: str | None = None
     written_stacks: set[str] = field(default_factory=set)
+    actions: dict[str, list[str]] = field(default_factory=dict)          # what the restore did to services: {"up": [...], "restart": [...]}
+    configs_before: dict[str, StackConfig | None] = field(default_factory=dict)   # per written stack, resolved before the files went back
+
+    def why(self) -> str | None:
+        """The reason a restore did not finish cleanly, in one line: the restore's own reason, else the first unrestored
+        service's (a failed `up` says what Compose said), else None."""
+        if self.reason:
+            return self.reason
+        for item in self.unrestored:
+            if item.get("reason"):
+                return f"{item.get('service', '?')}: {item['reason']}"[:300]
+        if self.unrestored:
+            first = self.unrestored[0]
+            return f"{first.get('service', '?')}: {', '.join(first.get('fields', []))} still differ from the checkpoint"[:300]
+        return None
 
     @property
     def partial(self) -> bool:
@@ -443,6 +458,9 @@ class CheckpointService:
                 "ports": self.provider.listening_ports(),
                 "mounts": self.provider.mount_table(),
                 "units": self.provider.unit_hashes(scope.units) if scope.units else {},
+                # Stacks whose project Compose could not resolve: their services' None facts mean "unknown", not "no container".
+                "unresolved": sorted(st for st in {s.split("/", 1)[0] for s in services}
+                                     if self.provider.project_name(st) is None),
             }
         except ProviderError as exc:
             raise ScopeRefused(str(exc)) from None
@@ -560,7 +578,8 @@ class CheckpointService:
 
     # ── restore ─────────────────────────────────────────────────────────────
     def restore(self, checkpoint_id: str, *, ack_drift: bool = False, actor: str = "core") -> RestoreReport:
-        """Restore every captured file (compare-and-swap) and recreate the affected services.
+        """Restore every captured file that differs (compare-and-swap), then act only on the services that differ from the
+        checkpoint (`_converge_and_compare`).
 
         Never raises for a failure after the restore started: it reports `refused` or `failed`, says which files
         were already written (`partial`), records the event and moves the mission to needs_operator."""
@@ -601,16 +620,16 @@ class CheckpointService:
             self._stop(mission_id, checkpoint_id, actor, report)
             return report
         try:
-            self._recreate_and_compare(manifest, report)
+            self._converge_and_compare(manifest, report)
         except Exception as exc:                    # noqa: BLE001
             report.status = "failed"
-            report.reason = f"recreate or comparison failed: {_safe_reason(exc)}"
+            report.reason = f"bringing the services back or comparing them failed: {_safe_reason(exc)}"
             self._stop(mission_id, checkpoint_id, actor, report)
             return report
         self._event(mission_id, "checkpoint.restore_done", actor,
                     {"checkpoint": checkpoint_id, "written": report.written, "unchanged": report.unchanged,
-                     "drift_saved": report.drift_saved,
-                     "unrestored": [{"service": u["service"], "fields": u["fields"]} for u in report.unrestored],
+                     "drift_saved": report.drift_saved, "actions": report.actions,
+                     "unrestored": [_unrestored_event(u) for u in report.unrestored],
                      "meta_skipped": report.meta_skipped, "observational": report.observational})
         return report
 
@@ -651,6 +670,10 @@ class CheckpointService:
                              else "files changed since the post-change manifest")
             return
 
+        # Each stack about to get files back is resolved by Compose FIRST, as the session left it, so the comparison after the
+        # write can tell which services' effective configuration the restore changes (a comment-only `.env` edit changes none).
+        for stack in sorted({e["stack"] for e, _d, _s in pending if e.get("stack")}):
+            report.configs_before[stack] = self._service_configs(stack)
         drift_paths = {d["path"] for d in report.drifted}
         for entry, data, _seen in pending:
             if entry["path"] in drift_paths and data is not None:
@@ -676,50 +699,103 @@ class CheckpointService:
                 report.written_stacks.add(entry["stack"])
             self.hooks.after_file_restored(len(report.written))
 
-    def _recreate_and_compare(self, manifest: dict[str, Any], report: RestoreReport) -> None:
-        # Version-1 checkpoints created before generated labels were excluded contain Docker/Compose bookkeeping. Keep
-        # those manifests restorable by comparing the same service-owned projection on both sides.
-        captured = {service: _comparable_facts(before)
-                    for service, before in manifest["facts"]["services"].items()}
-        affected = []
+    def _service_configs(self, stack: str) -> StackConfig | None:
+        try:
+            return self.provider.service_configs(stack)
+        except ProviderError:
+            return None
+
+    def _converge_and_compare(self, manifest: dict[str, Any], report: RestoreReport) -> None:
+        """The best path back for services, not a literal undo. Each service the checkpoint recorded is compared NOW, after the
+        files went back, on the comparable projection of its container facts, its run state and (for a stack whose files were
+        written) whether its effective Compose configuration changed with the write. Only the services that differ get an action:
+
+        - `up -d --no-deps` (Compose recreates only a container whose configuration changed): the container is missing, its facts
+          differ, its effective configuration changed with the restore (or could not be resolved), or it is not running when it
+          was running at the checkpoint;
+        - `restart`: configuration and facts match and it is running, but unhealthy when it was healthy at the checkpoint.
+
+        Everything else is left alone. A service with no container at the checkpoint is never named (naming a service behind a
+        profile would start it). Then every service is compared against the checkpoint again, on the same projection."""
+        raw_services = manifest["facts"]["services"]
+        captured = {service: comparable_facts(before) for service, before in raw_services.items()}
+        then_state = {service: (before or {}).get("state") for service, before in raw_services.items()}
+        unresolved_at_capture = set(manifest["facts"].get("unresolved", []))
+        configs_after = {stack: self._service_configs(stack) for stack in sorted(report.written_stacks)}
+        to_up: list[str] = []
+        to_restart: list[str] = []
         for service, before in captured.items():
-            if service.split("/", 1)[0] in report.written_stacks:
-                affected.append(service)
-                continue
+            if before is None:
+                continue                                    # no container then: nothing to put back, and naming it would start it
+            stack, name = service.split("/", 1)
             try:
                 now = self.provider.inspect(service)
             except ProviderError:
-                affected.append(service)
+                continue                                    # unreadable now: nothing is done blind; the comparison below reports it
+            if now is None or comparable_facts(now) != before:
+                to_up.append(service)
                 continue
-            if before is not None and _facts_dict(now) != before:
-                affected.append(service)
-        if affected:
-            result = self.provider.recreate(affected)
+            if stack in report.written_stacks:
+                pre, post = report.configs_before.get(stack), configs_after.get(stack)
+                if pre is None or post is None or pre.services.get(name) != post.services.get(name):
+                    to_up.append(service)                   # the write changed (or may have changed) what Compose would run
+                    continue
+            was, is_ = then_state[service] or {}, now.state or {}
+            if was.get("status") == "running" and is_.get("status") != "running":
+                to_up.append(service)
+            elif was.get("health") == "healthy" and is_.get("health") == "unhealthy":
+                to_restart.append(service)
+        # `up` starts what it creates. A service that was deliberately stopped at the checkpoint is put back stopped (review, rc14.1).
+        to_stop = [s for s in to_up if (then_state[s] or {}).get("status") in ("exited", "created", "paused", "dead")]
+        for verb, services in (("up", to_up), ("restart", to_restart), ("stop", to_stop)):
+            if not services:
+                continue
+            report.actions[verb] = list(services)
+            result = getattr(self.provider, verb)(services)
             if not result.ok:
-                report.unrestored.append({"service": ",".join(affected), "fields": ["recreate"],
-                                          "reason": result.error or "recreate failed"})
+                done = set(result.recreated)
+                report.unrestored.append({"service": ",".join(s for s in services if s not in done)[:400], "fields": [verb],
+                                          "reason": result.error or f"compose {verb} failed and said nothing"})
         for stack in manifest.get("facts_unavailable", []):
             report.unrestored.append({"service": stack, "fields": ["unverifiable"],
                                       "reason": "the compose file was not valid YAML when captured"})
+        resolved_now: dict[str, bool] = {}
         for service, before in captured.items():
-            if before is None:
-                # Nothing was observed at capture (no container, or none inspectable): there is nothing to
-                # compare against, so this is unknown, never "no difference".
-                report.unrestored.append({"service": service, "fields": ["unverifiable"],
-                                          "reason": "no container facts were captured"})
-                continue
+            stack = service.split("/", 1)[0]
             try:
-                after = _facts_dict(self.provider.inspect(service))
+                now = self.provider.inspect(service)
             except ProviderError as exc:
                 report.unrestored.append({"service": service, "fields": ["inspect"], "reason": str(exc)})
                 continue
-            if after == before:
+            if before is None:
+                if now is not None:
+                    report.unrestored.append({"service": service, "fields": ["existence"],
+                                              "reason": "a container exists that did not at the checkpoint; it was left as it is"})
+                    continue
+                # No container then and none now is a match, but only when "none" is known on both sides: Compose resolved the
+                # project at capture (a manifest from before this was recorded says nothing either way) and resolves it now.
+                if stack not in resolved_now:
+                    resolved_now[stack] = self._service_configs(stack) is not None
+                if stack in unresolved_at_capture or not resolved_now[stack]:
+                    report.unrestored.append({"service": service, "fields": ["unverifiable"],
+                                              "reason": "no container facts were captured and the project cannot be resolved"})
                 continue
-            if after is None:
-                report.unrestored.append({"service": service, "fields": ["existence"]})
+            if now is None:
+                report.unrestored.append({"service": service, "fields": ["existence"],
+                                          "reason": "the container is missing"})
                 continue
-            fields = [f for f in RESTORABLE_FIELDS if before.get(f) != after.get(f)]
-            report.unrestored.append({"service": service, "fields": fields})
+            after = comparable_facts(now)
+            if after != before:
+                fields = [f for f in RESTORABLE_FIELDS if before.get(f) != after.get(f)]
+                report.unrestored.append({"service": service, "fields": fields})
+                continue
+            was, is_ = then_state[service] or {}, now.state or {}
+            if was.get("status") == "running" and is_.get("status") != "running":
+                report.unrestored.append({"service": service, "fields": ["state"],
+                                          "reason": f"{is_.get('status') or 'not running'}; it was running at the checkpoint"})
+            elif was.get("status") in ("exited", "created", "paused", "dead") and is_.get("status") == "running":
+                report.unrestored.append({"service": service, "fields": ["state"],
+                                          "reason": f"running; it was {was.get('status')} at the checkpoint"})
         observed = {}
         try:
             for name, now in (("ports", self.provider.listening_ports()), ("mounts", self.provider.mount_table())):
@@ -781,18 +857,12 @@ def _metadata_matches(entry: dict[str, Any], meta: safefs.FileMeta | None) -> bo
     return os.geteuid() != 0 or (meta.uid, meta.gid) == (entry["uid"], entry["gid"])
 
 
-def _facts_dict(facts: ContainerFacts | None) -> dict[str, Any] | None:
-    return facts.to_dict() if facts is not None else None
-
-
-def _comparable_facts(raw: dict[str, Any] | None) -> dict[str, Any] | None:
-    if raw is None:
-        return None
-    facts = dict(raw)
-    labels = facts.get("labels")
-    if isinstance(labels, dict):
-        facts["labels"] = comparable_labels(labels)
-    return facts
+def _unrestored_event(item: dict[str, Any]) -> dict[str, Any]:
+    """An unrestored service as an event records it: the reason travels with it (a failed `up` that said why, a timeout)."""
+    out: dict[str, Any] = {"service": item["service"], "fields": item["fields"]}
+    if item.get("reason"):
+        out["reason"] = str(item["reason"])[:300]
+    return out
 
 
 def _compose_services(documents: Sequence[bytes]) -> list[str] | None:

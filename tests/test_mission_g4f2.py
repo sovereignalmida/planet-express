@@ -49,6 +49,8 @@ def test_long_exec_argv_appears_complete_on_the_card(stack):
     st = stack()
     argv = [f"arg{i}-" + "x" * 200 for i in range(6)]
     chk = {"id": "default", "check": "exec_probe", "params": {"container": "media-app", "argv": argv}}
+    from dataclasses import replace
+    st.verifier.env = replace(st.verifier.env, exec_allowlist=frozenset({argv[0]}))     # exec_probe is offered only where it can run
     mid = st.propose(checks=[chk])["mission_id"]
     shown = st.flow.card(mid)["verification"]["checks"][0]["params"]["argv"]
     assert all(a in shown for a in argv)

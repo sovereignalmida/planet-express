@@ -465,7 +465,12 @@ def test_recreate_failure_is_reported(tmp_path):
     env.docker.recreate_ok = False
     env.svc.capture_post(cid)
     report = env.svc.restore(cid)
-    assert any(u["fields"] == ["recreate"] for u in report.unrestored)
+    failed = [u for u in report.unrestored if u["fields"] == ["up"]]
+    assert failed and failed[0]["service"] == "media/web"
+    assert failed[0]["reason"] == "media: compose up exited 1: boom"          # the real reason, never None
+    done = json.loads(events(env, "checkpoint.restore_done")[-1].body_json)
+    assert {"service": "media/web", "fields": ["up"], "reason": "media: compose up exited 1: boom"} in done["unrestored"]
+    assert report.why() == "media/web: media: compose up exited 1: boom"
 
 
 def test_observational_facts_are_reported_not_asserted(tmp_path):
@@ -538,7 +543,7 @@ def test_checkpoint_id_must_be_well_formed(tmp_path):
 def test_provider_conformance(tmp_path, cls):
     env = make_env(tmp_path, provider_cls=cls)
     p = env.provider
-    assert p.version == 1
+    assert p.version == 2
     names = [Path(c.path).name for c in p.discover_compose("media")]
     assert names == ["docker-compose.yml", ".env"]
     assert all(c.real_path == os.path.realpath(c.path) for c in p.discover_compose("media"))
@@ -550,12 +555,17 @@ def test_provider_conformance(tmp_path, cls):
     assert p.listening_ports() == ["tcp 0.0.0.0:80"]
     assert p.mount_table() == []
     assert p.unit_hashes(["x.service"]) == {"x.service": "absent"}
-    assert p.recreate(["media/web"]).ok and env.docker.recreated == ["media/web"]
+    assert p.up(["media/web"]).ok and env.docker.recreated == ["media/web"]
     prefix = ["docker", "compose"] if cls is SystemdCheckpointProvider else ["docker-compose"]
     assert env.docker.calls[-1][:len(prefix)] == prefix
+    assert env.docker.calls[-1][-4:] == ["up", "-d", "--no-deps", "web"]
+    assert p.restart(["media/web"]).ok and env.docker.restarted == ["media/web"]
+    assert env.docker.calls[-1][-2:] == ["restart", "web"]
+    configs = p.service_configs("media")
+    assert configs.name == "media" and set(configs.services) == {"web"} and len(configs.services["web"]) == 64
     env.docker.recreate_ok = False
-    assert not p.recreate(["media/web"]).ok
-    assert not p.recreate(["bad name"]).ok
+    assert not p.up(["media/web"]).ok and not p.restart(["media/web"]).ok
+    assert not p.up(["bad name"]).ok
     with pytest.raises(ProviderError):
         p.discover_compose("../etc")
     assert all(isinstance(a, str) for call in env.docker.calls for a in call)     # argv lists only
@@ -587,7 +597,7 @@ def test_providers_read_unit_files_from_their_own_dirs(tmp_path):
 def test_recreate_passes_every_compose_file_and_the_project_name(tmp_path):
     env = make_env(tmp_path)
     (env.stacks / "media" / "docker-compose.override.yml").write_text("services: {web: {}}\n")
-    assert env.provider.recreate(["media/web"]).ok
+    assert env.provider.up(["media/web"]).ok
     argv = env.docker.calls[-1]
     base, override = str(env.compose.resolve()), str((env.stacks / "media" / "docker-compose.override.yml").resolve())
     assert argv[:6] == ["docker", "compose", "-p", "media", "-f", base] and argv[6:8] == ["-f", override]
@@ -604,7 +614,7 @@ def test_project_name_comes_from_compose_config_not_a_guess(tmp_path):
     assert env.provider.inspect("Media.App/web") is not None
     ps = next(c for c in env.docker.calls if c[:3] == ["docker", "ps", "-aq"])
     assert "label=com.docker.compose.project=from_dotenv" in ps
-    assert env.provider.recreate(["Media.App/web"]).ok
+    assert env.provider.up(["Media.App/web"]).ok
     up = env.docker.calls[-1]
     assert up[up.index("-p") + 1] == "from_dotenv"
     config = next(c for c in env.docker.calls if c[-3:] == ["config", "--format", "json"])
@@ -617,7 +627,7 @@ def test_unresolvable_project_omits_p_and_is_unverifiable(tmp_path):
     assert env.provider.project_name("media") is None
     assert env.provider.inspect("media/web") is None          # no guess, so no container is matched
     assert not any(c[:3] == ["docker", "ps", "-aq"] for c in env.docker.calls)
-    assert env.provider.recreate(["media/web"]).ok
+    assert env.provider.up(["media/web"]).ok
     assert "-p" not in env.docker.calls[-1]
     cid = env.svc.create(env.mission.id, env.scope)
     env.compose.write_text("x\n")
@@ -640,16 +650,42 @@ def test_legacy_compose_file_precedence(tmp_path):
     assert Path(env.provider.compose_chain("media")[0].path).name == "compose.yaml"
 
 
-def test_service_with_no_container_is_unverifiable_not_unchanged(tmp_path):
+def test_service_with_no_container_then_or_now_matches_and_is_never_started(tmp_path):
+    # Live M-19: `lidarr` sits behind a profile and had no container. Naming it in `compose up` would start it.
     env = make_env(tmp_path)
     env.compose.write_text(COMPOSE + "  db:\n    image: postgres\n")
-    cid = env.svc.create(env.mission.id, env.scope)           # no container exists for db
+    cid = env.svc.create(env.mission.id, env.scope)           # no container exists for db; the project resolves
     env.compose.write_text("x\n")
     env.svc.capture_post(cid)
     report = env.svc.restore(cid)
-    assert report.status == "done" and not report.ok
-    assert {"service": "media/db", "fields": ["unverifiable"],
-            "reason": "no container facts were captured"} in report.unrestored
+    assert report.status == "done" and report.ok, report.unrestored
+    assert "media/db" not in env.docker.recreated
+    assert not any("db" in call for call in env.docker.up_calls)
+
+
+def test_a_container_that_did_not_exist_at_the_checkpoint_is_reported_not_removed(tmp_path):
+    env = make_env(tmp_path)
+    env.compose.write_text(COMPOSE + "  db:\n    image: postgres\n")
+    cid = env.svc.create(env.mission.id, env.scope)
+    env.docker.containers[("media", "db")] = env.docker.containers[("media", "web")]     # the session started it
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert {"service": "media/db", "fields": ["existence"],
+            "reason": "a container exists that did not at the checkpoint; it was left as it is"} in report.unrestored
+    assert env.docker.up_calls == []
+
+
+def test_a_service_with_no_container_is_unverifiable_when_its_project_was_not_resolved(tmp_path):
+    env = make_env(tmp_path)
+    env.docker.config_ok = False
+    cid = env.svc.create(env.mission.id, env.scope)
+    env.docker.config_ok = True
+    env.svc.capture_post(cid)
+    manifest = env.svc.manifest(cid)
+    assert manifest["facts"]["unresolved"] == ["media"] and manifest["facts"]["services"]["media/web"] is None
+    env.docker.containers.pop(("media", "web"))
+    report = env.svc.restore(cid)
+    assert any(u["service"] == "media/web" and u["fields"] == ["unverifiable"] for u in report.unrestored)
 
 
 # ── review round: restore never escapes half-done ───────────────────────────
@@ -684,7 +720,7 @@ def test_recreate_exception_is_reported_not_raised(tmp_path, monkeypatch):
     env = make_env(tmp_path)
     cid = env.svc.create(env.mission.id, env.scope)
     mutate_and_post(env, cid)
-    monkeypatch.setattr(env.provider, "recreate", lambda services: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(env.provider, "up", lambda services: (_ for _ in ()).throw(RuntimeError("boom")))
     report = env.svc.restore(cid)
     assert report.status == "failed" and report.partial and "RuntimeError" in report.reason
     assert status(env) == "needs_operator" and events(env, "checkpoint.restore_refused")

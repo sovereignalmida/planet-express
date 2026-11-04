@@ -156,11 +156,88 @@ def test_a_rollback_from_the_conversation_restores_the_checkpoint_and_reports_wh
         assert rig.st.status(view["mission_id"]) == "needs_operator" and rig.feed()["execution"]["controls"]["rollback"] is True
         compose.write_text(original + "# the run changed this\n")
         out = rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
-        assert out["done"] == "rollback" and out["restore"] == "done" and isinstance(out["reason"], str)
+        # The request returns at once: the restore runs on the supervisor's rollback worker, and its outcome is read from the record.
+        assert out["done"] == "rollback" and out["restore"] == "started" and isinstance(out["reason"], str)
+        rig.st.sup._rolling_back[view["mission_id"]].result(timeout=30)
         assert rig.st.status(view["mission_id"]) == "rolled_back" and compose.read_text() == original
         assert "chris asked PE to roll back to the checkpoint." in rig.thread()
+        done = rig.feed()["execution"]
+        assert done["rollback"] == {"state": "done", "reason": ""} and done["status"]["text"] == "Rolled back"
     finally:
         rig.close()
+
+
+def _needs_operator_run(rig):
+    view = rig.start_run()
+    rig.st.sup._nothing_changed = lambda mission: False
+    rig.st.fresh = media_down()
+    rig.st.drive(view["mission_id"])
+    assert rig.st.status(view["mission_id"]) == "needs_operator"
+    rig.st.env.compose.write_text(rig.st.env.compose.read_text() + "# the run changed this\n")
+    return view
+
+
+def test_while_a_rollback_runs_the_run_reads_rolling_back_and_offers_nothing_to_click(tmp_path):
+    import threading
+    rig = Rig(tmp_path)
+    try:
+        view = _needs_operator_run(rig)
+        gate, entered = threading.Event(), threading.Event()
+        real = rig.st.sup.checkpoint.restore
+
+        def slow(*a, **kw):
+            entered.set()
+            assert gate.wait(30)
+            return real(*a, **kw)
+        rig.st.sup.checkpoint.restore = slow
+        out = rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
+        assert out["restore"] == "started"
+        assert entered.wait(30)
+        running = rig.feed()
+        x = running["execution"]
+        assert x["rollback"] == {"state": "running", "reason": ""} and x["controls"] == {"rollback": False}
+        assert x["status"] == {"text": "Rolling back\u2026", "level": "warn"} and x["rolling_back"] is True
+        with pytest.raises(ConsoleApiError) as err:                                  # a second click while it runs is refused
+            rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
+        assert err.value.code == "conflict"
+        gate.set()
+        rig.st.sup._rolling_back[view["mission_id"]].result(timeout=30)
+        after = rig.feed()["execution"]
+        assert after["rollback"]["state"] == "done" and after["rolling_back"] is False
+    finally:
+        rig.close()
+
+
+def test_a_rollback_refused_over_drift_in_the_background_offers_the_explicit_choice(tmp_path):
+    rig = Rig(tmp_path)
+    try:
+        view = _needs_operator_run(rig)
+        real = rig.st.sup.checkpoint.capture_post
+
+        def then_someone_else_edits(cid):
+            real(cid)
+            rig.st.env.compose.write_text("someone else edited this\n")
+        rig.st.sup.checkpoint.capture_post = then_someone_else_edits
+        rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
+        rig.st.sup._rolling_back[view["mission_id"]].result(timeout=30)
+        x = rig.feed()["execution"]
+        assert x["rollback"]["state"] == "refused" and "changed" in x["rollback"]["reason"] and x["controls"]["rollback"] is True
+        rig.st.sup.checkpoint.capture_post = real
+        rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris", ack_drift=True)
+        rig.st.sup._rolling_back[view["mission_id"]].result(timeout=30)
+        assert rig.st.status(view["mission_id"]) == "rolled_back"
+    finally:
+        rig.close()
+
+
+def test_rollback_pending_waits_for_the_operator_and_says_so():
+    from types import SimpleNamespace
+    mission = SimpleNamespace(status="rollback_pending", outcome_flags=None)
+    assert ex_mod.repair_status(mission) == ("Needs you: roll back to the checkpoint", "crit")
+    assert ex_mod.repair_status(mission, rolling_back=True) == ("Rolling back\u2026", "warn")
+    assert ex_mod.controls(mission) == {"rollback": True} and ex_mod.controls(mission, rolling_back=True) == {"rollback": False}
+    assert ex_mod.conversation_status(mission, True)["group"] == "Needs you"
+    assert ex_mod.conversation_status(mission, True, rolling_back=True)["text"] == "Rolling back"
 
 
 def test_a_legacy_paused_row_reads_as_needing_the_operator_never_as_a_pause():

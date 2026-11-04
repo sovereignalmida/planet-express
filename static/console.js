@@ -376,12 +376,35 @@
       try {
         const result = await post("/api/console/" + state.selected + "/run/" + name, fields);
         // A restore PE refused because files changed since the checkpoint is never a silent success: the operator is offered the explicit choice.
+        // A rollback started in the background ("started") reports its outcome through the run's own view on the next poll.
         state.drift = name === "rollback" && result.restore === "refused" ? { id: x.id, reason: result.reason || "Files changed since the checkpoint." } : null;
         state.firstPaint = "bottom"; state.sig.thread = ""; await loadFeed();
       } catch (e) { fail(e); }
     }
+    function rollingBack(x) { return !!(x.rollback && x.rollback.state === "running"); }
+    // The refusal the operator must answer: from this page's own last request, or from PE's record (a rollback that ran in the background).
+    function driftFor(x) {
+      if (x.rollback && x.rollback.state === "refused") return { id: x.id, reason: x.rollback.reason || "Files changed since the checkpoint." };
+      return state.drift && state.drift.id === x.id ? state.drift : null;
+    }
+    function rollbackNote(x) {
+      // While a restore runs nothing is clickable: the card says so, and the result replaces it when it lands.
+      if (rollingBack(x)) {
+        const note = el("div", "pe-note warn pe-con-rolling", "Rolling back\u2026 PE is putting the checkpointed files and services back. The result shows here when it lands.");
+        note.setAttribute("role", "status"); note.setAttribute("aria-live", "polite");
+        return note;
+      }
+      if (x.rollback && (x.rollback.state === "incomplete" || x.rollback.state === "not_run")) {
+        const note = el("div", "pe-note warn", (x.rollback.state === "not_run" ? "The rollback did not run: " : "The rollback did not complete cleanly: ") + (x.rollback.reason || ""));
+        note.setAttribute("role", "alert");
+        return note;
+      }
+      return null;
+    }
     function runButtons(x, names) {
       const wrap = el("div", "pe-tripwire-btns");
+      if (rollingBack(x)) return wrap;
+      const drift = driftFor(x);
       const labels = { rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint" };
       const cls = { rollback: "pe-btn warn" };
       for (const n of names) {
@@ -390,8 +413,8 @@
         b.addEventListener("click", () => runAction(n, x, false));
         wrap.appendChild(b);
       }
-      if (state.drift && state.drift.id === x.id && names.includes("rollback") && x.controls.rollback) {
-        const note = el("div", "pe-note warn", "PE did not restore: " + state.drift.reason); note.setAttribute("role", "alert");
+      if (drift && names.includes("rollback") && x.controls.rollback) {
+        const note = el("div", "pe-note warn", "PE did not restore: " + drift.reason); note.setAttribute("role", "alert");
         const any = el("button", "pe-btn warn", state.armed.drift ? "Overwrite those changes? Click again" : "Roll back anyway (files changed since the checkpoint)"); any.type = "button";
         any.addEventListener("click", () => runAction("rollback", x, true));
         wrap.appendChild(note); wrap.appendChild(any);
@@ -432,10 +455,16 @@
       }
       add(box, list);
       if (v.level !== "ok" && x.finished !== undefined) {
-        const keep = el("button", "pe-btn accent", "Keep working on it"); keep.type = "button";
-        keep.addEventListener("click", () => { refs.text.value = "Keep working on it: "; autosize(); refs.text.focus(); });
         const actions = el("div", "pe-plan-actions");
-        add(actions, runButtons(x, ["rollback"]), keep);
+        const note = rollbackNote(x);
+        if (note) box.appendChild(note);
+        add(actions, runButtons(x, ["rollback"]));
+        // Not while the run waits to be, or is being, rolled back: the conversation picks up again once the rollback has landed.
+        if (!x.rolling_back && !rollingBack(x)) {
+          const keep = el("button", "pe-btn accent", "Keep working on it"); keep.type = "button";
+          keep.addEventListener("click", () => { refs.text.value = "Keep working on it: "; autosize(); refs.text.focus(); });
+          add(actions, keep);
+        }
         box.appendChild(actions);
       }
       return box;
@@ -497,8 +526,8 @@
       if (x.verification) out.push(verifyBlock(x));
       // A run that needs the operator but has no verification to hang the button on (a restart, a refused rollback) still gets its control:
       // the thread must never say "you can roll back" with nothing to click.
-      if (!x.verification && x.controls.rollback) {
-        out.push(add(el("div", "pe-con-pause"), runButtons(x, ["rollback"])));
+      if (!x.verification && (x.controls.rollback || rollbackNote(x))) {
+        out.push(add(el("div", "pe-con-pause"), rollbackNote(x), runButtons(x, ["rollback"])));
       }
       return out;
     }

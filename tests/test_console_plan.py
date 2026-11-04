@@ -245,3 +245,47 @@ def test_what_an_option_will_not_touch_must_fit_the_grant_it_becomes_part_of():
         parse(doc)
     doc["options"][0]["exclude"] = doc["options"][0]["exclude"][:12]
     assert len(parse(doc).options[0].exclude) == 12
+
+
+# ── only the checks this host can run (rc14.1, live M-19: an exec_probe on a host with an empty exec allowlist) ──────
+from planet_express.missions.verify.checks import Availability, CheckEnv, availability  # noqa: E402
+
+EXEC = {"id": "prowlarr-responds", "check": "exec_probe", "params": {"container": "CASA_PROWLARR", "argv": ["curl", "-sf", "http://localhost:9696/ping"]}}
+
+
+def with_check(check):
+    doc = good()
+    doc["options"][0]["checks"].append(copy.deepcopy(check))
+    return doc
+
+
+def test_an_unavailable_check_is_refused_with_a_plain_reason_and_never_reaches_confirm():
+    host = availability(CheckEnv())                                     # the live host: empty exec allowlist
+    assert "exec_probe" in host.unavailable
+    with pytest.raises(PlanError) as err:
+        parse(with_check(EXEC), available=host)
+    assert str(err.value) == ("option 1: a verification check cannot run on this host: exec_probe is not available on this host "
+                              "(missions.verify.exec_allowlist is empty)")
+    assert "curl" not in str(err.value) and "prowlarr" not in str(err.value)
+    parse(good(), available=host)                                       # the same plan without it is fine
+    parse(with_check(EXEC))                                             # and with no host to ask, the catalogue alone decides (as before)
+
+
+def test_exec_probe_is_offered_only_with_the_allowlisted_binaries_and_others_are_refused():
+    host = Availability({}, frozenset({"curl"}))
+    parse(with_check(EXEC), available=host)
+    other = copy.deepcopy(EXEC)
+    other["params"]["argv"] = ["bash", "-c", "true"]
+    with pytest.raises(PlanError, match="exec allowlist"):
+        parse(with_check(other), available=host)
+    assert "argv[0]: curl" in plan_mod.instructions(host)
+
+
+def test_the_prompt_and_schema_list_only_this_hosts_checks():
+    host = availability(CheckEnv())
+    text = plan_mod.instructions(host)
+    assert "  exec_probe: " not in text and "  query: " not in text and "  project_complete: " not in text
+    assert "  container_state: " in text and "  http: " in text
+    assert "Not available on this host, so never use: exec_probe, project_complete, query" in text
+    kinds = plan_mod.json_schema(host)["properties"]["options"]["items"]["properties"]["checks"]["items"]["properties"]["check"]["enum"]
+    assert kinds == host.kinds() and "exec_probe" not in kinds

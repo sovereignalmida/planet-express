@@ -120,6 +120,15 @@ class MissionRunner:
                     log.exception("the model broker did not shut down cleanly")
 
 
+def _check_availability(verifier):
+    """() -> the checks this host's verifier can run (a Console plan may name only those), or None without a verifier."""
+    env = getattr(verifier, "env", None)
+    if env is None:
+        return None
+    from planet_express.missions.verify.checks import availability
+    return lambda: availability(env)
+
+
 def _cgroup_mount(root: str) -> str:
     """The cgroup2 mount point that holds `root`: peers' /proc/<pid>/cgroup paths are relative to it."""
     try:
@@ -325,7 +334,8 @@ def build_mission_runner(
         console_store = ConsoleStore(store)
         console_runtime = ConsoleRuntime(containment, console_store, cfg.console, worker_socket=cfg.worker_socket,
                                          env_policy=env_policy, broker=model_broker,
-                                         inventory=getattr(controls, "inventory", None))
+                                         inventory=getattr(controls, "inventory", None),
+                                         checks=_check_availability(verifier))
 
     def runtime_for(mission):
         if getattr(mission, "runtime", None) != "console":

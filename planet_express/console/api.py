@@ -268,12 +268,16 @@ class ConsoleApi:
         flow = self._require_flow()
         actor = f"operator:{operator}"
         try:
-            restore = flow.roll_back(actor, ex["mission_id"], ack_drift=ack_drift)      # the one action
+            # The one action. A restore can take minutes, so where the flow can, it is started on the supervisor's rollback worker and
+            # this request returns at once ("started"); the page shows "Rolling back" and the outcome lands with the next poll.
+            start = getattr(flow, "roll_back_start", None)
+            restore = (start or flow.roll_back)(actor, ex["mission_id"], ack_drift=ack_drift)
         except FlowError as exc:
             raise self._flow_error(exc) from None
         self.console.add_message(conv.id, "system", f"{operator} asked PE to roll back to the checkpoint.", actor=actor)
         # A restore PE refused (typically because files changed after the checkpoint) is reported, so the page can offer the explicit
-        # "roll back anyway" the operator must choose; PE never assumes it.
+        # "roll back anyway" the operator must choose; PE never assumes it. Started in the background, the refusal is read from the
+        # record instead (`rollback` in the run's view).
         return {"done": action, "status": self._execution_view(conv)["status"]["text"],
                 "restore": str(restore.get("restore", "unknown"))[:20], "reason": str(restore.get("reason", ""))[:200]}
 
@@ -429,10 +433,12 @@ class ConsoleApi:
             return None
         ex = shown[-1]
         mission = self.ms.get_mission(ex["mission_id"])
-        text, level = execution_mod.repair_status(mission)
+        rolling = self._rolling_back(mission.id)
+        text, level = execution_mod.repair_status(mission, rolling)
         waiting = execution_mod.start_waiting(self.ms, mission)
         if waiting:
             text, level = "Waiting to start", "warn"
+        rollback = execution_mod.rollback_view(self.ms, mission, rolling)
         row = self.console.plan(ex["plan_id"])
         name = ""
         if row is not None:
@@ -442,8 +448,19 @@ class ConsoleApi:
                 name = ""
         return {"id": ex["id"], "option": ex["option_index"], "name": name, "fingerprint": ex["grant_hash"][:8], "status": {"text": text, "level": level},
                 "timeline": execution_mod.timeline(mission, ex["authorised_by"], waiting),
-                "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission),
-                "finished": mission.status in execution_mod.TERMINALISH}
+                "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission, rolling),
+                "finished": mission.status in execution_mod.TERMINALISH, "rollback": rollback,
+                # "Keep working on it" is not offered while the run is waiting to be, or being, rolled back.
+                "rolling_back": rolling or mission.status == "rollback_pending"}
+
+    def _rolling_back(self, mission_id: str) -> bool:
+        """A rollback the Console started is still running on the supervisor (False where Repair is not available here)."""
+        try:
+            flow = self._flow() if self._flow is not None else None
+            probe = getattr(flow, "rollback_in_flight", None)
+            return bool(probe(mission_id)) if probe is not None else False
+        except Exception:                                  # noqa: BLE001 - a status read never breaks the feed
+            return False
 
     def _context(self, conv: Conversation, used_pct: int) -> dict:
         """The side panel, read from PE's own records (the mission's grant, its event log, the run's checkpoint), never from the agent's account.
@@ -505,7 +522,8 @@ class ConsoleApi:
         if not in_flight and not starting and not closed:
             runs = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
             if runs:                                                      # an active or troubled run is never hidden behind "Result ready"
-                override = execution_mod.conversation_status(self.ms.get_mission(runs[-1]["mission_id"]), runs[-1]["status"] == "authorised")
+                override = execution_mod.conversation_status(self.ms.get_mission(runs[-1]["mission_id"]), runs[-1]["status"] == "authorised",
+                                                             self._rolling_back(runs[-1]["mission_id"]))
                 # A finished run never hides a newer plan waiting for the operator, or a closing conversation.
                 if override and not (override["group"] == "Recent" and (pending is not None or conv.state != "open")):
                     out.update(override)

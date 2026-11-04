@@ -19,8 +19,11 @@ SECRET = "DB_PASSWORD=hunter2-very-secret\nTOKEN=abcdef0123456789\n"
 
 
 def inspect_doc(*, image="sha256:aaa", env=("A=1",), labels=None, cmd=("nginx",), networks=("media_default",),
-                restart="unless-stopped", health=None):
-    return {"Image": image, "Config": {"Env": list(env), "Labels": dict(labels or {"a": "b"}), "Cmd": list(cmd),
+                restart="unless-stopped", health=None, status="running", health_status=None):
+    state = {"Status": status, "Running": status == "running"}
+    if health_status:
+        state["Health"] = {"Status": health_status}
+    return {"Image": image, "State": state, "Config": {"Env": list(env), "Labels": dict(labels or {"a": "b"}), "Cmd": list(cmd),
                                        "Entrypoint": None, "Healthcheck": health},
             "HostConfig": {"RestartPolicy": {"Name": restart, "MaximumRetryCount": 0}},
             "Mounts": [{"Type": "bind", "Source": "/data/web", "Destination": "/data", "RW": True}],
@@ -34,7 +37,10 @@ class FakeDocker:
         self.containers = {("media", "web"): inspect_doc()}
         self.baseline = {k: json.loads(json.dumps(v)) for k, v in self.containers.items()}
         self.calls: list[list[str]] = []
-        self.recreated: list[str] = []
+        self.recreated: list[str] = []            # every service named in a `compose up`
+        self.restarted: list[str] = []
+        self.stopped: list[str] = []
+        self.up_calls: list[list[str]] = []
         self.fix_on_recreate = True
         self.recreate_ok = True
         self.ports = ["tcp 0.0.0.0:80"]
@@ -56,13 +62,16 @@ class FakeDocker:
             _, project, service = argv[2].split("-", 2)
             return 0, json.dumps([self.containers[(project, service)]]), ""
         if argv[-3:] == ["config", "--format", "json"]:
-            stack = Path(argv[argv.index("-f") + 1]).parent.name
+            compose = Path(argv[argv.index("-f") + 1])
+            stack = compose.parent.name
             if not self.config_ok:
                 return 1, "", "compose config failed"
             if self.config_output is not None:
                 return 0, self.config_output, ""
-            return 0, json.dumps({"name": self.projects.get(stack, stack.lower()), "services": {}}), ""
-        if "up" in argv and "--force-recreate" in argv:
+            return 0, json.dumps({"name": self.projects.get(stack, stack.lower()), "services": resolved_services(compose)}), ""
+        if "up" in argv and "--no-deps" in argv:
+            assert "--force-recreate" not in argv, "a restore never force-recreates"
+            self.up_calls.append(list(argv))
             if not self.recreate_ok:
                 return 1, "", "boom"
             stack = Path(argv[argv.index("-f") + 1]).parent.name
@@ -71,9 +80,45 @@ class FakeDocker:
                 if self.fix_on_recreate and (stack, name) in self.baseline:
                     self.containers[(stack, name)] = json.loads(json.dumps(self.baseline[(stack, name)]))
             return 0, "", ""
+        if "restart" in argv and "-f" in argv:
+            if not self.recreate_ok:
+                return 1, "", "boom"
+            stack = Path(argv[argv.index("-f") + 1]).parent.name
+            for name in argv[argv.index("restart") + 1:]:
+                self.restarted.append(f"{stack}/{name}")
+                if (stack, name) in self.containers:
+                    self.containers[(stack, name)]["State"] = {"Status": "running", "Running": True, "Health": {"Status": "healthy"}}
+            return 0, "", ""
+        if "stop" in argv and "-f" in argv:
+            stack = Path(argv[argv.index("-f") + 1]).parent.name
+            for name in argv[argv.index("stop") + 1:]:
+                self.stopped.append(f"{stack}/{name}")
+                if (stack, name) in self.containers:
+                    self.containers[(stack, name)]["State"] = {"Status": "exited", "Running": False}
+            return 0, "", ""
         if argv[0] == "ss":
             return 0, "\n".join(f"{p.split()[0]} LISTEN 0 128 {p.split()[1]} 0.0.0.0:*" for p in self.ports), ""
         return 127, "", "unexpected argv"
+
+
+def resolved_services(compose: Path) -> dict:
+    """What `compose config` would resolve, closely enough for the tests: each service of the compose file, with the `.env`
+    beside it applied (its comments and blank lines ignored, as Compose does). A document that is not a mapping resolves no
+    services."""
+    import yaml
+    try:
+        doc = yaml.safe_load(compose.read_text())
+    except (OSError, yaml.YAMLError):
+        return {}
+    dotenv = compose.parent / ".env"
+    try:
+        env_lines = sorted(line.strip() for line in dotenv.read_text().splitlines() if line.strip() and not line.strip().startswith("#"))
+    except OSError:
+        env_lines = []
+    if not isinstance(doc, dict) or not isinstance(doc.get("services"), dict):
+        return {}
+    return {str(k): {**(v if isinstance(v, dict) else {}), "x-env": env_lines} for k, v in doc["services"].items()
+            if not (isinstance(v, dict) and v.get("profiles"))}
 
 
 class Env:

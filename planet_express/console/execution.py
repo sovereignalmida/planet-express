@@ -13,7 +13,10 @@ REPAIR_STATUS = {
     "awaiting_decision": ("Starting", "ok"), "queued": ("Starting", "ok"), "investigating": ("Starting", "ok"),
     "executing": ("Working", "ok"), "verifying": ("Checking it worked", "ok"), "completed": ("Done and verified", "ok"),
     # paused_tripwire: a row from before trust mode removed the tripwire; startup recovery moves it to recovery_required.
-    "paused_tripwire": ("Needs you: PE isn't sure what state this is in", "crit"), "rollback_pending": ("Rolling back", "warn"),
+    "paused_tripwire": ("Needs you: PE isn't sure what state this is in", "crit"),
+    # rollback_pending is where a run waits for the operator's rollback (a grant that rolls back on a failed check, a restore PE refused
+    # over drift): nothing is rolling back until they ask. While a restore runs, `ROLLING_BACK` is shown instead.
+    "rollback_pending": ("Needs you: roll back to the checkpoint", "crit"),
     "rolled_back": ("Rolled back", "warn"), "failed": ("Didn't work", "high"), "cancelled": ("Scrapped", "none"),
     "needs_operator": ("Needs you: PE isn't sure what state this is in", "crit"),
     "recovery_required": ("Needs you: PE isn't sure what state this is in", "crit"), "blocked": ("Waiting", "warn"),
@@ -25,6 +28,7 @@ CONTROLS = {                      # which operator actions each state offers (th
 }
 ACTIONS = tuple(CONTROLS)
 TERMINALISH = ("completed", "failed", "rolled_back", "cancelled")
+ROLLING_BACK = ("Rolling back\u2026", "warn")
 
 
 # A failed Repair closed because nothing its checkpoint covers changed: only that is known, never "nothing changed".
@@ -35,10 +39,50 @@ def _closed_nothing_checkpointed(mission: Mission) -> bool:
     return mission.status == "failed" and getattr(mission, "outcome_flags", None) == NOTHING_CHECKPOINTED_FLAG
 
 
-def repair_status(mission: Mission) -> tuple[str, str]:
+def repair_status(mission: Mission, rolling_back: bool = False) -> tuple[str, str]:
+    if rolling_back and mission.status not in TERMINALISH:
+        return ROLLING_BACK
     if _closed_nothing_checkpointed(mission):
         return NOTHING_SNAPSHOTTED_STATUS
     return REPAIR_STATUS.get(mission.status, ("Working", "ok"))
+
+
+_ROLLBACK_EVENTS = ("checkpoint.restore_started", "checkpoint.restore_refused", "checkpoint.restore_done", "mission.rollback_incomplete")
+
+
+def rollback_view(ms: Any, mission: Mission, in_flight: bool) -> dict[str, Any] | None:
+    """What the run's rollback is doing, from PE's own record (Core's and the supervisor's events, never the agent's):
+    `running` while the supervisor's rollback worker has it; `refused` when PE refused to restore before writing anything (files
+    changed since the checkpoint) and the run waits for an explicit "roll back anyway"; `incomplete` when a restore ran and
+    did not finish cleanly, with why; `not_run` when the worker could not start it; `done` once rolled back. None when no
+    rollback was ever asked for."""
+    if in_flight and mission.status not in TERMINALISH:
+        return {"state": "running", "reason": ""}
+    if mission.status == "rolled_back":
+        return {"state": "done", "reason": ""}
+    with ms.store._connect() as conn:                    # the newest trusted notes only: a feed poll must not read the whole log
+        rows = conn.execute("SELECT body_json FROM mission_events WHERE mission_id=? AND kind IN ('note', 'decision') "
+                            "AND (actor IN ('core', ?) OR actor LIKE 'operator:%') ORDER BY seq DESC LIMIT 100",
+                            (mission.id, SUPERVISOR)).fetchall()
+    for row in rows:
+        try:
+            body = json.loads(row["body_json"])
+        except ValueError:
+            continue
+        if not isinstance(body, dict):
+            continue
+        if "rollback_not_run" in body:
+            return {"state": "not_run", "reason": str(body["rollback_not_run"])[:200]}
+        event = body.get("event")
+        if event not in _ROLLBACK_EVENTS:
+            continue
+        if event == "mission.rollback_incomplete":
+            return {"state": "incomplete", "reason": str(body.get("reason") or "the restore did not complete cleanly")[:200]}
+        if (event == "checkpoint.restore_refused" and body.get("status", "refused") == "refused" and not body.get("partial")
+                and mission.status in CONTROLS["rollback"]):
+            return {"state": "refused", "reason": str(body.get("reason") or "files changed since the checkpoint")[:200]}
+        return None                                     # started (and not running any more) or done: the state says the rest
+    return None
 
 
 def check_state(result: CheckResult) -> str:
@@ -78,14 +122,17 @@ def verification_view(mission: Mission) -> dict[str, Any] | None:
             "scan_note": (result.scan.error if result.scan is not None and result.scan.error else None)}
 
 
-def conversation_status(mission: Mission, live: bool) -> dict[str, Any] | None:
+def conversation_status(mission: Mission, live: bool, rolling_back: bool = False) -> dict[str, Any] | None:
     """How a conversation reads while a confirmed plan is running or needs attention: derived from the run, so an active repair is never hidden
     behind 'Result ready'. None when the run needs no say in the conversation's status."""
     status = mission.status
-    if live and status in ("awaiting_decision", "queued", "investigating", "executing", "verifying", "rollback_pending"):
+    if rolling_back and status not in TERMINALISH:
+        return {"text": "Rolling back", "level": "warn", "group": "Working",
+                "verdict": {"h": "Rolling back to the checkpoint", "p": "PE is putting the files and services back. The result shows here when it lands."}}
+    if live and status in ("awaiting_decision", "queued", "investigating", "executing", "verifying"):
         return {"text": "Working on the plan", "level": "ok", "group": "Working",
                 "verdict": {"h": "Carrying out the confirmed plan", "p": "PE is supervising it and will check it worked."}}
-    if status in ("needs_operator", "recovery_required", "paused_tripwire", "failed"):
+    if status in ("needs_operator", "recovery_required", "paused_tripwire", "failed", "rollback_pending"):
         return {"text": "Run needs you", "level": "crit" if status != "failed" else "high", "group": "Needs you",
                 "verdict": {"h": "The run didn't finish cleanly" if status != "failed" else "The run didn't pass PE's checks",
                             "p": ("Nothing PE snapshotted was changed; check the run's record for anything else it did."
@@ -155,8 +202,10 @@ def timeline(mission: Mission, authorised_by: str | None, waiting: str | None = 
             {"label": "PE checks it worked", "state": check, "meta": "PE's own checks, not the agent's say-so"}]
 
 
-def controls(mission: Mission) -> dict[str, bool]:
-    return {name: mission.status in states for name, states in CONTROLS.items()}
+def controls(mission: Mission, rolling_back: bool = False) -> dict[str, bool]:
+    """Which actions apply now. None while a rollback is running: the page shows that it is rolling back instead."""
+    return {name: mission.status in states and not rolling_back for name, states in CONTROLS.items()}
 
 
-__all__ = ["ACTIONS", "CONTROLS", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "TERMINALISH", "check_state", "controls", "conversation_status", "repair_status", "timeline", "verification_view"]
+__all__ = ["ACTIONS", "CONTROLS", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "ROLLING_BACK", "TERMINALISH", "check_state", "controls",
+           "conversation_status", "repair_status", "rollback_view", "timeline", "verification_view"]

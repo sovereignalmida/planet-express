@@ -413,3 +413,18 @@ def test_with_no_inventory_the_agent_is_told_it_cannot_name_a_scope_and_a_plan_w
     assert "do not write plan.json" in (workspace / "INVENTORY.md").read_text()
     rig.runtime.inventory = lambda: (_ for _ in ()).throw(OSError("unreadable"))
     assert "do not write plan.json" in rig.runtime._inventory_text()                       # an unreadable inventory is no inventory, never a wider one
+
+
+def test_plan_format_lists_only_this_hosts_checks_and_a_plan_using_another_is_refused(tmp_path):
+    from planet_express.missions.verify.checks import CheckEnv, availability
+    rig = Rig(tmp_path, broker=Broker(tokens=1))
+    rig.runtime.checks = lambda: availability(CheckEnv())                 # empty exec allowlist, as on the live host
+    handle, workspace, cs = rig.start()
+    text = (workspace / "PLAN_FORMAT.md").read_text()
+    assert "  exec_probe: " not in text and "never use: exec_probe" in text
+    bad = json.loads(json.dumps(GOOD_PLAN))
+    bad["options"][0]["checks"] = [{"id": "p", "check": "exec_probe", "params": {"container": "c", "argv": ["curl"]}}]
+    (workspace / "plan.json").write_text(json.dumps(bad))
+    rig.finish(handle, cs)
+    refused = [m.text for m in rig.console.messages(rig.conv.id) if m.role == "system"]
+    assert refused and "cannot run on this host" in refused[-1] and rig.console.current_plan(rig.conv.id) is None

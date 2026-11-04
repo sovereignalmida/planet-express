@@ -162,6 +162,8 @@ class ConsoleTelegram:
         if not runs:
             raise _Usage(f"{conv.id[:8]}: no run to control.")
         out = self.api.execution_action(conv.id, runs[-1]["id"], action, operator)
+        if action == "rollback" and out.get("restore") == "started":
+            return f"{conv.id[:8]}: rollback started. The result shows on the dashboard when it lands."
         if action == "rollback" and out.get("restore") != "done":
             why = out.get("reason") or "the restore did not complete"
             if out.get("restore") == "refused":
