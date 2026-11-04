@@ -51,8 +51,9 @@ def test_table_covers_contract_edges():
 
 
 def test_terminal_states_have_no_exits_and_no_self_edges():
+    # rc14.2: the one exception is the operator's undo of a completed Repair (completed -> rollback_pending).
     for s in TERMINAL:
-        assert TRANSITIONS[s] == frozenset()
+        assert TRANSITIONS[s] == (frozenset({"rollback_pending"}) if s == "completed" else frozenset())
     for s in STATES:
         assert s not in TRANSITIONS[s]
 
@@ -68,6 +69,11 @@ def test_every_edge_matches_table(tmp_path, frm, to):
     if (frm, to) == ("awaiting_decision", "investigating"):
         # In the table for the observe/propose follow-up, but a repair mission is never reopened by one.
         with pytest.raises(IllegalTransition, match="cannot be reopened"):
+            transition(store, m.id, to, "operator:me")
+        assert ms.get_mission(m.id).status == frm
+    elif (frm, to) == ("completed", "rollback_pending"):
+        # The undo of a finished change: only an operator, only a repair mission WITH a checkpoint (none here).
+        with pytest.raises(IllegalTransition, match="cannot be rolled back"):
             transition(store, m.id, to, "operator:me")
         assert ms.get_mission(m.id).status == frm
     elif legal and to == "completed":
@@ -155,3 +161,56 @@ def test_event_api_is_insert_only():
     for path in pathlib.Path(pkg.__file__).parent.glob("*.py"):
         text = path.read_text()
         assert "UPDATE mission_events" not in text and "DELETE FROM mission_events" not in text, path
+
+
+def _completed_repair(store, ms, closed=True):
+    m = new_mission(ms, Grant.model_validate({"tier": "repair"}))
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE missions SET status='completed', checkpoint_id='C-0000000000000000', closed_at=1 WHERE id=?", (m.id,))
+    return m
+
+
+def test_a_completed_repair_has_one_exit_the_operators_undo_and_it_reopens_the_mission(tmp_path):
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    m = _completed_repair(store, ms)
+    for actor in ("core", "supervisor", "system", "agent", "core:console/plan-retry"):
+        with pytest.raises(IllegalTransition, match="only an operator"):
+            transition(store, m.id, "rollback_pending", actor)
+    for to in ("executing", "verifying", "investigating", "cancelled", "needs_operator", "rolled_back"):
+        with pytest.raises(IllegalTransition):
+            transition(store, m.id, to, "operator:me")
+    transition(store, m.id, "rollback_pending", "operator:me")
+    assert ms.get_mission(m.id).status == "rollback_pending" and ms.get_mission(m.id).closed_at is None
+    transition(store, m.id, "rolled_back", "operator:me")
+    assert ms.get_mission(m.id).closed_at is not None
+    assert TRANSITIONS["rolled_back"] == frozenset()                              # and rolled_back has no exit at all
+
+
+def test_a_completed_observe_mission_cannot_be_rolled_back(tmp_path):
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    m = new_mission(ms, Grant.model_validate({"tier": "observe"}))
+    force_status(store, m.id, "completed")
+    with pytest.raises(IllegalTransition):
+        transition(store, m.id, "rollback_pending", "operator:me")
+
+
+def test_pes_plan_retry_actor_reopens_only_a_console_conversation(tmp_path):
+    from planet_express.missions.state import CONSOLE_PLAN_RETRY
+    store, _ = make_store(tmp_path)
+    ms = MissionStore(store)
+    console = ms.create_mission(title="t", origin="operator", grant=Grant.model_validate({"tier": "observe"}), goal="g",
+                                success_criteria="s", runtime="console")
+    other = ms.create_mission(title="t", origin="operator", grant=Grant.model_validate({"tier": "observe"}), goal="g",
+                              success_criteria="s", runtime="command")
+    for m in (console, other):
+        force_status(store, m.id, "awaiting_decision")
+    with pytest.raises(IllegalTransition, match="only an operator"):
+        transition(store, other.id, "investigating", CONSOLE_PLAN_RETRY)
+    with pytest.raises(IllegalTransition, match="only an operator"):
+        transition(store, console.id, "investigating", "core:console")             # only the exact actor
+    transition(store, console.id, "investigating", CONSOLE_PLAN_RETRY)
+    force_status(store, console.id, "needs_operator")
+    with pytest.raises(IllegalTransition):
+        transition(store, console.id, "investigating", CONSOLE_PLAN_RETRY)        # resuming stays the operator's

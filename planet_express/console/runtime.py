@@ -21,6 +21,7 @@ from planet_express.console import lessons as lessons_mod, plan as plan_mod
 from planet_express.console.store import ConsoleStore, clean_text
 from planet_express.console.stream import StreamParser
 from planet_express.memory import store as memory_store
+from planet_express.missions.state import CONSOLE_PLAN_RETRY
 from planet_express.missions.runtime import (
     AgentEvent,
     AgentResult,
@@ -33,6 +34,7 @@ MAX_ARG_PROMPT = 3000                 # the launcher refuses an argument over 40
 MAX_EVENTS_PER_POLL = 256             # AgentUpdate's own limit
 MAX_BACKLOG = 10_000                  # events carried between polls while the turn runs
 _DRAIN_PER_CALL = 256 * 1024
+MAX_PLAN_RETRIES = 2                  # automatic "fix your plan" turns per operator message (rc14.2)
 SYSTEM = (
     "You are Planet Express's investigation agent for one operator's Docker Compose homelab. You are PE-aware: BRIEF.md in the current "
     "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. You have full "
@@ -108,7 +110,12 @@ class ConsoleRuntime:
         # The agent's own session id is stored only once the stream has CONFIRMED it (`_record`): a first turn that dies before the CLI
         # saved its transcript must not leave a `--resume` id that does not exist. Until then every turn starts a new one.
         resume = ["--resume", conv.agent_session_id] if conv.agent_session_id else ["--session-id", str(uuid.uuid4())]
-        prompt = message.text if len(message.text) <= MAX_ARG_PROMPT else (
+        text = message.text
+        if message.role == "operator" and plan_mod.goes_ahead(text)[0] and self.console.current_plan(conv.id) is None:
+            # "Go ahead" with no plan to authorise: the agent is asked for the plan, not left to answer that it cannot change the host.
+            # (With a valid plan, the Console answers the operator with the Authorise card itself and never sends the words here.)
+            text = plan_mod.GO_AHEAD_PROMPT.format(text=" ".join(text.split())[:80])
+        prompt = text if len(text) <= MAX_ARG_PROMPT else (
             "The operator's message is long: read it in full from MESSAGE.md in the current directory, then answer it.")
         tools = ",".join(self.cfg.tools)
         # The message is the LAST argument, after `--`: whatever it says (a bullet, `--verbose`, `--settings=...`) is text, never an option.
@@ -219,9 +226,25 @@ class ConsoleRuntime:
             plan = plan_mod.load_file(str(run.workspace), inventory=inventory,                # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
                                       available=self._checks())
         except plan_mod.PlanError as exc:
-            self.console.add_message(run.conversation_id, "system", f"The agent's plan was refused: {exc}", turn=run.turn)
+            self._refused(run, str(exc))
             return
         self.console.add_plan(run.conversation_id, run.turn, plan_mod.canonical(plan), plan_mod.plan_hash(plan))
+
+    def _refused(self, run: _Run, reason: str) -> None:
+        """A refused plan goes back to the planner (rc14.2): PE queues the next turn of the same conversation itself, attributed to
+        `CONSOLE_PLAN_RETRY` (never the operator), with the refusal (PlanError never echoes agent text). At most MAX_PLAN_RETRIES per
+        operator message, and only with budget left for a turn: past that, or out of budget, the operator sees the refusal as before.
+        The operator sees a short note either way."""
+        conv_id = run.conversation_id
+        tries = self.console.core_messages_since_operator(conv_id, CONSOLE_PLAN_RETRY)
+        conv = self.console.get(conv_id)
+        if tries < MAX_PLAN_RETRIES and conv.state == "open" and conv.tokens_left >= self.cfg.min_turn_tokens:
+            which = "the plan" if tries == 0 else "the corrected plan"
+            self.console.add_message(conv_id, "system", f"PE refused {which} ({reason}) and asked the agent to fix it.", turn=run.turn)
+            self.console.add_message(conv_id, "core", plan_mod.RETRY_PROMPT.format(reason=reason), actor=CONSOLE_PLAN_RETRY)
+            return
+        after = f" (after {tries} automatic attempt{'s' if tries != 1 else ''} to have it fixed)" if tries else ""
+        self.console.add_message(conv_id, "system", f"The agent's plan was refused{after}: {reason}", turn=run.turn)
 
     def _lessons(self, run: _Run) -> None:
         """`lessons.json` becomes memory CANDIDATES (quarantined: nothing uses them until the operator keeps them). A refused or secret-shaped

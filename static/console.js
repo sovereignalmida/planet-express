@@ -97,9 +97,8 @@
     return b.state === "stop" ? "used up" : b.used_pct + "% used";
   }
 
-  // A short message that only says yes, typed while a plan waits: the agent cannot run anything, so it would answer with words and
-  // the operator would wait for a change that never comes (M-5). The page points at the Confirm button instead.
-  const APPROVAL_NUDGE = "Typing it here only tells the agent, and the agent cannot run anything. To go ahead, use the Confirm option button on the plan above. Press Send again to send this message anyway.";
+  // A short message that only says yes. Kept as a pure helper: since rc14.2 the server decides (a "go ahead" while a plan waits opens the
+  // Authorise card; without one the agent is asked for the plan), so the page no longer holds such a message back.
   function soundsLikeApproval(text) {
     return /^\s*(please\s+)?(confirm(ed)?|approved?|authori[sz]e(d)?|yes|yep|yeah|go( ahead)?|do it|proceed|ok(ay)?|run it|go for it)(\s+(it|that|this|the plan|option\s*[a-c1-3]|[a-c]))?[\s.!]*$/i.test(String(text || ""));
   }
@@ -405,7 +404,9 @@
       const wrap = el("div", "pe-tripwire-btns");
       if (rollingBack(x)) return wrap;
       const drift = driftFor(x);
-      const labels = { rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint" };
+      // A completed run's rollback is the undo of a change that worked (rc14.2): it says so, and still takes two clicks.
+      const labels = x.undo ? { rollback: state.armed.rollback ? "Undo this change? Click again" : "Undo this change (roll back to the checkpoint)" }
+                            : { rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint" };
       const cls = { rollback: "pe-btn warn" };
       for (const n of names) {
         if (!x.controls[n]) continue;
@@ -466,6 +467,11 @@
           add(actions, keep);
         }
         box.appendChild(actions);
+      } else if (x.controls.rollback || rollbackNote(x)) {
+        // A run that passed can still be undone while its checkpoint is kept; while that rollback runs, the card says so.
+        const note = rollbackNote(x);
+        if (note) box.appendChild(note);
+        box.appendChild(add(el("div", "pe-plan-actions"), runButtons(x, ["rollback"])));
       }
       return box;
     }
@@ -675,21 +681,15 @@
       refs.send.disabled = off || state.sending;
       refs.send.textContent = state.newMode ? "Start" : "Send";
       refs.stop.hidden = !(state.feed && state.feed.stoppable && !state.newMode && c.mode !== "off");
-      const nudge = state.approvalNudged !== null && state.approvalNudged !== undefined && refs.text.value.trim() === state.approvalNudged ? APPROVAL_NUDGE : "";
-      refs.note.textContent = state.error || nudge || c.reason || (state.newMode ? "Nothing runs until you press Start." : "");
-      refs.note.setAttribute("role", state.error || nudge ? "alert" : "status");
+      refs.note.textContent = state.error || c.reason || (state.newMode ? "Nothing runs until you press Start." : "");
+      refs.note.setAttribute("role", state.error ? "alert" : "status");
     }
 
     async function send() {
       const text = refs.text.value.trim();
       if (!text || state.sending) return;
-      const plan = !state.newMode && state.feed && state.feed.plan;
-      if (plan && plan.status === "pending" && !plan.expired && soundsLikeApproval(text) && state.approvalNudged !== text) {
-        state.approvalNudged = text;                     // shown until the text changes; a second Send of the same words goes through
-        renderComposer();
-        return;
-      }
-      state.approvalNudged = null;
+      // rc14.2: "go ahead" while a plan waits is answered by PE itself with the Authorise card (the same as pressing Confirm); the
+      // words never reach the agent and are never the approval. Without a plan, PE asks the agent for one.
       state.sending = true; state.error = null; renderComposer();
       try {
         if (state.newMode) {
@@ -697,8 +697,9 @@
           refs.text.value = ""; autosize();
           await refreshList(); select(made.id, true);
         } else {
-          await post("/api/console/" + state.selected + "/message", { text });
+          const sent = await post("/api/console/" + state.selected + "/message", { text });
           refs.text.value = ""; autosize();
+          if (sent && sent.confirm) { state.sheet = sent.confirm; state.sheet.index = sent.option; state.sheetError = null; renderSheet(); }
           state.firstPaint = true; await loadFeed();
         }
       } catch (e) { fail(e); } finally { state.sending = false; renderComposer(); schedule(true); }
@@ -747,7 +748,7 @@
     }
     function select(id, push) {
       if (!leaveConversation()) return;
-      state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null; state.approvalNudged = null;
+      state.selected = id; state.newMode = false; state.picked = {}; state.scrapArmed = false; state.archiveArmed = false; state.feed = null;
       state.sig = { rail: "", top: "", thread: "", ctx: "" };
       con.classList.remove("is-list"); con.classList.add("is-thread");
       if (push && window.history) window.history.pushState({ id }, "", "/console/" + id);
@@ -784,9 +785,6 @@
     });
     refs.text.addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } });
     refs.text.addEventListener("input", autosize);
-    refs.text.addEventListener("input", () => {                              // editing the words clears the hint, and what it remembered
-      if (state.approvalNudged && refs.text.value.trim() !== state.approvalNudged) { state.approvalNudged = null; renderComposer(); }
-    });
     refs.newBtn.addEventListener("click", () => startNew(true));
     window.addEventListener("popstate", () => {
       const m = /\/console\/([0-9a-f]{16})/.exec(window.location.pathname);

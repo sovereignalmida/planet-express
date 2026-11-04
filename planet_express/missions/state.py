@@ -20,6 +20,10 @@ NON_TERMINAL = frozenset({
 LEGACY_STATES = frozenset({"paused_tripwire"})
 # Edges only an operator may take (the contract leaves needs_operator exits undefined: see the slice report).
 OPERATOR_EXITS = frozenset({"investigating", "awaiting_decision", "executing", "verifying", "rollback_pending"})
+# PE's own Console actors (rc14.2). `CONSOLE_PLAN_RETRY` starts the automatic follow-up turn that hands a refused plan back to the
+# planner: the one non-operator actor that may reopen a finished conversation (a Console observe/propose mission only, so it can
+# never move a mission that may change the host).
+CONSOLE_PLAN_RETRY = "core:console/plan-retry"
 # States that only exist because something may have been executed: observe and propose never get there.
 EXECUTION_STATES = frozenset({"executing", "paused_tripwire", "rollback_pending", "verifying", "rolled_back"})
 
@@ -45,6 +49,14 @@ for _state in NON_TERMINAL:
 for _state in TERMINAL:
     TRANSITIONS[_state] = frozenset()
 TRANSITIONS = {_state: edges - LEGACY_STATES for _state, edges in TRANSITIONS.items()}
+# The ONE exit from a terminal state (rc14.2): an operator may undo a completed Repair by rolling it back to its checkpoint. Completed
+# stays terminal in every other sense (closed, leases and session freed). Why it is safe: it is the operator's own act (never Core's,
+# the system's or an agent's), only for a `repair` mission, and the supervisor takes it only after it has re-acquired the mission's
+# leases (refused in words when another mission holds them) and confirmed the checkpoint is still kept and intact. It leads only to
+# `rollback_pending`, whose own exits are a finished restore (`rolled_back`) or the operator's hands (`needs_operator`).
+UNDO_FROM_TERMINAL = {"completed": "rollback_pending"}
+for _state, _to in UNDO_FROM_TERMINAL.items():
+    TRANSITIONS[_state] = frozenset({_to})
 
 
 class IllegalTransition(RuntimeError):
@@ -132,8 +144,14 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         # a mission that may mutate the host leaves `awaiting_decision` by approval, never by a follow-up.
         if tier not in ("observe", "propose"):
             raise IllegalTransition(f"a {tier} mission cannot be reopened for a follow-up")
-        if not actor.startswith("operator:"):
+        if not actor.startswith("operator:") and not (actor == CONSOLE_PLAN_RETRY and row["runtime"] == "console"):
             raise IllegalTransition("only an operator may reopen a finished mission")
+    if frm in UNDO_FROM_TERMINAL:
+        # Undoing a finished change is the operator's decision, and only a Repair mission has a change (and a checkpoint) to undo.
+        if tier != "repair" or not row["checkpoint_id"]:
+            raise IllegalTransition(f"a finished {tier} mission cannot be rolled back")
+        if not actor.startswith("operator:"):
+            raise IllegalTransition("only an operator may roll back a finished mission")
     if to == "executing":
         verdict = evaluate(conn, mission_id, now)
         if not verdict.ok:
@@ -142,7 +160,8 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         problems = completion_problems(row)
         if problems:
             raise IllegalTransition("completion refused: " + "; ".join(problems))
-    closed = ", closed_at=?" if to in TERMINAL else ""
+    # Leaving the one terminal state that has an exit reopens the mission: it is not closed while its rollback runs.
+    closed = ", closed_at=?" if to in TERMINAL else (", closed_at=NULL" if frm in TERMINAL else "")
     # A result belongs to one pass through `verifying`: leaving it for more work (or entering it afresh) voids it.
     voided = ", verification_result_json=NULL" if to in ("executing", "verifying") else ""
     args = (to, now, *((now,) if to in TERMINAL else ()), mission_id, frm)

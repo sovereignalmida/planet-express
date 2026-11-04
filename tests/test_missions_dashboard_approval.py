@@ -202,3 +202,14 @@ def test_the_missions_board_links_to_the_standing_grants_page():
     import pathlib
     html = pathlib.Path("templates/missions.html").read_text()
     assert "url_for('standing_page')" in html
+
+
+def test_a_completed_repair_with_a_checkpoint_offers_undo_and_one_without_does_not(web):
+    client, core, _ = web
+    core.results["mission.get"] = detail({**mission("M-2", "restart media", status="completed", tier="repair"), "has_checkpoint": True})
+    core.results["mission.approval_card"] = card(status="completed")
+    page = client.get("/missions/M-2").get_data(as_text=True)
+    assert 'action="/missions/M-2/rollback"' in page and "UNDO THIS CHANGE (ROLL BACK)" in page and 'name="ack_drift"' in page
+    core.results["mission.get"] = detail({**mission("M-2", "restart media", status="completed", tier="repair"), "has_checkpoint": False})
+    page = client.get("/missions/M-2").get_data(as_text=True)
+    assert 'action="/missions/M-2/rollback"' not in page

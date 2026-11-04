@@ -13,7 +13,10 @@ from planet_express.core.redact import redact
 from planet_express.core.store import Store
 
 State = Literal["open", "archiving", "archived"]
-Role = Literal["operator", "agent", "system"]
+Role = Literal["operator", "agent", "system", "core"]
+# A `core` message is one PE itself puts to the agent as the conversation's next turn (rc14.2: a refused plan goes back to the planner).
+# It is attributed to `core:console/...`, never to the operator, is not shown in the thread (the operator sees PE's short note instead),
+# and does not count as the operator's activity.
 MAX_MESSAGE_CHARS = 32_000
 MAX_TITLE_CHARS = 120
 TRUNCATED = "\n[message truncated]"
@@ -168,7 +171,9 @@ class ConsoleStore:
 
     # ── messages ───────────────────────────────────────────────────────────────────────────
     def add_message(self, conversation_id: str, role: Role, text: str, *, turn: int | None = None,
-                    require_open: bool = False, actor: str | None = None) -> int:
+                    require_open: bool = False, actor: str | None = None, taken: bool = False) -> int:
+        """`taken`: the message is recorded as already handled (an operator's "go ahead" that PE answered with the Authorise card
+        itself): no turn will ever take it, in the same write that stores it."""
         now = self._now()
         with self.store._write() as conn:
             row = conn.execute("SELECT state FROM console_conversations WHERE id=?", (conversation_id,)).fetchone()
@@ -176,8 +181,9 @@ class ConsoleStore:
                 raise ConversationNotFound(conversation_id)
             if require_open and row["state"] != "open":
                 raise ConversationClosed("this conversation is closed: it takes no more messages")
-            cur = conn.execute("INSERT INTO console_messages (conversation_id, at, role, actor, turn, text) VALUES (?, ?, ?, ?, ?, ?)",
-                               (conversation_id, now, role, actor[:128] if actor else None, turn, clean_text(text)))
+            cur = conn.execute("INSERT INTO console_messages (conversation_id, at, role, actor, turn, text, consumed_turn) "
+                               "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (conversation_id, now, role, actor[:128] if actor else None, turn, clean_text(text), 0 if taken else None))
             if role == "operator":
                 conn.execute("UPDATE console_conversations SET last_activity_at=?, updated_at=? WHERE id=?", (now, now, conversation_id))
             return int(cur.lastrowid)
@@ -202,9 +208,9 @@ class ConsoleStore:
         return row[0] if row else None
 
     def pending(self, conversation_id: str) -> Message | None:
-        """The oldest operator message no turn has taken yet."""
+        """The oldest operator (or PE `core`) message no turn has taken yet."""
         with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM console_messages WHERE conversation_id=? AND role='operator' "
+            row = conn.execute("SELECT * FROM console_messages WHERE conversation_id=? AND role IN ('operator', 'core') "
                                "AND consumed_turn IS NULL ORDER BY seq LIMIT 1", (conversation_id,)).fetchone()
         return Message(**dict(row)) if row else None
 
@@ -215,12 +221,22 @@ class ConsoleStore:
             return cur.rowcount == 1
 
     def has_pending(self) -> list[str]:
-        """Open conversations with an operator message waiting for a turn."""
+        """Open conversations with an operator (or PE `core`) message waiting for a turn."""
         with self.store._connect() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT c.id FROM console_conversations c JOIN console_messages m ON m.conversation_id=c.id "
-                "WHERE c.state='open' AND m.role='operator' AND m.consumed_turn IS NULL ORDER BY c.id").fetchall()
+                "WHERE c.state='open' AND m.role IN ('operator', 'core') AND m.consumed_turn IS NULL ORDER BY c.id").fetchall()
         return [r[0] for r in rows]
+
+    def core_messages_since_operator(self, conversation_id: str, actor: str) -> int:
+        """How many `core` messages by `actor` PE has put to the agent since the operator's last message a turn took: the count that
+        bounds automatic plan retries per operator message (a new operator message starts the count again)."""
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM console_messages WHERE conversation_id=? AND role='core' AND actor=? AND seq > COALESCE(("
+                "  SELECT MAX(seq) FROM console_messages WHERE conversation_id=? AND role='operator' AND consumed_turn IS NOT NULL), 0)",
+                (conversation_id, actor, conversation_id)).fetchone()
+        return int(row[0])
 
 
     # ── executions: a confirmed plan option and the Repair mission made from it ─────────────────────────

@@ -350,3 +350,53 @@ def test_a_conversation_is_launched_without_any_group_flag_the_launcher_applies_
     conv = rig.open()
     rig.sup.tick()
     assert "read_logs" not in rig.spawns(conv)[0]                # trust mode: groups come from launch.conf, for every session
+
+
+# ── rc14.2: PE's own follow-up turn for a refused plan ───────────────────────────────────────────────────────────────────────
+BAD_PLAN = {"known": [], "unsure": [], "options": [{
+    "name": "n", "recommended": True, "summary": "s", "changes": [], "will_not_touch": [], "risk": {"level": "low", "text": "t"},
+    "rolls_back_to": "r", "effort": "e", "scope": {"stacks": ["media"]}, "checks": [{"check": "nonsense", "params": {}}]}]}
+
+
+class _Inv:
+    stacks, services = ("media",), ("media/qbittorrent",)
+
+
+def _write_plan(rig, doc):
+    rig.runtime.inventory = lambda: _Inv
+    run = next(iter(rig.runtime._runs.values()))
+    (run.workspace / "plan.json").write_text(json.dumps(doc))
+
+
+def test_a_refused_plan_starts_pes_own_follow_up_turn_attributed_to_pe_and_it_stops_after_two(rig):
+    from planet_express.missions.state import CONSOLE_PLAN_RETRY
+    conv = rig.open()
+    rig.sup.tick()
+    for _ in range(3):
+        _write_plan(rig, BAD_PLAN)
+        rig.finish_turn(conv)
+        assert rig.status(conv) == "awaiting_decision"
+        rig.sup.tick()
+    assert rig.status(conv) == "awaiting_decision" and not rig.sup.has_run(conv.mission_id)        # two retries ran, no third
+    moves = [e.actor for e in rig.ms.events(conv.mission_id) if e.kind == "state" and '"to": "investigating"' in e.body_json]
+    assert moves == ["supervisor", CONSOLE_PLAN_RETRY, CONSOLE_PLAN_RETRY]                          # never the operator's name
+    texts = [m.text for m in rig.console.messages(conv.id) if m.role == "system"]
+    assert sum(t.startswith("PE refused") for t in texts) == 2 and texts[-1].startswith("The agent's plan was refused (after 2")
+    assert "the kind is not one PE knows; use one of: container_state" in texts[-1]
+
+
+def test_pes_retry_never_resumes_a_conversation_that_needs_the_operator(rig):
+    import sqlite3
+
+    from planet_express.missions.state import CONSOLE_PLAN_RETRY
+    conv = rig.open()
+    rig.sup.tick()
+    _write_plan(rig, BAD_PLAN)
+    rig.finish_turn(conv)
+    with sqlite3.connect(rig.store.path) as db:
+        db.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (conv.mission_id,))
+    with pytest.raises(Exception, match="only the operator may resume"):
+        rig.sup.start_followup(conv.mission_id, CONSOLE_PLAN_RETRY)
+    rig.sup.tick()
+    assert rig.status(conv) == "needs_operator" and rig.console.pending(conv.id) is None
+    assert rig.console.messages(conv.id)[-1].text == "PE did not ask the agent to fix its plan: the last turn did not finish."

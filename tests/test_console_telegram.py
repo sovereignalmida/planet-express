@@ -237,3 +237,23 @@ def test_a_rollback_that_has_only_started_says_so_and_never_reads_as_failed(rig)
     rig.api.execution_action = lambda *a, **k: {"done": "rollback", "status": "Rolling back", "restore": "started"}
     out = rig.tg.command(f"/run {rig.short} rollback", OP)
     assert "rollback started" in out and "NOT" not in out
+
+
+def test_a_go_ahead_reply_answers_with_the_authorise_card_and_authorises_nothing(rig):
+    rig.add_plan()
+    card = rig.tg.command(f"/reply {rig.short} go ahead", OP)
+    assert card.startswith(f"{rig.short}: authorise option A") and f"/authorise {rig.short} " in card
+    execution = rig.console.executions(rig.conv.id)[0]
+    assert execution["status"] == "proposed"                                       # the chat text is never the approval
+
+
+def test_undo_from_telegram_starts_the_rollback_of_a_completed_run(rig):
+    rig.add_plan()
+    card = rig.tg.command(f"/confirm {rig.short} A {plan8(rig)}", OP)
+    fp = card.split(f"/authorise {rig.short} ")[1].split()[0]
+    rig.tg.command(f"/authorise {rig.short} {fp}", OP)
+    mid = rig.console.executions(rig.conv.id)[0]["mission_id"]
+    assert rig.st.drive(mid) == "completed"
+    assert rig.tg.command(f"/run {rig.short} rollback", OP) == f"{rig.short}: rollback started. The result shows on the dashboard when it lands."
+    rig.st.sup._rolling_back[mid].result(timeout=30)
+    assert rig.st.status(mid) == "rolled_back"

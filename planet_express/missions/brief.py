@@ -49,6 +49,13 @@ INSTRUCTIONS = (
     "matches the output schema."
 )
 
+# rc14.2: the checkpoint covers compose files, not data. A new image or a recreate can migrate a database in place, so a stateful
+# service's data is copied first. Shared with the planner's PLAN_FORMAT.md (console/plan.py).
+BACKUP_RULE = (
+    "Before pulling a new image for, or recreating, a service whose data could be migrated (a database, an *arr app with its SQLite "
+    "db, anything with a config or data bind mount), copy its data directory to a timestamped backup next to it with "
+    "`sudo cp -a <dir> <dir>.pe-backup-<mission id>-<UTC yyyymmddThhmmssZ>`, and give the backup path in your result.")
+
 REPAIR_INSTRUCTIONS = (
     "You are a repair agent for one mission. Carry out the change the operator approved (the goal below) on what the scope "
     "names.\n"
@@ -56,7 +63,7 @@ REPAIR_INSTRUCTIONS = (
     "Do the job by whatever works: `docker compose` in the stack's directory (with sudo if its files need it), "
     "`docker restart <container>`, editing a stack's files with sudo. Core took a checkpoint before you started and keeps a "
     "rollback of the scoped files (compose files and the files they reference) and the container settings it recorded; other "
-    "files, data and host state are NOT covered by it. Do not try to hide, undo or work around a change. Whether you succeeded "
+    "files, data and host state are NOT covered by it. " + BACKUP_RULE + " Do not try to hide, undo or work around a change. Whether you succeeded "
     "is decided by verification checks Core agreed beforehand and runs itself, not by your report: report what you changed and "
     "what you found, accurately, including anything you could not fix, and set work_done to all, some or none of the approved "
     "change. If something unexpected happens, stop and say so. Finish by submitting one JSON result that matches the output "

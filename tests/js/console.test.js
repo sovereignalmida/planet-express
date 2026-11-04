@@ -165,23 +165,27 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.strictEqual(sent[0], "/api/console/0123456789abcdef/message");
     assert.ok(sent[2].includes("csrf_token=csrf-xyz") && sent[2].includes("text=and+the+logs%3F"));
   });
-  await atest("typing a yes while a plan waits points at the Confirm button and sends nothing; a second Send goes through", async () => {
+  await atest("a go-ahead the server answers with the Authorise card opens the same sheet as Confirm, and approves nothing", async () => {
+    win.__override = url => url.endsWith("/message") ? { ok: true, status: 200, json: async () => ({ seq: 9, confirm: VIEW, option: 0 }) } : null;
+    const text = doc.getElementById("con-text");
+    text.value = "do it";
+    await page.send();
+    win.__override = null;
+    assert.ok(requests.some(r => r[1] === "POST" && r[0].endsWith("/message") && r[2].includes("text=do+it")), "the words go to PE, which decides");
+    const sheet = walk(doc.getElementById("con-sheet"));
+    assert.ok(sheet.some(n => n.tag === "button" && n.textContent.startsWith("Authorise:")), "the Authorise card is open");
+    assert.ok(!requests.some(r => r[0].endsWith("/confirm/authorise")), "opening the card authorises nothing");
+    const back = sheet.find(n => n.tag === "button" && n.textContent === "Back to the plan");
+    back.fire("click"); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
+    assert.strictEqual(walk(doc.getElementById("con-sheet")).filter(n => n.tag === "button").length, 0);
+  });
+  await atest("an ordinary yes with no card in the answer is just sent, never held back", async () => {
     const posts = () => requests.filter(r => r[1] === "POST" && r[0].endsWith("/message")).length;
     const before = posts();
     doc.getElementById("con-text").value = "confirm";
     await page.send();
-    assert.strictEqual(posts(), before, "not sent to the agent");
-    const note = doc.getElementById("con-note");
-    assert.ok(note.textContent.includes("use the Confirm option button") && note.attrs.role === "alert");
-    await page.send();
-    assert.strictEqual(posts(), before + 1, "the operator insisted");
-    const text = doc.getElementById("con-text");
-    text.value = "confirm"; await page.send();
-    assert.strictEqual(posts(), before + 1, "a fresh yes is caught again");
-    text.value = "confirm it"; text.fire("input"); text.value = "confirm"; text.fire("input");
-    await page.send();
-    assert.strictEqual(posts(), before + 1, "editing away and back forgets the earlier acknowledgement");
-    text.value = ""; text.fire("input");
+    assert.strictEqual(posts(), before + 1);
+    assert.strictEqual(walk(doc.getElementById("con-sheet")).filter(n => n.tag === "button").length, 0);
   });
   await atest("scrapping a plan takes two clicks", async () => {
     const find = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Scrap"));
@@ -425,6 +429,28 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.ok(rollButtons().some(t => t.includes("Click again")));
     page.select("0123456789abcdef", false); await settle(6);
     assert.ok(!rollButtons().some(t => t.includes("Click again")), rollButtons().join("|"));
+  });
+  await atest("a completed, verified run offers Undo this change, two clicks, and shows Rolling back while it runs", async () => {
+    const passed = { headline: "All 1 check passed", level: "ok", by_pe: true, checks: [{ state: "pass", label: "sonarr is running and stable", evidence: "ok" }] };
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Done and verified", level: "ok" }, finished: true, undo: true,
+      controls: { rollback: true }, verification: passed, rollback: null, rolling_back: false };
+    await page.loadFeed();
+    const undo = () => walk(doc.getElementById("con-thread")).find(n => n.tag === "button" && n.textContent.startsWith("Undo this change"));
+    assert.ok(undo() && undo().textContent === "Undo this change (roll back to the checkpoint)", rollButtons().join("|"));
+    assert.ok(!rollButtons().includes("Keep working on it"));
+    const before = requests.filter(r => r[0].endsWith("/run/rollback")).length;
+    win.__override = url => url.endsWith("/run/rollback") ? reply({ done: "rollback", status: "Rolling back\u2026", restore: "started", reason: "" }) : null;
+    undo().fire("click");
+    assert.ok(undo().textContent === "Undo this change? Click again" && requests.filter(r => r[0].endsWith("/run/rollback")).length === before);
+    undo().fire("click"); await settle();
+    win.__override = null;
+    assert.strictEqual(requests.filter(r => r[0].endsWith("/run/rollback")).length, before + 1);
+    FEED.execution = { ...FEED.execution, status: { text: "Rolling back\u2026", level: "warn" }, controls: { rollback: false },
+      rollback: { state: "running", reason: "" }, rolling_back: true };
+    await page.loadFeed();
+    assert.ok(!undo(), "nothing to click while it runs");
+    assert.ok(walk(doc.getElementById("con-thread")).some(n => (n.className || "").includes("pe-con-rolling")));
+    FEED.execution = null;
   });
   await atest("the confirm sheet says the run has full access and lists what it will not touch, as text", async () => {
     FEED.execution = null; FEED.plan = { id: 1, turn: 1, status: "pending", created_at: 1, hash: "abcd1234", expired: false, plan: PLAN }; await page.loadFeed();

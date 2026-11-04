@@ -146,6 +146,26 @@ def acquire_in_txn(conn: sqlite3.Connection, resources: Sequence[str], mission_i
     return fences
 
 
+def held_by(store: Store, mission_id: str) -> list[str]:
+    """The resources this mission holds a lease on (suspect ones included)."""
+    with store._connect() as conn:
+        return [r["resource"] for r in conn.execute(
+            "SELECT resource FROM mission_leases WHERE mission_id=? ORDER BY resource", (mission_id,)).fetchall()]
+
+
+def find_conflict(store: Store, resources: Sequence[str], mission_id: str,
+                  declared: Mapping[str, Sequence[str]] | None = None) -> LeaseConflict | None:
+    """The conflict `acquire` would raise now, without taking anything (a refusal an operator should get at once)."""
+    wanted = expand(resources, declared)
+    with store._connect() as conn:
+        held = conn.execute("SELECT resource, mission_id FROM mission_leases").fetchall()
+    for want in wanted:
+        for row in held:
+            if row["mission_id"] != mission_id and overlaps(want, row["resource"]):
+                return LeaseConflict(want, row["resource"], row["mission_id"])
+    return None
+
+
 def acquire(store: Store, resources: Sequence[str], mission_id: str, ttl: int,
             declared: Mapping[str, Sequence[str]] | None = None) -> dict[str, int]:
     with store._write() as conn:

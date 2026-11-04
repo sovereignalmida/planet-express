@@ -72,6 +72,7 @@ from .runtime import (
 )
 from .sessions import SessionRow, issue_session, set_leader_pid
 from .state import (
+    CONSOLE_PLAN_RETRY,
     TERMINAL,
     IllegalTransition,
     MissionNotFound,
@@ -483,8 +484,13 @@ class Supervisor:
     def start_followup(self, mission_id: str, operator: str) -> None:
         """A Console turn after the first: the operator's next message reopens the finished conversation (`awaiting_decision`, or
         `needs_operator` after a turn that did not finish) and a new contained session runs. The edge is the operator's, named in the
-        audit trail, and exists only for an observe/propose mission; the uid is the conversation's reserved one."""
-        actor = self._operator(operator)
+        audit trail, and exists only for an observe/propose mission; the uid is the conversation's reserved one.
+
+        rc14.2: `operator` may instead be PE's own `CONSOLE_PLAN_RETRY` actor (the automatic turn that hands a refused plan back to the
+        planner). That turn is attributed to PE, never to an operator, and starts only from `awaiting_decision`: a conversation whose
+        last turn did not finish (`needs_operator`) is the operator's to resume."""
+        auto = operator == CONSOLE_PLAN_RETRY
+        actor = operator if auto else self._operator(operator)
         with self._lifecycle:
             self._require_enabled()
             if self._shutting_down:
@@ -498,6 +504,8 @@ class Supervisor:
                 raise ValueError(f"{mission_id} already has a running session")
             if mission.status not in ("awaiting_decision", "needs_operator"):
                 raise IllegalTransition(f"{mission_id} is {mission.status}: it takes a follow-up only when it is waiting for the operator")
+            if auto and mission.status != "awaiting_decision":
+                raise IllegalTransition(f"{mission_id} is {mission.status}: only the operator may resume it")
             if mission.cancel_requested_at is not None:
                 raise IllegalTransition(f"{mission_id} has a cancel requested")
             with self._heartbeating(mission_id):
@@ -1055,6 +1063,71 @@ class Supervisor:
             raise ResumeRefused(f"{mission_id} is {mission.status}; this action needs {' or '.join(statuses)}")
         return mission
 
+    # Where an operator rollback may start. `completed` is the undo of a finished change (rc14.2): the one exit from a terminal state.
+    ROLLBACK_FROM = ("needs_operator", "recovery_required", "rollback_pending", "verifying", "completed")
+
+    def _undo_checks(self, mission: Mission) -> None:
+        """What an undo of a COMPLETED Repair needs before anything is touched, refused in words: the checkpoint still kept, intact and
+        inside its retention, and the mission's resources free (it released its leases when it completed; another mission may hold
+        them now: it is named). Asked again, atomically, when the leases are actually re-acquired."""
+        problem = self.checkpoint.undo_problem(mission.checkpoint_id, mission.closed_at)
+        if problem:
+            raise ResumeRefused(f"{mission.id} cannot be undone: {problem}")
+        wanted, declared = self._rollback_resources(mission)
+        if wanted:
+            conflict = leases.find_conflict(self.store, wanted, mission.id, declared)
+            if conflict is not None:
+                raise ResumeRefused(f"{mission.id} cannot be rolled back now: {leases.conflict_words(conflict)}")
+
+    def _rollback_resources(self, mission: Mission) -> tuple[list[str], dict[str, list[str]]]:
+        grant = mission.grant()
+        wanted = grant_resources(grant)
+        try:
+            declared = stack_lease_paths(grant, self.ms.stacks_roots) if wanted else {}
+        except ValueError as exc:
+            raise ResumeRefused(str(exc)) from None
+        return wanted, declared
+
+    def _reacquire_for_rollback(self, mission: Mission) -> bool:
+        """A rollback holds the mission's leases while it restores. A mission that does not hold them any more (an undo of a completed
+        Repair, or a retry of one) takes them again here, all or none, and gives them back when the rollback ends (`_release_rollback`).
+        Returns True when it took them. A conflict is refused in words, naming the mission that holds them."""
+        if leases.held_by(self.store, mission.id):
+            return False
+        wanted, declared = self._rollback_resources(mission)
+        if not wanted:
+            return False
+        try:
+            leases.acquire(self.store, wanted, mission.id, self.lease_ttl_s, declared)
+        except leases.LeaseConflict as exc:
+            raise ResumeRefused(f"{mission.id} cannot be rolled back now: {leases.conflict_words(exc)}") from None
+        except leases.LeaseSuspect as exc:
+            raise ResumeRefused(f"{mission.id} cannot be rolled back now: {str(exc)[:160]}") from None
+        owner = getattr(self.host_lock, "mutation_owner", None) if self.host_lock is not None else None
+        if owner and not owner.startswith("mission:"):
+            # Asked AFTER the leases are held, as a start does: no v3 change can take the lock from here on.
+            self._release_rollback(mission.id)
+            raise ResumeRefused(f"{mission.id} cannot be rolled back now: {owner} is changing the host; try again when it finishes")
+        self._note(mission.id, {"rollback_leases_taken": sorted(leases.held_by(self.store, mission.id))[:20]})
+        return True
+
+    def _release_rollback(self, mission_id: str) -> None:
+        """Give back leases a rollback re-acquired. A terminal state has already freed them; any other end (a refused restore waiting in
+        rollback_pending, a failed one handed to the operator) frees them here: the mission is no longer running anything, and a retry
+        takes them again."""
+        with contextlib.suppress(Exception):
+            if leases.held_by(self.store, mission_id):
+                leases.release(self.store, mission_id)
+
+    def _undoing_completed(self, mission_id: str) -> bool:
+        """This mission's rollback began as the undo of a completed run (an operator's completed -> rollback_pending edge)."""
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM mission_events WHERE mission_id=? AND kind='state' AND actor LIKE 'operator:%' "
+                "AND body_json LIKE '%\"from\": \"completed\"%' AND body_json LIKE '%\"to\": \"rollback_pending\"%' "
+                "AND body_json NOT LIKE '%\"refused\"%' LIMIT 1", (mission_id,)).fetchone()
+        return row is not None
+
     @_per_mission
     def roll_back(self, mission_id: str, actor: str, *, ack_drift: bool = False) -> Any:
         """Operator 'roll back' of a Repair mission the session has already left (needs_operator, recovery_required,
@@ -1063,18 +1136,37 @@ class Supervisor:
         clean restore; a restore that PE refused before writing anything (drift) stays in `rollback_pending`, reported, so the
         operator can choose `ack_drift` (their explicit acknowledgement that overrides the drift refusal); a restore that failed
         or raised is handed to the operator as `needs_operator` with what happened. (Until trust mode removed the tripwire,
-        a paused mission's rollback went through the monitor; this is the same sequence.)"""
+        a paused mission's rollback went through the monitor; this is the same sequence.)
+
+        rc14.2: also the UNDO of a `completed` Repair while its checkpoint is kept (`_undo_checks`). Its leases were freed when it
+        completed, so they are re-acquired first (another mission holding them is named) and given back when the rollback ends. The
+        post-change manifest taken when its session ended is KEPT, not taken again: anything changed since (another mission, the
+        operator) is then drift, refused unless the operator acknowledges it, never silently overwritten."""
         self._require_enabled()
         actor = self._operator(actor)
-        mission = self._repair_mission(mission_id, "needs_operator", "recovery_required", "rollback_pending", "verifying")
+        mission = self._repair_mission(mission_id, *self.ROLLBACK_FROM)
         if self.checkpoint is None or not mission.checkpoint_id:
             raise ResumeRefused("this mission has no checkpoint to restore")
+        if mission.status == "completed":
+            self._undo_checks(mission)
         self._stop_session_for_restore(mission_id)
+        reacquired = self._reacquire_for_rollback(mission)
         try:
-            self.checkpoint.capture_post(mission.checkpoint_id)
-        except Exception as exc:                  # noqa: BLE001 - nothing has changed yet: the operator can try again
-            log.warning("mission %s: the post-change capture failed", mission_id, exc_info=exc)
-            raise ResumeRefused(f"the post-change capture failed ({type(exc).__name__}); nothing was restored") from None
+            with (self._heartbeating(mission_id) if reacquired else contextlib.nullcontext()):
+                return self._roll_back_held(mission, actor, ack_drift)
+        finally:
+            if reacquired:
+                self._release_rollback(mission_id)
+
+    def _roll_back_held(self, mission: Mission, actor: str, ack_drift: bool) -> Any:
+        mission_id = mission.id
+        undo = mission.status == "completed" or self._undoing_completed(mission_id)
+        if not (undo and self.checkpoint.has_post(mission.checkpoint_id)):
+            try:
+                self.checkpoint.capture_post(mission.checkpoint_id)
+            except Exception as exc:                  # noqa: BLE001 - nothing has changed yet: the operator can try again
+                log.warning("mission %s: the post-change capture failed", mission_id, exc_info=exc)
+                raise ResumeRefused(f"the post-change capture failed ({type(exc).__name__}); nothing was restored") from None
         if mission.status != "rollback_pending":
             transition(self.store, mission_id, "rollback_pending", actor)
         try:
@@ -1100,9 +1192,11 @@ class Supervisor:
         Returns "started"."""
         self._require_enabled()
         actor = self._operator(actor)
-        mission = self._repair_mission(mission_id, "needs_operator", "recovery_required", "rollback_pending", "verifying")
+        mission = self._repair_mission(mission_id, *self.ROLLBACK_FROM)
         if self.checkpoint is None or not mission.checkpoint_id:
             raise ResumeRefused("this mission has no checkpoint to restore")
+        if mission.status == "completed":
+            self._undo_checks(mission)               # an expired checkpoint or a held lease is refused here, at once, in words
         run = self._runs.get(mission_id)
         if run is not None and run.phase == "running":
             raise ResumeRefused("the session is still running: cancel it first")

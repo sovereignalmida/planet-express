@@ -139,8 +139,9 @@ class ConsoleApi:
             "budget": {"used_pct": used_pct, "tokens_used": conv.tokens_used, "token_budget": conv.token_budget, "tokens_left": conv.tokens_left,
                        "state": "stop" if spent else "warn" if used_pct >= 80 else "ok"},
             "running": running, "stoppable": stoppable, "composer": self._composer(conv, running, spent, status, status_view),
+            # PE's own `core` turns (a refused plan handed back to the planner) are not drawn: the thread has PE's short note instead.
             "messages": [{"seq": m.seq, "role": m.role, "turn": m.turn, "at": m.at, "text": clean_text(m.text, MAX_TEXT),
-                          "by": (m.actor or "").removeprefix("operator:") or None} for m in messages],
+                          "by": (m.actor or "").removeprefix("operator:") or None} for m in messages if m.role != "core"],
             "last_message": messages[-1].seq if messages else after_message,
             "events": events, "last_event": last_event, "turn_starts": turn_starts,
             "plan": self._plan(plan), "execution": self._execution_view(conv), "lessons": self._lessons(conv), "status": status,
@@ -158,7 +159,10 @@ class ConsoleApi:
         return {"id": conv.id}
 
     def post(self, conversation_id: str, operator: str, text: str) -> dict:
-        self._conversation(conversation_id)
+        conv = self._conversation(conversation_id)
+        card = self._go_ahead(conv, operator, text)
+        if card is not None:
+            return card
         try:
             seq = self.service.post(conversation_id, operator, text)
         except ConversationNotFound:
@@ -170,6 +174,35 @@ class ConsoleApi:
         except ConsoleError as exc:
             raise ConsoleApiError(str(exc)) from None
         return {"seq": seq}
+
+    def _go_ahead(self, conv: Conversation, operator: str, text: str) -> dict | None:
+        """rc14.2: "do it" / "go ahead" / "authorise" (a fixed list, the whole message) while a valid plan waits is answered by PE, not
+        the agent: the operator's words are recorded as already handled and the SAME Authorise card as pressing Confirm is returned for
+        the recommended option (or the one named). Chat text is never the approval: nothing runs until the Authorise button. None when
+        this is not a go-ahead or there is no plan it can act on (then the words go to the agent, which is asked for a plan)."""
+        go, named = plan_mod.goes_ahead(text)
+        if not go or conv.state != "open" or self.ms.get_mission(conv.mission_id).status in TERMINAL:
+            return None
+        row = self.console.current_plan(conv.id)
+        if row is None:
+            return None
+        try:
+            plan = self._pending_plan(row)
+        except ConsoleApiError:
+            return None                                                    # expired or unreadable: the agent is asked for a fresh one
+        index = named if named is not None else next(i for i, o in enumerate(plan.options) if o.recommended)
+        if not 0 <= index < len(plan.options):
+            return None
+        actor = f"operator:{operator}"
+        seq = self.console.add_message(conv.id, "operator", text, actor=actor, require_open=True, taken=True)
+        try:
+            view = self.confirm_prepare(conv.id, row["id"], index, operator)
+        except ConsoleApiError as exc:
+            self.console.add_message(conv.id, "system", f"PE did not open the Authorise card: {exc}", actor=actor)
+            raise
+        self.console.add_message(conv.id, "system", f"PE opened the Authorise card for option {chr(65 + index)}. Nothing runs until you press "
+                                 "Authorise; Back leaves the plan as it was.", actor=actor)
+        return {"seq": seq, "confirm": view, "option": index}
 
     def interrupt(self, conversation_id: str, operator: str) -> dict:
         self._conversation(conversation_id)
@@ -267,6 +300,7 @@ class ConsoleApi:
             raise ConsoleApiError("that is not an action", "bad_request")
         flow = self._require_flow()
         actor = f"operator:{operator}"
+        undo = self.ms.get_mission(ex["mission_id"]).status in execution_mod.UNDO_STATES
         try:
             # The one action. A restore can take minutes, so where the flow can, it is started on the supervisor's rollback worker and
             # this request returns at once ("started"); the page shows "Rolling back" and the outcome lands with the next poll.
@@ -274,7 +308,8 @@ class ConsoleApi:
             restore = (start or flow.roll_back)(actor, ex["mission_id"], ack_drift=ack_drift)
         except FlowError as exc:
             raise self._flow_error(exc) from None
-        self.console.add_message(conv.id, "system", f"{operator} asked PE to roll back to the checkpoint.", actor=actor)
+        self.console.add_message(conv.id, "system", f"{operator} asked PE to {'undo this change by rolling back' if undo else 'roll back'} to the checkpoint.",
+                                 actor=actor)
         # A restore PE refused (typically because files changed after the checkpoint) is reported, so the page can offer the explicit
         # "roll back anyway" the operator must choose; PE never assumes it. Started in the background, the refusal is read from the
         # record instead (`rollback` in the run's view).
@@ -449,7 +484,9 @@ class ConsoleApi:
         return {"id": ex["id"], "option": ex["option_index"], "name": name, "fingerprint": ex["grant_hash"][:8], "status": {"text": text, "level": level},
                 "timeline": execution_mod.timeline(mission, ex["authorised_by"], waiting),
                 "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission, rolling),
-                "finished": mission.status in execution_mod.TERMINALISH, "rollback": rollback,
+                "finished": mission.status in execution_mod.TERMINALISH and not rolling, "rollback": rollback,
+                # A completed run's rollback is offered as "Undo this change" (rc14.2).
+                "undo": execution_mod.can_undo(mission),
                 # "Keep working on it" is not offered while the run is waiting to be, or being, rolled back.
                 "rolling_back": rolling or mission.status == "rollback_pending"}
 

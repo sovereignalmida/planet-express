@@ -812,6 +812,34 @@ class CheckpointService:
         report.observational = observed
 
     # ── purge and retention ─────────────────────────────────────────────────
+    def has_post(self, checkpoint_id: str) -> bool:
+        """A post-change manifest was taken for this checkpoint (when the session ended)."""
+        self._require_enabled()
+        try:
+            return self.store.read_post(checkpoint_id) is not None
+        except (OSError, ValueError, StoreError):
+            return False
+
+    def undo_problem(self, checkpoint_id: str, closed_at: int | None) -> str | None:
+        """Why a FINISHED mission can no longer be rolled back to this checkpoint, in words, or None when it can (rc14.2: undoing a
+        completed Repair). Past `retention_days` after the mission closed it is refused even if the directory is still there (the
+        retention is the promise, and `purge_expired` may remove it at any moment); a removed, uncommitted or unreadable checkpoint is
+        refused before anything is touched. Payloads are verified against their manifest hashes here, so a restore does not discover a
+        damaged checkpoint only after it began."""
+        self._require_enabled()
+        days = self.settings.retention_days
+        if closed_at is not None and closed_at <= self._now() - days * 86400:
+            return f"its checkpoint is past the {days}-day retention, so PE no longer rolls back to it"
+        try:
+            manifest = self._manifest(checkpoint_id)
+            for entry in manifest["files"]:
+                self._verified_payload(checkpoint_id, entry)
+        except CheckpointNotFound:
+            return "its checkpoint is no longer kept (it was removed), so there is nothing to roll back to"
+        except (CheckpointCorrupt, KeyError, TypeError):
+            return "its checkpoint can no longer be read intact, so PE will not roll back to it"
+        return None
+
     def purge(self, checkpoint_id: str) -> bool:
         """Remove the directory; the mission row keeps its reference. Refused while a mission that references the
         checkpoint is not terminal. Returns False when there was nothing to remove."""

@@ -300,3 +300,57 @@ def test_the_context_panel_follows_the_run_and_says_when_it_has_ended(rig):
     after = rig.api.feed(rig.conv.id)["context"]
     assert after["scope"]["kind"] == "last_run"                              # an ended run is history, not something the operator can act on
     assert after["record"]["runs"] == 1 and after["record"]["events"] > before["record"]["events"]     # the run's own events are part of the record
+
+
+# ── rc14.2: "go ahead" in the chat opens the Authorise card; it never approves and never reaches the agent ────────────────────
+@pytest.mark.parametrize("text", ["do it", "Go ahead!", "yes", "apply it", "authorise", "Please go ahead.", "yes, do it"])
+def test_a_go_ahead_with_a_valid_plan_opens_the_same_card_as_confirm_for_the_recommended_option(rig, text):
+    plan_id = rig.add_plan()
+    out = rig.api.post(rig.conv.id, "chris", text)
+    assert out["option"] == 0 and out["confirm"]["phases"] == ["grant"] and out["confirm"]["fingerprint"] == out["confirm"]["grant_hash"][:8]
+    ex = rig.console.execution(out["confirm"]["execution_id"])
+    assert ex["status"] == "proposed" and ex["plan_id"] == plan_id                       # proposed only: nothing is approved by chat text
+    assert rig.st.status(ex["mission_id"]) == "awaiting_decision"
+    assert all(r["state"] == "pending" for r in rig.flow.card(ex["mission_id"])["required"])
+    assert rig.console.pending(rig.conv.id) is None or rig.console.pending(rig.conv.id).text != text        # never sent to the agent
+    said = [m for m in rig.console.messages(rig.conv.id) if m.text == text]
+    assert said and said[-1].role == "operator" and said[-1].actor == "operator:chris" and said[-1].consumed_turn is not None
+    assert any(m.role == "system" and m.text.startswith("PE opened the Authorise card for option A") for m in rig.console.messages(rig.conv.id))
+
+
+def test_a_go_ahead_naming_an_option_opens_that_option(rig):
+    rig.add_plan()
+    assert rig.api.post(rig.conv.id, "chris", "go with option B")["option"] == 1
+
+
+def test_anything_else_or_no_valid_plan_goes_to_the_agent_as_written(rig):
+    rig.add_plan()
+    out = rig.api.post(rig.conv.id, "chris", "yes but why is gluetun restarting?")
+    assert "confirm" not in out and rig.console.executions(rig.conv.id) == []
+    rig.api.scrap_plan(rig.conv.id, "chris")
+    out = rig.api.post(rig.conv.id, "chris", "do it")                                   # no plan: the agent is asked for one (runtime)
+    assert "confirm" not in out and rig.console.executions(rig.conv.id) == []
+
+
+def test_the_go_ahead_phrases_are_whole_messages_only():
+    for text in ("do it", "DO IT.", "go ahead", "yes please", "ok, go ahead", "authorize it", "apply it", "let's do it", "approve option c"):
+        assert plan_mod.goes_ahead(text)[0], text
+    for text in ("do it later", "go ahead and explain", "yes but why", "no", "", "confirm the logs first", "what does option B do?"):
+        assert not plan_mod.goes_ahead(text)[0], text
+    assert plan_mod.goes_ahead("approve option c") == (True, 2) and plan_mod.goes_ahead("yes") == (True, None)
+
+
+def test_a_completed_run_offers_undo_and_the_console_rolls_it_back_in_the_background(rig):
+    plan_id = rig.add_plan()
+    view = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
+    assert rig.st.drive(view["mission_id"]) == "completed"
+    run = rig.api.feed(rig.conv.id)["execution"]
+    assert run["controls"]["rollback"] is True and run["undo"] is True and run["status"]["text"] == "Done and verified"
+    out = rig.api.execution_action(rig.conv.id, view["execution_id"], "rollback", "chris")
+    assert out["restore"] == "started"
+    rig.st.sup._rolling_back[view["mission_id"]].result(timeout=30)
+    assert rig.st.status(view["mission_id"]) == "rolled_back"
+    assert any(m.text == "chris asked PE to undo this change by rolling back to the checkpoint." for m in rig.console.messages(rig.conv.id))
+    run = rig.api.feed(rig.conv.id)["execution"]
+    assert run["controls"]["rollback"] is False and run["undo"] is False and run["rollback"]["state"] == "done"

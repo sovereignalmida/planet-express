@@ -17,7 +17,7 @@ from pathlib import Path
 from config_schema import MissionConsoleConfig
 from planet_express.console.store import ConsoleStore, Conversation, clean_text
 from planet_express.missions.models import Grant
-from planet_express.missions.state import TERMINAL, IllegalTransition, transition
+from planet_express.missions.state import CONSOLE_PLAN_RETRY, TERMINAL, IllegalTransition, transition
 from planet_express.missions.store import MissionStore, NoFreeUid
 from planet_express.missions.supervisor import (
     ProposalOnly,
@@ -222,7 +222,18 @@ class ConsoleService:
         if mission.status not in ("awaiting_decision", "needs_operator") or self.supervisor.has_run(mission.id):
             return                                       # the first turn starts from `queued` by the supervisor itself; a running turn finishes first
         message = self.console.pending(conv.id)
-        if message is None or not message.actor or not message.actor.startswith("operator:"):
+        if message is None or not message.actor:
+            return
+        auto = message.role == "core" and message.actor == CONSOLE_PLAN_RETRY
+        if not auto and not (message.role == "operator" and message.actor.startswith("operator:")):
+            return
+        if auto and (mission.status != "awaiting_decision" or conv.tokens_left < self.cfg.min_turn_tokens):
+            # PE's own retry runs only on a conversation that is simply waiting, with budget left for a turn. Otherwise it is dropped,
+            # once, and the operator sees why: it never waits to retry later, so it can never loop.
+            if self.console.consume(message.seq, conv.turns):
+                why = ("the conversation's model budget is used up" if conv.tokens_left < self.cfg.min_turn_tokens
+                       else "the last turn did not finish")
+                self.console.add_message(conv.id, "system", f"PE did not ask the agent to fix its plan: {why}.")
             return
         try:
             self.supervisor.start_followup(mission.id, message.actor)

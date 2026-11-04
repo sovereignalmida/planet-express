@@ -85,8 +85,11 @@ class ConsoleTelegram:
             raise _Usage("Usage: /reply [id] <text>")
         if conv is None:
             raise _Usage("No open conversation. Start one with /ask <question>.")
-        self.api.post(conv.id, operator, text)
+        out = self.api.post(conv.id, operator, text)
         self.console.tg_follow(conv.id)
+        if isinstance(out, dict) and out.get("confirm"):
+            # "go ahead" with a valid plan waiting: PE answered with the Authorise card itself (chat text is never the approval).
+            return self._card(conv, chr(65 + int(out.get("option", 0))), out["confirm"], operator)
         return f"{conv.id[:8]}: sent."
 
     def _threads(self) -> str:
@@ -117,6 +120,9 @@ class ConsoleTelegram:
             raise _Usage(f"{conv.id[:8]}: that is not the plan you read (it has changed). Read it again: /plan {conv.id[:8]}")
         view = self.api.confirm_prepare(conv.id, plan["id"], ord(letter) - 65, operator)
         self.console.tg_follow(conv.id)                                 # a run authorised here reports back here
+        return self._card(conv, letter, view, operator)
+
+    def _card(self, conv: Conversation, letter: str, view: dict, operator: str) -> str:
         if view["needs_elevation"]:
             self.api.confirm_withdraw(conv.id, view["execution_id"], operator)
             return f"{conv.id[:8]}: option {letter} needs an elevated dashboard session (Telegram cannot give one). Nothing was approved or changed."

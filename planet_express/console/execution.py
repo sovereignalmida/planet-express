@@ -26,8 +26,12 @@ CONTROLS = {                      # which operator actions each state offers (th
     # operator's explicit "roll back anyway" has a button.
     "rollback": ("needs_operator", "recovery_required", "rollback_pending"),
 }
+# rc14.2: a completed Repair can be undone (rolled back to its checkpoint) while the checkpoint is kept. The supervisor refuses in words
+# when it is not (past retention, removed) or when another mission holds its resources.
+UNDO_STATES = ("completed",)
 ACTIONS = tuple(CONTROLS)
 TERMINALISH = ("completed", "failed", "rolled_back", "cancelled")
+SETTLED = ("failed", "rolled_back", "cancelled")       # nothing more can happen to these: a rollback can start from `completed`
 ROLLING_BACK = ("Rolling back\u2026", "warn")
 
 
@@ -40,7 +44,7 @@ def _closed_nothing_checkpointed(mission: Mission) -> bool:
 
 
 def repair_status(mission: Mission, rolling_back: bool = False) -> tuple[str, str]:
-    if rolling_back and mission.status not in TERMINALISH:
+    if rolling_back and mission.status not in SETTLED:
         return ROLLING_BACK
     if _closed_nothing_checkpointed(mission):
         return NOTHING_SNAPSHOTTED_STATUS
@@ -56,7 +60,7 @@ def rollback_view(ms: Any, mission: Mission, in_flight: bool) -> dict[str, Any] 
     changed since the checkpoint) and the run waits for an explicit "roll back anyway"; `incomplete` when a restore ran and
     did not finish cleanly, with why; `not_run` when the worker could not start it; `done` once rolled back. None when no
     rollback was ever asked for."""
-    if in_flight and mission.status not in TERMINALISH:
+    if in_flight and mission.status not in SETTLED:
         return {"state": "running", "reason": ""}
     if mission.status == "rolled_back":
         return {"state": "done", "reason": ""}
@@ -126,7 +130,7 @@ def conversation_status(mission: Mission, live: bool, rolling_back: bool = False
     """How a conversation reads while a confirmed plan is running or needs attention: derived from the run, so an active repair is never hidden
     behind 'Result ready'. None when the run needs no say in the conversation's status."""
     status = mission.status
-    if rolling_back and status not in TERMINALISH:
+    if rolling_back and status not in SETTLED:
         return {"text": "Rolling back", "level": "warn", "group": "Working",
                 "verdict": {"h": "Rolling back to the checkpoint", "p": "PE is putting the files and services back. The result shows here when it lands."}}
     if live and status in ("awaiting_decision", "queued", "investigating", "executing", "verifying"):
@@ -202,10 +206,18 @@ def timeline(mission: Mission, authorised_by: str | None, waiting: str | None = 
             {"label": "PE checks it worked", "state": check, "meta": "PE's own checks, not the agent's say-so"}]
 
 
+def can_undo(mission: Mission) -> bool:
+    """A completed Repair with a checkpoint: the operator may undo it (the supervisor checks the checkpoint is still kept)."""
+    return (mission.status in UNDO_STATES and getattr(mission, "tier", None) == "repair"
+            and bool(getattr(mission, "checkpoint_id", None)))
+
+
 def controls(mission: Mission, rolling_back: bool = False) -> dict[str, bool]:
     """Which actions apply now. None while a rollback is running: the page shows that it is rolling back instead."""
-    return {name: mission.status in states and not rolling_back for name, states in CONTROLS.items()}
+    out = {name: mission.status in states and not rolling_back for name, states in CONTROLS.items()}
+    out["rollback"] = out["rollback"] or (can_undo(mission) and not rolling_back)
+    return out
 
 
-__all__ = ["ACTIONS", "CONTROLS", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "ROLLING_BACK", "TERMINALISH", "check_state", "controls",
+__all__ = ["ACTIONS", "CONTROLS", "SETTLED", "UNDO_STATES", "can_undo", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "ROLLING_BACK", "TERMINALISH", "check_state", "controls",
            "conversation_status", "repair_status", "rollback_view", "timeline", "verification_view"]

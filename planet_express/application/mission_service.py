@@ -164,7 +164,8 @@ def _mission_summary(m: Mission) -> dict[str, Any]:
     return {"id": m.id, "title": _text(m.title, 256), "status": m.status, "tier": m.tier, "origin": m.origin,
             "incident_id": m.incident_id, "priority": m.priority, "runtime": m.runtime,
             "created_at": m.created_at, "updated_at": m.updated_at, "closed_at": m.closed_at,
-            "cancel_requested": m.cancel_requested_at is not None, "outcome": _text(m.outcome, 512)}
+            "cancel_requested": m.cancel_requested_at is not None, "outcome": _text(m.outcome, 512),
+            "has_checkpoint": bool(m.checkpoint_id)}
 
 
 def _card_out(card: Card) -> dict[str, Any]:

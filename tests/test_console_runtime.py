@@ -160,8 +160,8 @@ def test_a_valid_plan_file_is_recorded_and_a_refused_one_is_reported_without_ech
     bad["options"][0]["checks"][0]["check"] = "SECRETSHELL"
     (workspace2 / "plan.json").write_text(json.dumps(bad))
     rig.finish(handle2, cs2)
-    refused = [m.text for m in rig.console.messages(rig.conv.id) if m.role == "system"]
-    assert refused and refused[-1].startswith("The agent's plan was refused") and "SECRETSHELL" not in refused[-1]
+    refused = [m.text for m in rig.console.messages(rig.conv.id) if m.role in ("system", "core")]
+    assert refused and refused[-2].startswith("PE refused the plan (") and not any("SECRETSHELL" in t for t in refused)
     assert rig.console.current_plan(rig.conv.id)["turn"] == 1                  # the earlier valid plan is still the pending one
 
 
@@ -287,7 +287,7 @@ def test_a_symlinked_or_unreadable_plan_file_is_a_refused_plan_and_the_turn_is_s
     os.symlink("/etc/passwd", workspace / "plan.json")
     rig.finish(handle, cs)
     assert rig.console.get(rig.conv.id).tokens_used == 3000                      # an agent cannot make its turn free
-    assert any(m.role == "system" and m.text.startswith("The agent's plan was refused") for m in rig.console.messages(rig.conv.id))
+    assert any(m.role == "system" and m.text.startswith("PE refused the plan (there is no plan file)") for m in rig.console.messages(rig.conv.id))
     assert rig.console.current_plan(rig.conv.id) is None
 
 
@@ -396,7 +396,7 @@ def test_the_agent_is_given_the_inventory_and_a_plan_naming_anything_else_is_ref
     (workspace / "plan.json").write_text(json.dumps(bad))
     rig.finish(handle, cs)
     assert rig.console.current_plan(rig.conv.id) is None
-    assert any("does not have" in m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
+    assert any("`scope.stacks` item 1 is not a stack on this host" in m.text for m in rig.console.messages(rig.conv.id) if m.role == "system")
 
 
 def test_with_no_inventory_the_agent_is_told_it_cannot_name_a_scope_and_a_plan_written_anyway_is_refused(tmp_path):
@@ -427,4 +427,78 @@ def test_plan_format_lists_only_this_hosts_checks_and_a_plan_using_another_is_re
     (workspace / "plan.json").write_text(json.dumps(bad))
     rig.finish(handle, cs)
     refused = [m.text for m in rig.console.messages(rig.conv.id) if m.role == "system"]
-    assert refused and "cannot run on this host" in refused[-1] and rig.console.current_plan(rig.conv.id) is None
+    assert refused and "exec_probe is not available on this host" in refused[-1] and rig.console.current_plan(rig.conv.id) is None
+
+
+# ── rc14.2: a refused plan goes back to the planner, at most twice per operator message ─────────────────────────────────────
+from planet_express.missions.state import CONSOLE_PLAN_RETRY  # noqa: E402
+
+
+def _refused_turn(rig, plan=None):
+    handle, workspace, cs = rig.start()
+    bad = json.loads(json.dumps(plan or GOOD_PLAN))
+    if plan is None:
+        bad["options"][0]["checks"][0]["params"]["timeout_s"] = 10_000
+    (workspace / "plan.json").write_text(json.dumps(bad))
+    rig.finish(handle, cs)
+    return workspace
+
+
+def test_a_refused_plan_is_handed_back_to_the_agent_by_pe_with_the_reason_then_shown_after_two_tries(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=1))
+    _refused_turn(rig)
+    msgs = rig.console.messages(rig.conv.id)
+    note, retry = msgs[-2], msgs[-1]
+    assert note.role == "system" and note.text == ("PE refused the plan (option 1, check 1 (container_state): parameter `timeout_s` must be "
+                                                   "at most 60) and asked the agent to fix it.")
+    assert retry.role == "core" and retry.actor == CONSOLE_PLAN_RETRY and retry.consumed_turn is None        # PE's, never the operator's
+    assert "parameter `timeout_s` must be at most 60" in retry.text and "write the whole plan.json again" in retry.text
+    assert rig.console.pending(rig.conv.id).seq == retry.seq                     # it is the conversation's next turn
+    _refused_turn(rig)                                                           # the retry turn takes it, and is refused again
+    msgs = rig.console.messages(rig.conv.id)
+    assert msgs[-2].text.startswith("PE refused the corrected plan (") and msgs[-1].role == "core"
+    workspace = _refused_turn(rig)                                               # the second retry: no third
+    last = rig.console.messages(rig.conv.id)[-1]
+    assert last.role == "system" and last.text.startswith("The agent's plan was refused (after 2 automatic attempts to have it fixed): option 1")
+    assert rig.console.pending(rig.conv.id) is None                              # nothing more is queued: it cannot loop
+    rig.console.add_message(rig.conv.id, "operator", "try again")                # a new operator message starts the count again
+    _refused_turn(rig)
+    assert rig.console.messages(rig.conv.id)[-1].role == "core"
+
+
+def test_the_retry_turns_prompt_is_pes_refusal_and_never_counts_as_the_operator(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=1))
+    _refused_turn(rig)
+    before = rig.console.get(rig.conv.id).last_activity_at
+    handle, workspace, cs = rig.start()
+    assert rig.spawned[-1]["argv"][-1].startswith("PE refused your plan.json: option 1, check 1 (container_state)")
+    assert rig.console.get(rig.conv.id).last_activity_at == before
+
+
+def test_no_retry_is_queued_when_the_budget_cannot_pay_for_another_turn(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=149_000), budget=150_000)
+    _refused_turn(rig)
+    msgs = rig.console.messages(rig.conv.id)
+    assert msgs[-1].role == "system" and msgs[-1].text.startswith("The agent's plan was refused: option 1")
+    assert rig.console.pending(rig.conv.id) is None
+
+
+def test_a_plan_missing_its_check_ids_is_accepted_not_bounced(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=1))
+    plan = json.loads(json.dumps(GOOD_PLAN))
+    del plan["options"][0]["checks"][0]["id"]                                   # the live refusal, three times over
+    handle, workspace, cs = rig.start()
+    (workspace / "plan.json").write_text(json.dumps(plan))
+    rig.finish(handle, cs)
+    stored = json.loads(rig.console.current_plan(rig.conv.id)["plan_json"])
+    assert stored["options"][0]["checks"][0]["id"] == "container_state-1"
+
+
+def test_go_ahead_without_a_plan_asks_the_agent_for_one(tmp_path):
+    rig = Rig(tmp_path, text="Go ahead!")
+    rig.start()
+    prompt = rig.spawned[-1]["argv"][-1]
+    assert prompt.startswith("The operator wants to go ahead with what you proposed") and "write plan.json" in prompt.lower()
+    rig2 = Rig(tmp_path / "b", text="go ahead and explain why first")
+    rig2.start()
+    assert rig2.spawned[-1]["argv"][-1] == "go ahead and explain why first"      # not a whole-message go-ahead: sent as written

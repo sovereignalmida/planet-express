@@ -53,11 +53,13 @@
     <button class="pe-btn warn" type="submit">DENY AND CLOSE</button>
   </form>
   {% endif %}
-  {% if m.status in ('needs_operator', 'recovery_required', 'rollback_pending') %}
+  {% set undo = m.status == 'completed' and m.tier == 'repair' and m.has_checkpoint %}
+  {% if m.status in ('needs_operator', 'recovery_required', 'rollback_pending') or undo %}
   <div class="mc-form">
     <form method="post" action="{{ url_for('mission_rollback', mission_id=m.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      {% if undo %}<p class="muted-body">This change was verified. Undoing it rolls the host back to the checkpoint taken just before it ran, while that checkpoint is kept.</p>{% endif %}
       <label><input type="checkbox" name="ack_drift" value="1"> I accept overwriting what changed since</label>
-      <button class="pe-btn warn" type="submit">ROLL BACK</button></form>
+      <button class="pe-btn warn" type="submit">{{ 'UNDO THIS CHANGE (ROLL BACK)' if undo else 'ROLL BACK' }}</button></form>
   </div>
   {% endif %}
 </section>

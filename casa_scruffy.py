@@ -1141,8 +1141,10 @@ def register_mission_pages(app, core) -> None:
                 return shell("mission_detail.html", page="missions", disabled=True, notice=None)
             refuse(error)
         card = None
-        if mission["tier"] not in ("observe", "propose") and mission["status"] in (
-                "awaiting_decision", "needs_operator", "recovery_required", "rollback_pending"):
+        # A completed Repair with a checkpoint keeps its card: it can be undone (rolled back) from here (rc14.2).
+        if mission["tier"] not in ("observe", "propose") and (mission["status"] in (
+                "awaiting_decision", "needs_operator", "recovery_required", "rollback_pending")
+                or (mission["status"] == "completed" and mission.get("has_checkpoint"))):
             try:
                 card = core("mission.approval_card", {"mission_id": mission_id})
             except RpcError:

@@ -754,3 +754,106 @@ def test_a_rollback_start_racing_shutdown_is_either_waited_for_or_refused(stack)
     st.sup.shutdown()
     with pytest.raises(ResumeRefused, match="shutting down"):
         st.sup.roll_back_start(mid, "operator:alice")
+
+
+# ── rc14.2: undo a completed Repair (roll it back to its checkpoint) ────────────────────────────────────────────────────────
+from planet_express.missions import leases as leases_mod  # noqa: E402
+
+
+def _completed_with_a_change(st):
+    """A completed Repair whose session changed the compose file (the post-change manifest records it, as at a session's end)."""
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    assert st.drive(mid) == "completed"
+    original = st.env.compose.read_text()
+    st.env.compose.write_text(original + "# the verified change\n")
+    st.env.svc.capture_post(st.ms.get_mission(mid).checkpoint_id)
+    assert leases_mod.held_by(st.store, mid) == []                          # a completed mission holds nothing
+    return mid, original
+
+
+def test_an_operator_can_undo_a_completed_repair_and_its_leases_are_held_only_while_it_restores(stack):
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    held, real = [], st.env.svc.restore
+
+    def watching(*a, **kw):
+        held.append(leases_mod.held_by(st.store, mid))
+        return real(*a, **kw)
+    st.env.svc.restore = watching
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["status"] == "rolled_back" and st.env.compose.read_text() == original
+    assert held and "host:local/stack:media" in held[0]                       # re-acquired before the restore
+    assert leases_mod.held_by(st.store, mid) == []                            # and freed at the end
+    assert states(st, mid)[-3:] == ["completed", "rollback_pending", "rolled_back"]
+    undo = [(a, b) for k, a, b in events(st, mid) if k == "state" and b.get("from") == "completed" and not b.get("refused")]
+    assert undo == [("operator:alice", {"from": "completed", "to": "rollback_pending"})]
+    assert st.ms.get_mission(mid).closed_at is not None
+
+
+def test_undo_is_refused_in_words_while_another_mission_holds_the_stack(stack):
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    other = st.propose()["mission_id"]
+    leases_mod.acquire(st.store, ["host:local/stack:media"], other, 600)
+    for start in (st.sup.roll_back, st.sup.roll_back_start):
+        with pytest.raises(ResumeRefused, match=f"cannot be rolled back now: {other} is holding the media stack"):
+            start(mid, "operator:alice")
+    assert st.status(mid) == "completed" and st.env.compose.read_text() != original           # nothing touched
+    assert leases_mod.held_by(st.store, mid) == []
+
+
+def test_undo_is_refused_once_the_checkpoint_is_past_retention_or_removed(stack):
+    st = stack()
+    mid, _ = _completed_with_a_change(st)
+    st.clock.t += st.env.svc.settings.retention_days * 86400 + 5
+    with pytest.raises(ResumeRefused, match="past the 90-day retention"):
+        st.sup.roll_back_start(mid, "operator:alice")
+    st.clock.t -= st.env.svc.settings.retention_days * 86400 + 5
+    st.env.svc.purge(st.ms.get_mission(mid).checkpoint_id)
+    with pytest.raises(ResumeRefused, match="no longer kept"):
+        st.sup.roll_back(mid, "operator:alice")
+    assert st.status(mid) == "completed"
+
+
+def test_undo_never_overwrites_what_changed_after_the_run_without_the_operators_word(stack):
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    st.env.compose.write_text(original + "# someone else's later edit\n")    # after the run: not the session's change
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["restore"] == "refused" and st.status(mid) == "needs_operator"     # nothing written: handed to the operator
+    assert st.env.compose.read_text().endswith("# someone else's later edit\n")
+    assert leases_mod.held_by(st.store, mid) == []                            # a refused undo does not keep the stack
+    out = st.flow.roll_back("operator:alice", mid, ack_drift=True)            # the operator's explicit overwrite
+    assert out["status"] == "rolled_back" and st.env.compose.read_text() == original
+
+
+def test_a_second_undo_start_is_refused_while_the_first_runs_and_after_it_landed(stack):
+    import threading
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    entered, release, real = threading.Event(), threading.Event(), st.env.svc.restore
+
+    def slow(*a, **kw):
+        entered.set()
+        release.wait(10)
+        return real(*a, **kw)
+    st.env.svc.restore = slow
+    assert st.sup.roll_back_start(mid, "operator:alice") == "started"
+    assert entered.wait(10)
+    with pytest.raises(ResumeRefused, match="already running"):
+        st.sup.roll_back_start(mid, "operator:alice")
+    release.set()
+    st.sup._rolling_back[mid].result(timeout=30)
+    assert st.status(mid) == "rolled_back" and st.env.compose.read_text() == original
+    with pytest.raises(ResumeRefused, match="rolled_back"):
+        st.sup.roll_back_start(mid, "operator:alice")
+
+
+def test_only_an_operator_can_undo_and_only_a_repair(stack):
+    st = stack()
+    mid, _ = _completed_with_a_change(st)
+    for actor in ("core", "supervisor"):
+        with pytest.raises(ValueError):
+            st.sup.roll_back(mid, actor)
+    assert st.status(mid) == "completed"

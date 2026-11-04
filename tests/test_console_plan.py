@@ -51,7 +51,8 @@ def test_a_good_plan_is_accepted_and_hashes_stably():
     (lambda d: d["options"][0].update(changes="restart it"), "changes not a list"),
     (lambda d: d["options"][0].update(summary="x" * 601), "summary too long"),
     (lambda d: d["options"][0].update(recommended="yes"), "recommended not a bool"),
-    (lambda d: d.pop("known"), "missing known"),
+    (lambda d: d["options"][0].pop("risk"), "no risk"),
+    (lambda d: d["options"][0].pop("rolls_back_to"), "nothing to roll back to"),
 ])
 def test_a_plan_that_adds_removes_or_loosens_anything_is_refused(mutate, why):
     doc = good()
@@ -75,11 +76,10 @@ def test_an_invented_check_or_out_of_limits_parameters_are_refused_by_pes_own_ca
         parse(doc)
 
 
-def test_duplicate_check_ids_in_one_option_are_refused():
+def test_duplicate_check_ids_in_one_option_are_made_unique_not_refused():
     doc = good()
     doc["options"][0]["checks"] = [copy.deepcopy(CHECK), copy.deepcopy(CHECK)]
-    with pytest.raises(PlanError):
-        parse(doc)
+    assert [c.id for c in parse(doc).options[0].checks] == ["gateway-up", "gateway-up-2"]
 
 
 def test_the_error_never_echoes_the_agents_text():
@@ -207,7 +207,7 @@ def test_a_scope_naming_something_the_host_does_not_have_is_refused_when_the_inv
     for scope in ({"stacks": ["ghost"]}, {"services": ["media/ghost"]}, {"stacks": ["media"], "services": ["network/nothing"]}):
         doc = good()
         doc["options"][1]["scope"] = scope
-        with pytest.raises(PlanError, match="option 2: it names a stack or service this host does not have"):
+        with pytest.raises(PlanError, match=r"option 2: `scope\.(stacks|services)` item \d is not a (stack|service) on this host"):
             parse(doc, Inv)
     assert parse(doc)                                                                    # with no inventory only the shape is checked
 
@@ -222,7 +222,7 @@ def test_exclusions_must_be_resource_ids_and_are_part_of_the_hash():
     for bad in ("the gateway", "service:no-slash", "kind:x", "host:../service:a/b", "s" * 600):
         doc = good()
         doc["options"][0]["exclude"] = [bad]
-        with pytest.raises(PlanError, match="option 1: an exclusion is not a resource id"):
+        with pytest.raises(PlanError, match="option 1: `exclude` item 1 is not a resource id"):
             parse(doc)
 
 
@@ -264,8 +264,8 @@ def test_an_unavailable_check_is_refused_with_a_plain_reason_and_never_reaches_c
     assert "exec_probe" in host.unavailable
     with pytest.raises(PlanError) as err:
         parse(with_check(EXEC), available=host)
-    assert str(err.value) == ("option 1: a verification check cannot run on this host: exec_probe is not available on this host "
-                              "(missions.verify.exec_allowlist is empty)")
+    assert str(err.value) == ("option 1, check 2 (exec_probe): exec_probe is not available on this host "
+                              "(missions.verify.exec_allowlist is empty); use one of: container_state, file_state, http, log_absent, mount_readable")
     assert "curl" not in str(err.value) and "prowlarr" not in str(err.value)
     parse(good(), available=host)                                       # the same plan without it is fine
     parse(with_check(EXEC))                                             # and with no host to ask, the catalogue alone decides (as before)
@@ -289,3 +289,98 @@ def test_the_prompt_and_schema_list_only_this_hosts_checks():
     assert "Not available on this host, so never use: exec_probe, project_complete, query" in text
     kinds = plan_mod.json_schema(host)["properties"]["options"]["items"]["properties"]["checks"]["items"]["properties"]["check"]["enum"]
     assert kinds == host.kinds() and "exec_probe" not in kinds
+
+
+# ── rc14.2: lenient where it costs nothing, and refusals that name what is wrong ─────────────────────────────────────────────
+
+def test_a_check_without_an_id_gets_one_and_kind_whitespace_and_case_are_normalised():
+    doc = good()
+    del doc["options"][0]["checks"][0]["id"]                          # live: "options.0.checks.0.id: missing", three times
+    doc["options"][1]["checks"][0]["check"] = " Container_State "
+    del doc["options"][1]["checks"][0]["id"]
+    plan = parse(doc)
+    assert plan.options[0].checks[0].id == "container_state-1"
+    assert plan.options[1].checks[0].check == "container_state" and plan.options[1].checks[0].id == "container_state-1"
+    assert plan_mod.plan_hash(parse(doc)) == plan_mod.plan_hash(plan)     # the filled-in plan is what is stored and hashed
+
+
+def test_missing_optional_fields_get_their_defaults():
+    doc = good()
+    for key in ("known", "unsure"):
+        del doc[key]
+    del doc["options"][1]
+    for key in ("will_not_touch", "changes", "effort", "recommended"):
+        del doc["options"][0][key]
+    del doc["options"][0]["scope"]["services"]
+    del doc["options"][0]["checks"][0]["params"]["min_uptime_s"]
+    plan = parse(doc)
+    option = plan.options[0]
+    assert plan.known == [] and option.recommended and option.will_not_touch == [] and option.effort == "not stated"
+    assert option.scope.services == [] and option.scope.stacks == ["media"]
+
+
+def test_when_one_option_is_marked_recommended_the_unmarked_ones_are_not():
+    doc = good()
+    del doc["options"][1]["recommended"]
+    assert [o.recommended for o in parse(doc).options] == [True, False]
+
+
+def test_none_recommended_among_several_is_still_refused_because_it_is_a_choice():
+    doc = good()
+    for option in doc["options"]:
+        del option["recommended"]
+    with pytest.raises(PlanError):
+        parse(doc)
+
+
+@pytest.mark.parametrize("mutate, words", [
+    (lambda c: c["params"].update(timeout_s=10_000), "option 1, check 1 (container_state): parameter `timeout_s` must be at most 60"),
+    (lambda c: c["params"].pop("container"), "option 1, check 1 (container_state): parameter `container` is missing"),
+    (lambda c: c["params"].update(SECRETPARAM=1), "option 1, check 1 (container_state): a parameter container_state does not take (it takes: "),
+    (lambda c: c.update(check="SECRETKIND"), "option 1, check 1: the kind is not one PE knows; use one of: container_state, exec_probe"),
+    (lambda c: c["params"].update(min_uptime_s="30"), "option 1, check 1 (container_state): parameter `min_uptime_s` must be a whole number"),
+])
+def test_a_refused_check_names_the_option_the_position_the_kind_and_the_problem(mutate, words):
+    doc = good()
+    mutate(doc["options"][0]["checks"][0])
+    with pytest.raises(PlanError) as err:
+        parse(doc)
+    assert str(err.value).startswith(words)
+    assert "SECRET" not in str(err.value)
+
+
+def test_a_refusal_names_several_problems_so_one_retry_can_fix_them():
+    doc = good()
+    doc["options"][0]["summary"] = "x" * 700
+    doc["options"][1]["name"] = ""
+    with pytest.raises(PlanError) as err:
+        parse(doc)
+    assert str(err.value) == "option 1: `summary` is longer than 600 characters; option 2: `name` must not be empty"
+
+
+def test_an_unknown_field_is_named_as_unknown_and_never_echoed():
+    doc = good()
+    doc["options"][0]["checks"][0]["SECRETFIELD"] = 1
+    with pytest.raises(PlanError) as err:
+        parse(doc)
+    assert str(err.value).startswith("option 1, check 1 (container_state): has a field PE does not know")
+    assert "SECRET" not in str(err.value)
+
+
+def test_a_refused_exec_probe_names_the_allowlist():
+    host = Availability({}, frozenset({"curl", "wget"}))
+    other = copy.deepcopy(EXEC)
+    other["params"]["argv"] = ["bash"]
+    with pytest.raises(PlanError) as err:
+        parse(with_check(other), available=host)
+    assert str(err.value).endswith("exec allowlist (curl, wget)") and "bash" not in str(err.value)
+
+
+def test_the_planner_and_the_repair_brief_say_to_back_up_stateful_data_and_to_answer_a_go_ahead_with_a_plan():
+    from planet_express.missions import brief
+    text = plan_mod.instructions()
+    assert ".pe-backup-" in text and "sudo cp -a" in text and "rolls_back_to" in text
+    assert "If the operator says to go ahead" in text and "Authorise button" in text
+    repair = brief.instructions_for("repair")
+    assert ".pe-backup-" in repair and "sudo cp -a" in repair and "backup path in your result" in repair
+    assert ".pe-backup-" not in brief.instructions_for("observe")
