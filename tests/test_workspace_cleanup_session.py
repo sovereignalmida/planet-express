@@ -294,3 +294,9 @@ def test_a_leftover_cleanup_cgroup_that_cannot_be_reaped_yet_is_retried_and_noth
     rig.cont.kill = real_kill
     rig.sup.sweep_uids()
     assert sid in rig.sup._cleanup_leftovers_reaped and rig.cont.exists(cleanup_id(sid))           # retried, then it proceeds
+
+
+def test_the_cleanup_script_restores_traversal_before_it_looks_for_root_owned_entries():
+    """Codex, rc14: a directory the session made untraversable hid a root-owned file from the ownership scan, so sudo was
+    never called and the unprivileged delete then failed on it (uid held until the retry). chmod runs first."""
+    assert CLEANUP_SCRIPT.index("chmod -R u+rwX") < CLEANUP_SCRIPT.index("! -user")

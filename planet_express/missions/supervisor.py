@@ -128,9 +128,10 @@ CLEANUP_SUDO = "/usr/bin/sudo"
 # everything is deleted as the uid. Every command discards its output: the launcher's merged output pipe is never read for a
 # cleanup session, and a full pipe would block find.
 CLEANUP_SCRIPT = ('[ -L "$1" ] && exit 1; '
+                  'chmod -R u+rwX -- "$1" >/dev/null 2>&1; '       # first, so the ownership scan below can see every directory
                   'if [ -n "$(' + CLEANUP_FIND + ' "$1" -xdev ! -user "$2" -print -quit 2>/dev/null)" ]; then '
                   '"$3" -n ' + CLEANUP_FIND + ' "$1" -xdev -mindepth 1 -delete </dev/null >/dev/null 2>&1; fi; '
-                  'chmod -R u+rwX -- "$1" >/dev/null 2>&1; exec ' + CLEANUP_FIND
+                  'exec ' + CLEANUP_FIND
                   + ' "$1" -xdev -mindepth 1 -delete >/dev/null 2>&1')       # nobody drains the session's output: never let it fill
 
 
