@@ -422,6 +422,25 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.ok(walk(doc.getElementById("con-thread")).some(n => n.textContent === "The rollback did not complete cleanly: media/sonarr: media: compose up timed out after 150s"));
     FEED.execution = { ...FEED.execution, rollback: null };
   });
+  await atest("a rolled-back run lists what it left alone as a neutral line, not a failure (rc14.3)", async () => {
+    const passed = { headline: "All 1 check passed", level: "ok", by_pe: true, checks: [{ state: "pass", label: "prowlarr is running", evidence: "ok" }] };
+    FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), status: { text: "Rolled back", level: "warn" }, finished: true, verification: passed,
+      controls: { rollback: false }, rollback: { state: "done", reason: "", left_alone: ["media/sonarr " + EVIL] }, rolling_back: false };
+    await page.loadFeed();
+    const thread = walk(doc.getElementById("con-thread"));
+    const line = thread.find(n => (n.className || "").includes("pe-con-left-alone"));
+    assert.ok(line && line.textContent === "Changed since this run, left as it is: media/sonarr " + EVIL, line && line.textContent);
+    assert.ok(!/\b(warn|crit|high)\b/.test(line.className) && line.attrs.role !== "alert");
+    assert.ok(!thread.some(n => ["img", "script"].includes(n.tag)));
+    // alongside an incomplete restore it is shown too, after the reason
+    FEED.execution = { ...FEED.execution, status: { text: "Needs you", level: "crit" }, verification: null,
+      rollback: { state: "incomplete", reason: "media/prowlarr: compose up failed", left_alone: ["media/sonarr"] } };
+    await page.loadFeed();
+    const again = walk(doc.getElementById("con-thread"));
+    assert.ok(again.some(n => n.textContent === "The rollback did not complete cleanly: media/prowlarr: compose up failed"));
+    assert.ok(again.some(n => n.textContent === "Changed since this run, left as it is: media/sonarr"));
+    FEED.execution = { ...FEED.execution, rollback: null };
+  });
   await atest("an armed rollback does not follow the operator into another conversation", async () => {
     FEED.execution = { ...JSON.parse(JSON.stringify(EXEC)), verification: null, controls: { rollback: true } };
     await page.loadFeed();

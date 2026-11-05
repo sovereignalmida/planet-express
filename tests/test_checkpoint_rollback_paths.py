@@ -130,10 +130,12 @@ def test_a_service_whose_container_differs_is_brought_up_alone(tmp_path):
     env.docker.containers[("media", "prowlarr")]["Config"]["Env"] = ["PUID=1000", "PGID=1000", "TZ=UTC", "PATH=/usr/bin"]
     env.svc.capture_post(cid)
     report = env.svc.restore(cid)
-    # The fake resolves `.env` into every service, so the write changes every active service's config: each of THOSE is named
-    # (Compose recreates only the ones whose hash changed), but never with --force-recreate, and never lidarr.
+    # The fake resolves `.env` into every service, so the write changes every active service's config. rc14.3: only the service the
+    # run changed (prowlarr, recreated with TZ=UTC) is named. sonarr and archivist-es were never recreated, so their containers are
+    # exactly as at the checkpoint and the restored `.env` is what they already run: naming them would be a no-op at best.
+    # Never --force-recreate, never lidarr.
     assert report.ok, report.unrestored
-    assert report.actions == {"up": ["media/archivist-es", "media/prowlarr", "media/sonarr"]}
+    assert report.actions == {"up": ["media/prowlarr"]} and report.left_alone == []
     assert all("--force-recreate" not in call and "lidarr" not in call for call in env.docker.up_calls)
 
 
@@ -143,7 +145,19 @@ def test_only_a_service_whose_effective_config_the_restore_changes_is_named(tmp_
     env.compose.write_text(MEDIA.replace("image: lscr.io/linuxserver/sonarr:latest", "image: lscr.io/linuxserver/sonarr:develop"))
     env.svc.capture_post(cid)                                                  # edited, never brought up: containers unchanged
     report = env.svc.restore(cid)
-    assert report.ok and report.actions == {"up": ["media/sonarr"]}
+    # rc14.3: the run changed no container, so the restored file is what every container already runs: no service is named.
+    assert report.ok and report.actions == {} and report.written == [str(env.compose.resolve())]
+
+
+def test_a_service_the_run_brought_up_from_an_edited_file_is_the_only_one_named(tmp_path):
+    env = media_env(tmp_path)
+    cid = env.svc.create(env.mission.id, env.scope)
+    env.compose.write_text(MEDIA.replace("image: lscr.io/linuxserver/sonarr:latest", "image: lscr.io/linuxserver/sonarr:develop"))
+    env.docker.containers[("media", "sonarr")]["Image"] = "sha256:" + "d" * 64     # and brought sonarr up on it
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert report.ok, report.unrestored
+    assert report.actions == {"up": ["media/sonarr"]}
 
 
 def test_a_service_stopped_since_the_checkpoint_is_started_and_others_are_untouched(tmp_path):
@@ -284,9 +298,9 @@ def test_a_service_stopped_at_the_checkpoint_is_put_back_stopped_after_up(tmp_pa
     env.docker.baseline = {k: json.loads(json.dumps(v)) for k, v in env.docker.containers.items()}
     cid = env.svc.create(env.mission.id, env.scope)
     env.compose.write_text(MEDIA.replace("image: lscr.io/linuxserver/sonarr:latest", "image: lscr.io/linuxserver/sonarr:develop"))
+    env.docker.containers[("media", "sonarr")]["State"] = {"Status": "running", "Running": True}   # the run started it
     env.svc.capture_post(cid)
     env.docker.fix_on_recreate = False                       # `up` really starts it
-    env.docker.containers[("media", "sonarr")]["State"] = {"Status": "running", "Running": True}
     report = env.svc.restore(cid)
     assert report.actions.get("up") == ["media/sonarr"] and report.actions.get("stop") == ["media/sonarr"]
     assert env.docker.stopped == ["media/sonarr"]

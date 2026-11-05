@@ -59,22 +59,51 @@ def rollback_view(ms: Any, mission: Mission, in_flight: bool) -> dict[str, Any] 
     `running` while the supervisor's rollback worker has it; `refused` when PE refused to restore before writing anything (files
     changed since the checkpoint) and the run waits for an explicit "roll back anyway"; `incomplete` when a restore ran and
     did not finish cleanly, with why; `not_run` when the worker could not start it; `done` once rolled back. None when no
-    rollback was ever asked for."""
+    rollback was ever asked for. A `done` or `incomplete` view carries `left_alone` when the restore left something as it is
+    because this run had not changed it (rc14.3)."""
     if in_flight and mission.status not in SETTLED:
         return {"state": "running", "reason": ""}
+    rows = _recent_trusted_notes(ms, mission)
+    left_alone = _left_alone(rows)
     if mission.status == "rolled_back":
-        return {"state": "done", "reason": ""}
+        return {"state": "done", "reason": "", **({"left_alone": left_alone} if left_alone else {})}
+    view = _rollback_state(rows, mission)
+    if view is not None and left_alone and view["state"] == "incomplete":
+        view["left_alone"] = left_alone
+    return view
+
+
+def _recent_trusted_notes(ms: Any, mission: Mission) -> list[dict[str, Any]]:
     with ms.store._connect() as conn:                    # the newest trusted notes only: a feed poll must not read the whole log
         rows = conn.execute("SELECT body_json FROM mission_events WHERE mission_id=? AND kind IN ('note', 'decision') "
                             "AND (actor IN ('core', ?) OR actor LIKE 'operator:%') ORDER BY seq DESC LIMIT 100",
                             (mission.id, SUPERVISOR)).fetchall()
+    out = []
     for row in rows:
         try:
             body = json.loads(row["body_json"])
         except ValueError:
             continue
-        if not isinstance(body, dict):
-            continue
+        if isinstance(body, dict):
+            out.append(body)
+    return out
+
+
+def _left_alone(bodies: list[dict[str, Any]]) -> list[str]:
+    """rc14.3: what the newest finished restore left as it is because this run had not changed it (someone changed it since the run
+    ended). Neutral information, not a failure: names only, bounded."""
+    for body in bodies:
+        if body.get("event") in ("checkpoint.restore_done", "checkpoint.restore_refused"):     # refused also records a failed restore
+            items = body.get("left_alone") if isinstance(body.get("left_alone"), list) else []
+            return [str(i.get("service") or i.get("path"))[:160] for i in items[:20]
+                    if isinstance(i, dict) and (i.get("service") or i.get("path"))]
+        if body.get("event") == "checkpoint.restore_started":
+            return []
+    return []
+
+
+def _rollback_state(bodies: list[dict[str, Any]], mission: Mission) -> dict[str, Any] | None:
+    for body in bodies:
         if "rollback_not_run" in body:
             return {"state": "not_run", "reason": str(body["rollback_not_run"])[:200]}
         event = body.get("event")

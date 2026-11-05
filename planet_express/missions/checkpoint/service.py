@@ -20,6 +20,7 @@ The authenticated identity is derived by the slice 7 RPC layer from the dashboar
 never taken from request parameters.
 """
 
+import json
 import logging
 import os
 import secrets
@@ -44,6 +45,7 @@ from . import safefs
 from .provider import (
     RESTORABLE_FIELDS,
     CheckpointProvider,
+    ContainerFacts,
     ProviderError,
     StackConfig,
     comparable_facts,
@@ -137,6 +139,9 @@ class RestoreReport:
     drift_saved: list[str] = field(default_factory=list)
     unrestored: list[dict[str, Any]] = field(default_factory=list)       # restorable facts that still differ
     meta_skipped: list[dict[str, Any]] = field(default_factory=list)     # owner/ACL that could not be set
+    # rc14.3: what this run did NOT change but someone changed since it ended (another mission, the operator). Never acted on, never
+    # counted against the outcome: {"path" | "service": ..., "note": LEFT_ALONE_NOTE}.
+    left_alone: list[dict[str, Any]] = field(default_factory=list)
     observational: dict[str, Any] = field(default_factory=dict)          # reported, never asserted
     reason: str | None = None
     written_stacks: set[str] = field(default_factory=set)
@@ -562,7 +567,11 @@ class CheckpointService:
             raise CheckpointCorrupt(f"{checkpoint_id}: the scan baseline is unreadable") from None
 
     def capture_post(self, checkpoint_id: str) -> None:
-        """Take the post-change manifest. The caller does this only once the session is provably dead."""
+        """Take the post-change manifest. The caller does this only once the session is provably dead.
+
+        rc14.3: it records each checkpointed service as the run left it too (`service_signature`: the comparable facts and the run
+        state), so a later rollback can tell what THIS run changed from what someone changed after it. A service that cannot be read
+        now is recorded as unknown, and a restore then treats it as the run's (compared with the checkpoint, as before)."""
         self._require_enabled()
         manifest = self._manifest(checkpoint_id)
         files, changed = {}, []
@@ -571,15 +580,41 @@ class CheckpointService:
             files[entry["path"]] = {"sha256": sha, "problem": problem is not None}
             if sha != entry["sha256"]:
                 changed.append(entry["path"])
-        self.store.write_post(checkpoint_id, {"v": MANIFEST_V, "post_at": self._now(), "files": files})
+        services: dict[str, dict[str, Any]] = {}
+        services_changed = []
+        for name, before in (manifest.get("facts", {}).get("services") or {}).items():
+            try:
+                services[name] = {"sig": service_signature(self.provider.inspect(name))}
+            except Exception:                       # noqa: BLE001 - an unreadable service must not cost the file snapshot
+                services[name] = {"unknown": True}
+                services_changed.append(name)
+                continue
+            if not same_service(service_signature(before), services[name]["sig"]):
+                services_changed.append(name)
+        self.store.write_post(checkpoint_id, {"v": MANIFEST_V, "post_at": self._now(), "files": files, "services": services})
         self._event(manifest["mission_id"], "checkpoint.post_captured", "core",
                     {"checkpoint": checkpoint_id, "files": len(files), "changed": changed,
+                     "services_changed": sorted(services_changed),
                      "hashes": {p: v["sha256"] for p, v in files.items()}})
+
+    def post(self, checkpoint_id: str) -> dict[str, Any] | None:
+        """The post-change manifest as stored, or None when there is none or it cannot be read."""
+        self._require_enabled()
+        try:
+            post = self.store.read_post(checkpoint_id)
+        except (OSError, ValueError, StoreError):
+            return None
+        return post if isinstance(post, dict) else None
 
     # ── restore ─────────────────────────────────────────────────────────────
     def restore(self, checkpoint_id: str, *, ack_drift: bool = False, actor: str = "core") -> RestoreReport:
         """Restore every captured file that differs (compare-and-swap), then act only on the services that differ from the
         checkpoint (`_converge_and_compare`).
+
+        rc14.3: a rollback reverses only what THIS run changed. The run's changes are the difference between the checkpoint and the
+        post-change manifest taken when the run ended (`untouched_by_run`). A file or service the run did not change but someone changed
+        since (another mission, the operator) is left exactly as it is and reported in `left_alone`: never written, never recreated,
+        never counted against the outcome. One the run changed and someone changed again since is drift: refused until acknowledged.
 
         Never raises for a failure after the restore started: it reports `refused` or `failed`, says which files
         were already written (`partial`), records the event and moves the mission to needs_operator."""
@@ -609,8 +644,10 @@ class CheckpointService:
             self._event(mission_id, "checkpoint.restore_refused", actor,
                         {"checkpoint": checkpoint_id, "reason": report.reason})
             return report
+        untouched_files, untouched_services = untouched_by_run(manifest, post)
         try:
-            self._restore_files(checkpoint_id, manifest, payloads, post, ack_drift, actor, report)
+            self._service_drift(manifest, post, untouched_services, report)
+            self._restore_files(checkpoint_id, manifest, payloads, post, ack_drift, actor, report, untouched_files)
         except Exception as exc:                    # noqa: BLE001 - nothing may escape a half-done restore
             report.status = "failed"
             report.reason = _safe_reason(exc)
@@ -620,7 +657,7 @@ class CheckpointService:
             self._stop(mission_id, checkpoint_id, actor, report)
             return report
         try:
-            self._converge_and_compare(manifest, report)
+            self._converge_and_compare(manifest, report, untouched_services)
         except Exception as exc:                    # noqa: BLE001
             report.status = "failed"
             report.reason = f"bringing the services back or comparing them failed: {_safe_reason(exc)}"
@@ -630,7 +667,8 @@ class CheckpointService:
                     {"checkpoint": checkpoint_id, "written": report.written, "unchanged": report.unchanged,
                      "drift_saved": report.drift_saved, "actions": report.actions,
                      "unrestored": [_unrestored_event(u) for u in report.unrestored],
-                     "meta_skipped": report.meta_skipped, "observational": report.observational})
+                     "meta_skipped": report.meta_skipped, "observational": report.observational,
+                     "left_alone": report.left_alone})
         return report
 
     def _stop(self, mission_id: str, checkpoint_id: str, actor: str, report: RestoreReport) -> None:
@@ -638,7 +676,8 @@ class CheckpointService:
         try:
             self._event(mission_id, "checkpoint.restore_refused", actor,
                         {"checkpoint": checkpoint_id, "status": report.status, "reason": report.reason,
-                         "partial": report.partial, "written": report.written, "drifted": report.drifted})
+                         "partial": report.partial, "written": report.written, "drifted": report.drifted,
+                         "left_alone": report.left_alone})
         except Exception:                           # noqa: BLE001
             log.warning("checkpoint %s: could not record the restore outcome", checkpoint_id)
         try:
@@ -646,8 +685,28 @@ class CheckpointService:
         except IllegalTransition:
             pass                                    # already there, or terminal: the report still says why
 
+    def _service_drift(self, manifest: dict[str, Any], post: dict[str, Any], untouched: dict[str, Any],
+                       report: RestoreReport) -> None:
+        """A service THIS run changed (its post signature differs from the checkpoint's) whose configuration has changed again since
+        the run ended is drift, like a file: putting it back would overwrite someone else's change. Recorded before anything is
+        written, so the restore refuses unless the operator acknowledges it. Only the configuration is compared here (a container that
+        stopped on its own since is not someone's change); a service that cannot be read now is left to the comparison after."""
+        recorded = post.get("services") if isinstance(post.get("services"), dict) else {}
+        for name, before in (manifest.get("facts", {}).get("services") or {}).items():
+            rec = recorded.get(name)
+            if name in untouched or not isinstance(rec, dict) or rec.get("unknown") or "sig" not in rec:
+                continue
+            try:
+                now = service_signature(self.provider.inspect(name))
+            except ProviderError:
+                continue
+            then, left = service_signature(before), rec["sig"]
+            if _facts_of(now) != _facts_of(left) and _facts_of(now) != _facts_of(then):
+                report.drifted.append({"service": name, "expected": "as this run left it", "current": "changed since"})
+
     def _restore_files(self, checkpoint_id: str, manifest: dict[str, Any], payloads: dict[int, bytes],
-                       post: dict[str, Any], ack_drift: bool, actor: str, report: RestoreReport) -> None:
+                       post: dict[str, Any], ack_drift: bool, actor: str, report: RestoreReport,
+                       untouched: set[str] = frozenset()) -> None:          # type: ignore[assignment]
         pending: list[tuple[dict[str, Any], bytes | None, str | None]] = []
         for entry in manifest["files"]:
             current, data, problem, meta = self._current(entry)
@@ -659,6 +718,10 @@ class CheckpointService:
             if current == entry["sha256"] and _metadata_matches(entry, meta):
                 report.unchanged.append(entry["path"])
                 continue
+            if entry["path"] in untouched and current != entry["sha256"]:
+                # The run left these bytes as the checkpoint had them; someone changed them after it ended. Not this run's to undo.
+                report.left_alone.append({"path": entry["path"], "note": LEFT_ALONE_NOTE})
+                continue
             if current != expected and current != entry["sha256"]:
                 report.drifted.append({"path": entry["path"], "expected": expected, "current": current})
             pending.append((entry, data, current))
@@ -667,14 +730,15 @@ class CheckpointService:
         if report.drifted and (not ack_drift or uncomparable):
             report.status = "refused"
             report.reason = ("a file cannot be compared or its drifted bytes cannot be kept" if uncomparable
-                             else "files changed since the post-change manifest")
+                             else "files changed since the post-change manifest" if all(d.get("path") for d in report.drifted)
+                             else "files or services this run changed were changed again since it ended")
             return
 
         # Each stack about to get files back is resolved by Compose FIRST, as the session left it, so the comparison after the
         # write can tell which services' effective configuration the restore changes (a comment-only `.env` edit changes none).
         for stack in sorted({e["stack"] for e, _d, _s in pending if e.get("stack")}):
             report.configs_before[stack] = self._service_configs(stack)
-        drift_paths = {d["path"] for d in report.drifted}
+        drift_paths = {d["path"] for d in report.drifted if d.get("path")}
         for entry, data, _seen in pending:
             if entry["path"] in drift_paths and data is not None:
                 report.drift_saved.append(
@@ -705,7 +769,8 @@ class CheckpointService:
         except ProviderError:
             return None
 
-    def _converge_and_compare(self, manifest: dict[str, Any], report: RestoreReport) -> None:
+    def _converge_and_compare(self, manifest: dict[str, Any], report: RestoreReport,
+                              untouched: dict[str, Any] | None = None) -> None:
         """The best path back for services, not a literal undo. Each service the checkpoint recorded is compared NOW, after the
         files went back, on the comparable projection of its container facts, its run state and (for a stack whose files were
         written) whether its effective Compose configuration changed with the write. Only the services that differ get an action:
@@ -716,7 +781,11 @@ class CheckpointService:
         - `restart`: configuration and facts match and it is running, but unhealthy when it was healthy at the checkpoint.
 
         Everything else is left alone. A service with no container at the checkpoint is never named (naming a service behind a
-        profile would start it). Then every service is compared against the checkpoint again, on the same projection."""
+        profile would start it). Then every service is compared against the checkpoint again, on the same projection.
+
+        rc14.3: a service in `untouched` (the run left it as the checkpoint had it) is never acted on, whatever it looks like now: a
+        difference is someone else's later change, reported in `left_alone`, never in `unrestored`."""
+        untouched = untouched or {}
         raw_services = manifest["facts"]["services"]
         captured = {service: comparable_facts(before) for service, before in raw_services.items()}
         then_state = {service: (before or {}).get("state") for service, before in raw_services.items()}
@@ -725,8 +794,8 @@ class CheckpointService:
         to_up: list[str] = []
         to_restart: list[str] = []
         for service, before in captured.items():
-            if before is None:
-                continue                                    # no container then: nothing to put back, and naming it would start it
+            if before is None or service in untouched:
+                continue                                    # no container then (naming it would start it), or not this run's change
             stack, name = service.split("/", 1)
             try:
                 now = self.provider.inspect(service)
@@ -760,7 +829,16 @@ class CheckpointService:
             report.unrestored.append({"service": stack, "fields": ["unverifiable"],
                                       "reason": "the compose file was not valid YAML when captured"})
         resolved_now: dict[str, bool] = {}
+        for service, then in untouched.items():
+            try:
+                now_sig = service_signature(self.provider.inspect(service))
+            except ProviderError:
+                continue                                    # not this run's: nothing was done to it, and its reading decides nothing
+            if not same_service(then, now_sig):
+                report.left_alone.append({"service": service, "note": LEFT_ALONE_NOTE})
         for service, before in captured.items():
+            if service in untouched:
+                continue
             stack = service.split("/", 1)[0]
             try:
                 now = self.provider.inspect(service)
@@ -876,6 +954,72 @@ class CheckpointService:
 
 _PARSED = ("compose", "override", "include")
 MAX_INCLUDE_DEPTH = 5
+
+
+LEFT_ALONE_NOTE = "changed since this run, left as it is"
+_RUNNING = frozenset({"running", "restarting"})
+_STOPPED = frozenset({"exited", "created", "dead"})
+
+
+def _run_class(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(running | stopped | paused, health), each None when it was not recorded (a manifest from before run state was)."""
+    state = raw.get("state") if isinstance(raw.get("state"), dict) else {}
+    status, health = state.get("status"), state.get("health")
+    run = None if not status else "running" if status in _RUNNING else "stopped" if status in _STOPPED else str(status)
+    return run, (str(health) if health else None)
+
+
+def service_signature(raw: Any) -> dict[str, Any] | None:
+    """A service as a rollback compares it to tell who changed it (rc14.3): the comparable facts and the run state, JSON-shaped so a
+    signature read back from the post manifest compares equal to one taken now. None: no container."""
+    if raw is None:
+        return None
+    if isinstance(raw, ContainerFacts):
+        raw = raw.to_dict()
+    run, health = _run_class(raw)
+    return json.loads(json.dumps({"facts": comparable_facts(raw), "run": run, "health": health}, sort_keys=True, default=str))
+
+
+def _facts_of(sig: dict[str, Any] | None) -> dict[str, Any] | None:
+    return sig["facts"] if sig else None
+
+
+def same_service(a: dict[str, Any] | None, b: dict[str, Any] | None) -> bool:
+    """Two signatures describe the same service. A run state or health missing on either side is not compared. Health is compared
+    where both have one: erring towards "the run changed it" only means the service is compared with the checkpoint, as before."""
+    if a is None or b is None:
+        return a is None and b is None
+    if a.get("facts") != b.get("facts"):
+        return False
+    return all(a.get(k) is None or b.get(k) is None or a.get(k) == b.get(k) for k in ("run", "health"))
+
+
+def untouched_by_run(manifest: dict[str, Any], post: dict[str, Any] | None) -> tuple[set[str], dict[str, dict[str, Any] | None]]:
+    """What the run did NOT change, from its checkpoint and its end-of-run post manifest (rc14.3): (files, services) where `files` is
+    the paths whose bytes the post recorded as the checkpoint's, and `services` maps each service the post recorded exactly as the
+    checkpoint did to that signature. Everything else is the run's (changed by it, or unknown: not recorded, unreadable, or a post
+    from before services were recorded) and is compared with the checkpoint as before. No post: nothing is known to be untouched."""
+    files: set[str] = set()
+    services: dict[str, dict[str, Any] | None] = {}
+    if not isinstance(post, dict):
+        return files, services
+    recorded_files = post.get("files") if isinstance(post.get("files"), dict) else {}
+    for entry in manifest.get("files", []):
+        rec = recorded_files.get(entry["path"])
+        if isinstance(rec, dict) and not rec.get("problem") and rec.get("sha256") == entry["sha256"]:
+            files.add(entry["path"])
+    recorded_services = post.get("services") if isinstance(post.get("services"), dict) else {}
+    unresolved = set(manifest.get("facts", {}).get("unresolved") or [])
+    for name, before in (manifest.get("facts", {}).get("services") or {}).items():
+        rec = recorded_services.get(name)
+        if not isinstance(rec, dict) or rec.get("unknown") or "sig" not in rec:
+            continue
+        if before is None and name.split("/", 1)[0] in unresolved:
+            continue                       # "no container" was not known at the checkpoint: it cannot show the run left it alone
+        then = service_signature(before)
+        if same_service(then, rec["sig"]):
+            services[name] = then
+    return files, services
 
 
 def _metadata_matches(entry: dict[str, Any], meta: safefs.FileMeta | None) -> bool:

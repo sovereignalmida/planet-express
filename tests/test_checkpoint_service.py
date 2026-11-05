@@ -462,6 +462,7 @@ def test_recreate_failure_is_reported(tmp_path):
     env = make_env(tmp_path)
     cid = env.svc.create(env.mission.id, env.scope)
     env.compose.write_text("x\n")
+    env.docker.containers[("media", "web")]["Config"]["Env"] = ["A=2"]          # the run brought web up on it (rc14.3: only then is it named)
     env.docker.recreate_ok = False
     env.svc.capture_post(cid)
     report = env.svc.restore(cid)
@@ -719,6 +720,7 @@ def test_write_failure_reports_partial_restore_and_hands_to_operator(tmp_path, m
 def test_recreate_exception_is_reported_not_raised(tmp_path, monkeypatch):
     env = make_env(tmp_path)
     cid = env.svc.create(env.mission.id, env.scope)
+    env.docker.containers[("media", "web")]["Config"]["Env"] = ["A=2"]          # the run changed web too, so the restore acts on it
     mutate_and_post(env, cid)
     monkeypatch.setattr(env.provider, "up", lambda services: (_ for _ in ()).throw(RuntimeError("boom")))
     report = env.svc.restore(cid)

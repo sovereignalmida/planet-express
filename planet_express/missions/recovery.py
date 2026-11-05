@@ -131,18 +131,31 @@ def _comparable(facts: Any) -> dict[str, Any] | None:
     return comparable_facts(facts)
 
 
-def matches_checkpoint(host: HostState, manifest: Mapping[str, Any]) -> bool:
+def matches_checkpoint(host: HostState, manifest: Mapping[str, Any], post: Mapping[str, Any] | None = None) -> bool:
     """Is the host exactly as the checkpoint recorded it? Anything unknown is "no", and so is an EMPTY comparison: a
-    manifest that covers no file, service or unit shows nothing about the host, so it cannot prove "unchanged"."""
+    manifest that covers no file, service or unit shows nothing about the host, so it cannot prove "unchanged".
+
+    rc14.3: with `post`, the post-change manifest taken when THIS run's session ended, the question is "is nothing this run changed
+    still different?": a file or service the run left as the checkpoint had it (`untouched_by_run`) is not compared, so another
+    mission's later change does not hold this one's cancel. Pass it only when it was taken after the run's last session ended."""
     if not host.readable:
         return False
     facts = manifest.get("facts", {})
     if not (manifest.get("files") or facts.get("services") or facts.get("units")):
         return False
+    untouched_files: set[str] = set()
+    untouched_services: Mapping[str, Any] = {}
+    if post is not None:
+        from .checkpoint.service import untouched_by_run
+        untouched_files, untouched_services = untouched_by_run(dict(manifest), dict(post))
     for entry in manifest.get("files", []):
+        if entry["path"] in untouched_files:
+            continue
         if entry["path"] not in host.files or host.files[entry["path"]] != entry["sha256"]:
             return False
     for name, facts in manifest.get("facts", {}).get("services", {}).items():
+        if name in untouched_services:
+            continue
         if name not in host.services:
             return False
         # Both sides through the same projection the restore uses: a container recreated with the same configuration (new id,
@@ -222,7 +235,7 @@ def _phase(status: str) -> str:
 
 
 def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping[str, Any] | None,
-             events: Sequence[MissionEvent]) -> Classification:
+             events: Sequence[MissionEvent], post: Mapping[str, Any] | None = None) -> Classification:
     """Decide what a crashed mission is, from the host and the trusted journal. `events` is read only for Core's own
     journal; `host_state` must come from `collect_host_state` (Core's reading), never from the runtime."""
     if mission.status in ("completed", "failed", "rolled_back", "cancelled"):
@@ -238,7 +251,7 @@ def classify(mission: Mission, host_state: HostState | None, checkpoint: Mapping
         return Classification("recovery_required", "there is no checkpoint or no host reading to compare with", phase,
                               next_state="needs_operator", offers=("cancel",), partially_applied=True,
                               refused_replays=unknown)
-    if matches_checkpoint(host_state, checkpoint):
+    if matches_checkpoint(host_state, checkpoint, post):
         return Classification("needs_operator", "the checkpointed files and services are as the checkpoint recorded them: nothing they cover was changed (other files and data are not checked)", phase,
                               offers=("cancel",), refused_replays=unknown)      # trust mode has no resume; nothing to roll back
     if matches_expectation(host_state, end_expectation(mission)):

@@ -393,12 +393,20 @@
         note.setAttribute("role", "status"); note.setAttribute("aria-live", "polite");
         return note;
       }
+      const left = leftAloneNote(x);
       if (x.rollback && (x.rollback.state === "incomplete" || x.rollback.state === "not_run")) {
         const note = el("div", "pe-note warn", (x.rollback.state === "not_run" ? "The rollback did not run: " : "The rollback did not complete cleanly: ") + (x.rollback.reason || ""));
         note.setAttribute("role", "alert");
-        return note;
+        return left ? add(el("div", ""), note, left) : note;
       }
-      return null;
+      return left;
+    }
+    // rc14.3: a rollback reverses only what this run changed. What someone changed after it (another run, the operator) is left as it is:
+    // information, not a failure, so a neutral line.
+    function leftAloneNote(x) {
+      const names = x.rollback && Array.isArray(x.rollback.left_alone) ? x.rollback.left_alone : [];
+      if (!names.length) return null;
+      return el("div", "pe-note pe-con-left-alone", "Changed since this run, left as it is: " + names.join(", "));
     }
     function runButtons(x, names) {
       const wrap = el("div", "pe-tripwire-btns");

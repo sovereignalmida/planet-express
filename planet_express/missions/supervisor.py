@@ -1145,7 +1145,11 @@ class Supervisor:
         rc14.2: also the UNDO of a `completed` Repair while its checkpoint is kept (`_undo_checks`). Its leases were freed when it
         completed, so they are re-acquired first (another mission holding them is named) and given back when the rollback ends. The
         post-change manifest taken when its session ended is KEPT, not taken again: anything changed since (another mission, the
-        operator) is then drift, refused unless the operator acknowledges it, never silently overwritten."""
+        operator) is then drift, refused unless the operator acknowledges it, never silently overwritten.
+
+        rc14.3: a rollback reverses only what THIS run changed (checkpoint vs the end-of-run snapshot). Something the run did not change
+        but someone changed since is left as it is and reported (`left_alone`); only something the run changed and someone changed
+        again is drift. A non-undo rollback retakes the snapshot (its leases were held throughout: see `_roll_back_held`)."""
         self._require_enabled()
         actor = self._operator(actor)
         mission = self._repair_mission(mission_id, *self.ROLLBACK_FROM)
@@ -1168,6 +1172,16 @@ class Supervisor:
         if undo and not self.checkpoint.has_post(mission.checkpoint_id):
             # Without the snapshot taken when the run ended, drift since then could not be seen: refuse rather than overwrite it blind.
             raise ResumeRefused("this run's end-of-run snapshot is missing, so PE cannot tell what changed since; roll back by hand")
+        if undo and self._end_of_run_post(mission) is None:
+            # The kept snapshot must be the one taken when the LAST session ended (review, rc14.3): an older one (a later session's
+            # capture failed) would mark that session's changes as untouched and the undo would silently leave them in place.
+            raise ResumeRefused("this run's end-of-run snapshot predates its last session, so PE cannot tell what that session changed; "
+                                "roll back by hand")
+        # rc14.3: a rollback reverses only what this run changed: the checkpoint against the post-change snapshot. An UNDO keeps the one
+        # taken when the run ended (other missions may have changed things since: those are left alone). A non-undo rollback (needs_operator,
+        # recovery_required, rollback_pending, verifying) retakes it now, as before: the mission has held its leases since its session
+        # ended, so no other mission can have touched what it covers, and "now" is the end of the run plus whatever the operator did by
+        # hand in between, which the rollback is asked to put back. The scoped rule then compares everything with the checkpoint, as before.
         if not undo:
             try:
                 self.checkpoint.capture_post(mission.checkpoint_id)
@@ -1259,7 +1273,8 @@ class Supervisor:
                                 **({"reason": str(u["reason"])[:200]} if u.get("reason") else {})}
                                for u in report.unrestored[:10]],
                 "actions": {str(k)[:20]: [str(x)[:80] for x in v[:30]] for k, v in (getattr(report, "actions", None) or {}).items()},
-                "meta_skipped": len(report.meta_skipped)}
+                "meta_skipped": len(report.meta_skipped),
+                "left_alone": [str(i.get("service") or i.get("path") or "?")[:160] for i in (getattr(report, "left_alone", None) or [])[:20]]}
         else:
             report = RestoreReport(status="failed", reason=reason)
         body = {"event": "mission.rollback_incomplete", "reason": str(reason)[:200], "summary": summary,
@@ -1544,7 +1559,9 @@ class Supervisor:
         if mission.checkpoint_id and self.checkpoint is not None:
             try:
                 manifest = self.checkpoint.manifest(mission.checkpoint_id)
-                unchanged = recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest)
+                # rc14.3: judged on what THIS run changed: another mission's later change does not hold the cancel.
+                unchanged = recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest,
+                                                        self._end_of_run_post(mission))
             except Exception as exc:                   # noqa: BLE001 - an unreadable host is not "unchanged"
                 self._note(mission.id, {"host_state_unreadable": type(exc).__name__})
                 unchanged = False
@@ -1555,7 +1572,7 @@ class Supervisor:
         self._cancel_held.add(mission.id)
         self.ms.set_outcome(mission.id, mission.outcome, "partially_applied", ACTOR)
         self.ms.append_event(mission.id, "decision", ACTOR, {
-            "event": "cancel.held", "reason": "the checkpointed files or services differ from the checkpoint, so the mission is not closed as cancelled",
+            "event": "cancel.held", "reason": "files or services this run changed still differ from the checkpoint, so the mission is not closed as cancelled",
             "offers": ["rollback"], "cancel_requested_by": mission.cancel_requested_by})
         if mission.status not in ("needs_operator", "recovery_required", "rollback_pending"):
             try:
@@ -1576,15 +1593,16 @@ class Supervisor:
                             self._settle_repair_cancel(self.ms.get_mission(mission.id))
 
     def _classify_and_apply(self, mission: Mission, reason: str) -> None:
-        manifest = host = None
+        manifest = host = post = None
         if mission.checkpoint_id and self.checkpoint is not None:
             try:
                 manifest = self.checkpoint.manifest(mission.checkpoint_id)
                 host = recovery.collect_host_state(self.checkpoint, manifest)
+                post = self._end_of_run_post(mission)
             except Exception as exc:                   # noqa: BLE001 - an unreadable host is classified as such
                 self._note(mission.id, {"host_state_unreadable": type(exc).__name__})
-                manifest = host = None
-        c = recovery.classify(mission, host, manifest, self.ms.events(mission.id))
+                manifest = host = post = None
+        c = recovery.classify(mission, host, manifest, self.ms.events(mission.id), post)
         self._note(mission.id, {"session_ended": reason, "classified": c.state})
         final = recovery.apply_classification(self.ms, mission.id, c, actor=ACTOR)
         if final == "verifying":
@@ -1718,9 +1736,27 @@ class Supervisor:
             return False
         try:
             manifest = self.checkpoint.manifest(mission.checkpoint_id)
-            return recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest)
+            return recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest,
+                                               self._end_of_run_post(mission))
         except Exception:                                  # noqa: BLE001 - an unreadable host is not "unchanged"
             return False
+
+    def _end_of_run_post(self, mission: Mission) -> dict[str, Any] | None:
+        """The post-change manifest of this mission's checkpoint, but only when it records how the run ENDED (rc14.3): no session is
+        alive or tracked, and it was taken no earlier than the mission's last session was issued. Otherwise None, and the host is
+        compared with the checkpoint as before: a snapshot that may predate what a session did cannot tell the run's changes apart."""
+        if (not mission.checkpoint_id or self.checkpoint is None or mission.id in self._runs
+                or self.ms.live_session(mission.id) is not None):
+            return None
+        post = self.checkpoint.post(mission.checkpoint_id)
+        if post is None or not isinstance(post.get("post_at"), (int, float)):
+            return None
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT MAX(issued_at) AS last FROM mission_sessions WHERE mission_id=?", (mission.id,)).fetchone()
+        last = row["last"] if row is not None else None
+        if last is not None and post["post_at"] < last:
+            return None
+        return post
 
     # ── the daemon's loop and shutdown ──────────────────────────────────────
     def tick(self) -> None:

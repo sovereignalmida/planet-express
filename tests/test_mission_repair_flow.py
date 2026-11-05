@@ -857,3 +857,66 @@ def test_only_an_operator_can_undo_and_only_a_repair(stack):
         with pytest.raises(ValueError):
             st.sup.roll_back(mid, actor)
     assert st.status(mid) == "completed"
+
+
+# ── rc14.3: a rollback reverses only what THIS run changed ─────────────────────────────────────────────────────────────────
+def _another_mission_updates_web(st):
+    """A later mission's legitimate change to a service this run never touched (M-25 updating sonarr after M-22)."""
+    st.env.docker.containers[("media", "web")]["Image"] = "sha256:" + "5" * 64
+
+
+def test_undo_leaves_a_later_missions_change_alone_and_ends_rolled_back(stack):
+    from planet_express.console.execution import rollback_view
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    _another_mission_updates_web(st)
+    out = st.flow.roll_back("operator:alice", mid)
+    assert out["status"] == "rolled_back" and st.env.compose.read_text() == original
+    assert st.env.docker.up_calls == [] and st.env.docker.containers[("media", "web")]["Image"] == "sha256:" + "5" * 64
+    done = noted(st, mid, "checkpoint.restore_done")[-1]
+    assert done["left_alone"] == [{"service": "media/web", "note": "changed since this run, left as it is"}]
+    assert done["unrestored"] == [] and done["actions"] == {}
+    view = rollback_view(st.ms, st.ms.get_mission(mid), False)
+    assert view == {"state": "done", "reason": "", "left_alone": ["media/web"]}
+
+
+def test_a_cancel_is_not_held_by_another_missions_later_change(stack):
+    from planet_express.application.mission_service import MissionService
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.cont.crash(st.runtimes[0].context.session.session_id)
+    st.sup.tick()
+    assert st.status(mid) == "needs_operator"                                  # the run changed nothing it covers
+    _another_mission_updates_web(st)                                           # something else changed web afterwards
+    MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    st.sup.tick()
+    assert st.status(mid) == "cancelled" and not noted(st, mid, "cancel.held")
+
+
+def test_a_cancel_is_still_held_by_what_this_run_changed(stack):
+    from planet_express.application.mission_service import MissionService
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.env.compose.write_text(st.env.compose.read_text() + "# half applied\n")
+    st.cont.crash(st.runtimes[0].context.session.session_id)
+    st.sup.tick()
+    _another_mission_updates_web(st)
+    MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    st.sup.tick()
+    assert st.status(mid) in ("needs_operator", "recovery_required") and noted(st, mid, "cancel.held")
+
+
+def test_an_undo_refuses_a_snapshot_older_than_the_last_session(stack):
+    """Review, rc14.3: if the last session's capture failed, the kept snapshot predates it and would hide that session's changes."""
+    st = stack()
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    assert st.drive(mid) == "completed"
+    with st.store._write() as conn:
+        conn.execute("UPDATE mission_sessions SET issued_at=issued_at+100000 WHERE mission_id=?", (mid,))
+    with pytest.raises(ResumeRefused, match="predates its last session"):
+        st.sup.roll_back(mid, "operator:alice")
