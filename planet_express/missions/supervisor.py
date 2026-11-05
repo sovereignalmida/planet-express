@@ -106,6 +106,7 @@ MAX_MEMORY_HITS = 20
 MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll (the final drain reads on until it is empty)
 MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
+TAIL_LINES = 64                 # non-JSON output lines kept in `session-tail.txt` when a session ends without a result (rc14.4)
 CLEANUP_PREFIX = "X-"          # a cleanup session is named for the session whose workspace it empties
 CLEANUP_SH, CLEANUP_FIND = "/bin/sh", "/usr/bin/find"
 
@@ -229,6 +230,7 @@ class _Run:
     hook_sha: str | None = None               # sha256 of settings.json at launch: it is checked at every poll
     script_sha: str | None = None             # sha256 of the per-launch pe_hook.py copy, when one was installed: checked likewise
     policy_sha: str | None = None             # sha256 of policy.json when the policy was too large for the environment
+    interrupted: bool = False                 # an operator's interrupt stopped it (a Console turn): its end is no mystery
 
 
 def default_memory_cards(store: Store, mission: Mission) -> list[Card]:
@@ -356,6 +358,7 @@ class Supervisor:
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
         self._start_failures: dict[str, int] = {}
         self._cancel_held: set[str] = set()     # missions whose held cancel has been recorded
+        self.last_session_tail: dict[str, str] = {}   # Console mission -> the artifact id of its last ended turn's output tail (rc14.4)
         self._waiting: dict[str, str] = {}               # mission id -> the last "cannot start yet" reason noted
         self._deferred_since: dict[str, float] = {}      # mission id -> when its start first had to wait for a resource
         self._deferred_retry: dict[str, float] = {}      # mission id -> do not ask again before this time
@@ -524,6 +527,11 @@ class Supervisor:
         if run is None or run.phase != "running" or run.cs is None or run.runtime is None or run.handle is None:
             return False
         self._note(mission_id, {"interrupted_by": by})
+        run.interrupted = True
+        with contextlib.suppress(Exception):
+            stopping = getattr(run.runtime, "stopping", None)
+            if stopping is not None:
+                stopping(run.handle)                       # what is collected next is a turn PE stopped, never one that ended by itself
         try:
             self.containment.kill(run.cs)                  # freeze, cgroup.kill, wait until provably empty
         except ContainmentError:
@@ -1332,12 +1340,48 @@ class Supervisor:
             return
         self._revoke(run)
         self._drain_hook_log(run, final=True)          # what the dead session's hooks recorded last, before anything is judged
+        self._keep_session_tail(run)                   # before cleanup: the containment forgets the exit status with the session
         self._capture_post(run.mission_id)             # the session is provably dead: only now is the post-change manifest honest
         if run.cs is not None:
             self.containment.cleanup(run.cs)
         self._runs.pop(run.mission_id, None)
         self._reap_session(run)
         self._settle(run)
+
+    def _keep_session_tail(self, run: _Run) -> None:
+        """rc14.4: a session that ended without a result (a crash, a budget, a CLI that exited with no result line) keeps WHY: the last
+        non-JSON lines it printed (its stderr is merged into the output pipe; the runtime keeps a bounded ring of them) and the exit
+        status when the containment knows it, as the redacted artifact `session-tail.txt`, referenced from a note. An operator's cancel
+        is not a mystery and keeps nothing. Diagnostic only: nothing here can fail the session's settling."""
+        if run.runtime is None or run.handle is None:
+            return
+        try:
+            taker = getattr(run.runtime, "take_tail", None)
+            tail = taker(run.handle) if taker is not None else None      # always taken, so the runtime never holds one nobody wants
+            if run.reason == "cancel" or run.interrupted:
+                return
+            if not isinstance(tail, dict) or (run.reason == "result" and (run.submitted is not None or not tail.get("no_result"))):
+                return
+            lines = [str(line)[:600] for line in list(tail.get("lines") or [])[-TAIL_LINES:]]
+            status = None
+            getter = getattr(self.containment, "exit_status", None)
+            if getter is not None and run.cs is not None:
+                with contextlib.suppress(Exception):
+                    status = getter(run.cs)
+            status = status if isinstance(status, int) and not isinstance(status, bool) else None
+            exit_text = ("unknown" if status is None else f"killed by signal {-status}" if status < 0 else str(status))
+            header = (f"session {run.session_id}: ended ({run.reason}) without a result\nexit status: {exit_text}\n"
+                      f"last {len(lines)} non-JSON output line{'s' if len(lines) != 1 else ''}:\n")
+            artifact_id = artifacts.store_text(self.store, self.artifact_dir, run.mission_id, "session-tail.txt",
+                                               header + "".join(f"{line}\n" for line in lines), ACTOR)
+            self._note(run.mission_id, {"session_tail": artifact_id, "session": run.session_id, "ended": run.reason,
+                                        "exit_status": status, "lines": len(lines)})
+            if self.ms.get_mission(run.mission_id).runtime == "console":
+                self.last_session_tail[run.mission_id] = artifact_id
+                while len(self.last_session_tail) > 256:
+                    self.last_session_tail.pop(next(iter(self.last_session_tail)))
+        except Exception as exc:                       # noqa: BLE001 - diagnostic only
+            log.warning("mission %s: the session tail was not kept (%s)", run.mission_id, type(exc).__name__)
 
     def _capture_post(self, mission_id: str) -> None:
         mission = self.ms.get_mission(mission_id)
@@ -1552,9 +1596,18 @@ class Supervisor:
     def _settle_repair_cancel(self, mission: Mission) -> None:
         """A cancel of a Repair mission whose session may have changed the host. The host is classified FIRST: unchanged from
         the checkpoint means `cancelled`; anything else (changed, unreadable, no manifest) means `needs_operator` with the cancel
-        recorded and a rollback offered. A mission is never closed `cancelled` over a half-applied host."""
+        recorded and a rollback offered. A mission is never closed `cancelled` over a half-applied host.
+
+        rc14.4: except a run that had ALREADY completed (PE's own verification passed) and whose undo did not finish. Nothing is running
+        and the run was verified: the operator's cancel dismisses the undo and closes it, without judging the host (live M-22: a run
+        from before rc14.3 has no end-of-run service record, so every service was compared with the checkpoint and a later mission's
+        update held the cancel forever). A `completed` mission with a cancel recorded only has the request cleared."""
+        if mission.status == "completed":
+            return self._dismiss_cancel_of_completed(mission)
         if mission.status in TERMINAL:
             return
+        if (mission.cancel_requested_by or "").startswith("operator:") and self._unfinished_undo(mission):
+            return self._close_dismissed_undo(mission)
         unchanged = not mission.checkpoint_id          # no checkpoint: no session was ever allowed to start, nothing was applied
         if mission.checkpoint_id and self.checkpoint is not None:
             try:
@@ -1580,8 +1633,78 @@ class Supervisor:
             except IllegalTransition as exc:
                 self._note(mission.id, {"transition_refused": "needs_operator", "why": str(exc)[:200]})
 
+    def _unfinished_undo(self, mission: Mission) -> bool:
+        """The mission completed (verification passed), the operator began its undo, and that undo did not finish: it waits in
+        `rollback_pending` or was handed over (`needs_operator`), no rollback is running, and nothing has executed since the undo."""
+        if mission.status not in ("rollback_pending", "needs_operator") or self.rollback_in_flight(mission.id):
+            return False
+        with self.store._connect() as conn:
+            undo = conn.execute(
+                "SELECT MAX(seq) FROM mission_events WHERE mission_id=? AND kind='state' AND actor LIKE 'operator:%' "
+                "AND body_json LIKE '%\"from\": \"completed\"%' AND body_json LIKE '%\"to\": \"rollback_pending\"%' "
+                "AND body_json NOT LIKE '%\"refused\"%'", (mission.id,)).fetchone()[0]
+            if undo is None:
+                return False
+            later = conn.execute(
+                "SELECT 1 FROM mission_events WHERE mission_id=? AND kind='state' AND seq>? AND body_json NOT LIKE '%\"refused\"%' "
+                "AND (body_json LIKE '%\"to\": \"executing\"%' OR body_json LIKE '%\"to\": \"verifying\"%') LIMIT 1",
+                (mission.id, undo)).fetchone()
+            if later is not None:
+                return False
+            # A restore that wrote part of the checkpoint back has left the host as neither the verified run nor the checkpoint: that
+            # is not "it already passed", and the cancel is judged against the host as before. (A refused restore writes nothing, and a
+            # restore that raised did so before writing.)
+            for (body,) in conn.execute("SELECT body_json FROM mission_events WHERE mission_id=? AND seq>? AND kind='decision' "
+                                        "AND body_json LIKE '%mission.rollback_incomplete%'", (mission.id, undo)):
+                try:
+                    summary = json.loads(body).get("summary") or {}
+                except (ValueError, AttributeError):
+                    return False
+                if not isinstance(summary, dict) or summary.get("partial") or summary.get("written"):
+                    return False
+        return True
+
+    def _dismiss_cancel_of_completed(self, mission: Mission) -> None:
+        """A cancel recorded on a run that is already `completed`: there is nothing to stop and it passed. The request is cleared (so no
+        card shows it and no tick looks at it again) and the acknowledgement recorded. The mission stays completed."""
+        if mission.cancel_requested_at is None:
+            return
+        now = int(self.store._clock())
+        with self.store._write() as conn:
+            cur = conn.execute("UPDATE missions SET cancel_requested_at=NULL, cancel_requested_by=NULL, updated_at=? "
+                               "WHERE id=? AND status='completed' AND cancel_requested_at IS NOT NULL", (now, mission.id))
+            if cur.rowcount == 1:
+                insert_event(conn, mission.id, "decision", ACTOR, {
+                    "event": "cancel.dismissed", "reason": "the run had already completed and passed PE's verification: nothing to cancel",
+                    "cancel_requested_by": mission.cancel_requested_by}, now)
+        self._cancel_held.discard(mission.id)
+
+    def _close_dismissed_undo(self, mission: Mission) -> None:
+        """The operator cancelled the unfinished undo of a run that had completed and passed verification: closed as dismissed."""
+        self._clear_waiting(mission.id)
+        actor = str(mission.cancel_requested_by)          # an operator (checked by the caller): theirs is the edge out of needs_operator
+        now = int(self.store._clock())
+        try:
+            with self.store._write() as conn:             # the close, its label and its reason are one write
+                transition_in_txn(conn, mission.id, "cancelled", actor, now)
+                conn.execute("UPDATE missions SET outcome='dismissed', updated_at=? WHERE id=?", (now, mission.id))
+                insert_event(conn, mission.id, "decision", ACTOR, {
+                    "event": "cancel.dismissed", "reason": "the run had completed and passed PE's verification and its undo did not "
+                                                           "finish: the operator's cancel closes it without judging the host",
+                    "cancel_requested_by": mission.cancel_requested_by, "outcome": "dismissed"}, now)
+        except IllegalTransition as exc:
+            self._note(mission.id, {"transition_refused": "cancelled", "why": str(exc)[:200]})
+            return
+        self._cancel_held.discard(mission.id)
+
     def _finish_pending_repair_cancels(self) -> None:
         """A cancel asked for through a surface that cannot judge the host (MissionService) is finished here, the same way."""
+        with self.store._connect() as conn:
+            done = [r["id"] for r in conn.execute("SELECT id FROM missions WHERE status='completed' AND tier='repair' "
+                                                  "AND cancel_requested_at IS NOT NULL LIMIT 50")]
+        for mission_id in done:                          # rc14.4: a cancel on a completed run is acknowledged, never judged against the host
+            with contextlib.suppress(Exception), self._lock_for(mission_id):
+                self._dismiss_cancel_of_completed(self.ms.get_mission(mission_id))
         for status in ("executing", "verifying", "needs_operator", "recovery_required", "rollback_pending"):
             for mission in self.ms.list_missions(status):
                 # A rollback the Console started holds the mission lock for the whole restore (minutes): waiting for it here would

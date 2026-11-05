@@ -116,8 +116,13 @@ class ConsoleStore:
         return [Conversation(**dict(r)) for r in rows]
 
     def count_open(self) -> int:
+        """Open conversations that still count against `max_open` (rc14.4): one whose mission has finished (closed from the Work log,
+        cancelled, failed) takes no more turns, so it no longer holds a place, though it stays listed until it is archived."""
+        from planet_express.missions.state import TERMINAL
+        marks = ",".join("?" for _ in TERMINAL)
         with self.store._connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM console_conversations WHERE state='open'").fetchone()[0]
+            return conn.execute("SELECT COUNT(*) FROM console_conversations c JOIN missions m ON m.id = c.mission_id "
+                                f"WHERE c.state='open' AND m.status NOT IN ({marks})", tuple(sorted(TERMINAL))).fetchone()[0]
 
     def idle_since(self, cutoff: int) -> list[Conversation]:
         """Open conversations with no activity since `cutoff` (the archive policy's candidates)."""

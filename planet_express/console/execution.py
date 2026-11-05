@@ -43,11 +43,17 @@ def _closed_nothing_checkpointed(mission: Mission) -> bool:
     return mission.status == "failed" and getattr(mission, "outcome_flags", None) == NOTHING_CHECKPOINTED_FLAG
 
 
+# rc14.4: a run that was done and verified, whose undo did not finish, closed at the operator's cancel without judging the host.
+DISMISSED_STATUS = ("Closed \u2014 it was done and verified; the unfinished undo was dismissed", "none")
+
+
 def repair_status(mission: Mission, rolling_back: bool = False) -> tuple[str, str]:
     if rolling_back and mission.status not in SETTLED:
         return ROLLING_BACK
     if _closed_nothing_checkpointed(mission):
         return NOTHING_SNAPSHOTTED_STATUS
+    if mission.status == "cancelled" and getattr(mission, "outcome", None) == "dismissed":
+        return DISMISSED_STATUS
     return REPAIR_STATUS.get(mission.status, ("Working", "ok"))
 
 

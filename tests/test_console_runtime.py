@@ -374,6 +374,7 @@ def test_an_interrupted_turn_never_publishes_the_plan_it_had_written(tmp_path):
     handle, workspace, cs = rig.start()
     (workspace / "plan.json").write_text(json.dumps(GOOD_PLAN))
     rig.cont.write_output(cs.session_id, b'{"type":"assistant","message":{"content":[{"type":"text","text":"drafting"}]}}\n')
+    rig.runtime.stopping(handle)                                                          # the supervisor's interrupt says so before its kill
     rig.cont.crash(cs.session_id)                                                         # the stream ends with no result line: interrupted
     assert rig.runtime.status(handle).state == "failed"
     result = rig.runtime.collect(handle)                                                  # the supervisor's interrupt path collects it anyway

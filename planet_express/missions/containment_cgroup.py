@@ -99,6 +99,7 @@ class CgroupContainment:
         self.launcher = launcher
         self._leaders: dict[str, object] = {}
         self._out: dict[str, object] = {}
+        self._exits: dict[str, int] = {}          # the leader's exit status once reaped, until cleanup (rc14.4: kept in session-tail.txt)
 
     # --- low-level file access (overridable seam for tests) ---------------------------------
 
@@ -131,8 +132,11 @@ class CgroupContainment:
     def _reap(self, session_id, path):
         leader = self._leaders.get(session_id)
         if leader is not None:
-            if leader.poll() is not None:
+            code = leader.poll()
+            if code is not None:
                 del self._leaders[session_id]
+                if isinstance(code, int):
+                    self._exits[session_id] = code
             return
         # A session this instance did not launch (Core restarted or re-exec'd; the children stayed): its dead
         # leader is our zombie child and keeps the cgroup populated until somebody waits for it.
@@ -293,6 +297,12 @@ class CgroupContainment:
             raise ContainmentError(f"cannot remove cgroup: {exc.strerror}") from exc
         self._remove_sock_dir(cs.session_id)
         self._leaders.pop(cs.session_id, None)
+        self._exits.pop(cs.session_id, None)
+
+    def exit_status(self, cs) -> int | None:
+        """The session leader's exit status (the launcher execs the agent, so it is the agent's; negative: killed by that signal),
+        once it has been reaped and until cleanup. None when unknown (not yet reaped, or a session this instance did not launch)."""
+        return self._exits.get(cs.session_id)
 
     def _remove_sock_dir(self, session_id: str) -> None:
         """The per-session socket directory (made by Core before the launch, handed to the session's group by the helper): unlink what Core bound in it and

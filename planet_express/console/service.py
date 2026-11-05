@@ -142,6 +142,7 @@ class ConsoleService:
 
     # ── the supervisor's callbacks ────────────────────────────────────────────────────────
     def turn_ended(self, mission_id: str, reason: str, had_result: bool) -> None:
+        tail = getattr(self.supervisor, "last_session_tail", {}).pop(mission_id, None)     # rc14.4: why it died, kept as an artifact
         conv = self.console.by_mission(mission_id)
         if conv is None or had_result or reason in ("cancel", "result"):
             return
@@ -154,6 +155,8 @@ class ConsoleService:
         why = _WHY.get(reason, "The turn did not finish.")
         if reason == "start_failed" and conv.tokens_left < self.cfg.min_turn_tokens:
             why = "This conversation's model budget is used up. Start a new conversation to go on."
+        if tail:
+            why += " What the session printed last is kept with this conversation's run record (session-tail.txt)."
         self.console.add_message(conv.id, "system", why, turn=conv.turns or None)
 
     def tick(self) -> None:

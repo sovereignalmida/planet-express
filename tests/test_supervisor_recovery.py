@@ -139,3 +139,41 @@ def test_recover_cleans_up_an_empty_leftover_cgroup(tmp_path):
     rig.sup = rig.new_supervisor()
     assert rig.sup.recover() == []
     assert not rig.cont.exists(old)
+
+
+def test_a_crashed_command_session_keeps_its_last_output_lines_and_exit_status(tmp_path):
+    """rc14.4: why a Repair (command) session died is kept as session-tail.txt, redacted, with the exit status."""
+    import json
+    import sqlite3
+
+    from planet_express.missions.adapters.command import CommandRuntime
+    rig = Rig(tmp_path, budgets={"retries": 0})
+    runtime = CommandRuntime(rig.cont, argv=["/usr/bin/agent"], worker_socket="/run/w.sock")
+    rig.sup.runtime_factory = lambda mission: runtime
+    rig.sup.start(rig.mid)
+    sid = rig.session_ids()[0]
+    rig.cont.write_output(sid, b'{"type":"system"}\nTraceback (most recent call last):\nRuntimeError: boom PASSWORD=hunter2hunter2\n')
+    rig.cont.crash(sid, exit_status=2)
+    rig.sup.poll(rig.mid)
+    assert rig.status() == "needs_operator"
+    with sqlite3.connect(rig.store.path) as db:
+        paths = [r[0] for r in db.execute("SELECT path FROM mission_artifacts WHERE mission_id=? AND name='session-tail.txt'", (rig.mid,))]
+    text = open(paths[0]).read()
+    assert "exit status: 2" in text and "RuntimeError: boom" in text and "hunter2hunter2" not in text and '"system"' not in text
+    note = [json.loads(e.body_json) for e in rig.ms.events(rig.mid) if e.kind == "note" and "session_tail" in e.body_json]
+    assert note[0]["lines"] == 2 and note[0]["ended"] == "crash"
+
+
+def test_a_cancelled_command_session_keeps_no_tail(tmp_path):
+    import sqlite3
+
+    from planet_express.missions.adapters.command import CommandRuntime
+    rig = Rig(tmp_path, budgets={"retries": 0})
+    runtime = CommandRuntime(rig.cont, argv=["/usr/bin/agent"], worker_socket="/run/w.sock")
+    rig.sup.runtime_factory = lambda mission: runtime
+    rig.sup.start(rig.mid)
+    rig.cont.write_output(rig.session_ids()[0], b"working\n")
+    rig.sup.cancel(rig.mid, "operator:alice")
+    assert rig.status() == "cancelled"
+    with sqlite3.connect(rig.store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM mission_artifacts WHERE name='session-tail.txt'").fetchone()[0] == 0

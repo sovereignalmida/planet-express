@@ -9,6 +9,7 @@ workspace, and PE validates that file. Its
 words are untrusted data: they are redacted and stored, shown to the operator, and never executed or treated as a decision.
 """
 
+import contextlib
 import logging
 import os
 import stat
@@ -35,6 +36,7 @@ MAX_EVENTS_PER_POLL = 256             # AgentUpdate's own limit
 MAX_BACKLOG = 10_000                  # events carried between polls while the turn runs
 _DRAIN_PER_CALL = 256 * 1024
 MAX_PLAN_RETRIES = 2                  # automatic "fix your plan" turns per operator message (rc14.2)
+MAX_TAILS = 64                        # ended turns whose output tail waits for the supervisor to take it
 SYSTEM = (
     "You are Planet Express's investigation agent for one operator's Docker Compose homelab. You are PE-aware: BRIEF.md in the current "
     "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. You have full "
@@ -76,6 +78,8 @@ class _Run:
         self.parser = StreamParser()
         self.backlog: list[AgentEvent] = []
         self.output_open = True
+        self.stopping = False          # PE is stopping it (an interrupt): a turn PE ended is never "ended early" (rc14.4)
+        self.ended_early = False       # rc14.4: the process exited by itself with no result line, but left a plan or a reply
 
 
 class ConsoleRuntime:
@@ -91,6 +95,7 @@ class ConsoleRuntime:
         self.inventory = inventory                # () -> the host's stacks and services (None where Repair is not available): a plan's scope is checked against it
         self.checks = checks                      # () -> `verify.checks.Availability`: the checks this host can run (offered in PLAN_FORMAT.md, enforced on the plan)
         self._runs: dict[str, _Run] = {}
+        self._tails: dict[str, dict] = {}         # run id -> the ended turn's output tail, until the supervisor takes it (rc14.4)
 
     # ── AgentRuntime ──────────────────────────────────────────────────────────────────────
     def start(self, mission, context: RunContext, grant) -> RunHandle:
@@ -156,19 +161,68 @@ class ConsoleRuntime:
             update, run.backlog = pending[:MAX_EVENTS_PER_POLL], pending[MAX_EVENTS_PER_POLL:][-MAX_BACKLOG:]    # carried to the next poll, in order
         if not empty:
             return AgentUpdate(state="running", events=update)
-        return AgentUpdate(state="finished" if run.parser.result.subtype is not None else "failed", events=update)
+        if run.parser.result.subtype is None and not run.stopping and not run.ended_early and self._left_something(run):
+            # rc14.4 (live M-26): the CLI exited by itself without its result line, after writing a plan or streaming its reply. That is
+            # not a crash: the turn is collected like a finished one, its plan and reply kept, and the operator told it ended early.
+            run.ended_early = True
+        return AgentUpdate(state="finished" if run.parser.result.subtype is not None or run.ended_early else "failed", events=update)
+
+    def stopping(self, handle) -> None:
+        """PE is about to stop this turn itself (an operator's interrupt): what is collected after is a stopped turn, never one that
+        ended early by itself."""
+        run = self._runs.get(handle.run_id)
+        if run is not None:
+            run.stopping = True
+
+    def take_tail(self, handle) -> dict | None:
+        """The ended turn's last non-JSON output lines (redacted, bounded) and whether it ended without a result line, once."""
+        tail = self._tails.pop(handle.run_id, None)
+        run = self._runs.get(handle.run_id)
+        if run is not None:                                 # still tracked (its cancel could not prove it dead): its latest tail
+            with contextlib.suppress(Exception):
+                run.parser.feed(self._drain(run))
+                tail = {"lines": run.parser.tail(), "no_result": run.parser.result.subtype is None}
+        return tail
+
+    def _keep_tail(self, run: _Run, handle_id: str) -> None:
+        try:
+            self._tails[handle_id] = {"lines": run.parser.tail(), "no_result": run.parser.result.subtype is None}
+            while len(self._tails) > MAX_TAILS:
+                self._tails.pop(next(iter(self._tails)))
+        except Exception:                                   # the tail is diagnostic only
+            log.debug("console turn %s: no output tail kept", handle_id, exc_info=True)
+
+    def _left_something(self, run: _Run) -> bool:
+        """A turn that died without its result line left something the operator can use: a plan file, or words it said. Read only
+        after the process is provably gone and its output drained."""
+        getter = getattr(self.containment, "exit_status", None)
+        status = None
+        if getter is not None:
+            try:
+                status = getter(run.cs)
+            except Exception:                               # noqa: BLE001 -- unknown is not a signal
+                status = None
+        if isinstance(status, int) and status < 0:
+            return False                                    # killed by a signal (the OOM killer, say): a crash, whatever it left
+        return os.path.lexists(run.workspace / plan_mod.PLAN_FILE) or run.parser.has_closing_text()
 
     def cancel(self, handle) -> None:
         run = self._runs.get(handle.run_id)
         if run is None:
             return
-        self.containment.kill(run.cs)                       # raises if it cannot prove the session empty
+        run.ended_early = False                             # PE stopped it (a budget, a tamper, a crash): never "ended early"
+        try:
+            self.containment.kill(run.cs)                   # raises if it cannot prove the session empty
+        except BaseException:
+            self._keep_tail(run, handle.run_id)             # the hard-to-kill case is the one whose tail matters most
+            raise
         try:
             # A turn that is killed (a budget, a crash, a tamper) still used the model and still said something: keep it and charge it.
             run.parser.feed(self._drain(run), final=True)
             self._record(run, run.parser.finish(), keep_plan=False)       # a stopped turn's plan is not offered to the operator
         except Exception:                                   # noqa: BLE001 -- recording must never block the kill that already happened
             pass
+        self._keep_tail(run, handle.run_id)
         if self.broker is not None:
             self.broker.clear_mission_cap(run.mission_id)
         self._release(run)
@@ -181,10 +235,12 @@ class ConsoleRuntime:
         try:
             run.parser.feed(self._drain(run), final=True)
             result = run.parser.finish()
-            self._record(run, result, keep_plan=not result.interrupted)       # a turn stopped part-way never publishes a plan
+            # A turn stopped part-way never publishes a plan; one that ended early by itself (rc14.4) does: the agent finished writing it.
+            self._record(run, result, keep_plan=not result.interrupted or run.ended_early)
             reply = result.reply or "(the agent gave no reply)"
             return AgentResult(diagnosis=reply[:8000], confidence="low" if result.interrupted else "medium")
         finally:
+            self._keep_tail(run, handle.run_id)
             self._release(run)
             self._runs.pop(handle.run_id, None)
 
@@ -193,7 +249,9 @@ class ConsoleRuntime:
         conv_id = run.conversation_id
         if result.reply:
             self.console.add_message(conv_id, "agent", result.reply, turn=run.turn)
-        if result.interrupted:
+        if run.ended_early:
+            pass                                       # rc14.4: said below, after the plan is read, so the note names what is really shown
+        elif result.interrupted:
             self.console.add_message(conv_id, "system", "This turn was stopped before it finished.", turn=run.turn)
         elif not result.reply:
             self.console.add_message(conv_id, "system", "The agent gave no reply.", turn=run.turn)
@@ -207,28 +265,35 @@ class ConsoleRuntime:
                 # interrupting turns over and over cannot dodge the conversation's budget (conservative, never an undercount).
                 tokens = usage["tokens"] + usage.get("reserved", 0)
         self.console.add_usage(conv_id, tokens)                    # before anything that can fail: what the vendor charged is always counted
+        planned = False
         if keep_plan:
-            self._plan(run)
+            planned = self._plan(run)
             try:
                 self._lessons(run)
             except Exception:
                 log.exception("console lessons for %s failed", conv_id)
+        if run.ended_early:
+            shown = " and ".join(w for w, there in (("plan", planned), ("reply", bool(result.reply))) if there)
+            self.console.add_message(conv_id, "system", "The agent's session ended before it signed off"
+                                     + (f"; its {shown} {'are' if ' and ' in shown else 'is'} shown." if shown else "."), turn=run.turn)
 
-    def _plan(self, run: _Run) -> None:
+    def _plan(self, run: _Run) -> bool:
+        """Read the turn's plan. True when one was stored for the operator."""
         if not os.path.lexists(run.workspace / plan_mod.PLAN_FILE):
-            return                                                     # the agent proposed no plan this turn
+            return False                                               # the agent proposed no plan this turn
         inventory = self._inventory()
         if inventory is None:
             # The agent was told it cannot name a scope: a plan written anyway is refused, never taken on faith.
             self.console.add_message(run.conversation_id, "system", "The agent's plan was refused: this host's inventory is not available, so its scope cannot be checked.", turn=run.turn)
-            return
+            return False
         try:
             plan = plan_mod.load_file(str(run.workspace), inventory=inventory,                # a link, a directory, a FIFO or a bad file is a refused plan, never a crash
                                       available=self._checks())
         except plan_mod.PlanError as exc:
             self._refused(run, str(exc))
-            return
+            return False
         self.console.add_plan(run.conversation_id, run.turn, plan_mod.canonical(plan), plan_mod.plan_hash(plan))
+        return True
 
     def _refused(self, run: _Run, reason: str) -> None:
         """A refused plan goes back to the planner (rc14.2): PE queues the next turn of the same conversation itself, attributed to

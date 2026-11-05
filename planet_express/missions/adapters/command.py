@@ -19,10 +19,12 @@ adapter only starts, reports, cancels and collects. Spawning always goes through
 which puts the process inside the session's containment.
 """
 
+import contextlib
 import json
 import os
 import re
 import stat
+from collections import deque
 from pathlib import Path
 
 from config_schema import MissionRuntimeConfig
@@ -40,6 +42,8 @@ MAX_RESULT_BYTES = 256 * 1024
 MAX_LINE_CHARS = 4096
 _DRAIN_PER_CALL = 256 * 1024
 TRUNCATED = "[output truncated]"
+TAIL_LINES = 64                 # the last non-JSON output lines kept for `session-tail.txt` (rc14.4)
+MAX_TAILS = 64
 
 
 class AgentResultError(ValueError):
@@ -48,6 +52,11 @@ class AgentResultError(ValueError):
 
 def _chunks(text: str, size: int = 8000):
     return [text[i:i + size] for i in range(0, len(text), size)][:256]
+
+
+def _is_json_object(line: str) -> bool:
+    stripped = line.strip()                      # cheap on the drain path: a line shaped like an object is the stream, not the tail
+    return stripped.startswith("{") and stripped.endswith(("}", "[line truncated]"))
 
 
 class _Run:
@@ -61,6 +70,7 @@ class _Run:
         self.output_open = True
         self.notified = False
         self.emitted = 0
+        self.tail: deque = deque(maxlen=TAIL_LINES)     # redacted (each line is cleaned before it is kept)
 
 
 class CommandRuntime:
@@ -82,6 +92,7 @@ class CommandRuntime:
         # what the session sees (`grants.make_env_policy`). An exception from it stops the start: fail closed.
         self.env_policy = env_policy
         self._runs: dict[str, _Run] = {}
+        self._tails: dict[str, dict] = {}
 
     # --- AgentRuntime ----------------------------------------------------------------------
 
@@ -118,6 +129,9 @@ class CommandRuntime:
         if run is None:
             return
         self.containment.kill(run.cs)  # raises if it cannot prove the session empty
+        with contextlib.suppress(Exception):   # diagnostic only: never blocks the kill that already happened
+            self._drain(run, final=True)       # what it printed dying is the tail worth keeping
+        self._keep_tail(run, handle.run_id)
         self._release(run)
         del self._runs[handle.run_id]
 
@@ -128,8 +142,19 @@ class CommandRuntime:
         try:
             return self._read_result(run.workspace)
         finally:
+            self._keep_tail(run, handle.run_id)
             self._release(run)
             self._runs.pop(handle.run_id, None)
+
+    def take_tail(self, handle) -> dict | None:
+        """The ended session's last non-JSON output lines (redacted, bounded) and whether it left no result, once (rc14.4)."""
+        return self._tails.pop(handle.run_id, None)
+
+    def _keep_tail(self, run, run_id) -> None:
+        with contextlib.suppress(Exception):   # diagnostic only
+            self._tails[run_id] = {"lines": list(run.tail), "no_result": not self._has_result(run.workspace)}
+            while len(self._tails) > MAX_TAILS:
+                self._tails.pop(next(iter(self._tails)))
 
     # --- internals -------------------------------------------------------------------------
 
@@ -219,6 +244,10 @@ class CommandRuntime:
                 out.append(self._clean(data) + "\n")
             data = b""
         run.partial = data
+        for line in out:
+            stripped = line.rstrip("\n")
+            if stripped.strip() and not _is_json_object(stripped):
+                run.tail.append(stripped[:500])
         text = "".join(out)
         # Redaction can expand a line (`TOKEN=x` -> `TOKEN=[REDACTED]`), so the ceiling is enforced
         # on what is emitted as well as on what was read.

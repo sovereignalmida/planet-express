@@ -12,6 +12,7 @@ touches the host, and nothing it returns is evidence of anything. Its rules, eac
 
 import json
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,6 +25,8 @@ MAX_ARG = 300                        # characters of one tool argument kept for 
 MAX_DELTA = 4000
 MAX_REPLY = 32_000
 MAX_EVENTS_PER_TURN = 2000
+TAIL_LINES = 64                      # non-JSON lines kept (the CLI's stderr is merged into the pipe): why a session died
+MAX_TAIL_LINE = 500                  # characters of one such line kept
 READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "NotebookRead", "TodoRead"})
 CHANGING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 # Which arguments of a tool call are worth showing. Anything else is dropped, not stored.
@@ -52,6 +55,7 @@ class TurnResult:
     skipped_lines: int = 0
     truncated: bool = False
     events_dropped: int = 0
+    from_deltas: bool = False          # rc14.4: the reply was assembled from streamed text (no complete message carried it)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -84,6 +88,13 @@ class StreamParser:
     _last_text: str = ""
     _events: int = 0
     _tool_names: dict[str, str] = field(default_factory=dict)
+    # rc14.4: text streamed since the last complete assistant message (or message start). A process that dies after streaming its
+    # final words but before the CLI wrote that message (or the result line) still said them: bounded, redacted when used.
+    _delta_text: str = ""
+    # rc14.4: complete text the agent wrote since its last tool call or result (its closing words, when it has any).
+    _closing_text: str = ""
+    # rc14.4: the last non-JSON output lines (the CLI's own stderr: a stack trace, an error), raw and bounded; redacted on the way out.
+    _tail: deque = field(default_factory=lambda: deque(maxlen=TAIL_LINES))
 
     def feed(self, data: bytes, *, final: bool = False) -> list[TurnEvent]:
         """Take more bytes; return the events for the complete lines in them. `final` also takes an unterminated last line."""
@@ -117,8 +128,23 @@ class StreamParser:
         if res.subtype is None:
             res.interrupted = True              # the stream ended with no result line: stopped part-way, what it said is still kept
         if not res.reply:
-            res.reply = _clip(self._last_text, MAX_REPLY)
+            if self._delta_text.strip():
+                # Streamed after the last complete message: newer than `_last_text` (the CLI writes the message after its deltas). It is
+                # joined to any complete closing text before it, so a full answer followed by a cut-off fragment keeps the answer.
+                joined = "\n\n".join(t for t in (self._closing_text.strip(), self._delta_text.strip()) if t)
+                res.reply, res.from_deltas = _clip(joined, MAX_REPLY), True
+            else:
+                res.reply = _clip(self._last_text, MAX_REPLY)
         return res
+
+    def has_closing_text(self) -> bool:
+        """The agent's last act was to say something (complete or streamed text AFTER its last tool call or result), result line or
+        not: its closing words. A sentence before a tool call that was never answered is not one."""
+        return bool(self._delta_text.strip() or self._closing_text.strip())
+
+    def tail(self) -> list[str]:
+        """The last non-JSON lines the process printed, redacted and bounded (oldest first)."""
+        return [redact(line) for line in self._tail]
 
     # ── internals ─────────────────────────────────────────────────────────────────────────
     def _bounded(self, events: list[TurnEvent]) -> list[TurnEvent]:
@@ -136,13 +162,16 @@ class StreamParser:
             self.result.skipped_lines += 1
             self.result.truncated = True
             return
+        text = raw.decode("utf-8", errors="replace")
         try:
-            obj = json.loads(raw.decode("utf-8", errors="replace"))
+            obj = json.loads(text)
         except (ValueError, RecursionError):
             self.result.skipped_lines += 1
+            self._keep_tail(text)
             return
         if not isinstance(obj, dict):
             self.result.skipped_lines += 1
+            self._keep_tail(text)
             return
         kind = obj.get("type")
         sid = obj.get("session_id")
@@ -151,8 +180,12 @@ class StreamParser:
         if kind == "stream_event":
             event = obj.get("event")
             delta = event.get("delta") if isinstance(event, dict) else None
+            if isinstance(event, dict) and event.get("type") == "message_start":
+                self._delta_text = ""
             if isinstance(delta, dict) and delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
                 deltas.append(delta["text"])
+                if len(self._delta_text) < MAX_REPLY + 512:
+                    self._delta_text += delta["text"][:MAX_REPLY + 512 - len(self._delta_text)]
         elif kind == "assistant":
             self._assistant(obj.get("message"), events)
         elif kind == "user":
@@ -182,6 +215,11 @@ class StreamParser:
                                                  **({"changes_files": True} if changes else {})}))
         if texts:
             self._last_text = "\n".join(texts)
+            if len(self._closing_text) < MAX_REPLY + 512:
+                self._closing_text = (self._closing_text + "\n" + self._last_text).strip()[:MAX_REPLY + 512]
+        if any(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks):
+            self._closing_text = ""                 # a tool call: what was said before it was not the agent's last word
+        self._delta_text = ""                       # a complete message carries what was streamed before it
 
     def _tool_results(self, message: Any, events: list[TurnEvent]) -> None:
         blocks = message.get("content") if isinstance(message, dict) else None
@@ -189,6 +227,7 @@ class StreamParser:
             return
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_result":
+                self._closing_text = self._delta_text = ""
                 text = _flatten(block.get("content"))
                 clipped = len(text) > MAX_EXCERPT
                 tool_id = block.get("tool_use_id")
@@ -196,6 +235,11 @@ class StreamParser:
                     "result_of": self._tool_names.get(tool_id[:128] if isinstance(tool_id, str) else "", "?"),
                     "excerpt": _clip(text[:MAX_EXCERPT + 1], MAX_EXCERPT), "bytes": len(text),
                     "is_error": bool(block.get("is_error")), **({"clipped": True} if clipped else {})}))
+
+    def _keep_tail(self, text: str) -> None:
+        line = text.rstrip("\r\n")
+        if line.strip():
+            self._tail.append(line[:MAX_TAIL_LINE] + (" [truncated]" if len(line) > MAX_TAIL_LINE else ""))
 
     def _final(self, obj: dict) -> None:
         res = self.result
@@ -212,4 +256,4 @@ class StreamParser:
                              and isinstance(v, int) and not isinstance(v, bool) and v > 0)
 
 
-__all__ = ["MAX_EXCERPT", "READ_ONLY_TOOLS", "StreamParser", "TurnEvent", "TurnResult"]
+__all__ = ["MAX_EXCERPT", "READ_ONLY_TOOLS", "TAIL_LINES", "StreamParser", "TurnEvent", "TurnResult"]

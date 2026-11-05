@@ -54,6 +54,7 @@ class _Group:
     spawns: list[dict] = field(default_factory=list)
     out_read: int | None = None                         # merged stdout/stderr, created on first write_output
     out_write: int | None = None
+    exit_status: int | None = None                      # set by crash(exit_status=...)
 
 
 class FakeContainment:
@@ -171,10 +172,15 @@ class FakeContainment:
         """After kill(), the members survive `polls` is_empty() calls."""
         self._groups[session_id].ignore_polls = polls
 
-    def crash(self, session_id: str) -> None:
+    def crash(self, session_id: str, exit_status: int | None = None) -> None:
         """The session's processes die on their own (leaked children are not affected)."""
         group = self._groups[session_id]
         group.members &= group.leaked
+        group.exit_status = exit_status
+
+    def exit_status(self, cs: ContainedSession) -> int | None:
+        group = self._group(cs)
+        return group.exit_status if group else None
 
     def leak_child(self, session_id: str) -> int:
         group = self._groups[session_id]

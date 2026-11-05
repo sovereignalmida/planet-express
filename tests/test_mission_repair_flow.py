@@ -920,3 +920,67 @@ def test_an_undo_refuses_a_snapshot_older_than_the_last_session(stack):
         conn.execute("UPDATE mission_sessions SET issued_at=issued_at+100000 WHERE mission_id=?", (mid,))
     with pytest.raises(ResumeRefused, match="predates its last session"):
         st.sup.roll_back(mid, "operator:alice")
+
+
+# ── rc14.4: a cancel on a run that already passed verification is acknowledged, never judged against the host ─────────────────
+def test_cancelling_a_verified_run_whose_undo_did_not_finish_closes_it_as_dismissed(stack):
+    """Live M-22: a completed run, its undo refused and handed to the operator, then the operator's cancel. Before rc14.4 the cancel
+    compared the host with the checkpoint and was held for good by a later mission's change."""
+    from planet_express.application.mission_service import MissionService
+    from planet_express.console.execution import DISMISSED_STATUS, repair_status
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    st.env.compose.write_text(original + "# someone else's later edit\n")
+    assert st.flow.roll_back("operator:alice", mid)["restore"] == "refused" and st.status(mid) == "needs_operator"
+    MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    st.sup.tick()
+    mission = st.ms.get_mission(mid)
+    assert mission.status == "cancelled" and mission.outcome == "dismissed" and not noted(st, mid, "cancel.held")
+    assert [b["cancel_requested_by"] for b in noted(st, mid, "cancel.dismissed")] == ["operator:alice"]
+    assert st.env.compose.read_text().endswith("# someone else's later edit\n")          # the host was not touched or judged
+    assert leases_mod.held_by(st.store, mid) == []
+    assert repair_status(mission) == DISMISSED_STATUS
+    st.sup.tick()
+    assert len(noted(st, mid, "cancel.dismissed")) == 1
+
+
+def test_a_cancel_recorded_on_a_completed_run_is_cleared_once_and_the_run_stays_completed(stack):
+    st = stack()
+    mid, _ = _completed_with_a_change(st)
+    with st.store._write() as conn:
+        conn.execute("UPDATE missions SET cancel_requested_at=1, cancel_requested_by='operator:alice' WHERE id=?", (mid,))
+    for _ in range(3):
+        st.sup.tick()
+    mission = st.ms.get_mission(mid)
+    assert mission.status == "completed" and mission.cancel_requested_at is None
+    assert len(noted(st, mid, "cancel.dismissed")) == 1 and not noted(st, mid, "cancel.held")
+
+
+def test_a_cancel_of_a_run_that_never_completed_is_still_judged_against_the_host(stack):
+    """The dismissal is only for a run that passed verification: a crashed run that changed the host is still held."""
+    from planet_express.application.mission_service import MissionService
+    st = stack(behaviours=[{"script": [update()] * 6}])
+    mid = st.propose()["mission_id"]
+    st.approve_all(mid)
+    st.sup.tick()
+    st.env.compose.write_text(st.env.compose.read_text() + "# half applied\n")
+    st.cont.crash(st.runtimes[0].context.session.session_id)
+    st.sup.tick()
+    MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    st.sup.tick()
+    assert st.status(mid) in ("needs_operator", "recovery_required") and noted(st, mid, "cancel.held")
+    assert not noted(st, mid, "cancel.dismissed")
+
+
+def test_a_cancel_after_an_undo_that_wrote_part_way_is_still_judged_against_the_host(stack):
+    from planet_express.application.mission_service import MissionService
+    st = stack()
+    mid, original = _completed_with_a_change(st)
+    st.env.compose.write_text(original + "# someone else's later edit\n")
+    st.flow.roll_back("operator:alice", mid)
+    assert st.status(mid) == "needs_operator"
+    st.ms.append_event(mid, "decision", "supervisor", {"event": "mission.rollback_incomplete", "reason": "x",
+                                                      "summary": {"status": "failed", "partial": True, "written": ["compose.yaml"]}})
+    MissionService(st.store, enabled=lambda: True).cancel_mission(mid, operator="alice")
+    st.sup.tick()
+    assert st.status(mid) == "needs_operator" and not noted(st, mid, "cancel.dismissed") and noted(st, mid, "cancel.held")
