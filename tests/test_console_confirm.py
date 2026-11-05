@@ -303,7 +303,7 @@ def test_the_context_panel_follows_the_run_and_says_when_it_has_ended(rig):
 
 
 # ── rc14.2: "go ahead" in the chat opens the Authorise card; it never approves and never reaches the agent ────────────────────
-@pytest.mark.parametrize("text", ["do it", "Go ahead!", "yes", "apply it", "authorise", "Please go ahead.", "yes, do it"])
+@pytest.mark.parametrize("text", ["do it", "Go ahead!", "apply it", "authorise", "Please go ahead.", "yes, do it"])
 def test_a_go_ahead_with_a_valid_plan_opens_the_same_card_as_confirm_for_the_recommended_option(rig, text):
     plan_id = rig.add_plan()
     out = rig.api.post(rig.conv.id, "chris", text)
@@ -333,11 +333,11 @@ def test_anything_else_or_no_valid_plan_goes_to_the_agent_as_written(rig):
 
 
 def test_the_go_ahead_phrases_are_whole_messages_only():
-    for text in ("do it", "DO IT.", "go ahead", "yes please", "ok, go ahead", "authorize it", "apply it", "let's do it", "approve option c"):
+    for text in ("do it", "DO IT.", "go ahead", "ok, go ahead", "authorize it", "apply it", "let's do it", "approve option c"):
         assert plan_mod.goes_ahead(text)[0], text
     for text in ("do it later", "go ahead and explain", "yes but why", "no", "", "confirm the logs first", "what does option B do?"):
         assert not plan_mod.goes_ahead(text)[0], text
-    assert plan_mod.goes_ahead("approve option c") == (True, 2) and plan_mod.goes_ahead("yes") == (True, None)
+    assert plan_mod.goes_ahead("approve option c") == (True, 2) and plan_mod.goes_ahead("yes") == (False, None)   # a bare yes answers questions (review, rc14.2)
 
 
 def test_a_completed_run_offers_undo_and_the_console_rolls_it_back_in_the_background(rig):

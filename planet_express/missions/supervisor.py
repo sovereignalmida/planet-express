@@ -1108,7 +1108,11 @@ class Supervisor:
             # Asked AFTER the leases are held, as a start does: no v3 change can take the lock from here on.
             self._release_rollback(mission.id)
             raise ResumeRefused(f"{mission.id} cannot be rolled back now: {owner} is changing the host; try again when it finishes")
-        self._note(mission.id, {"rollback_leases_taken": sorted(leases.held_by(self.store, mission.id))[:20]})
+        try:
+            self._note(mission.id, {"rollback_leases_taken": sorted(leases.held_by(self.store, mission.id))[:20]})
+        except BaseException:
+            self._release_rollback(mission.id)                 # never keep leases the caller does not know it holds (review)
+            raise
         return True
 
     def _release_rollback(self, mission_id: str) -> None:
@@ -1161,7 +1165,10 @@ class Supervisor:
     def _roll_back_held(self, mission: Mission, actor: str, ack_drift: bool) -> Any:
         mission_id = mission.id
         undo = mission.status == "completed" or self._undoing_completed(mission_id)
-        if not (undo and self.checkpoint.has_post(mission.checkpoint_id)):
+        if undo and not self.checkpoint.has_post(mission.checkpoint_id):
+            # Without the snapshot taken when the run ended, drift since then could not be seen: refuse rather than overwrite it blind.
+            raise ResumeRefused("this run's end-of-run snapshot is missing, so PE cannot tell what changed since; roll back by hand")
+        if not undo:
             try:
                 self.checkpoint.capture_post(mission.checkpoint_id)
             except Exception as exc:                  # noqa: BLE001 - nothing has changed yet: the operator can try again

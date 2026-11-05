@@ -384,3 +384,50 @@ def test_the_planner_and_the_repair_brief_say_to_back_up_stateful_data_and_to_an
     repair = brief.instructions_for("repair")
     assert ".pe-backup-" in repair and "sudo cp -a" in repair and "backup path in your result" in repair
     assert ".pe-backup-" not in brief.instructions_for("observe")
+
+
+def test_a_check_without_an_id_is_given_one_instead_of_refusing_the_plan():
+    """Live rc14.1 (M-23, M-24): every plan was refused with "options.0.checks.0.id: missing", so Authorise never appeared."""
+    from planet_express.console import plan as plan_mod
+    doc = good()
+    doc["options"][0]["checks"] = [{k: v for k, v in CHECK.items() if k != "id"},
+                                   {k: v for k, v in CHECK.items() if k != "id"}]
+    parsed = plan_mod.parse(doc)
+    ids = [c.id for c in parsed.options[0].checks]
+    assert all(ids) and len(set(ids)) == len(ids)
+
+
+def test_the_instructions_spell_out_a_checks_shape():
+    from planet_express.console.plan import instructions
+    assert '"id"' in instructions() and '"params"' in instructions()
+
+
+def test_an_unhashable_check_id_is_an_ordinary_refusal():
+    """Codex, hotfix: an id that is a list or object must be refused as invalid, never crash parse()."""
+    from planet_express.console import plan as plan_mod
+    doc = good()
+    doc["options"][0]["checks"] = [{**CHECK, "id": ["x"]}, {k: v for k, v in CHECK.items() if k != "id"}]
+    with pytest.raises(plan_mod.PlanError):
+        plan_mod.parse(doc)
+
+
+def test_a_check_kind_that_is_a_list_or_object_is_refused_not_a_crash():
+    """Review, rc14.2: lenient() looked a list kind up in a dict and raised TypeError past PlanError."""
+    from planet_express.console import plan as plan_mod
+    for kind in (["http"], {"x": 1}):
+        doc = good()
+        doc["options"][0]["checks"] = [{"check": kind, "params": {}}]
+        with pytest.raises(plan_mod.PlanError):
+            plan_mod.parse(doc)
+
+
+@pytest.mark.parametrize("text", ["yes", "yep", "yeah", "apply", "Yes."])
+def test_a_bare_yes_is_not_a_go_ahead(text):
+    from planet_express.console.plan import goes_ahead
+    assert goes_ahead(text)[0] is False
+
+
+@pytest.mark.parametrize("text", ["do it", "go ahead", "yes, do it", "ok go ahead please", "authorise it"])
+def test_phrases_that_only_mean_carry_it_out_still_are(text):
+    from planet_express.console.plan import goes_ahead
+    assert goes_ahead(text)[0] is True

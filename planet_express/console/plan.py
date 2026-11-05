@@ -162,7 +162,8 @@ def lenient(doc: Any) -> Any:
             check.setdefault("params", {})
             cid = check.get("id")
             if cid is None or (isinstance(cid, str) and not cid.strip()):
-                kind = check.get("check") if check.get("check") in PARAM_MODELS else "check"
+                raw = check.get("check")
+                kind = raw if isinstance(raw, str) and raw in PARAM_MODELS else "check"     # a list/object kind must not crash (review)
                 cid = f"{kind}-{n}"
             if isinstance(cid, str):
                 cid = cid.strip()
@@ -484,7 +485,8 @@ PLAN_INSTRUCTIONS = (
     "<stack>/<service>). PE leases it, so no other run works on it at the same time, and checkpoints its compose files before the "
     "run. `exclude` lists resource ids such as service:<stack>/<service> the run is told to leave alone. The run that carries out "
     "a confirmed option has full access to this host (docker, sudo), as the operator has at a terminal. `checks` are how PE will "
-    "verify the option worked, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, "
+    "verify the option worked. Each check is an object {\"id\": a short name such as \"sonarr-up\", \"check\": one of the kinds "
+    "below, \"params\": {...}}, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, "
     "no extra fields):\n{catalogue}\nWhen the fix is a restart, add a container_state check for each container it restarts with "
     "`started_during_mission: true`: PE then checks that the container really started again during the run, not only that it is "
     "running. Stateful changes back up data first: when an option pulls a new image for, or recreates, a service whose data could be "
@@ -500,7 +502,9 @@ PLAN_INSTRUCTIONS = (
 # valid plan it opens the same Authorise card as pressing Confirm; without one it asks the agent for the plan. ─────────────
 _GO_AHEAD = re.compile(
     r"(?:please\s+|ok(?:ay)?[,\s]+|yes[,\s]+|yeah[,\s]+)*"
-    r"(?:do it|go ahead|go for it|yes|yep|yeah|apply it|apply|apply the fix|authori[sz]e(?: it)?|approve(?: it)?|confirm(?: it)?|"
+    # A bare "yes" / "yep" / "apply" also answers an ordinary question from the agent ("shall I check radarr too?"): only phrases
+    # that can only mean "carry out the plan" count (review, rc14.2). "yes, do it" still matches through the prefix.
+    r"(?:do it|go ahead|go for it|apply it|apply the fix|authori[sz]e(?: it)?|approve(?: it)?|confirm(?: it)?|"
     r"proceed|run it|let'?s do it|fix it)"
     r"(?:\s+(?:please|now))?[\s.!]*", re.IGNORECASE)
 _GO_OPTION = re.compile(r"(?:go (?:ahead )?with|do|apply|authori[sz]e|approve|confirm)\s+option\s+([a-c1-3])[\s.!]*", re.IGNORECASE)
