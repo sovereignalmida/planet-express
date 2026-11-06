@@ -104,4 +104,87 @@ second before changing the matcher.
 **Priority:** P3
 **Depends on:** nothing (T29 ships the workaround)
 
+## Missions (trust mode, from live use after rc14.4)
+
+### Undo covers every file the plan changes
+
+**What:** The checkpoint snapshots every existing file the confirmed plan lists under `changes` (absolute paths, size-capped),
+not only the stack's own compose and `.env` files. After the run, any file the session wrote or edited that the checkpoint does
+not cover is flagged on the result card ("changed, not covered by Undo"), with the agent's backup path when it made one.
+
+**Why:** A live Repair edited the stack's compose file and a helper script outside the stack. Undo would have restored the
+compose file and left the script pointing at a path that no longer exists, with nothing saying so.
+
+**Context:** `checkpoint/service.py` (`create` scope), the plan's `changes` in `console/plan.py`, the hook record of Write/Edit
+calls for the "outside the checkpoint" list.
+
+**Effort:** M
+**Priority:** P1
+
+### Accept plain text for `known` and `unsure`
+
+**What:** `lenient()` turns a string `known` / `unsure` into a one-item list instead of refusing the plan.
+
+**Why:** A live plan was refused for exactly this and needed an automatic retry.
+
+**Effort:** S
+**Priority:** P2
+
+### "Close anyway" when PE holds a cancel
+
+**What:** When a cancel is held (the run's changes still differ from the checkpoint), the Missions page and Console say why and
+offer an explicit "Close anyway" (operator-only, recorded), instead of a disabled "CANCEL REQUESTED" button.
+
+**Why:** A held cancel left the operator with no way to close the mission without a hand edit to the database.
+
+**Effort:** S
+**Priority:** P2
+
+### Hide closed missions by default
+
+**What:** The Missions page hides terminal missions behind a toggle (on by default). Decide separately whether test history is
+ever deleted.
+
+**Effort:** S
+**Priority:** P3
+
+### An agent's main reply is lost when it replies twice in one turn
+
+**What:** When the agent writes its reply, then finishes a background task and replies again, only the last reply is stored.
+Keep both (or the longer one) in the conversation.
+
+**Why:** A live investigation's full diagnosis was missing from the Console; only its short follow-up was shown.
+
+**Context:** `console/stream.py` (assistant messages vs closing words), `console/service.py` turn end.
+
+**Effort:** S
+**Priority:** P2
+
+### Cancel and crash checks ignore run state
+
+**What:** `recovery.matches_checkpoint` compares facts but not running/stopped, while restore does. A session that only stopped
+a service can be classified "nothing changed".
+
+**Context:** Low finding from the rc14.1 review; unchanged since.
+
+**Effort:** S
+**Priority:** P3
+
+### Finished conversations hold a session uid until archived
+
+**What:** Since rc14.4 a finished conversation no longer counts towards `max_open`, but it still holds its reserved uid and
+state directory. Auto-archive after N days, or release the uid when the mission ends.
+
+**Effort:** S
+**Priority:** P3
+
+### Ops: NFS subdirectory binds go stale
+
+**What:** Containers that bind an NFS *subdirectory* pin its file handle at start and get ESTALE when the server stops honouring
+it; binding the share root avoids it. Move the remaining subdirectory binds on the host to the share root (one Console request
+each).
+
+**Effort:** S
+**Priority:** P2
+
 ## Completed
