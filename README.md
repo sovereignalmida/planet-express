@@ -4,20 +4,29 @@ A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stack
 failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
 rollback, and talks to you over Telegram.
 
-**Status: v4 release candidate (`v4.0.0-rc3`).** It started as a bespoke agent running on one person's
+**Status: v4 release candidate (`v4.0.0-rc14.4`).** It started as a bespoke agent running on one person's
 home server and has been generalized into something anyone with a Docker Compose homelab can install. It
-is dogfooded on the author's own fleet, not developed in isolation. See [CHANGELOG.md](CHANGELOG.md) for
-the history.
+is dogfooded on the author's own fleet, not developed in isolation: the latest candidate runs there with
+mission control on, doing real repairs. See [CHANGELOG.md](CHANGELOG.md) for the history.
 
 **What v4 adds:**
 
 - **Mission control, off by default.** An operator can hand a bounded job to a supervised agent session
   (investigate, propose, or repair inside a grant you approve). The safety model for missions is
-  trust mode: once you confirm a plan the session has your access (Docker, sudo), wrapped in a checkpoint
-  and restore service, a full record, per-resource leases and a short list of hard blocks, and a
-  mission only completes when Planet Express's own pre-agreed checks pass, never on the agent's say-so. Typed
-  steps remain the fast path for known repairs. Nothing mission-related runs unless `missions.enabled` is
-  true; read [INSTALL.md](INSTALL.md) "Mission control" first. No agent is bundled.
+  [trust mode](docs/designs/v4-trust-mode.md): once you confirm a plan, the session has your access
+  (Docker, sudo), the same as you at a terminal. What protects the host is the plan you confirmed, a
+  checkpoint taken before anything changes, a full record of every tool call, per-resource leases, a
+  short list of hard blocks, and Planet Express's own pre-agreed checks: a mission only completes when
+  those pass, never on the agent's say-so. Typed steps remain the fast path for known repairs. Nothing
+  mission-related runs unless `missions.enabled` is true; read [INSTALL.md](INSTALL.md) "Mission control"
+  first. No agent is bundled.
+- **The Console.** A dashboard tab where you describe a problem in plain words. A planning session
+  investigates and comes back with up to three options, each saying what it will change, what it will
+  not touch, the risk, how to get back, and the checks PE will run afterwards. You confirm one, the
+  approval is bound to exactly that plan, and it runs as a Repair mission. The result card shows PE's
+  own checks, not the agent's account. **Undo** rolls a finished run back to its checkpoint, and reverses
+  only what that run changed: later changes by someone else are left alone and named. Shown when
+  `missions.console.enabled` is on.
 - **`/prepare_reboot`.** Proposes bringing every compose stack down before you reboot the host, behind the
   usual approval card: dependents before what they depend on, ingress last, each service keeping its own
   stop grace period. It never reboots the host.
@@ -120,7 +129,7 @@ Plus a canary auto-updater (**Zoidberg**) that updates one service at a time, wa
 back automatically if it doesn't come up healthy.
 
 There's also a web dashboard (**Scruffy**) with Overview, Backups, Network, Actions, History, Chat
-and Config tabs — fleet/container health, Borg backup and cert status, live Traefik router and
+and Config tabs (plus Console, Missions and Memory when mission control is on) — fleet/container health, Borg backup and cert status, live Traefik router and
 AdGuard stats, and a live view of each execution's steps with ABORT and ROLL BACK. **Actions holds
 only what wants a decision from you** — approvals, open incidents, and canary rollback windows that
 may still need settling; anything you can merely read about went to History. Plus a
@@ -242,9 +251,9 @@ This repo was built out in small, independent specs rather than one big rewrite.
 standing engineering process, including an independent second-review gate that every slice goes through,
 and [CHANGELOG.md](CHANGELOG.md) for the full history.
 
-Branches: `main` is the older v2.x line; `v4-next` is where development happens and where the
-`v4.0.0-rc*` tags are cut (the author's own host runs the latest candidate, with missions off);
-`v3-production` is the stable v3 line, kept for emergency fixes until v4 is released.
+Branches: `v4-next` is the default branch. Development happens there, and the `v4.0.0-rc*` tags are cut
+from it (the author's own host runs the latest candidate, with missions on). `main` holds the last v3
+release (3.1.2) until v4 is released. `v3-production` is the stable v3 line, kept for emergency fixes.
 `sudo ./setup.sh` is the way to install; `git clone` plus `bash deploy.sh` is the older scripted path and
 still works. See [INSTALL.md](INSTALL.md) for the walkthrough, including how to get a Telegram bot token.
 
