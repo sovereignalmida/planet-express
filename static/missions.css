@@ -1,6 +1,10 @@
 /* v4 S4: Missions and Memory pages. Additive to the sealed cockpit.css: tokens only, no overrides. */
 .mc-notice { border: 1px solid var(--pe-accent); background: var(--pe-accent-bg); color: var(--pe-accent-hi);
   border-radius: var(--pe-r-md); padding: 10px 14px; font-size: 13px; }
+.mc-credit { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin: 0 0 var(--pe-gap); padding: 8px 12px;
+  border: 1px solid var(--pe-border); border-radius: var(--pe-r-md, 6px); font-size: 13px; }
+.mc-credit.warn { border-color: var(--pe-warn); } .mc-credit.warn strong { color: var(--pe-warn); }
+.mc-credit.low { border-color: var(--pe-crit); } .mc-credit.low strong { color: var(--pe-crit); }
 .mc-board { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); gap: var(--pe-gap); }
 .mc-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .mc-col-head { margin: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px;

@@ -58,6 +58,7 @@ class Core:
             "memory.confirm": card("cand-one", "confirmed"),
             "memory.deprecate": card("conf-one", "deprecated"),
             "canary.candidates": [], "proposal.list_pending": [],
+            "mission.provider_usage": {"source": "none", "available": False, "state": "off"},
         }
         self.errors = {}
         self.pool = [mission("M-2", "Why is <script>x</script> slow"),
@@ -138,12 +139,35 @@ def test_board_renders_groups_and_escapes(web):
     client, core, _ = web
     r = client.get("/missions")
     page = r.get_data(as_text=True)
-    assert r.status_code == 200 and core.methods() == ["mission.list", "mission.list"]
+    assert r.status_code == 200 and core.methods() == ["mission.list", "mission.list", "mission.provider_usage"]
     assert [p["scope"] for m, p in core.calls if m == "mission.list"] == ["active", "closed"]
     assert "Why is &lt;script&gt;x&lt;/script&gt; slow" in page and "<script>x</script>" not in page
     assert "INVESTIGATING" in page.upper() and "COMPLETED" in page.upper()
     assert 'href="/missions/M-2"' in page
     assert 'name="viewport"' in page and "missions.css" in page
+
+
+def test_board_shows_provider_credit_and_spend(web):
+    client, core, _ = web
+    core.results["mission.provider_usage"] = {
+        "source": "openrouter", "available": True, "state": "warn", "left": 8.4, "warn_below": 10.0, "low_below": 2.0,
+        "spend": {"day": 1.48, "week": 3.0, "month": 4.74, "all": 7.62}, "spend_scope": "this key", "stale": False, "error": None,
+        "age_s": 30}
+    page = client.get("/missions").get_data(as_text=True)
+    assert "$8.40 credit left" in page and "today $1.48" in page and "month $4.74" in page and 'class="mc-credit warn"' in page
+    assert "nothing stops at either" in page
+
+
+def test_board_without_provider_usage_still_renders(web):
+    client, core, _ = web
+    core.errors["mission.provider_usage"] = "unavailable"
+    r = client.get("/missions")
+    assert r.status_code == 200 and "mc-credit" not in r.get_data(as_text=True)
+    core.errors.clear()
+    core.results["mission.provider_usage"] = {"source": "anthropic", "available": False, "state": "unknown", "warn_below": 10.0,
+                                              "low_below": 2.0, "error": "set missions.model_broker.usage.admin_key_env to see spend"}
+    page = client.get("/missions").get_data(as_text=True)
+    assert "admin_key_env" in page and "credit left" not in page
 
 
 def test_board_empty_state(web):

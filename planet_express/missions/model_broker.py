@@ -153,10 +153,12 @@ class ModelBroker:
                  environ: Mapping[str, str] | None = None,
                  connect: Callable[[str, float], http.client.HTTPConnection] | None = None,
                  path_prefix: str = "", auth_scheme: str = "x-api-key", session_env: Mapping[str, str] | None = None,
-                 allow_body_keys: Sequence[str] = ()):
+                 allow_body_keys: Sequence[str] = (), extra_secret_envs: Sequence[str] = ()):
         if auth_scheme not in ("x-api-key", "bearer"):
             raise ValueError(f"unknown auth_scheme {auth_scheme!r}")
         self.extra_body_keys = frozenset(allow_body_keys)
+        # Other Core credentials that must never reach a session either (rc14.7: the Anthropic Admin key the usage display reads).
+        self.extra_secret_envs = tuple(name for name in extra_secret_envs if name)
         self.upstream_host, self.key_env, self.models = upstream_host, key_env, frozenset(models)
         self.path_prefix, self.auth_scheme = path_prefix, auth_scheme       # where the vendor's API is mounted; how the key is sent
         self.session_env = dict(session_env or {})
@@ -174,8 +176,9 @@ class ModelBroker:
 
     def secret_values(self) -> list[str]:
         """The real key, for the environment builder's by-value scan: if it ever shows up in a session, that is a leak."""
-        key = self._key()
-        return [key] if key else []
+        import os
+        env = self.environ if self.environ is not None else os.environ
+        return [v for v in (self._key(), *(env.get(name, "") for name in self.extra_secret_envs)) if v]
 
     def start(self, cs) -> Callable[[], None]:
         if not self._key():
@@ -468,7 +471,7 @@ class ModelBroker:
                     state["released"] = True
                 broker._record(session, "model.request", {
                     "path": path, "model": model, "status": status, "input_tokens": counter.input, "output_tokens": counter.output,
-                    "charged": charge, "bytes": sent, "ms": int((time.monotonic() - started) * 1000)})
+                    "charged": charge, **({"cost_usd": round(counter.cost, 6)} if counter.cost is not None else {}), "bytes": sent, "ms": int((time.monotonic() - started) * 1000)})
                 self.close_connection = True
 
         return Handler
@@ -502,6 +505,7 @@ class _UsageCounter:
 
     def __init__(self):
         self.input = self.output = 0
+        self.cost: float | None = None   # USD, when the vendor reports it (OpenRouter's `usage.cost`); never estimated here
         self._buffer = b""
         self._whole = bytearray()
         self._json = True
@@ -554,6 +558,9 @@ class _UsageCounter:
         if isinstance(usage.get("cache_read_input_tokens"), int):
             counted_in += int(usage["cache_read_input_tokens"]) // 10
         counted_out = int(usage["output_tokens"]) if isinstance(usage.get("output_tokens"), int) else 0
+        cost = usage.get("cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and 0 <= cost < 10_000:
+            self.cost = float(cost) if self.cost is None or not stream else max(self.cost, float(cost))
         if stream:
             self.input = max(self.input, counted_in)
             self.output = max(self.output, counted_out)          # message_delta usage is cumulative

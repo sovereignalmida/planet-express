@@ -108,6 +108,10 @@ second before changing the matcher.
 
 ### Surface real usage from the provider so the operator decides
 
+**Status (rc14.7):** account level done: credit and spend in the Console and on Missions, Telegram alerts, per-call `cost_usd` on the
+broker's events when OpenRouter reports it (confirm on a live request). Still open: per-conversation and per-mission cost shown from
+those events, the Anthropic price-table estimate without an Admin key, and routing v3's model calls through the broker (rc14.8).
+
 **What:** Replace guessed limits with the provider's own figures, shown where the operator works (Console header, Missions page,
 Telegram on request), so they decide when to stop, not a cap:
 - **API key through a gateway (OpenRouter, the host today):** `GET /api/v1/key` with the key the broker already holds: `limit`,

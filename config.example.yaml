@@ -173,6 +173,11 @@ multi_host:
 #                                   # (an API key, never a subscription login). For OpenRouter also set upstream_host: openrouter.ai,
 #                                   # upstream_path_prefix: /api, auth_scheme: bearer and session_env (see INSTALL.md)
 #     models: ["claude-sonnet-4-5"] # the only model ids a mission may request
+#     usage:                        # credit and spend from the provider, in the Console and on Missions; nothing stops on it
+#       poll_s: 300                 # OpenRouter: read with the same key; Anthropic: only with admin_key_env (an Admin API key)
+#       warn_below: 10.0            # USD of credit left: amber and one Telegram alert
+#       low_below: 2.0              # USD: red and a second alert
+#       admin_key_env: ""           # Anthropic direct: the NAME of the variable holding an sk-ant-admin key (read-only cost report)
 #   hooks:                          # required by the Console: PE's settings must be the only ones the agent reads
 #     install_claude_code: true
 #     command: ["/usr/bin/python3"]  # the interpreter; Core copies the hook into each session's hook dir at every launch

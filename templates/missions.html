@@ -1,12 +1,27 @@
 {% extends "missions_base.html" %}
 {% block title %}Missions{% endblock %}
 {% block content %}
+{% macro money(v) %}{{ '—' if v is none else '$%.2f' | format(v) }}{% endmacro %}
 <section class="panel" aria-label="Missions">
   <div class="panel-head-row">
     <h3>MISSIONS</h3>
     <a class="status-chip" href="{{ url_for('standing_page') }}">STANDING GRANTS</a>
     <span class="panel-head-note">{{ active.total }} open · {{ closed.total }} closed · Repair missions run only after you approve their grant</span>
   </div>
+  {% if usage and usage.state != 'off' %}
+  <div class="mc-credit {{ usage.state }}" role="status">
+    {% if usage.source == 'other' %}
+    <strong>Model usage</strong> <span>no source for this provider yet</span>
+    {% elif not usage.available %}
+    <strong>Model usage</strong> <span>{{ usage.error or 'not read yet' }}</span>
+    {% else %}
+    <strong>{% if usage.left is not none %}{{ money(usage.left) }} credit left{% else %}Model spend{% endif %}</strong>
+    <span>today {{ money(usage.spend.day) }} · week {{ money(usage.spend.week) }} · month {{ money(usage.spend.month) }} ({{ usage.spend_scope }}{{ ', partial' if usage.partial }})</span>
+    {% if usage.left is not none %}<span class="muted-body">amber below {{ money(usage.warn_below) }}, red below {{ money(usage.low_below) }}; nothing stops at either</span>{% endif %}
+    {% if usage.stale or usage.error %}<span class="muted-body">last read {{ (usage.age_s // 60) if usage.age_s is not none else '?' }} min ago{% if usage.error %} · {{ usage.error }}{% endif %}</span>{% endif %}
+    {% endif %}
+  </div>
+  {% endif %}
   {% if not missions %}
   <p class="muted-body">No missions yet. Press INVESTIGATE on an incident to open one.</p>
   {% endif %}

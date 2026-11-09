@@ -132,6 +132,14 @@ def test_the_usage_meter_is_a_mark_and_never_stops_the_conversation(tmp_path):
     rig.api.post(made["id"], "chris", "more")                                           # taken, not refused
 
 
+def test_status_carries_the_providers_credit_when_attached(rig):
+    assert rig.api.status()["provider"] is None
+    rig.api.provider_usage = type("U", (), {"snapshot": lambda self: {"source": "openrouter", "state": "warn", "left": 8.4}})()
+    assert rig.api.status()["provider"]["left"] == 8.4
+    assert rig.api.list()["status"]["provider"]["state"] == "warn"
+    rig.api.provider_usage = None
+
+
 def test_the_composer_is_off_with_a_reason_when_the_launcher_is_not_proven_or_the_conversation_is_closed(rig):
     made = rig.api.create("chris", "hello")
     rig.sup.preflight_fn = lambda: None

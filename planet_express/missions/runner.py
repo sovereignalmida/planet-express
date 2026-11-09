@@ -173,7 +173,8 @@ def without_broker_key(policy, broker):
     def wrapped(grant, mission_id, workspace, env):
         out = dict(policy(grant, mission_id, workspace, env)) if policy is not None else dict(env)
         secrets = broker.secret_values()
-        return {k: v for k, v in out.items() if k != broker.key_env and not any(s in v for s in secrets)}
+        names = {broker.key_env, *getattr(broker, "extra_secret_envs", ())}
+        return {k: v for k, v in out.items() if k not in names and not any(s in v for s in secrets)}
     return wrapped
 
 
@@ -288,8 +289,8 @@ def build_mission_runner(
             upstream_host=mb.upstream_host, key_env=mb.key_env, models=list(mb.models), store=MissionStore(store),
             limits=BrokerLimits(max_requests=mb.max_requests, max_tokens=mb.max_tokens, timeout_s=float(mb.timeout_s)),
             path_prefix=mb.upstream_path_prefix, auth_scheme=mb.auth_scheme, session_env=mb.session_env,
-            allow_body_keys=mb.allow_body_keys)
-    if model_broker is not None and not model_broker.secret_values():
+            allow_body_keys=mb.allow_body_keys, extra_secret_envs=[mb.usage.admin_key_env])
+    if model_broker is not None and not model_broker._key():
         log.error("missions.model_broker is enabled but %s is not set in Core's environment: no mission session can start until it is",
                   cfg.model_broker.key_env)
     if stacks_root is not None and (tool_broker is None or env_policy is None):

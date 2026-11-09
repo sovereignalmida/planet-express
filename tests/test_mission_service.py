@@ -620,3 +620,11 @@ def test_shared_constants_cover_every_status():
     assert ms_mod.TERMINAL_STATUSES == {"completed", "failed", "rolled_back", "cancelled"}
     assert ms_mod.MISSION_ID_RE.fullmatch("M-12") and not ms_mod.MISSION_ID_RE.fullmatch("M-")
     assert ms_mod.INCIDENT_ID_RE.fullmatch("a" * 12) and not ms_mod.INCIDENT_ID_RE.fullmatch("A" * 12)
+
+
+def test_provider_usage_says_off_without_a_poller_and_shows_it_with_one(handlers, env):
+    svc = env[0]
+    assert call(handlers, "mission.provider_usage") ["state"] == "off"
+    svc.provider_usage = type("U", (), {"snapshot": lambda self: {"source": "openrouter", "state": "ok", "left": 50.0}})()
+    assert call(handlers, "mission.provider_usage")["left"] == 50.0
+    err(handlers, "mission.provider_usage", "bad_request", extra=1)

@@ -335,6 +335,34 @@ class MissionRuntimeConfig(BaseModel):
 _MODEL_ID = re.compile(r"~?[A-Za-z0-9][A-Za-z0-9._:-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._:-]{0,63}){0,2}(\[[0-9a-z]{1,6}\])?")
 
 
+class ProviderUsageConfig(BaseModel):
+    """What the model provider says about the account (missions/provider_usage.py): credit left and spend, polled by Core with the
+    broker's own key (OpenRouter) or an optional read-only admin key (Anthropic), shown in the Console and on the Missions page, and
+    one Telegram alert when credit runs low. It never stops anything: the operator decides."""
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    poll_s: int = Field(default=300, ge=60, le=3600)
+    warn_below: float = Field(default=10.0, ge=0, le=100_000)      # USD of credit left: amber, and one Telegram alert
+    low_below: float = Field(default=2.0, ge=0, le=100_000)        # USD of credit left: red, and a second alert
+    # Anthropic direct: the NAME of a Core environment variable holding an Admin API key (sk-ant-admin...), which reads the
+    # organisation's cost report. Empty: no spend figures for Anthropic (a usage key cannot read them).
+    admin_key_env: str = ""
+
+    @field_validator("admin_key_env")
+    @classmethod
+    def _admin_key_env(cls, name: str) -> str:
+        if name and (not _ENV_NAME.fullmatch(name) or name.startswith("PE_")):
+            raise ValueError("missions.model_broker.usage.admin_key_env is the name of an environment variable, not a PE_ one")
+        return name
+
+    @model_validator(mode="after")
+    def _order(self):
+        if self.low_below > self.warn_below:
+            raise ValueError("missions.model_broker.usage.low_below must not be above warn_below")
+        return self
+
+
 class ModelBrokerConfig(BaseModel):
     """The per-session model broker (missions/model_broker.py): Core holds the model API key, a session holds only a
     per-session access code and a loopback base URL. Off by default; with it off a session has no model access of its own."""
@@ -354,6 +382,7 @@ class ModelBrokerConfig(BaseModel):
     max_requests: int = Field(default=300, gt=0, le=100_000)       # per session
     max_tokens: int = Field(default=10_000_000, gt=0)              # per session: input + output, cache reads at a tenth
     timeout_s: int = Field(default=300, gt=0, le=3600)
+    usage: ProviderUsageConfig = ProviderUsageConfig()             # credit and spend from the provider, shown, never enforced
 
     @field_validator("upstream_host")
     @classmethod

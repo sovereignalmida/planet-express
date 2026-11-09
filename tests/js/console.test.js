@@ -97,6 +97,24 @@ test("budget labels", () => {
   assert.strictEqual(C.budgetLabel({ state: "warn", used_pct: 100, over: true, tokens_used: 312400 }), "312k tokens · past the usual size");
 });
 
+test("the provider credit line (rc14.7)", () => {
+  assert.strictEqual(C.creditLine(null), null);
+  assert.strictEqual(C.creditLine({ state: "off" }), null);
+  const warn = C.creditLine({ source: "openrouter", available: true, state: "warn", left: 8.4, warn_below: 10, low_below: 2,
+                              spend: { day: 1.48, week: 3, month: 4.74 }, spend_scope: "this key", age_s: 20 });
+  assert.strictEqual(warn.level, "warn");
+  assert.strictEqual(warn.head, "$8.40 credit left");
+  assert.strictEqual(warn.detail, "today $1.48 · week $3.00 · month $4.74");
+  assert.ok(/Nothing stops/.test(warn.title) && /this key/.test(warn.title));
+  const stale = C.creditLine({ source: "openrouter", available: true, state: "ok", left: 50, spend: {}, stale: true, age_s: 1800, error: "the provider answered HTTP 503" });
+  assert.strictEqual(stale.detail, "today — · week — · month — · as of 30m ago");
+  assert.ok(/HTTP 503/.test(stale.title));
+  const spendOnly = C.creditLine({ source: "anthropic", available: true, state: "ok", left: null, spend: { day: 0, week: 2.2, month: 5.2 } });
+  assert.strictEqual(spendOnly.head, "Model spend");
+  assert.strictEqual(C.creditLine({ source: "anthropic", available: false, state: "unknown", error: "set admin_key_env" }).detail, "can't read it yet");
+  assert.strictEqual(C.creditLine({ source: "other", available: false, state: "unknown", note: "x" }).detail, "no source for this provider yet");
+});
+
 // ── the page ──
 const EVIL = '<img src=x onerror=alert(1)><script>alert(2)</script>';
 const LIST = { conversations: [{ id: "0123456789abcdef", title: EVIL, origin: "operator", state: "open", age: "2m", turns: 1, status: { text: "Needs your call", level: "warn", group: "Needs you" } }],

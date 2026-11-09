@@ -167,6 +167,23 @@ def test_a_second_prepare_withdraws_the_first_and_only_one_execution_runs_at_a_t
     assert err.value.code == "conflict"
 
 
+def test_a_run_held_for_the_operator_is_named_with_where_to_close_it(rig):
+    # live M-33: a run held at needs_operator ran nothing, yet blocked a new confirmation with "wait for it to finish, or stop it"
+    plan_id = rig.add_plan()
+    first = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.api.confirm_authorise(rig.conv.id, first["execution_id"], first["grant_hash"], "chris")
+    with rig.st.store._write() as conn:
+        conn.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (first["mission_id"],))
+    with pytest.raises(ConsoleApiError) as err:
+        rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
+    assert err.value.code == "conflict" and first["mission_id"] in str(err.value) and "held for you (needs operator)" in str(err.value)
+    assert "Missions" in str(err.value) and "stop it first" not in str(err.value)
+    with rig.st.store._write() as conn:                      # mid-recovery is PE's own work, not "held for you"
+        conn.execute("UPDATE missions SET status='recovery_required' WHERE id=?", (first["mission_id"],))
+    with pytest.raises(ConsoleApiError, match="already running") as err:
+        rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
+
+
 def test_an_option_that_does_not_exist_and_another_conversations_plan_are_refused(rig):
     plan_id = rig.add_plan()
     with pytest.raises(ConsoleApiError) as err:

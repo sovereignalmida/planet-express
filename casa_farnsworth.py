@@ -3136,6 +3136,22 @@ def run_bot() -> None:
             from planet_express.console.telegram import ConsoleTelegram
             missions.console_telegram = ConsoleTelegram(missions.console_api, service.console, lambda text: notifier.notify(TelegramClient.s(text)))
             service.after_tick = missions.console_telegram.push_async
+    # rc14.7: credit and spend as the model provider reports them, polled with Core's own key; shown, never enforced.
+    provider_usage = None
+    if mission_runner is not None:
+        from planet_express.missions import provider_usage as provider_usage_mod
+        try:
+            usage = provider_usage_mod.build(config.MISSIONS.model_broker, state_dir=Path(store.path).parent,
+                                             notify=lambda text: notifier.notify(TelegramClient.s(text)))
+        except Exception as exc:                                  # noqa: BLE001 -- a display must never stop Core starting
+            log.warning("provider usage is not available: %s", type(exc).__name__)
+            usage = None
+        if usage is not None:
+            provider_usage = usage
+            missions.provider_usage = usage
+            if missions.console_api is not None:
+                missions.console_api.provider_usage = usage
+            usage.start()
     shutdown = threading.Event()
     if mission_runner is not None:
         # systemd stops the service with SIGTERM. The handler only sets a flag: the main loop (and its backoff
@@ -3186,6 +3202,8 @@ def run_bot() -> None:
             if rpc_server is not None:
                 rpc_server.stop()
         finally:
+            if provider_usage is not None:
+                provider_usage.stop()                   # no provider read or alert while Core is going down
             if mission_runner is not None:
                 mission_runner.stop()
     log.info("Farnsworth shutting down. Goodbye!")

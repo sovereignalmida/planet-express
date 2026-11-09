@@ -1116,11 +1116,15 @@ def register_mission_pages(app, core) -> None:
             if error.code != "disabled":
                 raise
             return shell("missions.html", page="missions", disabled=True, notice=None, data=None)
+        try:
+            usage = core("mission.provider_usage", {})          # credit and spend as the provider reports them (rc14.7)
+        except RpcError:
+            usage = None                                         # an older Core, or a read that failed: the board still shows
         rows = active["missions"] + closed["missions"]
         seen = {m["status"] for m in rows}
         order = list(STATUS_ORDER) + sorted(seen - set(STATUS_ORDER))   # a status added later still gets a column
         return shell("missions.html", page="missions", disabled=False, missions=rows, order=order,
-                     active=active, closed=closed, notice=notice_for(_MISSION_NOTICES))
+                     active=active, closed=closed, usage=usage, notice=notice_for(_MISSION_NOTICES))
 
     @app.get("/missions/<mission_id>")
     def mission_page(mission_id):

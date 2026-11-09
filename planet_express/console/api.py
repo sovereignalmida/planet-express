@@ -96,6 +96,7 @@ class ConsoleApi:
                  cfg: MissionConsoleConfig, *, clock: Callable[[], float] = time.time, flow: Callable[[], Any] | None = None):
         self.service, self.console, self.ms, self.supervisor, self.cfg, self._clock = service, console, ms, supervisor, cfg, clock
         self._flow = flow                      # () -> the approval flow, or None where Repair missions are not available (late-bound by the daemon)
+        self.provider_usage = None             # `missions.provider_usage.ProviderUsage`, attached by the daemon: credit and spend in the header
 
     # ── reads ─────────────────────────────────────────────────────────────────────────────
     def status(self) -> dict:
@@ -104,6 +105,7 @@ class ConsoleApi:
         proven = not configured or bool(report is not None and report.ok)
         return {"enabled": True, "open": self.console.count_open(), "max_open": self.cfg.max_open, "token_budget": self.cfg.token_budget,
                 "proposal_only": not proven,
+                "provider": self.provider_usage.snapshot() if self.provider_usage is not None else None,
                 "proposal_only_reason": None if proven else "The session launcher has not been proven on this host, so the agent cannot start."}
 
     def list(self) -> dict:
@@ -336,8 +338,12 @@ class ConsoleApi:
             if ex["status"] == "proposed":
                 if not self._withdraw(flow, ex, operator, quiet=True):
                     raise ConsoleApiError("An earlier confirmation in this conversation is still open or already running. Finish or withdraw it first.", "conflict")
-            elif ex["status"] == "authorised" and self._mission_open(ex["mission_id"]):
-                raise ConsoleApiError("A plan is already running in this conversation. Wait for it to finish, or stop it first.", "conflict")
+            elif ex["status"] == "authorised" and (held := self.ms.get_mission(ex["mission_id"]).status) not in TERMINAL:
+                if held == "needs_operator":                       # nothing is running: it waits for the operator (live M-33)
+                    raise ConsoleApiError(f"The earlier run, {ex['mission_id']}, is held for you ({held.replace('_', ' ')}). Open it from "
+                                          f"Missions and close or restore it, then confirm again.", "conflict")
+                raise ConsoleApiError(f"A plan is already running in this conversation ({ex['mission_id']}). Wait for it to finish, or "
+                                      "stop it first.", "conflict")
         chosen = plan.options[option]
         actor = f"operator:{operator}"
         try:
@@ -407,9 +413,6 @@ class ConsoleApi:
         code = {"conflict": "conflict", "stale": "stale", "forbidden": "forbidden", "not_found": "not_found", "unavailable": "unavailable",
                 "elevation_required": "elevation_required", "invalid_grant": "bad_request"}.get(exc.code, "bad_request")
         return ConsoleApiError(str(exc), code)
-
-    def _mission_open(self, mission_id: str) -> bool:
-        return self.ms.get_mission(mission_id).status not in TERMINAL
 
     def _pending_plan(self, row: dict | None) -> plan_mod.Plan:
         """The plan a confirmation may act on: pending, within its 24 hours, and exactly what was hashed when it was stored."""

@@ -98,12 +98,30 @@
     return b.over ? k + "k tokens · past the usual size" : b.used_pct + "% of the usual size";
   }
 
+  // rc14.7: what the model provider says about the account (credit left, spend), for the operator to decide on. Never a stop.
+  function money(v) { return v === null || v === undefined || !isFinite(Number(v)) ? "—" : "$" + Number(v).toFixed(2); }
+  function ageText(s) { return s === null || s === undefined ? "" : s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; }
+  function creditLine(p) {
+    if (!p || p.state === "off") return null;
+    if (p.source === "other") return { level: "unknown", head: "Model usage", detail: "no source for this provider yet", title: p.note || "" };
+    if (!p.available) return { level: "unknown", head: "Model usage", detail: p.error ? "can't read it yet" : "not read yet", title: p.error || "" };
+    const s = p.spend || {};
+    const head = p.left !== null && p.left !== undefined ? money(p.left) + " credit left" : "Model spend";
+    const parts = ["today " + money(s.day), "week " + money(s.week), "month " + money(s.month)];
+    if (p.partial) parts.push("partial");
+    if (p.stale || p.error) parts.push("as of " + ageText(p.age_s));
+    const title = ["Spend of " + (p.spend_scope || "the account") + ", as the provider reports it.",
+                   p.left !== null && p.left !== undefined ? "Amber below " + money(p.warn_below) + ", red below " + money(p.low_below) + ". Nothing stops at either." : "",
+                   p.error || ""].filter(Boolean).join(" ");
+    return { level: p.state === "low" || p.state === "warn" ? p.state : "ok", head, detail: parts.join(" · "), title };
+  }
+
   // A short message that only says yes. Kept as a pure helper: since rc14.2 the server decides (a "go ahead" while a plan waits opens the
   // Authorise card; without one the agent is asked for the plan), so the page no longer holds such a message back.
   function soundsLikeApproval(text) {
     return /^\s*(please\s+)?(confirm(ed)?|approved?|authori[sz]e(d)?|yes|yep|yeah|go( ahead)?|do it|proceed|ok(ay)?|run it|go for it)(\s+(it|that|this|the plan|option\s*[a-c1-3]|[a-c]))?[\s.!]*$/i.test(String(text || ""));
   }
-  const pure = { inline, proseBlocks, trailFor, checkPhrase, groupRail, budgetLabel, soundsLikeApproval };
+  const pure = { inline, proseBlocks, trailFor, checkPhrase, groupRail, budgetLabel, soundsLikeApproval, creditLine };
   if (typeof module !== "undefined" && module.exports) { module.exports = { ...pure, boot: (doc, win) => boot(doc, win) }; }
 
   // ── DOM ──────────────────────────────────────────────────────────────────────────────────────────
@@ -114,7 +132,7 @@
     const bootData = JSON.parse(document.getElementById("con-boot").textContent);
     const $ = id => document.getElementById(id);
     const refs = { sheet: $("con-sheet"), list: $("con-list"), top: $("con-top"), scroll: $("con-scroll"), thread: $("con-thread"), composer: $("con-composer"),
-                   ctx: $("con-ctx"), text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new") };
+                   ctx: $("con-ctx"), text: $("con-text"), send: $("con-send"), stop: $("con-stop"), note: $("con-note"), newBtn: $("con-new"), credit: $("con-credit") };
     const state = { selected: null, list: [], feed: null, messages: [], events: [], lastMessage: 0, lastEvent: 0, newMode: true,
                     picked: {}, openTrails: {}, scrapArmed: false, archiveArmed: false, timer: null, error: null, sending: false,
                     inflight: null, again: false, ctxTab: "evidence", ctxOpen: false, sig: { rail: "", top: "", thread: "", ctx: "" }, sheet: null, sheetError: null, sheetBusy: false, armed: {}, drift: null, preparing: false, editing: null, draft: "", area: null, deciding: false };
@@ -142,6 +160,18 @@
 
     // ── rail ──
     function renderRail() {
+      const credit = creditLine(state.status && state.status.provider);
+      const creditSig = JSON.stringify(credit);
+      if (refs.credit && creditSig !== state.sig.credit) {     // its own signature: an "as of" ticking never rebuilds the list
+        state.sig.credit = creditSig;
+        refs.credit.hidden = !credit;
+        refs.credit.replaceChildren();
+        if (credit) {
+          refs.credit.className = "pe-con-credit " + credit.level;
+          refs.credit.title = credit.title;
+          refs.credit.append(el("span", "pe-con-credit-head", credit.head), el("span", "pe-con-credit-detail", credit.detail));
+        }
+      }
       const sig = JSON.stringify([state.list, state.selected]);
       if (sig === state.sig.rail) return;                      // nothing changed: leave the nodes (and any focus) alone
       state.sig.rail = sig;

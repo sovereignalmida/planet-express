@@ -279,6 +279,7 @@ class MissionService:
         self._runtime = runtime
         self.console_api = None          # `console.api.ConsoleApi`, attached by the daemon when missions.console is enabled
         self.console_telegram = None     # `console.telegram.ConsoleTelegram`, attached with it when a Telegram notifier exists
+        self.provider_usage = None       # `missions.provider_usage.ProviderUsage`, attached by the daemon when the broker is on
         self._incident_lock = threading.Lock()
         self.flow: ApprovalFlow | None = None      # attached by the daemon (slice 7a); None: approvals are unavailable
 
@@ -613,6 +614,13 @@ class MissionService:
         return self._flowed(lambda f: f.standing_list(include_inactive=include_inactive))
 
     # ── RPC ─────────────────────────────────────────────────────────────────
+    def provider_usage_view(self) -> dict[str, Any]:
+        """Credit and spend as the model provider reports them (rc14.7), or why there are none."""
+        if self.provider_usage is None:
+            return {"source": "none", "available": False, "state": "off",
+                    "note": "Provider usage is shown when the model broker is on (missions.model_broker)."}
+        return self.provider_usage.snapshot()
+
     def handlers(self) -> dict[str, Callable[[Any], Any]]:
         """The RPC method table. Each wrapper checks the flag before it looks at params, so a disabled host
         answers "disabled" to everything and parses nothing."""
@@ -730,7 +738,11 @@ class MissionService:
         def standing_list(p):
             return self.standing_list(**_params(p, {}, {"include_inactive": _bool}))
 
-        table = {"mission.approval_card": card_, "mission.propose_repair": propose_repair, "mission.approve": approve,
+        def provider_usage(p):
+            _params(p, {})
+            return self.provider_usage_view()
+
+        table = {"mission.provider_usage": provider_usage, "mission.approval_card": card_, "mission.propose_repair": propose_repair, "mission.approve": approve,
                  "mission.deny": deny, "mission.rollback": rollback, "standing.create": standing_create,
                  "standing.supersede": standing_supersede, "standing.revoke": standing_revoke,
                  "standing.list": standing_list,
