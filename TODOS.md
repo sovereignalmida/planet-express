@@ -130,8 +130,58 @@ what is left at the provider, and decide.
 second review), `console/api.py` and `static/console.js` (the header), the Missions page, `config_schema.py` (`missions.model_broker`).
 Verify OpenRouter's `/api/v1/key` fields and usage accounting against the live key before building.
 
+**Includes:** route v3's model calls (Hermes and Farnsworth through `casa_llm.py`, Amy through `casa_amy.py`) through the model
+broker too. Today they call the provider directly with their own key, so v3's spend is in no record and any usage figure would leave
+it out. One key, one record, one honest number.
+
 **Effort:** M
 **Priority:** P1
+
+### State machines: find the implicit ones and make the ones that matter explicit (after rc14.7)
+
+**What:** Inventory every implicit state machine (status strings compared in several places, timestamps doubling as state, flag
+combinations, in-memory registries, step sequences) into `docs/designs/state-machines.md`: states, transitions, writers, readers,
+storage, risk. Then per machine: make it explicit (the `missions/state.py` pattern: a transition table, one guard, one
+state-to-label/actions table every surface reads), fold it into an existing machine, or leave it with a recorded reason. Stored values
+and schemas do not change; legacy values map onto the table. One machine per release, characterization tests first, a replay of the
+live host's events to prove nothing changed, the agent's brief told its state and allowed next moves from the same table. Order:
+Console (conversation, plan, execution), checkpoint and rollback/undo, leases and approvals; the v3 `PipelineState` lock is mapped,
+not changed, unless something is wrong.
+
+**Why:** One word and one set of actions per state on every surface (UX), one file that says what can happen next (DX), and an
+agent that is told its state instead of guessing (AX).
+
+**Effort:** L (about half a day to map, then one or two days per machine)
+**Priority:** P2
+
+### One planner and one investigator: v3's Farnsworth planner and Amy hand off to the Console
+
+**What:** A finding with a typed runbook keeps the v3 fast path. A finding without one, or a runbook that failed, opens a Console
+conversation (the incident attached) instead of asking Farnsworth's LLM planner or Amy. The Console plans with PE's check catalogue,
+the checkpoint and Undo; Amy's web search becomes a tool the Console agent has.
+
+**Why:** Two planners and two diagnosticians, each with its own prompts and output shape, to keep correct. One way to reason about a
+problem is simpler for the operator, the code and the agent.
+
+**Context:** `casa_farnsworth.py` (`_devise_typed_plans`, `_propose_compose_runbook`), `casa_amy.py`, `console/service.py` (incident
+origin). Part of the state-machine work: it is where the two flows meet.
+
+**Effort:** M
+**Priority:** P2
+
+### One way approval and undo look, whichever path did the work
+
+**What:** v3 runbooks (approval card, engine step rollback) and v4 missions (hash-bound grant, checkpoint restore) keep their
+mechanisms, but present the same: the same words for approve, running, done, undo; the same Undo button; the same record view, on the
+dashboard and Telegram.
+
+**Why:** The operator, and the agent, learn one model of "approve, watch, undo" instead of two.
+
+**Context:** The state-machine label/actions tables are the place to do it. Approval and rollback code stays under the second-review
+gate.
+
+**Effort:** M
+**Priority:** P2
 
 ### Accept plain text for `known` and `unsure`
 
