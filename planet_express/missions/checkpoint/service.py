@@ -32,6 +32,7 @@ from typing import Any
 import yaml
 
 from ..events import insert_event
+from ..hooks import is_pe_path
 from ..models import Mission
 from ..state import (
     NON_TERMINAL,
@@ -123,11 +124,14 @@ class CheckpointScope:
     files: tuple[str, ...] = ()              # extra absolute file paths to capture
     units: tuple[str, ...] = ()
 
+    plan_files: tuple[str, ...] = ()         # rc14.5: the files the confirmed plan says it changes, anywhere on the host
+
     @classmethod
     def from_grant_scope(cls, scope: Any, *, units: Sequence[str] = ()) -> "CheckpointScope":
-        """A Repair's checkpoint: its stacks' and services' compose files and what they reference, and the container facts.
-        Data volumes are not captured (that is a backup's job, and trust mode does not require one)."""
-        return cls(tuple(scope.stacks), tuple(scope.services), (), tuple(units))
+        """A Repair's checkpoint: its stacks' and services' compose files and what they reference, the container facts, and every
+        file the confirmed plan lists (`files`, rc14.5), wherever it is. Data volumes are not captured (that is a backup's job, and
+        trust mode does not require one)."""
+        return cls(tuple(scope.stacks), tuple(scope.services), (), tuple(units), tuple(getattr(scope, "files", ()) or ()))
 
 
 @dataclass
@@ -181,6 +185,14 @@ class _Planned:
     meta: safefs.FileMeta
     base: str = ""       # directory its relative references resolve against
     aliases: list[str] = field(default_factory=list)   # other in-scope paths that resolve to the same real file
+    root: str = ""       # the root every safe-fs call for it is made against: "" is the stacks root; a plan file's is "/"
+
+
+PLAN_FILE = "plan_file"
+HOST_ROOT = "/"
+# Why a plan file is not covered by Undo. Words only, never the file's contents.
+NOT_COVERED_ABSENT = "did not exist before the run: Undo will not remove it"
+NOT_COVERED_PE = "is part of Planet Express itself"
 
 
 class _Hooks:
@@ -204,8 +216,9 @@ class CheckpointService:
                  provider: CheckpointProvider,
                  settings: CheckpointSettings | None = None, enabled: Callable[[], bool] | bool = True,
                  trace: Callable[[str, str], None] | None = None, hooks: _Hooks | None = None,
-                 baseline_provider: Callable[[], Sequence[Any]] | None = None):
+                 baseline_provider: Callable[[], Sequence[Any]] | None = None, pe_paths: Sequence[str] = ()):
         self.missions = mission_store
+        self.pe_paths = tuple(pe_paths)          # this install's own paths (config, database, code): never covered by Undo
         # Slice 8: returns the normalised scan findings (`verify.baseline.Finding`) at this moment. When set, a
         # checkpoint is not created without one (a failed scan is a refusal): verification compares against it.
         self.baseline_provider = baseline_provider
@@ -246,7 +259,7 @@ class CheckpointService:
             raise CheckpointExists(f"{mission_id} already has checkpoint {mission.checkpoint_id}")
         if mission.status not in NON_TERMINAL:
             raise CheckpointError(f"{mission_id} is {mission.status}; a checkpoint is for a live mission")
-        planned = self.validate_scope(scope)
+        planned, not_covered = self._validate(scope)
         total = sum(p.meta.size for p in planned)
         if total > self.settings.max_total_bytes:
             raise DiskGuardError(f"scope is {total} bytes; the per-checkpoint limit is {self.settings.max_total_bytes}")
@@ -262,7 +275,7 @@ class CheckpointService:
                 # The scan baseline is taken PER ATTEMPT, so the one committed describes the host the committed
                 # capture saw (a ScopeChanged retry takes a fresh one).
                 baseline_text, baseline_sha, baseline_count = self._take_baseline()
-                manifest = self._capture(checkpoint_id, mission_id, scope, planned)
+                manifest = self._capture(checkpoint_id, mission_id, scope, planned, list(not_covered))
                 manifest["baseline"] = None
                 if baseline_text is not None:
                     self.store.write_baseline(checkpoint_id, baseline_text.encode("utf-8"))
@@ -273,7 +286,7 @@ class CheckpointService:
                 self.store.discard(checkpoint_id)
                 if attempt == 2:
                     raise
-                planned = self.validate_scope(scope)          # one retry against what the files say now
+                planned, not_covered = self._validate(scope)  # one retry against what the files say now
             except BaseException:
                 self.store.discard(checkpoint_id)
                 raise
@@ -292,7 +305,8 @@ class CheckpointService:
                              {"event": "checkpoint.created", "checkpoint": checkpoint_id, "files": len(planned),
                               "bytes": sum(f["size"] for f in manifest["files"]),
                               "facts_unavailable": manifest["facts_unavailable"],
-                              "hashes": {f["path"]: f["sha256"] for f in manifest["files"]}}, now)
+                              "hashes": {f["path"]: f["sha256"] for f in manifest["files"]},
+                              **({"not_covered": manifest["not_covered"]} if manifest.get("not_covered") else {})}, now)
         if not reserved:
             self.store.remove(checkpoint_id)
             raise CheckpointExists(f"{mission_id} already has a checkpoint, or is no longer live")
@@ -348,10 +362,19 @@ class CheckpointService:
         return text, sha, len(findings)
 
     def validate_scope(self, scope: CheckpointScope) -> list[_Planned]:
-        """Everything in scope must be a regular file Core can read, inside the stacks root after realpath,
+        return self._validate(scope)[0]
+
+    def _validate(self, scope: CheckpointScope) -> tuple[list[_Planned], list[dict[str, str]]]:
+        """Everything in the stacks' scope must be a regular file Core can read, inside the stacks root after realpath,
         under the size limit. Anything else is REFUSED, never skipped. Files a compose file names in `env_file:`
-        and `include:` are in scope too, under the same rules. Nothing is written."""
+        and `include:` are in scope too, under the same rules. Nothing is written.
+
+        rc14.5: the plan's own files (`plan_files`) are captured wherever they are on the host, as long as Core can read the file and
+        write its directory (so Undo can put it back). One it cannot cover is NOT a refusal: it is returned in the second list with
+        why, and the result says it is not covered. Trust mode: the operator approved the run; a file Undo cannot reach is a fact
+        they are told, not a reason to stop."""
         planned: list[_Planned] = []
+        not_covered: list[dict[str, str]] = []
         seen: set[str] = set()
         by_real: dict[str, _Planned] = {}
 
@@ -399,38 +422,56 @@ class CheckpointService:
                 add(compose.path, stack, compose.kind)
         for path in scope.files:
             add(path, None, "file")
-        return planned
+        for path in dict.fromkeys(scope.plan_files):
+            why = self._plan_file(path, planned, seen, by_real)
+            if why:
+                not_covered.append({"path": path, "why": why})
+        return planned, not_covered
 
-    def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned]) -> dict[str, Any]:
+    def _plan_file(self, path: str, planned: list[_Planned], seen: set[str], by_real: dict[str, "_Planned"]) -> str | None:
+        """Plan one file the plan lists, anywhere on the host. Returns why it cannot be covered, or None when it is planned (or is
+        already planned under another name)."""
+        try:
+            real, symlink = safefs.resolve_in_root(HOST_ROOT, path)
+        except safefs.UnsafePath:
+            return "is not a plain absolute path"
+        if real in seen:
+            first = by_real[real]
+            if path != first.path and path not in first.aliases:
+                first.aliases.append(path)
+            return None
+        if is_pe_path(real, (*self.pe_paths, str(self.store.root))):
+            return NOT_COVERED_PE
+        if not os.path.lexists(real):
+            return NOT_COVERED_ABSENT
+        try:
+            fd, meta = safefs.open_regular(HOST_ROOT, real, max_bytes=self.settings.max_file_bytes)
+            os.close(fd)
+        except safefs.UnsafePath as exc:
+            return f"cannot be snapshotted: {_safe_reason(exc)}"[:200]
+        if not os.access(os.path.dirname(real), os.W_OK | os.X_OK):
+            return "its directory is not writable by Planet Express, so Undo could not put it back"
+        seen.add(real)
+        item = _Planned(path, real, symlink, None, PLAN_FILE, meta, os.path.dirname(real), root=HOST_ROOT)
+        planned.append(item)
+        by_real[real] = item
+        return None
+
+    def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned],
+                 not_covered: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        not_covered = not_covered if not_covered is not None else []
         files, compose_docs, parsed = [], {}, []
         captured = 0
         store_base = self.store.total_bytes() if self.store.root.exists() else 0
         for index, item in enumerate(planned):
             try:
-                fd, meta = safefs.open_regular(self.stacks_root, item.real, max_bytes=self.settings.max_file_bytes)
-            except safefs.UnsafePath as exc:
-                raise ScopeRefused(str(exc)) from None
-            try:
-                if (meta.dev, meta.ino) != (item.meta.dev, item.meta.ino):
-                    raise ScopeRefused(f"{item.real}: is not the file that was validated")
-                acl = safefs.read_acl(fd)
-                try:
-                    data = safefs.read_all(fd, self.settings.max_file_bytes)
-                except safefs.UnsafePath as exc:
-                    raise ScopeRefused(str(exc)) from None
-                self.hooks.after_file_read(item.real)
-                # A torn read: size or mtime moved under us, we read a different length than the file had, or a
-                # second pass over the same fd hashes differently from the bytes we kept.
-                after = os.fstat(fd)
-                os.lseek(fd, 0, os.SEEK_SET)
-                again = safefs.sha256_bytes(safefs.read_all(fd, self.settings.max_file_bytes + 1))
-                if ((after.st_size, after.st_mtime_ns) != (meta.size, meta.mtime_ns) or len(data) != meta.size
-                        or again != safefs.sha256_bytes(data)):
-                    raise ScopeRefused(f"{item.real}: changed while it was captured")
-            except safefs.UnsafePath as exc:
-                raise ScopeRefused(str(exc)) from None
-            finally:
-                os.close(fd)
+                data, meta, acl = self._read_planned(item)
+            except ScopeRefused as exc:
+                if item.kind != PLAN_FILE:
+                    raise
+                # A plan file that vanished or changed since it was planned is not covered; the run is not refused over it.
+                not_covered.append({"path": item.path, "why": f"cannot be snapshotted: {str(exc)[:160]}"})
+                continue
             # What was actually read is what counts against the limits, not what fstat promised.
             captured += len(data)
             if len(data) > self.settings.max_file_bytes:
@@ -444,12 +485,46 @@ class CheckpointService:
             files.append({"idx": index, "path": item.real, "given_path": item.path, "symlink": item.symlink,
                           "aliases": list(item.aliases),
                           "stack": item.stack, "kind": item.kind, "sha256": safefs.sha256_bytes(data),
-                          "mode": meta.mode, "uid": meta.uid, "gid": meta.gid, "size": len(data), "acl": acl})
+                          "mode": meta.mode, "uid": meta.uid, "gid": meta.gid, "size": len(data), "acl": acl,
+                          **({"root": item.root} if item.root else {})})
             if item.kind in _PARSED:
                 compose_docs.setdefault(item.stack, []).append(data)
                 parsed.append((item, data))
         self._check_references(planned, parsed)
+        return self._finish_manifest(checkpoint_id, mission_id, scope, files, compose_docs, not_covered)
 
+    def _read_planned(self, item: _Planned) -> tuple[bytes, safefs.FileMeta, str | None]:
+        """The bytes, metadata and ACL of one planned file, read once and checked for a torn read. Raises ScopeRefused."""
+        root = item.root or self.stacks_root
+        try:
+            fd, meta = safefs.open_regular(root, item.real, max_bytes=self.settings.max_file_bytes)
+        except safefs.UnsafePath as exc:
+            raise ScopeRefused(str(exc)) from None
+        try:
+            if (meta.dev, meta.ino) != (item.meta.dev, item.meta.ino):
+                raise ScopeRefused(f"{item.real}: is not the file that was validated")
+            acl = safefs.read_acl(fd)
+            try:
+                data = safefs.read_all(fd, self.settings.max_file_bytes)
+            except safefs.UnsafePath as exc:
+                raise ScopeRefused(str(exc)) from None
+            self.hooks.after_file_read(item.real)
+            # A torn read: size or mtime moved under us, we read a different length than the file had, or a
+            # second pass over the same fd hashes differently from the bytes we kept.
+            after = os.fstat(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            again = safefs.sha256_bytes(safefs.read_all(fd, self.settings.max_file_bytes + 1))
+            if ((after.st_size, after.st_mtime_ns) != (meta.size, meta.mtime_ns) or len(data) != meta.size
+                    or again != safefs.sha256_bytes(data)):
+                raise ScopeRefused(f"{item.real}: changed while it was captured")
+        except safefs.UnsafePath as exc:
+            raise ScopeRefused(str(exc)) from None
+        finally:
+            os.close(fd)
+        return data, meta, acl
+
+    def _finish_manifest(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, files: list[dict[str, Any]],
+                         compose_docs: dict[str | None, list[bytes]], not_covered: list[dict[str, str]]) -> dict[str, Any]:
         services, unavailable = set(scope.services), []
         for stack in scope.stacks:
             names = _compose_services(compose_docs.get(stack, []))
@@ -472,8 +547,9 @@ class CheckpointService:
         return {"v": MANIFEST_V, "id": checkpoint_id, "mission_id": mission_id, "created_at": self._now(),
                 "stacks_root": self.stacks_root, "files": files, "facts": facts,
                 "facts_unavailable": sorted(unavailable),
+                **({"not_covered": not_covered[:64]} if not_covered else {}),
                 "scope": {"stacks": list(scope.stacks), "services": list(scope.services),
-                          "units": list(scope.units)}}
+                          "units": list(scope.units), **({"files": list(scope.plan_files)} if scope.plan_files else {})}}
 
     def _check_references(self, planned: list[_Planned], parsed: list[tuple[_Planned, bytes]]) -> None:
         """Expand the references again from the bytes that were actually captured. If the set differs from the
@@ -524,22 +600,45 @@ class CheckpointService:
         still matches, and a restore would report success. The link's own path is therefore resolved again here, and a link that
         no longer leads to the captured target is a problem (a restore refuses, even with drift acknowledged; the operator repairs
         the link by hand)."""
+        root = self._root_of(entry)
         names = ([entry["given_path"]] if entry.get("symlink") and entry.get("given_path") else [])
         names += [a for a in entry.get("aliases") or [] if a not in names]      # every name captured for this file
         for given in names:
             try:
-                real, _through_link = safefs.resolve_in_root(self.stacks_root, given)
+                real, _through_link = safefs.resolve_in_root(root, given)
             except safefs.UnsafePath as exc:
                 return None, None, f"{given}: the symlink can no longer be followed safely ({exc})", None
             if real != entry["path"]:
                 return None, None, (f"{given}: the symlink now leads to {real}, not to {entry['path']} where it led when the "
                                     "checkpoint was taken"), None
         try:
-            sha, data, meta = safefs.file_state(self.stacks_root, entry["path"],
+            sha, data, meta = safefs.file_state(root, entry["path"],
                                                 max_bytes=self.settings.max_file_bytes)
             return sha, data, None, meta
         except safefs.UnsafePath as exc:
             return None, None, str(exc), None
+
+    def _root_of(self, entry: dict[str, Any]) -> str:
+        """The root a captured file's safe-fs calls are made against: the stacks root, or `/` for a plan file (rc14.5). Only the two
+        values PE itself writes are honoured: anything else in a manifest is treated as the stacks root."""
+        return HOST_ROOT if entry.get("root") == HOST_ROOT and entry.get("kind") == PLAN_FILE else self.stacks_root
+
+    def not_covered(self, checkpoint_id: str) -> list[dict[str, str]]:
+        """The plan files this checkpoint could not cover (rc14.5), as recorded when it was taken."""
+        self._require_enabled()
+        items = self._manifest(checkpoint_id).get("not_covered") or []
+        return [i for i in items if isinstance(i, dict)]
+
+    def covered_paths(self, checkpoint_id: str) -> set[str]:
+        """Every path the checkpoint covers, by every name it was captured under (real path, given path, aliases)."""
+        self._require_enabled()
+        out: set[str] = set()
+        for entry in self._manifest(checkpoint_id).get("files", []):
+            out.add(entry["path"])
+            if entry.get("given_path"):
+                out.add(entry["given_path"])
+            out.update(a for a in entry.get("aliases") or [] if isinstance(a, str))
+        return out
 
     def manifest(self, checkpoint_id: str) -> dict[str, Any]:
         """The committed, immutable manifest (read-only: recovery and cancel compare the host against it)."""
@@ -745,7 +844,7 @@ class CheckpointService:
                     self.store.save_drift(checkpoint_id, entry["idx"], safefs.sha256_bytes(data), data))
         for entry, _data, seen in pending:
             try:
-                skipped = safefs.write_atomic(self.stacks_root, entry["path"], payloads[entry["idx"]],
+                skipped = safefs.write_atomic(self._root_of(entry), entry["path"], payloads[entry["idx"]],
                                               mode=entry["mode"], uid=entry["uid"], gid=entry["gid"],
                                               acl=entry.get("acl"), expect=(seen,),
                                               max_bytes=self.settings.max_file_bytes)

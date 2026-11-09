@@ -124,6 +124,28 @@ def _rollback_state(bodies: list[dict[str, Any]], mission: Mission) -> dict[str,
     return None
 
 
+def not_covered_view(ms: Any, mission: Mission) -> dict[str, Any] | None:
+    """rc14.5: what Undo will not put back, from PE's own record: the supervisor's note when the run ended (files the plan listed that
+    could not be snapshotted, files the run was seen writing outside the checkpoint, and how many calls PE could not read for writes);
+    before that, Core's note when the checkpoint was taken. None when there is nothing to say."""
+    if not mission.checkpoint_id:
+        return None
+    for body in _recent_trusted_notes(ms, mission):
+        if body.get("checkpoint") != mission.checkpoint_id:
+            continue
+        if body.get("event") == "checkpoint.not_covered":
+            files, unread = body.get("files"), body.get("unread_calls")
+        elif body.get("event") == "checkpoint.created":
+            files, unread = body.get("not_covered"), 0
+        else:
+            continue
+        items = [{"path": str(f.get("path"))[:300], "why": str(f.get("why") or "")[:200]}
+                 for f in (files if isinstance(files, list) else [])[:40] if isinstance(f, dict) and f.get("path")]
+        unread = unread if isinstance(unread, int) and not isinstance(unread, bool) and unread > 0 else 0
+        return {"files": items, "unread_calls": unread} if items or unread else None
+    return None
+
+
 def check_state(result: CheckResult) -> str:
     """pass | fail | could_not_check. A check that never ran (an unknown kind or bad parameters), timed out or errored inside is NOT a failure of the
     thing it checks and NOT a pass: it is shown as could-not-check. Either way it fails the gate (`ok` is False), exactly as before."""
@@ -254,5 +276,5 @@ def controls(mission: Mission, rolling_back: bool = False) -> dict[str, bool]:
     return out
 
 
-__all__ = ["ACTIONS", "CONTROLS", "SETTLED", "UNDO_STATES", "can_undo", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "ROLLING_BACK", "TERMINALISH", "check_state", "controls",
+__all__ = ["ACTIONS", "CONTROLS", "SETTLED", "UNDO_STATES", "can_undo", "not_covered_view", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "ROLLING_BACK", "TERMINALISH", "check_state", "controls",
            "conversation_status", "repair_status", "rollback_view", "timeline", "verification_view"]

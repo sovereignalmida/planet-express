@@ -106,21 +106,6 @@ second before changing the matcher.
 
 ## Missions (trust mode, from live use after rc14.4)
 
-### Undo covers every file the plan changes
-
-**What:** The checkpoint snapshots every existing file the confirmed plan lists under `changes` (absolute paths, size-capped),
-not only the stack's own compose and `.env` files. After the run, any file the session wrote or edited that the checkpoint does
-not cover is flagged on the result card ("changed, not covered by Undo"), with the agent's backup path when it made one.
-
-**Why:** A live Repair edited the stack's compose file and a helper script outside the stack. Undo would have restored the
-compose file and left the script pointing at a path that no longer exists, with nothing saying so.
-
-**Context:** `checkpoint/service.py` (`create` scope), the plan's `changes` in `console/plan.py`, the hook record of Write/Edit
-calls for the "outside the checkpoint" list.
-
-**Effort:** M
-**Priority:** P1
-
 ### Accept plain text for `known` and `unsure`
 
 **What:** `lenient()` turns a string `known` / `unsure` into a one-item list instead of refusing the plan.
@@ -188,3 +173,10 @@ each).
 **Priority:** P2
 
 ## Completed
+
+### Undo covers every file the plan changes (done, rc14.5)
+
+A confirmed option lists its `files`; they are hash-bound in the grant, shown on the Authorise sheet, and captured by the checkpoint
+wherever they are on the host, so Undo puts them back. A file the checkpoint cannot cover (absent, unwritable directory, PE's own)
+does not stop the run. The result card names it, along with every file the hook saw the run write outside the checkpoint and the
+number of calls it could not read for writes.

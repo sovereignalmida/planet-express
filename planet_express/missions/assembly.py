@@ -27,6 +27,8 @@ from .approval_flow import ApprovalFlow
 from .checkpoint import CheckpointService, CheckpointSettings
 from .grants import Inventory, SiteLimits, validate_grant
 from .models import Budgets, Grant, VerificationPlan
+from .hooks import policy_for
+from .runner import _pe_paths
 from .store import MissionStore
 from .tools import default_registry
 from .verify.baseline import normalize
@@ -98,6 +100,14 @@ def discover_inventory(stacks_root: str) -> Inventory:
     return Inventory(hosts=("local",), stacks=tuple(stacks), services=tuple(services))
 
 
+def _own_paths(cfg: Any, store: Store, stacks_root: str) -> tuple[str, ...]:
+    """PE's own paths as the session hook sees them (config, database, hook root), so Undo and the hook agree on what is PE."""
+    try:
+        return tuple(policy_for(cfg, stacks_root=stacks_root, pe_paths=_pe_paths(store)).pe_paths)
+    except Exception:                                  # noqa: BLE001 - a config without hook settings: the install's own paths
+        return _pe_paths(store)
+
+
 def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, containment: Any, broker: Any, stacks_root: str,
                           enabled: Callable[[], bool], model_broker: Any = None) -> RepairControls:
     ms = MissionStore(store)
@@ -105,7 +115,9 @@ def build_repair_controls(store: Store, cfg: Any, wiring: RepairWiring, *, conta
     checkpoint = CheckpointService(
         mission_store=ms, root=cfg.checkpoint.root or str(state_dir / "checkpoints"), stacks_root=stacks_root,
         provider=wiring.provider, settings=CheckpointSettings.from_config(cfg.checkpoint), enabled=enabled,
-        baseline_provider=lambda: normalize(wiring.scan()))
+        baseline_provider=lambda: normalize(wiring.scan()),
+        # Undo never writes PE back (rc14.5): its config and database, its state directory and its own code.
+        pe_paths=(*_own_paths(cfg, store, stacks_root), str(state_dir), str(Path(__file__).resolve().parents[2])))
     verifier = verifier_from_config(cfg, missions=ms, checkpoint=checkpoint, provider=wiring.provider, broker=broker,
                                     scan=wiring.scan, stacks_root=stacks_root, enabled=enabled)
     known_tools = default_registry().names()

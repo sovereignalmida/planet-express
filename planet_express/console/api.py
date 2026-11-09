@@ -342,7 +342,8 @@ class ConsoleApi:
         try:
             made = flow.propose_repair(
                 actor, title=f"{conv.title[:120]} · {chosen.name}"[:256], goal=plan_mod.goal_text(chosen),
-                scope={"stacks": list(chosen.scope.stacks), "services": list(chosen.scope.services), "hosts": ["local"]},
+                scope={"stacks": list(chosen.scope.stacks), "services": list(chosen.scope.services), "hosts": ["local"],
+                       **({"files": list(chosen.files)} if chosen.files else {})},
                 checks=[c.model_dump() for c in chosen.checks],
                 incident_id=self.ms.get_mission(conv.mission_id).incident_id)
         except FlowError as exc:
@@ -487,6 +488,7 @@ class ConsoleApi:
                 "finished": mission.status in execution_mod.TERMINALISH and not rolling, "rollback": rollback,
                 # A completed run's rollback is offered as "Undo this change" (rc14.2).
                 "undo": execution_mod.can_undo(mission),
+                "not_covered": execution_mod.not_covered_view(self.ms, mission),
                 # "Keep working on it" is not offered while the run is waiting to be, or being, rolled back.
                 "rolling_back": rolling or mission.status == "rollback_pending"}
 
@@ -525,7 +527,8 @@ class ConsoleApi:
         return {
             "execution_id": execution_id, "mission_id": mission_id, "grant_hash": card["grant_hash"], "fingerprint": card["grant_hash"][:8],
             "operator": operator, "option": option.name, "summary": option.summary,
-            "scope": {"stacks": card["scope"]["stacks"], "services": card["scope"]["services"]},
+            "scope": {"stacks": card["scope"]["stacks"], "services": card["scope"]["services"],
+                      **({"files": card["scope"]["files"]} if card["scope"].get("files") else {})},
             "warnings": [w["text"] for w in card["warnings"] if w["kind"] != "full_access"],
             "access": "Full access to this host (docker, sudo), as you have at a terminal. It will not wipe disks, delete Docker volumes "
                       "or data, or touch PE's own config, secrets or database.",

@@ -10,6 +10,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    model_serializer,
     model_validator,
 )
 
@@ -62,11 +63,40 @@ def _without(doc: Any, keys: frozenset[str]) -> Any:
     return {k: v for k, v in doc.items() if k not in keys} if isinstance(doc, dict) else doc
 
 
+# A file a plan names: absolute, normalised, no `..`, no NUL. The checkpoint captures it wherever it is (rc14.5).
+FILE_PATH_RE = re.compile(r"^/(?!.*(?:^|/)\.\.?(?:/|$))[^\0]*[^/]$")
+MAX_SCOPE_FILES = 32
+MAX_SCOPE_FILE_CHARS = 440       # leaves room for the `host:<host>/path:` prefix inside a 512-character lease resource id
+
+
+def scope_file_problem(path: Any) -> str | None:
+    """Why `path` cannot be a file in a grant's scope, or None. Never echoes the path."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        return "is not an absolute path"
+    if any(ord(c) < 32 or ord(c) == 127 for c in path):
+        return "has a control character in it"
+    if len(path) > MAX_SCOPE_FILE_CHARS:
+        return f"is longer than {MAX_SCOPE_FILE_CHARS} characters"
+    if "//" in path or not FILE_PATH_RE.fullmatch(path):
+        return "is not a plain absolute file path (no `..`, `.`, `//` or trailing `/`)"
+    return None
+
+
 class GrantScope(_Strict):
-    """What a Repair works on: the stacks and services its leases cover and its verification is about."""
+    """What a Repair works on: the stacks and services its leases cover and its verification is about, and (rc14.5) the files the
+    confirmed plan says it changes, which the checkpoint captures so Undo covers them. `files` is left out of the stored and hashed
+    form when it is empty, so every grant made before it existed keeps its hash."""
     stacks: ShortList = []
     services: ShortList = []
     hosts: ShortList = ["local"]
+    files: Annotated[list[Str], Field(max_length=MAX_SCOPE_FILES)] = []
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_files(self, handler: Any) -> Any:
+        out = handler(self)
+        if isinstance(out, dict) and not out.get("files"):
+            out.pop("files", None)
+        return out
 
     @classmethod
     def load(cls, doc: Any) -> "GrantScope":

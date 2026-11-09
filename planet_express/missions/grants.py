@@ -16,7 +16,7 @@ import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from .models import Grant, VerificationPlan
+from .models import Grant, VerificationPlan, scope_file_problem
 from .resources import BadResource, canon
 from .store import grant_resources
 from .verify.plan import binding_problems
@@ -71,6 +71,10 @@ def validate_grant(grant: Grant, *, inventory: Inventory, known_checks: Collecti
     for service in scope.services:
         if service not in inventory.services:
             out.append(f"scope service {service!r} is not in the discovered inventory")
+    for n, path in enumerate(scope.files, 1):
+        why = scope_file_problem(path)
+        if why:
+            out.append(f"scope file {n} {why}")
     try:
         scope_ids = [canon(r) for r in grant_resources(grant)]
     except BadResource as exc:

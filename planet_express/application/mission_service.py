@@ -936,7 +936,11 @@ def _render_card(card: dict) -> str:
     lines = [f"{card['mission_id']} [{card['status']}/{card['tier']}] {card['title']}"]
     lines += [f"!! {w['text']}" for w in card["warnings"]]
     scope = card["scope"]
-    lines.append("scope: " + ", ".join(f"{k}={','.join(v)}" for k, v in scope.items() if v))
+    lines.append("scope: " + ", ".join(f"{k}={','.join(v)}" for k, v in scope.items() if v and k != "files"))
+    if scope.get("files"):                       # rc14.5: bounded, so the grant-hash line below always fits Telegram's limit
+        files = [f[:120] for f in scope["files"][:6]]
+        more = len(scope["files"]) - len(files)
+        lines.append("files Undo covers: " + ", ".join(files) + (f" and {more} more" if more > 0 else ""))
     bud = card["budgets"]
     lines.append(f"budgets: {bud['wall_s']}s, {bud['tool_calls']} tools, {bud['output_bytes']} bytes, retries {bud['retries']}")
     lines.append("verification: " + (", ".join(f"{c['id']}({c['check']})" for c in card["verification"]["checks"]) or "none")

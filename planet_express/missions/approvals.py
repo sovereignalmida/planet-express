@@ -160,7 +160,7 @@ def has_approving_row(conn: sqlite3.Connection, mission_id: str, bound_hash: str
 
 def _scope_within(inner: GrantScope, outer: GrantScope) -> bool:
     return all(set(getattr(inner, f)) <= set(getattr(outer, f))
-               for f in ("stacks", "services", "hosts"))
+               for f in ("stacks", "services", "hosts", "files"))
 
 
 def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, now: int) -> list[str]:

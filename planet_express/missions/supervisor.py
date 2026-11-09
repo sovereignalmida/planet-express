@@ -107,6 +107,12 @@ MAX_HOOK_READ = 256 * 1024       # bytes of a session's hook log read per poll (
 MAX_FINAL_DRAINS = 64
 MAX_HOOK_LINE = 4096
 TAIL_LINES = 64                 # non-JSON output lines kept in `session-tail.txt` when a session ends without a result (rc14.4)
+# rc14.5: what a run wrote that Undo does not cover. Scratch space and PE's own state are not the host's files.
+NOT_COVERED_WRITTEN = "the run wrote it and the checkpoint does not hold it"
+NOT_COVERED_GONE = "the run wrote or removed it and it is not there now; the checkpoint does not hold it"
+MAX_NOT_COVERED = 40
+MAX_HOOK_WRITES = 20
+_SCRATCH_PREFIXES = ("/tmp/", "/var/tmp/", "/run/", "/dev/shm/", "/var/lib/planetexpress/")
 CLEANUP_PREFIX = "X-"          # a cleanup session is named for the session whose workspace it empties
 CLEANUP_SH, CLEANUP_FIND = "/bin/sh", "/usr/bin/find"
 
@@ -983,6 +989,13 @@ class Supervisor:
                 value = line["data"].get(key)
                 if isinstance(value, str):
                     body[key] = value[:MAX_HOOK_FIELD]
+            writes = line["data"].get("writes")             # rc14.5: advisory, absolute paths only, bounded
+            if isinstance(writes, list):
+                kept = [w[:512] for w in writes[:MAX_HOOK_WRITES] if isinstance(w, str) and w.startswith("/")]
+                if kept:
+                    body["writes"] = kept
+            if line["data"].get("writes_unsure") is True:
+                body["writes_unsure"] = True
             if len(body) == 1:
                 continue                                  # nothing a hook records: not an event
             self.ms.append_event(run.mission_id, line["kind"], "worker", body)
@@ -1391,6 +1404,45 @@ class Supervisor:
             self.checkpoint.capture_post(mission.checkpoint_id)
         except Exception as exc:                       # noqa: BLE001 - the restore refuses without it and says so
             self._note(mission_id, {"capture_post_failed": type(exc).__name__})
+        try:
+            self._record_not_covered(mission)
+        except Exception:                              # noqa: BLE001 - advisory: never costs the run its end
+            log.warning("mission %s: could not work out what Undo does not cover", mission_id, exc_info=True)
+
+    def _record_not_covered(self, mission: Mission) -> None:
+        """rc14.5: what Undo will not put back, said once when the run ends. Two sources, both advisory (they decide nothing): the
+        plan's files the checkpoint could not capture (and why), and every file the hook saw a session call write that the checkpoint
+        does not cover. Calls the hook could not read for writes (a script, a path built from a variable) are counted, not guessed."""
+        covered = self.checkpoint.covered_paths(mission.checkpoint_id)
+        scratch = (*_SCRATCH_PREFIXES, str(self.workspace_dir).rstrip("/") + "/", str(self.store.path.parent).rstrip("/") + "/")
+        items: dict[str, str] = {i["path"]: str(i.get("why") or "")[:200]
+                                 for i in self.checkpoint.not_covered(mission.checkpoint_id) if isinstance(i.get("path"), str)}
+        unread = 0
+        for event in self.ms.events(mission.id, kind="tool"):
+            if event.actor != "worker":
+                continue
+            try:
+                body = json.loads(event.body_json)
+            except ValueError:
+                continue
+            if not isinstance(body, dict) or body.get("hook") != "pre" or body.get("verdict") != "allow":
+                continue
+            unread += int(body.get("writes_unsure") is True)
+            for path in body.get("writes") or []:
+                if not isinstance(path, str) or not path.startswith("/"):
+                    continue
+                real = os.path.realpath(path)
+                if (path in covered or real in covered or path in items or path.startswith(scratch) or real.startswith(scratch)
+                        or os.path.isdir(path)):
+                    continue
+                items[path] = NOT_COVERED_WRITTEN if os.path.lexists(path) else NOT_COVERED_GONE
+                if len(items) >= MAX_NOT_COVERED:
+                    break
+        if not items and not unread:
+            return
+        self._note(mission.id, {"event": "checkpoint.not_covered", "checkpoint": mission.checkpoint_id,
+                                "files": [{"path": p[:512], "why": w} for p, w in list(items.items())[:MAX_NOT_COVERED]],
+                                "unread_calls": unread})
 
     def _reap_session(self, run: _Run) -> None:
         """The session is provably dead and its cgroup is gone: stop its socket, remove its workspace and release its
@@ -1857,12 +1909,29 @@ class Supervisor:
                 break
         if post is None or post.get("changed") != [] or not post.get("files"):
             return False
+        if self._wrote_outside_checkpoint(mission):
+            return False                               # rc14.5: it changed a file the checkpoint does not hold: not "nothing changed"
         try:
             manifest = self.checkpoint.manifest(mission.checkpoint_id)
             return recovery.matches_checkpoint(recovery.collect_host_state(self.checkpoint, manifest), manifest,
                                                self._end_of_run_post(mission))
         except Exception:                                  # noqa: BLE001 - an unreadable host is not "unchanged"
             return False
+
+    def _wrote_outside_checkpoint(self, mission: Mission) -> bool:
+        """Did the run (or may it have) changed a file the checkpoint does not hold? Only the supervisor's own note counts (a worker can
+        post notes too). Any file in it does: a plan file the checkpoint could not take was listed because the run meant to change it,
+        and nothing here can show it did not."""
+        for event in reversed(self.ms.events(mission.id, kind="note")):
+            if event.actor != ACTOR:
+                continue
+            try:
+                body = json.loads(event.body_json)
+            except ValueError:
+                continue
+            if isinstance(body, dict) and body.get("event") == "checkpoint.not_covered" and body.get("checkpoint") == mission.checkpoint_id:
+                return any(isinstance(f, dict) for f in body.get("files") or [])
+        return False
 
     def _end_of_run_post(self, mission: Mission) -> dict[str, Any] | None:
         """The post-change manifest of this mission's checkpoint, but only when it records how the run ENDED (rc14.3): no session is

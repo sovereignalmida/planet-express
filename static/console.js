@@ -329,7 +329,8 @@
                       o.recommended ? el("span", "pe-opt-rec", "RECOMMENDED") : null), el("div", "pe-opt-sum", o.summary));
         const sec = (label, ...body) => add(el("div", "pe-opt-sec"), el("span", "pe-label", label), ...body);
         const list = (items, cls) => { const ul = el("ul"); for (const it of items) add(ul, add(el("li", cls), el("span", "", it))); return ul; };
-        add(opt, sec("WHAT CHANGES", list(o.changes)), sec("WILL NOT TOUCH", list(o.will_not_touch, "no")),
+        add(opt, sec("WHAT CHANGES", list(o.changes)), (o.files || []).length ? sec("FILES UNDO COVERS", list(o.files)) : null,
+            sec("WILL NOT TOUCH", list(o.will_not_touch, "no")),
             sec("RISK", add(el("div", "pe-opt-risk"), el("span", "pe-badge " + ({ low: "ok", medium: "warn", high: "high" }[o.risk.level] || "none"), o.risk.level.toUpperCase()), el("span", "", o.risk.text))),
             sec("ROLLS BACK TO", el("p", "", o.rolls_back_to)), sec("PE WILL CHECK", list(o.checks.map(checkPhrase), "chk")), sec("EFFORT", el("span", "pe-value", o.effort)));
         const pick = () => { state.picked[planInfo.id] = i; renderThread(); };
@@ -535,8 +536,25 @@
       }
       return box;
     }
+    // rc14.5: what Undo will not put back, from PE's own record. Information the operator needs before they rely on Undo.
+    function notCoveredBlock(x) {
+      const nc = x.not_covered;
+      if (!nc || (!(nc.files || []).length && !nc.unread_calls)) return null;
+      const box = el("div", "pe-note warn pe-con-not-covered");
+      add(box, el("div", "pe-label", "NOT COVERED BY UNDO"));
+      if ((nc.files || []).length) {
+        const ul = el("ul");
+        for (const f of nc.files) add(ul, add(el("li"), el("span", "pe-mono", f.path), el("span", "", f.why ? " \u2014 " + f.why : "")));
+        box.appendChild(ul);
+      }
+      if (nc.unread_calls) box.appendChild(el("div", "", nc.unread_calls + (nc.unread_calls === 1 ? " command" : " commands") +
+        " ran a script or used a path PE could not read, so PE cannot say which files it changed. The run's record has them."));
+      return box;
+    }
     function executionBlocks(x) {
       const out = [runBlock(x)];
+      const nc = notCoveredBlock(x);
+      if (nc) out.push(nc);
       if (x.verification) out.push(verifyBlock(x));
       // A run that needs the operator but has no verification to hang the button on (a restart, a refused rollback) still gets its control:
       // the thread must never say "you can roll back" with nothing to click.
@@ -590,6 +608,7 @@
       add(rows, row("SCOPE", scope), row("ACCESS", v.access, true), row("WILL NOT TOUCH", wont),
           row("LIMITS", v.limits.minutes + " min · " + v.limits.steps + " steps. PE checks it worked and can roll it back."),
           row("PE WILL CHECK", v.checks.join(" · ")), row("ROLLBACK", "PE takes a checkpoint just before it starts; you can roll back to it from here."));
+      if ((v.scope.files || []).length) add(rows, row("FILES UNDO COVERS", v.scope.files.join(" · ")));
       const who = add(el("div", "pe-attrib"), el("span", "pe-who", v.operator.slice(0, 2).toUpperCase()),
                       add(el("div"), el("div", "pe-attrib-name", "Logged as " + v.operator), add(el("div", "pe-attrib-meta"), document.createTextNode("operator · you approve "), el("span", "pe-fp", v.fingerprint))));
       const go = el("button", "pe-btn go", "Authorise: " + v.option); go.type = "button"; go.disabled = state.sheetBusy;

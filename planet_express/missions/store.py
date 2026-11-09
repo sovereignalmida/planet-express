@@ -42,6 +42,10 @@ def grant_resources(grant: Grant) -> list[str]:
     for host in grant.scope.hosts:
         out += [f"host:{host}/stack:{s}" for s in grant.scope.stacks]
         out += [f"host:{host}/service:{s}" for s in grant.scope.services]
+        # rc14.5: the plan's own files, so two runs cannot change the same file at once (one's Undo would overwrite the other's).
+        # Lease overlap is lexical, so the resolved path is leased too: two spellings of one file (a symlink) still conflict.
+        for f in getattr(grant.scope, "files", ()):
+            out += list(dict.fromkeys([f"host:{host}/path:{f}", f"host:{host}/path:{os.path.realpath(f)}"]))
     return out
 
 

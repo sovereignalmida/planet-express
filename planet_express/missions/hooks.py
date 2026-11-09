@@ -134,7 +134,17 @@ def _is_pe_secret(path: str) -> bool:
     return any(_within(norm, root) for root in _PE_SECRET)
 
 
+def is_pe_path(path: str, pe_paths: Sequence[str] = ()) -> bool:
+    """Is `path` one of Planet Express's own secrets or files (the same list the hook hard-blocks writes to), with `pe_paths` the
+    install's own extra paths? The checkpoint uses it so Undo never writes PE's own files back (rc14.5)."""
+    return _is_pe_secret(path) or _is_pe_own_paths(path, tuple(pe_paths))
+
+
 def _is_pe_own(path: str, policy: HookPolicy) -> bool:
+    return _is_pe_own_paths(path, policy.pe_paths)
+
+
+def _is_pe_own_paths(path: str, pe_paths: Sequence[str]) -> bool:
     norm = _norm(path.replace("\\", "/"))
     if any(_within(norm, root) for root in _PE_OWN):
         return True
@@ -142,7 +152,7 @@ def _is_pe_own(path: str, policy: HookPolicy) -> bool:
         return True
     if _within(norm, _PE_DATA) and _DB_NAME.fullmatch(posixpath.basename(norm)):
         return True
-    for own in policy.pe_paths:
+    for own in pe_paths:
         own = _norm(own)
         if _within(norm, own) or (_DB_NAME.fullmatch(posixpath.basename(own)) and norm.startswith(own + "-")):
             return True
@@ -531,6 +541,123 @@ def _classify_command(command: str, policy: HookPolicy, cwd: str) -> Decision:
     return ALLOW
 
 
+# ── what a call writes, for the record (rc14.5) ───────────────────────────────────────────────────────────
+
+MAX_WRITES = 20
+MAX_WRITES_CHARS = 1600          # with `input` and `reason` (400 each) a record stays well under MAX_LOG_LINE
+_NOT_FILES = ("/dev/", "/proc/", "/sys/")
+_DOCKERS = frozenset({"docker", "podman", "docker-compose", "podman-compose"})
+_GLOB_OR_VAR = re.compile(r"[$`*?\[{]")
+
+
+_NO_FILES_WRITTEN = frozenset({"cd", "pushd", "popd", "echo", "printf", "sleep", "date", "true", "false", ":", "export", "set",
+                               "unset", "local", "read", "wait", "exit", "return", "shift"})
+_RUNS_A_SCRIPT = frozenset({"source", "."})
+_REDIRECT_TOKEN = re.compile(r"^(\d?)(<<<|<<|>>|&>>|&>|>&|<&|<|>)(\S*)$")
+_WRITING_OPS = (">", ">>", "&>", "&>>")
+
+
+def _split_redirections(toks: Sequence[str]) -> tuple[list[str], list[str]]:
+    """A segment's tokens without its redirections, and the files its `>`/`>>` redirections write. Read from the segment's own
+    tokens, so a redirection inside a quoted argument (`docker exec c sh -c "echo a > /x"`) is not taken for one on the host. A
+    token such as `hi>/tmp/x` (no space) is split at the `>`. `2>&1` and `>&2` duplicate a descriptor and write no file."""
+    out: list[str] = []
+    written: list[str] = []
+    pending: str | None = None
+    for t in toks:
+        if pending is not None:
+            if pending in _WRITING_OPS and not t.startswith("&"):
+                written.append(t)
+            pending = None
+            continue
+        m = _REDIRECT_TOKEN.match(t)
+        if m is None and " " not in t and ">" in t:
+            head, _, tail = t.partition(">")
+            if head:
+                out.append(head)
+            m = _REDIRECT_TOKEN.match(">" + tail)
+        if m is None:
+            out.append(t)
+            continue
+        op, target = m.group(2), m.group(3)
+        if not target:
+            pending = op
+        elif op in _WRITING_OPS and not target.startswith("&"):
+            written.append(target)
+    return out, written
+
+
+def _sed_files(toks: Sequence[str]) -> list[str]:
+    """`sed -i SCRIPT FILE...`: the files, not the script (unless the script came with -e/-f)."""
+    args, scripted, positional, i = list(toks[1:]), False, [], 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-e", "-f", "--expression", "--file"):
+            scripted, i = True, i + 2
+            continue
+        if a.startswith(("--expression=", "--file=")) or (a.startswith(("-e", "-f")) and len(a) > 2 and not a.startswith("-i")):
+            scripted = True
+        elif not a.startswith("-") or a == "-":
+            positional.append(a)
+        i += 1
+    return positional if scripted else positional[1:]
+
+
+def writes_of(tool: str, args: Mapping[str, Any], cwd: str = "") -> tuple[list[str], bool]:
+    """The host files a call may write, as absolute paths, and whether it may write others this reader cannot name (a script run
+    through an interpreter, a path built from a variable or a glob, more than MAX_WRITES). Advisory only: it decides nothing. After
+    the run Core compares it with what the checkpoint covers, so the result can say what Undo will not put back. Docker commands are
+    left out (they change containers, not host files the checkpoint could hold)."""
+    tool_l = str(tool).lower()
+    found: list[str] = []
+    unsure = False
+    if tool_l in SHELL_TOOLS:
+        command = args.get("command") if isinstance(args.get("command"), str) else args.get("cmd")
+        if not isinstance(command, str):
+            return [], True
+        cwd = str(args.get("cwd") or cwd or "")
+        segments, unsure = _segments(command)
+        raw: list[str] = []
+        for toks in segments:
+            toks, redirected = _split_redirections(toks)
+            if not toks:
+                continue
+            low = posixpath.basename(toks[0]).lower()
+            if low in ("cd", "pushd") and len(toks) > 1 and not _GLOB_OR_VAR.search(toks[1]):
+                cwd = _abs(toks[1], cwd)           # later relative paths in the same command resolve from there
+                continue
+            raw += [(t, cwd) for t in redirected]
+            if low in _INLINE_INTERPRETERS or low in _SHELLS or low in _RUNS_A_SCRIPT or "/" in toks[0]:
+                unsure = True                      # a script this reader did not see (stdin, a heredoc, a sourced or local file)
+                continue
+            if low in _DOCKERS or low in _NO_FILES_WRITTEN:
+                continue
+            if low == "sed":
+                raw += [(t, cwd) for t in (_sed_files(toks) if _written_paths(low, toks) else [])]
+                continue
+            written = _written_paths(low, toks)
+            if low not in _READERS and any("$" in t or "`" in t for t in toks[1:]):
+                unsure = True                      # a writer given a path built from a variable: which file is not known here
+            raw += [(t, cwd) for t in written]
+    elif tool_l in ("write", "edit", "multiedit", "notebookedit", "create", "str_replace_editor"):
+        raw = [(str(v), cwd) for k, v in args.items()
+               if k in ("file_path", "path", "filepath", "notebook_path") and isinstance(v, str)]
+    else:
+        return [], False
+    for target, base in raw:
+        if "://" in target:
+            continue                               # a URL, not a file
+        if _GLOB_OR_VAR.search(target):
+            unsure = True
+            continue
+        path = _abs(target, base)
+        if not path.startswith(_NOT_FILES) and path not in found:
+            found.append(path)
+    if len(found) > MAX_WRITES:
+        found, unsure = found[:MAX_WRITES], True
+    return [p[:512] for p in found], unsure
+
+
 # ── the runner: failure modes and the record ──────────────────────────────────────────────────────────
 
 _PE_MARKERS = re.compile(r"(/etc/planetexpress|/run/planetexpress|/environ\b|sudoers\.d/planetexpress|mission-hooks|"
@@ -564,8 +691,11 @@ class HookRunner:
     def pre(self, raw: Any) -> Decision:
         """`raw` is the hook's input exactly as the runtime gave it (a dict, or the JSON text of one)."""
         decision, summary = self._decide(raw)
-        self._record("tool", {"hook": "pre", "tool": summary[0], "verdict": decision.verdict, "class": decision.cls,
-                              "reason": decision.reason[:EVENT_TEXT], "input": summary[1]})
+        body = {"hook": "pre", "tool": summary[0], "verdict": decision.verdict, "class": decision.cls,
+                "reason": decision.reason[:EVENT_TEXT], "input": summary[1]}
+        if decision.verdict == "allow":
+            body.update(_writes_record(raw))
+        self._record("tool", body)
         return decision
 
     def post_hook(self, raw: Any) -> None:
@@ -612,6 +742,28 @@ def _dump(value: Any) -> str:
         return json.dumps(value, default=str)[:MAX_COMMAND_CHARS]
     except (TypeError, ValueError):
         return ""
+
+
+def _writes_record(raw: Any) -> dict[str, Any]:
+    """`writes` (paths) and `writes_unsure` for an allowed call's record; empty when it writes nothing this reader can see. Never
+    raises: the record is advisory."""
+    try:
+        data = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+        tool = data.get("tool_name") or data.get("tool")
+        args = data.get("tool_input") if "tool_input" in data else data.get("args", {})
+        if not isinstance(tool, str) or not isinstance(args, dict):
+            return {}
+        paths, unsure = writes_of(tool, args, str(data.get("cwd") or ""))
+    except Exception:                                      # noqa: BLE001
+        return {"writes_unsure": True}
+    kept, size = [], 0
+    for p in paths:                                # the whole line must stay under MAX_LOG_LINE, or the hook log drops the record
+        size += len(p) + 4
+        if size > MAX_WRITES_CHARS:
+            unsure = True
+            break
+        kept.append(p)
+    return {**({"writes": kept} if kept else {}), **({"writes_unsure": True} if unsure else {})}
 
 
 def _summary(raw: Any) -> tuple[str, str]:

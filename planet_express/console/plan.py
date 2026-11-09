@@ -28,6 +28,7 @@ from pydantic import (
 
 from planet_express.missions.canonical import CanonicalError, loads_strict, sha256_hex
 from planet_express.missions.events import redact_value
+from planet_express.missions.models import MAX_SCOPE_FILE_CHARS, MAX_SCOPE_FILES, scope_file_problem
 from planet_express.missions.resources import BadResource, canon
 from planet_express.missions.verify.checks import PARAM_MODELS
 from planet_express.missions.verify.plan import CATALOGUE_V, PlanInvalid, parse_plan
@@ -83,6 +84,9 @@ class Option(_Strict):
     recommended: StrictBool
     summary: Line
     changes: Annotated[list[Line], Field(max_length=32)]
+    # rc14.5: every file the option changes, by absolute path. It goes into the grant, and the checkpoint captures each one, so Undo
+    # puts it back wherever it is on the host (not only the stack's compose files).
+    files: Annotated[list[Annotated[StrictStr, Field(min_length=1, max_length=MAX_SCOPE_FILE_CHARS)]], Field(max_length=MAX_SCOPE_FILES)] = []
     will_not_touch: Annotated[list[Carve], Field(max_length=32)]
     risk: Risk
     rolls_back_to: Line
@@ -124,7 +128,7 @@ def _norm_kind(kind: Any) -> Any:
 def lenient(doc: Any) -> Any:
     """A copy of the decoded plan with what is harmless filled in: a check without an `id` gets `<kind>-<n>`, a repeated id is made
     unique the same way, a missing `params` is `{}`, a kind's stray whitespace and case are normalised, missing lists (`known`,
-    `unsure`, `changes`, `will_not_touch`, `exclude`, a scope's `stacks`/`services`) are empty, a missing `effort` is "not stated", and
+    `unsure`, `changes`, `files`, `will_not_touch`, `exclude`, a scope's `stacks`/`services`) are empty, a missing `effort` is "not stated", and
     a single option with no `recommended` is the recommended one (and, when exactly one is marked, the unmarked are not). Nothing that the operator reviews or that bounds the run (a check's
     kind or parameters, the scope's names, risk, rolls_back_to) is invented: those are still validated, and refused when wrong."""
     if not isinstance(doc, dict):
@@ -141,7 +145,7 @@ def lenient(doc: Any) -> Any:
             continue
         if chosen == 1:
             option.setdefault("recommended", False)      # one option is marked recommended: the unmarked ones are not
-        for key in ("changes", "will_not_touch", "exclude"):
+        for key in ("changes", "files", "will_not_touch", "exclude"):
             option.setdefault(key, [])
         option.setdefault("effort", "not stated")
         if len(options) == 1:
@@ -315,6 +319,10 @@ def parse(doc: Any, inventory: Any = None, available: Any = None) -> Plan:
             for n, name in enumerate(option.scope.services, 1):
                 if name not in services:
                     problems.append(f"{label}: `scope.services` item {n} is not a service on this host (INVENTORY.md lists them)")
+        for n, path in enumerate(option.files, 1):
+            why = scope_file_problem(path)
+            if why:
+                problems.append(f"{label}: `files` item {n} {why}")
         for n, resource in enumerate(option.exclude, 1):
             try:
                 canon(resource)
@@ -418,6 +426,8 @@ def goal_text(option: Option) -> str:
     Built by PE from the validated option, never from free agent prose outside it."""
     lines = [f"Carry out this plan the operator approved: {option.name}.", option.summary, "", "Change only what it says:"]
     lines += [f"- {c}" for c in option.changes]
+    if option.files:
+        lines += ["", "Files it changes (PE snapshotted these, so Undo can put them back):"] + [f"- {f}" for f in option.files]
     lines += ["", "Do not touch:"] + [f"- {w}" for w in [*option.will_not_touch, *option.exclude]]
     lines += ["", f"Roll back to: {option.rolls_back_to}", "", "PE will check afterwards that:"] + [f"- {check_phrase(c)}" for c in option.checks]
     return "\n".join(lines)[:8000]
@@ -425,7 +435,11 @@ def goal_text(option: Option) -> str:
 
 def canonical(plan: Plan) -> dict[str, Any]:
     """The plan as stored: redacted string leaves, so nothing an agent smuggled into prose is kept as a secret."""
-    return redact_value(plan.model_dump(mode="json"))
+    doc = plan.model_dump(mode="json")
+    for option in doc.get("options", []):
+        if not option.get("files"):
+            option.pop("files", None)           # rc14.5: a plan without files hashes as it did before the field existed
+    return redact_value(doc)
 
 
 def plan_hash(plan: Plan) -> str:
@@ -468,6 +482,7 @@ def json_schema(available: Any = None) -> dict[str, Any]:
         "stacks": {"type": "array", "items": text, "maxItems": 8}, "services": {"type": "array", "items": text, "maxItems": 32}}}
     option = {"type": "object", "additionalProperties": False, "required": names, "properties": {
         "name": text, "recommended": {"type": "boolean"}, "summary": text, "changes": {"type": "array", "items": text},
+        "files": {"type": "array", "items": text, "maxItems": MAX_SCOPE_FILES},
         "will_not_touch": {"type": "array", "items": text}, "risk": risk, "rolls_back_to": text, "effort": text,
         "scope": scope, "exclude": {"type": "array", "items": text, "maxItems": 32},
         "checks": {"type": "array", "items": check, "minItems": 1}}}
@@ -480,10 +495,11 @@ PLAN_INSTRUCTIONS = (
     "When the right response is a change, write your plan as plan.json in the current directory (use the Write tool). It is a JSON "
     "object with `known` (what the evidence shows), `unsure` (what it does not), and 1 to 3 `options`. Exactly one option has "
     "`recommended` true. Each option has: name, recommended, summary (one sentence), changes (services or files it would touch), "
-    "will_not_touch, risk {level low|medium|high, text}, rolls_back_to, effort, scope, exclude (optional) and checks. `scope` is "
+    "files (the absolute path of EVERY file it will create or edit, inside a stack or anywhere else on the host: PE snapshots each "
+    "one before the run so Undo can put it back; a file not listed here is not covered by Undo), will_not_touch, risk {level low|medium|high, text}, rolls_back_to, effort, scope, exclude (optional) and checks. `scope` is "
     "{stacks: [...], services: [...]}: what the option works on, using ONLY names listed in INVENTORY.md (services as "
-    "<stack>/<service>). PE leases it, so no other run works on it at the same time, and checkpoints its compose files before the "
-    "run. `exclude` lists resource ids such as service:<stack>/<service> the run is told to leave alone. The run that carries out "
+    "<stack>/<service>). PE leases it, so no other run works on it at the same time, and checkpoints its compose files (and every file in `files`) "
+    "before the run. `exclude` lists resource ids such as service:<stack>/<service> the run is told to leave alone. The run that carries out "
     "a confirmed option has full access to this host (docker, sudo), as the operator has at a terminal. `checks` are how PE will "
     "verify the option worked. Each check is an object {\"id\": a short name such as \"sonarr-up\", \"check\": one of the kinds "
     "below, \"params\": {...}}, and may ONLY use these check kinds, with params that match the schema EXACTLY (respect every bound, "
@@ -492,7 +508,7 @@ PLAN_INSTRUCTIONS = (
     "running. Stateful changes back up data first: when an option pulls a new image for, or recreates, a service whose data could be "
     "migrated (a database, an *arr app with its SQLite db, anything with a config or data bind mount), its changes start with copying "
     "that data directory to `<dir>.pe-backup-<mission>-<UTC>` beside it with `sudo cp -a`, and its rolls_back_to says that backup is "
-    "there (the checkpoint covers compose files, not data). You cannot approve a plan: the operator confirms an option, and only then is it carried out. Investigate as much as "
+    "there (the checkpoint covers compose files and the listed files, not data directories). You cannot approve a plan: the operator confirms an option, and only then is it carried out. Investigate as much as "
     "you need, but do not change anything on the host yourself before the operator confirms. If the operator says to go ahead with "
     "what you proposed, write (or refresh) plan.json for exactly that: PE then shows them the Authorise button; never answer that you "
     "cannot change the host. If PE refuses plan.json, it tells you exactly why: fix that and write the whole file again.")
