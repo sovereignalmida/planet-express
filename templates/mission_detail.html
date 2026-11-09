@@ -53,6 +53,15 @@
     <button class="pe-btn warn" type="submit">DENY AND CLOSE</button>
   </form>
   {% endif %}
+  {% if m.held_after_failed_checks %}
+  <div class="mc-form">
+    <p class="muted-body">This run is held for you. Check again runs PE's own checks and its before/after scan once more; a pass completes it. Keep closes it as it is, recorded as kept by you (PE's checks had not passed).</p>
+    <form method="post" action="{{ url_for('mission_recheck', mission_id=m.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="pe-btn accent" type="submit">CHECK AGAIN</button></form>
+    <form method="post" action="{{ url_for('mission_keep', mission_id=m.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <button class="pe-btn" type="submit">KEEP THE CHANGES AND CLOSE</button></form>
+  </div>
+  {% endif %}
   {% set undo = m.status == 'completed' and m.tier == 'repair' and m.has_checkpoint %}
   {% if m.status in ('needs_operator', 'recovery_required', 'rollback_pending') or undo %}
   <div class="mc-form">
@@ -71,6 +80,7 @@
   <dl class="mc-facts">
     {% if m.result.outcome %}<dt>OUTCOME</dt><dd class="mc-pre">{{ m.result.outcome }}</dd>{% endif %}
     {% if m.result.flags %}<dt>FLAGS</dt><dd>{{ m.result.flags }}</dd>{% endif %}
+    {% if m.result.flags == 'kept_by_operator' %}<dt>MEANING</dt><dd>Kept by the operator: what the run changed was kept and the mission closed, though PE's checks had not passed.</dd>{% endif %}
     {% if m.result.flags == 'nothing_checkpointed_changed' %}<dt>MEANING</dt><dd>Didn't work: nothing PE snapshotted was changed. Check the run's record for anything else it did.</dd>{% endif %}
     {% if m.result.verification %}<dt>VERIFICATION</dt><dd class="mc-pre">{{ m.result.verification | tojson(indent=1) }}</dd>{% endif %}
   </dl>

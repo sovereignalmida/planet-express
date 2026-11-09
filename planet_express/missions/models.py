@@ -50,6 +50,7 @@ LEGACY_GRANT_TEXT = ("this was approved before PE's trust-mode update changed wh
 # A failed Repair that closes `failed` because the checkpoint shows nothing changed. Only the checkpointed files and service settings
 # are known: anything else the session did with its full access is in its record, not in this claim.
 NOTHING_CHECKPOINTED_FLAG = "nothing_checkpointed_changed"
+KEPT_BY_OPERATOR_FLAG = "kept_by_operator"            # rc14.7: a held run whose changes the operator kept and closed (Supervisor.keep_and_close)
 NOTHING_CHECKPOINTED_TEXT = "verification failed and nothing the checkpoint covers changed"
 LEGACY_STANDING_TEXT = ("this standing grant was approved before PE's trust-mode update changed what an approval covers, so it no "
                         "longer applies. Revoke it and make a new one.")

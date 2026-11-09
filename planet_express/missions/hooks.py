@@ -327,6 +327,77 @@ def _script_of(toks: Sequence[str]) -> str | None:
     return None
 
 
+class _Word(str):
+    """A shell word that remembers which of its characters were written unquoted (`bare[i]`), so a `>` inside a quoted argument
+    (`sed "s/x/<y>/I"`) is never read as a redirection. Equal to the plain string: every other reader sees the same word."""
+    bare: tuple[bool, ...] = ()
+
+
+def _shell_words(text: str) -> list[_Word]:
+    """POSIX word splitting as `shlex.split(posix=True)` does it, keeping which characters were quoted or escaped."""
+    words: list[_Word] = []
+    chars: list[str] = []
+    bare: list[bool] = []
+    in_word, i, n = False, 0, len(text)
+
+    def close():
+        word = _Word("".join(chars))
+        word.bare = tuple(bare)
+        words.append(word)
+        chars.clear()
+        bare.clear()
+
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n":
+            if in_word:
+                close()
+                in_word = False
+            i += 1
+            continue
+        in_word = True
+        if c == "'":
+            j = text.find("'", i + 1)
+            if j < 0:
+                raise ValueError("No closing quotation")
+            chars.extend(text[i + 1:j])
+            bare.extend([False] * (j - i - 1))
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while True:
+                if i >= n:
+                    raise ValueError("No closing quotation")
+                c = text[i]
+                if c == '"':
+                    i += 1
+                    break
+                if c == "\\" and i + 1 < n and text[i + 1] in '"\\':
+                    c, i = text[i + 1], i + 1
+                chars.append(c)
+                bare.append(False)
+                i += 1
+        elif c == "\\":
+            if i + 1 >= n:
+                raise ValueError("No escaped character")
+            chars.append(text[i + 1])
+            bare.append(False)
+            i += 2
+        else:
+            chars.append(c)
+            bare.append(True)
+            i += 1
+    if in_word:
+        close()
+    return words
+
+
+def _bare_at(tok: str, index: int) -> bool:
+    """Whether the character at `index` was written unquoted (a plain string, from a fallback split, counts as unquoted)."""
+    bare = getattr(tok, "bare", ())
+    return not bare or (index < len(bare) and bare[index])
+
+
 def _segments(command: str, depth: int = 0) -> tuple[list[list[str]], bool]:
     """Each simple command as a token list, and whether any part of the line could not be understood with confidence. Quoting
     is honoured within a segment; the split ignores quotes, which can only make MORE segments (never hide one). `sh -c '...'`,
@@ -346,6 +417,12 @@ def _segments(command: str, depth: int = 0) -> tuple[list[list[str]], bool]:
             continue
         try:
             toks = shlex.split(part, comments=False, posix=True)
+            try:
+                words = _shell_words(part)
+            except ValueError:
+                words = []
+            if words == toks:
+                toks = list(words)                    # the same words, now knowing which characters were quoted
         except ValueError:
             toks, unsure = part.split(), True
         toks, bad = _strip_wrappers(toks)
@@ -571,11 +648,14 @@ def _split_redirections(toks: Sequence[str]) -> tuple[list[str], list[str]]:
             pending = None
             continue
         m = _REDIRECT_TOKEN.match(t)
-        if m is None and " " not in t and ">" in t:
-            head, _, tail = t.partition(">")
-            if head:
-                out.append(head)
-            m = _REDIRECT_TOKEN.match(">" + tail)
+        if m is not None and not all(_bare_at(t, k) for k in range(m.start(2), m.end(2))):
+            m = None                                   # a quoted `">"` is an argument, not a redirection
+        if m is None and " " not in t:
+            at = next((k for k, ch in enumerate(t) if ch == ">" and _bare_at(t, k)), None)
+            if at is not None:                         # `hi>/tmp/x`: only at a `>` written unquoted
+                if at:
+                    out.append(t[:at])
+                m = _REDIRECT_TOKEN.match(t[at:])
         if m is None:
             out.append(t)
             continue

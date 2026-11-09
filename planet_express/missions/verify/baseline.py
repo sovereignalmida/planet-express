@@ -20,7 +20,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from ..canonical import canonical_json, sha256_hex
-from ..resources import DEFAULT_HOST, BadResource, canon, contains
+from ..resources import DEFAULT_HOST, BadResource, canon, contains, split
 
 UNSCOPED = "unscoped"
 MAX_FINDINGS = 2000
@@ -195,6 +195,30 @@ def in_scope(finding: Finding, scope_ids: Iterable[str], *, stacks_root: str | N
         return True
     return any(contains(s, finding.resource_id, stacks_root=stacks_root)
                or contains(finding.resource_id, s, stacks_root=stacks_root) for s in scope_ids)
+
+
+HOST_WIDE_KINDS = frozenset({"disk_alert"})            # a filesystem filling up: how full a disk is, not whether the run's files are there
+
+
+def host_wide(finding: Finding, scope_ids: Iterable[str], *, stacks_root: str | None = None) -> bool:
+    """A finding about the host as a whole, not about what the run was given: a path or mount OUTSIDE the stacks root that only
+    contains the run's scope (the root disk passing its alert line, live M-34) and that no scope id names. rc14.7, the operator's
+    call: such a finding is shown with the result but does not fail it. A finding on the run's own stacks, services or files, an
+    unscoped finding, and a path under the stacks root still do."""
+    rid = finding.resource_id
+    if rid == UNSCOPED or finding.kind not in HOST_WIDE_KINDS:
+        return False                                     # a missing or failing mount under the run's files is the run's business (review)
+    try:
+        _, kind, name = split(rid)
+    except (BadResource, ValueError):
+        return False
+    if kind not in ("path", "mount"):
+        return False
+    root = (stacks_root or "").rstrip("/")
+    if root and (name == root or name.startswith(root + "/")):
+        return False                                     # a path inside the stacks root is the stacks' business
+    scope = list(scope_ids)
+    return not any(contains(s, rid, stacks_root=stacks_root) for s in scope)
 
 
 def new_findings(baseline: Iterable[Finding], fresh: Iterable[Finding]) -> list[Finding]:

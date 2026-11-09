@@ -47,6 +47,12 @@ class FindingRef(_Strict):
     severity: Annotated[StrictStr, Field(max_length=16)] = ""
 
 
+    def phrase(self) -> str:
+        """One plain line for the operator: `disk alert on path:/ (HIGH)`."""
+        where = self.resource_id.partition("/")[2] or self.resource_id
+        return f"{self.kind.replace('_', ' ')} on {where}" + (f" ({self.severity})" if self.severity else "")
+
+
 class ScanResult(_Strict):
     ok: StrictBool
     error: Annotated[StrictStr, Field(max_length=200)] = ""
@@ -55,6 +61,9 @@ class ScanResult(_Strict):
     new_in_scope: Annotated[list[FindingRef], Field(max_length=20)] = []
     new_in_scope_count: StrictInt = 0
     new_out_of_scope: StrictInt = 0
+    # rc14.7: new findings about the host as a whole (a filesystem outside the stacks root): shown with the result, never failing it.
+    new_on_host: Annotated[list[FindingRef], Field(max_length=20)] = []
+    new_on_host_count: StrictInt = 0
 
 
 class VerificationResult(_Strict):
@@ -71,6 +80,15 @@ class VerificationResult(_Strict):
 
     def canonical(self) -> str:
         return canonical_json(self.model_dump(mode="json"))
+
+
+def held_after_failed_checks(mission: Any) -> bool:
+    """rc14.7: a Repair held for the operator because PE checked its run (for the current grant) and the checks did not pass. What
+    "Check again" and "Keep the changes and close" apply to; not a failed undo of a run that had passed, nor a run never checked."""
+    result = parse_result(getattr(mission, "verification_result_json", None))
+    return (getattr(mission, "status", None) == "needs_operator" and getattr(mission, "tier", None) == "repair"
+            and bool(getattr(mission, "checkpoint_id", None)) and result is not None
+            and result.status == "failed" and result.grant_hash == getattr(mission, "grant_hash", None))
 
 
 def parse_result(text: str | None) -> VerificationResult | None:

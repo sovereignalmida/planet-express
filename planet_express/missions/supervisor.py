@@ -57,6 +57,7 @@ from .events import insert_event
 from .hooks import HOOK_LOG_NAME, HOOK_SCRIPT_NAME, MAX_POLICY_FILE_BYTES
 from .launcher.spec import SESSION_ID, STATE_DIR, LaunchSpec
 from .models import (
+    KEPT_BY_OPERATOR_FLAG,
     LEGACY_GRANT_TEXT,
     NOTHING_CHECKPOINTED_FLAG,
     NOTHING_CHECKPOINTED_TEXT,
@@ -71,6 +72,7 @@ from .runtime import (
     RunContext,
 )
 from .sessions import SessionRow, issue_session, set_leader_pid
+from .verify.plan import held_after_failed_checks
 from .state import (
     CONSOLE_PLAN_RETRY,
     TERMINAL,
@@ -1084,6 +1086,82 @@ class Supervisor:
             raise ResumeRefused(f"{mission_id} is {mission.status}; this action needs {' or '.join(statuses)}")
         return mission
 
+    def _held_and_idle(self, mission_id: str) -> Mission:
+        """A Repair held for the operator after its run (`needs_operator`), with nothing of it still running: no session, no run, no
+        verification, no rollback. What `recheck` and `keep_and_close` need before they touch it."""
+        mission = self._repair_mission(mission_id, "needs_operator")
+        if not mission.checkpoint_id:
+            raise ResumeRefused(f"{mission_id} never ran (it has no checkpoint): cancel it instead")
+        if not held_after_failed_checks(mission):
+            # Only a run PE checked and that did not pass: never a failed undo of a run that had passed (half restored), nor a session
+            # that ended before PE could check it. Those keep their rollback.
+            raise ResumeRefused(f"{mission_id} is not held after PE's checks failed: roll it back or cancel it instead")
+        if mission_id in self._runs or self.ms.live_session(mission_id) is not None:
+            raise ResumeRefused("the session is still running: wait for it to end")
+        if self.rollback_in_flight(mission_id):
+            raise ResumeRefused("a rollback of this mission is running")
+        future = self._verifying.get(mission_id)
+        if future is not None and not future.done():
+            raise ResumeRefused("PE is already checking this run")
+        return mission
+
+    def recheck(self, mission_id: str, actor: str) -> str:
+        """rc14.7, the operator's "Check again" on a held run (live M-34: every check passed, a disk alert held it): PE runs its own
+        verification again, the same checks and the same before/after scan against the same checkpoint. A pass completes the mission as
+        any run does; a failure holds it for the operator again (never an automatic rollback: the operator only asked to look again)."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        with self._lock_for(mission_id):
+            mission = self._held_and_idle(mission_id)
+            if not mission.verification_plan_json:
+                raise ResumeRefused(f"{mission_id} has no verification plan to run again")
+            now = int(self.store._clock())
+            with self.store._write() as conn:
+                # The operator's newer decision replaces a cancel PE was holding (live M-34: Cancel, then held): left in place, the
+                # pending-cancel pass would take the mission back out of `verifying` before the check ran.
+                dropped = mission.cancel_requested_by if mission.cancel_requested_at is not None else None
+                conn.execute("UPDATE missions SET cancel_requested_at=NULL, cancel_requested_by=NULL, updated_at=? WHERE id=?",
+                             (now, mission_id))
+                transition_in_txn(conn, mission_id, "verifying", actor, now)    # the record of it: an operator's needs_operator -> verifying
+                insert_event(conn, mission_id, "decision", actor, {"event": "verify.recheck", "requested_by": actor,
+                                                                    **({"cancel_withdrawn": dropped} if dropped else {})}, now)
+            self._cancel_held.discard(mission_id)
+        return self.verify_and_close(mission_id)
+
+    def _operator_recheck(self, mission_id: str) -> bool:
+        """This pass through `verifying` is the operator's "Check again": the latest move into `verifying` was an operator's, out of
+        `needs_operator`. Read from the mission's record, never from memory, so it holds across a restart."""
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT actor, body_json FROM mission_events WHERE mission_id=? AND kind='state' "
+                               "AND body_json LIKE '%\"to\": \"verifying\"%' ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
+        if row is None or not str(row["actor"]).startswith("operator:"):
+            return False
+        try:
+            return json.loads(row["body_json"]).get("from") == "needs_operator"
+        except (ValueError, AttributeError):
+            return False
+
+    def keep_and_close(self, mission_id: str, actor: str) -> str:
+        """rc14.7, the operator's "Keep the changes and close" on a held run: what the run did stays, the mission closes `failed` (PE's
+        checks did not pass, so it never claims `completed`) with the outcome flag `kept_by_operator`, and its leases are released.
+        The checkpoint is kept as long as any other: an undo later is the operator's to ask for."""
+        self._require_enabled()
+        actor = self._operator(actor)
+        with self._lock_for(mission_id):
+            self._held_and_idle(mission_id)
+            now = int(self.store._clock())
+            with self.store._write() as conn:             # the close, its label and its reason are one write
+                transition_in_txn(conn, mission_id, "failed", actor, now)
+                conn.execute("UPDATE missions SET outcome='failed', outcome_flags=?, updated_at=? WHERE id=?",
+                             (KEPT_BY_OPERATOR_FLAG, now, mission_id))
+                insert_event(conn, mission_id, "decision", actor, {
+                    "event": "operator.kept", "outcome": "failed", "flags": KEPT_BY_OPERATOR_FLAG,
+                    "reason": "the operator kept what the run changed and closed it; PE's checks had not passed"}, now)
+            recovery.close_open_intents(self.ms, mission_id, "applied", actor=actor)
+            self._clear_waiting(mission_id)
+            self._cancel_held.discard(mission_id)
+        return "failed"
+
     # Where an operator rollback may start. `completed` is the undo of a finished change (rc14.2): the one exit from a terminal state.
     ROLLBACK_FROM = ("needs_operator", "recovery_required", "rollback_pending", "verifying", "completed")
 
@@ -1833,6 +1911,7 @@ class Supervisor:
         if mission.status != "verifying":
             return mission.status
         target, flags, summary = "needs_operator", None, {"event": "verify.unavailable"}
+        rechecking = self._operator_recheck(mission_id)   # read from the record, so a restart mid-check still knows (review)
         failed_check = False                              # PE's verification ran and did not pass (not: it could not run)
         if self.verifier is not None:
             try:
@@ -1844,13 +1923,14 @@ class Supervisor:
                 else:
                     failed_check = True
                     flags = "partially_applied"
-                    if mission.grant().on_verify_fail == "rollback" and mission.checkpoint_id:
+                    if (mission.grant().on_verify_fail == "rollback" and mission.checkpoint_id
+                            and not rechecking):                            # a "Check again" that fails holds it again, never rolls back
                         target = "rollback_pending"
             except Exception as exc:                      # noqa: BLE001 - a verifier that breaks is a failed verification
                 log.exception("verifier for %s raised", mission_id)
                 summary = {"event": "verify.error", "error": type(exc).__name__}
                 flags = "partially_applied"
-        if failed_check and target == "needs_operator" and self._nothing_changed(mission):
+        if failed_check and target == "needs_operator" and not rechecking and self._nothing_changed(mission):
             # Nothing to roll back and nothing for the operator to untangle: close it, so its leases stop holding the next run.
             # (A grant that asked for a rollback on failure still goes to rollback_pending: that is the operator's own choice.)
             # It says only what is known: the checkpointed files and service settings are as they were. The session had full

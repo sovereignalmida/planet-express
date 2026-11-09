@@ -15,7 +15,7 @@ from ..canonical import CanonicalError, loads_strict
 from ..models import Mission, VerificationPlan
 from ..resources import BadResource, canon
 from ..store import MissionStore, grant_resources
-from .baseline import Finding, TooManyFindings, in_scope, new_findings, normalize
+from .baseline import Finding, TooManyFindings, host_wide, in_scope, new_findings, normalize
 from .checks import CheckEnv, run_check
 from .plan import (
     CheckResult,
@@ -96,7 +96,9 @@ class Verifier:
         self.ms.append_event(mission_id, "note", ACTOR, {
             "event": "verify.result", "status": result.status, "reason": result.reason,
             "checks": [{"id": c.id, "ok": c.ok} for c in checks],
-            "new_in_scope": scan.new_in_scope_count if scan else None})
+            "new_in_scope": scan.new_in_scope_count if scan else None,
+            **({"new_on_host": [f.phrase() for f in scan.new_on_host[:5]]}
+               if scan and scan.new_on_host else {})})
         return result
 
     # ── plan ────────────────────────────────────────────────────────────────
@@ -196,12 +198,18 @@ class Verifier:
             return (ScanResult(ok=False, error=f"scan failed ({type(exc).__name__})", baseline_findings=len(baseline)),
                     "the fresh scan failed")
         new = new_findings(baseline, fresh)
-        mine = [f for f in new if in_scope(f, scope, stacks_root=self.stacks_root)]
+        touching = [f for f in new if in_scope(f, scope, stacks_root=self.stacks_root)]
+        host, mine = [], []
+        for f in touching:
+            (host if host_wide(f, scope, stacks_root=self.stacks_root) else mine).append(f)
         scan = ScanResult(
             ok=True, baseline_findings=len(baseline), fresh_findings=len(fresh), new_in_scope_count=len(mine),
             new_in_scope=[FindingRef(kind=f.kind, resource_id=f.resource_id, severity=f.severity) for f in mine[:20]],
-            new_out_of_scope=len(new) - len(mine))
-        return scan, (f"{len(mine)} new finding(s) in scope" if mine else "")
+            new_out_of_scope=len(new) - len(touching), new_on_host_count=len(host),
+            new_on_host=[FindingRef(kind=f.kind, resource_id=f.resource_id, severity=f.severity) for f in host[:20]])
+        named = "; ".join(FindingRef(kind=f.kind, resource_id=f.resource_id, severity=f.severity).phrase() for f in mine[:3])
+        more = f" and {len(mine) - 3} more" if len(mine) > 3 else ""
+        return scan, (f"{len(mine)} new finding(s) in scope: {named}{more}" if mine else "")
 
 
 def verifier_from_config(cfg: Any, *, missions: MissionStore, checkpoint: Any, provider: Any = None, broker: Any = None,

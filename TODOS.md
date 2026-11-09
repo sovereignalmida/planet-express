@@ -198,6 +198,9 @@ gate.
 
 ### "Close anyway" when PE holds a cancel
 
+**Status (rc14.7):** partly done: a run held after PE's checks failed has Check again and Keep the changes and close. A held CANCEL
+(the run's changes differ from the checkpoint, no failed check) still has only Roll back.
+
 **What:** When a cancel is held (the run's changes still differ from the checkpoint), the Missions page and Console say why and
 offer an explicit "Close anyway" (operator-only, recorded), instead of a disabled "CANCEL REQUESTED" button.
 

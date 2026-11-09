@@ -400,7 +400,7 @@
     // ── a confirmed plan's run: timeline, PE's verification, the rollback ──
     async function runAction(name, x, ackDrift) {
       const armKey = ackDrift ? "drift" : name;
-      if ((name === "rollback") && !state.armed[armKey]) { state.armed = { [armKey]: true }; state.sig.thread = ""; renderThread(); return; }
+      if ((name === "rollback" || name === "keep") && !state.armed[armKey]) { state.armed = { [armKey]: true }; state.sig.thread = ""; renderThread(); return; }
       state.armed = {};
       const fields = { execution_id: String(x.id) };
       if (ackDrift) fields.ack_drift = "1";
@@ -447,7 +447,9 @@
       // A completed run's rollback is the undo of a change that worked (rc14.2): it says so, and still takes two clicks.
       const labels = x.undo ? { rollback: state.armed.rollback ? "Undo this change? Click again" : "Undo this change (roll back to the checkpoint)" }
                             : { rollback: state.armed.rollback ? "Roll back to the checkpoint? Click again" : "Roll back to the checkpoint" };
-      const cls = { rollback: "pe-btn warn" };
+      labels.recheck = "Check again";
+      labels.keep = state.armed.keep ? "Keep it as it is and close? Click again" : "Keep the changes and close";
+      const cls = { rollback: "pe-btn warn", recheck: "pe-btn accent", keep: "pe-btn" };
       for (const n of names) {
         if (!x.controls[n]) continue;
         const b = el("button", cls[n], labels[n]); b.type = "button";
@@ -495,11 +497,12 @@
         list.appendChild(row);
       }
       add(box, list);
+      if (v.host_note && v.host_note.length) add(box, el("div", "pe-note pe-con-host-note", "Also new on the host since the checkpoint (not counted against this run): " + v.host_note.join(" · ")));
       if (v.level !== "ok" && x.finished !== undefined) {
         const actions = el("div", "pe-plan-actions");
         const note = rollbackNote(x);
         if (note) box.appendChild(note);
-        add(actions, runButtons(x, ["rollback"]));
+        add(actions, runButtons(x, ["recheck", "keep", "rollback"]));
         // Not while the run waits to be, or is being, rolled back: the conversation picks up again once the rollback has landed.
         if (!x.rolling_back && !rollingBack(x)) {
           const keep = el("button", "pe-btn accent", "Keep working on it"); keep.type = "button";

@@ -19,7 +19,9 @@ NON_TERMINAL = frozenset({
 # `Supervisor.recover()` moves any such row to `recovery_required` at startup.
 LEGACY_STATES = frozenset({"paused_tripwire"})
 # Edges only an operator may take (the contract leaves needs_operator exits undefined: see the slice report).
-OPERATOR_EXITS = frozenset({"investigating", "awaiting_decision", "executing", "verifying", "rollback_pending"})
+# rc14.7: `failed` is the operator's "keep the changes and close" on a held run (Supervisor.keep_and_close): PE's checks did not pass, so it
+# never closes `completed`, and the operator's decision to keep what the run did is recorded as the outcome.
+OPERATOR_EXITS = frozenset({"investigating", "awaiting_decision", "executing", "verifying", "rollback_pending", "failed"})
 # PE's own Console actors (rc14.2). `CONSOLE_PLAN_RETRY` starts the automatic follow-up turn that hands a refused plan back to the
 # planner: the one non-operator actor that may reopen a finished conversation (a Console observe/propose mission only, so it can
 # never move a mission that may change the host).
@@ -139,6 +141,9 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
         # and the system may cancel one that is waiting for the operator (an archived Console conversation whose last turn failed would
         # otherwise never finish archiving). A mission that may mutate the host stays the operator's to decide, cancel included.
         raise IllegalTransition("only an operator may resume a needs_operator mission")
+    if frm == "needs_operator" and to == "failed" and (tier != "repair" or not row["checkpoint_id"]):
+        # rc14.7: only a Repair that ran (it has a checkpoint) is closed this way, as the operator's "keep the changes" (review).
+        raise IllegalTransition(f"a held {tier} mission without a run is cancelled, not closed as failed")
     if frm == "awaiting_decision" and to == "investigating":
         # Reopening a finished mission for more work is the operator's act, and only an observe/propose mission can be reopened:
         # a mission that may mutate the host leaves `awaiting_decision` by approval, never by a follow-up.

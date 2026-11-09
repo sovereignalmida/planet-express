@@ -387,6 +387,16 @@ class ApprovalFlow:
         self._operator_action("roll_back_start", mission_id, actor, ack_drift=ack_drift)
         return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status, "restore": "started", "reason": ""}
 
+    def recheck(self, actor: str, mission_id: str) -> dict[str, Any]:
+        """rc14.7: the operator's "Check again" on a held run: PE's own verification runs again (in the background)."""
+        self._operator_action("recheck", mission_id, actor)
+        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}
+
+    def keep_and_close(self, actor: str, mission_id: str) -> dict[str, Any]:
+        """rc14.7: the operator keeps what a held run changed and closes it (`failed`, flagged kept_by_operator)."""
+        self._operator_action("keep_and_close", mission_id, actor)
+        return {"mission_id": mission_id, "status": self.ms.get_mission(mission_id).status}
+
     def rollback_in_flight(self, mission_id: str) -> bool:
         """Is a rollback started by `roll_back_start` still running? False where Repair is not running here."""
         sup = self.supervisor

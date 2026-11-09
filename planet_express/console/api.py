@@ -303,6 +303,14 @@ class ConsoleApi:
             raise ConsoleApiError("that is not an action", "bad_request")
         flow = self._require_flow()
         actor = f"operator:{operator}"
+        if action in ("recheck", "keep"):                # rc14.7: a held run checked again, or kept and closed
+            try:
+                (flow.recheck if action == "recheck" else flow.keep_and_close)(actor, ex["mission_id"])
+            except FlowError as exc:
+                raise self._flow_error(exc) from None
+            self.console.add_message(conv.id, "system", f"{operator} asked PE to check the run again." if action == "recheck" else
+                                     f"{operator} kept what the run changed and closed it. PE's checks had not passed.", actor=actor)
+            return {"done": action, "status": self._execution_view(conv)["status"]["text"], "restore": "", "reason": ""}
         undo = self.ms.get_mission(ex["mission_id"]).status in execution_mod.UNDO_STATES
         try:
             # The one action. A restore can take minutes, so where the flow can, it is started on the supervisor's rollback worker and

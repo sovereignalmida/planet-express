@@ -6,7 +6,7 @@ from typing import Any
 
 from planet_express.console import plan as plan_mod
 from planet_express.missions.models import NOTHING_CHECKPOINTED_FLAG, Mission
-from planet_express.missions.verify.plan import CheckResult, parse_result
+from planet_express.missions.verify.plan import CheckResult, held_after_failed_checks, parse_result
 
 # internal state -> (what the operator sees, level). The design brief's vocabulary; internal names never reach the page.
 REPAIR_STATUS = {
@@ -25,6 +25,9 @@ CONTROLS = {                      # which operator actions each state offers (th
     # Trust mode: no pause, resume or take-over; cancel is the stop. rollback_pending is where a restore PE refused (drift) waits, so the
     # operator's explicit "roll back anyway" has a button.
     "rollback": ("needs_operator", "recovery_required", "rollback_pending"),
+    # rc14.7: a run held after it ran (live M-34) can be checked again, or kept as it is and closed. Both need a run that happened.
+    "recheck": ("needs_operator",),
+    "keep": ("needs_operator",),
 }
 # rc14.2: a completed Repair can be undone (rolled back to its checkpoint) while the checkpoint is kept. The supervisor refuses in words
 # when it is not (past retention, removed) or when another mission holds its resources.
@@ -180,7 +183,10 @@ def verification_view(mission: Mission) -> dict[str, Any] | None:
     else:
         headline, level = result.reason or "Verification did not pass", "high"
     return {"headline": headline, "level": level, "checks": checks, "by_pe": True,
-            "scan_note": (result.scan.error if result.scan is not None and result.scan.error else None)}
+            "scan_note": (result.scan.error if result.scan is not None and result.scan.error else None),
+            # rc14.7: new on the host as a whole after the run (a filesystem past its alert line): shown, not counted against the run
+            "host_note": ([f.phrase() for f in result.scan.new_on_host[:5]]
+                          if result.scan is not None and result.scan.new_on_host else None)}
 
 
 def conversation_status(mission: Mission, live: bool, rolling_back: bool = False) -> dict[str, Any] | None:
@@ -273,6 +279,9 @@ def controls(mission: Mission, rolling_back: bool = False) -> dict[str, bool]:
     """Which actions apply now. None while a rollback is running: the page shows that it is rolling back instead."""
     out = {name: mission.status in states and not rolling_back for name, states in CONTROLS.items()}
     out["rollback"] = out["rollback"] or (can_undo(mission) and not rolling_back)
+    held = held_after_failed_checks(mission)              # the supervisor's own rule: never offered for a failed undo or an unchecked run
+    out["recheck"] = out["recheck"] and held
+    out["keep"] = out["keep"] and held
     return out
 
 

@@ -934,6 +934,8 @@ _MISSION_NOTICES = {
     "approved": "Approval recorded.",
     "denied": "Mission denied and closed.",
     "rolled_back": "Rollback finished. Check the mission status below.",
+    "rechecking": "PE is running its checks again. The result shows below when it lands.",
+    "kept": "Kept what the run changed and closed it. PE's checks had not passed; the checkpoint is kept for an undo.",
     "stale": "That card was out of date. Read it again before deciding.",
     "elevation_required": "That approval needs an elevated session. Elevate with your passphrase, then try again.",
     "refused": "That could not be done now. The event stream says why.",
@@ -1072,7 +1074,7 @@ def register_console_pages(app, core) -> None:
 
     @app.post("/api/console/<conversation_id>/run/<action>")
     def console_run_action(conversation_id, action):
-        if action != "rollback":                             # trust mode: pause, resume and take-over are gone
+        if action not in ("rollback", "recheck", "keep"):    # trust mode: pause, resume and take-over are gone; rc14.7 adds check again / keep
             abort(404)
         params = {"conversation_id": conversation(conversation_id), "operator": g.operator, "execution_id": int_field("execution_id", 1), "action": action,
                   "ack_drift": request.form.get("ack_drift") == "1"}
@@ -1190,6 +1192,14 @@ def register_mission_pages(app, core) -> None:
     def mission_rollback(mission_id):
         return mission_action(mission_id, "mission.rollback",
                               lambda elevated: {"ack_drift": request.form.get("ack_drift") == "1"}, "rolled_back")
+
+    @app.post("/missions/<mission_id>/recheck")
+    def mission_recheck(mission_id):
+        return mission_action(mission_id, "mission.recheck", lambda elevated: {}, "rechecking")
+
+    @app.post("/missions/<mission_id>/keep")
+    def mission_keep(mission_id):
+        return mission_action(mission_id, "mission.keep", lambda elevated: {}, "kept")
 
     @app.get("/missions/standing")
     def standing_page():

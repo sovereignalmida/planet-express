@@ -32,6 +32,7 @@ from planet_express.core.store import Store
 from planet_express.execution.actions import TargetTimeout
 from planet_express.memory import retrieval as memory_retrieval, store as memory_store
 from planet_express.memory.models import SLUG_RE, Card
+from planet_express.missions.verify.plan import held_after_failed_checks
 from planet_express.missions.approval_flow import ApprovalFlow, FlowError
 from planet_express.missions.events import insert_event, redact_value
 from planet_express.missions.models import (
@@ -340,6 +341,7 @@ class MissionService:
             "outcome_flags": _text(m.outcome_flags, 512),
             "cancel_requested_by": _text(m.cancel_requested_by, 128),
             "cancel_requested_at": m.cancel_requested_at,
+            "held_after_failed_checks": held_after_failed_checks(m),      # rc14.7: Check again / Keep apply (the supervisor's own rule)
             "result": {"outcome": _text(m.outcome, 512), "flags": _text(m.outcome_flags, 512),
                        "verification": _json(m.verification_result_json)},
             # Never the token hash, cgroup path, pid or uid: those are the session's identity.
@@ -597,6 +599,12 @@ class MissionService:
     def rollback_mission(self, mission_id: str, *, operator: str, ack_drift: bool = False) -> dict:
         return self._flowed(lambda f: f.roll_back(_actor(operator), mission_id, ack_drift=ack_drift))
 
+    def recheck_mission(self, mission_id: str, *, operator: str) -> dict:
+        return self._flowed(lambda f: f.recheck(_actor(operator), mission_id))
+
+    def keep_mission(self, mission_id: str, *, operator: str) -> dict:
+        return self._flowed(lambda f: f.keep_and_close(_actor(operator), mission_id))
+
     def standing_create(self, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
                         elevated: bool = False, ceilings: dict | None = None) -> dict:
         return self._flowed(lambda f: f.standing_create(_actor(operator), scope=scope, ttl_s=ttl_s, window_spec=window,
@@ -720,6 +728,14 @@ class MissionService:
             v = _params(p, {**mid, **op}, {"ack_drift": _bool})
             return self.rollback_mission(v["mission_id"], operator=v["operator"], ack_drift=v.get("ack_drift", False))
 
+        def recheck(p):
+            v = _params(p, {**mid, **op})
+            return self.recheck_mission(v["mission_id"], operator=v["operator"])
+
+        def keep(p):
+            v = _params(p, {**mid, **op})
+            return self.keep_mission(v["mission_id"], operator=v["operator"])
+
         def standing_create(p):
             v = _params(p, {**op, **scope_t}, {"window": _dict, "ceilings": _dict, **elev})
             return self.standing_create(operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
@@ -743,7 +759,7 @@ class MissionService:
             return self.provider_usage_view()
 
         table = {"mission.provider_usage": provider_usage, "mission.approval_card": card_, "mission.propose_repair": propose_repair, "mission.approve": approve,
-                 "mission.deny": deny, "mission.rollback": rollback, "standing.create": standing_create,
+                 "mission.deny": deny, "mission.rollback": rollback, "mission.recheck": recheck, "mission.keep": keep, "standing.create": standing_create,
                  "standing.supersede": standing_supersede, "standing.revoke": standing_revoke,
                  "standing.list": standing_list,
                  "mission.list": list_, "mission.get": get, "mission.events": events, "mission.create": create,
@@ -826,7 +842,7 @@ class MissionService:
             return api().confirm_withdraw(v["conversation_id"], v["execution_id"], v["operator"])
 
         def execution_action(p):
-            v = _params(p, {**conv, **op, **execution, "action": _choice("rollback")}, {"ack_drift": _bool})
+            v = _params(p, {**conv, **op, **execution, "action": _choice("rollback", "recheck", "keep")}, {"ack_drift": _bool})
             return api().execution_action(v["conversation_id"], v["execution_id"], v["action"], v["operator"], ack_drift=v.get("ack_drift", False))
 
         table = {"console.status": status, "console.list": list_, "console.feed": feed, "console.create": create, "console.post": post,

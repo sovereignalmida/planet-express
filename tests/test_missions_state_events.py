@@ -76,6 +76,11 @@ def test_every_edge_matches_table(tmp_path, frm, to):
         with pytest.raises(IllegalTransition, match="cannot be rolled back"):
             transition(store, m.id, to, "operator:me")
         assert ms.get_mission(m.id).status == frm
+    elif (frm, to) == ("needs_operator", "failed"):
+        # rc14.7: the operator's "keep the changes", only for a repair that ran (it has a checkpoint; none here).
+        with pytest.raises(IllegalTransition, match="without a run"):
+            transition(store, m.id, to, "operator:me")
+        assert ms.get_mission(m.id).status == frm
     elif legal and to == "completed":
         # In the table, but a repair mission completes only on a passed verification result (slice 8): none here.
         with pytest.raises(IllegalTransition, match="completion refused"):
