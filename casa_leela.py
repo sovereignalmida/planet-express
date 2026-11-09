@@ -906,6 +906,22 @@ def check_vpn_port_forwarding() -> dict:
     return result
 
 
+# The launcher preflight proves sudoers refuses arguments by asking for `pe-launch --x` and expecting a refusal, which sudo logs at
+# error priority. That is PE checking itself, not a host fault (rc14.7.2: it read as "repeated system errors").
+_PE_PROBE_COMMAND = "COMMAND=/usr/libexec/planetexpress/pe-launch --x"
+
+
+def _pe_own_probe(line: str) -> bool:
+    """Only Core's own account: the same refusal asked for by anyone else (a session account probing the launcher) still counts."""
+    import os
+    import pwd
+    try:
+        me = pwd.getpwuid(os.geteuid()).pw_name
+    except KeyError:
+        return False
+    return " sudo[" in line and f"]: {me} : " in line and line.rstrip().endswith(_PE_PROBE_COMMAND)
+
+
 def check_system() -> dict:
     """RAM, uptime, and recent journal errors."""
     _, mem_out, _ = _run("free -h")
@@ -913,7 +929,7 @@ def check_system() -> dict:
     _, journal_out, _ = _run(
         "journalctl -p err -S '1 hour ago' --no-pager -q --output=short"
     )
-    errors = [line for line in journal_out.splitlines() if line.strip()]
+    errors = [line for line in journal_out.splitlines() if line.strip() and not _pe_own_probe(line)]
     mem_lines = mem_out.splitlines()
     return {
         "memory_summary": mem_lines[1] if len(mem_lines) > 1 else mem_out,

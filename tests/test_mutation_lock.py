@@ -526,3 +526,41 @@ def test_scheduled_update_does_not_start_while_the_host_is_still_booting(monkeyp
     monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda **kw: order.append("ran"))
     assert fw._run_scheduled_update_pass(None, s, sleep=lambda _s: None, commands=COMMANDS) == "ran"
     assert order == ["settled", "ran"]
+
+
+def test_prunable_bytes_reads_docker_system_df():
+    snap = {"docker_disk": {"rows": [{"type": "Images", "reclaimable": "962.9MB (1%)"}, {"type": "Containers", "reclaimable": "5GB (9%)"},
+                                     {"type": "Build Cache", "reclaimable": "0B"}]}}
+    assert fw._prunable_bytes(snap) == pytest.approx(962.9e6)
+    assert fw._prunable_bytes({"docker_disk": {"rows": [{"type": "Images", "reclaimable": "12.5GB (40%)"}]}}) == pytest.approx(12.5e9)
+    assert fw._prunable_bytes({}) is None
+    assert fw._prunable_bytes({"docker_disk": {"rows": [{"type": "Images", "reclaimable": "lots"}]}}) is None
+
+
+def test_safe_prune_is_not_tried_when_almost_nothing_can_be_freed(monkeypatch):
+    # rc14.7.2 (live): every image in use, under 1 GB reclaimable; each scan tried again into the 30-minute cooldown.
+    monkeypatch.setattr(fw, "_root_disk_alert", lambda snap: {"used_pct": 80, "alert": "high"})
+    monkeypatch.setattr(fw, "_has_incomplete_stacks", lambda snap: False)
+    monkeypatch.setattr(fw, "_safe_to_prune", lambda snap: True)
+
+    class Commands:
+        def run_automatic(self, *a, **k):
+            pytest.fail("pruned with nothing to free")
+    monkeypatch.setattr(fw, "_has_active_rollback_candidates", lambda commands: False)
+    snap = {"docker_disk": {"rows": [{"type": "Images", "reclaimable": "962.9MB (1%)"}]}}
+    assert fw.maybe_run_safe_prune(snap, FakeNotifier(), _state(), Commands()) is False
+
+
+def test_a_nearly_full_disk_is_pruned_even_for_a_little(monkeypatch):
+    monkeypatch.setattr(fw, "_root_disk_alert", lambda snap: {"used_pct": 97, "alert": "CRITICAL"})
+    monkeypatch.setattr(fw, "_has_incomplete_stacks", lambda snap: False)
+    monkeypatch.setattr(fw, "_safe_to_prune", lambda snap: True)
+    monkeypatch.setattr(fw, "_has_active_rollback_candidates", lambda commands: False)
+    ran = []
+
+    class Commands:
+        def run_automatic(self, *a, **k):
+            ran.append(1)
+            return type("R", (), {"outcome": "passed", "reason": "freed 900MB"})()
+    snap = {"docker_disk": {"rows": [{"type": "Images", "reclaimable": "900MB (6%)"}]}}
+    assert fw.maybe_run_safe_prune(snap, FakeNotifier(), _state(), Commands()) is True and ran == [1]

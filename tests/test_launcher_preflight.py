@@ -660,3 +660,45 @@ def test_the_probe_must_hold_exactly_the_configured_session_groups_that_exist():
     assert not judged([], [4, 999])                                  # an older helper, or a launch.conf without the groups: caught at startup
     assert not judged([4, 999], None)                                # groups nobody configured
     assert not judged([4, 999, 0], [4, 999]) and not judged([4], [4, 999])
+
+
+def test_a_periodic_recheck_leaves_out_the_logged_sudo_refusal_probe(tmp_path):
+    # rc14.7.2: each refusal probe is a refused sudo call that sudo logs as an error; every ten minutes it read as host errors.
+    c, launcher, helper, conf, ws = tree(tmp_path)
+    calls = []
+
+    def counting(argv, **kw):
+        calls.append(argv)
+        return fake_run(returncode=1)(argv, **kw)
+    report = preflight(tmp_path, c, helper, conf, ws, sudo=True, run=counting, refusal_probe=False)
+    assert report.ok and calls == [] and verdicts(report)["sudoers refuses arguments"]
+    preflight(tmp_path, c, helper, conf, ws, sudo=True, run=counting)
+    assert len(calls) == 1
+
+
+def test_the_supervisor_runs_the_full_proof_at_start_after_a_failure_and_on_reprove_only():
+    from types import SimpleNamespace
+    from planet_express.missions.supervisor import PREFLIGHT_FULL_S, PREFLIGHT_REPROVE_S, Supervisor
+    asked = []
+    now = [1000.0]
+
+    def fn(*, full=True):
+        asked.append(full)
+        return SimpleNamespace(ok=True, render=lambda: "", reason="")
+    sup = Supervisor.__new__(Supervisor)
+    sup.preflight_fn, sup.preflight_report, sup._preflight_at, sup._preflight_full_at = fn, None, 0.0, 0.0
+    sup.clock = lambda: now[0]
+    sup.launcher_ready()
+    now[0] += PREFLIGHT_REPROVE_S + 1
+    sup.launcher_ready()
+    sup.launcher_ready(reprove=True)
+    assert asked == [True, False, True]
+    now[0] += PREFLIGHT_FULL_S + 1                          # a host that never starts a Repair still catches sudoers drift
+    sup.launcher_ready()
+    assert asked[-1] is True
+    sup.preflight_fn = lambda **kw: (asked.append(kw.get("full")), SimpleNamespace(ok=True, render=lambda: "", reason=""))[1]
+    now[0] += PREFLIGHT_REPROVE_S + 1
+    sup.launcher_ready()
+    assert asked[-1] is False                               # **kwargs counts as taking `full`
+    sup.preflight_fn = lambda: SimpleNamespace(ok=True, render=lambda: "", reason="")      # an older preflight without `full`
+    sup.launcher_ready(reprove=True)

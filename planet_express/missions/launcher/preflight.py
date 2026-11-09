@@ -401,9 +401,12 @@ def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root:
                   helper: str, conf: str, python: str = "/usr/bin/python3", trusted_uid: int = 0, below: str = "/",
                   uid_range: tuple[int, int] | None = None, sudo: bool = False, check_reach: bool = False,
                   run=subprocess.run, getpwall=None, getgrall=None, held_uids=None,
-                  log_groups: tuple[str, ...] = (), require_accounts: bool = False) -> PreflightReport:
+                  log_groups: tuple[str, ...] = (), require_accounts: bool = False,
+                  refusal_probe: bool = True) -> PreflightReport:
     """`log_groups` are the session groups (`missions.session_groups`); `require_accounts` makes a missing `pe-s<N>` account a
-    failure (a host with sudo: see `check_range_free`)."""
+    failure (a host with sudo: see `check_range_free`). `refusal_probe=False` skips the sudoers-refuses-arguments probe on a
+    periodic re-check: each probe is a refused sudo call that sudo logs as an error, and every ten minutes that read as repeated
+    host errors (live, rc14.7.2). It is still made at startup, after any failed preflight, every 6 hours and at every Repair start."""
     report = PreflightReport(strategy)
     if uid_range is not None:
         low, high = uid_range
@@ -416,7 +419,9 @@ def run_preflight(containment, *, strategy: str, workspace_root: str, sock_root:
     if not check_installation(report, helper=helper, conf=conf, trusted_uid=trusted_uid, below=below):
         report.add("probe session", False, "skipped: the helper or its config is not installed safely")
         return report
-    if sudo and not check_sudoers(report, helper, run=run):
+    if sudo and not refusal_probe:
+        report.add("sudoers refuses arguments", True, "not re-run on this re-check (run at startup, every 6 hours and at each Repair start)")
+    elif sudo and not check_sudoers(report, helper, run=run):
         report.add("probe session", False, "skipped: sudoers did not behave as required")
         return report
     if not (os.path.isfile(python) and os.access(python, os.X_OK)):

@@ -256,9 +256,9 @@ def make_preflight(cfg, containment: CgroupContainment, workspace_dir, *, euid: 
     low, high = cfg.session_uid_min, cfg.session_uid_max
     require_accounts = os.path.exists(SUDO_BIN) if has_sudo is None else has_sudo
 
-    def run() -> PreflightReport:
+    def run(*, full: bool = True) -> PreflightReport:
         return run_preflight(
-            containment, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
+            containment, refusal_probe=full, strategy=strategy, workspace_root=str(workspace_dir), sock_root=cfg.sock_root,
             probe_uid=high, helper=HELPER_PATH, conf=cfg.launch_conf, uid_range=(low, high), sudo=strategy == "sudo",
             check_reach=True, held_uids=held_uids, log_groups=tuple(cfg.session_groups), require_accounts=require_accounts)
     return run

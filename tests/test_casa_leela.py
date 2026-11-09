@@ -946,3 +946,25 @@ def test_a_journalctl_offset_without_a_colon_is_read(monkeypatch):
     _mock_host_logs(monkeypatch, _journal_line("Finished casa-borg.service - borg.", "2026-10-04T02:41:10+0100"))
     when, result = casa_leela._last_journal_completion("casa-borg.service")
     assert result == "success" and when
+
+
+def test_check_system_does_not_count_pes_own_sudo_refusal_probe(monkeypatch):
+    import os
+    import pwd
+    ME = pwd.getpwuid(os.geteuid()).pw_name
+    # rc14.7.2: the launcher preflight's refused `sudo pe-launch --x` is PE checking itself, not a host error.
+    journal = "\n".join([
+        f"Nov 09 18:27:46 h sudo[3505377]: {ME} : a password is required ; PWD=/x ; USER=root ; "
+        "COMMAND=/usr/libexec/planetexpress/pe-launch --x",
+        "Nov 09 18:28:00 h sudo[3505378]: pe-s200001 : a password is required ; PWD=/x ; USER=root ; "
+        "COMMAND=/usr/libexec/planetexpress/pe-launch --x",
+        "Nov 09 18:30:00 h kernel: EXT4-fs error (device sdb2): something real",
+        "Nov 09 18:31:00 h sudo[1]: bob : a password is required ; PWD=/x ; USER=root ; COMMAND=/usr/bin/rm -rf /",
+    ])
+
+    def fake_run(cmd, *a, **kw):
+        return (0, journal, "") if cmd.startswith("journalctl") else (0, "", "")
+    monkeypatch.setattr(casa_leela, "_run", fake_run)
+    out = casa_leela.check_system()
+    assert out["recent_error_count"] == 3                           # anyone else asking for it still counts
+    assert sum("pe-launch" in e for e in out["recent_errors"]) == 1 and "pe-s200001" in "".join(out["recent_errors"])

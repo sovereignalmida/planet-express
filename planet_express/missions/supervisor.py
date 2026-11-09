@@ -27,6 +27,7 @@ rebuild after a crash.
 import contextlib
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -97,6 +98,7 @@ SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
 PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often (an operator may have repaired the host)
 PREFLIGHT_REPROVE_S = 600     # a passing preflight is proven again this often, and at the start of every Repair session
+PREFLIGHT_FULL_S = 6 * 3600   # ...with the sudo refusal probe (logged by sudo as an error) at least this often, so drift is caught (rc14.7.2)
 START_DEFER_MAX_S = 1800      # a start waiting on a lease or a uid is handed to the operator after this long
 START_DEFER_RETRY_S = 10      # and is asked again no sooner than this
 ROLLBACK_SHUTDOWN_WAIT_S = 120.0   # shutdown waits this long for a rollback that is already running
@@ -357,6 +359,7 @@ class Supervisor:
         self.preflight_fn = preflight                 # returns a PreflightReport; None means "trusted" (tests)
         self.preflight_report: Any = None
         self._preflight_at = 0.0
+        self._preflight_full_at = 0.0       # the last preflight that ran the sudo refusal probe (rc14.7.2)
         self.ms = MissionStore(store)
         # So a stack lease also leases the stack's directory, under the checkpoint's resolved stacks root.
         self.ms.stacks_roots = tuple(dict.fromkeys(str(r) for r in (getattr(checkpoint, "stacks_root", None),) if r))
@@ -408,6 +411,15 @@ class Supervisor:
         if not self.enabled:
             raise MissionsDisabled("missions are disabled (missions.enabled is false)")
 
+    def _run_preflight(self, full: bool):
+        """`full` reaches a preflight that takes it (`make_preflight`'s, or one taking **kwargs); an older one runs whole."""
+        try:
+            params = inspect.signature(self.preflight_fn).parameters.values()
+            takes_full = any(p.name == "full" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+        except (TypeError, ValueError):
+            takes_full = False
+        return self.preflight_fn(full=full) if takes_full else self.preflight_fn()
+
     def launcher_ready(self, *, reprove: bool = False) -> bool:
         """The launcher preflight gate (contract 22.4). True when no preflight is configured, or the last one passed.
         While it fails the host is proposal-only: it is re-run at most every PREFLIGHT_RETRY_S. A pass is not forever: it is
@@ -418,12 +430,18 @@ class Supervisor:
         report = self.preflight_report
         stale = report is not None and report.ok and (reprove or now - self._preflight_at >= PREFLIGHT_REPROVE_S)
         if report is None or stale or (not report.ok and now - self._preflight_at >= PREFLIGHT_RETRY_S):
+            # The full proof (with the sudo refusal probe sudo logs as an error) at startup, after a failure and at every Repair
+            # start; the ten-minute re-check of a passing preflight leaves that one probe out (rc14.7.2).
+            full = (report is None or not report.ok or reprove
+                    or now - self._preflight_full_at >= PREFLIGHT_FULL_S)
             try:
-                report = self.preflight_fn()
+                report = self._run_preflight(full)
             except Exception as exc:       # a preflight that cannot run is a failed preflight
                 from .launcher.preflight import failed_report
                 report = failed_report("unknown", "preflight could not run", type(exc).__name__)
             self.preflight_report, self._preflight_at = report, now
+            if full:
+                self._preflight_full_at = now
             if report.ok:
                 log.info("%s", report.render())
             else:

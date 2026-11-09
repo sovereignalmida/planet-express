@@ -1106,6 +1106,28 @@ def _plan_batch(
 DISK_PRUNE_THRESHOLD_PCT = 80
 
 
+SAFE_PRUNE_MIN_RECLAIM_BYTES = 1_000_000_000   # below this, a prune frees nothing worth the cooldown it starts
+SAFE_PRUNE_ALWAYS_PCT = 90                      # ...unless the disk is this full: then any space helps
+_DF_SIZE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*([kKMGT]?B)\b")
+_DF_UNIT = {"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+
+
+def _prunable_bytes(snapshot: dict) -> float | None:
+    """What a safe prune could free, from `docker system df` (images and build cache, the kinds it removes). None when the
+    figures are missing or unreadable: the prune then runs as before."""
+    rows = (snapshot.get("docker_disk") or {}).get("rows") or []
+    total, seen = 0.0, False
+    for row in rows:
+        if row.get("type") not in ("Images", "Build Cache"):
+            continue
+        m = _DF_SIZE.match(str(row.get("reclaimable", "")))
+        if m is None or m.group(2) not in _DF_UNIT:
+            return None
+        total += float(m.group(1)) * _DF_UNIT[m.group(2)]
+        seen = True
+    return total if seen else None
+
+
 def _root_disk_alert(snapshot: dict) -> dict | None:
     for d in snapshot.get("disk", []):
         if d.get("mount") == "/" and d.get("used_pct", 0) >= DISK_PRUNE_THRESHOLD_PCT:
@@ -1246,6 +1268,14 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         blocked = _blocked_prune_message(disk_alert, commands)
         if blocked is not None and _should_alert_blocked_prune(blocked[0]):
             notifier.notify(blocked[1])
+        return False
+    prunable = _prunable_bytes(snapshot)
+    if (prunable is not None and prunable < SAFE_PRUNE_MIN_RECLAIM_BYTES
+            and int(disk_alert.get("used_pct", 0)) < SAFE_PRUNE_ALWAYS_PCT):
+        # rc14.7.2 (live): under 1 GB of unused images and build cache, and each scan tried again into the 30-minute cooldown. The
+        # disk pressure is real but a prune is not the answer; the disk finding tells the operator. Past SAFE_PRUNE_ALWAYS_PCT any
+        # space helps (a small disk nearly full), so it runs. After the rollback-window check, so a held window is still reported.
+        log.info(f"Safe-prune skipped: only {prunable / 1e6:.0f} MB of unused images and build cache could be freed")
         return False
 
     owner = "safe-prune"

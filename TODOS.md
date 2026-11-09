@@ -106,6 +106,14 @@ second before changing the matcher.
 
 ## Missions (trust mode, from live use after rc14.4)
 
+### Say why a mission action was refused on the mission page
+
+**What:** The mission page answers every supervisor refusal with "That could not be done now. The event stream says why.", but most
+refusals are not in the event stream (live: a second Check again while the first was running). Show the refusal's own words.
+
+**Effort:** S
+**Priority:** P2
+
 ### Surface real usage from the provider so the operator decides
 
 **Status (rc14.7):** account level done: credit and spend in the Console and on Missions, Telegram alerts, per-call `cost_usd` on the
