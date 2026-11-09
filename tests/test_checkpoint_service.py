@@ -866,13 +866,30 @@ def test_env_file_and_include_entries_are_captured(tmp_path):
 def test_unreadable_reference_refuses_scope(tmp_path):
     env = make_env(tmp_path)
     for text, why in (("services:\n  web:\n    env_file: gone.env\n", "cannot be inspected"),
-                      ("services:\n  web:\n    env_file: ../outside.env\n", "'..'"),
-                      ("services:\n  web:\n    env_file: /etc/passwd\n", "outside the stacks root"),
+                      ("services:\n  web:\n    env_file: ../outside.env\n", "cannot be inspected"),   # rc14.6.1: `..` resolved lexically
                       ("services:\n  web:\n    env_file: ${X}/a.env\n", "variables")):
         env.compose.write_text(text)
         with pytest.raises(ScopeRefused, match=why):
             env.svc.create(env.mission.id, env.scope)
         assert leftovers(env) == []
+
+
+def test_a_reference_outside_the_stacks_root_is_not_covered_rather_than_refused(tmp_path):
+    """rc14.6.1 (live M-33): an `env_file:` outside the stacks root is captured where it is, or (here: Core cannot write /etc) listed
+    as not covered. The run is not refused over it."""
+    if os.geteuid() == 0:
+        pytest.skip("root can write any directory")
+    env = make_env(tmp_path)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "app.env").write_text("A=1\n")
+    locked.chmod(0o555)
+    env.compose.write_text(f"services:\n  web:\n    env_file: {locked / 'app.env'}\n")
+    try:
+        cid = env.svc.create(env.mission.id, env.scope)
+    finally:
+        locked.chmod(0o755)
+    assert [i["path"] for i in env.svc.not_covered(cid)] == [str(locked / "app.env")]
 
 
 # ── review round: quarantine accounting and incomplete purge ────────────────

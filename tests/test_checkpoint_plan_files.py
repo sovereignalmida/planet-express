@@ -362,3 +362,163 @@ def test_the_longest_file_a_plan_may_list_still_makes_a_valid_lease():
     longest = "/" + "a" * (MAX_SCOPE_FILE_CHARS - 1)
     assert scope_file_problem(longest) is None and canon(f"host:local/path:{longest}")
     assert scope_file_problem(longest + "b") is not None
+
+
+# ── compose references outside the stacks root (rc14.6.1, live M-33) ───────────────────────────────
+
+def _compose_with_env_file(env, path: Path, required: bool = True):
+    entry = f"      - {path}\n" if required else f"      - path: {path}\n        required: false\n"
+    env.compose.write_text("services:\n  web:\n    image: nginx:1.27\n    env_file:\n" + entry)
+
+
+def test_m33_an_env_file_outside_the_stacks_root_is_captured_and_undo_puts_it_back(tmp_path):
+    env = make_env(tmp_path)
+    homelink = tmp_path / "apps" / "services" / "homelink" / ".env"
+    homelink.parent.mkdir(parents=True)
+    homelink.write_text("A=1\n")
+    _compose_with_env_file(env, homelink)
+    cid = env.svc.create(env.mission.id, env.scope)                      # refused before rc14.6.1: "resolves outside the stacks root"
+    entry = next(f for f in env.svc.manifest(cid)["files"] if f["path"] == str(homelink.resolve()))
+    assert entry["kind"] == "env_file" and entry["root"] == "/" and env.svc.not_covered(cid) == []
+    homelink.write_text("A=2\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert report.status == "done", report.reason
+    assert str(homelink.resolve()) in report.written and homelink.read_text() == "A=1\n"
+
+
+def test_a_missing_required_env_file_outside_the_root_is_not_covered_and_the_run_is_not_refused(tmp_path):
+    env = make_env(tmp_path)
+    missing = tmp_path / "apps" / "gone" / ".env"
+    _compose_with_env_file(env, missing)
+    cid = env.svc.create(env.mission.id, env.scope)
+    assert env.svc.not_covered(cid) == [{"path": str(missing), "why": "does not exist"}]
+
+
+def test_an_optional_env_file_outside_the_root_that_is_absent_is_simply_skipped(tmp_path):
+    env = make_env(tmp_path)
+    _compose_with_env_file(env, tmp_path / "apps" / "gone" / ".env", required=False)
+    cid = env.svc.create(env.mission.id, env.scope)
+    assert env.svc.not_covered(cid) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write any directory")
+def test_an_env_file_outside_the_root_in_a_directory_pe_cannot_write_is_not_covered(tmp_path):
+    env = make_env(tmp_path)
+    locked = tmp_path / "apps" / "locked" / ".env"
+    locked.parent.mkdir(parents=True)
+    locked.write_text("A=1\n")
+    _compose_with_env_file(env, locked)
+    locked.parent.chmod(0o555)
+    try:
+        cid = env.svc.create(env.mission.id, env.scope)
+    finally:
+        locked.parent.chmod(0o755)
+    [item] = env.svc.not_covered(cid)
+    assert item["path"] == str(locked) and "not writable" in item["why"]
+
+
+def test_an_env_file_that_is_pe_s_own_is_not_covered(tmp_path):
+    env = make_env(tmp_path)
+    own = tmp_path / "pe" / "planetexpress.env"
+    own.parent.mkdir()
+    own.write_text("X=1\n")
+    env.svc.pe_paths = (str(own.parent),)
+    _compose_with_env_file(env, own)
+    cid = env.svc.create(env.mission.id, env.scope)
+    assert env.svc.not_covered(cid) == [{"path": str(own), "why": NOT_COVERED_PE}]
+
+
+def test_an_outside_env_file_that_changes_before_capture_is_not_covered_not_refused(tmp_path):
+    holder = {}
+
+    class Swap(_Hooks):
+        def before_capture(self, planned):
+            holder["p"].unlink()
+            holder["p"].write_text("B=2\n")                  # a different file (new inode) by the time it is captured
+
+    env = make_env(tmp_path, hooks=Swap())
+    holder["p"] = tmp_path / "apps" / "homelink" / ".env"
+    holder["p"].parent.mkdir(parents=True)
+    holder["p"].write_text("A=1\n")
+    _compose_with_env_file(env, holder["p"])
+    cid = env.svc.create(env.mission.id, env.scope)
+    [item] = env.svc.not_covered(cid)
+    assert item["path"] == str(holder["p"]) and item["why"].startswith("cannot be snapshotted")
+
+
+def test_a_reference_written_inside_the_root_that_a_symlink_leads_out_of_is_still_refused(tmp_path):
+    from planet_express.missions.checkpoint.service import ScopeRefused
+    env = make_env(tmp_path)
+    target = tmp_path / "elsewhere" / "s.env"
+    target.parent.mkdir()
+    target.write_text("S=1\n")
+    (env.stacks / "media" / "secrets.env").symlink_to(target)
+    env.compose.write_text("services:\n  web:\n    image: nginx:1.27\n    env_file: secrets.env\n")
+    with pytest.raises(ScopeRefused, match="outside the stacks root"):
+        env.svc.create(env.mission.id, env.scope)
+
+
+def test_a_relative_reference_that_leaves_the_root_is_captured_where_it_is(tmp_path):
+    env = make_env(tmp_path)
+    shared = tmp_path / "shared" / ".env"
+    shared.parent.mkdir()
+    shared.write_text("A=1\n")
+    env.compose.write_text("services:\n  web:\n    image: nginx:1.27\n    env_file: ../../shared/.env\n")
+    cid = env.svc.create(env.mission.id, env.scope)
+    assert str(shared.resolve()) in env.svc.covered_paths(cid) and env.svc.not_covered(cid) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can search any directory")
+def test_an_optional_reference_in_a_directory_pe_cannot_search_is_not_covered_not_skipped(tmp_path):
+    env = make_env(tmp_path)
+    private = tmp_path / "private"
+    (private / "app").mkdir(parents=True)
+    (private / "app" / ".env").write_text("A=1\n")
+    _compose_with_env_file(env, private / "app" / ".env", required=False)
+    private.chmod(0o000)
+    try:
+        cid = env.svc.create(env.mission.id, env.scope)
+    finally:
+        private.chmod(0o755)
+    [item] = env.svc.not_covered(cid)
+    assert item["path"] == str(private / "app" / ".env") and item["why"].startswith("cannot be snapshotted")
+
+
+def test_a_file_named_by_the_compose_file_and_the_plan_is_reported_once(tmp_path):
+    env = make_env(tmp_path)
+    missing = tmp_path / "apps" / "gone" / ".env"
+    _compose_with_env_file(env, missing)
+    cid = env.svc.create(env.mission.id, with_files(env, missing))
+    assert [i["path"] for i in env.svc.not_covered(cid)] == [str(missing)]
+
+
+def test_an_outside_env_file_two_stacks_share_is_restored_for_both(tmp_path):
+    env = make_env(tmp_path)
+    shared = tmp_path / "opt" / "common.env"
+    shared.parent.mkdir()
+    shared.write_text("A=1\n")
+    (env.stacks / "arr").mkdir()
+    (env.stacks / "arr" / "docker-compose.yml").write_text(f"services:\n  app:\n    image: x:1\n    env_file: {shared}\n")
+    _compose_with_env_file(env, shared)
+    cid = env.svc.create(env.mission.id, dataclasses.replace(env.scope, stacks=("arr", "media")))
+    entry = next(f for f in env.svc.manifest(cid)["files"] if f["path"] == str(shared.resolve()))
+    assert {entry["stack"], *entry.get("also_stacks", [])} == {"arr", "media"}
+    shared.write_text("A=2\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert {"arr", "media"} <= report.written_stacks and shared.read_text() == "A=1\n"
+
+
+def test_an_in_root_file_also_named_through_an_outside_symlink_can_still_be_undone(tmp_path):
+    env = make_env(tmp_path)
+    link = tmp_path / "opt" / "media.env"
+    link.parent.mkdir()
+    link.symlink_to(env.dotenv)
+    cid = env.svc.create(env.mission.id, with_files(env, link))          # the plan names the stack's .env through the outside link
+    entry = next(f for f in env.svc.manifest(cid)["files"] if f["path"] == str(env.dotenv.resolve()))
+    assert str(link) in entry["aliases"]
+    env.dotenv.write_text("CHANGED=1\n")
+    env.svc.capture_post(cid)
+    report = env.svc.restore(cid)
+    assert report.status == "done", report.reason

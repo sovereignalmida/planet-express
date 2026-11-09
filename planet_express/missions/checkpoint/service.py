@@ -186,10 +186,12 @@ class _Planned:
     base: str = ""       # directory its relative references resolve against
     aliases: list[str] = field(default_factory=list)   # other in-scope paths that resolve to the same real file
     root: str = ""       # the root every safe-fs call for it is made against: "" is the stacks root; a plan file's is "/"
+    also_stacks: list[str] = field(default_factory=list)   # other stacks that name the same file (an outside env_file they share)
 
 
 PLAN_FILE = "plan_file"
 HOST_ROOT = "/"
+_HOST_ROOT_KINDS = (PLAN_FILE, "env_file", "include")     # what may be captured outside the stacks root (rc14.5, rc14.6.1)
 # Why a plan file is not covered by Undo. Words only, never the file's contents.
 NOT_COVERED_ABSENT = "did not exist before the run: Undo will not remove it"
 NOT_COVERED_PE = "is part of Planet Express itself"
@@ -365,32 +367,58 @@ class CheckpointService:
         return self._validate(scope)[0]
 
     def _validate(self, scope: CheckpointScope) -> tuple[list[_Planned], list[dict[str, str]]]:
-        """Everything in the stacks' scope must be a regular file Core can read, inside the stacks root after realpath,
-        under the size limit. Anything else is REFUSED, never skipped. Files a compose file names in `env_file:`
-        and `include:` are in scope too, under the same rules. Nothing is written.
+        """What the checkpoint will capture, and what it cannot cover. Nothing is written.
 
-        rc14.5: the plan's own files (`plan_files`) are captured wherever they are on the host, as long as Core can read the file and
-        write its directory (so Undo can put it back). One it cannot cover is NOT a refusal: it is returned in the second list with
-        why, and the result says it is not covered. Trust mode: the operator approved the run; a file Undo cannot reach is a fact
-        they are told, not a reason to stop."""
+        Inside the stacks root (the stacks' compose files and the `env_file:` / `include:` files they name, as written): each must be
+        a regular file Core can read, inside the root after realpath, under the size limit, or the scope is REFUSED. A path written
+        inside the root that a symlink leads out of is refused, as it always was.
+
+        Outside the stacks root (rc14.5: the plan's own `files`; rc14.6.1, live M-33: a compose reference written outside the root,
+        such as `env_file: /home/casaroot/apps/services/homelink/.env`): captured where it is when Core can read it and write its
+        directory, so Undo can put it back. One it cannot cover is NOT a refusal: it is returned in the second list with why, and
+        the result says it is not covered. Trust mode: the operator approved the run; a file Undo cannot reach is a fact they are
+        told, not a reason to stop. A reference's `..` is resolved lexically first, so `../shared.env` is judged by where it is."""
         planned: list[_Planned] = []
         not_covered: list[dict[str, str]] = []
         seen: set[str] = set()
+        skipped: set[str] = set()
         by_real: dict[str, _Planned] = {}
 
+        def uncover(path: str, real: str, why: str) -> None:
+            if real not in skipped and real not in seen:
+                skipped.add(real)
+                not_covered.append({"path": path, "why": why[:200], "real": real})
+
         def add(path: str, stack: str | None, kind: str, required: bool = True, depth: int = 0,
-                child_base: str | None = None) -> None:
+                child_base: str | None = None, host: bool = False) -> None:
+            root = HOST_ROOT if host else self.stacks_root
             try:
-                real, symlink = safefs.resolve_in_root(self.stacks_root, path)
-                if real in seen:
-                    first = by_real[real]
-                    if path != first.path and path not in first.aliases:
-                        first.aliases.append(path)      # restore must check this name still leads here too
+                real, symlink = safefs.resolve_in_root(root, path)
+            except safefs.UnsafePath as exc:
+                if not host:
+                    raise ScopeRefused(str(exc)) from None
+                uncover(path, path, f"cannot be snapshotted: {_safe_reason(exc)}")
+                return
+            if real in seen:
+                first = by_real[real]
+                if path != first.path and path not in first.aliases:
+                    first.aliases.append(path)          # restore must check this name still leads here too
+                if stack and stack != first.stack and stack not in first.also_stacks:
+                    first.also_stacks.append(stack)     # a file several stacks name: a restore resolves each of them
+                return
+            if real in skipped:
+                return
+            if host:
+                why = self._host_file_problem(real, kind, required)
+                if why is not None:
+                    if why:
+                        uncover(path, real, why)
                     return
+            try:
                 try:
-                    fd, meta = safefs.open_regular(self.stacks_root, real, max_bytes=self.settings.max_file_bytes)
+                    fd, meta = safefs.open_regular(root, real, max_bytes=self.settings.max_file_bytes)
                 except safefs.UnsafePath:
-                    if not required and safefs.is_absent(self.stacks_root, real):
+                    if not required and (_absent(real) if host else safefs.is_absent(root, real)):
                         return
                     raise
                 try:
@@ -398,17 +426,23 @@ class CheckpointService:
                 finally:
                     os.close(fd)
             except safefs.UnsafePath as exc:
-                raise ScopeRefused(str(exc)) from None
+                if not host:
+                    raise ScopeRefused(str(exc)) from None
+                uncover(path, real, f"cannot be snapshotted: {_safe_reason(exc)}")
+                return
+            if host and not os.access(os.path.dirname(real), os.W_OK | os.X_OK):
+                uncover(path, real, "its directory is not writable by Planet Express, so Undo could not put it back")
+                return
             seen.add(real)
-            base = child_base or os.path.dirname(real)
-            item = _Planned(path, real, symlink, stack, kind, meta, base)
+            item = _Planned(path, real, symlink, stack, kind, meta, child_base or os.path.dirname(real), root=HOST_ROOT if host else "")
             planned.append(item)
             by_real[real] = item
             if kind in _PARSED:
                 if depth >= MAX_INCLUDE_DEPTH:
                     raise ScopeRefused(f"{real}: includes are nested more than {MAX_INCLUDE_DEPTH} deep")
-                for ref, ref_kind, ref_required, ref_base in _references(data, base):
-                    add(ref, stack, ref_kind, ref_required, depth + 1, ref_base)
+                for ref, ref_kind, ref_required, ref_base in _references(data, item.base):
+                    ref = _lexical(ref)
+                    add(ref, stack, ref_kind, ref_required, depth + 1, ref_base, host=_written_outside(self.stacks_root, ref))
 
         stacks = set(scope.stacks) | {s.split("/", 1)[0] for s in scope.services}
         for stack in sorted(stacks):
@@ -423,38 +457,18 @@ class CheckpointService:
         for path in scope.files:
             add(path, None, "file")
         for path in dict.fromkeys(scope.plan_files):
-            why = self._plan_file(path, planned, seen, by_real)
-            if why:
-                not_covered.append({"path": path, "why": why})
+            add(path, None, PLAN_FILE, host=True)
         return planned, not_covered
 
-    def _plan_file(self, path: str, planned: list[_Planned], seen: set[str], by_real: dict[str, "_Planned"]) -> str | None:
-        """Plan one file the plan lists, anywhere on the host. Returns why it cannot be covered, or None when it is planned (or is
-        already planned under another name)."""
-        try:
-            real, symlink = safefs.resolve_in_root(HOST_ROOT, path)
-        except safefs.UnsafePath:
-            return "is not a plain absolute path"
-        if real in seen:
-            first = by_real[real]
-            if path != first.path and path not in first.aliases:
-                first.aliases.append(path)
-            return None
+    def _host_file_problem(self, real: str, kind: str, required: bool) -> str | None:
+        """Before reading a file outside the stacks root: why it cannot be covered, "" when it is optional and absent (skip it
+        quietly), or None when it may be read. Absent means the name does not exist; a directory Core cannot search is NOT absent."""
         if is_pe_path(real, (*self.pe_paths, str(self.store.root))):
             return NOT_COVERED_PE
-        if not os.path.lexists(real):
-            return NOT_COVERED_ABSENT
-        try:
-            fd, meta = safefs.open_regular(HOST_ROOT, real, max_bytes=self.settings.max_file_bytes)
-            os.close(fd)
-        except safefs.UnsafePath as exc:
-            return f"cannot be snapshotted: {_safe_reason(exc)}"[:200]
-        if not os.access(os.path.dirname(real), os.W_OK | os.X_OK):
-            return "its directory is not writable by Planet Express, so Undo could not put it back"
-        seen.add(real)
-        item = _Planned(path, real, symlink, None, PLAN_FILE, meta, os.path.dirname(real), root=HOST_ROOT)
-        planned.append(item)
-        by_real[real] = item
+        if _absent(real):
+            if kind == PLAN_FILE:
+                return NOT_COVERED_ABSENT
+            return "does not exist" if required else ""
         return None
 
     def _capture(self, checkpoint_id: str, mission_id: str, scope: CheckpointScope, planned: list[_Planned],
@@ -467,10 +481,11 @@ class CheckpointService:
             try:
                 data, meta, acl = self._read_planned(item)
             except ScopeRefused as exc:
-                if item.kind != PLAN_FILE:
+                if item.root != HOST_ROOT:
                     raise
-                # A plan file that vanished or changed since it was planned is not covered; the run is not refused over it.
-                not_covered.append({"path": item.path, "why": f"cannot be snapshotted: {str(exc)[:160]}"})
+                # A file captured outside the stacks root (a plan file, an outside compose reference) that vanished or changed since it
+                # was planned is not covered; the run is not refused over it (rc14.5, rc14.6.1).
+                not_covered.append({"path": item.path, "why": f"cannot be snapshotted: {str(exc)[:160]}", "real": item.real})
                 continue
             # What was actually read is what counts against the limits, not what fstat promised.
             captured += len(data)
@@ -486,11 +501,12 @@ class CheckpointService:
                           "aliases": list(item.aliases),
                           "stack": item.stack, "kind": item.kind, "sha256": safefs.sha256_bytes(data),
                           "mode": meta.mode, "uid": meta.uid, "gid": meta.gid, "size": len(data), "acl": acl,
-                          **({"root": item.root} if item.root else {})})
+                          **({"root": item.root} if item.root else {}),
+                          **({"also_stacks": list(item.also_stacks)} if item.also_stacks else {})})
             if item.kind in _PARSED:
                 compose_docs.setdefault(item.stack, []).append(data)
                 parsed.append((item, data))
-        self._check_references(planned, parsed)
+        self._check_references(planned, parsed, {i["real"] for i in not_covered if i.get("real")})
         return self._finish_manifest(checkpoint_id, mission_id, scope, files, compose_docs, not_covered)
 
     def _read_planned(self, item: _Planned) -> tuple[bytes, safefs.FileMeta, str | None]:
@@ -547,23 +563,30 @@ class CheckpointService:
         return {"v": MANIFEST_V, "id": checkpoint_id, "mission_id": mission_id, "created_at": self._now(),
                 "stacks_root": self.stacks_root, "files": files, "facts": facts,
                 "facts_unavailable": sorted(unavailable),
-                **({"not_covered": not_covered[:64]} if not_covered else {}),
+                **({"not_covered": [{"path": i["path"], "why": i["why"]} for i in not_covered[:64]]} if not_covered else {}),
                 "scope": {"stacks": list(scope.stacks), "services": list(scope.services),
                           "units": list(scope.units), **({"files": list(scope.plan_files)} if scope.plan_files else {})}}
 
-    def _check_references(self, planned: list[_Planned], parsed: list[tuple[_Planned, bytes]]) -> None:
+    def _check_references(self, planned: list[_Planned], parsed: list[tuple[_Planned, bytes]],
+                          left_out: set[str] = frozenset()) -> None:          # type: ignore[assignment]
         """Expand the references again from the bytes that were actually captured. If the set differs from the
-        validated one, a compose file changed in between and what was captured is not what was validated."""
+        validated one, a compose file changed in between and what was captured is not what was validated. References are judged
+        exactly as `_validate` judged them (lexical `..`, inside or outside the root as written); one deliberately left out as not
+        covered (`left_out`) is not expected."""
         validated = {p.real for p in planned}
-        expected = {p.real for p in planned if p.kind in ("include", "env_file")}
+        expected = {p.real for p in planned if p.kind in ("include", "env_file")} - left_out
         found: set[str] = set()
         for item, data in parsed:
             for ref, _kind, required, _base in _references(data, item.base):
+                ref = _lexical(ref)
+                outside = _written_outside(self.stacks_root, ref)
                 try:
-                    real, _ = safefs.resolve_in_root(self.stacks_root, ref)
+                    real, _ = safefs.resolve_in_root(HOST_ROOT if outside else self.stacks_root, ref)
                 except safefs.UnsafePath:
+                    if outside and ref in left_out:
+                        continue
                     raise ScopeChanged(f"{item.real}: a reference changed during capture") from None
-                if not required and safefs.is_absent(self.stacks_root, real):
+                if real in left_out or (not required and _absent(real)):
                     continue
                 found.add(real)
         if found - validated or expected - found:
@@ -605,7 +628,8 @@ class CheckpointService:
         names += [a for a in entry.get("aliases") or [] if a not in names]      # every name captured for this file
         for given in names:
             try:
-                real, _through_link = safefs.resolve_in_root(root, given)
+                # Each name is judged by where it is WRITTEN (rc14.6.1): an outside alias of an in-root file resolves against `/`.
+                real, _through_link = safefs.resolve_in_root(HOST_ROOT if _written_outside(self.stacks_root, given) else root, given)
             except safefs.UnsafePath as exc:
                 return None, None, f"{given}: the symlink can no longer be followed safely ({exc})", None
             if real != entry["path"]:
@@ -621,10 +645,11 @@ class CheckpointService:
     def _root_of(self, entry: dict[str, Any]) -> str:
         """The root a captured file's safe-fs calls are made against: the stacks root, or `/` for a plan file (rc14.5). Only the two
         values PE itself writes are honoured: anything else in a manifest is treated as the stacks root."""
-        return HOST_ROOT if entry.get("root") == HOST_ROOT and entry.get("kind") == PLAN_FILE else self.stacks_root
+        return HOST_ROOT if entry.get("root") == HOST_ROOT and entry.get("kind") in _HOST_ROOT_KINDS else self.stacks_root
 
     def not_covered(self, checkpoint_id: str) -> list[dict[str, str]]:
-        """The plan files this checkpoint could not cover (rc14.5), as recorded when it was taken."""
+        """The files this checkpoint could not cover (plan files and compose references outside the stacks root), as recorded when
+        it was taken."""
         self._require_enabled()
         items = self._manifest(checkpoint_id).get("not_covered") or []
         return [i for i in items if isinstance(i, dict)]
@@ -835,7 +860,7 @@ class CheckpointService:
 
         # Each stack about to get files back is resolved by Compose FIRST, as the session left it, so the comparison after the
         # write can tell which services' effective configuration the restore changes (a comment-only `.env` edit changes none).
-        for stack in sorted({e["stack"] for e, _d, _s in pending if e.get("stack")}):
+        for stack in sorted({st for e, _d, _s in pending for st in _stacks_of(e)}):
             report.configs_before[stack] = self._service_configs(stack)
         drift_paths = {d["path"] for d in report.drifted if d.get("path")}
         for entry, data, _seen in pending:
@@ -858,8 +883,7 @@ class CheckpointService:
             report.written.append(entry["path"])
             if skipped:
                 report.meta_skipped.append({"path": entry["path"], "skipped": skipped})
-            if entry.get("stack"):
-                report.written_stacks.add(entry["stack"])
+            report.written_stacks.update(_stacks_of(entry))
             self.hooks.after_file_restored(len(report.written))
 
     def _service_configs(self, stack: str) -> StackConfig | None:
@@ -1213,6 +1237,39 @@ def _references(data: bytes, base_dir: str) -> list[tuple[str, str, bool, str | 
             if isinstance(service, dict) and service.get("env_file") is not None:
                 take(service["env_file"], "env_file")
     return out
+
+
+def _lexical(path: Any) -> Any:
+    """An absolute reference with its `.` and `..` resolved lexically (symlinks are NOT followed: where a link leads is judged later)."""
+    if isinstance(path, str) and path.startswith("/") and "\0" not in path:
+        norm = os.path.normpath(path)
+        return "/" + norm.lstrip("/")
+    return path
+
+
+def _written_outside(stacks_root: str, path: Any) -> bool:
+    """Is the path, AS WRITTEN (lexically, no symlinks followed), outside the stacks root? A path written inside the root that a
+    symlink leads out of is not: it stays under the stacks-root rules and is refused."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        return False
+    return path != stacks_root and not path.startswith(stacks_root.rstrip("/") + "/")
+
+
+def _absent(real: str) -> bool:
+    """True only when the name does not exist (ENOENT, on it or a parent). A permission error is not absence."""
+    try:
+        os.lstat(real)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _stacks_of(entry: dict[str, Any]) -> list[str]:
+    """Every stack a captured file belongs to: its own and any others that name it."""
+    out = [entry["stack"]] if entry.get("stack") else []
+    return out + [x for x in entry.get("also_stacks") or [] if isinstance(x, str) and x not in out]
 
 
 def _safe_reason(exc: BaseException) -> str:
