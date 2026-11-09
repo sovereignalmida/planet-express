@@ -106,6 +106,29 @@ second before changing the matcher.
 
 ## Missions (trust mode, from live use after rc14.4)
 
+### A conversation's token budget must not stop the work
+
+**What:** The per-conversation token budget (`missions.console.token_budget`, 150k on the host) stops a Console turn mid-flight with
+"403 the mission's model budget is used up", and the conversation is then dead: its budget is fixed when it is created and raising
+the config does not help it. Make the budget something that matches real use instead of a hard stop:
+- No mid-turn refusal on the conversation budget. The broker's own site-wide ceilings (requests, tokens per session) stay as the
+  runaway-cost backstop, set high.
+- Usage stays visible (the Console already shows `used_pct`); when a conversation passes a threshold the operator sees it, and can
+  extend it with one click if a cap is kept at all.
+- Long conversations keep their context in one place: compact or summarise older turns instead of re-sending the whole history every
+  turn (each turn re-sends the conversation, so cost grows with every turn even when the question does not).
+- Decide whether the per-conversation cap exists at all, or whether only a daily/site spend figure is reported.
+
+**Why:** Live M-31 (2026-11-09), an investigation of the networks across every active stack, ran out after three turns (about 22k,
+30k and 62k tokens) while reading six compose files. Sessions drift and the context needs to stay in one conversation; starting a
+new one loses it. Another guardrail that looks right on paper and does not match real use.
+
+**Context:** `missions/model_broker.py` (`set_session_cap`, the 403 in the relay), `console/service.py` (budget at create, cap per
+turn), `console/store.py` (`token_budget`, `tokens_left`), `console/api.py` (the budget shown on the page).
+
+**Effort:** M
+**Priority:** P1
+
 ### Accept plain text for `known` and `unsure`
 
 **What:** `lenient()` turns a string `known` / `unsure` into a one-item list instead of refusing the plan.
