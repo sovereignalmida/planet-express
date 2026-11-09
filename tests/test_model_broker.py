@@ -304,24 +304,12 @@ def test_the_token_budget_ends_it_too(rig):
 def test_a_session_cap_lowers_the_token_ceiling_and_can_never_raise_it(rig):
     upstream, _store, build = rig
     broker = started(build, limits=BrokerLimits(max_tokens=10_000))
-    assert broker.set_session_cap("S-1", 90) is True                               # a conversation's remaining budget
+    assert broker.set_session_cap("S-1", 90) is True                               # a lower ceiling for this session
     assert [ask(broker)[0].status for _ in range(6)] == [200] * 6                  # the same arithmetic as the 90-token broker above
     assert ask(broker)[0].status == 403 and len(upstream.seen) == 6
     assert broker.set_session_cap("S-1", 10**9) is True                            # asking for more changes nothing
     assert ask(broker)[0].status == 403
     assert broker.set_session_cap("S-nope", 5) is False
-
-
-def test_a_mission_cap_set_before_the_session_exists_applies_to_its_next_session_once(rig):
-    """The Console asks for the turn's ceiling before the supervisor opens the turn's endpoint: the cap must wait for that session."""
-    upstream, _store, build = rig
-    broker = build(limits=BrokerLimits(max_tokens=10_000))
-    broker.set_mission_cap("M-1", 90)                                             # no session yet
-    broker.set_mission_cap("M-1", 10**9)                                          # asking for more changes nothing
-    broker.start(CS())
-    assert [ask(broker)[0].status for _ in range(6)] == [200] * 6                 # the 90-token arithmetic again
-    assert ask(broker)[0].status == 403 and len(upstream.seen) == 6
-    assert broker._mission_caps == {}                                             # consumed: the mission's next session starts clean
 
 
 def test_a_resumed_conversation_is_not_refused_for_re_sending_its_context(rig):

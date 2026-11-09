@@ -11,7 +11,6 @@ from missions_helpers import make_store
 from config_schema import MissionConsoleConfig
 from planet_express.console.runtime import ConsoleRuntime
 from planet_express.console.service import (
-    BudgetSpent,
     ConsoleError,
     ConsoleFull,
     ConsoleService,
@@ -29,12 +28,6 @@ STREAM_ID = "2dc11a5c-9cef-4ce6-98ca-232a0476de7a"
 class Broker:
     def __init__(self, tokens=4000):
         self.tokens = tokens
-
-    def set_mission_cap(self, mission_id, tokens):
-        pass
-
-    def clear_mission_cap(self, mission_id):
-        pass
 
     def usage(self, session_id):
         return {"requests": 2, "tokens": self.tokens, "refused": 0}
@@ -168,7 +161,7 @@ def test_a_turn_that_dies_is_reported_and_never_restarted_by_itself_and_the_oper
     assert rig.status(conv) == "investigating" and len(rig._rows(conv)) == 2
 
 
-def test_the_open_conversation_cap_and_the_budget_and_empty_messages_are_refused_in_plain_words(tmp_path):
+def test_the_open_conversation_cap_and_empty_messages_are_refused_in_plain_words_and_the_usage_mark_is_not(tmp_path):
     rig = Rig(tmp_path, max_open=2, token_budget=30_000)
     one, two = rig.open("a"), rig.open("b")
     with pytest.raises(ConsoleFull, match="2 conversations"):
@@ -180,10 +173,9 @@ def test_the_open_conversation_cap_and_the_budget_and_empty_messages_are_refused
         rig.service.create("chris", "")
     with pytest.raises(ConsoleError, match="operator name"):
         rig.service.post(one.id, "  ", "hello")
-    rig.console.add_usage(one.id, 15_000)                                       # 15,000 left: under the 20,000 a turn needs
-    with pytest.raises(BudgetSpent):
-        rig.service.post(one.id, "chris", "hello")
-    assert rig.console.count_open() == 2 and len(rig.console.messages(one.id)) == 1
+    rig.console.add_usage(one.id, 45_000)                                       # rc14.6: past the 30,000 mark, a message is still taken
+    rig.service.post(one.id, "chris", "hello")
+    assert rig.console.count_open() == 2 and len(rig.console.messages(one.id)) == 2
 
 
 def test_a_failed_creation_leaves_nothing_reserved_and_nothing_to_start(tmp_path):
@@ -309,15 +301,18 @@ def test_every_message_and_event_is_redacted_and_the_state_directory_name_is_the
 
 # ── regressions from the second review ───────────────────────────────────────────────────────────
 
-def test_a_turn_that_cannot_start_is_reported_once_and_never_retried_by_itself(tmp_path):
+def test_a_turn_that_cannot_start_is_reported_once_and_never_retried_by_itself(tmp_path, monkeypatch):
     rig = Rig(tmp_path, token_budget=30_000)
     conv = rig.open()
-    rig.console.add_usage(conv.id, 15_000)                                        # 15,000 left: a turn needs 20,000
+
+    def broken(*a, **kw):                                                         # the turn cannot start (a workspace it cannot write)
+        raise OSError("read-only workspace")
+    monkeypatch.setattr(rig.runtime, "_prepare_workspace", broken)
     for _ in range(8):
         rig.sup.tick()
     assert len(rig._rows(conv)) == 1 and rig.status(conv) == "needs_operator"     # one attempt, no storm
     system = [m.text for m in rig.console.messages(conv.id) if m.role == "system"]
-    assert len(system) == 1 and "budget is used up" in system[0]                 # one message, and it says why
+    assert len(system) == 1 and "could not start" in system[0]                    # one message, and it says why
     assert rig.console.pending(conv.id) is None
 
 

@@ -52,10 +52,6 @@ class ConsoleFull(ConsoleConflict):
     pass
 
 
-class BudgetSpent(ConsoleConflict):
-    pass
-
-
 def _actor(operator: str) -> str:
     name = operator.removeprefix("operator:").strip()
     if not name or len(name) > 100 or any(c in name for c in "\0\r\n"):
@@ -121,8 +117,6 @@ class ConsoleService:
         conv = self.console.get(conversation_id)
         if self.ms.get_mission(conv.mission_id).status in TERMINAL:
             raise ConsoleConflict("this conversation was closed from the Work log: start a new conversation")
-        if conv.tokens_left < self.cfg.min_turn_tokens:
-            raise BudgetSpent("this conversation's model budget is used up: start a new conversation")
         return self.console.add_message(conversation_id, "operator", text, actor=actor, require_open=True)
 
     def interrupt(self, conversation_id: str, operator: str) -> bool:
@@ -153,8 +147,6 @@ class ConsoleService:
             if message is not None:
                 self.console.consume(message.seq, conv.turns)
         why = _WHY.get(reason, "The turn did not finish.")
-        if reason == "start_failed" and conv.tokens_left < self.cfg.min_turn_tokens:
-            why = "This conversation's model budget is used up. Start a new conversation to go on."
         if tail:
             why += " What the session printed last is kept with this conversation's run record (session-tail.txt)."
         self.console.add_message(conv.id, "system", why, turn=conv.turns or None)
@@ -230,13 +222,11 @@ class ConsoleService:
         auto = message.role == "core" and message.actor == CONSOLE_PLAN_RETRY
         if not auto and not (message.role == "operator" and message.actor.startswith("operator:")):
             return
-        if auto and (mission.status != "awaiting_decision" or conv.tokens_left < self.cfg.min_turn_tokens):
-            # PE's own retry runs only on a conversation that is simply waiting, with budget left for a turn. Otherwise it is dropped,
-            # once, and the operator sees why: it never waits to retry later, so it can never loop.
+        if auto and mission.status != "awaiting_decision":
+            # PE's own retry runs only on a conversation that is simply waiting. Otherwise it is dropped, once, and the operator sees
+            # why: it never waits to retry later, so it can never loop.
             if self.console.consume(message.seq, conv.turns):
-                why = ("the conversation's model budget is used up" if conv.tokens_left < self.cfg.min_turn_tokens
-                       else "the last turn did not finish")
-                self.console.add_message(conv.id, "system", f"PE did not ask the agent to fix its plan: {why}.")
+                self.console.add_message(conv.id, "system", "PE did not ask the agent to fix its plan: the last turn did not finish.")
             return
         try:
             self.supervisor.start_followup(mission.id, message.actor)
@@ -274,4 +264,4 @@ class ConsoleService:
             self.console.set_state(conv.id, "archived")
 
 
-__all__ = ["BudgetSpent", "ConsoleConflict", "ConsoleError", "ConsoleFull", "ConsoleService"]
+__all__ = ["ConsoleConflict", "ConsoleError", "ConsoleFull", "ConsoleService"]

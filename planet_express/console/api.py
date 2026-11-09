@@ -57,7 +57,7 @@ def _level(text: str, level: str, group: str, h: str, p: str) -> dict:
 
 
 def describe(conv: Conversation, mission_status: str, plan: dict | None, running: bool, last_system: str | None,
-             min_turn_tokens: int, starting: bool = False) -> dict:
+             starting: bool = False) -> dict:
     """The plain-language status of a conversation (the design brief's vocabulary): never an internal state name. Written by PE.
     `running` is a turn in progress; `starting` is one that is about to begin (queued, or the operator's message is waiting)."""
     if conv.state == "archived":
@@ -77,9 +77,6 @@ def describe(conv: Conversation, mission_status: str, plan: dict | None, running
         rec = next((o["name"] for o in plan["options"] if o.get("recommended")), None)
         return _level("Needs your call", "warn", "Needs you", f"Waiting for your choice between {n} option{'s' if n != 1 else ''}",
                       f"Recommended: {rec}. Nothing has been changed." if rec else "Nothing has been changed.")
-    if conv.tokens_left < min_turn_tokens:
-        return _level("Budget used up", "warn", "Recent", "This conversation's model budget is used up",
-                      "Start a new conversation to go on. Everything said so far stays here.")
     return _level("Result ready", "ok", "Recent", "Answer ready", "Ask a follow-up, or close the conversation when you are done.")
 
 
@@ -106,7 +103,7 @@ class ConsoleApi:
         configured = self.supervisor.preflight_fn is not None
         proven = not configured or bool(report is not None and report.ok)
         return {"enabled": True, "open": self.console.count_open(), "max_open": self.cfg.max_open, "token_budget": self.cfg.token_budget,
-                "min_turn_tokens": self.cfg.min_turn_tokens, "proposal_only": not proven,
+                "proposal_only": not proven,
                 "proposal_only_reason": None if proven else "The session launcher has not been proven on this host, so the agent cannot start."}
 
     def list(self) -> dict:
@@ -131,14 +128,18 @@ class ConsoleApi:
         running = view.pop("running")
         status_view = view["mission_closed"]
         stoppable = self.supervisor.has_run(conv.mission_id) and not status_view        # a turn that is actually running, not one still queued
-        used_pct = min(100, round(100 * conv.tokens_used / conv.token_budget)) if conv.token_budget else 100
-        spent = conv.tokens_left < self.cfg.min_turn_tokens
+        # rc14.6: the conversation's token budget is a usage mark, never a stop (live M-31/M-32: a fleet-wide investigation ran past
+        # 150k in one turn). Past it the page says so; the broker's own per-turn ceilings stay the runaway-cost backstop.
+        # The mark is the CURRENT config's (it only affects what is shown), not the one stored when the conversation was made.
+        mark = self.cfg.token_budget
+        used_pct = round(100 * conv.tokens_used / mark) if mark else 0          # may pass 100: the page draws the bar capped
+        over = bool(mark) and conv.tokens_used >= mark                           # raw counts: 99.5% rounds to 100 but is not over
         return {
             "conversation": {"id": conv.id, "title": conv.title, "origin": conv.origin, "state": conv.state, "turns": conv.turns,
                              "status": {k: view[k] for k in ("text", "level", "group")}, "verdict": view["verdict"]},
-            "budget": {"used_pct": used_pct, "tokens_used": conv.tokens_used, "token_budget": conv.token_budget, "tokens_left": conv.tokens_left,
-                       "state": "stop" if spent else "warn" if used_pct >= 80 else "ok"},
-            "running": running, "stoppable": stoppable, "composer": self._composer(conv, running, spent, status, status_view),
+            "budget": {"used_pct": used_pct, "tokens_used": conv.tokens_used, "token_budget": mark, "tokens_left": max(mark - conv.tokens_used, 0),
+                       "over": over, "state": "warn" if over or used_pct >= 80 else "ok"},
+            "running": running, "stoppable": stoppable, "composer": self._composer(conv, running, status, status_view),
             # PE's own `core` turns (a refused plan handed back to the planner) are not drawn: the thread has PE's short note instead.
             "messages": [{"seq": m.seq, "role": m.role, "turn": m.turn, "at": m.at, "text": clean_text(m.text, MAX_TEXT),
                           "by": (m.actor or "").removeprefix("operator:") or None} for m in messages if m.role != "core"],
@@ -515,7 +516,7 @@ class ConsoleApi:
             "evidence": {"incident": own.incident_id, "turns": conv.turns, "budget_used_pct": used_pct},
             "scope": {"kind": "run" if active else "last_run" if runs else "read_only", "stacks": list(grant.scope.stacks),
                       "services": list(grant.scope.services)},
-            "limits": {"kind": "run" if runs else "conversation", "token_budget": conv.token_budget, "minutes": max(1, grant.budgets.wall_s // 60), "steps": grant.budgets.tool_calls},
+            "limits": {"kind": "run" if runs else "conversation", "token_budget": self.cfg.token_budget, "minutes": max(1, grant.budgets.wall_s // 60), "steps": grant.budgets.tool_calls},
             "record": {"events": events, "checkpoint": mission.checkpoint_id is not None, "runs": len(runs)},
         }
 
@@ -556,7 +557,7 @@ class ConsoleApi:
             pending = None
         plan = json.loads(pending["plan_json"]) if pending else None
         last_system = self.console.last_system_text(conv.id) if mission.status == "needs_operator" else None
-        out = describe(conv, mission.status, plan, in_flight, last_system, self.cfg.min_turn_tokens, starting)
+        out = describe(conv, mission.status, plan, in_flight, last_system, starting)
         shown = pending or self.console.latest_plan(conv.id)                  # the card still shows an expired plan, as expired
         out.update(running=in_flight or starting, plan_row=shown if shown and shown["status"] in ("pending", "expired") else None, mission_closed=closed)
         if not in_flight and not starting and not closed:
@@ -569,13 +570,11 @@ class ConsoleApi:
                     out.update(override)
         return out
 
-    def _composer(self, conv: Conversation, running: bool, spent: bool, status: dict, mission_closed: bool = False) -> dict:
+    def _composer(self, conv: Conversation, running: bool, status: dict, mission_closed: bool = False) -> dict:
         if conv.state != "open" or mission_closed:
             return {"mode": "off", "reason": "This conversation is closed."}
         if status["proposal_only"]:
             return {"mode": "off", "reason": status["proposal_only_reason"]}
-        if spent:
-            return {"mode": "off", "reason": "This conversation's model budget is used up. Start a new conversation."}
         if running:
             return {"mode": "busy", "reason": "Working. Your message waits for this turn to finish, or press Stop to interrupt it."}
         return {"mode": "idle", "reason": None}

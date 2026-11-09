@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 os.environ.setdefault("CASA_CONFIG", str(ROOT / "config.example.yaml"))
 
 A, B, C, D, E = "a" * 16, "b" * 16, "c" * 16, "d" * 16, "e" * 16
-STATUS = {"enabled": True, "open": 3, "max_open": 10, "token_budget": 150000, "min_turn_tokens": 20000, "proposal_only": False, "proposal_only_reason": None}
+STATUS = {"enabled": True, "open": 3, "max_open": 10, "token_budget": 500000, "proposal_only": False, "proposal_only_reason": None}
 PLAN = {"known": ["The VPN gateway is healthy.", "Four containers share its network and are running."],
         "unsure": ["Whether the provider's port rotation or the start order caused it."],
         "options": [

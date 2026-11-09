@@ -8,7 +8,7 @@ BROKER = {"enabled": True, "upstream_host": "openrouter.ai", "models": ["~anthro
 
 def test_the_defaults_are_the_phase_zero_numbers_and_the_console_is_off():
     cfg = MissionConsoleConfig()
-    assert not cfg.enabled and cfg.token_budget == 150_000 and cfg.max_open == 10 and cfg.archive_after_days == 3
+    assert not cfg.enabled and cfg.token_budget == 500_000 and cfg.max_open == 10 and cfg.archive_after_days == 3
     assert "Edit" in cfg.disallowed_tools and "Write" in cfg.tools and "Bash" in cfg.tools
     assert MissionsConfig().console.enabled is False
 
@@ -63,11 +63,12 @@ def test_the_runner_wires_the_console_only_when_it_is_enabled_and_a_console_miss
     assert type(on.supervisor.runtime_factory(Plain())).__name__ == "CommandRuntime"
 
 
-def test_the_console_model_must_be_one_the_broker_allows_and_a_turn_must_be_able_to_start():
+def test_the_console_model_must_be_one_the_broker_allows_and_an_old_min_turn_tokens_still_loads():
     with pytest.raises(ValueError, match="model_broker.models"):
         MissionsConfig(enabled=True, console={"enabled": True, "model": "other-model"}, model_broker=BROKER, hooks=HOOKS)
-    with pytest.raises(ValueError, match="min_turn_tokens"):
-        MissionsConfig(enabled=True, console={"enabled": True, "token_budget": 10_000, "min_turn_tokens": 20_000}, model_broker=BROKER, hooks=HOOKS)
+    # rc14.6: the budget is a usage mark, so min_turn_tokens is no longer used; a config that still sets it loads
+    assert MissionsConfig(enabled=True, console={"enabled": True, "token_budget": 10_000, "min_turn_tokens": 20_000},
+                          model_broker=BROKER, hooks=HOOKS).console.token_budget == 10_000
 
 
 def test_a_console_only_host_needs_no_mission_command(tmp_path):

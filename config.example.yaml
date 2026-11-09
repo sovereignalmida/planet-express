@@ -181,7 +181,7 @@ multi_host:
 #     enabled: false
 #     claude: /usr/local/bin/claude       # the claude CLI itself, never a wrapper
 #     model: claude-sonnet-4-5            # must be one of missions.model_broker.models above (OpenRouter: the alias you listed there)
-#     token_budget: 150000                # per conversation (a chat turn is about 3,000 tokens, a plan about 13,000)
+#     token_budget: 500000                # a usage mark per conversation, shown on the page; nothing stops at it (the broker's own limits are the backstop)
 #     max_open: 10                        # open conversations; each keeps one session uid for its whole life
 #     archive_after_days: 3               # an idle conversation is archived: its state directory is emptied and its uid freed
 #   session_uid_min: 200000         # one uid, private group and pe-s<N> account per session; not Core's uid, not systemd DynamicUser's 61184-65519

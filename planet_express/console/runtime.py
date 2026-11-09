@@ -102,8 +102,6 @@ class ConsoleRuntime:
         conv = self.console.by_mission(mission.id)
         if conv is None or conv.state != "open":
             raise TurnRefused("this conversation is closed")
-        if conv.tokens_left < self.cfg.min_turn_tokens:
-            raise TurnRefused("this conversation's model budget is used up")
         message = self.console.pending(conv.id)
         if message is None:
             raise TurnRefused("there is no message waiting")
@@ -136,15 +134,9 @@ class ConsoleRuntime:
         # What a Console turn needs and the grant's environment policy would drop or reset (it forces HOME to the workspace and removes
         # anything named like a token). PE computes these values itself; none is a secret and none comes from the agent.
         env.update({"HOME": state, "CLAUDE_CONFIG_DIR": f"{state}/cfg", "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(self.cfg.max_output_tokens)})
-        if self.broker is not None:
-            self.broker.set_mission_cap(mission.id, conv.tokens_left)      # the broker opens this turn's endpoint during spawn: ask first
-        try:
-            turn = self.console.begin_turn(conv.id)
-            pid = context.spawn(argv, env, str(workspace), (), state_dir=conv.state_dir)
-        except BaseException:
-            if self.broker is not None:
-                self.broker.clear_mission_cap(mission.id)              # no session was opened: the ceiling must not wait for a later one
-            raise
+        # rc14.6: no per-turn cap from the conversation's budget (it is a usage mark, not a stop). The broker's own per-session ceilings apply.
+        turn = self.console.begin_turn(conv.id)
+        pid = context.spawn(argv, env, str(workspace), (), state_dir=conv.state_dir)
         self.console.consume(message.seq, turn)                       # taken only once the process is running
         run_id = f"{mission.id}:{cs.session_id}"
         self._runs[run_id] = _Run(cs, workspace, conv.id, turn, mission.id)
@@ -223,8 +215,6 @@ class ConsoleRuntime:
         except Exception:                                   # noqa: BLE001 -- recording must never block the kill that already happened
             pass
         self._keep_tail(run, handle.run_id)
-        if self.broker is not None:
-            self.broker.clear_mission_cap(run.mission_id)
         self._release(run)
         del self._runs[handle.run_id]
 
@@ -298,12 +288,12 @@ class ConsoleRuntime:
     def _refused(self, run: _Run, reason: str) -> None:
         """A refused plan goes back to the planner (rc14.2): PE queues the next turn of the same conversation itself, attributed to
         `CONSOLE_PLAN_RETRY` (never the operator), with the refusal (PlanError never echoes agent text). At most MAX_PLAN_RETRIES per
-        operator message, and only with budget left for a turn: past that, or out of budget, the operator sees the refusal as before.
+        operator message: past that, the operator sees the refusal as before.
         The operator sees a short note either way."""
         conv_id = run.conversation_id
         tries = self.console.core_messages_since_operator(conv_id, CONSOLE_PLAN_RETRY)
         conv = self.console.get(conv_id)
-        if tries < MAX_PLAN_RETRIES and conv.state == "open" and conv.tokens_left >= self.cfg.min_turn_tokens:
+        if tries < MAX_PLAN_RETRIES and conv.state == "open":
             which = "the plan" if tries == 0 else "the corrected plan"
             self.console.add_message(conv_id, "system", f"PE refused {which} ({reason}) and asked the agent to fix it.", turn=run.turn)
             self.console.add_message(conv_id, "core", plan_mod.RETRY_PROMPT.format(reason=reason), actor=CONSOLE_PLAN_RETRY)

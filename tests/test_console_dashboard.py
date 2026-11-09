@@ -15,7 +15,7 @@ import casa_scruffy
 import config
 
 CID = "0123456789abcdef"
-STATUS = {"enabled": True, "open": 1, "max_open": 10, "token_budget": 150000, "min_turn_tokens": 20000, "proposal_only": False,
+STATUS = {"enabled": True, "open": 1, "max_open": 10, "token_budget": 500000, "proposal_only": False,
           "proposal_only_reason": None}
 FEED = {"conversation": {"id": CID, "title": "t", "origin": "operator", "state": "open", "turns": 1,
                          "status": {"text": "Result ready", "level": "ok", "group": "Recent"}, "verdict": {"h": "Answer ready", "p": "p"}},

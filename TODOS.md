@@ -106,25 +106,29 @@ second before changing the matcher.
 
 ## Missions (trust mode, from live use after rc14.4)
 
-### A conversation's token budget must not stop the work
+### Surface real usage from the provider so the operator decides
 
-**What:** The per-conversation token budget (`missions.console.token_budget`, 150k on the host) stops a Console turn mid-flight with
-"403 the mission's model budget is used up", and the conversation is then dead: its budget is fixed when it is created and raising
-the config does not help it. Make the budget something that matches real use instead of a hard stop:
-- No mid-turn refusal on the conversation budget. The broker's own site-wide ceilings (requests, tokens per session) stay as the
-  runaway-cost backstop, set high.
-- Usage stays visible (the Console already shows `used_pct`); when a conversation passes a threshold the operator sees it, and can
-  extend it with one click if a cap is kept at all.
-- Long conversations keep their context in one place: compact or summarise older turns instead of re-sending the whole history every
-  turn (each turn re-sends the conversation, so cost grows with every turn even when the question does not).
-- Decide whether the per-conversation cap exists at all, or whether only a daily/site spend figure is reported.
+**What:** Replace guessed limits with the provider's own figures, shown where the operator works (Console header, Missions page,
+Telegram on request), so they decide when to stop, not a cap:
+- **API key through a gateway (OpenRouter, the host today):** `GET /api/v1/key` with the key the broker already holds: `limit`,
+  `limit_remaining`, `limit_reset`, `usage` (all-time) and daily/weekly/monthly usage. Show "credit left" and "spent today / this
+  month". The broker can also ask OpenRouter for per-request cost (usage accounting) and record it on its per-call event, so each
+  conversation and mission shows what it cost in money, not only tokens.
+- **Anthropic API directly:** spend from the Usage and Cost API, which needs an Admin API key (a separate, optional credential held
+  by Core like the model key; never in a session). Without one, show tokens and an estimate from a configured price table, labelled
+  as an estimate.
+- **Subscription:** no public API for usage against plan limits was found, and the broker refuses a subscription login by design.
+  Out of scope until there is a source of truth; say so on the page rather than guess.
+- Per conversation and per mission: tokens and cost (from the broker's records), next to the account-level figures.
+- Optional alerting the operator configures (for example "tell me on Telegram when credit left drops under $5"): information, never
+  a stop.
 
-**Why:** Live M-31 (2026-11-09), an investigation of the networks across every active stack, ran out after three turns (about 22k,
-30k and 62k tokens) while reading six compose files. Sessions drift and the context needs to stay in one conversation; starting a
-new one loses it. Another guardrail that looks right on paper and does not match real use.
+**Why:** Fixed per-conversation budgets did not match real use (live M-31/M-32). The operator should see what is being spent and
+what is left at the provider, and decide.
 
-**Context:** `missions/model_broker.py` (`set_session_cap`, the 403 in the relay), `console/service.py` (budget at create, cap per
-turn), `console/store.py` (`token_budget`, `tokens_left`), `console/api.py` (the budget shown on the page).
+**Context:** `missions/model_broker.py` (it holds the key and sees every call: the place to fetch and record; any change gets the
+second review), `console/api.py` and `static/console.js` (the header), the Missions page, `config_schema.py` (`missions.model_broker`).
+Verify OpenRouter's `/api/v1/key` fields and usage accounting against the live key before building.
 
 **Effort:** M
 **Priority:** P1
@@ -203,3 +207,10 @@ A confirmed option lists its `files`; they are hash-bound in the grant, shown on
 wherever they are on the host, so Undo puts them back. A file the checkpoint cannot cover (absent, unwritable directory, PE's own)
 does not stop the run. The result card names it, along with every file the hook saw the run write outside the checkpoint and the
 number of calls it could not read for writes.
+
+### A conversation's token budget must not stop the work (done, rc14.6)
+
+The per-conversation `token_budget` is a usage mark: the page shows how big the conversation has grown and flags it past the mark,
+and nothing refuses a message, a turn or PE's plan retry because of it; no per-turn cap is set from it. The broker's own per-session
+ceilings (requests, tokens) stay the runaway-cost backstop. The default mark is 500k. `min_turn_tokens` is accepted but unused.
+Context compaction for long conversations stays with the CLI (`--resume` auto-compacts); revisit if cost per turn becomes a problem.

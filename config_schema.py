@@ -515,8 +515,9 @@ class MissionConsoleConfig(BaseModel):
     claude: str = "/usr/local/bin/claude"          # the claude CLI itself, never a wrapper (the forced settings are CLI flags)
     model: str = "~anthropic/claude-sonnet-latest"
     max_turns: int = Field(default=40, ge=1, le=200)               # the agent's own turns inside one operator message
-    token_budget: int = Field(default=150_000, ge=10_000, le=5_000_000)       # per conversation (phase 0: about 3k per chat turn, 13k per plan)
-    min_turn_tokens: int = Field(default=20_000, ge=1_000, le=1_000_000)      # a turn does not start with less than this left
+    # rc14.6: a usage mark per conversation, shown on the page; nothing stops at it. The broker's per-session ceilings are the backstop.
+    token_budget: int = Field(default=500_000, ge=10_000, le=50_000_000)
+    min_turn_tokens: int = Field(default=20_000, ge=1_000, le=1_000_000)      # no longer used (rc14.6); still accepted so old configs load
     max_output_tokens: int = Field(default=8192, ge=1024, le=32_000)         # declared per request: the broker reserves it up front
     max_open: int = Field(default=10, ge=1, le=50)
     archive_after_days: int = Field(default=3, ge=1, le=90)
@@ -634,8 +635,6 @@ class MissionsConfig(BaseModel):
                 raise ValueError("missions.console.tools and disallowed_tools overlap")
             if self.console.model not in self.model_broker.models:
                 raise ValueError("missions.console.model must be one of missions.model_broker.models: the broker refuses any other model")
-            if self.console.min_turn_tokens > self.console.token_budget:
-                raise ValueError("missions.console.min_turn_tokens exceeds token_budget: no turn could ever start")
         return self
 
     @field_validator("windows")

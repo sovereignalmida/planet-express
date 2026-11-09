@@ -92,8 +92,9 @@ test("a short yes is recognised as an approval, a real question is not", () => {
 });
 
 test("budget labels", () => {
-  assert.strictEqual(C.budgetLabel({ state: "ok", used_pct: 24 }), "24% used");
-  assert.strictEqual(C.budgetLabel({ state: "stop", used_pct: 99 }), "used up");
+  assert.strictEqual(C.budgetLabel({ state: "ok", used_pct: 24, tokens_used: 36000 }), "24% of the usual size");
+  // rc14.6: past the mark nothing stops; the label says how big the conversation has grown
+  assert.strictEqual(C.budgetLabel({ state: "warn", used_pct: 100, over: true, tokens_used: 312400 }), "312k tokens · past the usual size");
 });
 
 // ── the page ──

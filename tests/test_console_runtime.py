@@ -24,13 +24,7 @@ GOOD_PLAN = {"known": ["a"], "unsure": ["b"], "options": [{
 
 class Broker:
     def __init__(self, tokens=0):
-        self.caps, self.tokens = {}, tokens
-
-    def set_mission_cap(self, mission_id, tokens):
-        self.caps[mission_id] = tokens
-
-    def clear_mission_cap(self, mission_id):
-        pass
+        self.tokens = tokens                    # rc14.6: no cap methods; a Console turn never asks the broker for one
 
     def usage(self, session_id):
         return {"requests": 3, "tokens": self.tokens, "refused": 0}
@@ -92,7 +86,7 @@ def test_the_first_turn_is_launched_as_the_agent_with_a_new_session_id_in_its_st
     assert env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8192" and "ANTHROPIC_API_KEY" not in env
     assert (workspace / "BRIEF.md").read_text() == "THE BRIEF" and "plan.json" in (workspace / "PLAN_FORMAT.md").read_text()
     assert oct((workspace / "BRIEF.md").stat().st_mode & 0o777) == "0o400"
-    assert rig.broker.caps[rig.mission.id] == 150_000                      # the turn may spend what is left of the conversation (set before the session exists)
+    assert not hasattr(rig.broker, "set_mission_cap")                     # rc14.6: the fake has no cap API, so the turn asked for none
     assert rig.console.get(rig.conv.id).turns == 1 and rig.console.pending(rig.conv.id) is None
 
 
@@ -177,10 +171,11 @@ def test_a_planted_plan_file_from_a_previous_attempt_is_not_read_again(tmp_path)
     assert rig.console.current_plan(rig.conv.id) is None
 
 
-def test_a_closed_conversation_a_spent_budget_or_no_message_refuses_the_turn_before_anything_is_spawned(tmp_path):
-    spent = Rig(tmp_path / "a", budget=19_999)
-    with pytest.raises(TurnRefused, match="budget"):
-        spent.start()
+def test_a_closed_conversation_or_no_message_refuses_the_turn_but_a_conversation_past_its_mark_starts(tmp_path):
+    past = Rig(tmp_path / "a", budget=19_999)
+    past.console.add_usage(past.conv.id, 50_000)                                 # rc14.6: past the usage mark, the turn still starts
+    past.start()
+    assert len(past.spawned) == 1
     closed = Rig(tmp_path / "b")
     closed.console.set_state(closed.conv.id, "archiving")
     with pytest.raises(TurnRefused, match="closed"):
@@ -189,10 +184,8 @@ def test_a_closed_conversation_a_spent_budget_or_no_message_refuses_the_turn_bef
     quiet.console.consume(quiet.msg, 1)
     with pytest.raises(TurnRefused, match="no message"):
         quiet.start()
-    for rig in (spent, closed, quiet):
+    for rig in (closed, quiet):
         assert rig.spawned == []
-    assert not any(m.role == "system" for m in spent.console.messages(spent.conv.id))            # the service says why, once (turn_ended)
-    assert spent.console.get(spent.conv.id).turns == 0 and spent.console.pending(spent.conv.id) is not None
 
 
 def test_a_spawn_that_fails_leaves_the_message_waiting(tmp_path):
@@ -319,19 +312,12 @@ def test_a_very_large_stream_still_ends_with_its_result_line(tmp_path):
     assert rig.runtime.status(handle).state == "finished" and rig.runtime.collect(handle).diagnosis == "the end"
 
 
-def test_a_killed_turns_plan_is_not_offered_and_a_start_that_fails_leaves_no_cap_behind(tmp_path):
-    class CapBroker(Broker):
-        def __init__(self):
-            super().__init__(tokens=500)
-            self.cleared = []
-
-        def clear_mission_cap(self, mission_id):
-            self.cleared.append(mission_id)
-    rig = Rig(tmp_path, broker=CapBroker())
+def test_a_killed_turns_plan_is_not_offered_and_a_start_that_fails_leaves_the_message_waiting(tmp_path):
+    rig = Rig(tmp_path, broker=Broker(tokens=500))
     handle, workspace, cs = rig.start()
     (workspace / "plan.json").write_text(json.dumps(GOOD_PLAN))
     rig.runtime.cancel(handle)                                                      # killed (a tamper, a crash, a budget)
-    assert rig.console.current_plan(rig.conv.id) is None and rig.broker.cleared == [rig.mission.id]
+    assert rig.console.current_plan(rig.conv.id) is None
     assert rig.console.get(rig.conv.id).tokens_used == 500                          # but it is still charged
     rig.console.add_message(rig.conv.id, "operator", "again")
     workspace2 = rig.root / "S-9"
@@ -343,7 +329,7 @@ def test_a_killed_turns_plan_is_not_offered_and_a_start_that_fails_leaves_no_cap
     with pytest.raises(OSError):
         rig.runtime.start(rig.mission, RunContext(brief="b", session=cs2, token_fd=3, env={}, cwd=str(workspace2), spawn=broken),
                           Grant.model_validate({"tier": "observe"}))
-    assert rig.broker.cleared == [rig.mission.id, rig.mission.id]                    # the failed start released its ceiling
+    assert rig.console.pending(rig.conv.id) is not None
 
 
 def test_events_beyond_the_per_poll_limit_are_carried_to_the_next_poll_while_the_turn_runs(tmp_path):
@@ -476,12 +462,12 @@ def test_the_retry_turns_prompt_is_pes_refusal_and_never_counts_as_the_operator(
     assert rig.console.get(rig.conv.id).last_activity_at == before
 
 
-def test_no_retry_is_queued_when_the_budget_cannot_pay_for_another_turn(tmp_path):
+def test_a_retry_is_queued_even_past_the_usage_mark(tmp_path):
+    """rc14.6: a conversation past its usage mark still gets PE's plan retry; the mark stops nothing."""
     rig = Rig(tmp_path, broker=Broker(tokens=149_000), budget=150_000)
     _refused_turn(rig)
-    msgs = rig.console.messages(rig.conv.id)
-    assert msgs[-1].role == "system" and msgs[-1].text.startswith("The agent's plan was refused: option 1")
-    assert rig.console.pending(rig.conv.id) is None
+    retry = rig.console.messages(rig.conv.id)[-1]
+    assert retry.role == "core" and retry.actor == CONSOLE_PLAN_RETRY and rig.console.pending(rig.conv.id).seq == retry.seq
 
 
 def test_a_plan_missing_its_check_ids_is_accepted_not_bounced(tmp_path):

@@ -109,24 +109,27 @@ def test_a_turn_that_did_not_finish_says_so_with_the_reason_and_needs_you(rig):
     assert "stopped unexpectedly" in feed["conversation"]["verdict"]["p"]
 
 
-def test_the_budget_meter_and_the_composer_follow_the_budget(tmp_path):
+def test_the_usage_meter_is_a_mark_and_never_stops_the_conversation(tmp_path):
+    """rc14.6 (live M-31/M-32): the token budget is a usage mark. Past it the meter says so; the composer stays open and a message is taken."""
     rig = ApiRig(tmp_path, token_budget=100_000)
     made = rig.api.create("chris", "hello")
     rig.sup.tick()
     conv = rig.console.get(made["id"])
     rig.finish_turn(conv)
     rig.console.add_usage(conv.id, 20_000)
-    assert rig.api.feed(made["id"])["budget"] == {"used_pct": 24, "tokens_used": 24_000, "token_budget": 100_000, "tokens_left": 76_000, "state": "ok"}   # 4,000 for the turn + 20,000
-    rig.console.add_usage(conv.id, 56_000)                                              # 80,000 used: the warning line
+    assert rig.api.feed(made["id"])["budget"] == {"used_pct": 24, "tokens_used": 24_000, "token_budget": 100_000, "tokens_left": 76_000,
+                                                  "over": False, "state": "ok"}                # 4,000 for the turn + 20,000
+    rig.console.add_usage(conv.id, 56_000)                                              # 80,000 used: the early warning, nothing stops
     feed = rig.api.feed(made["id"])
-    assert feed["budget"]["state"] == "warn" and feed["budget"]["used_pct"] == 80 and feed["composer"]["mode"] == "idle"
-    rig.console.add_usage(conv.id, 1_000)                                               # 19,000 left: under the 20,000 a turn needs
+    assert feed["budget"]["state"] == "warn" and feed["budget"]["over"] is False and feed["composer"]["mode"] == "idle"
+    rig.console.add_usage(conv.id, 19_500)                                              # 99,500 used: rounds to 100% but is not past the mark
+    assert rig.api.feed(made["id"])["budget"]["over"] is False
+    rig.console.add_usage(conv.id, 104_500)                                             # 204,000 used: twice the mark
     feed = rig.api.feed(made["id"])
-    assert feed["budget"]["state"] == "stop" and feed["composer"]["mode"] == "off" and "budget" in feed["composer"]["reason"]
-    assert feed["conversation"]["status"]["text"] == "Budget used up"
-    with pytest.raises(ConsoleApiError) as err:
-        rig.api.post(made["id"], "chris", "more")
-    assert err.value.code == "conflict"
+    assert feed["budget"]["over"] is True and feed["budget"]["state"] == "warn" and feed["budget"]["used_pct"] == 204
+    assert feed["context"]["evidence"]["budget_used_pct"] == 204                       # the meter and the context panel agree
+    assert feed["composer"]["mode"] == "idle" and feed["conversation"]["status"]["text"] != "Budget used up"
+    rig.api.post(made["id"], "chris", "more")                                           # taken, not refused
 
 
 def test_the_composer_is_off_with_a_reason_when_the_launcher_is_not_proven_or_the_conversation_is_closed(rig):

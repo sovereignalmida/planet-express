@@ -94,7 +94,8 @@
 
   function budgetLabel(b) {
     if (!b) return "";
-    return b.state === "stop" ? "used up" : b.used_pct + "% used";
+    const k = Math.round((b.tokens_used || 0) / 1000);
+    return b.over ? k + "k tokens · past the usual size" : b.used_pct + "% of the usual size";
   }
 
   // A short message that only says yes. Kept as a pure helper: since rc14.2 the server decides (a "go ahead" while a plan waits opens the
@@ -181,9 +182,9 @@
       back.addEventListener("click", showList);
       const title = add(el("div"), el("div", "pe-con-title", c.title), el("div", "pe-con-title-sub", (ORIGINS[c.origin] || ORIGINS.operator)[1] + " · " + c.turns + (c.turns === 1 ? " turn" : " turns")));
       title.style.cssText = "min-width:0;flex:1";
-      const meter = el("span", "pe-budget" + (b.state === "ok" ? "" : " " + b.state)); meter.title = "Model budget for this conversation";
-      const fill = el("span", "pe-bar-fill " + (b.state === "ok" ? "" : b.state)); fill.style.cssText = "display:block;width:" + b.used_pct + "%";
-      add(meter, el("span", "", "BUDGET"), add(el("span", "pe-bar"), fill), el("span", "", budgetLabel(b)));
+      const meter = el("span", "pe-budget" + (b.state === "ok" ? "" : " " + b.state)); meter.title = "Model tokens this conversation has used. Nothing stops at this mark: it shows how big the conversation has grown.";
+      const fill = el("span", "pe-bar-fill " + (b.state === "ok" ? "" : b.state)); fill.style.cssText = "display:block;width:" + Math.min(100, b.used_pct) + "%";
+      add(meter, el("span", "", "USAGE"), add(el("span", "pe-bar"), fill), el("span", "", budgetLabel(b)));
       const log = el("a", "", "Work log"); log.href = "/missions";
       const open = c.state === "open";
       const archive = el("button", "pe-btn sm" + (state.archiveArmed ? " danger" : " ghost"), state.archiveArmed ? "Archive? Click again" : "Archive"); archive.type = "button";
@@ -210,9 +211,9 @@
       const list = items => items.length ? items.join(", ") : "none";
       if (state.ctxTab === "scope") return [["Can act on", { run: "the confirmed run", last_run: "nothing: the last run has ended" }[x.scope.kind] || "nothing: read-only"], ["Stacks", list(x.scope.stacks)],
         ["Services", list(x.scope.services)]];
-      if (state.ctxTab === "limits") return [["Model budget (this conversation)", x.limits.token_budget.toLocaleString() + " tokens"], ["Time" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), x.limits.minutes + " min"], ["Steps" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), String(x.limits.steps)]];
+      if (state.ctxTab === "limits") return [["Usual conversation size (a mark, not a stop)", x.limits.token_budget.toLocaleString() + " tokens"], ["Time" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), x.limits.minutes + " min"], ["Steps" + (x.limits.kind === "run" ? " (the run)" : " (one turn)"), String(x.limits.steps)]];
       if (state.ctxTab === "record") return [["Events", String(x.record.events)], ["Runs", String(x.record.runs)], ["Checkpoint", x.record.checkpoint ? "taken" : "none"]];
-      return [["Incident", x.evidence.incident || "none"], ["Turns", String(x.evidence.turns)], ["Budget used", x.evidence.budget_used_pct + "%"]];
+      return [["Incident", x.evidence.incident || "none"], ["Turns", String(x.evidence.turns)], ["Usage", x.evidence.budget_used_pct + "% of the usual size"]];
     }
     function renderCtx() {
       const f = state.feed, x = f && f.context;
