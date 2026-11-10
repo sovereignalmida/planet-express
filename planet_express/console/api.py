@@ -40,7 +40,7 @@ from planet_express.missions.supervisor import Supervisor
 MAX_MESSAGES = 200
 MAX_EVENTS = 300
 MAX_TEXT = 8_000
-PLAN_TTL_S = 24 * 3600           # plan section 9: a plan is valid for 24 hours or until its evidence changes
+PLAN_TTL_S = plan_mod.PLAN_TTL_S
 IDLE_MODES = ("idle", "busy", "off")
 
 
@@ -308,8 +308,8 @@ class ConsoleApi:
                 (flow.recheck if action == "recheck" else flow.keep_and_close)(actor, ex["mission_id"])
             except FlowError as exc:
                 raise self._flow_error(exc) from None
-            self.console.add_message(conv.id, "system", f"{operator} asked PE to check the run again." if action == "recheck" else
-                                     f"{operator} kept what the run changed and closed it. PE's checks had not passed.", actor=actor)
+            if action == "recheck":                     # a kept run's one line is the reporter's, which names who kept it
+                self.console.add_message(conv.id, "system", f"{operator} asked PE to check the run again.", actor=actor)
             return {"done": action, "status": self._execution_view(conv)["status"]["text"], "restore": "", "reason": ""}
         undo = self.ms.get_mission(ex["mission_id"]).status in execution_mod.UNDO_STATES
         try:
@@ -346,10 +346,11 @@ class ConsoleApi:
             if ex["status"] == "proposed":
                 if not self._withdraw(flow, ex, operator, quiet=True):
                     raise ConsoleApiError("An earlier confirmation in this conversation is still open or already running. Finish or withdraw it first.", "conflict")
-            elif ex["status"] == "authorised" and (held := self.ms.get_mission(ex["mission_id"]).status) not in TERMINAL:
-                if held == "needs_operator":                       # nothing is running: it waits for the operator (live M-33)
-                    raise ConsoleApiError(f"The earlier run, {ex['mission_id']}, is held for you ({held.replace('_', ' ')}). Open it from "
-                                          f"Missions and close or restore it, then confirm again.", "conflict")
+            elif ex["status"] in ("authorised", "ended") and (earlier := self.ms.get_mission(ex["mission_id"])).status not in TERMINAL:
+                phase = execution_mod.run_phase(earlier, self._rolling_back(earlier))
+                if phase.group == "Needs you":                     # nothing is running: it waits for the operator (live M-33)
+                    raise ConsoleApiError(f"The earlier run, {ex['mission_id']}, is waiting for you ({phase.label.removeprefix('Needs you: ')}). "
+                                          "Open it from Missions and close or restore it, then confirm again.", "conflict")
                 raise ConsoleApiError(f"A plan is already running in this conversation ({ex['mission_id']}). Wait for it to finish, or "
                                       "stop it first.", "conflict")
         chosen = plan.options[option]
@@ -481,11 +482,10 @@ class ConsoleApi:
             return None
         ex = shown[-1]
         mission = self.ms.get_mission(ex["mission_id"])
-        rolling = self._rolling_back(mission.id)
-        text, level = execution_mod.repair_status(mission, rolling)
+        rolling = self._rolling_back(mission)
         waiting = execution_mod.start_waiting(self.ms, mission)
-        if waiting:
-            text, level = "Waiting to start", "warn"
+        phase = execution_mod.run_phase(mission, rolling, waiting)        # the one place the run's words and actions come from
+        text, level = phase.label, phase.level
         rollback = execution_mod.rollback_view(self.ms, mission, rolling)
         row = self.console.plan(ex["plan_id"])
         name = ""
@@ -504,14 +504,13 @@ class ConsoleApi:
                 # "Keep working on it" is not offered while the run is waiting to be, or being, rolled back.
                 "rolling_back": rolling or mission.status == "rollback_pending"}
 
-    def _rolling_back(self, mission_id: str) -> bool:
-        """A rollback the Console started is still running on the supervisor (False where Repair is not available here)."""
+    def _rolling_back(self, mission) -> bool:
+        """A rollback of this run is running, from wherever it was started (the supervisor's own record)."""
         try:
             flow = self._flow() if self._flow is not None else None
-            probe = getattr(flow, "rollback_in_flight", None)
-            return bool(probe(mission_id)) if probe is not None else False
         except Exception:                                  # noqa: BLE001 - a status read never breaks the feed
             return False
+        return execution_mod.rollback_running(flow, mission.id)
 
     def _context(self, conv: Conversation, used_pct: int) -> dict:
         """The side panel, read from PE's own records (the mission's grant, its event log, the run's checkpoint), never from the agent's account.
@@ -574,8 +573,9 @@ class ConsoleApi:
         if not in_flight and not starting and not closed:
             runs = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
             if runs:                                                      # an active or troubled run is never hidden behind "Result ready"
-                override = execution_mod.conversation_status(self.ms.get_mission(runs[-1]["mission_id"]), runs[-1]["status"] == "authorised",
-                                                             self._rolling_back(runs[-1]["mission_id"]))
+                run = self.ms.get_mission(runs[-1]["mission_id"])
+                override = execution_mod.conversation_status(run, rolling_back=self._rolling_back(run),
+                                                             waiting=execution_mod.start_waiting(self.ms, run))
                 # A finished run never hides a newer plan waiting for the operator, or a closing conversation.
                 if override and not (override["group"] == "Recent" and (pending is not None or conv.state != "open")):
                     out.update(override)

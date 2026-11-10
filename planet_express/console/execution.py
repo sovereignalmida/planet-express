@@ -2,62 +2,124 @@
 verification (never the agent's account of itself). Pure functions over the mission and its stored records; the words are PE's, written from state
 and counts. A check that could not be run is shown as such and is never counted as a pass."""
 import json
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from planet_express.console import plan as plan_mod
-from planet_express.missions.models import NOTHING_CHECKPOINTED_FLAG, Mission
+from planet_express.missions.models import KEPT_BY_OPERATOR_FLAG, NOTHING_CHECKPOINTED_FLAG, Mission
 from planet_express.missions.verify.plan import CheckResult, held_after_failed_checks, parse_result
 
-# internal state -> (what the operator sees, level). The design brief's vocabulary; internal names never reach the page.
-REPAIR_STATUS = {
-    "awaiting_decision": ("Starting", "ok"), "queued": ("Starting", "ok"), "investigating": ("Starting", "ok"),
-    "executing": ("Working", "ok"), "verifying": ("Checking it worked", "ok"), "completed": ("Done and verified", "ok"),
+# ── The run phase (rc14.7.5, docs/designs/state-machines.md C2/C3/C6) ──────────────────────────────────────────────────────
+# One table says, for each phase a confirmed plan's run can be in, what every surface shows and what the operator may do: the run's
+# label, the conversation's rail line and verdict, the line posted into the thread, and the actions. The phase is worked out once
+# (`run_phase`) from the Repair mission's status plus what the status alone does not say: PE's checks failed (held), the operator kept
+# the changes, nothing PE snapshotted changed, an unfinished undo was dismissed, a rollback is running, the start is waiting.
+# Before this, six places worded the run and four declared its actions, and they disagreed (a kept run read "Didn't work" under
+# "Needs you"; a held run whose checks failed read "PE isn't sure what state this is in").
+
+
+@dataclass(frozen=True)
+class Phase:
+    name: str
+    label: str                       # the run's own status line
+    level: str                       # ok | warn | high | crit | none
+    rail: str | None                 # the conversation's status while this run is the latest; None: the run has no say in it
+    rail_level: str
+    group: str                       # the rail group: Working | Needs you | Recent
+    verdict: tuple[str, str]
+    thread: str | None               # the line posted into the conversation once when the run enters the phase; None posts nothing
+    actions: tuple[str, ...]         # what the operator may do now (the supervisor still decides whether it can be done)
+    final: bool                      # nothing more can happen to the run
+
+
+_WORKING = ("Carrying out the confirmed plan", "PE is supervising it and will check it worked.")
+_NOT_CLEAN = ("The run didn't finish cleanly", "Look at the run below for what you can do next.")
+PHASES: dict[str, Phase] = {p.name: p for p in (
+    Phase("starting", "Starting", "ok", "Working on the plan", "ok", "Working", _WORKING, None, (), False),
+    Phase("waiting_to_start", "Waiting to start", "warn", "Waiting to start", "warn", "Working",
+          ("Waiting to start", "PE will start it as soon as nothing is in the way; the run below says what is."), None, (), False),
+    Phase("working", "Working", "ok", "Working on the plan", "ok", "Working", _WORKING,
+          "PE took a checkpoint and is carrying out the plan.", (), False),
+    Phase("checking", "Checking it worked", "ok", "Working on the plan", "ok", "Working", _WORKING,
+          "The plan has been carried out. PE is checking it worked.", (), False),
+    Phase("rolling_back", "Rolling back\u2026", "warn", "Rolling back", "warn", "Working",
+          ("Rolling back to the checkpoint", "PE is putting the files and services back. The result shows here when it lands."), None, (), False),
+    # Undo is offered on a done run while its checkpoint is kept (`can_undo`); that is checked per run, not by the phase.
+    Phase("done", "Done and verified", "ok", "Done and verified", "ok", "Recent",
+          ("The plan was carried out and verified", "PE's own checks passed."), "Done and verified by PE", (), False),
+    # rollback_pending entered by PE (a grant that rolls back on a failed check, recovery): nothing rolls back until the operator asks.
+    Phase("rollback_wanted", "Needs you: roll back to the checkpoint", "crit", "Run needs you", "crit", "Needs you", _NOT_CLEAN,
+          "Needs you: roll back to the checkpoint", ("rollback",), False),
+    Phase("held_failed_checks", "Needs you: PE's checks failed", "crit", "Run needs you", "crit", "Needs you",
+          ("The run didn't pass PE's checks", "Check it again, keep the changes, or roll back to the checkpoint."),
+          "Needs you: PE's checks failed", ("rollback", "recheck", "keep"), False),
+    Phase("held_unknown", "Needs you: PE isn't sure what state this is in", "crit", "Run needs you", "crit", "Needs you", _NOT_CLEAN,
+          "Needs you: PE isn't sure what state this is in", ("rollback",), False),
     # paused_tripwire: a row from before trust mode removed the tripwire; startup recovery moves it to recovery_required.
-    "paused_tripwire": ("Needs you: PE isn't sure what state this is in", "crit"),
-    # rollback_pending is where a run waits for the operator's rollback (a grant that rolls back on a failed check, a restore PE refused
-    # over drift): nothing is rolling back until they ask. While a restore runs, `ROLLING_BACK` is shown instead.
-    "rollback_pending": ("Needs you: roll back to the checkpoint", "crit"),
-    "rolled_back": ("Rolled back", "warn"), "failed": ("Didn't work", "high"), "cancelled": ("Scrapped", "none"),
-    "needs_operator": ("Needs you: PE isn't sure what state this is in", "crit"),
-    "recovery_required": ("Needs you: PE isn't sure what state this is in", "crit"), "blocked": ("Waiting", "warn"),
-}
-CONTROLS = {                      # which operator actions each state offers (the supervisor still decides whether it can)
-    # Trust mode: no pause, resume or take-over; cancel is the stop. rollback_pending is where a restore PE refused (drift) waits, so the
-    # operator's explicit "roll back anyway" has a button.
-    "rollback": ("needs_operator", "recovery_required", "rollback_pending"),
-    # rc14.7: a run held after it ran (live M-34) can be checked again, or kept as it is and closed. Both need a run that happened.
-    "recheck": ("needs_operator",),
-    "keep": ("needs_operator",),
-}
-# rc14.2: a completed Repair can be undone (rolled back to its checkpoint) while the checkpoint is kept. The supervisor refuses in words
-# when it is not (past retention, removed) or when another mission holds its resources.
-UNDO_STATES = ("completed",)
-ACTIONS = tuple(CONTROLS)
-TERMINALISH = ("completed", "failed", "rolled_back", "cancelled")
+    Phase("held_legacy", "Needs you: PE isn't sure what state this is in", "crit", "Run needs you", "crit", "Needs you", _NOT_CLEAN,
+          "Needs you: PE isn't sure what state this is in", (), False),
+    # failed is closed: nothing can be done to it from here, so it is not "Needs you" (rc14.7.5).
+    Phase("failed", "Didn't work", "high", "Didn't work", "high", "Recent",
+          ("The run didn't pass PE's checks", "PE closed it. The run below shows what it did and what PE found."), "Didn't work", (), True),
+    # A failed Repair closed because nothing its checkpoint covers changed: only that is known, never "nothing changed".
+    Phase("failed_nothing_changed",
+          "Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did", "high",
+          "Didn't work", "high", "Recent",
+          ("The run didn't pass PE's checks", "Nothing PE snapshotted was changed; check the run's record for anything else it did."),
+          "Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did", (), True),
+    # rc14.7: the operator kept what a held run changed and closed it.
+    Phase("kept", "Kept as it was \u2014 PE's checks had not passed", "warn", "Kept as it was", "warn", "Recent",
+          ("You kept what the run changed", "PE's checks had not passed when it was closed."),
+          "Closed with the changes kept; PE's checks had not passed", (), True),
+    Phase("rolled_back", "Rolled back", "warn", "Rolled back", "warn", "Recent",
+          ("The run was rolled back", "The host is back at the checkpoint."), "Rolled back", (), True),
+    Phase("cancelled", "Cancelled", "none", None, "none", "Recent", ("Cancelled", ""), "Cancelled", (), True),
+    # rc14.4: a run that was done and verified, whose undo did not finish, closed at the operator's cancel without judging the host.
+    Phase("dismissed", "Closed \u2014 it was done and verified; the unfinished undo was dismissed", "none", None, "none", "Recent",
+          ("Closed", ""), "Closed \u2014 it was done and verified; the unfinished undo was dismissed", (), True),
+    Phase("blocked", "Waiting", "warn", None, "warn", "Working", ("Waiting", ""), None, (), False),
+)}
+ACTIONS = ("rollback", "recheck", "keep")            # every action a run can offer; trust mode removed pause, resume and take-over
+TERMINALISH = ("completed", "failed", "rolled_back", "cancelled")          # missions.state.TERMINAL
 SETTLED = ("failed", "rolled_back", "cancelled")       # nothing more can happen to these: a rollback can start from `completed`
-ROLLING_BACK = ("Rolling back\u2026", "warn")
+UNDO_STATES = ("completed",)
+_BY_STATUS = {"draft": "starting", "queued": "starting", "investigating": "starting", "awaiting_decision": "starting",
+              "executing": "working", "verifying": "checking", "completed": "done", "rollback_pending": "rollback_wanted",
+              "needs_operator": "held_unknown", "recovery_required": "held_unknown", "paused_tripwire": "held_legacy",
+              "failed": "failed", "rolled_back": "rolled_back", "cancelled": "cancelled", "blocked": "blocked"}
 
 
-# A failed Repair closed because nothing its checkpoint covers changed: only that is known, never "nothing changed".
-NOTHING_SNAPSHOTTED_STATUS = ("Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did", "high")
+def run_phase(mission: Mission, rolling_back: bool = False, waiting: str | None = None) -> Phase:
+    """The phase a run is in. `rolling_back`: a restore is running (the supervisor's worker has it, or the operator asked for one and
+    it has not landed); `waiting`: why an authorised run has not started (`start_waiting`)."""
+    status = mission.status
+    flags = getattr(mission, "outcome_flags", None)
+    if rolling_back and status not in SETTLED:
+        return PHASES["rolling_back"]
+    if waiting and status in ("awaiting_decision", "queued"):
+        return PHASES["waiting_to_start"]
+    if status == "failed" and flags == NOTHING_CHECKPOINTED_FLAG:
+        return PHASES["failed_nothing_changed"]
+    if status == "failed" and flags == KEPT_BY_OPERATOR_FLAG:
+        return PHASES["kept"]
+    if status == "cancelled" and getattr(mission, "outcome", None) == "dismissed":
+        return PHASES["dismissed"]
+    if status == "needs_operator" and _held(mission):
+        return PHASES["held_failed_checks"]
+    return PHASES[_BY_STATUS.get(status, "working")]
 
 
-def _closed_nothing_checkpointed(mission: Mission) -> bool:
-    return mission.status == "failed" and getattr(mission, "outcome_flags", None) == NOTHING_CHECKPOINTED_FLAG
-
-
-# rc14.4: a run that was done and verified, whose undo did not finish, closed at the operator's cancel without judging the host.
-DISMISSED_STATUS = ("Closed \u2014 it was done and verified; the unfinished undo was dismissed", "none")
+def _held(mission: Mission) -> bool:
+    try:
+        return held_after_failed_checks(mission)
+    except AttributeError:                               # a partial record (a test double) carries no verification result
+        return False
 
 
 def repair_status(mission: Mission, rolling_back: bool = False) -> tuple[str, str]:
-    if rolling_back and mission.status not in SETTLED:
-        return ROLLING_BACK
-    if _closed_nothing_checkpointed(mission):
-        return NOTHING_SNAPSHOTTED_STATUS
-    if mission.status == "cancelled" and getattr(mission, "outcome", None) == "dismissed":
-        return DISMISSED_STATUS
-    return REPAIR_STATUS.get(mission.status, ("Working", "ok"))
+    phase = run_phase(mission, rolling_back)
+    return phase.label, phase.level
 
 
 _ROLLBACK_EVENTS = ("checkpoint.restore_started", "checkpoint.restore_refused", "checkpoint.restore_done", "mission.rollback_incomplete")
@@ -121,10 +183,28 @@ def _rollback_state(bodies: list[dict[str, Any]], mission: Mission) -> dict[str,
         if event == "mission.rollback_incomplete":
             return {"state": "incomplete", "reason": str(body.get("reason") or "the restore did not complete cleanly")[:200]}
         if (event == "checkpoint.restore_refused" and body.get("status", "refused") == "refused" and not body.get("partial")
-                and mission.status in CONTROLS["rollback"]):
+                and "rollback" in run_phase(mission).actions):
             return {"state": "refused", "reason": str(body.get("reason") or "files changed since the checkpoint")[:200]}
         return None                                     # started (and not running any more) or done: the state says the rest
     return None
+
+
+def latest_state_event(ms: Any, mission_id: str) -> tuple[int, str | None]:
+    """The mission's newest state change: (its event seq, its actor), or (0, None) before any."""
+    with ms.store._connect() as conn:
+        row = conn.execute("SELECT seq, actor FROM mission_events WHERE mission_id=? AND kind='state' ORDER BY seq DESC LIMIT 1",
+                           (mission_id,)).fetchone()
+    return (int(row["seq"]), row["actor"]) if row else (0, None)
+
+
+def rollback_running(owner: Any, mission_id: str) -> bool:
+    """A rollback of this mission is running, by the supervisor's own record (`rollback_in_flight`, which a rollback on the worker
+    and one on a request both register in). `owner` is the supervisor or the approval flow; False where neither can say."""
+    probe = getattr(owner, "rollback_in_flight", None)
+    try:
+        return bool(probe(mission_id)) if probe is not None else False
+    except Exception:                                    # noqa: BLE001 - a status read never breaks a feed or the reporting
+        return False
 
 
 def not_covered_view(ms: Any, mission: Mission) -> dict[str, Any] | None:
@@ -189,28 +269,13 @@ def verification_view(mission: Mission) -> dict[str, Any] | None:
                           if result.scan is not None and result.scan.new_on_host else None)}
 
 
-def conversation_status(mission: Mission, live: bool, rolling_back: bool = False) -> dict[str, Any] | None:
-    """How a conversation reads while a confirmed plan is running or needs attention: derived from the run, so an active repair is never hidden
-    behind 'Result ready'. None when the run needs no say in the conversation's status."""
-    status = mission.status
-    if rolling_back and status not in SETTLED:
-        return {"text": "Rolling back", "level": "warn", "group": "Working",
-                "verdict": {"h": "Rolling back to the checkpoint", "p": "PE is putting the files and services back. The result shows here when it lands."}}
-    if live and status in ("awaiting_decision", "queued", "investigating", "executing", "verifying"):
-        return {"text": "Working on the plan", "level": "ok", "group": "Working",
-                "verdict": {"h": "Carrying out the confirmed plan", "p": "PE is supervising it and will check it worked."}}
-    if status in ("needs_operator", "recovery_required", "paused_tripwire", "failed", "rollback_pending"):
-        return {"text": "Run needs you", "level": "crit" if status != "failed" else "high", "group": "Needs you",
-                "verdict": {"h": "The run didn't finish cleanly" if status != "failed" else "The run didn't pass PE's checks",
-                            "p": ("Nothing PE snapshotted was changed; check the run's record for anything else it did."
-                                  if _closed_nothing_checkpointed(mission) else "Look at the run below for what you can do next.")}}
-    if status == "completed":
-        return {"text": "Done and verified", "level": "ok", "group": "Recent",
-                "verdict": {"h": "The plan was carried out and verified", "p": "PE's own checks passed."}}
-    if status == "rolled_back":
-        return {"text": "Rolled back", "level": "warn", "group": "Recent",
-                "verdict": {"h": "The run was rolled back", "p": "The host is back at the checkpoint."}}
-    return None
+def conversation_status(mission: Mission, rolling_back: bool = False, waiting: str | None = None) -> dict[str, Any] | None:
+    """How a conversation reads while its latest confirmed run is going or needs attention, so an active repair is never hidden behind
+    'Result ready'. None when the run has no say in the conversation's status."""
+    phase = run_phase(mission, rolling_back, waiting)
+    if phase.rail is None:
+        return None
+    return {"text": phase.rail, "level": phase.rail_level, "group": phase.group, "verdict": {"h": phase.verdict[0], "p": phase.verdict[1]}}
 
 
 SUPERVISOR = "supervisor"           # missions.supervisor.ACTOR: only its own notes say why a start is waiting
@@ -276,14 +341,37 @@ def can_undo(mission: Mission) -> bool:
 
 
 def controls(mission: Mission, rolling_back: bool = False) -> dict[str, bool]:
-    """Which actions apply now. None while a rollback is running: the page shows that it is rolling back instead."""
-    out = {name: mission.status in states and not rolling_back for name, states in CONTROLS.items()}
-    out["rollback"] = out["rollback"] or (can_undo(mission) and not rolling_back)
-    held = held_after_failed_checks(mission)              # the supervisor's own rule: never offered for a failed undo or an unchecked run
-    out["recheck"] = out["recheck"] and held
-    out["keep"] = out["keep"] and held
+    """Which actions apply now, from the run's phase: none while a rollback is running (the page shows that instead); a done run's
+    undo is the rollback action while its checkpoint is kept."""
+    phase = run_phase(mission, rolling_back)
+    out = {name: name in phase.actions for name in ACTIONS}
+    out["rollback"] = out["rollback"] or (phase.name == "done" and can_undo(mission))
     return out
 
 
-__all__ = ["ACTIONS", "CONTROLS", "SETTLED", "UNDO_STATES", "can_undo", "not_covered_view", "NOTHING_SNAPSHOTTED_STATUS", "REPAIR_STATUS", "ROLLING_BACK", "TERMINALISH", "check_state", "controls",
+NEXT_STEP_WORDS = {"rollback": "roll back", "recheck": "check it again", "keep": "keep the changes and close it"}
+
+
+def thread_line(phase: Phase, mission: Mission, verification: dict[str, Any] | None, actor: str | None = None) -> str | None:
+    """The line posted into the conversation when the run enters `phase`, naming only what the phase really offers. `actor` is who
+    took the run into it (the kept line names the operator: it is the one line about it, wherever they pressed Keep)."""
+    if phase.thread is None:
+        return None
+    if phase.name == "kept" and actor and actor.startswith("operator:"):
+        return f"{actor.removeprefix('operator:')} kept what the run changed and closed it. PE's checks had not passed."
+    if phase.name == "done":
+        if verification:
+            return f"Done and verified by PE: {verification['headline'].lower()}."
+        return "The run finished, but PE has no verification result to show for this grant. Do not rely on it until it is checked."
+    tail = f" {verification['headline']}." if verification else ""
+    offered = [NEXT_STEP_WORDS[a] for a in phase.actions]
+    if phase.name in ("held_unknown", "held_failed_checks"):
+        offered.append("ask the agent to keep working on it")
+    steps = (f" Look at the run above; you can {', '.join(offered[:-1])}{' or ' if len(offered) > 1 else ''}{offered[-1]}."
+             if offered else "")
+    return f"{phase.thread}.{tail}{steps}"
+
+
+__all__ = ["ACTIONS", "PHASES", "Phase", "SETTLED", "run_phase", "thread_line", "rollback_running", "UNDO_STATES", "can_undo",
+           "not_covered_view", "TERMINALISH", "check_state", "controls",
            "conversation_status", "repair_status", "rollback_view", "timeline", "verification_view"]

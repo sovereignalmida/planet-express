@@ -236,8 +236,8 @@ def test_rollback_pending_waits_for_the_operator_and_says_so():
     assert ex_mod.repair_status(mission) == ("Needs you: roll back to the checkpoint", "crit")
     assert ex_mod.repair_status(mission, rolling_back=True) == ("Rolling back\u2026", "warn")
     assert ex_mod.controls(mission) == {"rollback": True, "recheck": False, "keep": False} and ex_mod.controls(mission, rolling_back=True) == {"rollback": False, "recheck": False, "keep": False}
-    assert ex_mod.conversation_status(mission, True)["group"] == "Needs you"
-    assert ex_mod.conversation_status(mission, True, rolling_back=True)["text"] == "Rolling back"
+    assert ex_mod.conversation_status(mission)["group"] == "Needs you"
+    assert ex_mod.conversation_status(mission, rolling_back=True)["text"] == "Rolling back"
 
 
 def test_a_legacy_paused_row_reads_as_needing_the_operator_never_as_a_pause():
@@ -342,7 +342,8 @@ def test_keep_the_changes_closes_the_run_as_failed_kept_by_the_operator_and_free
     rig.api.execution_action(rig.conv.id, view["execution_id"], "keep", "chris")
     mission = rig.st.ms.get_mission(view["mission_id"])
     assert mission.status == "failed" and mission.outcome_flags == "kept_by_operator"
-    assert any("kept what the run changed" in t for t in rig.thread())
+    rig.service.tick()                                                   # the one line about it is the reporter's, naming who kept it
+    assert any("chris kept what the run changed" in t for t in rig.thread())
     with rig.st.store._connect() as conn:
         held = conn.execute("SELECT COUNT(*) FROM mission_leases WHERE mission_id=?",
                             (view["mission_id"],)).fetchone()[0]

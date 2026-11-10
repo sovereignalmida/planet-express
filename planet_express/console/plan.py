@@ -33,6 +33,8 @@ from planet_express.missions.resources import BadResource, canon
 from planet_express.missions.verify.checks import PARAM_MODELS
 from planet_express.missions.verify.plan import CATALOGUE_V, PlanInvalid, parse_plan
 
+PLAN_TTL_S = 24 * 3600           # plan section 9: a plan is valid for 24 hours or until its evidence changes
+
 MAX_PLAN_BYTES = 128 * 1024
 PLAN_FILE = "plan.json"
 Line = Annotated[StrictStr, Field(min_length=1, max_length=600)]

@@ -12,6 +12,7 @@ import re
 import threading
 from collections.abc import Callable
 
+from planet_express.console import execution as execution_mod
 from planet_express.console import plan as plan_mod
 from planet_express.console.api import ConsoleApi, ConsoleApiError
 from planet_express.console.store import ConsoleStore, Conversation
@@ -23,9 +24,9 @@ ID_RE = re.compile(r"[0-9a-f]{6,16}")
 MAX_PUSH = 1500                       # characters of one pushed message; the page has the rest
 MAX_PUSH_TOTAL = 3500                 # of one Telegram message
 MAX_CARD = 3500                       # of a confirmation or plan card (Telegram's own limit is 4096)
-ACTIONS = ("rollback",)
+ACTIONS = execution_mod.ACTIONS                    # the run phase table's: a held run is checked again or kept here too (rc14.7.5)
 HELP = ("Console: /ask <question> · /reply [id] <text> · /threads · /plan [id] · /confirm <id> <A|B|C> <plan8> · /authorise <id> <hash8> · "
-        "/withdraw <id> · /run <id> rollback · /close <id>")
+        "/withdraw <id> · /run <id> rollback|recheck|keep · /close <id>")
 
 
 class ConsoleTelegram:
@@ -163,11 +164,15 @@ class ConsoleTelegram:
     def _run(self, conv: Conversation, tail: str, operator: str) -> str:
         action = tail.strip().lower()
         if action not in ACTIONS:
-            raise _Usage("Usage: /run <id> rollback")
+            raise _Usage("Usage: /run <id> rollback|recheck|keep")
         runs = [e for e in self.console.executions(conv.id) if e["status"] in ("authorised", "ended")]
         if not runs:
             raise _Usage(f"{conv.id[:8]}: no run to control.")
         out = self.api.execution_action(conv.id, runs[-1]["id"], action, operator)
+        if action == "recheck":
+            return f"{conv.id[:8]}: PE is checking the run again. Now: {out['status']}."
+        if action == "keep":
+            return f"{conv.id[:8]}: kept what the run changed and closed it. Now: {out['status']}."
         if action == "rollback" and out.get("restore") == "started":
             return f"{conv.id[:8]}: rollback started. The result shows on the dashboard when it lands."
         if action == "rollback" and out.get("restore") != "done":

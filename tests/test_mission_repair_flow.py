@@ -95,7 +95,7 @@ def test_a_failed_verification_that_changed_nothing_closes_failed_and_releases_i
     text, level = repair_status(mission)
     assert text == "Didn't work \u2014 nothing PE snapshotted was changed; check the run's record for anything else it did"
     assert level == "high" and "nothing on the host" not in text
-    assert "anything else it did" in conversation_status(mission, live=False)["verdict"]["p"]
+    assert "anything else it did" in conversation_status(mission)["verdict"]["p"]
     assert [b for k, a, b in events(st, mid) if k == "state" and b.get("to") == "failed"][0]["from"] == "verifying"
     with st.store._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM mission_leases WHERE mission_id=?", (mid,)).fetchone()[0] == 0
@@ -927,7 +927,7 @@ def test_cancelling_a_verified_run_whose_undo_did_not_finish_closes_it_as_dismis
     """Live M-22: a completed run, its undo refused and handed to the operator, then the operator's cancel. Before rc14.4 the cancel
     compared the host with the checkpoint and was held for good by a later mission's change."""
     from planet_express.application.mission_service import MissionService
-    from planet_express.console.execution import DISMISSED_STATUS, repair_status
+    from planet_express.console.execution import PHASES, repair_status
     st = stack()
     mid, original = _completed_with_a_change(st)
     st.env.compose.write_text(original + "# someone else's later edit\n")
@@ -939,7 +939,7 @@ def test_cancelling_a_verified_run_whose_undo_did_not_finish_closes_it_as_dismis
     assert [b["cancel_requested_by"] for b in noted(st, mid, "cancel.dismissed")] == ["operator:alice"]
     assert st.env.compose.read_text().endswith("# someone else's later edit\n")          # the host was not touched or judged
     assert leases_mod.held_by(st.store, mid) == []
-    assert repair_status(mission) == DISMISSED_STATUS
+    assert repair_status(mission) == (PHASES["dismissed"].label, PHASES["dismissed"].level)
     st.sup.tick()
     assert len(noted(st, mid, "cancel.dismissed")) == 1
 

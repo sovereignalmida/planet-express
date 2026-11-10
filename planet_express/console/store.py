@@ -261,11 +261,36 @@ class ConsoleStore:
             rows = conn.execute("SELECT * FROM console_executions WHERE conversation_id=? ORDER BY id", (conversation_id,)).fetchall()
         return [dict(r) for r in rows]
 
-    def live_executions(self) -> list[dict]:
-        """Authorised executions whose progress is still being reported into their conversation."""
+    def reportable_executions(self) -> list[dict]:
+        """The runs whose thread may have something new to hear (rc14.7.5): every authorised one, and every ended one whose Repair
+        mission has changed since its thread last heard (an undo of a completed run, a kept or closed held run, an outcome flag
+        written after the close). The newest state or decision event the thread has heard of is recorded in `reported` as
+        `seen@<seq>`; an ended run before rc14.7.5 has none, and is looked at once."""
         with self.store._connect() as conn:
-            rows = conn.execute("SELECT * FROM console_executions WHERE status='authorised' ORDER BY id").fetchall()
+            rows = conn.execute(
+                "SELECT e.* FROM console_executions e WHERE e.status='authorised' OR (e.status='ended' AND instr("
+                "  ',' || COALESCE(e.reported, '') || ',', ',seen@' || COALESCE((SELECT MAX(v.seq) FROM mission_events v "
+                "    WHERE v.mission_id = e.mission_id AND v.kind IN ('state', 'decision')), 0) || ',') = 0) ORDER BY e.id").fetchall()
         return [dict(r) for r in rows]
+
+    def proposed_executions(self) -> list[dict]:
+        with self.store._connect() as conn:
+            rows = conn.execute("SELECT * FROM console_executions WHERE status='proposed' ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_seen(self, execution_id: int, seq: int) -> None:
+        """Record the newest mission state event this run's thread has heard about (one `seen@` entry, replacing the last)."""
+        with self.store._write() as conn:
+            row = conn.execute("SELECT reported FROM console_executions WHERE id=?", (execution_id,)).fetchone()
+            if row is None:
+                return
+            keys = [k for k in (row["reported"].split(",") if row["reported"] else []) if not k.startswith("seen@")]
+            conn.execute("UPDATE console_executions SET reported=? WHERE id=?", (",".join([*keys, f"seen@{int(seq)}"]), execution_id))
+
+    def reported_keys(self, execution_id: int) -> list[str]:
+        with self.store._connect() as conn:
+            row = conn.execute("SELECT reported FROM console_executions WHERE id=?", (execution_id,)).fetchone()
+        return row["reported"].split(",") if row is not None and row["reported"] else []
 
     def set_execution_status(self, execution_id: int, status: str, *, by: str | None = None) -> bool:
         """proposed -> authorised | withdrawn; authorised -> ended. Forward only."""
@@ -281,11 +306,6 @@ class ConsoleStore:
             else:
                 cur = conn.execute(f"UPDATE console_executions SET status=? WHERE id=? AND status IN ({marks})", (status, execution_id, *allowed[status]))
             return cur.rowcount == 1
-
-    def was_reported(self, execution_id: int, key: str) -> bool:
-        with self.store._connect() as conn:
-            row = conn.execute("SELECT reported FROM console_executions WHERE id=?", (execution_id,)).fetchone()
-        return row is not None and key in (row["reported"].split(",") if row["reported"] else [])
 
     def mark_reported(self, execution_id: int, key: str) -> bool:
         """Record that a progress line (`key`) was posted into the thread; False if it already had been (so it is posted once)."""

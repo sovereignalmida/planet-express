@@ -1266,7 +1266,26 @@ class Supervisor:
 
         rc14.3: a rollback reverses only what THIS run changed (checkpoint vs the end-of-run snapshot). Something the run did not change
         but someone changed since is left as it is and reported (`left_alone`); only something the run changed and someone changed
-        again is drift. A non-undo rollback retakes the snapshot (its leases were held throughout: see `_roll_back_held`)."""
+        again is drift. A non-undo rollback retakes the snapshot (its leases were held throughout: see `_roll_back_held`).
+
+        rc14.7.5: while it runs it is in the in-flight map `rollback_in_flight` reads, as a worker's rollback is, so every surface sees
+        it (a rollback from the dashboard or Telegram runs here, on the request) and a second one for the same mission is refused
+        instead of queued behind it (state-machines.md bug 9)."""
+        from concurrent.futures import Future
+        self._require_enabled()
+        marker: Future = Future()
+        with self._verify_guard:
+            current = self._rolling_back.get(mission_id)
+            if current is not None and not current.done():
+                raise ResumeRefused("a rollback of this mission is already running")
+            self._rolling_back[mission_id] = marker
+        try:
+            return self._roll_back(mission_id, actor, ack_drift=ack_drift)
+        finally:
+            marker.set_result(None)
+
+    def _roll_back(self, mission_id: str, actor: str, *, ack_drift: bool = False) -> Any:
+        """`roll_back` itself, for a caller already in the in-flight map (the rollback worker)."""
         self._require_enabled()
         actor = self._operator(actor)
         mission = self._repair_mission(mission_id, *self.ROLLBACK_FROM)
@@ -1354,13 +1373,13 @@ class Supervisor:
         return "started"
 
     def rollback_in_flight(self, mission_id: str) -> bool:
-        """A rollback `roll_back_start` began is still running for this mission."""
+        """A rollback of this mission is running: on the worker (`roll_back_start`) or on a request (`roll_back`)."""
         future = self._rolling_back.get(mission_id)
         return future is not None and not future.done()
 
     def _roll_back_job(self, mission_id: str, actor: str, ack_drift: bool) -> Any:
         try:
-            return self.roll_back(mission_id, actor, ack_drift=ack_drift)
+            return self._roll_back(mission_id, actor, ack_drift=ack_drift)     # its own future is the in-flight entry
         except Exception as exc:                  # noqa: BLE001 - nobody is waiting on this thread: the outcome must be on record
             log.warning("mission %s: the rollback could not run", mission_id, exc_info=exc)
             why = str(exc)[:200] if isinstance(exc, (ResumeRefused, IllegalTransition)) else type(exc).__name__

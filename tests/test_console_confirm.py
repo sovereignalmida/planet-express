@@ -176,11 +176,17 @@ def test_a_run_held_for_the_operator_is_named_with_where_to_close_it(rig):
         conn.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (first["mission_id"],))
     with pytest.raises(ConsoleApiError) as err:
         rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
-    assert err.value.code == "conflict" and first["mission_id"] in str(err.value) and "held for you (needs operator)" in str(err.value)
+    assert err.value.code == "conflict" and first["mission_id"] in str(err.value) and "is waiting for you" in str(err.value)
     assert "Missions" in str(err.value) and "stop it first" not in str(err.value)
-    with rig.st.store._write() as conn:                      # mid-recovery is PE's own work, not "held for you"
+    # rc14.7.5: the message follows the run's phase. recovery_required that lasts is the operator's (recovery passes through it in one
+    # step otherwise), and the run reads "Needs you" with a rollback offered, so it is "waiting for you" here too.
+    with rig.st.store._write() as conn:
         conn.execute("UPDATE missions SET status='recovery_required' WHERE id=?", (first["mission_id"],))
-    with pytest.raises(ConsoleApiError, match="already running") as err:
+    with pytest.raises(ConsoleApiError, match="is waiting for you"):
+        rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
+    with rig.st.store._write() as conn:                      # a run still going is "already running"
+        conn.execute("UPDATE missions SET status='executing' WHERE id=?", (first["mission_id"],))
+    with pytest.raises(ConsoleApiError, match="already running"):
         rig.api.confirm_prepare(rig.conv.id, rig.add_plan(), 0, "chris")
 
 
@@ -284,9 +290,9 @@ def test_the_conversation_status_follows_an_active_repair_not_the_last_answer(ri
     shown = rig.api.feed(rig.conv.id)["conversation"]["status"]
     assert shown["group"] == "Working"
     assert rig.st.drive(view["mission_id"]) == "completed"
-    done = ex_mod.conversation_status(rig.st.ms.get_mission(view["mission_id"]), live=False)
+    done = ex_mod.conversation_status(rig.st.ms.get_mission(view["mission_id"]))
     assert done["text"] == "Done and verified" and done["group"] == "Recent"
-    held = ex_mod.conversation_status(type("M", (), {"status": "recovery_required"})(), live=True)
+    held = ex_mod.conversation_status(type("M", (), {"status": "recovery_required"})())
     assert held["group"] == "Needs you" and held["level"] == "crit"
 
 
