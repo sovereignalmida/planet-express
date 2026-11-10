@@ -1037,7 +1037,7 @@ def test_actions_splits_what_wants_you_from_what_is_wrong(tmp_path, monkeypatch)
     columns = re.findall(r'<div class="actions-col">(.*?)\n      </div>', dock, re.DOTALL)
     assert len(columns) == 2
     assert re.findall(r'id="([a-z-]+-panel|rollback-candidates-panel)"', columns[0]) == [
-        "approval-panel", "rollback-candidates-panel"]
+        "waiting-missions-panel", "approval-panel", "rollback-candidates-panel"]
     assert re.findall(r'id="([a-z-]+-panel)"', columns[1]) == [
         "incident-panel", "hull-diagnostics-panel"]
     assert 'id="manifest-panel"' not in html
@@ -1142,7 +1142,7 @@ def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):
     for panel in ("approval-panel", "incident-panel", "chat-panel"):
         assert f'id="{panel}"' not in html, panel
     script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
-    live = re.search(r"var LIVE_PANELS = \[(.*?)\];", script).group(1)
+    live = re.search(r"var LIVE_PANELS = \[(.*?)\];", script, re.DOTALL).group(1)
     assert "approval-panel" not in live and "incident-panel" not in live
 
 
@@ -1152,7 +1152,7 @@ def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp
     html = _render_with_certs(tmp_path, monkeypatch, [], path="/memory/deployments")
     assert 'id="manifest-panel"' in html
     script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
-    assert '"manifest-panel"' in re.search(r"var LIVE_PANELS = \[(.*?)\];", script).group(1)
+    assert '"manifest-panel"' in re.search(r"var LIVE_PANELS = \[(.*?)\];", script, re.DOTALL).group(1)
 
 
 def test_the_crew_tab_carries_the_eight_the_design_package_names(tmp_path, monkeypatch):

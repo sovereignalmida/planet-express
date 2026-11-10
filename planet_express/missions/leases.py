@@ -298,12 +298,18 @@ def claim_reason(store: Store) -> str | None:
     One exception: a mission in `needs_operator` with no session that could still be running has handed the host to the
     operator (a held cancel, a failed run). Its leases still fence other missions out, but they do not stop
     the operator's own tools: blocking Actions, config apply and update rollbacks until the mission is closed would leave
-    the operator nothing to fix the host with, and safe-prune would stop silently."""
+    the operator nothing to fix the host with, and safe-prune would stop silently.
+
+    "Could still be running" is a session not yet revoked, or a revoked one not proven dead. The proof is its uid
+    released, which happens only once its cgroup is gone and nothing runs as the uid (`MissionStore.release_session_uid`);
+    a session with no uid has no such proof and keeps the claim. It used to test `state = 'live'`, which nothing ever
+    moves a session out of, so the exception never applied (rc14.7.4)."""
     with store._connect() as conn:
         rows = conn.execute(
             "SELECT l.mission_id, l.resource FROM mission_leases l JOIN missions m ON m.id = l.mission_id "
             "WHERE NOT (m.status = 'needs_operator' AND NOT EXISTS ("
-            "  SELECT 1 FROM mission_sessions s WHERE s.mission_id = l.mission_id AND (s.revoked_at IS NULL OR s.state = 'live'))) "
+            "  SELECT 1 FROM mission_sessions s WHERE s.mission_id = l.mission_id AND (s.revoked_at IS NULL "
+            "    OR s.session_uid IS NULL OR s.uid_released_at IS NULL))) "
             "ORDER BY l.acquired_at, l.mission_id, l.resource").fetchall()
     if not rows:
         return None

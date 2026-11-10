@@ -1015,7 +1015,8 @@ class CommandService:
         refused_event: str, abort_check: Callable[[], bool] | None = None,
     ) -> AutomaticResult:
         """Everything after the policy said yes, shared by the unattended runs and a mission's step: T24's limits, the
-        execution row, the engine, and settling the row whatever the engine did. `abort_check` is asked between steps."""
+        execution row, the engine, and settling the row whatever the engine did. Between steps the engine stops if the
+        operator asked to abort this run (the engine reads that from the execution itself) or if `abort_check` says so."""
         now = self._clock()
         since = now - policy.limit_lookback_seconds()
         for pair, requested in Counter(decision.pairs).items():
@@ -1128,12 +1129,8 @@ class CommandService:
     def _run_rollback(self, approval: dict, parent: dict, child_id: str, runbook, owner: str) -> None:
         """Worker thread: the rollback child holds the lock until it finishes."""
         try:
-            result = engine.RunbookEngine(
-                self,
-                is_abort_requested=lambda: bool(
-                    (self._store.get_execution(child_id) or {}).get("abort_requested_at")
-                ),
-            ).run(child_id, runbook, origin="rollback")
+            # The operator's abort is read by the engine from the child's own row.
+            result = engine.RunbookEngine(self).run(child_id, runbook, origin="rollback")
             self._store.set_execution_status(child_id, result.status, reason=result.reason)
             self._store.set_execution_status(
                 parent["id"], "rolled_back" if result.status == "passed" else "rollback_failed",
@@ -1284,13 +1281,7 @@ class CommandService:
                 self._finish(row, execution_id, "failed",
                              "refused: its approved plan is missing or does not match its fingerprint")
                 return
-            runner = engine.RunbookEngine(
-                self,
-                is_abort_requested=lambda: bool(
-                    (self._store.get_execution(execution_id) or {}).get("abort_requested_at")
-                ),
-                on_failure=self._on_failure,
-            )
+            runner = engine.RunbookEngine(self, on_failure=self._on_failure)     # the engine reads the abort itself
             result = runner.run(execution_id, plan, origin=row.get("origin") or row["requested_via"])
             self._finish(row, execution_id, result.status, result.reason)
             if result.status == "passed" and runbooks.risk(plan) != "R0":

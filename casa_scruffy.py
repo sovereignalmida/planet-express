@@ -1037,6 +1037,19 @@ def register_console_pages(app, core) -> None:
     app.add_url_rule("/api/console/<conversation_id>/plan/scrap", "console_scrap", action("console.scrap_plan"), methods=["POST"])
 
 
+_UNREAD = object()      # needs_count(): the caller did not read the waiting missions, as opposed to read them and failed
+
+
+class WaitingMissions(list):
+    """The missions waiting on the operator, and whether Core's answer was cut short (`truncated`)."""
+    truncated = False
+
+
+# The mission states that wait on the operator, listed and counted under Missions > NEEDS YOU (rc14.7.4). A legacy
+# paused_tripwire mission moves on only by an operator's hand too.
+WAITING_ON_YOU = ("awaiting_decision", "needs_operator", "recovery_required", "paused_tripwire")
+
+
 def register_mission_pages(app, core) -> None:
     """The Missions and Memory pages (v4 S4). Server-rendered; every mutation is a form POST that the
     before-request hook has already CSRF-checked and authenticated, and the acting operator is always the
@@ -1061,15 +1074,34 @@ def register_mission_pages(app, core) -> None:
             abort(404)
         raise error
 
-    def needs_count(windows=None):
-        """What NEEDS YOU counts on its sub-tab: plans waiting for approval and rollback windows held for a human.
-        Incidents and findings are not decisions, so they are not counted. `windows` is a `canary.candidates` answer
-        the caller already has, so it is not read twice. Core down shows no number."""
+    def waiting_missions(active=None):
+        """Missions waiting on the operator (NEEDS YOU lists them, rc14.7.4): a grant to decide, a run held for them, a
+        recovery to choose. `active` is a `mission.list` answer the caller already has. Missions off is an empty list;
+        Core unable to answer is None."""
+        if not config.MISSIONS_ENABLED:
+            return []
+        try:
+            listing = active if active is not None else core("mission.list", {"scope": "active", "limit": 500})
+            rows = listing["missions"]
+        except Exception:  # noqa: BLE001 -- the list is not worth a failed page
+            return None
+        waiting = WaitingMissions(m for m in rows if isinstance(m, dict) and m.get("status") in WAITING_ON_YOU)
+        # Core cut the list to fit, or there are more open missions than one page: some may be missing.
+        waiting.truncated = bool(listing.get("truncated")) or (listing.get("total") or 0) > len(rows)
+        return waiting
+
+    def needs_count(windows=None, waiting=_UNREAD):
+        """What NEEDS YOU counts on its sub-tab: plans waiting for approval, rollback windows held for a human, and missions
+        waiting on the operator. Incidents and findings are not decisions, so they are not counted. `windows` and
+        `waiting` are answers the caller already has, so they are not read twice. Core down shows no number; missions
+        that cannot be read leave out only themselves (NEEDS YOU says so), not the plans and windows."""
         try:
             plans = len(core("proposal.list_pending", {}) or [])
             if windows is None:
                 windows = core("canary.candidates", {}) or []
-            return plans + sum(1 for r in windows if isinstance(r, dict) and r.get("held"))
+            if waiting is _UNREAD:                           # None is "could not be read", and is not asked again
+                waiting = waiting_missions()
+            return plans + sum(1 for r in windows if isinstance(r, dict) and r.get("held")) + len(waiting or [])
         except Exception:  # noqa: BLE001 -- a badge is not worth a failed page
             return None
 
@@ -1092,13 +1124,15 @@ def register_mission_pages(app, core) -> None:
         seen = {m["status"] for m in rows}
         order = list(STATUS_ORDER) + sorted(seen - set(STATUS_ORDER))   # a status added later still gets a column
         return shell("missions.html", page="missions", disabled=False, missions=rows, order=order,
-                     active=active, closed=closed, usage=usage, notice=notice_for(_MISSION_NOTICES))
+                     active=active, closed=closed, usage=usage, notice=notice_for(_MISSION_NOTICES),
+                     needs_count=needs_count(waiting=waiting_missions(active)))
 
     @app.get("/missions/needs-you")
     def needs_you_page():
         """The old dashboard Actions tab (rc14.7.3): plans to authorise, open rollback windows, incidents and hull
         findings. Works with missions off: none of it needs them."""
-        live = {"findings": dashboard_data.summarize_findings(), "rollback_candidates": []}
+        waiting = waiting_missions()
+        live = {"findings": dashboard_data.summarize_findings(), "rollback_candidates": [], "waiting_missions": waiting}
         windows = None
         try:
             # Core's database holds the windows; this process may not read it (web_access.py). Core down empties
@@ -1107,7 +1141,7 @@ def register_mission_pages(app, core) -> None:
         except Exception:  # noqa: BLE001 -- see above
             current_app.logger.warning("Could not read the canary rollback windows from core")
         return shell("missions_needs_you.html", page="missions", sub="needs", disabled=False, notice=None,
-                     live=live, needs_count=needs_count(windows) if windows is not None else None)
+                     live=live, needs_count=needs_count(windows, waiting) if windows is not None else None)
 
     @app.get("/missions/<mission_id>")
     def mission_page(mission_id):

@@ -2997,9 +2997,11 @@ def _retire_one(path: Path, kind: str, describe, notifier: Notifier) -> None:
 
 
 def _normalise_stale_status() -> None:
-    """`awaiting_approval` was the shell planner's "a card is waiting" state. Nothing enters it now,
-    so a status file still saying it would leave the dashboard showing a state that cannot exist
-    until the next transition happens to overwrite it (Codex, T44)."""
+    """Core starts with its scan slot idle (`PipelineState()`), so at startup any other state in the status file is
+    left over from the process before: `running` after a crash or restart mid-scan, or `awaiting_approval`, the shell
+    planner's "a card is waiting", which nothing enters now (Codex, T44). Left alone, the dashboard shows SCANNING with
+    its button disabled until the next scheduled scan, which boot settle or a maintenance window can hold off for hours
+    (rc14.7.4). Runs once at startup, before the dashboard RPC and the scheduler can start a scan."""
     path = config.STATE_STATUS
     if not path.exists():
         return
@@ -3007,15 +3009,18 @@ def _normalise_stale_status() -> None:
         status = json.loads(path.read_text())
     except Exception:  # noqa: BLE001 -- an unreadable status file is rewritten by the next transition
         return
-    if status.get("state") != "awaiting_approval":
+    if not isinstance(status, dict):
+        status = {"schema_version": 1}                          # not a status at all: replace it with a sound idle one
+    stale = status.get("state")
+    if stale == PipelineState.IDLE:
         return
     status.update({"state": PipelineState.IDLE, "pending_plan_id": None, "pending_msg_id": None,
                    "updated_at": datetime.now(timezone.utc).isoformat()})
     try:
         path.write_text(json.dumps(status, indent=2))
-        log.info("Normalised a pre-upgrade 'awaiting_approval' run status to idle")
+        log.info("Normalised a run status left as %r by the previous process to idle", stale)
     except OSError:
-        log.warning("Could not normalise the pre-upgrade run status")
+        log.warning("Could not normalise the run status left by the previous process")
 
 
 def _update_v5_cutover_cards(cutover: dict[str, list[dict]], notifier: Notifier) -> None:
@@ -3137,17 +3142,19 @@ def run_bot() -> None:
         incident_context=lambda incident_id: commands.get_incident_context(
             incident_id, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS),
     )
+    # Actions and Missions see each other: while a mission holds a lease, no v3 change starts (the busy message names the
+    # mission); the mission's own writes take the same lock (the Docker proxy, typed steps). Registered BEFORE anything can
+    # ask for the lock: the dashboard RPC below (an Action, a config apply, an update rollback) and mission control (its
+    # thread can take leases at once), and whether or not missions start: a lease left from an earlier run still counts.
+    # It came after the dashboard RPC until rc14.7.4, which left a moment at startup where the dashboard did not see one.
+    from planet_express.missions import leases as mission_leases
+    state.set_mission_claims(lambda: mission_leases.claim_reason(store))
     rpc_server = _start_dashboard_rpc(
         commands, store, notifier, chat, config_service,
         start_scan=make_scan_starter(notifier, state, store, commands), missions=missions,
     )
 
     # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).
-    # Actions and Missions see each other: while a mission holds a lease, no v3 change starts (the busy message names the
-    # mission); the mission's own writes take the same lock (the Docker proxy, typed steps). Registered BEFORE mission control
-    # starts (its thread can take leases at once) and whether or not it starts: a lease left from an earlier run still counts.
-    from planet_express.missions import leases as mission_leases
-    state.set_mission_claims(lambda: mission_leases.claim_reason(store))
     mission_runner = start_mission_runner(store, config.MISSIONS, enabled=lambda: config.MISSIONS_ENABLED,
                                           stacks_root=str(config.STACKS_ROOT), repair_wiring=_repair_wiring(),
                                           host_lock=state)

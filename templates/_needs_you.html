@@ -6,6 +6,31 @@
     <div class="actions-split">
 
       <div class="actions-col">
+        {# Always present, so static/panels.js can swap it in when a mission starts waiting after the page loaded. #}
+        <div id="waiting-missions-panel">
+        {% if ctx.waiting_missions %}
+        <section class="panel" aria-label="Missions waiting for you">
+          <div class="panel-head-row">
+            <h2>MISSIONS WAITING FOR YOU</h2>
+            <span class="panel-head-note">{{ ctx.waiting_missions | length }}{{ '+' if ctx.waiting_missions.truncated }} · a grant to decide, a run held for you, or a recovery to choose</span>
+          </div>
+          <div class="mc-waiting">
+            {% for m in ctx.waiting_missions %}
+            <a class="mc-card" href="/missions/{{ m.id }}">
+              <span class="mc-card-id">{{ m.id }}</span>
+              <span class="mc-card-title">{{ m.title }}</span>
+              <span class="mc-card-meta">{{ m.status | replace('_', ' ') }} · {{ m.tier }}</span>
+            </a>
+            {% endfor %}
+          </div>
+          {% if ctx.waiting_missions.truncated %}<p class="muted-body">Core's list was cut short, so some may be missing: open Missions for all of them.</p>{% endif %}
+        </section>
+        {% elif ctx.waiting_missions is none %}
+        <section class="panel" aria-label="Missions waiting for you">
+          <p class="muted-body">Could not read the missions waiting for you; open Missions to see them.</p>
+        </section>
+        {% endif %}
+        </div>
         <div class="approval-dock" id="approval-panel" data-api="/api/approvals">
           <section class="panel">
             <div class="panel-head-row">

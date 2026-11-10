@@ -368,6 +368,30 @@ def test_a_cancel_during_a_run_stops_the_remaining_steps(served):
     assert result.outcome != "passed" and len(seen) == 1
 
 
+def test_an_operator_abort_stops_an_unattended_run_before_its_next_step(served):
+    """ABORT is offered on every running execution (`get_status`); the stored request must be honoured by the runs that do
+    not come from an approval card too. Until rc14.7.4 `_run_decided` asked only its caller's check, so the abort was
+    recorded, answered "the run stops before its next step", and ignored."""
+    env = served
+    two = book(*[json.loads(json.dumps(step)) for step in (
+        {"type": "service.restart", "params": {"stack": "healthy", "service": s},
+         "binding": env.service._binder.service(actions.Target("healthy", s, f"fixture-{s}"), timeout=4)} for s in ("web", "api"))])
+    original = env.service._run_argv
+    seen = []
+
+    def abort_after_first(argv, timeout=None):
+        seen.append(argv)
+        with env.store._connect() as conn:
+            running = [r["id"] for r in conn.execute("SELECT id FROM executions WHERE status IN ('running', 'verifying')")]
+        assert len(running) == 1
+        assert env.service.abort(running[0], operator="me").outcome != "refused"
+        return original(argv, timeout)
+    env.service._run_argv = abort_after_first
+    result = env.service.run_mission_runbook(two, mission_id=env.mission.id, session_id=env.session, gate=env.gate)
+    assert result.outcome == "aborted" and len(seen) == 1, (result.outcome, result.reason)
+    assert env.store.get_execution(result.execution_id)["status"] == "aborted"
+
+
 def test_the_outcome_is_written_to_the_missions_own_timeline(served):
     env = served
     result = env.service.run_mission_runbook(healthy_restart(env), mission_id=env.mission.id, session_id=env.session, gate=env.gate)

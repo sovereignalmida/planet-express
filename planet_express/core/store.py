@@ -1398,6 +1398,13 @@ class Store:
             self._event(conn, "approval.superseded", approval_id=approval_id, reason=reason)
         return dict(row)
 
+    def abort_requested(self, execution_id: str) -> bool:
+        """Has the operator asked this run to stop? The engine asks before every step and about once a second in a
+        wait, so it reads the one column, not the row and its plan."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT abort_requested_at FROM executions WHERE id = ?", (execution_id,)).fetchone()
+        return row is not None and row[0] is not None
+
     def get_execution(self, execution_id: str) -> dict | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()

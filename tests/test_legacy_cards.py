@@ -105,8 +105,30 @@ def test_a_stale_awaiting_approval_status_is_normalised(state_dir):
     assert status["pending_plan_id"] is None and status["pending_msg_id"] is None
 
 
-def test_a_healthy_status_file_is_left_alone(state_dir):
-    original = {"schema_version": 1, "state": "running", "pending_plan_id": None,
+def test_a_running_status_left_by_the_previous_process_is_normalised(state_dir):
+    """Core starts idle, so a file still saying "running" is from a crash or restart mid-scan. Left alone, the dashboard
+    showed SCANNING with its button disabled until the next scheduled scan (rc14.7.4)."""
+    (state_dir / "run_status.json").write_text(json.dumps({
+        "schema_version": 1, "state": "running", "pending_plan_id": None,
+        "pending_msg_id": None, "updated_at": "2026-09-24T00:00:00+00:00"}))
+
+    fw._retire_legacy_state(FakeNotifier())
+
+    status = json.loads((state_dir / "run_status.json").read_text())
+    assert status["state"] == "idle" and status["updated_at"] != "2026-09-24T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("junk", ["[]", '"running"', "3"])
+def test_a_status_file_that_is_not_an_object_does_not_stop_startup(state_dir, junk):
+    (state_dir / "run_status.json").write_text(junk)
+
+    fw._retire_legacy_state(FakeNotifier())
+
+    assert json.loads((state_dir / "run_status.json").read_text())["state"] == "idle"
+
+
+def test_an_idle_status_file_is_left_alone(state_dir):
+    original = {"schema_version": 1, "state": "idle", "pending_plan_id": None,
                 "pending_msg_id": None, "updated_at": "2026-09-24T00:00:00+00:00"}
     (state_dir / "run_status.json").write_text(json.dumps(original))
 

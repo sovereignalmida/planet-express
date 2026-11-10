@@ -48,3 +48,4 @@
   background: var(--pe-warn-line); color: var(--pe-ink); text-align: center;
 }
 .main-col .actions-dock, .main-col .history-dock { padding: 0; }
+.mc-waiting { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }

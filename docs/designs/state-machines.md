@@ -187,10 +187,10 @@ These are fixable without building any machine, so they need not wait for the pr
 
 | | Bug | Status | Where |
 |---|---|---|---|
-| 1 | A held mission keeps blocking every v3 host change (the exemption is dead) | **[checked]** | `leases.py:302-307`, `missions/store.py:411` |
-| 2 | `run_status.json` says "running" after a crash mid-scan; SCAN stays disabled | **[checked]** | `casa_farnsworth.py:3010` |
-| 3 | Dashboard RPC starts before mission claims are wired | **[checked]** | `casa_farnsworth.py:3140` vs `3150` |
-| 4 | Abort accepted but ignored for automatic and Zoidberg runs | **[checked]** | `command_service.py:955-961`, `engine.py:117` |
+| 1 | A held mission keeps blocking every v3 host change (the exemption is dead) | fixed rc14.7.4 | `leases.py:302-307`, `missions/store.py:411` |
+| 2 | `run_status.json` says "running" after a crash mid-scan; SCAN stays disabled | fixed rc14.7.4 | `casa_farnsworth.py:3010` |
+| 3 | Dashboard RPC starts before mission claims are wired | fixed rc14.7.4 | `casa_farnsworth.py:3140` vs `3150` |
+| 4 | Abort accepted but ignored for automatic and Zoidberg runs | fixed rc14.7.4 | `command_service.py:955-961`, `engine.py:117` |
 | 5 | An undo's result never reaches the conversation or Telegram | **[checked]** | `console/service.py:211-212`, `console/store.py:267` |
 | 6 | A kept run reads "Didn't work" under "Needs you" in the Console | **[checked]** | `console/execution.py` (no `kept_by_operator`) |
 | 7 | Scrapping or superseding a plan leaves its prepared Repair waiting | **[checked]** | `console/api.py:286-293` |
@@ -205,7 +205,7 @@ These are fixable without building any machine, so they need not wait for the pr
 | 16 | "STEP 1 OF 2" counter wrong for longer runbooks | sweep | `static/execution.js:206` |
 | 17 | No re-scan after a failed rollback or an interrupted canary update | sweep | `casa_farnsworth.py:2738`, `2797` |
 | 18 | Lease expiry and checkpoint purge sweeps never run | sweep | `leases.py:520`, `checkpoint/service.py:1062` |
-| 19 | The NEEDS YOU count ignores missions held for the operator | sweep | `casa_scruffy.py` `needs_count` |
+| 19 | The NEEDS YOU count ignores missions held for the operator | fixed rc14.7.4 | `casa_scruffy.py` `needs_count` |
 
 ## Proposed order
 

@@ -257,7 +257,8 @@
   // Fetch this same page again and swap in the panels that show live data. Each swap is by id, so a
   // page that does not carry a panel simply skips it.
   // mc-subtabs carries the NEEDS YOU count, which changes when a plan is approved or a window settled.
-  var LIVE_PANELS = ["mc-subtabs", "hull-diagnostics-panel", "rollback-candidates-panel", "manifest-panel"];
+  var LIVE_PANELS = ["mc-subtabs", "waiting-missions-panel", "hull-diagnostics-panel", "rollback-candidates-panel",
+                     "manifest-panel"];
 
   function refreshPanels() {
     // An open findings drawer would snap shut under the reader; wait for the next interval.

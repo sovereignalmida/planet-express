@@ -164,7 +164,8 @@ def test_needs_you_holds_the_old_actions_panels(web):
     assert 'class="mc-subtab is-active" href="/missions/needs-you" aria-current="page">NEEDS YOU' in page
     assert "panels.js" in page and "approvals.js" in page and "incidents.js" in page and "elevate.js" in page
     assert 'class="tab active" href="/missions"' in page                 # the top bar still says Missions
-    assert not any(m.startswith("mission.") for m in core.methods())     # nothing here needs missions
+    # Only the list of missions waiting on you (rc14.7.4); the panels themselves need no mission.
+    assert [m for m in core.methods() if m.startswith("mission.")] == ["mission.list"]
 
 
 def test_needs_you_and_deployments_work_with_missions_off(web, monkeypatch, tmp_path):
@@ -205,9 +206,65 @@ def test_needs_you_reads_the_windows_once_and_every_missions_page_shows_the_coun
         assert '<span class="mc-subtab-count">1</span>' in client.get(path).get_data(as_text=True), path
 
 
+def test_needs_you_lists_and_counts_the_missions_waiting_on_you(web):
+    client, core, _ = web
+    core.pool = [mission("M-5", "Approve <b>this</b>", status="awaiting_decision", tier="repair"),
+                 mission("M-6", "Held run", status="needs_operator", tier="repair"),
+                 mission("M-7", "Busy", status="executing", tier="repair"),
+                 mission("M-1", "Old one", status="completed")]
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    panel = page[page.index('id="waiting-missions-panel"'):page.index('id="approval-panel"')]
+    assert 'href="/missions/M-5"' in panel and 'href="/missions/M-6"' in panel
+    assert "M-7" not in panel and "M-1" not in panel
+    assert "Approve &lt;b&gt;this&lt;/b&gt;" in panel and "needs operator" in panel
+    assert '<span class="mc-subtab-count">2</span>' in page
+    board = client.get("/missions").get_data(as_text=True)
+    assert '<span class="mc-subtab-count">2</span>' in board                # the board counts from its own list
+
+
+def test_needs_you_says_so_when_it_cannot_read_the_missions(web):
+    """The missions it cannot read leave out only themselves: the plans and held windows are still counted."""
+    client, core, _ = web
+    core.errors["mission.list"] = "unavailable"
+    core.results["proposal.list_pending"] = [{"id": "p1"}]
+    core.calls.clear()
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert "Could not read the missions waiting for you" in page
+    assert '<span class="mc-subtab-count">1</span>' in page
+    assert core.methods().count("mission.list") == 1                  # a failed read is not asked again for the badge
+
+
+def test_more_open_missions_than_one_page_is_said_too(web):
+    client, core, _ = web
+    core.pool = [mission("M-5", "Approve", status="awaiting_decision", tier="repair")]
+    listing = core.list_pool
+    core.results["mission.list"] = lambda params: listing(params) | {"total": 900}
+    assert "Core's list was cut short" in client.get("/missions/needs-you").get_data(as_text=True)
+
+
+def test_needs_you_says_when_cores_list_was_cut_short(web):
+    client, core, _ = web
+    core.pool = [mission("M-5", "Approve", status="awaiting_decision", tier="repair"),
+                 mission("M-9", "Legacy pause", status="paused_tripwire", tier="repair")]
+    listing = core.list_pool
+    core.results["mission.list"] = lambda params: listing(params) | {"truncated": True}
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert "2+ ·" in page and "Core's list was cut short" in page
+    assert 'href="/missions/M-9"' in page                       # a legacy paused mission waits on you too
+
+
+def test_with_missions_off_needs_you_lists_none_and_asks_nothing(web, monkeypatch):
+    client, core, _ = web
+    monkeypatch.setattr(config, "MISSIONS_ENABLED", False, raising=False)
+    core.calls.clear()
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert "MISSIONS WAITING FOR YOU" not in page and "Could not read" not in page
+    assert "mission.list" not in core.methods()
+
+
 def test_the_needs_you_count_refreshes_with_the_panels():
     script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
-    assert 'var LIVE_PANELS = ["mc-subtabs",' in script
+    assert 'var LIVE_PANELS = ["mc-subtabs", "waiting-missions-panel",' in script
     assert "window.pePollWhileVisible" in script and "function pollWhileVisible" not in script
 
 
@@ -276,7 +333,8 @@ def test_board_empty_state(web):
 def test_detail_shows_events_artifacts_result_and_cancel(web):
     client, core, _ = web
     page = client.get("/missions/M-2").get_data(as_text=True)
-    assert [m for m in core.methods()] == ["mission.get", "mission.events", "proposal.list_pending", "canary.candidates"]
+    assert [m for m in core.methods()] == ["mission.get", "mission.events", "proposal.list_pending", "canary.candidates",
+                                          "mission.list"]
     assert "Find &lt;b&gt;why&lt;/b&gt;" in page and "<b>why</b>" not in page
     assert "report.md" in page and "operator:alice" in page and "done" in page
     assert 'action="/missions/M-2/cancel"' in page and 'name="csrf_token"' in page

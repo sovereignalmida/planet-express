@@ -114,6 +114,8 @@ class RunbookEngine:
         sleep: Callable[[float], None] = time.sleep, monotonic: Callable[[], float] = time.monotonic,
     ):
         self.svc = svc
+        # An extra reason to stop, on top of the operator's own abort, which `_abort_requested` always reads from the
+        # execution row (a mission step also stops when its session is no longer current).
         self._is_abort_requested = is_abort_requested or (lambda: False)
         self._on_failure = on_failure
         self._sleep = sleep
@@ -156,7 +158,7 @@ class RunbookEngine:
         mutating_ns = {n for n, _type, _key in mutating}
         results = []
         for n, step in enumerate(runbook.steps, start=1):
-            if self._is_abort_requested():
+            if self._abort_requested(execution_id):
                 self._abandon(execution_id, runbook, n, "aborted", "aborted by the operator")
                 return EngineResult("aborted", "aborted by the operator", results)
             dispatch = _Dispatch(self, execution_id, n, n in mutating_ns)
@@ -398,6 +400,12 @@ class RunbookEngine:
                                    f"could not be recorded: {_clip(str(exc))}")
         return StepOutcome("passed", "applied", self.svc._stack_report(passed, None, None, []), output)
 
+    def _abort_requested(self, execution_id: str) -> bool:
+        """The operator's abort, stored on the execution (ABORT on the dashboard or Telegram), or the caller's own reason.
+        Read here rather than wired by each caller: until rc14.7.4 every caller had to pass the stored flag in, and the
+        unattended runs did not, so their aborts were recorded and answered but ignored."""
+        return self.svc._store.abort_requested(execution_id) or bool(self._is_abort_requested())
+
     def _wait(self, execution_id, step, params, dispatch) -> StepOutcome:
         dispatch()
         deadline = self._monotonic() + params["seconds"]
@@ -405,7 +413,7 @@ class RunbookEngine:
             left = deadline - self._monotonic()
             if left <= 0:
                 return StepOutcome("passed", "not_applied", f"waited {params['seconds']}s")
-            if self._is_abort_requested():
+            if self._abort_requested(execution_id):
                 return StepOutcome("aborted", "not_applied", "aborted by the operator during wait")
             self._sleep(min(1.0, left))
 

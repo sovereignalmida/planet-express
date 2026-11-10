@@ -122,6 +122,9 @@ def test_core_registers_the_claims_before_mission_control_starts_and_whether_or_
     src = inspect.getsource(fw.run_bot)
     register = src.index("state.set_mission_claims(")
     assert register < src.index("start_mission_runner(")
+    # And before the dashboard RPC, which takes the same lock for an Action, a config apply or an update rollback
+    # (rc14.7.4: it used to start first, so for a moment it did not see a lease left from before the restart).
+    assert register < src.index("_start_dashboard_rpc(")
     line = next(ln for ln in src.splitlines() if "state.set_mission_claims(" in ln)
     assert line.startswith("    state.") and not line.startswith("     "), "at run_bot's top level, not under a condition"
     assert "host_lock=state" in src
@@ -136,8 +139,19 @@ def test_a_mission_handed_to_the_operator_no_longer_blocks_the_operators_tools(s
     with st.store._write() as conn:
         conn.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (mid,))
     assert leases.claim_reason(st.store) is not None, "a session that may still be running keeps the claim"
+    # The rows as production leaves them (rc14.7.4): nothing ever moves `state` off 'live'; a session's end is its
+    # revocation, and it is provably dead once its uid is released. The test used to write state='ended' by hand,
+    # which production never does, so the exemption it proved never applied on a real host.
     with st.store._write() as conn:
-        conn.execute("UPDATE mission_sessions SET revoked_at=1, state='ended' WHERE id=?", (sid,))
+        conn.execute("UPDATE mission_sessions SET session_uid=NULL, uid_released_at=NULL, revoked_at=1 WHERE id=?", (sid,))
+    assert leases.claim_reason(st.store) is not None, "revoked, but with no uid there is no proof it is dead"
+    with st.store._write() as conn:
+        conn.execute("UPDATE mission_sessions SET session_uid=200001, uid_released_at=NULL WHERE id=?", (sid,))
+    assert leases.claim_reason(st.store) is not None, "revoked, but its uid is not released: it may still be running"
+    with st.store._write() as conn:
+        conn.execute("UPDATE mission_sessions SET uid_released_at=2 WHERE id=?", (sid,))
+    with st.store._connect() as conn:
+        assert conn.execute("SELECT state FROM mission_sessions WHERE id=?", (sid,)).fetchone()[0] in ("live", "launching")
     assert leases.claim_reason(st.store) is None
     with st.store._connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM mission_leases WHERE mission_id=?", (mid,)).fetchone()[0] > 0
