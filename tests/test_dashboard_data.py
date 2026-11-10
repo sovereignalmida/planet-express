@@ -802,10 +802,11 @@ def test_summarize_containers_filters_to_issues_only(tmp_path, monkeypatch):
 
 
 def test_rollback_candidates_are_not_read_from_the_dashboard_process():
-    """They live in the core's database, which this process is denied (`scripts/web_access.py`);
-    `casa_scruffy.index()` fetches them over the `canary.candidates` RPC instead (slice 5b-3)."""
-    assert dashboard_data.summarize_rollback_candidates() == []
-    assert dashboard_data.build_dashboard_context()["rollback_candidates"] == []
+    """They live in the core's database, which this process is denied (`scripts/web_access.py`); Missions >
+    NEEDS YOU reads them over the `canary.candidates` RPC instead (slice 5b-3, rc14.7.3), and the dashboard
+    context does not carry them at all."""
+    assert not hasattr(dashboard_data, "summarize_rollback_candidates")
+    assert "rollback_candidates" not in dashboard_data.build_dashboard_context()
 
 
 def test_summarize_update_history_newest_first_and_capped(tmp_path, monkeypatch):
@@ -836,8 +837,8 @@ def test_build_dashboard_context_never_raises_with_no_state(tmp_path, monkeypatc
     assert ctx["health"]["state_available"] is False
     assert ctx["findings"]["list"] == []
     assert ctx["containers"]["total"] == 0
-    assert ctx["update_history"] == []
-    assert ctx["rollback_candidates"] == []
+    # The deployment manifest and the rollback windows moved off the dashboard (rc14.7.3); it no longer reads them.
+    assert "update_history" not in ctx and "rollback_candidates" not in ctx
 
 
 def test_permission_error_warns_once_per_path(tmp_path, monkeypatch, caplog):

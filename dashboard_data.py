@@ -397,13 +397,6 @@ def summarize_update_history(limit: int = 20) -> list[dict]:
     return entries[:limit]
 
 
-def summarize_rollback_candidates() -> list[dict]:
-    """Nothing here: the open canary rollback windows live in the core's database, which the
-    dashboard's user is denied (`scripts/web_access.py`). `casa_scruffy.index()` fetches them over
-    the `canary.candidates` RPC, the same way it fetches Traefik and AdGuard (Codex, T42)."""
-    return []
-
-
 _MEM_SIZE_RE = re.compile(r"^([\d.]+)([KMGT]?)i?B?$", re.IGNORECASE)
 _MEM_FIELDS = ["total", "used", "free", "shared", "buff_cache", "available"]
 # procps `uptime`'s middle segment is either "N day(s), HH:MM" or "N day(s), M min"
@@ -1127,14 +1120,14 @@ def build_professor_lines(ctx: dict) -> dict:
             f"{adguard.get('num_dns_queries', '?')} queries, for what it's worth."
         )
 
-    # Actions
+    # Missions: where a decision waits now that the Actions tab is gone (rc14.7.3)
     bot_handle = f"@{ctx['telegram_bot_username']}" if ctx.get("telegram_bot_username") else "your Telegram bot"
-    actions = (
-        "Everything's been updated and nothing exploded! For now I carry out fixes "
-        f"over Telegram, {bot_handle}, while the good people bolt hands onto this dashboard."
+    missions = (
+        "Anything that wants your say waits under Missions, NEEDS YOU, or over Telegram on "
+        f"{bot_handle}. Good news: nothing has exploded yet."
     )
 
-    lines = {"overview": overview, "backups": backups, "network": network, "actions": actions}
+    lines = {"overview": overview, "backups": backups, "network": network, "missions": missions}
 
     if scanning:
         override = "Scanning the entire ship! Hold your hydrogen — this'll only take a moment, unless it takes several."
@@ -1332,8 +1325,6 @@ def build_dashboard_context(enforced: dict | None = None) -> dict:
         "stack_completeness": summarize_stack_completeness(),
         "services": summarize_services(),
         "disk": summarize_disk(),
-        "update_history": summarize_update_history(),
-        "rollback_candidates": summarize_rollback_candidates(),
         "system_and_backups": summarize_system_and_backups(enforced),
         "certs": summarize_certs(),
     }

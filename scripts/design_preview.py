@@ -417,7 +417,6 @@ class OfflineRpc:
         "config.enforced": {"paused_containers": ["CASA_ADGUARD"], "backup_jobs": ["weekly"], "links": []},
         "proposal.list_pending": [],
         "incident.list": [],
-        "chat.quota": {"used": 3, "limit": 100, "resets_at": time.time() + 3600},
         "auth.status": {"locked": False, "remaining_attempts": 3, "locked_until": None,
                         "accepted": True, "epoch": 0, "sent": True},
     }

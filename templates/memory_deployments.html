@@ -1,0 +1,7 @@
+{% extends "missions_base.html" %}
+{% block title %}Deployments{% endblock %}
+{% block content %}{% include "_deployments.html" %}{% endblock %}
+{% block scripts %}
+<script src="{{ asset('poll.js') }}"></script>
+<script src="{{ asset('panels.js') }}"></script>
+{% endblock %}

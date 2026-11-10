@@ -228,7 +228,7 @@
     get("execution-reason").textContent = reason;
     get("execution-progress").hidden = true;
     get("execution-summary").hidden = true;
-    get("execution-actions").replaceChildren(action("BACK TO ACTIONS", "/#actions", true));
+    get("execution-actions").replaceChildren(action("BACK TO NEEDS YOU", "/missions/needs-you", true));
     get("execution-message").textContent = "";
   }
 

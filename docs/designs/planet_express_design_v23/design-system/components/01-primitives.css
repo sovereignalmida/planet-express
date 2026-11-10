@@ -258,3 +258,5 @@
 .pe-crew-name { font-family: var(--pe-font-display); font-weight: 600; font-size: 13px; color: var(--pe-ink-2); }
 .pe-crew-role { font-family: var(--pe-font-mono); font-size: 10px; color: var(--pe-ink-faint); }
 
+/* Screen-reader-only text (the container page's widget status). */
+.pe-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

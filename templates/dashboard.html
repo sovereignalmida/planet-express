@@ -50,14 +50,14 @@
           </div>
 
           {% set hull = tiles.hull %}
-          <button class="overview-tile overview-hull-tile {{ hull.level }}" type="button" data-tile-tab="actions">
+          <a class="overview-tile overview-hull-tile {{ hull.level }}" href="/missions/needs-you">
             <span class="overview-tile-head"><span>HULL</span><span>{{ hull.note }}</span></span>
             <span class="overview-tile-hero">{{ hull.hero }}</span>
             {% if not hull.show_pills %}<span class="overview-tile-sub">{{ hull.sub }}</span>{% else %}
             <span class="overview-hull-pills">
               <span>{{ hull.critical }} CRIT</span><span>{{ hull.high }} HIGH</span><span>{{ hull.plans }} PLANS</span>
             </span>{% endif %}
-          </button>
+          </a>
 
           {% set backup = tiles.backups %}
           <button class="overview-tile {{ backup.level }}" type="button" data-tile-tab="backups">
@@ -488,7 +488,6 @@
         </section>
       </div>
 
-      <!-- ═══ ACTIONS ═══ -->
     </main>
 
   </div>
@@ -501,177 +500,8 @@
        that is still in flight. Anything holding operator state lives out here; anything out
        here that also shows live data is swapped by id in refreshDashboard() instead.
 
-       Actions is one tab-panel with two columns rather than four stacked siblings. Left is
-       what wants a decision from you: a plan to authorise, or an open rollback window, which
-       means a canary is either still in flight or its automatic rollback failed and is
-       waiting for a human. Right is what is wrong: reconciled incidents, then the hull
-       findings the Overview HULL tile points at. -->
-  <div class="tab-panel actions-dock" data-tab-panel="actions">
-    <div class="actions-split">
-
-      <div class="actions-col">
-        <div class="approval-dock" id="approval-panel" data-api="/api/approvals">
-          <section class="panel">
-            <div class="panel-head-row">
-              <h2>FLIGHT AUTHORISATION</h2>
-              <span class="panel-head-note" id="approval-count">typed actions</span>
-            </div>
-            <p id="approval-message" role="status">Loading approvals…</p>
-            <div id="approval-cards" class="approval-cards" aria-live="polite"></div>
-          </section>
-        </div>
-
-        <div id="rollback-candidates-panel">
-          {% if ctx.rollback_candidates %}
-          <section class="panel">
-            <h3 style="margin-bottom: 16px;">OPEN ROLLBACK CANDIDATES</h3>
-            <div class="grid-head" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr 0.8fr;">
-              <span>STACK</span><span>SERVICE</span><span>RECORDED</span><span>EXPIRES</span><span></span>
-            </div>
-            {% for r in ctx.rollback_candidates %}
-            <div class="grid-row" style="grid-template-columns: 1.4fr 1.4fr 1.6fr 1.6fr 0.8fr;">
-              <span class="cell-mono cell-dim">{{ r.stack }}</span>
-              <span class="cell-mono cell-service">{{ r.service }}</span>
-              <span class="cell-mono cell-when">{{ r.recorded_at }}</span>
-              <span class="cell-mono cell-when">{{ r.expires_at }}</span>
-              {% if r.held %}
-              <button type="button" class="pe-btn" data-settle-window
-                      data-execution="{{ r.execution_id }}" data-step="{{ r.step_n }}"
-                      data-label="{{ r.stack }}/{{ r.service }}">SETTLE</button>
-              {% else %}<span></span>{% endif %}
-            </div>
-            {% endfor %}
-            <p class="cell-dim" style="margin-top: 12px;">While a window is open, safe-prune is
-              blocked on this host. Settling releases that update's old image to the next prune,
-              so check the service is healthy first.</p>
-          </section>
-          {% endif %}
-        </div>
-      </div>
-
-      <div class="actions-col">
-        <div class="incident-dock" id="incident-panel" data-api="/api/incidents" data-missions="{{ '1' if missions_enabled() else '0' }}" data-console="{{ '1' if console_enabled() else '0' }}">
-          <section class="panel">
-            <div class="panel-head-row">
-              <h2>INCIDENT CONSOLE</h2>
-              <span class="panel-head-note" id="incident-count">reconciled evidence</span>
-              <div class="tabs-spacer"></div>
-              <div class="incident-filter" role="group" aria-label="Incident status">
-                <button class="incident-filter-btn is-active" type="button" data-incident-status="open" aria-pressed="true">OPEN</button>
-                <button class="incident-filter-btn" type="button" data-incident-status="resolved" aria-pressed="false">RESOLVED</button>
-              </div>
-            </div>
-            <p id="incident-message" role="status">Loading incidents…</p>
-            <div id="incident-cards" class="incident-cards" aria-live="polite"></div>
-            <div class="incident-rollup" id="incident-rollup" hidden>
-              <img src="{{ url_for('static', filename='characters/futurama/avatar/leela.png') }}" alt="">
-              <span id="incident-rollup-text"></span>
-            </div>
-          </section>
-        </div>
-
-        <div class="action-hull-dock" id="hull-diagnostics-panel">
-          {% set fc = ctx.findings.counts %}
-          {% if fc.critical %}{% set worst = 'crit' %}
-          {% elif fc.high %}{% set worst = 'high' %}
-          {% elif fc.medium %}{% set worst = 'medium' %}
-          {% elif fc.low %}{% set worst = 'low' %}
-          {% else %}{% set worst = 'none' %}{% endif %}
-          {% set hull_copy = {
-            'crit': ('⚠', 'CRITICAL FAULT', fc.critical|string ~ ' critical fault' ~ ('' if fc.critical == 1 else 's') ~ ' — immediate action required'),
-            'high': ('⚠', 'HIGH ALERT', fc.high|string ~ ' high-severity finding' ~ ('' if fc.high == 1 else 's') ~ ' need attention'),
-            'medium': ('!', 'CAUTION', fc.medium|string ~ ' finding' ~ ('' if fc.medium == 1 else 's') ~ ' worth a look'),
-            'low': ('i', 'MINOR NOTES', fc.low|string ~ ' low-severity note' ~ ('' if fc.low == 1 else 's') ~ ' — informational, non-blocking'),
-            'none': ('✓', 'ALL SYSTEMS NOMINAL', 'No open findings.'),
-          } %}
-          <section class="panel">
-            <h3 class="action-hull-title">HULL DIAGNOSTICS</h3>
-            {% if ctx.findings.available %}
-            <div class="alarm-banner {{ worst }}">
-              <div class="alarm-orb">{{ hull_copy[worst][0] }}</div>
-              <div class="alarm-text"><p class="alarm-title">{{ hull_copy[worst][1] }}</p><p class="alarm-sub">{{ hull_copy[worst][2] }}</p></div>
-              <div class="alarm-chips">
-                <span class="alarm-chip crit {{ 'zero' if not fc.critical }}">CRIT {{ fc.critical }}</span>
-                <span class="alarm-chip high {{ 'zero' if not fc.high }}">HIGH {{ fc.high }}</span>
-                <span class="alarm-chip med {{ 'zero' if not fc.medium }}">MED {{ fc.medium }}</span>
-                <span class="alarm-chip low {{ 'zero' if not fc.low }}">LOW {{ fc.low }}</span>
-              </div>
-            </div>
-            {% if ctx.findings.top %}<div class="hull-cards">{% for f in ctx.findings.top %}
-              <div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }}"><span class="hull-dot"></span><div class="hull-card-body">
-                <span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span>
-                <div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p>
-              </div></div>
-            {% endfor %}</div>{% endif %}
-            {% set drawer_items = (ctx.findings.medium_list or []) + (ctx.findings.low_list or []) %}
-            {% if drawer_items %}<details class="hull-drawer">
-              <summary class="hull-drawer-toggle"><span class="hull-drawer-caret">▸</span>{{ drawer_items|length }} low-severity note{{ '' if drawer_items|length == 1 else 's' }} · informational · non-blocking</summary>
-              <div class="hull-drawer-body">{% for f in drawer_items %}<div class="hull-card sev-{{ f.get('severity', 'unknown')|lower }} action-hull-note">
-                <span class="hull-dot"></span><div class="hull-card-body"><span class="hull-card-sev">{{ f.get('severity', 'unknown')|upper }}</span><div class="hull-card-resource">{{ f.get('resource', f.get('category', '—')) }}</div><p class="hull-card-desc">{{ f.get('description', '') }}</p></div>
-              </div>{% endfor %}</div>
-            </details>{% endif %}
-            {% else %}<p class="muted-body">No findings analysis is available yet. Run a full scan to collect it.</p>{% endif %}
-          </section>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <!-- History: what already happened. It left the Actions tab because nothing here is ever a
-       decision — Actions is for things that want one from you, and a log of clean canary runs
-       was the largest thing on that tab while being the only thing you could not act on.
-       Outside #dashboard-live with the rest, so refreshDashboard() swaps it by id. -->
-  <div class="tab-panel history-dock" data-tab-panel="history" id="manifest-panel">
-    {% if ctx.update_history %}
-    <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
-    <div class="history-split">
-      <section class="history-runs">
-        <div class="panel-head-row">
-          <h3>DEPLOYMENT MANIFEST</h3>
-          <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
-        </div>
-        <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
-      </section>
-      <aside class="history-detail" id="run-detail" aria-live="polite"></aside>
-    </div>
-    {% else %}
-    <section class="panel">
-      <div class="panel-head-row"><h3>DEPLOYMENT MANIFEST</h3></div>
-      <p class="muted-body">No canary update has run yet. Zoidberg's weekly pass records each one
-      here: which stack, which services, and whether they came up clean.</p>
-    </section>
-    {% endif %}
-  </div>
-
-  <div class="tab-panel chat-dock" data-tab-panel="chat" id="chat-panel">
-    <div class="chat-split">
-      <section class="panel chat-ask">
-        <div class="panel-head-row">
-          <h2>ASK THE SHIP</h2>
-          <div class="tabs-spacer"></div>
-          <span id="chat-quota" class="chat-quota">loading quota…</span>
-        </div>
-        <p class="chat-notice">Read-only checks. It can propose a plan, never run one.</p>
-        <form id="chat-form">
-          <label class="pe-visually-hidden" for="chat-question">Question</label>
-          <textarea id="chat-question" name="question" maxlength="2000" required
-                    placeholder="Why is immich slow this morning?"></textarea>
-          <button class="pe-btn chat-ask-btn" id="chat-ask" type="submit">ASK ⏎</button>
-        </form>
-        <p id="chat-message" role="status" class="chat-message"></p>
-        {# Only this browser session's questions. There is no chat.list RPC, so a real day
-           history would need a backend endpoint -- the label says what this actually is
-           rather than promising a day it cannot show. #}
-        <div class="chat-history-label">THIS SESSION</div>
-        <ol id="chat-transcript" class="chat-history" aria-label="This session's questions"
-            aria-live="polite"></ol>
-      </section>
-
-      <section class="panel chat-answer" id="chat-answer" aria-live="polite"></section>
-    </div>
-  </div>
-
+       Actions and History moved to Missions (NEEDS YOU) and Memory (DEPLOYMENTS) in rc14.7.3,
+       and Chat went: the Console replaced it. -->
   <!-- Kept outside #dashboard-live: a snapshot refresh must never destroy a config
        draft, review sheet, apply request, or activation watch. Config text is loaded
        only from /api/config by static/config.js. -->
@@ -817,7 +647,7 @@
           <li><span>› overview</span>{{ ctx.professor_lines.overview }}</li>
           <li><span>› backups</span>{{ ctx.professor_lines.backups }}</li>
           <li><span>› network</span>{{ ctx.professor_lines.network }}</li>
-          <li><span>› actions</span>{{ ctx.professor_lines.actions }}</li>
+          <li><span>› missions</span>{{ ctx.professor_lines.missions }}</li>
         </ul>
       </aside>
     </section>
@@ -833,10 +663,8 @@
   <aside class="pe-drawer" data-drawer hidden aria-label="Stack drawer"></aside>
   {% include "_elevate.html" %}
 
+  <script src="{{ asset('poll.js') }}"></script>
   <script src="{{ asset('dashboard.js') }}"></script>
-  <script src="{{ asset('incidents.js') }}"></script>
-  <script src="{{ asset('approvals.js') }}"></script>
-  <script src="{{ asset('chat.js') }}"></script>
   <script src="{{ asset('elevate.js') }}"></script>
   <script src="{{ asset('stacks.js') }}"></script>
   <script src="{{ asset('config.js') }}"></script>

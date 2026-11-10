@@ -12,8 +12,9 @@
   text-align: left; font-family: var(--pe-font-body);
   --tile-level: var(--pe-idle); --tile-ink: var(--pe-ink-dim);
 }
-button.overview-tile { cursor: pointer; }
-button.overview-tile:hover { border-color: var(--tile-level); }
+button.overview-tile, a.overview-tile { cursor: pointer; }
+a.overview-tile { text-decoration: none; }
+button.overview-tile:hover, a.overview-tile:hover { border-color: var(--tile-level); }
 .overview-tile.ok { --tile-level: var(--pe-ok); --tile-ink: var(--pe-ok-ink); }
 .overview-tile.warn { --tile-level: var(--pe-warn); --tile-ink: var(--pe-warn-ink); }
 .overview-tile.high { --tile-level: var(--pe-high); --tile-ink: var(--pe-high-ink); }

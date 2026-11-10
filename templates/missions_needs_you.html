@@ -1,0 +1,11 @@
+{% extends "missions_base.html" %}
+{% block title %}Needs you{% endblock %}
+{% block content %}{% include "_needs_you.html" %}{% endblock %}
+{% block scripts %}
+{% include "_elevate.html" %}
+<script src="{{ asset('elevate.js') }}"></script>
+<script src="{{ asset('poll.js') }}"></script>
+<script src="{{ asset('panels.js') }}"></script>
+<script src="{{ asset('incidents.js') }}"></script>
+<script src="{{ asset('approvals.js') }}"></script>
+{% endblock %}

@@ -9,17 +9,19 @@
 (function () {
   "use strict";
 
-  var TAB_NAMES = ["overview", "backups", "network", "actions", "history", "chat", "config", "crew"];
+  var TAB_NAMES = ["overview", "backups", "network", "config", "crew"];
+  // Tabs that left the dashboard in rc14.7.3. An old bookmark or link to one goes to where it lives now:
+  // Actions is NEEDS YOU under Missions, History is DEPLOYMENTS under Memory, and the Console replaced Chat.
+  var MOVED_TABS = { actions: "/missions/needs-you", history: "/memory/deployments", chat: "/console" };
   // Tabs whose panels live OUTSIDE #dashboard-live, as siblings of it. The live region's
   // main column has nothing to show for these, so it must be hidden or the tab opens with a
   // screen of empty space above its persistent content.
   // Add a tab here the moment its panel moves out of the snapshot region — forgetting to is what
-  // made Actions and History open blank when the deployment manifest left the live grid.
-  var DETACHED_TABS = ["actions", "history", "chat", "config", "crew"];
+  // made the old Actions and History tabs open blank when the deployment manifest left the live grid.
+  var DETACHED_TABS = ["config", "crew"];
 
   function setActiveTab(name) {
     if (name !== "overview") closeDrawer();
-    document.body.classList.toggle("chat-active", name === "chat");
     document.body.classList.toggle("detached-tab", DETACHED_TABS.indexOf(name) !== -1);
     document.querySelectorAll(".tab").forEach(function (btn) {
       btn.classList.toggle("active", btn.dataset.tab === name);
@@ -35,6 +37,16 @@
   // silently bounce the view back to Overview.
   function applyHashTab() {
     var hashTab = window.location.hash.slice(1);
+    if (Object.prototype.hasOwnProperty.call(MOVED_TABS, hashTab)) {
+      // Chat's replacement is the Console, which may be off; then there is nowhere better than Overview.
+      if (hashTab === "chat" && !document.querySelector('a.tab[href="/console"]')) {
+        history.replaceState(null, "", window.location.pathname);
+        setActiveTab("overview");
+        return;
+      }
+      window.location.replace(MOVED_TABS[hashTab]);
+      return;
+    }
     if (TAB_NAMES.indexOf(hashTab) !== -1) {
       setActiveTab(hashTab);
     }
@@ -44,51 +56,9 @@
   // a refresh (or a real reload) should keep a dismissed plan hidden, but a *different*
   // plan ID (new pending plan) should always show up regardless of a past dismissal.
 
-  // Close a held canary rollback window. Confirmed first: it releases the update's old image to
-  // the next prune, which is the only thing that could restore the service.
-  function settleWindow(btn) {
-    var label = btn.dataset.label;
-    if (!window.confirm("Close the rollback window for " + label + "? Its old image becomes " +
-        "prunable, so confirm the service is healthy first.")) return;
-    var meta = document.querySelector('meta[name="csrf-token"]');
-    var url = "/api/canary/" + encodeURIComponent(btn.dataset.execution) + "/" +
-              encodeURIComponent(btn.dataset.step) + "/settle";
-    function post() {
-      return fetch(url, {
-        method: "POST", cache: "no-store",
-        body: new URLSearchParams({ csrf_token: meta ? meta.content : "" })
-      }).then(function (r) {
-        return r.json().then(function (data) { return { r: r, data: data }; });
-      });
-    }
-    btn.disabled = true;
-    post().then(function (res) {
-      if (res.r.status === 401) { window.location.assign("/login?next=" + encodeURIComponent("/")); return null; }
-      if (res.data.reason === "elevation_required" && window.peElevate) {
-        return window.peElevate(res.data.error || "This needs your passphrase again.")
-          .then(function (ok) { return ok ? post() : null; });
-      }
-      return res;
-    }).then(function (res) {
-      if (!res) { btn.disabled = false; return; }
-      if (!res.r.ok) throw new Error(res.data.error || "host slow, retry");
-      window.alert(res.data.message || "Done.");
-      // The windows panel sits outside the live region the refresh swaps, so reload the page.
-      window.location.reload();
-    }).catch(function (error) {
-      btn.disabled = false;
-      window.alert(error.message);
-    });
-  }
-
   // Everything in here binds to DOM nodes -- must re-run after every refresh swap
   // (fresh nodes from the fetched HTML have no listeners of their own yet).
   function bindInteractions() {
-    document.querySelectorAll("[data-settle-window]").forEach(function (btn) {
-      // Assigned, not added: the windows panel sits outside the swapped region, so this runs
-      // again on the same buttons after every refresh and a listener would stack (Codex).
-      btn.onclick = function () { settleWindow(btn); };
-    });
     var scanBtn = document.getElementById("scan-btn");
     if (scanBtn && !scanBtn.disabled) {
       scanBtn.addEventListener("click", function () { startScan(scanBtn); });
@@ -178,7 +148,6 @@
       });
     });
 
-    buildDeployManifest();
   }
 
   var drawerOpener = null;
@@ -230,245 +199,10 @@
   // tab and -- since an open drawer holds off the refresh -- freeze the whole page.
   window.addEventListener("hashchange", closeDrawer);
 
-  // Which run the detail pane is showing. Module-level, because manifest-panel's innerHTML is
-  // replaced every 60 seconds and a selection held inside buildDeployManifest() would reset to
-  // the newest run under the operator every minute.
-  var selectedRunKey = null;
-
-  // Deployment manifest: group the flat update-history list (rendered into a JSON data
-  // island, not fetched) into "runs" -- a batch update writes many entries seconds
-  // apart, so cluster by stack + a small time-proximity gap and render a run card +
-  // timeline + chip board per cluster. Same data as the old flat table, just
-  // reorganized client-side -- no new backend endpoint.
-  function buildDeployManifest() {
-    var dataEl = document.getElementById("update-history-data");
-    var manifestEl = document.querySelector("[data-deploy-manifest]");
-    if (!dataEl || !manifestEl) return;
-
-    var entries;
-    try {
-      entries = JSON.parse(dataEl.textContent);
-    } catch (e) {
-      return;
-    }
-    if (!entries || !entries.length) return;
-
-    var GAP_MS = 10 * 60 * 1000;
-    // Cluster in chronological order (oldest first); the source list is newest-first.
-    var chrono = entries.slice().reverse();
-    var runs = [];
-    chrono.forEach(function (e) {
-      var t = new Date(e.ts).getTime();
-      var last = runs[runs.length - 1];
-      if (last && last.stack === e.stack && !isNaN(t) && (t - last.lastTs) <= GAP_MS) {
-        last.entries.push(e);
-        last.lastTs = t;
-      } else {
-        runs.push({ stack: e.stack, entries: [e], lastTs: t });
-      }
-    });
-    runs.reverse(); // newest run first
-
-    // Full local date/time + the browser's own timezone abbreviation -- the source
-    // timestamps are UTC ISO strings, but a sysadmin reading "05:16:04" wants to know
-    // it's in their own timezone, not have to mentally convert from UTC.
-    function fmtDateTime(ts) {
-      var d = new Date(ts);
-      if (isNaN(d.getTime())) return { date: ts, time: ts, tz: "" };
-      var tz = "";
-      try {
-        var part = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(d)
-          .find(function (p) { return p.type === "timeZoneName"; });
-        tz = part ? part.value : "";
-      } catch (e) { /* Intl unavailable -- degrade to no tz label */ }
-      return {
-        date: d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }),
-        time: d.toLocaleTimeString(undefined, { hour12: false }),
-        tz: tz,
-      };
-    }
-    function fmtSpan(ms) {
-      var mins = Math.round(ms / 60000);
-      if (mins < 1) return "<1 min";
-      if (mins < 60) return "~" + mins + " min";
-      return "~" + (mins / 60).toFixed(1) + " hr";
-    }
-    function fmtInterval(ms) {
-      var mins = Math.round(ms / 60000);
-      return mins < 1 ? "<1 min" : "~" + mins + " min";
-    }
-    function alertLabel(count) {
-      return count ? count + " alert" + (count === 1 ? "" : "s") : "all clean";
-    }
-    function el(tag, className, text) {
-      var node = document.createElement(tag);
-      if (className) node.className = className;
-      if (text !== undefined) node.textContent = text;
-      return node;
-    }
-
-    var summaryEl = document.getElementById("deploy-summary-chip");
-    if (summaryEl) {
-      var newest = runs[0];
-      var newestAlerts = newest.entries.filter(function (e) { return e.is_alert; }).length;
-      // "updated" and "no_change" both count as non-alert, but only "updated" actually
-      // changed anything -- don't claim a no-op check "updated" a service.
-      var allActuallyUpdated = newest.entries.every(function (e) { return e.status === "updated"; });
-      summaryEl.classList.toggle("alert", newestAlerts > 0);
-      summaryEl.innerHTML = "";
-      summaryEl.appendChild(el("span", "dot"));
-      summaryEl.appendChild(document.createTextNode(
-        newest.entries.length + " service" + (newest.entries.length === 1 ? "" : "s") + " · " +
-        (newestAlerts ? newestAlerts + " alert" + (newestAlerts === 1 ? "" : "s") : (allActuallyUpdated ? "all updated" : "all clean"))
-      ));
-    }
-
-    // Selection is held by identity, not by index: the list grows at the top, so an index
-    // would quietly point at a different run after the next canary pass.
-    function runKey(run) { return (run.stack || "unknown") + "@" + run.entries[0].ts; }
-
-    var detailEl = document.getElementById("run-detail");
-    var selected = runs.find(function (run) { return runKey(run) === selectedRunKey; }) || runs[0];
-    selectedRunKey = runKey(selected);
-
-    function renderDetail(run) {
-      if (!detailEl) return;
-      var alerts = run.entries.filter(function (e) { return e.is_alert; }).length;
-      var startMs = new Date(run.entries[0].ts).getTime();
-      var endMs = new Date(run.entries[run.entries.length - 1].ts).getTime();
-      var startDT = fmtDateTime(run.entries[0].ts);
-      var endDT = fmtDateTime(run.entries[run.entries.length - 1].ts);
-
-      detailEl.innerHTML = "";
-      var head = el("div", "run-detail-head");
-      head.appendChild(el("span", "run-detail-eyebrow", "RUN DETAIL"));
-      head.appendChild(el("div", "pe-spacer"));
-      head.appendChild(el("span", "run-detail-badge" + (alerts ? " alert" : ""), alertLabel(alerts).toUpperCase()));
-      detailEl.appendChild(head);
-
-      detailEl.appendChild(el("div", "run-detail-title", (run.stack || "unknown") + " · batch update"));
-      var endLabel = endDT.date !== startDT.date ? (endDT.date + " " + endDT.time) : endDT.time;
-      detailEl.appendChild(el("div", "run-detail-range",
-        startDT.date + " · " + startDT.time + " → " + endLabel + (endDT.tz ? " " + endDT.tz : "")));
-
-      var stats = el("div", "run-detail-stats");
-      [["SERVICES", String(run.entries.length), ""],
-       ["DURATION", fmtSpan(Math.max(endMs - startMs, 0)), ""],
-       ["CANARY", alerts ? "alerts" : "pass", alerts ? "alert" : "ok"]].forEach(function (cell) {
-        var well = el("div", "run-detail-well");
-        well.appendChild(el("div", "run-detail-well-label", cell[0]));
-        well.appendChild(el("div", "run-detail-well-value " + cell[2], cell[1]));
-        stats.appendChild(well);
-      });
-      detailEl.appendChild(stats);
-
-      detailEl.appendChild(el("div", "run-detail-eyebrow", "TIMELINE"));
-      var list = el("div", "run-timeline");
-      run.entries.forEach(function (e) {
-        var row = el("div", "run-timeline-row" + (e.is_alert ? " alert" : ""));
-        row.appendChild(el("span", "run-timeline-tick", e.is_alert ? "✗" : "✓"));
-        row.appendChild(el("span", "run-timeline-service", e.service));
-        row.appendChild(el("span", "run-timeline-time", fmtDateTime(e.ts).time));
-        list.appendChild(row);
-      });
-      detailEl.appendChild(list);
-
-      var note = el("div", "run-detail-note");
-      var portrait = document.createElement("img");
-      portrait.src = "/static/characters/futurama/avatar/zoidberg.png";
-      portrait.alt = "";
-      note.appendChild(portrait);
-      note.appendChild(el("span", "", "canary-tested by zoidberg · pulled, restarted, healthchecked"));
-      detailEl.appendChild(note);
-    }
-
-    function select(run) {
-      selectedRunKey = runKey(run);
-      manifestEl.querySelectorAll("[data-run-key]").forEach(function (card) {
-        var active = card.dataset.runKey === selectedRunKey;
-        card.classList.toggle("is-selected", active);
-        card.setAttribute("aria-pressed", active ? "true" : "false");
-      });
-      renderDetail(run);
-    }
-
-    manifestEl.innerHTML = "";
-    runs.forEach(function (run) {
-      var first = run.entries[0];
-      var lastEntry = run.entries[run.entries.length - 1];
-      var hasAlert = run.entries.some(function (e) { return e.is_alert; });
-      var span = Math.max(new Date(lastEntry.ts).getTime() - new Date(first.ts).getTime(), 0);
-      var startDT = fmtDateTime(first.ts);
-
-      var card = document.createElement("button");
-      card.type = "button";
-      card.className = "deploy-run" + (hasAlert ? " alert" : "");
-      card.dataset.runKey = runKey(run);
-      card.setAttribute("aria-pressed", "false");
-
-      var head = el("div", "deploy-run-head");
-      head.appendChild(el("span", "deploy-run-led"));
-      head.appendChild(el("span", "deploy-run-stack", run.stack || "unknown"));
-      head.appendChild(el("div", "pe-spacer"));
-      head.appendChild(el("span", "deploy-run-date", startDT.date));
-      card.appendChild(head);
-
-      var figures = el("div", "deploy-run-figures");
-      figures.appendChild(el("span", "deploy-run-n", String(run.entries.length)));
-      figures.appendChild(el("span", "deploy-run-n-label",
-        run.entries.length === 1 ? "SERVICE" : "SERVICES"));
-      figures.appendChild(el("div", "pe-spacer"));
-      figures.appendChild(el("span", "deploy-run-span", fmtSpan(span)));
-      card.appendChild(figures);
-
-      // One bar per service instead of a dot floating in 2,000px of timeline. At a glance
-      // the bar count is the run size and a red bar is the one that went wrong.
-      var bars = el("div", "deploy-run-bars");
-      run.entries.forEach(function (e) {
-        var bar = el("span", "deploy-run-bar" + (e.is_alert ? " alert" : ""));
-        bar.title = e.service + " · " + fmtDateTime(e.ts).time;
-        bars.appendChild(bar);
-      });
-      card.appendChild(bars);
-
-      card.addEventListener("click", function () { select(run); });
-      manifestEl.appendChild(card);
-    });
-
-    select(selected);
-  }
-
   var REFRESH_INTERVAL_MS = 60000;
 
-  // fn resolves to true only on success; skipped/failed reads do not reset
-  // freshness. The initial server-rendered view starts fresh.
-  function pollWhileVisible(fn, intervalMs) {
-    var timer = null;
-    var inFlight = false;
-    var lastSuccess = Date.now();
-
-    function poll() {
-      if (inFlight || document.visibilityState !== "visible") return;
-      inFlight = true;
-      Promise.resolve().then(fn).then(function (success) {
-        if (success === true) lastSuccess = Date.now();
-        inFlight = false;
-      }, function () {
-        inFlight = false;
-      });
-    }
-
-    function visibilityChanged() {
-      if (timer !== null) clearInterval(timer);
-      timer = null;
-      if (document.visibilityState !== "visible") return;
-      if (Date.now() - lastSuccess > intervalMs) poll();
-      timer = setInterval(poll, intervalMs);
-    }
-
-    document.addEventListener("visibilitychange", visibilityChanged);
-    visibilityChanged();
-  }
+  // The poller is shared with panels.js (static/poll.js, loaded first).
+  var pollWhileVisible = window.pePollWhileVisible;
 
   // ── SCAN ────────────────────────────────────────────────────────────────────
   // The button was <a href="/">: it said SCAN and reloaded the page. It now posts to
@@ -608,27 +342,13 @@
         var currentLive = document.getElementById("dashboard-live");
         if (!freshLive || !currentLive) return;
         currentLive.innerHTML = freshLive.innerHTML;
-        // The deployment manifest sits outside #dashboard-live so it can render below the two
-        // docks, which have to stay outside it. Swap it by id here, or it would be the one panel
-        // on the page that silently stopped updating.
-        var freshManifest = fresh.getElementById("manifest-panel");
-        var currentManifest = document.getElementById("manifest-panel");
-        if (freshManifest && currentManifest) currentManifest.innerHTML = freshManifest.innerHTML;
-        // Same treatment for the Crew tab's ship's-computer log: it sits outside the live
-        // region because nothing in it holds operator state, but its lines come straight out
+        // The Crew tab's ship's-computer log sits outside the live region because nothing in it
+        // holds operator state, but its lines come straight out
         // of build_professor_lines() and would otherwise contradict a dashboard that has
         // since re-scanned.
         var freshCrew = fresh.getElementById("crew-panel");
         var currentCrew = document.getElementById("crew-panel");
         if (freshCrew && currentCrew) currentCrew.innerHTML = freshCrew.innerHTML;
-        var freshHull = fresh.getElementById("hull-diagnostics-panel");
-        var currentHull = document.getElementById("hull-diagnostics-panel");
-        if (freshHull && currentHull) currentHull.innerHTML = freshHull.innerHTML;
-        // A window can appear or become held after page load; this panel is the only way out of
-        // a held one, so it follows the refresh (bindInteractions rebinds its buttons).
-        var freshWindows = fresh.getElementById("rollback-candidates-panel");
-        var currentWindows = document.getElementById("rollback-candidates-panel");
-        if (freshWindows && currentWindows) currentWindows.innerHTML = freshWindows.innerHTML;
         applyHashTab();
         bindInteractions();
         return true;

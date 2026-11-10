@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_the_incident_panel_knows_whether_the_console_is_on():
-    assert 'data-console="{{ \'1\' if console_enabled() else \'0\' }}"' in (ROOT / "templates/dashboard.html").read_text()
+    assert 'data-console="{{ \'1\' if console_enabled() else \'0\' }}"' in (ROOT / "templates/_needs_you.html").read_text()
 
 
 def test_the_incident_button_posts_the_incident_id_to_the_console_and_goes_there():

@@ -148,11 +148,11 @@ def test_the_standing_page_lists_and_offers_revoke_and_create(web):
     client, core, _ = web
     core.results["standing.list"] = {"standing_grants": [GRANT]}
     page = client.get("/missions/standing").get_data(as_text=True)
-    assert core.calls[-1] == ("standing.list", {"include_inactive": False})
+    assert ("standing.list", {"include_inactive": False}) in core.calls       # then the NEEDS YOU count's reads
     assert "SG-1-v1" in page and 'action="/missions/standing/SG-1-v1/revoke"' in page and 'action="/missions/standing"' in page
     assert "never change or critical" in page
     client.get("/missions/standing?all=1")
-    assert core.calls[-1] == ("standing.list", {"include_inactive": True})
+    assert ("standing.list", {"include_inactive": True}) in core.calls
 
 
 def test_the_standing_page_says_a_pre_upgrade_standing_grant_no_longer_applies(web):

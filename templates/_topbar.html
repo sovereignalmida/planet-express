@@ -6,20 +6,20 @@
     </div>
 
     <nav class="tabs">
-      {# On the dashboard the tabs switch panels in place (dashboard.js, data-tab). Anywhere else
-         (Hosts is its own page) they are plain links back to the dashboard at that tab. #}
-      {% for name, label in [("overview", "Overview"), ("backups", "Backups"), ("network", "Network"), ("actions", "Actions"), ("history", "History"), ("chat", "Chat"), ("config", "Config"), ("crew", "Crew")] %}
-      {% if page == "dashboard" %}<button class="tab{{ ' active' if loop.first }}" data-tab="{{ name }}" type="button">{{ label }}</button>
-      {% else %}<a class="tab" href="{{ url_for('index') }}#{{ name }}">{{ label }}</a>
-      {% endif %}{% endfor %}
-      <a class="tab{{ ' active' if page == 'hosts' }}" href="{{ url_for('hosts') }}">Hosts</a>
-      {% if console_enabled() %}
+      {# Overview, Network, Backups, Config and Crew are panels of the dashboard: there they switch in place
+         (dashboard.js, data-tab), anywhere else they are links back to the dashboard at that tab. Console,
+         Hosts, Missions and Memory are pages of their own. Missions and Memory are always shown: NEEDS YOU and
+         DEPLOYMENTS live there and work with missions off (rc14.7.3). #}
+      {% for name, label in [("overview", "Overview"), ("console", "Console"), ("network", "Network"), ("hosts", "Hosts"), ("backups", "Backups"), ("missions", "Missions"), ("memory", "Memory"), ("config", "Config"), ("crew", "Crew")] %}
+      {% if name == "console" %}{% if console_enabled() %}
       <a class="tab{{ ' active' if page == 'console' }}" href="{{ url_for('console_page') }}">Console</a>
       {% endif %}
-      {% if missions_enabled() %}
-      <a class="tab{{ ' active' if page == 'missions' }}" href="{{ url_for('missions_page') }}">Missions</a>
-      <a class="tab{{ ' active' if page == 'memory' }}" href="{{ url_for('memory_page') }}">Memory</a>
-      {% endif %}
+      {% elif name == "hosts" %}<a class="tab{{ ' active' if page == 'hosts' }}" href="{{ url_for('hosts') }}">Hosts</a>
+      {% elif name == "missions" %}<a class="tab{{ ' active' if page == 'missions' }}" href="{{ '/missions' if missions_enabled() else '/missions/needs-you' }}">Missions</a>
+      {% elif name == "memory" %}<a class="tab{{ ' active' if page == 'memory' }}" href="{{ '/memory' if missions_enabled() else '/memory/deployments' }}">Memory</a>
+      {% elif page == "dashboard" %}<button class="tab{{ ' active' if loop.first }}" data-tab="{{ name }}" type="button">{{ label }}</button>
+      {% else %}<a class="tab" href="{{ url_for('index') }}#{{ name }}">{{ label }}</a>
+      {% endif %}{% endfor %}
     </nav>
 
     <div class="topbar-spacer"></div>

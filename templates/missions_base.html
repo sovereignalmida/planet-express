@@ -21,6 +21,19 @@
 <div class="body-grid">
   <main class="main-col">
     <div class="tab-panel active">
+      {# Sub-tabs (rc14.7.3): Missions holds NEEDS YOU (the old Actions tab), Memory holds DEPLOYMENTS (the old
+         History tab). Shown even with missions off, since those two views do not need missions. #}
+      {% if page == "missions" %}
+      <nav class="mc-subtabs" id="mc-subtabs" aria-label="Missions views">
+        <a class="mc-subtab{{ ' is-active' if sub != 'needs' }}" href="{{ url_for('missions_page') }}"{{ ' aria-current="page"' | safe if sub != 'needs' }}>MISSIONS</a>
+        <a class="mc-subtab{{ ' is-active' if sub == 'needs' }}" href="{{ url_for('needs_you_page') }}"{{ ' aria-current="page"' | safe if sub == 'needs' }}>NEEDS YOU{% if needs_count %} <span class="mc-subtab-count">{{ needs_count }}</span>{% endif %}</a>
+      </nav>
+      {% elif page == "memory" %}
+      <nav class="mc-subtabs" id="mc-subtabs" aria-label="Memory views">
+        <a class="mc-subtab{{ ' is-active' if sub != 'deployments' }}" href="{{ url_for('memory_page') }}"{{ ' aria-current="page"' | safe if sub != 'deployments' }}>CARDS</a>
+        <a class="mc-subtab{{ ' is-active' if sub == 'deployments' }}" href="{{ url_for('deployments_page') }}"{{ ' aria-current="page"' | safe if sub == 'deployments' }}>DEPLOYMENTS</a>
+      </nav>
+      {% endif %}
       {% if notice %}<div class="mc-notice" role="status">{{ notice }}</div>{% endif %}
       {% if disabled %}
       <section class="panel" aria-label="Disabled">
@@ -31,5 +44,6 @@
     </div>
   </main>
 </div>
+{% block scripts %}{% endblock %}
 </body>
 </html>

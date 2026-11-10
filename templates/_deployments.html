@@ -1,0 +1,23 @@
+{# DEPLOYMENTS: the old dashboard History tab, now a sub-tab of Memory (rc14.7.3). What already
+   happened: Zoidberg's canary runs. Needs ctx.update_history; static/panels.js draws the manifest. #}
+  <div class="history-dock" id="manifest-panel">
+    {% if ctx.update_history %}
+    <script type="application/json" id="update-history-data">{{ ctx.update_history|tojson }}</script>
+    <div class="history-split">
+      <section class="history-runs">
+        <div class="panel-head-row">
+          <h3>DEPLOYMENT MANIFEST</h3>
+          <span class="deploy-summary-chip" id="deploy-summary-chip"></span>
+        </div>
+        <div class="deploy-runs" id="deploy-manifest" data-deploy-manifest></div>
+      </section>
+      <aside class="history-detail" id="run-detail" aria-live="polite"></aside>
+    </div>
+    {% else %}
+    <section class="panel">
+      <div class="panel-head-row"><h3>DEPLOYMENT MANIFEST</h3></div>
+      <p class="muted-body">No canary update has run yet. Zoidberg's weekly pass records each one
+      here: which stack, which services, and whether they came up clean.</p>
+    </section>
+    {% endif %}
+  </div>

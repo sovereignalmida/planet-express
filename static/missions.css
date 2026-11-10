@@ -34,3 +34,17 @@
   .mc-facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
   .mc-facts dd { margin-bottom: 8px; }
 }
+
+/* Sub-tabs on Missions (MISSIONS · NEEDS YOU) and Memory (CARDS · DEPLOYMENTS), rc14.7.3. */
+.mc-subtabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.mc-subtab {
+  padding: 6px 12px; border-radius: var(--pe-r-sm); border: 1px solid var(--pe-border-strong);
+  color: var(--pe-ink-dim); font: 10.5px var(--pe-font-mono); letter-spacing: .08em; text-decoration: none;
+}
+.mc-subtab:hover { color: var(--pe-ink); }
+.mc-subtab.is-active { color: var(--pe-accent-hi); border-color: var(--pe-accent); background: var(--pe-accent-bg); }
+.mc-subtab-count {
+  display: inline-block; min-width: 16px; margin-left: 4px; padding: 0 4px; border-radius: 8px;
+  background: var(--pe-warn-line); color: var(--pe-ink); text-align: center;
+}
+.main-col .actions-dock, .main-col .history-dock { padding: 0; }

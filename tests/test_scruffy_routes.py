@@ -239,7 +239,8 @@ def test_index_renders_real_findings(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "STATE_STATUS", tmp_path / "nope.json")
     monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", tmp_path / "nope.json")
 
-    resp = _client().get("/")
+    # The findings themselves are on Missions > NEEDS YOU (rc14.7.3).
+    resp = _client().get("/missions/needs-you")
     assert resp.status_code == 200
     assert b"backups.daily" in resp.data
     assert b"Backup timer has not run in 9 days" in resp.data
@@ -285,7 +286,7 @@ def test_widget_with_real_findings(tmp_path, monkeypatch):
 
 
 # ── 1r.1: certificate vault attention count (Codex finding on 1r) ───────────────
-def _render_with_certs(tmp_path, monkeypatch, certs):
+def _render_with_certs(tmp_path, monkeypatch, certs, path="/"):
     monitor = tmp_path / "latest_monitor.json"
     monitor.write_text(json.dumps({"timestamp": "2026-09-15T12:00:00+00:00", "mode": "full", "certs": certs}))
     monkeypatch.setattr(config, "STATE_MONITOR", monitor)
@@ -293,7 +294,7 @@ def _render_with_certs(tmp_path, monkeypatch, certs):
         monkeypatch.setattr(config, attr, tmp_path / f"{attr}_missing.json")
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_traefik_routers", lambda: {"available": False, "routers": []})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats", lambda: {"available": False})
-    resp = _client().get("/")
+    resp = _client().get(path)
     assert resp.status_code == 200
     return resp.data.decode()
 
@@ -654,127 +655,6 @@ def assert_chat_error(response, status):
     assert response.headers["Cache-Control"] == "no-store"
     assert b"secret diagnostic" not in response.data
     assert b"<html" not in response.data
-
-
-@pytest.mark.parametrize("path", ["/api/chat", "/api/chat/012345abcdef", "/api/chat/quota"])
-def test_chat_requires_auth_json(path):
-    client, rpc, _now = make_client()
-    response = client.post(path) if path == "/api/chat" else client.get(path)
-    assert_chat_error(response, 401)
-    assert not rpc.calls
-
-
-def test_chat_csrf_and_operator(chat_client):
-    client, rpc, _now, data = chat_client
-    assert_chat_error(client.post("/api/chat", data={"question": "hello"}), 400)
-    assert_chat_error(client.post("/api/chat", data=data | {"csrf_token": "wrong"}), 400)
-    assert not rpc.calls
-    ticket = {"ticket_id": "012345abcdef", "status": "queued"}
-    rpc.results["chat.ask"] = ticket
-    response = client.post("/api/chat", data=data | {"operator": "bob"})
-    assert response.status_code == 200 and response.get_json() == ticket
-    assert response.headers["Cache-Control"] == "no-store"
-    assert rpc.calls == [("chat.ask", {"operator": "alice", "question": "What failed?",
-                                       "submission_id": "submission-123"})]
-
-
-@pytest.mark.parametrize("field,value", [("question", ""), ("question", "  "),
-    ("question", "x" * 2001), ("submission_id", "short"), ("submission_id", "x" * 65),
-    ("submission_id", "invalid!"), ("submission_id", "abcdefgh\n")])
-def test_chat_validation_before_rpc(chat_client, field, value):
-    client, rpc, _now, data = chat_client
-    assert_chat_error(client.post("/api/chat", data=data | {field: value}), 400)
-    assert not rpc.calls
-
-
-@pytest.mark.parametrize("ticket_id", ["bad", "ABCDEF012345", "a" * 13, "a" * 11])
-def test_chat_malformed_ticket(chat_client, ticket_id):
-    client, rpc, _now, _data = chat_client
-    assert_chat_error(client.get("/api/chat/" + ticket_id), 404)
-    assert not rpc.calls
-
-
-@pytest.mark.parametrize("code,status", [("not_found", 404), ("bad_request", 400), ("internal", 503)])
-def test_chat_core_error_envelope(chat_client, code, status):
-    client, rpc, _now, _data = chat_client
-    # Exercise the actual wire envelope, rather than only raised transport errors.
-    original = rpc.__class__.__call__
-    with pytest.MonkeyPatch.context() as patch:
-        def call(self, method, params):
-            if method == "chat.get":
-                self.calls.append((method, params))
-                return {"ok": False, "error": {"code": code, "message": "secret diagnostic"}}
-            return original(self, method, params)
-        patch.setattr(FakeRpc, "__call__", call)
-        assert_chat_error(client.get("/api/chat/012345abcdef"), status)
-    assert rpc.calls == [("chat.get", {"operator": "alice", "ticket_id": "012345abcdef"})]
-
-
-@pytest.mark.parametrize("method", ["chat.ask", "chat.get", "chat.quota", "auth.device_epoch"])
-def test_chat_unreachable_is_json(chat_client, method):
-    client, rpc, now, data = chat_client
-    rpc.results[method] = RpcError("secret diagnostic")
-    if method == "auth.device_epoch":
-        now[0] += 61
-    response = (client.post("/api/chat", data=data) if method == "chat.ask" else
-                client.get("/api/chat/quota" if method == "chat.quota" else "/api/chat/012345abcdef"))
-    assert_chat_error(response, 503)
-    assert client.get_cookie("pe_auth") is not None
-
-
-def test_chat_quota_and_ticket_passthrough(chat_client):
-    client, rpc, _now, data = chat_client
-    quota = {"used": 12, "limit": 100, "resets_at": 1800050000}
-    ticket = {"ticket_id": "012345abcdef", "status": "failed", "error": "chat is busy, try again shortly"}
-    rpc.results.update({"chat.quota": quota, "chat.ask": ticket, "chat.get": ticket})
-    for response, expected in [(client.get("/api/chat/quota"), quota),
-                               (client.post("/api/chat", data=data), ticket),
-                               (client.get("/api/chat/012345abcdef"), ticket)]:
-        assert response.status_code == 200 and response.get_json() == expected
-        assert response.headers["Cache-Control"] == "no-store"
-    assert rpc.calls[0] == ("chat.quota", {})
-
-
-def test_chat_panel_outside_live_snapshot(tmp_path, monkeypatch):
-    class DashboardParser(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.stack = []
-            self.chat_ancestors = None
-            self.chat_tab = False
-            self.csrf_meta = False
-
-        def handle_starttag(self, tag, attrs):
-            attrs = dict(attrs)
-            if attrs.get("data-tab-panel") == "chat":
-                self.chat_ancestors = list(self.stack)
-                assert "tab-panel" in attrs.get("class", "").split()
-            if tag == "button" and attrs.get("data-tab") == "chat":
-                self.chat_tab = True
-            if tag == "meta" and attrs.get("name") == "csrf-token":
-                self.csrf_meta = bool(attrs.get("content"))
-            if tag not in {"meta", "link", "img", "input", "br", "hr"}:
-                self.stack.append((tag, attrs.get("id")))
-
-        def handle_endtag(self, tag):
-            if self.stack and self.stack[-1][0] == tag:
-                self.stack.pop()
-
-    parser = DashboardParser()
-    parser.feed(_render_with_certs(tmp_path, monkeypatch, []))
-    assert parser.chat_tab and parser.csrf_meta
-    assert parser.chat_ancestors is not None
-    assert ("div", "dashboard-live") not in parser.chat_ancestors
-    assert parser.chat_ancestors == [("html", None), ("body", None)]
-
-
-
-def test_chat_js_does_not_need_a_secure_context():
-    """crypto.randomUUID() only exists over HTTPS or localhost; the dashboard is plain HTTP on the LAN."""
-    js = (Path(__file__).resolve().parent.parent / "static" / "chat.js").read_text()
-    code = "\n".join(line for line in js.splitlines() if not line.strip().startswith("//"))
-    assert "randomUUID" not in code
-    assert "crypto.getRandomValues" in code
 
 
 def test_container_shell_and_validation(chat_client):
@@ -1149,25 +1029,25 @@ def test_config_rpc_errors_are_always_503_json(chat_client, path):
 
 
 def test_actions_splits_what_wants_you_from_what_is_wrong(tmp_path, monkeypatch):
-    """Left column: things asking for a decision -- a plan to authorise, an open rollback
-    window. Right column: things that are wrong -- incidents, then hull findings. The update
-    history is not on this tab at all; it is the one thing here you could never act on."""
-    html = _render_with_certs(tmp_path, monkeypatch, [])
-    dock = html[html.index('data-tab-panel="actions"'):html.index('data-tab-panel="history"')]
+    """Missions > NEEDS YOU (the old Actions tab). Left column: things asking for a decision -- a plan to
+    authorise, an open rollback window. Right column: things that are wrong -- incidents, then hull findings.
+    The update history is not here; it is the one thing you could never act on, and lives under Memory."""
+    html = _render_with_certs(tmp_path, monkeypatch, [], path="/missions/needs-you")
+    dock = html[html.index('class="actions-dock"'):]
     columns = re.findall(r'<div class="actions-col">(.*?)\n      </div>', dock, re.DOTALL)
     assert len(columns) == 2
     assert re.findall(r'id="([a-z-]+-panel|rollback-candidates-panel)"', columns[0]) == [
         "approval-panel", "rollback-candidates-panel"]
     assert re.findall(r'id="([a-z-]+-panel)"', columns[1]) == [
         "incident-panel", "hull-diagnostics-panel"]
-    assert 'data-tab-panel="history" id="manifest-panel"' in html
-    assert 'data-tab="history"' in html          # and it has a tab of its own to live on
+    assert 'id="manifest-panel"' not in html
+    assert 'id="manifest-panel"' in _client().get("/memory/deployments").data.decode()
 
 
 def test_the_actions_panels_are_not_themselves_tab_panels(tmp_path, monkeypatch):
     """They are children of one tab-panel now. Leaving the class on them would have
     setActiveTab() toggling .active on the column contents too."""
-    html = _render_with_certs(tmp_path, monkeypatch, [])
+    html = _render_with_certs(tmp_path, monkeypatch, [], path="/missions/needs-you")
     for panel in ("approval-panel", "incident-panel", "hull-diagnostics-panel",
                   "rollback-candidates-panel"):
         opening = re.search(rf'<div[^>]*id="{panel}"', html).group(0)
@@ -1178,22 +1058,24 @@ def test_the_actions_panels_are_not_themselves_tab_panels(tmp_path, monkeypatch)
 def test_overview_replaces_full_width_hull_and_system_with_tiles(tmp_path, monkeypatch):
     html = _render_with_certs(tmp_path, monkeypatch, [])
     overview = html[html.index('data-tab-panel="overview"'):html.index('data-tab-panel="backups"')]
-    assert 'data-tile-tab="actions"' in overview
+    assert re.search(r'<a class="overview-tile overview-hull-tile \w+" href="/missions/needs-you">', overview)
     assert 'class="overview-tile none"' in overview
     assert "panel-green" not in overview
     assert "stat-tiles" not in overview
-    # It moved to Actions, which is where the HULL tile's "actions ›" leads.
-    dock = html[html.index('data-tab-panel="actions"'):html.index('data-tab-panel="history"')]
-    assert 'id="hull-diagnostics-panel"' in dock
+    # It moved to Missions > NEEDS YOU, which is where the HULL tile leads.
+    assert 'id="hull-diagnostics-panel"' not in html
+    assert 'id="hull-diagnostics-panel"' in _render_with_certs(tmp_path, monkeypatch, [], path="/missions/needs-you")
 
 
 def test_static_assets_are_versioned_so_a_cached_one_cannot_outlive_a_deploy(tmp_path, monkeypatch):
     """A browser holding the previous cockpit.css against freshly deployed markup looks
     exactly like a broken release. Every stylesheet and script carries its file mtime."""
     html = _render_with_certs(tmp_path, monkeypatch, [])
-    for asset in ("cockpit.css", "dashboard.js", "incidents.js", "approvals.js",
-                  "chat.js", "config.js"):
+    for asset in ("cockpit.css", "poll.js", "dashboard.js", "config.js"):
         assert re.search(rf"/static/{re.escape(asset)}\?v=\d+", html), asset
+    needs = _render_with_certs(tmp_path, monkeypatch, [], path="/missions/needs-you")
+    for asset in ("cockpit.css", "missions.css", "poll.js", "panels.js", "incidents.js", "approvals.js", "elevate.js"):
+        assert re.search(rf"/static/{re.escape(asset)}\?v=\d+", needs), asset
 
 
 def test_the_backups_tab_never_calls_a_disabled_daily_a_fault(tmp_path, monkeypatch):
@@ -1241,8 +1123,9 @@ def test_the_fleet_and_system_tiles_are_not_clickable_controls(tmp_path, monkeyp
     overview = html[html.index('data-tab-panel="overview"'):html.index('data-tab-panel="backups"')]
     tiles = overview[overview.index('class="overview-tiles"'):overview.index("overview-control-grid")]
     assert 'data-tile-tab="overview"' not in tiles
-    for target in ("actions", "backups", "network"):
+    for target in ("backups", "network"):
         assert f'data-tile-tab="{target}"' in tiles
+    assert 'href="/missions/needs-you"' in tiles          # HULL is a link to a page of its own
 
 
 def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):
@@ -1251,21 +1134,25 @@ def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):
     html = _render_with_certs(tmp_path, monkeypatch, [])
     # Everything below this marker is a sibling of the live region, never a child.
     detached = html[html.index("PANELS OUTSIDE #dashboard-live"):]
-    for panel in ("approval-panel", "incident-panel", "hull-diagnostics-panel",
-                  "rollback-candidates-panel", "manifest-panel", "chat-panel",
-                  "config-panel", "crew-panel"):
+    for panel in ("config-panel", "crew-panel"):
         assert f'id="{panel}"' in detached, panel
-    assert "incidents.js" in html
-    assert "approvals.js" in html
+    # The approval and incident docks moved to Missions > NEEDS YOU (rc14.7.3). That page has no 60-second
+    # snapshot swap at all: panels.js swaps only the read-only panels, by id, and never the approval or
+    # incident docks, which keep their own scripts.
+    for panel in ("approval-panel", "incident-panel", "chat-panel"):
+        assert f'id="{panel}"' not in html, panel
+    script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
+    live = re.search(r"var LIVE_PANELS = \[(.*?)\];", script).group(1)
+    assert "approval-panel" not in live and "incident-panel" not in live
 
 
 def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp_path, monkeypatch):
     """It renders below the docks, so it cannot live inside #dashboard-live — the refresh has to
     swap it by id instead, or it would be the one panel that silently stopped updating."""
-    html = _render_with_certs(tmp_path, monkeypatch, [])
+    html = _render_with_certs(tmp_path, monkeypatch, [], path="/memory/deployments")
     assert 'id="manifest-panel"' in html
-    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
-    assert 'getElementById("manifest-panel")' in script
+    script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
+    assert '"manifest-panel"' in re.search(r"var LIVE_PANELS = \[(.*?)\];", script).group(1)
 
 
 def test_the_crew_tab_carries_the_eight_the_design_package_names(tmp_path, monkeypatch):
@@ -1321,7 +1208,7 @@ def test_history_renders_run_cards_beside_a_detail_pane(tmp_path, monkeypatch):
                         lambda: {"available": False, "routers": []})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
-    html = _client().get("/").data.decode()
+    html = _client().get("/memory/deployments").data.decode()
     assert 'class="history-split"' in html
     assert 'id="deploy-manifest"' in html and 'id="run-detail"' in html
 
@@ -1330,7 +1217,7 @@ def test_the_selected_run_survives_a_manifest_rebuild(tmp_path, monkeypatch):
     """manifest-panel's innerHTML is replaced every 60 seconds. A selection held inside
     buildDeployManifest() would reset to the newest run under the operator every minute, and
     an index would point at a different run once a new one lands at the top."""
-    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
+    script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
     declaration = re.search(r"^  var selectedRunKey = null;", script, re.MULTILINE)
     assert declaration, "selectedRunKey must live at module scope, not inside the builder"
     assert declaration.start() < script.index("function buildDeployManifest")
@@ -1362,11 +1249,12 @@ def test_the_header_still_wraps_before_the_single_row_runs_out_of_space(tmp_path
     narrow = css[css.index("@media (max-width: 1560px)"):]
     assert "flex-wrap: wrap" in narrow
     assert "overflow-x: auto" in narrow
-    # Nine tabs today. A tenth needs the measurement redone, not the number nudged.
+    # Eight tabs with the Console off, nine with it on (rc14.7.3 dropped Actions, History and Chat and made
+    # Missions and Memory permanent). A tenth needs the measurement redone, not the number nudged.
     # `class="tab active"` is one of them, so match the class rather than the literal string.
     # The tabs come from the shared _topbar.html partial, so count them in the rendered page.
     html = _render_with_certs(tmp_path, monkeypatch, [])
-    assert len(re.findall(r'class="tab(?: active)?"', html)) == 9
+    assert len(re.findall(r'class="tab(?: active)?"', html)) == 8
 
 
 def test_config_panel_is_persistent_and_loaded_by_javascript(tmp_path, monkeypatch):
@@ -1481,7 +1369,7 @@ def test_index_shows_open_canary_windows_from_core(tmp_path, monkeypatch):
          "image_reference": "nginx:1.27", "recorded_at": "2026-09-23T12:00:00+01:00",
          "expires_at": "when a human closes it"},
     ]]
-    resp = client.get("/")
+    resp = client.get("/missions/needs-you")
     assert resp.status_code == 200
     assert ("canary.candidates", {}) in rpc.calls
     assert b"OPEN ROLLBACK CANDIDATES" in resp.data and b"sonarr" in resp.data
@@ -2582,3 +2470,10 @@ def test_the_drawer_offers_no_down_for_an_ingress_stack():
     for guess in ('== "network"', "'network'", "traefik", "adguard"):
         assert guess not in page.split("data-stack-act")[1][:600], \
             f"the drawer restates the ingress rule ({guess}); that rule belongs to core"
+
+
+def test_screen_reader_only_text_is_still_hidden():
+    """It lived among the Chat styles; removing Chat (rc14.7.3) must not take it with it."""
+    css = (Path(__file__).resolve().parent.parent / "static" / "cockpit.css").read_text()
+    assert ".pe-visually-hidden { position: absolute;" in css
+    assert 'class="pe-visually-hidden"' in (Path(__file__).resolve().parent.parent / "templates" / "container.html").read_text()

@@ -14,6 +14,15 @@
 **Priority:** P3
 **Depends on:** Landing 1c (dashboard RPC + container panel)
 
+### Retire Core's chat service (P3)
+
+**What:** rc14.7.3 removed the dashboard Chat tab and its `/api/chat*` routes, so Core's `ChatService` and its `chat.ask`,
+`chat.get` and `chat.quota` RPC methods have no caller left. Remove them, the chat tables' writers, and the chat-only
+investigation path, after checking nothing in Telegram reaches them. `casa_bender.diagnostic_label()` (it named the Chat tab's evidence
+cards) has no caller left either; it goes with them, under the second-review gate. The chat spend-ceiling item below goes with it.
+
+**Why:** dead code on the RPC surface is surface a reviewer still has to check.
+
 ### Chat spend ceiling: count cost, not calls
 
 **What:** Record per-call token usage and make the daily chat ceiling a cost budget instead of a

@@ -104,7 +104,7 @@ def token(client):
 
 
 # ── auth and CSRF ─────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("path", ["/missions", "/missions/M-2", "/memory"])
+@pytest.mark.parametrize("path", ["/missions", "/missions/M-2", "/memory", "/missions/needs-you", "/memory/deployments"])
 def test_pages_require_auth(path):
     core = Core()
     app = casa_scruffy.create_app(ENV, rpc_call=core, clock=lambda: 1800000000.0)
@@ -134,12 +134,109 @@ def test_investigate_api_needs_csrf_and_auth(web):
     assert anon.post(f"/api/incidents/{INC}/investigate").status_code == 401
 
 
+# ── Sub-tabs: NEEDS YOU and DEPLOYMENTS (rc14.7.3) ─────────────────────────────
+
+def test_the_board_has_sub_tabs_and_counts_what_needs_a_decision(web):
+    client, core, _ = web
+    core.results["proposal.list_pending"] = [{"id": "p1"}, {"id": "p2"}]
+    core.results["canary.candidates"] = [{"held": True, "stack": "media"}, {"held": False, "stack": "media"}]
+    page = client.get("/missions").get_data(as_text=True)
+    assert 'href="/missions/needs-you"' in page and "NEEDS YOU" in page
+    assert '<span class="mc-subtab-count">3</span>' in page            # two plans and one held window
+    assert 'class="mc-subtab is-active" href="/missions" aria-current="page">MISSIONS' in page
+
+
+def test_the_count_goes_quiet_when_core_cannot_answer(web):
+    client, core, _ = web
+    core.errors["proposal.list_pending"] = "unavailable"
+    r = client.get("/missions")
+    assert r.status_code == 200 and "mc-subtab-count" not in r.get_data(as_text=True)
+
+
+def test_needs_you_holds_the_old_actions_panels(web):
+    client, core, _ = web
+    core.results["canary.candidates"] = [{"execution_id": "a" * 12, "step_n": 1, "held": True, "stack": "media",
+                                          "service": "sonarr", "recorded_at": "x", "expires_at": "when a human closes it"}]
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    for panel in ("approval-panel", "rollback-candidates-panel", "incident-panel", "hull-diagnostics-panel"):
+        assert f'id="{panel}"' in page, panel
+    assert "sonarr" in page and "data-settle-window" in page
+    assert 'class="mc-subtab is-active" href="/missions/needs-you" aria-current="page">NEEDS YOU' in page
+    assert "panels.js" in page and "approvals.js" in page and "incidents.js" in page and "elevate.js" in page
+    assert 'class="tab active" href="/missions"' in page                 # the top bar still says Missions
+    assert not any(m.startswith("mission.") for m in core.methods())     # nothing here needs missions
+
+
+def test_needs_you_and_deployments_work_with_missions_off(web, monkeypatch, tmp_path):
+    client, core, _ = web
+    monkeypatch.setattr(config, "MISSIONS_ENABLED", False, raising=False)
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert 'id="approval-panel"' in page and "Missions are disabled" not in page
+    assert 'href="/missions/needs-you">Missions</a>' in page              # the tab lands where there is something
+    assert 'href="/memory/deployments">Memory</a>' in page
+    assert 'id="manifest-panel"' in client.get("/memory/deployments").get_data(as_text=True)
+
+
+def test_deployments_is_a_memory_sub_tab(web, monkeypatch, tmp_path):
+    client, core, _ = web
+    history = tmp_path / "update_history.json"
+    history.write_text('{"entries": [{"ts": "2026-09-06T06:29:23+00:00", "stack": "tgbot", "service": "renderd", '
+                       '"status": "updated"}]}')
+    monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", history)
+    page = client.get("/memory/deployments").get_data(as_text=True)
+    assert 'id="update-history-data"' in page and "renderd" in page and 'id="deploy-manifest"' in page
+    assert 'class="mc-subtab is-active" href="/memory/deployments" aria-current="page">DEPLOYMENTS' in page
+    assert 'class="tab active" href="/memory"' in page
+    cards = client.get("/memory").get_data(as_text=True)
+    assert 'class="mc-subtab is-active" href="/memory" aria-current="page">CARDS' in cards
+
+
+def test_needs_you_reads_the_windows_once_and_every_missions_page_shows_the_count(web):
+    client, core, _ = web
+    core.results["canary.candidates"] = [{"held": True, "stack": "media", "service": "sonarr", "execution_id": "a" * 12,
+                                          "step_n": 1, "recorded_at": "x", "expires_at": "y"}]
+    core.calls.clear()
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert core.methods().count("canary.candidates") == 1
+    assert '<span class="mc-subtab-count">1</span>' in page
+    assert 'id="mc-subtabs"' in page                                    # panels.js swaps it, so the count follows
+    for path in ("/missions/M-2", "/missions/standing"):
+        core.results.setdefault("standing.list", {"standing_grants": []})
+        assert '<span class="mc-subtab-count">1</span>' in client.get(path).get_data(as_text=True), path
+
+
+def test_the_needs_you_count_refreshes_with_the_panels():
+    script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
+    assert 'var LIVE_PANELS = ["mc-subtabs",' in script
+    assert "window.pePollWhileVisible" in script and "function pollWhileVisible" not in script
+
+
+def test_a_chat_bookmark_with_the_console_off_stays_on_overview():
+    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
+    assert 'if (hashTab === "chat" && !document.querySelector(\'a.tab[href="/console"]\'))' in script
+
+
+def test_old_dashboard_tabs_send_you_where_they_went():
+    script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
+    assert 'var MOVED_TABS = { actions: "/missions/needs-you", history: "/memory/deployments", chat: "/console" };' in script
+    assert "window.location.replace(MOVED_TABS[hashTab])" in script
+
+
+def test_the_tabs_run_in_the_operators_order(web):
+    page = web[0].get("/missions").get_data(as_text=True)
+    import re
+    labels = re.findall(r'class="tab(?: active)?"[^>]*>([A-Za-z]+)<', page)
+    assert labels == ["Overview", "Console", "Network", "Hosts", "Backups", "Missions", "Memory", "Config", "Crew"] or \
+        labels == ["Overview", "Network", "Hosts", "Backups", "Missions", "Memory", "Config", "Crew"]
+
+
 # ── Missions ──────────────────────────────────────────────────────────────────
 def test_board_renders_groups_and_escapes(web):
     client, core, _ = web
     r = client.get("/missions")
     page = r.get_data(as_text=True)
-    assert r.status_code == 200 and core.methods() == ["mission.list", "mission.list", "mission.provider_usage"]
+    assert r.status_code == 200 and core.methods() == ["mission.list", "mission.list", "mission.provider_usage",
+                                                       "proposal.list_pending", "canary.candidates"]
     assert [p["scope"] for m, p in core.calls if m == "mission.list"] == ["active", "closed"]
     assert "Why is &lt;script&gt;x&lt;/script&gt; slow" in page and "<script>x</script>" not in page
     assert "INVESTIGATING" in page.upper() and "COMPLETED" in page.upper()
@@ -179,7 +276,7 @@ def test_board_empty_state(web):
 def test_detail_shows_events_artifacts_result_and_cancel(web):
     client, core, _ = web
     page = client.get("/missions/M-2").get_data(as_text=True)
-    assert [m for m in core.methods()] == ["mission.get", "mission.events"]
+    assert [m for m in core.methods()] == ["mission.get", "mission.events", "proposal.list_pending", "canary.candidates"]
     assert "Find &lt;b&gt;why&lt;/b&gt;" in page and "<b>why</b>" not in page
     assert "report.md" in page and "operator:alice" in page and "done" in page
     assert 'action="/missions/M-2/cancel"' in page and 'name="csrf_token"' in page

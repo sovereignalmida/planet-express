@@ -28,7 +28,6 @@ from flask import (
 from flask.sessions import SecureCookieSessionInterface
 from itsdangerous import BadData, URLSafeSerializer
 
-import casa_bender
 import casa_scruffy_net
 import config
 import dashboard_data
@@ -93,25 +92,6 @@ class ConfigReloadWatch:
             return
         self._signalled = digest
         self._reload()
-
-
-def label_chat_evidence(ticket):
-    """Give each evidence record the plain-language name of the check it ran.
-
-    Added here, on the way out to the browser, and deliberately not in the evidence record
-    itself: that record is embedded verbatim in the planner prompt, and a label exists only
-    so an operator reading the Chat tab sees "Container log" on the card face instead of an
-    argv. The model has no use for it and should not be paying tokens for it."""
-    if not isinstance(ticket, dict):
-        return ticket
-    evidence = ticket.get("evidence")
-    if not isinstance(evidence, list):
-        return ticket
-    return ticket | {"evidence": [
-        record | {"label": casa_bender.diagnostic_label(record.get("command", ""))}
-        if isinstance(record, dict) else record
-        for record in evidence
-    ]}
 
 
 def register_template_helpers(app) -> None:
@@ -199,9 +179,6 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             raise RpcError("Core unavailable")
         return result
 
-    def is_chat_request():
-        return request.path.startswith("/api/chat")
-
     def is_console_request():
         return request.path.startswith("/api/console")
 
@@ -209,7 +186,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
         # This list is not only about response format: POST CSRF is checked for exactly the
         # paths it matches (see the auth hook below), so a JSON route left out of it is a
         # route with no CSRF check. /api/scan starts a host-wide scan and belongs here.
-        return (is_chat_request() or is_console_request() or request.path.startswith("/api/containers/")
+        return (is_console_request() or request.path.startswith("/api/containers/")
                 or request.path.startswith("/api/approvals")
                 or request.path.startswith("/api/executions/")
                 or request.path.startswith("/api/incidents")
@@ -333,11 +310,6 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
             return jsonify(error=message, code=error.code), status
         if request.path.startswith("/api/config"):
             return jsonify(error="Config unavailable; try again shortly"), 503
-        if is_chat_request():
-            status, message = {"bad_request": (400, "Invalid chat request"),
-                               "not_found": (404, "Chat ticket not found")}.get(
-                                   error.code, (503, "Chat unavailable; try again shortly"))
-            return jsonify(error=message), status
         if request.path.startswith("/api/containers/"):
             status, message = {"bad_request": (400, "Invalid container request"),
                                "not_found": (404, "Container not found")}.get(
@@ -550,26 +522,6 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     def logout():
         session.clear()
         return clear_auth(redirect(url_for("login")))
-
-    @app.post("/api/chat")
-    def chat_ask():
-        question = request.form.get("question", "").strip()
-        submission_id = request.form.get("submission_id", "")
-        if not 1 <= len(question) <= 2000 or re.fullmatch(r"[A-Za-z0-9_-]{8,64}", submission_id) is None:
-            return jsonify(error="Invalid question or submission_id"), 400
-        return jsonify(core("chat.ask", {"operator": g.operator, "question": question,
-                                         "submission_id": submission_id}))
-
-    @app.get("/api/chat/<ticket_id>")
-    def chat_get(ticket_id):
-        if re.fullmatch(r"[0-9a-f]{12}", ticket_id) is None:
-            return jsonify(error="Chat ticket not found"), 404
-        ticket = core("chat.get", {"operator": g.operator, "ticket_id": ticket_id})
-        return jsonify(label_chat_evidence(ticket))
-
-    @app.get("/api/chat/quota")
-    def chat_quota():
-        return jsonify(core("chat.quota", {}))
 
     @app.get("/api/config")
     def config_get():
@@ -1091,9 +1043,11 @@ def register_mission_pages(app, core) -> None:
     signed-in session's (`g.operator`), never a form field. Core answers "disabled" while missions are off."""
     from planet_express.memory.models import SLUG_RE
 
-    def shell(template, **context):
+    def shell(template, live=None, **context):
         ctx = {"health": dashboard_data.summarize_health(),
-               "pipeline_status": dashboard_data.summarize_pipeline_status()}
+               "pipeline_status": dashboard_data.summarize_pipeline_status(), **(live or {})}
+        if context.get("page") == "missions" and "needs_count" not in context:
+            context["needs_count"] = needs_count()         # every Missions page shows the NEEDS YOU count
         return render_template(template, ctx=ctx, **context)
 
     def notice_for(table):
@@ -1106,6 +1060,18 @@ def register_mission_pages(app, core) -> None:
         if error.code == "not_found":
             abort(404)
         raise error
+
+    def needs_count(windows=None):
+        """What NEEDS YOU counts on its sub-tab: plans waiting for approval and rollback windows held for a human.
+        Incidents and findings are not decisions, so they are not counted. `windows` is a `canary.candidates` answer
+        the caller already has, so it is not read twice. Core down shows no number."""
+        try:
+            plans = len(core("proposal.list_pending", {}) or [])
+            if windows is None:
+                windows = core("canary.candidates", {}) or []
+            return plans + sum(1 for r in windows if isinstance(r, dict) and r.get("held"))
+        except Exception:  # noqa: BLE001 -- a badge is not worth a failed page
+            return None
 
     @app.get("/missions")
     def missions_page():
@@ -1127,6 +1093,21 @@ def register_mission_pages(app, core) -> None:
         order = list(STATUS_ORDER) + sorted(seen - set(STATUS_ORDER))   # a status added later still gets a column
         return shell("missions.html", page="missions", disabled=False, missions=rows, order=order,
                      active=active, closed=closed, usage=usage, notice=notice_for(_MISSION_NOTICES))
+
+    @app.get("/missions/needs-you")
+    def needs_you_page():
+        """The old dashboard Actions tab (rc14.7.3): plans to authorise, open rollback windows, incidents and hull
+        findings. Works with missions off: none of it needs them."""
+        live = {"findings": dashboard_data.summarize_findings(), "rollback_candidates": []}
+        windows = None
+        try:
+            # Core's database holds the windows; this process may not read it (web_access.py). Core down empties
+            # the panel, it never fails the page.
+            windows = live["rollback_candidates"] = core("canary.candidates", {})
+        except Exception:  # noqa: BLE001 -- see above
+            current_app.logger.warning("Could not read the canary rollback windows from core")
+        return shell("missions_needs_you.html", page="missions", sub="needs", disabled=False, notice=None,
+                     live=live, needs_count=needs_count(windows) if windows is not None else None)
 
     @app.get("/missions/<mission_id>")
     def mission_page(mission_id):
@@ -1276,6 +1257,12 @@ def register_mission_pages(app, core) -> None:
             raise
         return shell("memory.html", page="memory", disabled=False, unavailable=False, candidates=candidates,
                      confirmed=confirmed, due=due, notice=notice_for(_MEMORY_NOTICES))
+
+    @app.get("/memory/deployments")
+    def deployments_page():
+        """The old dashboard History tab (rc14.7.3): Zoidberg's canary runs. Works with missions off."""
+        return shell("memory_deployments.html", page="memory", sub="deployments", disabled=False, notice=None,
+                     live={"update_history": dashboard_data.summarize_update_history()})
 
     def card_change(card_id, method, extra, done):
         if SLUG_RE.fullmatch(card_id) is None:
@@ -1434,19 +1421,13 @@ def index(core=None):
                     ", ".join(sorted(refused)))
     ctx = dashboard_data.build_dashboard_context(enforced)
     if core is not None:
-        try:
-            # The open canary rollback windows live in the core's database, which this process is
-            # denied (web_access.py); core hands them over instead (Codex, T42). Core being down
-            # empties one panel, it never 500s the page.
-            ctx["rollback_candidates"] = core("canary.candidates", {})
-        except Exception:  # noqa: BLE001 -- see above
-            current_app.logger.warning("Could not read the canary rollback windows from core")
+        # The open canary rollback windows are read on Missions > NEEDS YOU now (rc14.7.3), not here.
         try:
             # The Hull tile's PLANS count. RunStatus.pending_plan_id was the shell planner's
             # signal and nothing writes it any more, so reading it would have reported "0 plans"
             # with approvals genuinely waiting. Same source as /api/approvals.
             ctx["pending_approvals"] = len(core("proposal.list_pending", {}) or [])
-        except Exception:  # noqa: BLE001 -- see above
+        except Exception:  # noqa: BLE001 -- core being down empties one count, it never 500s the page
             current_app.logger.warning("Could not read pending approvals from core")
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()
     # Zone grouping, LAN-twin merging and provider tagging are string work over the router
