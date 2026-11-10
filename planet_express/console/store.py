@@ -270,7 +270,8 @@ class ConsoleStore:
             rows = conn.execute(
                 "SELECT e.* FROM console_executions e WHERE e.status='authorised' OR (e.status='ended' AND instr("
                 "  ',' || COALESCE(e.reported, '') || ',', ',seen@' || COALESCE((SELECT MAX(v.seq) FROM mission_events v "
-                "    WHERE v.mission_id = e.mission_id AND v.kind IN ('state', 'decision')), 0) || ',') = 0) ORDER BY e.id").fetchall()
+                "    WHERE v.mission_id = e.mission_id AND v.kind IN ('state', 'decision') "
+                "      AND json_extract(v.body_json, '$.refused') IS NULL), 0) || ',') = 0) ORDER BY e.id").fetchall()
         return [dict(r) for r in rows]
 
     def proposed_executions(self) -> list[dict]:

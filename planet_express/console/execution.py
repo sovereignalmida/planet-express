@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from planet_express.console import plan as plan_mod
+from planet_express.missions import holds
 from planet_express.missions.models import KEPT_BY_OPERATOR_FLAG, NOTHING_CHECKPOINTED_FLAG, Mission
 from planet_express.missions.verify.plan import CheckResult, held_after_failed_checks, parse_result
 
@@ -56,6 +57,21 @@ PHASES: dict[str, Phase] = {p.name: p for p in (
           "Needs you: PE's checks failed", ("rollback", "recheck", "keep"), False),
     Phase("held_unknown", "Needs you: PE isn't sure what state this is in", "crit", "Run needs you", "crit", "Needs you", _NOT_CLEAN,
           "Needs you: PE isn't sure what state this is in", ("rollback",), False),
+    # rc14.7.5: why the run is held, from the edge that held it (`missions.holds`), so each says what it wants from the operator.
+    Phase("held_unverified", "Needs you: PE could not check it", "crit", "Run needs you", "crit", "Needs you",
+          ("PE could not check the run", "Check it again, or roll back to the checkpoint."),
+          "Needs you: PE could not check it", ("rollback", "recheck"), False),
+    Phase("held_restore_refused", "Needs you: PE did not roll back \u2014 files changed since the checkpoint", "crit", "Run needs you",
+          "crit", "Needs you", ("PE did not roll back", "Files changed after the checkpoint. Roll back anyway (on the dashboard) to "
+                                                       "overwrite them, or cancel it from Missions to leave them."),
+          "Needs you: PE did not roll back \u2014 files changed since the checkpoint", ("rollback",), False),
+    Phase("held_restore_failed", "Needs you: the rollback did not finish", "crit", "Run needs you", "crit", "Needs you",
+          ("The rollback did not finish", "Look at the run below for what was put back and what was not."),
+          "Needs you: the rollback did not finish", ("rollback",), False),
+    Phase("held_cancel", "Needs you: cancelled, but what it changed is still there", "crit", "Run needs you", "crit", "Needs you",
+          ("Cancelled, but not closed", "What the run changed still differs from the checkpoint: roll back, or cancel it from Missions "
+                                         "to leave it."),
+          "Needs you: cancelled, but what it changed is still there", ("rollback",), False),
     # paused_tripwire: a row from before trust mode removed the tripwire; startup recovery moves it to recovery_required.
     Phase("held_legacy", "Needs you: PE isn't sure what state this is in", "crit", "Run needs you", "crit", "Needs you", _NOT_CLEAN,
           "Needs you: PE isn't sure what state this is in", (), False),
@@ -90,9 +106,15 @@ _BY_STATUS = {"draft": "starting", "queued": "starting", "investigating": "start
               "failed": "failed", "rolled_back": "rolled_back", "cancelled": "cancelled", "blocked": "blocked"}
 
 
-def run_phase(mission: Mission, rolling_back: bool = False, waiting: str | None = None) -> Phase:
-    """The phase a run is in. `rolling_back`: a restore is running (the supervisor's worker has it, or the operator asked for one and
-    it has not landed); `waiting`: why an authorised run has not started (`start_waiting`)."""
+_BY_HOLD = {holds.FAILED_CHECKS: "held_failed_checks", holds.UNVERIFIED: "held_unverified", holds.RESTORE_REFUSED: "held_restore_refused",
+            holds.RESTORE_FAILED: "held_restore_failed", holds.CANCEL_HELD: "held_cancel", holds.RUN_UNFINISHED: "held_unknown",
+            holds.RECOVERED: "held_unknown", holds.UNKNOWN: "held_unknown"}
+
+
+def run_phase(mission: Mission, rolling_back: bool = False, waiting: str | None = None, hold: str | None = None) -> Phase:
+    """The phase a run is in. `rolling_back`: a restore is running (the supervisor's own record); `waiting`: why an authorised run has
+    not started (`start_waiting`); `hold`: why a `needs_operator` run is held (`missions.holds.hold_reason`). Without `hold`, a held run
+    is judged from its stored result alone (a caller with no store to ask)."""
     status = mission.status
     flags = getattr(mission, "outcome_flags", None)
     if rolling_back and status not in SETTLED:
@@ -105,21 +127,10 @@ def run_phase(mission: Mission, rolling_back: bool = False, waiting: str | None 
         return PHASES["kept"]
     if status == "cancelled" and getattr(mission, "outcome", None) == "dismissed":
         return PHASES["dismissed"]
-    if status == "needs_operator" and _held(mission):
-        return PHASES["held_failed_checks"]
+    if status == "needs_operator":
+        reason = hold if hold is not None else (holds.FAILED_CHECKS if holds.held(mission) else holds.UNKNOWN)
+        return PHASES[_BY_HOLD.get(reason, "held_unknown")]
     return PHASES[_BY_STATUS.get(status, "working")]
-
-
-def _held(mission: Mission) -> bool:
-    try:
-        return held_after_failed_checks(mission)
-    except AttributeError:                               # a partial record (a test double) carries no verification result
-        return False
-
-
-def repair_status(mission: Mission, rolling_back: bool = False) -> tuple[str, str]:
-    phase = run_phase(mission, rolling_back)
-    return phase.label, phase.level
 
 
 _ROLLBACK_EVENTS = ("checkpoint.restore_started", "checkpoint.restore_refused", "checkpoint.restore_done", "mission.rollback_incomplete")
@@ -190,10 +201,11 @@ def _rollback_state(bodies: list[dict[str, Any]], mission: Mission) -> dict[str,
 
 
 def latest_state_event(ms: Any, mission_id: str) -> tuple[int, str | None]:
-    """The mission's newest state change: (its event seq, its actor), or (0, None) before any."""
+    """The mission's newest state change: (its event seq, its actor), or (0, None) before any. A refused attempt is recorded as a state
+    event too (`refused`); it changed nothing, so it is not a change here (a supervisor retrying a refused edge must not re-post)."""
     with ms.store._connect() as conn:
-        row = conn.execute("SELECT seq, actor FROM mission_events WHERE mission_id=? AND kind='state' ORDER BY seq DESC LIMIT 1",
-                           (mission_id,)).fetchone()
+        row = conn.execute("SELECT seq, actor FROM mission_events WHERE mission_id=? AND kind='state' "
+                           "AND json_extract(body_json, '$.refused') IS NULL ORDER BY seq DESC LIMIT 1", (mission_id,)).fetchone()
     return (int(row["seq"]), row["actor"]) if row else (0, None)
 
 
@@ -269,10 +281,11 @@ def verification_view(mission: Mission) -> dict[str, Any] | None:
                           if result.scan is not None and result.scan.new_on_host else None)}
 
 
-def conversation_status(mission: Mission, rolling_back: bool = False, waiting: str | None = None) -> dict[str, Any] | None:
+def conversation_status(mission: Mission, rolling_back: bool = False, waiting: str | None = None,
+                        hold: str | None = None) -> dict[str, Any] | None:
     """How a conversation reads while its latest confirmed run is going or needs attention, so an active repair is never hidden behind
     'Result ready'. None when the run has no say in the conversation's status."""
-    phase = run_phase(mission, rolling_back, waiting)
+    phase = run_phase(mission, rolling_back, waiting, hold)
     if phase.rail is None:
         return None
     return {"text": phase.rail, "level": phase.rail_level, "group": phase.group, "verdict": {"h": phase.verdict[0], "p": phase.verdict[1]}}
@@ -340,10 +353,10 @@ def can_undo(mission: Mission) -> bool:
             and bool(getattr(mission, "checkpoint_id", None)))
 
 
-def controls(mission: Mission, rolling_back: bool = False) -> dict[str, bool]:
+def controls(mission: Mission, rolling_back: bool = False, hold: str | None = None) -> dict[str, bool]:
     """Which actions apply now, from the run's phase: none while a rollback is running (the page shows that instead); a done run's
     undo is the rollback action while its checkpoint is kept."""
-    phase = run_phase(mission, rolling_back)
+    phase = run_phase(mission, rolling_back, hold=hold)
     out = {name: name in phase.actions for name in ACTIONS}
     out["rollback"] = out["rollback"] or (phase.name == "done" and can_undo(mission))
     return out
@@ -365,7 +378,7 @@ def thread_line(phase: Phase, mission: Mission, verification: dict[str, Any] | N
         return "The run finished, but PE has no verification result to show for this grant. Do not rely on it until it is checked."
     tail = f" {verification['headline']}." if verification else ""
     offered = [NEXT_STEP_WORDS[a] for a in phase.actions]
-    if phase.name in ("held_unknown", "held_failed_checks"):
+    if phase.name in ("held_unknown", "held_failed_checks", "held_unverified"):
         offered.append("ask the agent to keep working on it")
     steps = (f" Look at the run above; you can {', '.join(offered[:-1])}{' or ' if len(offered) > 1 else ''}{offered[-1]}."
              if offered else "")
@@ -374,4 +387,4 @@ def thread_line(phase: Phase, mission: Mission, verification: dict[str, Any] | N
 
 __all__ = ["ACTIONS", "PHASES", "Phase", "SETTLED", "run_phase", "thread_line", "rollback_running", "UNDO_STATES", "can_undo",
            "not_covered_view", "TERMINALISH", "check_state", "controls",
-           "conversation_status", "repair_status", "rollback_view", "timeline", "verification_view"]
+           "conversation_status", "rollback_view", "timeline", "verification_view"]

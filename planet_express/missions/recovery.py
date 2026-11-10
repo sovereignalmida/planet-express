@@ -289,7 +289,8 @@ def apply_classification(ms: MissionStore, mission_id: str, c: Classification, *
             if is_legal(current, path_via):
                 transition(ms.store, mission_id, path_via, actor)
         try:
-            transition(ms.store, mission_id, target, actor)
+            from planet_express.missions import holds
+            transition(ms.store, mission_id, target, actor, why=holds.RECOVERED if target == "needs_operator" else None)
         except IllegalTransition as exc:
             log.warning("recovery edge %s -> %s refused for %s: %s", current, target, mission_id, exc)
             break

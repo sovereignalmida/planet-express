@@ -805,7 +805,12 @@ class CheckpointService:
         except Exception:                           # noqa: BLE001
             log.warning("checkpoint %s: could not record the restore outcome", checkpoint_id)
         try:
-            transition(self.missions.store, mission_id, "needs_operator", "core")
+            from planet_express.missions import holds
+            transition(self.missions.store, mission_id, "needs_operator", "core",
+                       # Refused before writing anything is a refusal; refused part-way (a file changed mid-write) left the host
+                       # half restored, which is a restore that did not finish.
+                       why=holds.RESTORE_REFUSED if report.status == "refused" and not report.partial and not report.written
+                       else holds.RESTORE_FAILED)
         except IllegalTransition:
             pass                                    # already there, or terminal: the report still says why
 

@@ -73,7 +73,7 @@ from .runtime import (
     RunContext,
 )
 from .sessions import SessionRow, issue_session, set_leader_pid
-from .verify.plan import held_after_failed_checks
+from . import holds
 from .state import (
     CONSOLE_PLAN_RETRY,
     TERMINAL,
@@ -1104,15 +1104,16 @@ class Supervisor:
             raise ResumeRefused(f"{mission_id} is {mission.status}; this action needs {' or '.join(statuses)}")
         return mission
 
-    def _held_and_idle(self, mission_id: str) -> Mission:
+    def _held_and_idle(self, mission_id: str, reasons: tuple[str, ...] = holds.KEEPABLE) -> Mission:
         """A Repair held for the operator after its run (`needs_operator`), with nothing of it still running: no session, no run, no
         verification, no rollback. What `recheck` and `keep_and_close` need before they touch it."""
         mission = self._repair_mission(mission_id, "needs_operator")
         if not mission.checkpoint_id:
             raise ResumeRefused(f"{mission_id} never ran (it has no checkpoint): cancel it instead")
-        if not held_after_failed_checks(mission):
-            # Only a run PE checked and that did not pass: never a failed undo of a run that had passed (half restored), nor a session
-            # that ended before PE could check it. Those keep their rollback.
+        if holds.hold_reason(self.store, mission) not in reasons:
+            # Only a run PE checked and that did not pass, and held for exactly that: never a failed rollback (half restored, even of
+            # a run whose checks had failed: rc14.7.5), a held cancel, nor a session that ended before PE could check it. Those keep
+            # their rollback.
             raise ResumeRefused(f"{mission_id} is not held after PE's checks failed: roll it back or cancel it instead")
         if mission_id in self._runs or self.ms.live_session(mission_id) is not None:
             raise ResumeRefused("the session is still running: wait for it to end")
@@ -1130,9 +1131,13 @@ class Supervisor:
         self._require_enabled()
         actor = self._operator(actor)
         with self._lock_for(mission_id):
-            mission = self._held_and_idle(mission_id)
+            mission = self._held_and_idle(mission_id, holds.RECHECKABLE)    # also a run PE could not check (a verifier error)
             if not mission.verification_plan_json:
                 raise ResumeRefused(f"{mission_id} has no verification plan to run again")
+            if self.verifier is None:
+                # Checked first: with no verifier the check would hold it again as unverified, and Check again and Keep (which need
+                # a held failed check) would be gone for good (rc14.7.5).
+                raise ResumeRefused("PE cannot run its checks right now; try again once it can")
             now = int(self.store._clock())
             with self.store._write() as conn:
                 # The operator's newer decision replaces a cancel PE was holding (live M-34: Cancel, then held): left in place, the
@@ -1175,7 +1180,9 @@ class Supervisor:
                 insert_event(conn, mission_id, "decision", actor, {
                     "event": "operator.kept", "outcome": "failed", "flags": KEPT_BY_OPERATOR_FLAG,
                     "reason": "the operator kept what the run changed and closed it; PE's checks had not passed"}, now)
-            recovery.close_open_intents(self.ms, mission_id, "applied", actor=actor)
+            # As the supervisor: recovery trusts only Core's and the supervisor's intent records, so one closed as the operator stayed
+            # open (rc14.7.5). The operator's decision is the `operator.kept` event above.
+            recovery.close_open_intents(self.ms, mission_id, "applied", actor=ACTOR)
             self._clear_waiting(mission_id)
             self._cancel_held.discard(mission_id)
         return "failed"
@@ -1254,9 +1261,11 @@ class Supervisor:
         """Operator 'roll back' of a Repair mission the session has already left (needs_operator, recovery_required,
         rollback_pending, verifying), built directly on the checkpoint service: prove no session is alive (killing a leftover
         one), take the post-change manifest again, then restore. Every outcome ends in a defined state: `rolled_back` on a
-        clean restore; a restore that PE refused before writing anything (drift) stays in `rollback_pending`, reported, so the
-        operator can choose `ack_drift` (their explicit acknowledgement that overrides the drift refusal); a restore that failed
-        or raised is handed to the operator as `needs_operator` with what happened. (Until trust mode removed the tripwire,
+        clean restore; a restore that PE refused before writing anything (drift) is handed to the operator as `needs_operator`
+        (held as `restore_refused`), so they can choose `ack_drift` (their explicit acknowledgement that overrides the drift
+        refusal); a restore that failed or raised is handed over as `needs_operator` (`restore_failed`) with what happened. Only a
+        refusal for want of the end-of-run snapshot stays in `rollback_pending`, for the snapshot to be taken and the restore asked
+        again. (Until trust mode removed the tripwire,
         a paused mission's rollback went through the monitor; this is the same sequence.)
 
         rc14.2: also the UNDO of a `completed` Repair while its checkpoint is kept (`_undo_checks`). Its leases were freed when it
@@ -1419,7 +1428,7 @@ class Supervisor:
         with self.store._write() as conn:
             row = conn.execute("SELECT status FROM missions WHERE id=?", (mission_id,)).fetchone()
             if row is not None and row["status"] != "needs_operator":
-                transition_in_txn(conn, mission_id, "needs_operator", ACTOR, now)
+                transition_in_txn(conn, mission_id, "needs_operator", ACTOR, now, why=holds.RESTORE_FAILED)
             insert_event(conn, mission_id, "decision", ACTOR, body, now)
         return report
 
@@ -1796,7 +1805,7 @@ class Supervisor:
             "offers": ["rollback"], "cancel_requested_by": mission.cancel_requested_by})
         if mission.status not in ("needs_operator", "recovery_required", "rollback_pending"):
             try:
-                transition(self.store, mission.id, "needs_operator", ACTOR)
+                transition(self.store, mission.id, "needs_operator", ACTOR, why=holds.CANCEL_HELD)
             except IllegalTransition as exc:
                 self._note(mission.id, {"transition_refused": "needs_operator", "why": str(exc)[:200]})
 
@@ -1916,7 +1925,7 @@ class Supervisor:
         # A cancel is the requesting operator's act (and leaving needs_operator is reserved to an operator).
         actor = mission.cancel_requested_by if target == "cancelled" and mission.cancel_requested_by else ACTOR
         try:
-            transition(self.store, mission_id, target, actor)
+            transition(self.store, mission_id, target, actor, why=holds.RUN_UNFINISHED if target == "needs_operator" else None)
         except IllegalTransition as exc:
             self._note(mission_id, {"transition_refused": target, "why": str(exc)[:200]})
 
@@ -1987,9 +1996,13 @@ class Supervisor:
                 self._note(mission_id, {"verify_superseded": current.status})
                 return current.status
             self._note(mission_id, summary)
+            # Why it is held if it is: the checks failed, or PE could not run them; a run that passed but whose completion was
+            # refused is neither, and says only that PE does not know.
+            held_because = (holds.FAILED_CHECKS if failed_check else holds.UNVERIFIED if summary.get("event") != "verify.closed"
+                            else holds.UNKNOWN)
             for attempt in (target, "needs_operator"):
                 try:
-                    transition(self.store, mission_id, attempt, ACTOR)
+                    transition(self.store, mission_id, attempt, ACTOR, why=held_because if attempt == "needs_operator" else None)
                     break
                 except IllegalTransition as exc:
                     self._note(mission_id, {"transition_refused": attempt, "why": str(exc)[:200]})

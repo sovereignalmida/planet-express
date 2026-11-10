@@ -119,10 +119,10 @@ def test_a_terminal_mission_gets_no_outcome_after_a_refused_transition(tmp_path,
     rig = build(tmp_path)
     real = sup_mod.transition
 
-    def cancel_then_refuse(store, mid, to, actor):
+    def cancel_then_refuse(store, mid, to, actor, why=None):
         with sqlite3.connect(store.path) as conn:
             conn.execute("UPDATE missions SET status='cancelled' WHERE id=?", (mid,))
-        return real(store, mid, to, actor)                                # now illegal: the mission is terminal
+        return real(store, mid, to, actor, why=why)                       # now illegal: the mission is terminal
 
     monkeypatch.setattr(sup_mod, "transition", cancel_then_refuse)
     assert supervisor(rig).verify_and_close(rig.mid, wait=True) == "cancelled"

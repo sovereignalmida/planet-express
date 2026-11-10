@@ -31,6 +31,7 @@ from planet_express.console.store import (
 )
 from planet_express.memory import store as memory_store
 from planet_express.memory.models import parse_actor
+from planet_express.missions import holds
 from planet_express.missions.approval_flow import FlowError, phase_demands_elevation
 from planet_express.missions.events import redact_value
 from planet_express.missions.state import TERMINAL
@@ -347,7 +348,7 @@ class ConsoleApi:
                 if not self._withdraw(flow, ex, operator, quiet=True):
                     raise ConsoleApiError("An earlier confirmation in this conversation is still open or already running. Finish or withdraw it first.", "conflict")
             elif ex["status"] in ("authorised", "ended") and (earlier := self.ms.get_mission(ex["mission_id"])).status not in TERMINAL:
-                phase = execution_mod.run_phase(earlier, self._rolling_back(earlier))
+                phase = execution_mod.run_phase(earlier, self._rolling_back(earlier), hold=holds.hold_reason(self.ms.store, earlier))
                 if phase.group == "Needs you":                     # nothing is running: it waits for the operator (live M-33)
                     raise ConsoleApiError(f"The earlier run, {ex['mission_id']}, is waiting for you ({phase.label.removeprefix('Needs you: ')}). "
                                           "Open it from Missions and close or restore it, then confirm again.", "conflict")
@@ -484,7 +485,8 @@ class ConsoleApi:
         mission = self.ms.get_mission(ex["mission_id"])
         rolling = self._rolling_back(mission)
         waiting = execution_mod.start_waiting(self.ms, mission)
-        phase = execution_mod.run_phase(mission, rolling, waiting)        # the one place the run's words and actions come from
+        hold = holds.hold_reason(self.ms.store, mission)
+        phase = execution_mod.run_phase(mission, rolling, waiting, hold)  # the one place the run's words and actions come from
         text, level = phase.label, phase.level
         rollback = execution_mod.rollback_view(self.ms, mission, rolling)
         row = self.console.plan(ex["plan_id"])
@@ -496,7 +498,7 @@ class ConsoleApi:
                 name = ""
         return {"id": ex["id"], "option": ex["option_index"], "name": name, "fingerprint": ex["grant_hash"][:8], "status": {"text": text, "level": level},
                 "timeline": execution_mod.timeline(mission, ex["authorised_by"], waiting),
-                "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission, rolling),
+                "verification": execution_mod.verification_view(mission), "controls": execution_mod.controls(mission, rolling, hold),
                 "finished": mission.status in execution_mod.TERMINALISH and not rolling, "rollback": rollback,
                 # A completed run's rollback is offered as "Undo this change" (rc14.2).
                 "undo": execution_mod.can_undo(mission),
@@ -575,7 +577,8 @@ class ConsoleApi:
             if runs:                                                      # an active or troubled run is never hidden behind "Result ready"
                 run = self.ms.get_mission(runs[-1]["mission_id"])
                 override = execution_mod.conversation_status(run, rolling_back=self._rolling_back(run),
-                                                             waiting=execution_mod.start_waiting(self.ms, run))
+                                                             waiting=execution_mod.start_waiting(self.ms, run),
+                                                             hold=holds.hold_reason(self.ms.store, run))
                 # A finished run never hides a newer plan waiting for the operator, or a closing conversation.
                 if override and not (override["group"] == "Recent" and (pending is not None or conv.state != "open")):
                     out.update(override)

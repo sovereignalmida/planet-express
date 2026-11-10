@@ -32,7 +32,7 @@ from planet_express.core.store import Store
 from planet_express.execution.actions import TargetTimeout
 from planet_express.memory import retrieval as memory_retrieval, store as memory_store
 from planet_express.memory.models import SLUG_RE, Card
-from planet_express.missions.verify.plan import held_after_failed_checks
+from planet_express.missions import holds
 from planet_express.missions.approval_flow import ApprovalFlow, FlowError
 from planet_express.missions.events import insert_event, redact_value
 from planet_express.missions.models import (
@@ -341,7 +341,10 @@ class MissionService:
             "outcome_flags": _text(m.outcome_flags, 512),
             "cancel_requested_by": _text(m.cancel_requested_by, 128),
             "cancel_requested_at": m.cancel_requested_at,
-            "held_after_failed_checks": held_after_failed_checks(m),      # rc14.7: Check again / Keep apply (the supervisor's own rule)
+            # rc14.7: Check again / Keep apply, by the supervisor's own rule: held because PE's checks failed (rc14.7.5: the hold's
+            # recorded reason, so a failed rollback of a failed run no longer offers Keep).
+            "hold_reason": (hold := holds.hold_reason(self.store, m)),
+            "held_after_failed_checks": hold == holds.FAILED_CHECKS,
             "result": {"outcome": _text(m.outcome, 512), "flags": _text(m.outcome_flags, 512),
                        "verification": _json(m.verification_result_json)},
             # Never the token hash, cgroup path, pid or uid: those are the session's identity.

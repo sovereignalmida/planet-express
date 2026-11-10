@@ -194,11 +194,11 @@ These are fixable without building any machine, so they need not wait for the pr
 | 5 | An undo's result never reaches the conversation or Telegram | fixed rc14.7.5 | `console/service.py:211-212`, `console/store.py:267` |
 | 6 | A kept run reads "Didn't work" under "Needs you" in the Console | fixed rc14.7.5 | `console/execution.py` (no `kept_by_operator`) |
 | 7 | Scrapping or superseding a plan leaves its prepared Repair waiting | fixed rc14.7.5 | `console/api.py:286-293` |
-| 8 | Drift-refused restore ends in `needs_operator`; docstring and Console say `rollback_pending` | **[checked]** | `checkpoint/service.py:780-808`, `supervisor.py:1253-1260` |
-| 9 | Sync rollback (dashboard, Telegram) invisible to the Console; a second restore can be queued | Console shows it as rolling back (rc14.7.5); the supervisor side is step 3 | `supervisor.py:1253` vs `1351` |
-| 10 | `outcome` stale after a rollback (an undone run says "completed") | sweep | `supervisor.py:1983-1989` |
-| 11 | Recheck without a verifier loses Check again / Keep for good | sweep | `supervisor.py:1126-1147`, `1931-1950` |
-| 12 | "Keep the changes" offered after a failed rollback of a failed run | sweep | `verify/plan.py:85-91` |
+| 8 | Drift-refused restore ends in `needs_operator`; docstring and Console say `rollback_pending` | fixed rc14.7.6 | `checkpoint/service.py:780-808`, `supervisor.py:1253-1260` |
+| 9 | Sync rollback (dashboard, Telegram) invisible to the Console; a second restore can be queued | fixed rc14.7.5 (the supervisor registers it) | `supervisor.py:1253` vs `1351` |
+| 10 | `outcome` stale after a rollback (an undone run says "completed") | fixed rc14.7.6 | `supervisor.py:1983-1989` |
+| 11 | Recheck without a verifier loses Check again / Keep for good | fixed rc14.7.6 | `supervisor.py:1126-1147`, `1931-1950` |
+| 12 | "Keep the changes" offered after a failed rollback of a failed run | fixed rc14.7.6 | `verify/plan.py:85-91` |
 | 13 | Idle auto-archive can archive a conversation whose run is still going | fixed rc14.7.5 | `console/service.py:164` |
 | 14 | Dashboard shows "EXPIRED" for a superseded v3 card and "Refused by current policy" for a missing plan | sweep | `static/approvals.js:174-177`, `integrations/rpc.py:466-475` |
 | 15 | Expired Telegram cards keep working buttons | sweep | `core/store.py:953-959` |

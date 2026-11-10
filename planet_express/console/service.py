@@ -17,6 +17,7 @@ from pathlib import Path
 from config_schema import MissionConsoleConfig
 from planet_express.console.store import ConsoleStore, Conversation, clean_text
 from planet_express.missions.models import Grant
+from planet_express.missions import holds
 from planet_express.missions.events import insert_event
 from planet_express.missions.state import CONSOLE_PLAN_RETRY, TERMINAL, IllegalTransition, transition, transition_in_txn
 from planet_express.missions.store import MissionStore, NoFreeUid
@@ -195,7 +196,8 @@ class ConsoleService:
             if f"seen@{mark}" in keys:
                 continue                                  # nothing happened to it since the thread last heard
             seq, actor = ex_mod.latest_state_event(self.ms, mission.id)
-            phase = ex_mod.run_phase(mission, ex_mod.rollback_running(self.supervisor, mission.id))
+            phase = ex_mod.run_phase(mission, ex_mod.rollback_running(self.supervisor, mission.id),
+                                     hold=holds.hold_reason(self.ms.store, mission))
             key = f"{phase.name}@{seq}"
             # A run reported before rc14.7.5 carries the old keys (`completed`, `ended:<status>`) and no `seen@`: what it already
             # posted is recorded under the new key and not posted again.
@@ -215,8 +217,8 @@ class ConsoleService:
     def _watermark(self, mission_id: str) -> int:
         """The newest state or decision event of the mission: what the thread has heard of once it is recorded as `seen@`."""
         with self.ms.store._connect() as conn:
-            row = conn.execute("SELECT MAX(seq) FROM mission_events WHERE mission_id=? AND kind IN ('state', 'decision')",
-                               (mission_id,)).fetchone()
+            row = conn.execute("SELECT MAX(seq) FROM mission_events WHERE mission_id=? AND kind IN ('state', 'decision') "
+                               "AND json_extract(body_json, '$.refused') IS NULL", (mission_id,)).fetchone()
         return int(row[0] or 0)
 
     def _reconcile_proposed(self) -> None:

@@ -226,3 +226,17 @@ def test_an_idle_conversation_is_not_archived_while_its_run_is_unfinished(rig, m
         conn.execute("UPDATE console_conversations SET last_activity_at=0 WHERE id=?", (rig.conv.id,))
     rig.service.tick()
     assert rig.console.get(rig.conv.id).state == "open"
+
+
+def test_a_refused_attempt_is_not_a_change_and_posts_nothing_again(rig):
+    """transition() records a refused edge as a state event (`refused`). The reporter must not read it as a new change: a supervisor
+    retrying a refused edge on a held run would otherwise post the same "Needs you" line every time (found after rc14.7.5)."""
+    from planet_express.missions.state import IllegalTransition, transition
+    view = _needs_operator_run(rig)
+    rig.service.tick()
+    before = list(rig.thread())
+    for _ in range(3):
+        with pytest.raises(IllegalTransition):
+            transition(rig.st.store, view["mission_id"], "executing", "supervisor")      # refused: only an operator resumes
+        rig.service.tick()
+    assert rig.thread() == before

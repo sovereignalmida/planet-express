@@ -118,7 +118,7 @@ def release_for_terminal(conn: sqlite3.Connection, mission_id: str, now: int) ->
                      {"terminal_release": freed, "sessions_revoked": cur.rowcount}, now)
 
 
-def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor: str, now: int) -> str:
+def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor: str, now: int, *, why: str | None = None) -> str:
     """Take one edge inside the caller's transaction (status CAS, predicate on `executing`, state event).
     Raises IllegalTransition without logging: the caller decides whether the transaction survives.
 
@@ -126,7 +126,10 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
     same transaction. That is only safe because the SUPERVISOR MUST HAVE CONFIRMED THE SESSION DEAD (cgroup
     or uid empty, token and endpoints revoked, contract §2.1) BEFORE it asks for a terminal transition:
     the lease is what fences a still-running worker out. A `suspect` lease is freed by this path or by
-    leases.release_after_proven_dead, and by nothing else."""
+    leases.release_after_proven_dead, and by nothing else.
+
+    `why` is recorded in the state event: the edge into `needs_operator` says why the mission is held (`holds.hold_reason`).
+    Entering `rolled_back` also writes the outcome, so a rolled-back run never keeps the label of the state it left (rc14.7.5)."""
     row = conn.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone()
     if row is None:
         raise MissionNotFound(mission_id)
@@ -169,24 +172,25 @@ def transition_in_txn(conn: sqlite3.Connection, mission_id: str, to: str, actor:
     closed = ", closed_at=?" if to in TERMINAL else (", closed_at=NULL" if frm in TERMINAL else "")
     # A result belongs to one pass through `verifying`: leaving it for more work (or entering it afresh) voids it.
     voided = ", verification_result_json=NULL" if to in ("executing", "verifying") else ""
+    labelled = ", outcome='rolled_back', outcome_flags=NULL" if to == "rolled_back" else ""
     args = (to, now, *((now,) if to in TERMINAL else ()), mission_id, frm)
     cur = conn.execute(
-        f"UPDATE missions SET status=?, updated_at=?{closed}{voided} WHERE id=? AND status=?", args)
+        f"UPDATE missions SET status=?, updated_at=?{closed}{voided}{labelled} WHERE id=? AND status=?", args)
     if cur.rowcount != 1:
         raise IllegalTransition(f"{mission_id} changed state concurrently")
     if to in TERMINAL:
         release_for_terminal(conn, mission_id, now)
-    insert_event(conn, mission_id, "state", actor, {"from": frm, "to": to}, now)
+    insert_event(conn, mission_id, "state", actor, {"from": frm, "to": to, **({"why": why} if why else {})}, now)
     return frm
 
 
-def transition(store: Store, mission_id: str, to: str, actor: str) -> str:
+def transition(store: Store, mission_id: str, to: str, actor: str, *, why: str | None = None) -> str:
     """Move a mission along one edge. A refused edge is recorded as a state event, then raised."""
     now = int(store._clock())
     refusal: IllegalTransition | None = None
     with store._write() as conn:
         try:
-            return transition_in_txn(conn, mission_id, to, actor, now)
+            return transition_in_txn(conn, mission_id, to, actor, now, why=why)
         except IllegalTransition as exc:
             frm = conn.execute("SELECT status FROM missions WHERE id=?", (mission_id,)).fetchone()
             insert_event(conn, mission_id, "state", actor,

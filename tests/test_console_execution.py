@@ -24,6 +24,11 @@ class Rig(ConfirmRig):
         return [m.text for m in self.console.messages(self.conv.id) if m.role == "system"]
 
 
+def _status(mission, **kw):
+    phase = ex_mod.run_phase(mission, **kw)
+    return phase.label, phase.level
+
+
 @pytest.fixture
 def rig(tmp_path):
     r = Rig(tmp_path)
@@ -233,8 +238,8 @@ def test_a_rollback_refused_over_drift_in_the_background_offers_the_explicit_cho
 def test_rollback_pending_waits_for_the_operator_and_says_so():
     from types import SimpleNamespace
     mission = SimpleNamespace(status="rollback_pending", outcome_flags=None)
-    assert ex_mod.repair_status(mission) == ("Needs you: roll back to the checkpoint", "crit")
-    assert ex_mod.repair_status(mission, rolling_back=True) == ("Rolling back\u2026", "warn")
+    assert _status(mission) == ("Needs you: roll back to the checkpoint", "crit")
+    assert _status(mission, rolling_back=True) == ("Rolling back\u2026", "warn")
     assert ex_mod.controls(mission) == {"rollback": True, "recheck": False, "keep": False} and ex_mod.controls(mission, rolling_back=True) == {"rollback": False, "recheck": False, "keep": False}
     assert ex_mod.conversation_status(mission)["group"] == "Needs you"
     assert ex_mod.conversation_status(mission, rolling_back=True)["text"] == "Rolling back"
@@ -243,7 +248,7 @@ def test_rollback_pending_waits_for_the_operator_and_says_so():
 def test_a_legacy_paused_row_reads_as_needing_the_operator_never_as_a_pause():
     from types import SimpleNamespace
     mission = SimpleNamespace(status="paused_tripwire", checkpoint_id="ck", verification_result_json=None)
-    assert ex_mod.repair_status(mission) == ("Needs you: PE isn't sure what state this is in", "crit")
+    assert _status(mission) == ("Needs you: PE isn't sure what state this is in", "crit")
     assert ex_mod.conversation_status(mission, False)["group"] == "Needs you"
     assert "paused" not in {s["state"] for s in ex_mod.timeline(mission, None)}
 
@@ -264,8 +269,8 @@ def test_a_run_closed_because_nothing_snapshotted_changed_says_only_that(rig):
 
 def test_any_other_failed_run_still_reads_didnt_work():
     from types import SimpleNamespace
-    assert ex_mod.repair_status(SimpleNamespace(status="failed", outcome_flags=None)) == ("Didn't work", "high")
-    assert ex_mod.repair_status(SimpleNamespace(status="failed", outcome_flags="partially_applied")) == ("Didn't work", "high")
+    assert _status(SimpleNamespace(status="failed", outcome_flags=None)) == ("Didn't work", "high")
+    assert _status(SimpleNamespace(status="failed", outcome_flags="partially_applied")) == ("Didn't work", "high")
 
 
 def test_a_failed_verification_marks_the_check_step_not_the_run_step_whatever_state_it_ends_in():
