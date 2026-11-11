@@ -22,6 +22,7 @@ client-supplied timestamp is never trusted.
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -36,6 +37,8 @@ from planet_express.memory import schema as _memory_schema
 from planet_express.console import schema as _console_schema
 from planet_express.missions.schema import DDL_V6 as _MISSIONS_DDL_V6
 from planet_express.missions.schema import repair_sessions_table
+
+log = logging.getLogger(__name__)
 
 
 def _repair_sessions(conn: sqlite3.Connection) -> None:
@@ -279,6 +282,18 @@ TERMINAL_EXECUTION_STATUSES = (
 )
 _EXECUTION_STATUSES = ("running", "verifying", *TERMINAL_EXECUTION_STATUSES)
 
+# A run's legal edges (rc14.7.8). While it runs it moves between running and verifying (a multi-step runbook flips on every step) and
+# ends in one terminal status; a finished run's only later edge is its rollback's outcome (the parent is marked rolled_back or
+# rollback_failed by its rollback child), and a rollback that did not finish may be tried again. Startup marks unfinished runs
+# interrupted on its own path (`interrupt_unfinished`).
+_LIVE_RUN_EDGES = frozenset({"running", "verifying", "passed", "failed", "aborted", "interrupted"})
+_ROLLBACK_EDGES = frozenset({"rolled_back", "rollback_failed"})
+EXECUTION_TRANSITIONS = {
+    "running": _LIVE_RUN_EDGES, "verifying": _LIVE_RUN_EDGES,
+    "passed": _ROLLBACK_EDGES, "failed": _ROLLBACK_EDGES, "aborted": _ROLLBACK_EDGES, "interrupted": _ROLLBACK_EDGES,
+    "rollback_failed": _ROLLBACK_EDGES, "rolled_back": frozenset(),
+}
+
 
 def _new_id() -> str:
     # 12 hex chars: short enough for Telegram callback_data ("act_ok:<id>" is 19 bytes of
@@ -308,6 +323,41 @@ def _execute_ddl(conn: sqlite3.Connection, script: str) -> None:
 # Year 2100: a rollback window that must not lapse on its own (a failed automatic inverse). The
 # column is NOT NULL, so "no expiry" is spelled as a date no deployment will reach.
 INDEFINITE_EXPIRY = 4_102_444_800.0
+
+
+_REFUSALS = ("approval.refused_by_policy", "approval.refused_stale_incident", "approval.refused_no_plan")
+
+
+def approval_outcome(store, item: dict) -> tuple[str, str | None]:
+    """What became of a v3 approval, in one place (rc14.7.8, state-machines.md V3): `pending`, `approved`, `denied` (a person),
+    `refused` (PE's policy: stored as denied by "policy"), `superseded` (a newer request replaced it: stored as expired), or `expired`,
+    with the reason in words. The stored status keeps its four values (a CHECK constraint); the event that decided it says which."""
+    status = item.get("status")
+    if status in ("pending", "approved"):
+        return status, None
+    actor = item.get("decided_by") or "unknown"
+    if status == "denied" and actor != "policy":
+        return "denied", f"Denied by {actor}."              # a person's denial needs no event to explain it
+    events = store.list_events(item["id"])
+    if status == "expired":
+        superseded = next((e for e in reversed(events) if e["kind"] == "approval.superseded"), None)
+        if superseded is not None:
+            reason = (superseded["payload"] or {}).get("reason")
+            return "superseded", f"Replaced by a newer request{': ' + reason if reason else ''}."
+        return "expired", None
+    refusal = next((e for e in reversed(events) if e["kind"] in _REFUSALS), None)
+    reason = (refusal["payload"] or {}).get("reason") if refusal is not None else None
+    if refusal is not None and refusal["kind"] == "approval.refused_stale_incident":
+        return "refused", f"Incident evidence refused: {reason}" if reason else "Incident evidence is no longer current."
+    if refusal is not None and refusal["kind"] == "approval.refused_no_plan":
+        return "refused", "Refused: its approved plan is missing or does not match its fingerprint."
+    return "refused", f"refused by current policy: {reason}" if reason else "Refused by current policy."
+
+
+def window_held(row) -> bool:
+    """A canary rollback window held until a human settles it (its service is in an unknown state), as opposed to one in its ordinary
+    grace, which lapses by itself. The one test of it (rc14.7.8: it was repeated in four places)."""
+    return row["expires_at"] >= INDEFINITE_EXPIRY
 
 
 class AttemptRefusal(NamedTuple):
@@ -1319,20 +1369,31 @@ class Store:
             row = conn.execute("SELECT * FROM executions WHERE id = ?", (execution_id,)).fetchone()
         return dict(row)
 
-    def set_execution_status(self, execution_id: str, status: str, reason: str | None = None) -> None:
+    def set_execution_status(self, execution_id: str, status: str, reason: str | None = None) -> bool:
+        """Move a run along one edge of `EXECUTION_TRANSITIONS` (rc14.7.8, state-machines.md V4). An edge not in the table is
+        refused, recorded as `execution.transition_refused`, and False is returned: until now any writer could overwrite any
+        status, a finished run's included. Refused rather than raised: the callers are workers settling a run, and a raise there
+        would strand it."""
         if status not in _EXECUTION_STATUSES:
             raise ValueError(f"unknown execution status {status!r}")
         finished = self._clock() if status in TERMINAL_EXECUTION_STATUSES else None
         with self._write() as conn:
-            row = conn.execute("SELECT approval_id FROM executions WHERE id = ?", (execution_id,)).fetchone()
+            row = conn.execute("SELECT approval_id, status FROM executions WHERE id = ?", (execution_id,)).fetchone()
             if row is None:
                 raise KeyError(execution_id)
-            conn.execute(
-                "UPDATE executions SET status = ?, reason = COALESCE(?, reason), finished_at = ? WHERE id = ?",
-                (status, reason, finished, execution_id),
-            )
+            if status not in EXECUTION_TRANSITIONS.get(row["status"], frozenset()):
+                log.warning("execution %s: refused %s -> %s", execution_id, row["status"], status)
+                self._event(conn, "execution.transition_refused", approval_id=row["approval_id"], execution_id=execution_id,
+                            frm=row["status"], to=status, reason=reason)
+                return False
+            if conn.execute(
+                "UPDATE executions SET status = ?, reason = COALESCE(?, reason), finished_at = ? WHERE id = ? AND status = ?",
+                (status, reason, finished, execution_id, row["status"]),
+            ).rowcount != 1:
+                return False
             self._event(conn, f"execution.{status}", approval_id=row["approval_id"],
                         execution_id=execution_id, reason=reason)
+            return True
 
     # ── abort / rollback (slice 5b-1, T40) ──────────────────────────────────
     def request_abort(self, execution_id: str, *, operator: str) -> str:
@@ -1690,6 +1751,16 @@ class Store:
                 "UPDATE rollback_candidates SET expires_at=?, closed_at=NULL "
                 "WHERE execution_id=? AND step_n=?",
                 (INDEFINITE_EXPIRY, execution_id, step_n),
+            ).rowcount == 1
+
+    def extend_rollback_candidate(self, execution_id: str, step_n: int, expires_at: float) -> bool:
+        """A clean canary update's grace: its open, finite window lapses at `expires_at` (from when the update landed) instead of
+        closing at once. Never shortens one, and never touches a held or closed window."""
+        with self._write() as conn:
+            return conn.execute(
+                "UPDATE rollback_candidates SET expires_at=MAX(expires_at, ?) "
+                "WHERE execution_id=? AND step_n=? AND closed_at IS NULL AND expires_at<?",
+                (expires_at, execution_id, step_n, INDEFINITE_EXPIRY),
             ).rowcount == 1
 
     def close_rollback_candidate(self, execution_id: str, step_n: int) -> bool:

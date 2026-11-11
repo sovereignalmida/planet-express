@@ -1,4 +1,17 @@
-(function () {
+// The phase line: a single-step run is "act, then PE checks" (two phases); a multi-step runbook counts its own steps (rc14.7.8: it
+// showed "STEP 1 OF 2" / "STEP 2 OF 2" from running/verifying, which flip on every step of a longer runbook).
+function phaseText(data) {
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  const status = String(data.status || "");
+  if (steps.length > 1 && (status === "running" || status === "verifying")) {
+    const at = steps.findIndex(step => step.status === "dispatched" || step.status === "pending");
+    return "STEP " + (at === -1 ? steps.length : at + 1) + " OF " + steps.length;
+  }
+  return status === "running" ? "STEP 1 OF 2" : status === "verifying" ? "STEP 2 OF 2" : status.toUpperCase();
+}
+if (typeof module !== "undefined" && module.exports) module.exports = { phaseText };
+
+if (typeof document !== "undefined") (function () {
   "use strict";
   const root = document.getElementById("execution");
   const state = { busy: false, timer: null, execution: null, control: false };
@@ -203,7 +216,7 @@
     get("execution-orb").textContent = status === "passed" ? "✓" : status === "failed" ? "✕" : status === "interrupted" ? "⏻" : "●";
     get("execution-title").textContent = treatment[1];
     get("execution-reason").textContent = treatment[2];
-    get("execution-phase").textContent = status === "running" ? "STEP 1 OF 2" : status === "verifying" ? "STEP 2 OF 2" : status.toUpperCase();
+    get("execution-phase").textContent = phaseText(data);
     get("execution-elapsed").textContent = duration(data);
     renderRail(data);
     const summary = get("execution-summary");

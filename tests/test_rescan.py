@@ -227,7 +227,12 @@ def test_a_prune_that_raises_never_stops_the_scan(monkeypatch):
 def test_an_update_pass_that_changed_something_asks_for_one_scan_and_a_quiet_pass_asks_for_none(monkeypatch):
     for results, expected in (([{"status": "no_change"}, {"status": "skipped"}], 0),
                               ([{"status": "updated"}] * 26 + [{"status": "no_change"}], 1),
-                              ([{"status": "rolled_back"}], 1)):
+                              ([{"status": "rolled_back"}], 1),
+                              # rc14.7.8: these changed the host too, and are the ones most worth a fresh look
+                              ([{"status": "rollback_failed"}], 1),
+                              ([{"status": "interrupted"}, {"status": "no_change"}], 1),
+                              ([{"status": "error"}], 1),
+                              ([{"status": "pull_failed"}], 0)):
         state, started = state_with_starter()
         monkeypatch.setattr(fw.zoidberg, "run_update_pass", lambda results=results, **kw: results)
         assert fw._run_scheduled_update_pass(None, state, commands=object()) == "ran"

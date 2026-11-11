@@ -60,7 +60,7 @@ from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
 from planet_express.core.redact import redact
 from planet_express.core.reexec import reexec
-from planet_express.core.store import INDEFINITE_EXPIRY, SchemaTooNewError, Store
+from planet_express.core.store import SchemaTooNewError, Store, window_held
 from planet_express.execution import actions, policy, runbook as runbooks
 from planet_express.execution.tool_loop import ToolCall, Turn, run_tool_loop
 from planet_express.integrations.rpc import RpcServer, build_core_handlers
@@ -1218,7 +1218,7 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[
             f"Root disk is at {disk_alert['used_pct']}% and the rollback-window table could not "
             f"be read, so no image is pruned. Check the Planet Express core database; the "
             f"dashboard cannot list or settle windows while it is unreadable.")
-    if all(row["expires_at"] < INDEFINITE_EXPIRY for row in windows):
+    if not any(window_held(row) for row in windows):
         # Only canaries inside their ordinary grace period -- or none at all, because the window
         # that blocked the gate closed between its read and this one. Neither is news.
         return None
@@ -1228,7 +1228,7 @@ def _blocked_prune_message(disk_alert: dict, commands: CommandService) -> tuple[
          f"and no image is pruned while one is."),
     ]
     for row in windows[:5]:
-        held = row["expires_at"] >= INDEFINITE_EXPIRY
+        held = window_held(row)
         lines.append(f"• {TelegramClient.s(row['stack'])}/{TelegramClient.s(row['service'])} "
                      f"({row['execution_id']}{', held until a human settles it' if held else ''})")
     lines.append("A held window never expires: check the service is healthy, then SETTLE it "
@@ -1268,6 +1268,10 @@ def maybe_run_safe_prune(snapshot: dict, notifier: Notifier, state: "PipelineSta
         blocked = _blocked_prune_message(disk_alert, commands)
         if blocked is not None and _should_alert_blocked_prune(blocked[0]):
             notifier.notify(blocked[1])
+        elif blocked is None:
+            # Only canaries in their ordinary grace (rc14.7.8: a clean update keeps its old image 15 minutes): the prune waits for
+            # them on purpose and runs at the next scan after they lapse. Said here, so the wait is never silent.
+            log.info("Safe prune waits: a canary update keeps the image it would roll back to for its grace period")
         return False
     prunable = _prunable_bytes(snapshot)
     if (prunable is not None and prunable < SAFE_PRUNE_MIN_RECLAIM_BYTES
@@ -2717,6 +2721,12 @@ def scheduler_loop(notifier: Notifier, state: PipelineState, incident_store: Sto
         time.sleep(PIPELINE_INTERVAL_HOURS * 3600)
 
 
+# The canary outcomes after which the host is not as it was before the pass, so it is scanned again: an update, an update rolled back,
+# and (rc14.7.8) a rollback that did not finish or an update whose effect is unknown. Those last two changed the host as much as the
+# others and are the ones most worth a fresh look; only they were left out.
+CHANGED_THE_HOST = ("updated", "rolled_back", "rollback_failed", "interrupted", "error")   # error: it raised after it may have deployed
+
+
 def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineState,
                      commands: CommandService | None = None) -> None:
     """Zoidberg's canary update pass (/patchnow). Doesn't touch PipelineState's _state —
@@ -2735,7 +2745,7 @@ def _run_update_pass(tg: TelegramClient, notifier: Notifier, state: PipelineStat
             notifier.notify("⚠️ Typed execution is unavailable; the canary pass did not start.")
             return
         results = zoidberg.run_update_pass(tg=tg, commands=commands)
-        if any(r.get("status") in ("updated", "rolled_back") for r in (results or [])):
+        if any(r.get("status") in CHANGED_THE_HOST for r in (results or [])):
             state.request_rescan("the update pass changed something")
     except Exception as e:
         log.exception("Zoidberg update pass crashed")
@@ -2794,7 +2804,7 @@ def _run_scheduled_update_pass(tg: TelegramClient | None, state: PipelineState, 
             return "skipped"
         log.info("Scheduled canary update pass starting")
         results = zoidberg.run_update_pass(tg=tg, commands=commands)
-        if any(r.get("status") in ("updated", "rolled_back") for r in (results or [])):
+        if any(r.get("status") in CHANGED_THE_HOST for r in (results or [])):
             state.request_rescan("the update pass changed something")     # one scan for the whole pass
         return "ran"
     except Exception:

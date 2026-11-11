@@ -1086,6 +1086,37 @@ def test_approval_reads_preserve_denial_reason_from_audit_events(tmp_path):
     )
 
 
+def test_an_approvals_outcome_is_read_from_the_event_that_decided_it(tmp_path):
+    """rc14.7.8 (state-machines.md V3, bug 14): a superseded card read "EXPIRED · lapsed" on the dashboard while Telegram said
+    superseded, and a missing or tampered plan read "Refused by current policy"."""
+    from planet_express.execution import actions
+
+    store = Store(tmp_path / 'core.db', clock=lambda: 100)
+    store.init()
+    handlers = build_core_handlers(Mock(), store)
+
+    def propose(key):
+        row, _ = store.propose(action=actions.RESTART_SERVICE, target_key=key, target={'stack': 's', 'service': key, 'container': 'c'},
+                               risk='R1', requested_via='chat', requested_by='chris', ttl_seconds=60)
+        return row
+
+    superseded = propose('a')
+    store.supersede_pending(superseded['id'], reason='target changed; replaced by a newer request')
+    got = handlers['approval.get']({'approval_id': superseded['id']})
+    assert got['status'] == 'expired' and got['outcome'] == 'superseded' and 'target changed' in got['outcome_reason']
+
+    no_plan = propose('b')
+    store.consume(no_plan['id'], decision='denied', decided_by='policy', arrived_at=100)
+    store.record_event('approval.refused_no_plan', approval_id=no_plan['id'], attempted_by='chris')
+    got = handlers['approval.get']({'approval_id': no_plan['id']})
+    assert got['outcome'] == 'refused' and 'plan is missing or does not match' in got['denial_reason']
+
+    person = propose('c')
+    store.consume(person['id'], decision='denied', decided_by='chris', arrived_at=100)
+    got = handlers['approval.get']({'approval_id': person['id']})
+    assert got['outcome'] == 'denied' and got['denial_reason'] == 'Denied by chris.'
+
+
 def test_approval_reads_database_timeout():
     import sqlite3
 

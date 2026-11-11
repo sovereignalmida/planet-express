@@ -661,6 +661,7 @@ class RunbookEngine:
             self.svc._store.close_rollback_candidate(execution_id, dispatch.n)
             raise
         closed = False
+        graced = False
         try:
             rc, out, err = self.svc._run_argv(
                 actions.compose_pull_argv(stack, service), timeout=CANARY_PULL_TIMEOUT_SECONDS)
@@ -689,13 +690,20 @@ class RunbookEngine:
                 return StepOutcome("failed", "not_applied", drifted)
             outcome = self._canary_deploy(execution_id, dispatch.n, target, reference,
                                           running_id, new_id)
-            closed = outcome.effect != "unknown"
+            # A clean update keeps the image it would roll back to for a grace period after it lands (rc14.7.8): a failure that
+            # shows later is undone by rolling back to it, and the next prune must not have taken it. It closed at once, against
+            # what `settle_rollback_candidate` and the prune gate's docs promise (state-machines.md bug B9).
+            graced = outcome.status == "passed" and outcome.effect == "applied"
+            closed = not graced and outcome.effect != "unknown"
             return outcome
         finally:
             # Any exit that is not a clean "nothing is in flight" — a failed inverse, or a crash
             # anywhere after dispatch — must outlive the ordinary grace period, or the next prune
             # removes the only image that can restore the service (Codex, T42).
-            if closed:
+            if graced:
+                self.svc._store.extend_rollback_candidate(
+                    execution_id, dispatch.n, self.svc._clock() + CANARY_CANDIDATE_GRACE_SECONDS)
+            elif closed:
                 self.svc._store.close_rollback_candidate(execution_id, dispatch.n)
             else:
                 self.svc._store.hold_rollback_candidate(execution_id, dispatch.n)

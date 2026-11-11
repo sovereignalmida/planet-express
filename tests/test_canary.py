@@ -46,7 +46,10 @@ def joined(svc):
     return [" ".join(argv) for argv in svc.argv]
 
 
-def test_a_new_image_is_deployed_pinned_verified_and_the_window_closes(svc):
+def test_a_new_image_is_deployed_pinned_verified_and_the_window_lapses_after_its_grace(svc):
+    """rc14.7.8 (bug B9): the window closed the moment a clean update landed, so the next prune could take the only image a later
+    rollback needs. It now keeps the old image for the grace period from when the update landed, then lapses by itself."""
+    from planet_express.execution import engine
     _ex, result, step = run(svc)
     assert result.status == "passed"
     assert (step["status"], step["effect"]) == ("passed", "applied")
@@ -54,7 +57,11 @@ def test_a_new_image_is_deployed_pinned_verified_and_the_window_closes(svc):
     assert f"docker tag {NEW} {REFERENCE}" in joined(svc)
     assert any("up -d --pull never" in line for line in joined(svc))  # never a second pull
     assert svc.running == NEW
-    assert open_candidates(svc) == []
+    window = open_candidates(svc)
+    assert len(window) == 1 and window[0]["old_image_id"] == OLD
+    assert window[0]["expires_at"] >= svc._clock() + engine.CANARY_CANDIDATE_GRACE_SECONDS - 1
+    assert svc._store.any_open_rollback_candidate(svc._clock())                      # the prune keeps the old image now
+    assert not svc._store.any_open_rollback_candidate(svc._clock() + engine.CANARY_CANDIDATE_GRACE_SECONDS + 1)   # and not after
 
 
 def test_an_unchanged_image_passes_without_recreating_anything(svc):

@@ -39,6 +39,7 @@ from notifier import Decision, Notifier
 from planet_express.core.incidents import scan_id
 from planet_express.core.redact import redact
 from planet_express.core.store import (
+    approval_outcome,
     DEFAULT_TTL_SECONDS,
     IncidentSourceError,
     PendingPlanConflict,
@@ -136,6 +137,11 @@ def row_summary(row: dict) -> str:
         return str(json.loads(row["plan_json"])["title"])[:200]
     except Exception:  # noqa: BLE001
         return str(row.get("action") or "typed action")
+
+
+def _plain_ack(message: str) -> str:
+    """A Telegram callback answer: no markup, within the callback's length limit."""
+    return _TAG_RE.sub("", message)[:_CALLBACK_TEXT_LIMIT]
 
 
 class CommandService:
@@ -718,11 +724,11 @@ class CommandService:
         if row is None:
             return self._reply(decision, DecideResult("unknown", "Unknown or already removed request."))
         if row["status"] != "pending":
-            return self._reply(decision, self._not_pending(row))
+            return self._stale(decision, row)
 
         if not approve:
             if not self._store.consume(approval_id, decision="denied", decided_by=decided_by, arrived_at=arrived):
-                return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+                return self._stale(decision, self._store.get_approval(approval_id))
             text = self._decision_text(row, "denied", decided_by)
             self._safe_finalize_card(row, decision, ack="Denied.", text=text)
             return DecideResult("denied", text)
@@ -739,7 +745,7 @@ class CommandService:
                 )
                 self._safe_finalize_card(row, decision, ack="Refused: invalid plan.", text=text)
                 return DecideResult("refused", text)
-            return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+            return self._stale(decision, self._store.get_approval(approval_id))
 
         provenance = self._store.get_incident_proposal(approval_id)
 
@@ -760,7 +766,7 @@ class CommandService:
                     text = self._policy_refusal_text(row, reason)
                     self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
                     return DecideResult("refused", text)
-                return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+                return self._stale(decision, self._store.get_approval(approval_id))
 
         owner = f"act:{approval_id}"
         if not self._state.try_begin_mutation(owner):
@@ -783,7 +789,7 @@ class CommandService:
                         text = self._policy_refusal_text(row, f"refused: {reason}")
                         self._safe_finalize_card(row, decision, ack="Refused: stale incident.", text=text)
                         return DecideResult("refused", text)
-                    return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+                    return self._stale(decision, self._store.get_approval(approval_id))
                 current = self._current_policy(row)
                 if not current.allowed:
                     reason = f"refused by current policy: {current.reason}"
@@ -797,14 +803,13 @@ class CommandService:
                         text = self._policy_refusal_text(row, reason)
                         self._safe_finalize_card(row, decision, ack="Refused by policy.", text=text)
                         return DecideResult("refused", text)
-                    return self._reply(
-                        decision, self._not_pending(self._store.get_approval(approval_id))
+                    return self._stale(decision, self._store.get_approval(approval_id)
                     )
             execution = self._store.approve_and_create_execution(
                 approval_id, decided_by=decided_by, arrived_at=arrived
             )
             if execution is None:
-                return self._reply(decision, self._not_pending(self._store.get_approval(approval_id)))
+                return self._stale(decision, self._store.get_approval(approval_id))
             execution_id = execution["id"]
             text = self._decision_text(row, "approved", decided_by)
             ack = "Approved. Restarting…" if row["action"] == actions.RESTART_SERVICE else "Approved. Starting…"
@@ -1131,7 +1136,9 @@ class CommandService:
         try:
             # The operator's abort is read by the engine from the child's own row.
             result = engine.RunbookEngine(self).run(child_id, runbook, origin="rollback")
-            self._store.set_execution_status(child_id, result.status, reason=result.reason)
+            if not self._store.set_execution_status(child_id, result.status, reason=result.reason):
+                log.warning(f"Rollback {child_id}: its outcome was refused; the parent is left as it is")
+                return
             self._store.set_execution_status(
                 parent["id"], "rolled_back" if result.status == "passed" else "rollback_failed",
                 reason=parent["reason"],
@@ -1306,7 +1313,10 @@ class CommandService:
         return "; ".join(parts)
 
     def _finish(self, row: dict, execution_id: str, status: str, reason: str) -> None:
-        self._store.set_execution_status(execution_id, status, reason=reason)
+        if not self._store.set_execution_status(execution_id, status, reason=reason):
+            # The run already ended (its first outcome was recorded and announced): a second, contrary one is not (rc14.7.8).
+            log.warning(f"Execution {execution_id}: a second outcome ({status}) was refused; the first stands")
+            return
         key = _s(row["target_key"])
         if row["action"] == actions.RESTART_SERVICE and status == "passed":
             text = f"🟢 <b>Verified good</b>: <code>{key}</code> restarted. {_s(reason)}"
@@ -1433,10 +1443,28 @@ class CommandService:
             return DecideResult("expired", "⌛ This request expired. Propose it again if it's still needed.")
         return DecideResult("already_decided", f"Already {row['status']} by {row['decided_by']}.")
 
+    def _stale(self, decision: Decision | None, row: dict | None) -> DecideResult:
+        """A tap on a card that is no longer pending (expired, decided elsewhere, superseded): say so, and settle the card itself, so
+        its buttons go (rc14.7.8, state-machines.md bug 15). Expiry is lazy (the row is marked when it is next read), so the card
+        was never edited and kept working buttons for good. Best effort, like every card edit after the decision is recorded."""
+        result = self._not_pending(row)
+        # Only a card that lapsed is settled here. A decided card was settled by its decision, and its text (the run's outcome,
+        # a refusal's reason) must not be replaced by a late second tap (review, rc14.7.8).
+        if decision is None or row is None or row.get("message_id") is None or row["status"] != "expired":
+            return self._reply(decision, result)
+        outcome, why = approval_outcome(self._store, row)
+        summary = _s(CommandService._row_summary(row))
+        if outcome == "superseded":
+            result = DecideResult("expired", f"🚫 Superseded: {_s(why or 'a newer request replaces it')}")
+            text = f"🚫 {summary}: superseded. {_s(why or 'A newer request replaces it.')}"
+        else:
+            text = f"⌛ {summary}: expired. Propose it again if it's still needed."
+        self._safe_finalize_card(row, decision, ack=_plain_ack(result.message), text=text)
+        return result
+
     def _reply(self, decision: Decision | None, result: DecideResult) -> DecideResult:
         if decision is not None:
-            plain = _TAG_RE.sub("", result.message)[:_CALLBACK_TEXT_LIMIT]
-            self._notifier.acknowledge(decision, plain)
+            self._notifier.acknowledge(decision, _plain_ack(result.message))
         return result
 
     def _finalize_card(self, row: dict, decision: Decision | None, *, ack: str, text: str) -> None:

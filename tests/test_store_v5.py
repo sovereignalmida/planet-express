@@ -431,3 +431,23 @@ def test_direct_request_adopts_an_identical_pending_plan_from_another_origin(tmp
         origin="dashboard-direct",
     )
     assert result["adopted"] and result["approval"]["id"] == pending["id"]
+
+
+def test_a_runs_status_moves_only_along_its_table(tmp_path):
+    """rc14.7.8 (state-machines.md V4): any writer could overwrite any status, a finished run's included. An edge not in
+    EXECUTION_TRANSITIONS is refused and recorded; the rollback outcome is a finished run's one later edge."""
+    store = Store(tmp_path / "db.sqlite")
+    store.init()
+    target = {"stack": "media", "service": "web", "container": "web"}
+    run = store.create_direct_runbook_execution(
+        action="docker.restart_service", target_key="media/web", target=target, risk="R1",
+        operator="chris", arrived_at=1, plan_json='{"p":1}', plan_sha256="a" * 64, origin="dashboard-direct",
+    )["execution"]["id"]
+    assert store.set_execution_status(run, "verifying") and store.set_execution_status(run, "running")
+    assert store.set_execution_status(run, "passed")
+    assert not store.set_execution_status(run, "running")                        # a finished run is not restarted
+    assert store.get_execution(run)["status"] == "passed"
+    assert any(e["kind"] == "execution.transition_refused" for e in store.list_events(store.get_execution(run)["approval_id"]))
+    assert store.set_execution_status(run, "rollback_failed") and store.set_execution_status(run, "rolled_back")
+    assert not store.set_execution_status(run, "rollback_failed")                 # rolled back is the end
+    assert store.get_execution(run)["status"] == "rolled_back"

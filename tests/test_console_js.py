@@ -20,3 +20,10 @@ def test_the_console_js_never_builds_markup_from_text():
     source = (ROOT / "static/console.js").read_text()
     for forbidden in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function"):
         assert forbidden not in source, forbidden
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_execution_page_counts_a_runbooks_own_steps():
+    run = subprocess.run(["node", str(ROOT / "tests/js/execution.test.js")], capture_output=True, text=True, timeout=60, cwd=ROOT)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "all passed" in run.stdout

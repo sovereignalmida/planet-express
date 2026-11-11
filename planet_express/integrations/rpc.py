@@ -21,7 +21,7 @@ from typing import Any
 
 import config
 from planet_express.application.command_service import CommandService, row_summary
-from planet_express.core.store import INDEFINITE_EXPIRY, Store
+from planet_express.core.store import Store, approval_outcome, window_held
 from planet_express.execution import actions
 from telegram_client import TelegramClient
 
@@ -457,22 +457,10 @@ def build_core_handlers(
         item["target"] = json.loads(item.pop("target_json"))
         spec = actions.REGISTRY.get(item["action"])
         item["capabilities"] = spec.capabilities() if spec else {}
+        outcome, why = approval_outcome(store, item)
+        item["outcome"], item["outcome_reason"] = outcome, why
         if item.get("status") == "denied":
-            actor = item.get("decided_by") or "unknown"
-            item["denial_reason"] = f"Denied by {actor}."
-            if actor == "policy":
-                refusal = next((event for event in reversed(store.list_events(item["id"]))
-                                if event["kind"] in {"approval.refused_by_policy",
-                                                     "approval.refused_stale_incident"}), None)
-                reason = refusal["payload"].get("reason") if refusal is not None else None
-                if refusal is not None and refusal["kind"] == "approval.refused_stale_incident":
-                    item["denial_reason"] = (
-                        f"Incident evidence refused: {reason}"
-                        if reason else "Incident evidence is no longer current."
-                    )
-                else:
-                    item["denial_reason"] = (f"refused by current policy: {reason}"
-                                             if reason else "Refused by current policy.")
+            item["denial_reason"] = why                     # the older field the page read
         return item
 
     def approval_get(params):
@@ -717,10 +705,10 @@ def build_core_handlers(
         return [
             {"execution_id": row["execution_id"], "step_n": row["step_n"],
              "stack": row["stack"], "service": row["service"],
-             "held": row["expires_at"] >= INDEFINITE_EXPIRY,
+             "held": window_held(row),
              "old_image_id": row["old_image_id"], "image_reference": row["image_reference"],
              "recorded_at": _iso(row["created_at"]),
-             "expires_at": "when a human closes it" if row["expires_at"] >= INDEFINITE_EXPIRY
+             "expires_at": "when a human closes it" if window_held(row)
                            else _iso(row["expires_at"])}
             for row in store.open_rollback_candidates(time.time())
         ]

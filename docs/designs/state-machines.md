@@ -200,10 +200,10 @@ These are fixable without building any machine, so they need not wait for the pr
 | 11 | Recheck without a verifier loses Check again / Keep for good | fixed rc14.7.6 | `supervisor.py:1126-1147`, `1931-1950` |
 | 12 | "Keep the changes" offered after a failed rollback of a failed run | fixed rc14.7.6 | `verify/plan.py:85-91` |
 | 13 | Idle auto-archive can archive a conversation whose run is still going | fixed rc14.7.5 | `console/service.py:164` |
-| 14 | Dashboard shows "EXPIRED" for a superseded v3 card and "Refused by current policy" for a missing plan | sweep | `static/approvals.js:174-177`, `integrations/rpc.py:466-475` |
-| 15 | Expired Telegram cards keep working buttons | sweep | `core/store.py:953-959` |
-| 16 | "STEP 1 OF 2" counter wrong for longer runbooks | sweep | `static/execution.js:206` |
-| 17 | No re-scan after a failed rollback or an interrupted canary update | sweep | `casa_farnsworth.py:2738`, `2797` |
+| 14 | Dashboard shows "EXPIRED" for a superseded v3 card and "Refused by current policy" for a missing plan | fixed rc14.7.8 | `static/approvals.js:174-177`, `integrations/rpc.py:466-475` |
+| 15 | Expired Telegram cards keep working buttons | fixed rc14.7.8 | `core/store.py:953-959` |
+| 16 | "STEP 1 OF 2" counter wrong for longer runbooks | fixed rc14.7.8 | `static/execution.js:206` |
+| 17 | No re-scan after a failed rollback or an interrupted canary update | fixed rc14.7.8 | `casa_farnsworth.py:2738`, `2797` |
 | 18 | Lease expiry and checkpoint purge sweeps never run | checkpoint purge scheduled rc14.7.7; the lease expiry sweep is left unscheduled on purpose: an expired lease already blocks, cannot be revived and fails its fence, and marking it suspect would change when the supervisor's own release succeeds | `leases.py:520`, `checkpoint/service.py:1062` |
 | 19 | The NEEDS YOU count ignores missions held for the operator | fixed rc14.7.4 | `casa_scruffy.py` `needs_count` |
 

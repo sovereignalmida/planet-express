@@ -164,17 +164,24 @@
     return card;
   }
 
+  // What became of it, from Core's one reader (rc14.7.8): a superseded card is not "expired", and a refusal by PE is not a person's denial.
+  const OUTCOME_WORDS = { approved: "AUTHORISED", denied: "DENIED", refused: "REFUSED", superseded: "SUPERSEDED", expired: "EXPIRED" };
+
   function resolvedCard(item) {
     const status = item.status || "expired";
+    const outcome = item.outcome || status;
     const level = status === "approved" ? "ok" : status === "denied" ? "crit" : "none";
     const card = node("article", "pe-card approval-card " + status);
     card.dataset.approvalId = item.id;
-    card.append(statusRow(item, status === "approved" ? "AUTHORISED" : status.toUpperCase(), level));
+    card.append(statusRow(item, OUTCOME_WORDS[outcome] || status.toUpperCase(), level));
     card.append(node("h3", "approval-title", item.summary));
     if (status === "expired") {
       card.append(facts(item));
-      const readout = node("p", "approval-requested", "Proposed " + date(item.created_at) + " · lapsed " + date(item.expires_at));
-      card.append(readout, actionLink("RE-PROPOSE", targetUrl(item), true));
+      const readout = node("p", "approval-requested", outcome === "superseded"
+        ? "Proposed " + date(item.created_at) + " · " + (item.outcome_reason || "Replaced by a newer request.")
+        : "Proposed " + date(item.created_at) + " · lapsed " + date(item.expires_at));
+      card.append(readout);
+      if (outcome !== "superseded") card.append(actionLink("RE-PROPOSE", targetUrl(item), true));   // a newer one is already pending
       return card;
     }
     card.append(attribution(item, status === "denied"));

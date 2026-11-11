@@ -246,8 +246,44 @@ def test_second_decision_gets_already_decided(env):
 
     assert result.outcome == "already_decided"
     assert "approved by @chris (1001)" in result.message
+    # A decided card keeps the text its decision gave it (the run's outcome): a late tap is only answered (review, rc14.7.8)
     assert env.notifier.acknowledgements[-1][0] is tap
+    assert not any(r[0] is tap for r in env.notifier.resolutions)
     assert len(env.argv_calls) == 1
+
+
+def test_a_tap_on_a_superseded_card_says_superseded_not_expired(env):
+    first = env.propose().approval_id
+    env.store.supersede_pending(first, reason="target changed; replaced by a newer request")
+    tap = _tap(first)
+    result = env.service.decide(first, approve=True, decided_by="@chris (1001)", decision=tap)
+    assert "Superseded" in result.message and env.notifier.resolutions[-1][0] is tap
+    assert "superseded" in env.notifier.resolutions[-1][2] and "Propose it again" not in env.notifier.resolutions[-1][2]
+
+
+def test_a_second_contrary_outcome_is_neither_recorded_nor_announced(env):
+    """`_finish` after a run already ended (an exception after the first outcome) must not tell the operator the opposite."""
+    approval_id = env.propose().approval_id
+    env.service.decide(approval_id, approve=True, decided_by="@chris (1001)", decision=_tap(approval_id))
+    row = env.store.get_approval(approval_id)
+    execution = env.store.list_executions(approval_id)[0]
+    assert execution["status"] == "passed"
+    before = list(env.notifier.notifications) + [r[2] for r in env.notifier.resolutions] + [u[1] for u in env.notifier.request_updates]
+    env.service._finish(row, execution["id"], "failed", "crashed: late")
+    after = list(env.notifier.notifications) + [r[2] for r in env.notifier.resolutions] + [u[1] for u in env.notifier.request_updates]
+    assert env.store.get_execution(execution["id"])["status"] == "passed" and after == before
+
+
+def test_a_tap_on_an_expired_card_settles_the_card_so_its_buttons_go(env):
+    """Bug 15: expiry is lazy, so the card was never edited and kept working buttons; a tap only answered "expired"."""
+    approval_id = env.propose().approval_id
+    with env.store._write() as conn:
+        conn.execute("UPDATE approvals SET status='expired' WHERE id=?", (approval_id,))
+    tap = _tap(approval_id)
+    result = env.service.decide(approval_id, approve=True, decided_by="@chris (1001)", decision=tap)
+    assert result.outcome == "expired"
+    assert env.notifier.resolutions[-1][0] is tap and "expired" in env.notifier.resolutions[-1][2]
+    assert env.argv_calls == []
 
 
 def test_expired_request_is_refused(env):
