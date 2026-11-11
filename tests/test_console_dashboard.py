@@ -45,7 +45,8 @@ class Core:
         return {"ok": True, "result": self.results[method]}
 
     def methods(self):
-        return [m for m, _ in self.calls if not m.startswith("auth.")]
+        # auth and the top bar's pipeline read (rc14.7.9) are every page's, not what these tests count
+        return [m for m, _ in self.calls if not m.startswith("auth.") and m != "pipeline.status"]
 
 
 @pytest.fixture

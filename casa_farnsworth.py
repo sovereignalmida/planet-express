@@ -785,6 +785,26 @@ def _format_diagnostic_evidence(evidence: list[dict]) -> str:
 
 
 # ── State management ──────────────────────────────────────────────────────────
+def owner_words(owner: str | None) -> str | None:
+    """The host lock's owner as the dashboard says it (rc14.7.9). The owner strings are internal; anything unknown is shown as is."""
+    if not owner:
+        return None
+    head, _, rest = owner.partition(":")
+    words = {"safe-prune": "a safe prune", "zoidberg-weekly": "Zoidberg's weekly update", "zoidberg-patchnow": "an update you asked for",
+             "config-apply": "a config change"}
+    if owner in words:
+        return words[owner]
+    if head == "mission":
+        return f"mission {rest.partition(':')[0]}"
+    if head == "act":
+        return "a direct action" if rest.startswith("direct:") else "an approved action"
+    if head == "rollback":
+        return "a rollback"
+    if head == "incident":
+        return "an incident decision"
+    return owner
+
+
 class PipelineState:
     """Thread-safe pipeline state. Persisted to STATE_STATUS."""
 
@@ -925,6 +945,24 @@ class PipelineState:
     def mutation_owner(self) -> str | None:
         with self._lock:
             return self._mutation_owner
+
+    def snapshot(self) -> dict:
+        """What the dashboard shows (rc14.7.9, state-machines.md V2), read under the one lock: the scan slot, the change holding the
+        host lock (in words) and a maintenance window. The dashboard read only `run_status.json`, which knows the scan slot alone,
+        so a host change in progress read "pipeline idle". A mission changing the host with its own tools holds leases, not the
+        lock, so its claim is said too. The marker file and the mission claims are read OUTSIDE the lock: every page asks for
+        this, and the lock serialises every host change, which must never wait behind a dashboard read (review, rc14.7.9)."""
+        window = self.maintenance()
+        claim = None
+        if self.mission_claims is not None:
+            try:
+                claim = self.mission_claims()
+            except Exception:  # noqa: BLE001 -- the bar says less; the lock itself still refuses on an unreadable claim
+                claim = None
+        with self._lock:
+            state, owner = self._state, self._mutation_owner
+        changing = owner_words(owner) or (claim.split(" (it finishes")[0] if claim else None)
+        return {"state": state, "changing": changing, "maintenance": window.reason if window else None}
 
     @property
     def busy_reason(self) -> str:
@@ -2911,7 +2949,7 @@ def make_scan_starter(notifier: Notifier, state: PipelineState, store: Store | N
 # ── Main bot loop ─────────────────────────────────────────────────────────────
 def _start_dashboard_rpc(
     commands: CommandService, store: Store, notifier: Notifier, chat=None, config_service=None,
-    start_scan=None, missions: MissionService | None = None,
+    start_scan=None, missions: MissionService | None = None, pipeline_status=None,
 ) -> RpcServer | None:
     """Optional dashboard transport: installation failures never prevent polling."""
     try:
@@ -2929,7 +2967,7 @@ def _start_dashboard_rpc(
         server = RpcServer(
             config.RPC_SOCKET,
             build_core_handlers(commands, store, notifier, chat, config_service,
-                                start_scan=start_scan, missions=missions),
+                                start_scan=start_scan, missions=missions, pipeline_status=pipeline_status),
             allowed_uids,
             config.RPC_GROUP,
         )
@@ -3162,6 +3200,7 @@ def run_bot() -> None:
     rpc_server = _start_dashboard_rpc(
         commands, store, notifier, chat, config_service,
         start_scan=make_scan_starter(notifier, state, store, commands), missions=missions,
+        pipeline_status=state.snapshot,
     )
 
     # v4 mission control: nothing is built or started unless missions.enabled (see missions/runner.py).

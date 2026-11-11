@@ -82,7 +82,8 @@ class Core:
         return {"ok": True, "result": result(params) if callable(result) else result}
 
     def methods(self):
-        return [m for m, _ in self.calls if not m.startswith("auth.")]
+        # auth and the top bar's pipeline read (rc14.7.9) are every page's, not what these tests count
+        return [m for m, _ in self.calls if not m.startswith("auth.") and m != "pipeline.status"]
 
 
 @pytest.fixture
@@ -271,6 +272,32 @@ def test_the_needs_you_count_refreshes_with_the_panels():
 def test_a_chat_bookmark_with_the_console_off_stays_on_overview():
     script = (Path(__file__).resolve().parent.parent / "static" / "dashboard.js").read_text()
     assert 'if (hashTab === "chat" && !document.querySelector(\'a.tab[href="/console"]\'))' in script
+
+
+def test_the_top_bar_says_what_is_changing_the_host(web, monkeypatch):
+    """rc14.7.9 (state-machines.md V2): the bar read only run_status.json, which knows scans alone, so a host change in progress
+    read "pipeline idle"."""
+    from types import SimpleNamespace
+    import dashboard_data
+    client, core, _ = web
+
+    def page(answer=None, error=None):
+        dashboard_data._pipeline_cache = (0.0, None, None)              # each case is a fresh read (the bar caches for 2 s)
+        core.errors.pop("pipeline.status", None)
+        if error:
+            core.errors["pipeline.status"] = error
+        else:
+            core.results["pipeline.status"] = answer
+        return client.get("/missions").get_data(as_text=True)
+
+    assert "changing the host: Zoidberg&#39;s weekly update" in page({"state": "idle", "changing": "Zoidberg's weekly update", "maintenance": None})
+    # a safe prune runs during a scan: both are said, the change is not hidden behind "running"
+    assert "scanning · changing the host: a safe prune" in page({"state": "running", "changing": "a safe prune", "maintenance": None})
+    # maintenance does not hide a change still in progress
+    both = page({"state": "idle", "changing": "a config change", "maintenance": "kernel upgrade"})
+    assert "maintenance: kernel upgrade" in both and "changing the host: a config change" in both
+    monkeypatch.setattr(dashboard_data, "load_status", lambda: SimpleNamespace(state="running", pending_plan_id=None, updated_at=None))
+    assert "pipeline running" in page(error="unavailable")                # Core cannot say: the file's own state is shown
 
 
 def test_old_dashboard_tabs_send_you_where_they_went():

@@ -25,7 +25,8 @@
     <div class="topbar-spacer"></div>
     <div class="header-status">
       <span class="led-dot status-{{ ctx.health.status }}"></span>
-      <span>pipeline {{ ctx.pipeline_status.state }} · scanned {{ ctx.health.last_scan or "never" }}</span>
+      {# rc14.7.9: Core's own view when it answers: a change holding the host lock, or maintenance, is said, not "idle". #}
+      <span>{% if ctx.pipeline_status.maintenance %}maintenance: {{ ctx.pipeline_status.maintenance }} · {% endif %}{% if ctx.pipeline_status.changing %}{% if ctx.pipeline_status.state == "running" %}scanning · {% endif %}changing the host: {{ ctx.pipeline_status.changing }}{% else %}pipeline {{ ctx.pipeline_status.state }}{% endif %} · scanned {{ ctx.health.last_scan or "never" }}</span>
     </div>
     {% if page == "dashboard" %}
     {# Server-rendered from the live pipeline state, so the 60s swap of #dashboard-live is

@@ -872,7 +872,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
     register_mission_pages(app, core)
     register_console_pages(app, core)
     app.add_url_rule("/", "index", partial(index, core))
-    app.add_url_rule("/hosts", "hosts", partial(hosts, fleet_cache))
+    app.add_url_rule("/hosts", "hosts", partial(hosts, fleet_cache, core))
     app.add_url_rule("/api/widget", view_func=widget)
     return app
 
@@ -919,7 +919,7 @@ def register_console_pages(app, core) -> None:
     (text only, never HTML). Every mutation is a form-encoded POST with the session CSRF token; the acting operator is always the signed-in
     session's (`g.operator`). Core answers `disabled` while missions are off and `unavailable` while the Console is not enabled."""
     def shell(template, **context):
-        ctx = {"health": dashboard_data.summarize_health(), "pipeline_status": dashboard_data.summarize_pipeline_status()}
+        ctx = {"health": dashboard_data.summarize_health(), "pipeline_status": dashboard_data.summarize_pipeline_status(core)}
         return render_template(template, ctx=ctx, **context)
 
     def conversation(conversation_id):
@@ -1058,7 +1058,7 @@ def register_mission_pages(app, core) -> None:
 
     def shell(template, live=None, **context):
         ctx = {"health": dashboard_data.summarize_health(),
-               "pipeline_status": dashboard_data.summarize_pipeline_status(), **(live or {})}
+               "pipeline_status": dashboard_data.summarize_pipeline_status(core), **(live or {})}
         if context.get("page") == "missions" and "needs_count" not in context:
             context["needs_count"] = needs_count()         # every Missions page shows the NEEDS YOU count
         return render_template(template, ctx=ctx, **context)
@@ -1453,7 +1453,7 @@ def index(core=None):
                     "Core's enforced config had unusable %s; falling back (pause decisions to the "
                     "scan's own, the rest to this process's config)",
                     ", ".join(sorted(refused)))
-    ctx = dashboard_data.build_dashboard_context(enforced)
+    ctx = dashboard_data.build_dashboard_context(enforced, core=core)       # the pipeline from Core's own view (rc14.7.9)
     if core is not None:
         # The open canary rollback windows are read on Missions > NEEDS YOU now (rc14.7.3), not here.
         try:
@@ -1506,12 +1506,12 @@ def widget():
     return jsonify(dashboard_data.summarize_health())
 
 
-def hosts(fleet_cache):
+def hosts(fleet_cache, core=None):
     """Other hosts, rendered inside the dashboard shell. `ctx` carries only what the shared header
     reads (the pipeline pill); the rest of the dashboard context is not built for this page."""
     ctx = {
         "health": dashboard_data.summarize_health(),
-        "pipeline_status": dashboard_data.summarize_pipeline_status(),
+        "pipeline_status": dashboard_data.summarize_pipeline_status(core),
     }
     return render_template("hosts.html", fleet=fleet_cache.view(), ctx=ctx)
 

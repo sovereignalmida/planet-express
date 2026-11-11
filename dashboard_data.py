@@ -197,13 +197,43 @@ def settling_reason() -> str | None:
     return _settling_cache[1]
 
 
-def summarize_pipeline_status() -> dict:
-    status = load_status()
+_PIPELINE_TTL_SECONDS = 2.0
+_pipeline_cache: tuple[float, object, dict | None] = (0.0, None, None)
+
+
+def _pipeline_from_core(core) -> dict | None:
+    """Core's `pipeline.status`, kept for a moment: every page and poll shows it, and a busy Core must not hold each of them up
+    (review, rc14.7.9). Short enough that SCAN still turns into SCANNING on the next poll. A failure is not kept."""
+    global _pipeline_cache
+    now = time.monotonic()
+    at, who, value = _pipeline_cache
+    if who is core and value is not None and now - at < _PIPELINE_TTL_SECONDS:
+        return value
+    value = core("pipeline.status", {})
+    _pipeline_cache = (now, core, value if isinstance(value, dict) else None)
+    return value
+
+
+def summarize_pipeline_status(core=None) -> dict:
+    """The pipeline as the top bar shows it. From Core when it answers (rc14.7.9: the scan slot, the change holding the host lock,
+    maintenance); otherwise from `run_status.json`, which knows the scan slot alone."""
     settling = settling_reason()
+    if core is not None:
+        try:
+            live = _pipeline_from_core(core)
+            if isinstance(live, dict) and isinstance(live.get("state"), str):
+                return {"state": live["state"], "changing": live.get("changing"), "maintenance": live.get("maintenance"),
+                        "pending_plan_id": None, "updated_at": None, "settling": settling}
+        except Exception:  # noqa: BLE001 -- Core down: the file still says something
+            pass
+    status = load_status()
     if not status:
-        return {"state": "unknown", "pending_plan_id": None, "updated_at": None, "settling": settling}
+        return {"state": "unknown", "changing": None, "maintenance": None, "pending_plan_id": None, "updated_at": None,
+                "settling": settling}
     return {
         "state": status.state,
+        "changing": None,
+        "maintenance": None,
         "pending_plan_id": status.pending_plan_id,
         "updated_at": status.updated_at,
         "settling": settling,
@@ -1314,13 +1344,14 @@ def container_images() -> dict:
             if isinstance(c, dict) and c.get("name")}
 
 
-def build_dashboard_context(enforced: dict | None = None) -> dict:
+def build_dashboard_context(enforced: dict | None = None, core=None) -> dict:
     """Single entry point the Flask route calls. `enforced` is core's config.enforced answer,
-    or None to fall back to this process's own import (see enforced_value)."""
+    or None to fall back to this process's own import (see enforced_value). `core` lets the
+    pipeline status come from Core's own view (`summarize_pipeline_status`)."""
     ctx = {
         "health": summarize_health(enforced),
         "findings": summarize_findings(),
-        "pipeline_status": summarize_pipeline_status(),
+        "pipeline_status": summarize_pipeline_status(core),
         "containers": summarize_containers(enforced),
         "stack_completeness": summarize_stack_completeness(),
         "services": summarize_services(),

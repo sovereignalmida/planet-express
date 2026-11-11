@@ -564,3 +564,23 @@ def test_a_nearly_full_disk_is_pruned_even_for_a_little(monkeypatch):
             return type("R", (), {"outcome": "passed", "reason": "freed 900MB"})()
     snap = {"docker_disk": {"rows": [{"type": "Images", "reclaimable": "900MB (6%)"}]}}
     assert fw.maybe_run_safe_prune(snap, FakeNotifier(), _state(), Commands()) is True and ran == [1]
+
+
+def test_the_snapshot_says_the_scan_slot_the_lock_owner_in_words_and_maintenance():
+    state = fw.PipelineState()
+    assert state.snapshot() == {"state": "idle", "changing": None, "maintenance": None}
+    assert state.try_begin_mutation("zoidberg-weekly")
+    assert state.snapshot()["changing"] == "Zoidberg's weekly update"
+    state.end_mutation("zoidberg-weekly")
+    assert state.try_begin_mutation("mission:M-7:abcd")
+    assert state.snapshot()["changing"] == "mission M-7"
+    state.end_mutation("mission:M-7:abcd")
+    assert fw.owner_words("something-new") == "something-new" and fw.owner_words(None) is None
+
+
+def test_a_mission_changing_the_host_with_its_own_tools_is_said_too():
+    """It holds leases, not the lock: the bar must not read "idle" while it works (review, rc14.7.9)."""
+    state = fw.PipelineState()
+    state.set_mission_claims(lambda: "M-9 is working on media/sonarr (it finishes, or is cancelled, before anything else changes the host)")
+    assert state.snapshot()["changing"] == "M-9 is working on media/sonarr"
+    assert fw.owner_words("act:direct:ab12") == "a direct action" and fw.owner_words("act:A-1") == "an approved action"

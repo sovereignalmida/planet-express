@@ -207,7 +207,7 @@ These are fixable without building any machine, so they need not wait for the pr
 | 18 | Lease expiry and checkpoint purge sweeps never run | checkpoint purge scheduled rc14.7.7; the lease expiry sweep is left unscheduled on purpose: an expired lease already blocks, cannot be revived and fails its fence, and marking it suspect would change when the supervisor's own release succeeds | `leases.py:520`, `checkpoint/service.py:1062` |
 | 19 | The NEEDS YOU count ignores missions held for the operator | fixed rc14.7.4 | `casa_scruffy.py` `needs_count` |
 
-## Proposed order
+## Proposed order (steps 1-6 done: rc14.7.4 to rc14.7.9)
 
 1. **rc14.7.4: bug fixes, no machines.**
    - Bugs 1, 2 and 3: small, high-value, and around the v3/v4 lock.
@@ -222,7 +222,7 @@ These are fixable without building any machine, so they need not wait for the pr
    - Replay the host's real mission events to prove the derived states match.
 4. **Sessions and leases (M6, M7).** Terminal session states, a per-state lease expectation, and the two sweeps scheduled or removed. Bug 1's permanent fix lands here if step 1 only patched the query.
 5. **v3 approvals, executions and windows (V3, V4, V5, V7).** Fixes bugs 14 to 17.
-6. **V2:** pipeline status over RPC.
+6. **V2:** pipeline status over RPC. Done rc14.7.9.
 
 Each step:
 - one release

@@ -358,7 +358,7 @@ def _params(params, strings, booleans=()):
 
 def build_core_handlers(
     commands: CommandService, store: Store, notifier=None, chat=None, config_service=None,
-    *, start_scan=None, missions=None,
+    *, start_scan=None, missions=None, pipeline_status=None,
 ) -> dict:
     def propose(params):
         _params(params, {"action": 128, "stack": 255, "service": 255, "requested_by": 256})
@@ -533,6 +533,14 @@ def build_core_handlers(
     def execution_rollback(params):
         _control_params(params)
         return asdict(commands.rollback(params["execution_id"], operator=params["operator"]))
+
+    def pipeline_status_get(params):
+        """rc14.7.9: the scan slot, the change holding the host lock and a maintenance window, as Core holds them. Read-only, no
+        secrets: what the dashboard's top bar shows."""
+        _params(params, {})
+        if pipeline_status is None:
+            raise RpcError("Pipeline status is unavailable", "unavailable")
+        return pipeline_status()
 
     def scan_start(params):
         """Start the same full pipeline Telegram's /check runs, and say so synchronously.
@@ -942,6 +950,7 @@ def build_core_handlers(
     handlers = {"logs.tail": logs, "approval.get": approval_get,
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "scan.start": scan_start,
+            "pipeline.status": pipeline_status_get,
             "proposal.create": propose, "proposal.list_pending": pending,
             "approval.decide": decide, "execution.get_status": status,
             "execution.abort": execution_abort, "execution.rollback": execution_rollback,

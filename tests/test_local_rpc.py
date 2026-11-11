@@ -313,7 +313,7 @@ def test_core_handlers():
                              "auth.consume_totp_step", "auth.device_epoch", "auth.notify_locked",
                              "incident.list", "incident.get", "incident.propose", "incident.dismiss",
                              "canary.candidates", "canary.settle", "scan.start", "containers.routers",
-                             "config.enforced", "query.widget_target"}
+                             "config.enforced", "query.widget_target", "pipeline.status"}
     params = {"action": "docker.restart_service", "stack": "media", "service": "sonarr", "requested_by": "Chris"}
     assert handlers["proposal.create"](params) == asdict(commands.propose.return_value)
     commands.propose.assert_called_once_with(**params, requested_via="dashboard", timeout=4)
