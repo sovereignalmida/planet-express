@@ -380,6 +380,18 @@ hard-block list (wiping disks, deleting Docker data, PE's own secrets and files)
 talks to the vendor directly, around the broker. Telemetry, updates and feedback traffic are switched off by the environment the
 broker sets. Name every model the CLI may request in `models`; a request for any other is refused and logged.
 
+
+**PE's own model calls through the broker (rc14.8).** Hermes (findings analysis), Farnsworth (planning), Amy (failure diagnosis)
+and Fry (`/install`) call a model too. Whenever the broker runs (missions enabled, the broker on, its key set), they go through it
+by themselves: the same key, the same usage record, so the credit and spend PE shows include them. There is nothing to switch on.
+They use a channel of their own (a loopback listener whose access code exists only in Core's memory), on the broker's models: the
+small tier is `ANTHROPIC_SMALL_FAST_MODEL` (or `ANTHROPIC_DEFAULT_HAIKU_MODEL`) from `session_env`, the large tier
+`ANTHROPIC_DEFAULT_SONNET_MODEL` (or `ANTHROPIC_MODEL`); with neither named, a Haiku for small and a Sonnet or Opus for large.
+Each call is logged as a `core.model.request` event naming who asked (`hermes`, `farnsworth`, `amy`, `fry`). That channel,
+unlike a session, may use the vendor's web search and fetch (Amy's and Fry's research); if the gateway in front of the vendor
+refuses them, the call is made once more without them, and the answer is marked unresearched (Fry's then proposes no install).
+Its budget is `core_max_requests_per_day` and `core_max_tokens_per_day` (UTC). While the broker is not running, they call the
+provider named by `LLM_PROVIDER` (`openai` or `anthropic`) directly, as before; once the broker carries them, that key can go.
 ### What v4 adds to the host
 
 | Kind | What | Where | Removed by |

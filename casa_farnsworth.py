@@ -533,14 +533,19 @@ class _AnthropicDiagnosticAdapter:
                  max_tokens=DIAGNOSTIC_MAX_TOKENS, user_prefix="Findings:\n"):
         import anthropic
 
+        import casa_llm
+
         self.system_prompt = system_prompt
         self.max_tokens = max_tokens
-        self.client = anthropic.Anthropic(api_key=config.anthropic_api_key())
+        # rc14.8: through the model broker whenever it runs (its key, its record, its budget), else the vendor directly.
+        self.provider = casa_llm.provider()
+        self.client = (casa_llm.broker_client("farnsworth") if self.provider == "broker"
+                       else anthropic.Anthropic(api_key=config.anthropic_api_key()))
         self.messages = [{"role": "user", "content": f"{user_prefix}{findings_json}"}]
 
     def request(self) -> Turn:
         response = self.client.messages.create(
-            model=config.model_for("small"),
+            model=config.model_for("small", self.provider),
             max_tokens=self.max_tokens,
             system=self.system_prompt,
             tools=[DIAGNOSTIC_TOOL_SCHEMA],
@@ -672,7 +677,8 @@ class _ChatAdapter:
 
 def _run_chat_investigation(question, reserve, *, operator, commands) -> ChatResult:
     evidence = []
-    adapter_type = (_AnthropicDiagnosticAdapter if config.LLM_PROVIDER == "anthropic"
+    import casa_llm
+    adapter_type = (_AnthropicDiagnosticAdapter if casa_llm.provider() in ("anthropic", "broker")
                     else _OpenAIDiagnosticAdapter)
     adapter = _ChatAdapter(adapter_type(question, system_prompt=CHAT_SYSTEM_PROMPT,
                                        max_tokens=2048, user_prefix="Question:\n"), reserve)
@@ -762,10 +768,12 @@ def _gather_diagnostics(findings_json: str) -> list[dict]:
     provider) just means planning proceeds with whatever real results came back
     before it, possibly none."""
     evidence: list[dict] = []
+    import casa_llm
     try:
-        if config.LLM_PROVIDER == "anthropic":
+        used = casa_llm.provider()                  # rc14.8: the broker whenever it runs
+        if used in ("anthropic", "broker"):
             _gather_diagnostics_anthropic(findings_json, evidence)
-        elif config.LLM_PROVIDER == "openai":
+        elif used == "openai":
             _gather_diagnostics_openai(findings_json, evidence)
     except Exception as e:  # noqa: BLE001
         log.warning(f"Diagnostic pre-check failed, planning with {len(evidence)} result(s) gathered before it: {e}")
@@ -1123,6 +1131,7 @@ def _plan_batch(
         user_content,
         MAX_TOKENS,
         tier="small",
+        purpose="farnsworth",
     ).strip()
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -1586,7 +1595,7 @@ def _devise_typed_plans(findings: dict) -> str:
             + "; ".join(f"{d['command']} (exit {d['exit_code']})" for d in diagnostics)
         )
         user_content += "\n\n" + _format_diagnostic_evidence(diagnostics)
-    return llm.complete(planner.PLAN_RUNBOOK_PROMPT, user_content, MAX_TOKENS, tier="small").strip()
+    return llm.complete(planner.PLAN_RUNBOOK_PROMPT, user_content, MAX_TOKENS, tier="small", purpose="farnsworth").strip()
 
 
 def _propose_typed_plans(

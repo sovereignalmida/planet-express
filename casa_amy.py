@@ -81,26 +81,6 @@ Return ONLY valid JSON, this exact structure, nothing else:
 }"""
 
 
-def _ask_anthropic(user_content: str) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key())
-    with client.messages.stream(
-        model=config.model_for("large"),
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "high"},
-        tools=[
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": MAX_SEARCH_USES},
-            {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": MAX_FETCH_USES},
-        ],
-        messages=[{"role": "user", "content": user_content}],
-    ) as stream:
-        response = stream.get_final_message()
-    return next((b.text for b in response.content if b.type == "text"), "")
-
-
 def _ask_openai(user_content: str) -> str:
     import openai
 
@@ -148,10 +128,15 @@ def diagnose(
 
     user_content = f"Diagnose this failure:\n{json.dumps(context, separators=(',', ':'))}"
 
-    if config.LLM_PROVIDER == "anthropic":
-        text = _ask_anthropic(user_content)
+    import casa_llm
+
+    # The broker whenever it runs (rc14.8), else the configured direct provider. One research call for Amy and Fry (casa_llm).
+    answered = casa_llm.research("amy", SYSTEM_PROMPT, user_content, MAX_TOKENS, max_search_uses=MAX_SEARCH_USES,
+                                 max_fetch_uses=MAX_FETCH_USES, log=log)
+    if answered is not None:
+        text, researched = answered
     elif config.LLM_PROVIDER == "openai":
-        text = _ask_openai(user_content)
+        text, researched = _ask_openai(user_content), True
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER {config.LLM_PROVIDER!r} — expected 'anthropic' or 'openai'.")
 
@@ -180,6 +165,8 @@ def diagnose(
             "_parse_error": str(e),
         }
 
+    if not researched:                                    # the web tools were refused: whatever the model said, nothing was looked up
+        result["researched"], result["sources"] = False, []
     result.setdefault("diagnosed_at", datetime.now(timezone.utc).isoformat())
     log.info(
         f"Amy's diagnosis for {stack}/{service}: category={result.get('category')}, "

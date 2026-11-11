@@ -381,6 +381,9 @@ class ModelBrokerConfig(BaseModel):
     models: list[str] = []                          # model ids a mission may request; empty is refused when enabled
     max_requests: int = Field(default=300, gt=0, le=100_000)       # per session
     max_tokens: int = Field(default=10_000_000, gt=0)              # per session: input + output, cache reads at a tenth
+    # rc14.8: PE's own calls (Hermes, Farnsworth, Amy, Fry) through the broker's Core channel, per UTC day
+    core_max_requests_per_day: int = Field(default=1000, gt=0, le=100_000)
+    core_max_tokens_per_day: int = Field(default=5_000_000, gt=0)
     timeout_s: int = Field(default=300, gt=0, le=3600)
     usage: ProviderUsageConfig = ProviderUsageConfig()             # credit and spend from the provider, shown, never enforced
 

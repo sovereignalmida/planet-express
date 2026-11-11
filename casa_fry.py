@@ -111,33 +111,6 @@ Return ONLY valid JSON, this exact structure, nothing else:
 }"""
 
 
-def _ask_anthropic(user_content: str) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key())
-    with client.messages.stream(
-        model=config.model_for("large"),
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        thinking={"type": "adaptive"},
-        output_config={"effort": "high"},
-        tools=[
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": MAX_SEARCH_USES},
-            {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": MAX_FETCH_USES},
-        ],
-        messages=[{"role": "user", "content": user_content}],
-    ) as stream:
-        response = stream.get_final_message()
-    text = next((b.text for b in response.content if b.type == "text"), "")
-    if not text:
-        block_types = [b.type for b in response.content]
-        log.error(
-            f"Fry's Anthropic response had no text block (stop_reason={response.stop_reason!r}, "
-            f"content block types={block_types!r}) — likely ran out of tokens mid-research"
-        )
-    return text
-
-
 def _ask_openai(user_content: str) -> str:
     import openai
 
@@ -173,10 +146,15 @@ def onboard(url: str, stack_name: str, domain: str) -> dict:
 
     user_content = f"Resolve deployment requirements for this project:\n{json.dumps(context, separators=(',', ':'))}"
 
-    if config.LLM_PROVIDER == "anthropic":
-        text = _ask_anthropic(user_content)
+    import casa_llm
+
+    # The broker whenever it runs (rc14.8), else the configured direct provider. One research call for Amy and Fry (casa_llm).
+    answered = casa_llm.research("fry", SYSTEM_PROMPT, user_content, MAX_TOKENS, max_search_uses=MAX_SEARCH_USES,
+                                 max_fetch_uses=MAX_FETCH_USES, log=log)
+    if answered is not None:
+        text, researched = answered
     elif config.LLM_PROVIDER == "openai":
-        text = _ask_openai(user_content)
+        text, researched = _ask_openai(user_content), True
     else:
         raise RuntimeError(f"Unknown LLM_PROVIDER {config.LLM_PROVIDER!r} — expected 'anthropic' or 'openai'.")
 
@@ -210,6 +188,12 @@ def onboard(url: str, stack_name: str, domain: str) -> dict:
             "_parse_error": str(e),
         }
 
+    if not researched:
+        # The web tools were refused, so nothing was read from the project's own repo: the requirements are not verified, and an
+        # install is not proposed from them (Farnsworth refuses without `sufficient_context`).
+        result["sufficient_context"], result["sources"] = False, []
+        result["notes"] = ("PE could not research this project (the model service refused web search and fetch); these "
+                           "requirements were not checked against the project's own files. " + str(result.get("notes") or ""))[:2000]
     result.setdefault("resolved_at", datetime.now(timezone.utc).isoformat())
     log.info(
         f"Fry's resolution for {stack_name}: sufficient_context={result.get('sufficient_context')}, "

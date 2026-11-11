@@ -169,6 +169,7 @@ def analyze(snapshot: dict) -> dict:
         f"Analyze this system snapshot and file your report:\n{snapshot_json}",
         MAX_TOKENS,
         tier="small",
+        purpose="hermes",
     ).strip()
 
     # Strip markdown fences if the model disobeyed

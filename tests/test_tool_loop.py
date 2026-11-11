@@ -81,7 +81,7 @@ def test_request_cap_even_if_executor_does_not_spend_budget(cap):
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai"])
 def test_provider_two_turn_request_kwargs(monkeypatch, provider):
-    monkeypatch.setattr(farnsworth.config, "model_for", lambda tier: "fixture-model")
+    monkeypatch.setattr(farnsworth.config, "model_for", lambda tier, provider=None: "fixture-model")
     if provider == "anthropic":
         first = _an(_an_text("checking"), _an_tool("docker ps"))
         last = _an(_an_text("done"))

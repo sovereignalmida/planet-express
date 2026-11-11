@@ -71,6 +71,16 @@ class MissionRunner:
         # The socket first: a session restarted by recover() may call it straight away.
         if self.worker_server is not None:
             self.worker_server.start()
+        # rc14.8: the broker's Core channel, so PE's own model calls (Hermes, Farnsworth, Amy, Fry) use the broker's key and land in
+        # its record. Started here, with the runner, and stopped with it (stop() shuts the broker down): a build that fails never
+        # leaves a listener behind.
+        broker = getattr(self.supervisor, "model_broker", None)
+        if broker is not None and getattr(broker, "start_core", None) is not None and broker._key():
+            try:
+                broker.start_core()
+                log.info("PE's own model calls go through the model broker")
+            except Exception:                  # noqa: BLE001 -- v3 then uses its direct provider (LLM_PROVIDER); missions are unaffected
+                log.exception("the model broker's Core channel did not start; PE's own model calls use LLM_PROVIDER directly")
         for step in self.startup:
             try:
                 log.info("Mission startup step: %s", step())
@@ -82,6 +92,11 @@ class MissionRunner:
                 log.warning("Reconciled %d in-flight mission(s) at startup", len(recovered))
         except Exception:
             self._stop_server()
+            if broker is not None:              # no runner will be left to stop it: v3 must fall back, not use an orphan (review)
+                try:
+                    broker.shutdown()
+                except Exception:               # noqa: BLE001
+                    log.exception("the model broker did not shut down after a failed start")
             raise
         self._thread = threading.Thread(target=self._loop, daemon=True, name="mission-runner")
         self._thread.start()
@@ -289,10 +304,12 @@ def build_mission_runner(
             upstream_host=mb.upstream_host, key_env=mb.key_env, models=list(mb.models), store=MissionStore(store),
             limits=BrokerLimits(max_requests=mb.max_requests, max_tokens=mb.max_tokens, timeout_s=float(mb.timeout_s)),
             path_prefix=mb.upstream_path_prefix, auth_scheme=mb.auth_scheme, session_env=mb.session_env,
-            allow_body_keys=mb.allow_body_keys, extra_secret_envs=[mb.usage.admin_key_env])
+            allow_body_keys=mb.allow_body_keys, extra_secret_envs=[mb.usage.admin_key_env],
+            core_max_requests=mb.core_max_requests_per_day, core_max_tokens=mb.core_max_tokens_per_day)
     if model_broker is not None and not model_broker._key():
         log.error("missions.model_broker is enabled but %s is not set in Core's environment: no mission session can start until it is",
                   cfg.model_broker.key_env)
+
     if stacks_root is not None and (tool_broker is None or env_policy is None):
         # The brokered tools (keys stay in Core's environment) and the grant-to-environment policy, which keeps PE's own secrets
         # (tool keys, the model key) out of what a session is handed.

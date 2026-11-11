@@ -221,7 +221,10 @@ def telegram_bot_username() -> str:
 
 # ── LLM provider switch ────────────────────────────────────────────────────────
 # Set LLM_PROVIDER=anthropic in /etc/planetexpress.env to switch providers — every call
-# site (Hermes, Farnsworth, Amy) reads this, there's no per-file copy to forget.
+# site (Hermes, Farnsworth, Amy, Fry) reads this, there's no per-file copy to forget.
+# rc14.8: when the missions model broker's Core channel runs, they go through it instead, by
+# themselves (casa_llm.provider): the same key and usage record as the missions, on the broker's own
+# models (see _broker_model). LLM_PROVIDER is then only the fallback while the broker is not running.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
 
 # tier "small" = fast/cheap deterministic classification (Hermes' findings analysis,
@@ -233,12 +236,36 @@ MODELS = {
     "openai": {"small": "gpt-5.4-nano", "large": "gpt-5.4-mini"},
 }
 
-def model_for(tier: str) -> str:
-    if LLM_PROVIDER not in MODELS:
+def _broker_model(tier: str) -> str:
+    """LLM_PROVIDER=broker (rc14.8): v3's calls go through the missions model broker (one key, one record), on the models its own
+    config names for a session's small and large tiers (`missions.model_broker.session_env`), else the first it allows."""
+    mb = MISSIONS.model_broker
+    env = dict(mb.session_env or {})
+    names = (("ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL") if tier == "small"
+             else ("ANTHROPIC_DEFAULT_SONNET_MODEL",))
+    if tier != "small" and env.get("ANTHROPIC_MODEL") in mb.models:
+        names = (*names, "ANTHROPIC_MODEL")
+    for name in names:
+        if env.get(name) in mb.models:
+            return env[name]
+    if not mb.models:
+        raise RuntimeError("the model broker allows no models (missions.model_broker.models is empty)")
+    # No tier named: the family that fits it, so research never quietly runs on the smallest model (review, rc14.8).
+    wanted = ("haiku",) if tier == "small" else ("sonnet", "opus")
+    fitting = sorted(m for m in mb.models if any(w in m.lower() for w in wanted))
+    return (fitting or sorted(mb.models))[0]
+
+
+def model_for(tier: str, provider: str | None = None) -> str:
+    """The model for `tier` on `provider` (default LLM_PROVIDER; casa_llm.provider() says which is in use)."""
+    provider = provider or LLM_PROVIDER
+    if provider == "broker":
+        return _broker_model(tier)
+    if provider not in MODELS:
         raise RuntimeError(
-            f"Unknown LLM_PROVIDER {LLM_PROVIDER!r} — expected 'anthropic' or 'openai'."
+            f"Unknown LLM_PROVIDER {provider!r} — expected 'anthropic' or 'openai' (the broker is used by itself when it runs)."
         )
-    return MODELS[LLM_PROVIDER][tier]
+    return MODELS[provider][tier]
 
 # ── Ensure runtime directories exist ─────────────────────────────────────────
 def ensure_dirs() -> None:

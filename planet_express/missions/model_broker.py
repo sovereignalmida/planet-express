@@ -23,6 +23,7 @@ removes is the key from the SESSION: its environment, its files and its process 
 import hmac
 import http.client
 import json
+import re
 import logging
 import secrets
 import socket
@@ -38,6 +39,15 @@ from planet_express.missions.store import MissionStore
 
 log = logging.getLogger(__name__)
 ACTOR = "model-broker"
+CORE_SESSION = "core"                # Core's own channel (rc14.8): not a mission session
+# The vendor-run tools Core's own channel may use (Amy's and Fry's research): web search and fetch, no code execution, no MCP.
+CORE_SERVER_TOOLS = frozenset({"web_search_20260209", "web_fetch_20260209", "web_search_20250305", "web_fetch_20250910"})
+_CORE: tuple[str, str] | None = None    # (base_url, access code) of the running Core channel, in this process only
+
+
+def core_endpoint() -> tuple[str, str] | None:
+    """Where Core's own model calls go, and the code they present; None when the broker's Core channel is not running."""
+    return _CORE
 LOOPBACK = "127.0.0.1"
 ALLOWED_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
 FORWARD_REQUEST_HEADERS = ("content-type", "accept", "anthropic-version", "anthropic-beta", "user-agent")
@@ -130,8 +140,10 @@ class _BoundedServer(ThreadingHTTPServer):
 
 
 class _Session:
-    def __init__(self, session_id: str, mission_id: str):
+    def __init__(self, session_id: str, mission_id: str | None):
         self.session_id, self.mission_id = session_id, mission_id
+        self.core = mission_id is None   # Core's own channel (rc14.8): v3's calls, not a mission session's
+        self.day = ""                    # the Core channel's budget is per day: its counters start again each day
         self.access = "sk-ant-pe-" + secrets.token_urlsafe(32)      # shaped like a key so a client does not reject it
         self.lock = threading.Lock()
         self.requests = 0
@@ -153,10 +165,14 @@ class ModelBroker:
                  environ: Mapping[str, str] | None = None,
                  connect: Callable[[str, float], http.client.HTTPConnection] | None = None,
                  path_prefix: str = "", auth_scheme: str = "x-api-key", session_env: Mapping[str, str] | None = None,
-                 allow_body_keys: Sequence[str] = (), extra_secret_envs: Sequence[str] = ()):
+                 allow_body_keys: Sequence[str] = (), extra_secret_envs: Sequence[str] = (),
+                 core_max_requests: int = 1000, core_max_tokens: int = 5_000_000):
         if auth_scheme not in ("x-api-key", "bearer"):
             raise ValueError(f"unknown auth_scheme {auth_scheme!r}")
         self.extra_body_keys = frozenset(allow_body_keys)
+        # Core's own channel has its own daily budget, not a mission session's (review, rc14.8).
+        self.core_max_requests, self.core_max_tokens = core_max_requests, core_max_tokens
+        self._core_endpoint: tuple[str, str] | None = None
         # Other Core credentials that must never reach a session either (rc14.7: the Anthropic Admin key the usage display reads).
         self.extra_secret_envs = tuple(name for name in extra_secret_envs if name)
         self.upstream_host, self.key_env, self.models = upstream_host, key_env, frozenset(models)
@@ -178,7 +194,11 @@ class ModelBroker:
         """The real key, for the environment builder's by-value scan: if it ever shows up in a session, that is a leak."""
         import os
         env = self.environ if self.environ is not None else os.environ
-        return [v for v in (self._key(), *(env.get(name, "") for name in self.extra_secret_envs)) if v]
+        with self._lock:
+            core = self._sessions.get(CORE_SESSION)
+        # The Core channel's access code (rc14.8) belongs to Core alone: in a session it would let the session spend as Core, with
+        # the vendor's web tools and no mission gating it.
+        return [v for v in (self._key(), *(env.get(name, "") for name in self.extra_secret_envs), core.access if core else "") if v]
 
     def start(self, cs) -> Callable[[], None]:
         if not self._key():
@@ -206,8 +226,35 @@ class ModelBroker:
                 **HARDENING_ENV}
 
     def shutdown(self) -> None:
+        global _CORE
         for session_id in list(self._sessions):
             self._stop(session_id)
+        if _CORE is not None and _CORE == self._core_endpoint:     # only this broker's channel: another's stays (review)
+            _CORE = None
+        self._core_endpoint = None
+
+    # ── Core's own channel (rc14.8) ───────────────────────────────────────────────────────────────────
+    def start_core(self) -> tuple[str, str]:
+        """A loopback listener for Core's own model calls (Hermes, Farnsworth, Amy, Fry), so v3 uses the same key and its calls land in
+        the same record as the missions'. Its access code lives only in Core's memory (`core_endpoint`): never in an environment, a
+        file or a session. It is not a mission: no mission state gates it, its budget (the broker's limits) runs per day, and it may
+        use the vendor's own web search and fetch, which a contained session may not (`_vendor_side_reach`). Returns (base_url,
+        access code)."""
+        global _CORE
+        if not self._key():
+            raise BrokerUnavailable(f"the model API key ({self.key_env}) is not set in Core's environment")
+        if CORE_SESSION in self._sessions:
+            self._stop(CORE_SESSION)                       # one Core channel: a second start replaces the first, never leaks it
+        session = _Session(CORE_SESSION, None)
+        server = _BoundedServer((LOOPBACK, 0), self._handler(session), max_connections=self.limits.max_connections)
+        session.server, session.port = server, server.server_address[1]
+        session.thread = threading.Thread(target=server.serve_forever, name="model-broker-core", daemon=True,
+                                          kwargs={"poll_interval": 0.2})
+        session.thread.start()
+        with self._lock:
+            self._sessions[CORE_SESSION] = session
+        _CORE = self._core_endpoint = (f"http://{LOOPBACK}:{session.port}", session.access)
+        return _CORE
 
     @staticmethod
     def _cut_upstreams(session: _Session) -> None:
@@ -278,12 +325,17 @@ class ModelBroker:
 
     def _record(self, session: _Session, event: str, body: dict[str, Any]) -> None:
         try:
-            self.ms.append_event(session.mission_id, "tool", ACTOR, redact_value({**body, "event": event}))
+            if session.core:                                     # Core's own calls: Core's event log, by caller (`purpose`)
+                self.ms.store.record_event(f"core.{event}", **redact_value(body))
+            else:
+                self.ms.append_event(session.mission_id, "tool", ACTOR, redact_value({**body, "event": event}))
         except Exception:                                        # noqa: BLE001 -- the record is best effort here
-            log.warning("could not record %s for %s", event, session.mission_id)
+            log.warning("could not record %s for %s", event, session.mission_id or "Core")
 
     def _permitted(self, session: _Session) -> str | None:
-        """Why this session may not use the model right now, or None."""
+        """Why this session may not use the model right now, or None. Core's own channel is not a mission: nothing here gates it."""
+        if session.core:
+            return None
         try:
             row = self.ms.get_session(session.session_id)
             if row is None or row.get("revoked_at") is not None:
@@ -361,9 +413,11 @@ class ModelBroker:
                 model = parsed.get("model") if isinstance(parsed, dict) else None
                 if not isinstance(model, str) or model not in broker.models:
                     return self._refuse(400, "invalid_request_error", "that model is not allowed for missions")
-                forbidden = _vendor_side_reach(parsed, broker.extra_body_keys)
+                forbidden = _vendor_side_reach(parsed, broker.extra_body_keys, core=session.core)
                 if forbidden:
                     return self._refuse(400, "invalid_request_error", f"{forbidden} is not allowed for missions")
+                purpose = self.headers.get("x-pe-purpose", "") if session.core else ""
+                purpose = purpose if re.fullmatch(r"[a-z][a-z-]{0,23}", purpose or "") else ("core" if session.core else "")
                 why = broker._permitted(session)           # the last look before this request counts against the budget
                 if why:
                     return self._refuse(403, "permission_error", f"model access is closed: {why}")
@@ -378,16 +432,22 @@ class ModelBroker:
                 promise = output + -(-len(body) // BYTES_PER_TOKEN_ESTIMATE)
                 worst = output + len(body)
                 with session.lock:
-                    ceiling = broker.limits.max_tokens if session.cap is None else min(broker.limits.max_tokens, session.cap)
-                    over = (session.requests >= broker.limits.max_requests
+                    if session.core and (today := time.strftime("%Y-%m-%d", time.gmtime())) != session.day:
+                        # Core's budget, and its refusal log, start again each day
+                        session.day, session.requests, session.tokens, session.refused_logged = today, 0, 0, 0
+                    max_tokens = broker.core_max_tokens if session.core else broker.limits.max_tokens
+                    max_requests = broker.core_max_requests if session.core else broker.limits.max_requests
+                    ceiling = max_tokens if session.cap is None else min(max_tokens, session.cap)
+                    over = (session.requests >= max_requests
                             or session.tokens + session.reserved + promise > ceiling)
                     if not over:
                         session.requests += 1
                         session.reserved += promise
                         session.at_risk += worst
                 if over:
-                    return self._refuse(403, "permission_error", "the mission's model budget is used up")
-                state = {"released": False, "contacted": False}
+                    return self._refuse(403, "permission_error", "Core's model budget for today is used up" if session.core
+                                        else "the mission's model budget is used up")
+                state = {"released": False, "contacted": False, "purpose": purpose}
                 try:
                     self._relay(path, body, model, key, promise, worst, state)
                 finally:
@@ -470,6 +530,7 @@ class ModelBroker:
                     session.at_risk -= worst
                     state["released"] = True
                 broker._record(session, "model.request", {
+                    **({"purpose": state["purpose"]} if state.get("purpose") else {}),
                     "path": path, "model": model, "status": status, "input_tokens": counter.input, "output_tokens": counter.output,
                     "charged": charge, **({"cost_usd": round(counter.cost, 6)} if counter.cost is not None else {}), "bytes": sent, "ms": int((time.monotonic() - started) * 1000)})
                 self.close_connection = True
@@ -484,18 +545,21 @@ ALLOWED_BODY_KEYS = frozenset({"model", "messages", "max_tokens", "system", "str
                                "tools", "tool_choice", "thinking", "metadata", "service_tier", "output_config", "context_management"})
 
 
-def _vendor_side_reach(body: dict, extra_keys: frozenset[str] = frozenset()) -> str | None:
+def _vendor_side_reach(body: dict, extra_keys: frozenset[str] = frozenset(), *, core: bool = False) -> str | None:
     """What in a request would make the VENDOR (or a gateway) reach out for the agent (fetch a URL, call an MCP server, run code,
     pick another model), around the session's own network containment, using Core's key. The agent's own tools are plain `custom`
-    tools: they run in the session."""
+    tools: they run in the session. Core's own channel (`core`) is not contained, and its research calls (Amy, Fry) use the vendor's
+    web search and fetch, as they did calling the vendor directly; those two, and nothing else, are allowed there. A gateway's own
+    fields (OpenRouter's `plugins`, `models`, ...) are refused on both."""
     unknown = sorted(set(body) - ALLOWED_BODY_KEYS - extra_keys)
     if unknown:
         return f"the field {unknown[0][:40]!r}"
     tools = body.get("tools")
     if isinstance(tools, list):
         for tool in tools:
-            if isinstance(tool, dict) and tool.get("type") not in (None, "custom"):
-                return f"the {str(tool.get('type'))[:40]} tool"
+            kind = tool.get("type") if isinstance(tool, dict) else None
+            if isinstance(tool, dict) and kind not in (None, "custom") and not (core and kind in CORE_SERVER_TOOLS):
+                return f"the {str(kind)[:40]} tool"
     return None
 
 

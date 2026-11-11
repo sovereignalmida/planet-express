@@ -54,7 +54,7 @@ def planner(monkeypatch):
     """Fake llm.complete: captures the plan prompt, returns an empty plan set."""
     prompts = []
 
-    def complete(system, user, max_tokens, tier="small"):
+    def complete(system, user, max_tokens, tier="small", purpose="core"):
         prompts.append(user)
         return json.dumps({"plans": []})
 

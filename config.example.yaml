@@ -173,6 +173,8 @@ multi_host:
 #                                   # (an API key, never a subscription login). For OpenRouter also set upstream_host: openrouter.ai,
 #                                   # upstream_path_prefix: /api, auth_scheme: bearer and session_env (see INSTALL.md)
 #     models: ["claude-sonnet-4-5"] # the only model ids a mission may request
+#     core_max_requests_per_day: 1000     # PE's own calls (Hermes, Farnsworth, Amy, Fry) go through the broker whenever it runs;
+#     core_max_tokens_per_day: 5000000    #   these are their daily budget (UTC), not a mission session's
 #     usage:                        # credit and spend from the provider, in the Console and on Missions; nothing stops on it
 #       poll_s: 300                 # OpenRouter: read with the same key; Anthropic: only with admin_key_env (an Admin API key)
 #       warn_below: 10.0            # USD of credit left: amber and one Telegram alert
