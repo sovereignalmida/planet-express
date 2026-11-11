@@ -174,3 +174,93 @@ def test_passed_checks_whose_completion_is_refused_do_not_read_as_could_not_chec
     monkeypatch.setattr(sup_mod, "transition", refuse_completion)
     assert rig.st.drive(mid) == "needs_operator"
     assert _hold(rig, mid) == holds.UNKNOWN
+
+
+# ── sessions and checkpoints (rc14.7.7, state-machines.md M7/M3) ────────────────────────────────────────────────────────────
+def test_a_sessions_state_column_follows_its_life(rig):
+    from planet_express.missions import session_state
+    view = rig.start_run()
+    rig.st.drive(view["mission_id"])
+    rig.st.sup.sweep_uids()
+    with rig.st.store._connect() as conn:
+        rows = conn.execute("SELECT * FROM mission_sessions WHERE mission_id=?", (view["mission_id"],)).fetchall()
+    assert rows and all(r["state"] in ("revoked", "reaped") for r in rows)
+    assert all(r["state"] == session_state.session_state(r) for r in rows)
+
+
+def test_the_session_state_and_the_sql_rule_agree_on_every_row(tmp_path):
+    """One rule, held together: a session may run exactly when its state is not `reaped`, for every combination a row can have,
+    including rows written before rc14.7.7 that still say `live`."""
+    import itertools
+    import sqlite3
+    from planet_express.missions import session_state
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE s (state TEXT, revoked_at INTEGER, session_uid INTEGER, uid_released_at INTEGER)")
+    for row in itertools.product(("launching", "live", "revoked", "reaped"), (None, 5), (None, 200001), (None, 9)):
+        conn.execute("INSERT INTO s VALUES (?, ?, ?, ?)", row)
+    for r in conn.execute(f"SELECT *, {session_state.MAY_RUN_SQL} AS may_run FROM s s").fetchall():
+        assert bool(r["may_run"]) == (session_state.session_state(r) != "reaped"), dict(r)
+
+
+def test_a_uid_released_before_revocation_does_not_mark_the_row_reaped(rig):
+    view = rig.start_run()
+    mid = view["mission_id"]
+    rig.st.drive(mid)                                    # a real session row, then made to look like one not yet revoked
+    with rig.st.store._write() as conn:                  # a session not yet revoked, holding a uid
+        conn.execute("UPDATE mission_sessions SET revoked_at=NULL, uid_released_at=NULL, session_uid=200009, state='live' "
+                     "WHERE id=(SELECT id FROM mission_sessions WHERE mission_id=? ORDER BY issued_at DESC LIMIT 1)", (mid,))
+        sid = conn.execute("SELECT id FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL", (mid,)).fetchone()[0]
+    assert rig.st.ms.release_session_uid(sid)
+    with rig.st.store._connect() as conn:
+        assert conn.execute("SELECT state FROM mission_sessions WHERE id=?", (sid,)).fetchone()[0] == "live"
+    rig.st.ms.revoke_session(sid)
+    with rig.st.store._connect() as conn:
+        row = conn.execute("SELECT * FROM mission_sessions WHERE id=?", (sid,)).fetchone()
+    from planet_express.missions import session_state
+    assert row["state"] == "revoked" and session_state.session_state(row) == "reaped"     # revoked, and its uid already released
+
+
+def test_the_tick_purges_a_checkpoint_past_retention_and_keeps_one_within_it(rig):
+    old, new = rig.start_run(), None
+    assert rig.st.drive(old["mission_id"]) == "completed"
+    plan_id = rig.add_plan()
+    new = rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+    rig.api.confirm_authorise(rig.conv.id, new["execution_id"], new["grant_hash"], "chris")
+    assert rig.st.drive(new["mission_id"]) == "completed"
+    cps = rig.st.sup.checkpoint
+    old_cp, new_cp = (rig.st.ms.get_mission(m).checkpoint_id for m in (old["mission_id"], new["mission_id"]))
+    retention = cps.settings.retention_days * 86400
+    with rig.st.store._write() as conn:                  # the first run closed long ago
+        conn.execute("UPDATE missions SET closed_at=? WHERE id=?", (int(rig.st.store._clock()) - retention - 10, old["mission_id"]))
+    rig.st.sup._purged_at = float("-inf")
+    rig.st.sup._purge_expired_checkpoints()
+    assert not cps.store.dir_for(old_cp).exists() and cps.store.dir_for(new_cp).exists()
+
+
+def test_one_checkpoint_that_cannot_be_purged_does_not_stop_the_others(rig, monkeypatch):
+    from planet_express.missions.checkpoint import CheckpointInUse
+    cps = rig.st.sup.checkpoint
+    missions = [type("M", (), {"checkpoint_id": cid, "closed_at": -10**10})() for cid in ("C-a", "C-b")]   # long past retention
+    monkeypatch.setattr(cps.missions, "list_missions", lambda *a, **k: missions)
+    monkeypatch.setattr(cps.store, "dir_for", lambda cid: type("D", (), {"exists": lambda self: True})())
+
+    def purge(cid):
+        if cid == "C-a":
+            raise CheckpointInUse("M-1 is executing")
+        return True
+    monkeypatch.setattr(cps, "purge", purge)
+    assert cps.purge_expired() == ["C-b"]
+
+
+def test_checkpoints_past_retention_are_purged_once_a_day_by_the_tick(rig, monkeypatch):
+    from planet_express.missions import supervisor as sup_mod
+    calls = []
+    monkeypatch.setattr(rig.st.sup.checkpoint, "purge_expired", lambda limit=None: calls.append(1) or [])
+    rig.st.sup._purged_at = 0.0
+    rig.st.sup._purge_expired_checkpoints()
+    rig.st.sup._purge_expired_checkpoints()                    # the same day: not again
+    assert len(calls) == 1
+    rig.st.sup._purged_at -= sup_mod.PURGE_EVERY_S
+    rig.st.sup._purge_expired_checkpoints()
+    assert len(calls) == 2

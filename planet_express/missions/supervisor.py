@@ -98,6 +98,8 @@ SESSION_TTL_PAD_S = 300
 LEASE_TTL_S = 60
 PREFLIGHT_RETRY_S = 300       # while the preflight fails, look again this often (an operator may have repaired the host)
 PREFLIGHT_REPROVE_S = 600     # a passing preflight is proven again this often, and at the start of every Repair session
+PURGE_EVERY_S = 24 * 3600     # checkpoints past retention are purged at most this often (rc14.7.7)...
+PURGE_BATCH = 20              # ...this many per tick, until a pass finds fewer
 PREFLIGHT_FULL_S = 6 * 3600   # ...with the sudo refusal probe (logged by sudo as an error) at least this often, so drift is caught (rc14.7.2)
 START_DEFER_MAX_S = 1800      # a start waiting on a lease or a uid is handed to the operator after this long
 START_DEFER_RETRY_S = 10      # and is asked again no sooner than this
@@ -360,6 +362,7 @@ class Supervisor:
         self.preflight_report: Any = None
         self._preflight_at = 0.0
         self._preflight_full_at = 0.0       # the last preflight that ran the sudo refusal probe (rc14.7.2)
+        self._purged_at = 0.0               # the last daily checkpoint purge (rc14.7.7)
         self.ms = MissionStore(store)
         # So a stack lease also leases the stack's directory, under the checkpoint's resolved stacks root.
         self.ms.stacks_roots = tuple(dict.fromkeys(str(r) for r in (getattr(checkpoint, "stacks_root", None),) if r))
@@ -570,15 +573,16 @@ class Supervisor:
         return True
 
     @contextlib.contextmanager
-    def _heartbeating(self, mission_id: str):
+    def _heartbeating(self, mission_id: str | None = None):
         """A start can spend a long time in the checkpoint, the baseline and the launch, all on the one poll thread. While it
-        does, a helper thread keeps refreshing the leases of every live session (and of the mission being started), so
-        a slow start cannot make another session lose its lease. It touches the store only, and takes no mission lock."""
+        does, a helper thread keeps refreshing the leases of every live session (and of the mission being started, if any), so
+        a slow start cannot make another session lose its lease. It touches the store only, and takes no mission lock. Any other
+        slow work on the poll thread (the daily checkpoint purge) runs inside it too."""
         stop = threading.Event()
 
         def beat() -> None:
             while not stop.wait(self.heartbeat_interval_s):
-                ids = {mid for mid, run in list(self._runs.items()) if run.phase == "running"} | {mission_id}
+                ids = {mid for mid, run in list(self._runs.items()) if run.phase == "running"} | ({mission_id} if mission_id else set())
                 for mid in ids:
                     with contextlib.suppress(Exception):          # a lost lease is the poll step's business
                         leases.heartbeat(self.store, mid, self.lease_ttl_s)
@@ -1600,6 +1604,29 @@ class Supervisor:
     def _note_held(self, cs: ContainedSession) -> None:
         log.warning("uid %s of session %s still has processes: it stays held", cs.session_uid, cs.session_id)
 
+    def _purge_expired_checkpoints(self) -> None:
+        """Once a day: remove the checkpoints of missions closed longer ago than `checkpoints.retention_days` (rc14.7.7). Retention was
+        enforced only when an undo was asked for, so checkpoints were kept for ever and the store would fill (max_store_bytes),
+        refusing the checkpoint of the next Repair. Nothing a mission still needs is removed: undo refuses past retention anyway, and
+        a checkpoint referenced by a mission that is not finished is never purged (`CheckpointService.purge`)."""
+        now = float(self.clock())
+        if self.checkpoint is None or now - self._purged_at < PURGE_EVERY_S:
+            return
+        try:
+            # In bounded passes on the poll thread: the first day after an upgrade may find months of them, and a long pass would
+            # hold up every session's poll. A full pass means there may be more: the next tick goes on, until a pass comes up short.
+            # Under the heartbeat: a slow disk can make even a bounded pass outlast a lease, and the poll step that refreshes running
+            # sessions' leases waits behind it (Codex, rc14.7.7: reproduced as a healthy Repair held for `lease_lost`).
+            with self._heartbeating():
+                purged = self.checkpoint.purge_expired(limit=PURGE_BATCH)
+        except Exception:                                   # noqa: BLE001 - housekeeping never stops the tick; tried again tomorrow
+            log.exception("the daily checkpoint purge failed")
+            purged = []
+        if len(purged) < PURGE_BATCH:
+            self._purged_at = now
+        if purged:
+            log.info("purged %d checkpoint(s) past retention: %s", len(purged), ", ".join(purged[:10]))
+
     def sweep_uids(self) -> int:
         """Retry releasing the uid of every revoked session (a crash between kill and release, or a straggler that
         was still running). Kills what is left in the session's cgroup first. Returns how many uids were freed."""
@@ -2117,6 +2144,7 @@ class Supervisor:
                 self._note_repairs_unavailable()
         with contextlib.suppress(Exception):
             self.sweep_uids()
+        self._purge_expired_checkpoints()
         if self.console_tick is not None:
             try:
                 self.console_tick()

@@ -125,6 +125,34 @@ def test_the_helper_thread_refreshes_live_leases_during_a_start(stack):
         st.sup._runs.clear()
 
 
+def test_a_slow_checkpoint_purge_does_not_cost_a_running_session_its_lease(stack):
+    """Codex, rc14.7.7: the daily purge runs on the poll thread, where the step that refreshes running sessions' leases waits
+    behind it; a pass slower than the lease (a slow disk) held a healthy Repair for `lease_lost`. It runs under the heartbeat."""
+    st = stack()
+    st.sup.heartbeat_interval_s = 0.01
+    live = st.propose()["mission_id"]
+    leases.acquire(st.store, ["host:local/stack:other"], live, 60)
+    st.sup._runs[live] = sup_mod._Run(live, None, None, None, None, 0.0)
+    seen = {}
+
+    class SlowPurge:
+        def purge_expired(self, limit=None):
+            st.clock.t += 40                                  # most of the lease passes while the purge runs
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and last_heartbeat(st, live) != st.clock.t:
+                time.sleep(0.01)
+            seen["refreshed"] = last_heartbeat(st, live) == st.clock.t
+            return []
+    real = st.sup.checkpoint
+    st.sup.checkpoint, st.sup._purged_at = SlowPurge(), float("-inf")
+    try:
+        st.sup._purge_expired_checkpoints()
+        assert seen["refreshed"]
+    finally:
+        st.sup.checkpoint = real
+        st.sup._runs.clear()
+
+
 def test_a_checkpoint_longer_than_the_lease_ttl_does_not_lose_the_early_lease(stack):
     st = stack()
     st.sup.heartbeat_interval_s = 0.01

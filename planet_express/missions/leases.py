@@ -9,6 +9,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
+from planet_express.missions import session_state
 from planet_express.core.store import Store
 
 from .events import insert_event
@@ -308,8 +309,7 @@ def claim_reason(store: Store) -> str | None:
         rows = conn.execute(
             "SELECT l.mission_id, l.resource FROM mission_leases l JOIN missions m ON m.id = l.mission_id "
             "WHERE NOT (m.status = 'needs_operator' AND NOT EXISTS ("
-            "  SELECT 1 FROM mission_sessions s WHERE s.mission_id = l.mission_id AND (s.revoked_at IS NULL "
-            "    OR s.session_uid IS NULL OR s.uid_released_at IS NULL))) "
+            f"  SELECT 1 FROM mission_sessions s WHERE s.mission_id = l.mission_id AND {session_state.MAY_RUN_SQL})) "
             "ORDER BY l.acquired_at, l.mission_id, l.resource").fetchall()
     if not rows:
         return None

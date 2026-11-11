@@ -362,6 +362,7 @@ def controls(mission: Mission, rolling_back: bool = False, hold: str | None = No
     return out
 
 
+_ABOUT_THE_CHECKS = ("held_failed_checks", "held_unverified", "failed", "failed_nothing_changed")   # lines that quote PE's verdict
 NEXT_STEP_WORDS = {"rollback": "roll back", "recheck": "check it again", "keep": "keep the changes and close it"}
 
 
@@ -376,13 +377,15 @@ def thread_line(phase: Phase, mission: Mission, verification: dict[str, Any] | N
         if verification:
             return f"Done and verified by PE: {verification['headline'].lower()}."
         return "The run finished, but PE has no verification result to show for this grant. Do not rely on it until it is checked."
-    tail = f" {verification['headline']}." if verification else ""
+    # PE's verdict on the run belongs on a line about a run that failed or is held for it; after a rollback or a cancel it reads as
+    # if that passed checks (live M-36: "Rolled back. All 3 checks passed.").
+    tail = f" {verification['headline']}." if verification and phase.name in _ABOUT_THE_CHECKS else ""
     offered = [NEXT_STEP_WORDS[a] for a in phase.actions]
     if phase.name in ("held_unknown", "held_failed_checks", "held_unverified"):
         offered.append("ask the agent to keep working on it")
     steps = (f" Look at the run above; you can {', '.join(offered[:-1])}{' or ' if len(offered) > 1 else ''}{offered[-1]}."
              if offered else "")
-    return f"{phase.thread}.{tail}{steps}"
+    return f"{phase.thread.rstrip('.')}.{tail}{steps}"           # one full stop (live M-36: "carrying out the plan..")
 
 
 __all__ = ["ACTIONS", "PHASES", "Phase", "SETTLED", "run_phase", "thread_line", "rollback_running", "UNDO_STATES", "can_undo",

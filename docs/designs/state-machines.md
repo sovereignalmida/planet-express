@@ -204,7 +204,7 @@ These are fixable without building any machine, so they need not wait for the pr
 | 15 | Expired Telegram cards keep working buttons | sweep | `core/store.py:953-959` |
 | 16 | "STEP 1 OF 2" counter wrong for longer runbooks | sweep | `static/execution.js:206` |
 | 17 | No re-scan after a failed rollback or an interrupted canary update | sweep | `casa_farnsworth.py:2738`, `2797` |
-| 18 | Lease expiry and checkpoint purge sweeps never run | sweep | `leases.py:520`, `checkpoint/service.py:1062` |
+| 18 | Lease expiry and checkpoint purge sweeps never run | checkpoint purge scheduled rc14.7.7; the lease expiry sweep is left unscheduled on purpose: an expired lease already blocks, cannot be revived and fails its fence, and marking it suspect would change when the supervisor's own release succeeds | `leases.py:520`, `checkpoint/service.py:1062` |
 | 19 | The NEEDS YOU count ignores missions held for the operator | fixed rc14.7.4 | `casa_scruffy.py` `needs_count` |
 
 ## Proposed order

@@ -446,14 +446,13 @@ class MissionService:
                 raise MissionError("Mission not found", "not_found")
             if row["status"] in TERMINAL:
                 raise MissionError(f"Mission is already {row['status']}", "conflict")
-            live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL",
-                                (mission_id,)).fetchone()
-            if live is None:
-                # The supervisor revokes the token BEFORE it has proven the cgroup empty: a revoked session whose
-                # uid is still held may be running, so it is not "no session".
-                live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND revoked_at IS NOT NULL "
-                                    "AND session_uid IS NOT NULL AND uid_released_at IS NULL",
-                                    (mission_id,)).fetchone()
+            # Is there a session the supervisor still has to stop? Not revoked, or revoked with its uid still held (the supervisor
+            # revokes the token BEFORE it has proven the cgroup empty). A revoked session with no uid has nothing the supervisor can
+            # stop or prove, so it is not one: counted as running here, the cancel would only be recorded, and nothing acts on a
+            # recorded cancel of an Observe/Propose mission that is not queued (review, rc14.7.7). The lease question is not this
+            # one: there it must fail safe (session_state.MAY_RUN_SQL).
+            live = conn.execute("SELECT 1 FROM mission_sessions WHERE mission_id=? AND (revoked_at IS NULL OR "
+                                "(session_uid IS NOT NULL AND uid_released_at IS NULL))", (mission_id,)).fetchone()
             # A Repair mission that has a checkpoint may have changed the host: only the supervisor, which reads the host against
             # the checkpoint, closes it as cancelled (or holds it for the operator). Here the request is just recorded.
             may_have_changed = (row["tier"] not in ("observe", "propose") and row["checkpoint_id"] is not None

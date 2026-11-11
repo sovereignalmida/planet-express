@@ -1064,16 +1064,23 @@ class CheckpointService:
             self._event(mission.id, "checkpoint.purged", "core", {"checkpoint": checkpoint_id})
         return True
 
-    def purge_expired(self) -> list[str]:
-        """Purge every checkpoint whose mission closed at least `retention_days` ago."""
+    def purge_expired(self, limit: int | None = None) -> list[str]:
+        """Purge every checkpoint whose mission closed at least `retention_days` ago, at most `limit` of them (the supervisor's tick
+        calls it in bounded passes). One that cannot be purged now (a mission still using it, a directory that will not go) is
+        skipped and logged, never the end of the pass."""
         self._require_enabled()
         cutoff = self._now() - self.settings.retention_days * 86400
-        purged = []
+        purged: list[str] = []
         for mission in self.missions.list_missions():
-            if (mission.checkpoint_id and mission.closed_at is not None and mission.closed_at <= cutoff
-                    and self.store.dir_for(mission.checkpoint_id).exists()
-                    and self.purge(mission.checkpoint_id)):
-                purged.append(mission.checkpoint_id)
+            if limit is not None and len(purged) >= limit:
+                break
+            if not (mission.checkpoint_id and mission.closed_at is not None and mission.closed_at <= cutoff):
+                continue
+            try:
+                if self.store.dir_for(mission.checkpoint_id).exists() and self.purge(mission.checkpoint_id):
+                    purged.append(mission.checkpoint_id)
+            except (CheckpointError, OSError) as exc:
+                log.warning("checkpoint %s: not purged this time: %s", mission.checkpoint_id, exc)
         return purged
 
     def _referencing(self, checkpoint_id: str) -> list[Mission]:

@@ -111,7 +111,7 @@ def release_for_terminal(conn: sqlite3.Connection, mission_id: str, now: int) ->
     freed = [r["resource"] for r in conn.execute(
         "SELECT resource FROM mission_leases WHERE mission_id=? ORDER BY resource", (mission_id,))]
     conn.execute("DELETE FROM mission_leases WHERE mission_id=?", (mission_id,))
-    cur = conn.execute("UPDATE mission_sessions SET revoked_at=? WHERE mission_id=? AND revoked_at IS NULL",
+    cur = conn.execute("UPDATE mission_sessions SET revoked_at=?, state='revoked' WHERE mission_id=? AND revoked_at IS NULL",
                        (now, mission_id))
     if freed or cur.rowcount:
         insert_event(conn, mission_id, "decision", "core",

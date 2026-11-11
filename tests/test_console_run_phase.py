@@ -240,3 +240,20 @@ def test_a_refused_attempt_is_not_a_change_and_posts_nothing_again(rig):
             transition(rig.st.store, view["mission_id"], "executing", "supervisor")      # refused: only an operator resumes
         rig.service.tick()
     assert rig.thread() == before
+
+
+def test_thread_lines_end_with_one_full_stop_and_quote_checks_only_where_they_matter(rig):
+    """Live M-36: "PE took a checkpoint and is carrying out the plan.." and "Rolled back. All 3 checks passed." (the original run's
+    checks, read as if the rollback had passed them)."""
+    view = rig.start_run()
+    mid = view["mission_id"]
+    rig.st.drive(mid)
+    rig.service.tick()
+    rig.st.sup.roll_back(mid, "operator:chris")
+    rig.service.tick()
+    lines = rig.thread()
+    assert not any(t.endswith("..") for t in lines), lines
+    assert "Rolled back." in lines
+    failed = SimpleNamespace(status="failed", outcome_flags=None)
+    verification = {"headline": "1 of 1 failed: http://x/ answers"}
+    assert ex_mod.thread_line(ex_mod.run_phase(failed), failed, verification) == "Didn't work. 1 of 1 failed: http://x/ answers."

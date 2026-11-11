@@ -415,7 +415,8 @@ class MissionStore:
     def release_session_uid(self, session_id: str) -> bool:
         """Free the uid for reuse. Called only after the session cgroup is gone and no process runs as the uid."""
         with self.store._write() as conn:
-            cur = conn.execute("UPDATE mission_sessions SET uid_released_at=? WHERE id=? "
+            cur = conn.execute("UPDATE mission_sessions SET uid_released_at=?, "
+                               "state=CASE WHEN revoked_at IS NOT NULL THEN 'reaped' ELSE state END WHERE id=? "
                                "AND session_uid IS NOT NULL AND uid_released_at IS NULL", (self._now(), session_id))
             return cur.rowcount == 1
 
@@ -432,7 +433,7 @@ class MissionStore:
             row = conn.execute("SELECT mission_id FROM mission_sessions WHERE id=?", (session_id,)).fetchone()
             if row is None:
                 raise LookupError(session_id)
-            conn.execute("UPDATE mission_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+            conn.execute("UPDATE mission_sessions SET revoked_at=?, state='revoked' WHERE id=? AND revoked_at IS NULL",
                          (now, session_id))
             insert_event(conn, row["mission_id"], "note", actor, {"session_revoked": session_id}, now)
 
