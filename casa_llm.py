@@ -127,16 +127,24 @@ def research(purpose: str, system_prompt: str, user_content: str, max_tokens: in
     message, researched = ask_with_web_tools(client, config.model_for("large", used), system_prompt, user_content, max_tokens,
                                              max_search_uses=max_search_uses, max_fetch_uses=max_fetch_uses,
                                              tools_optional=used == "broker", log=log)
-    text = next((b.text for b in message.content if b.type == "text"), "")
+    text = answer_text(message)
     if not text and log is not None:
         log.error(f"The {purpose} answer had no text block (stop_reason={message.stop_reason!r}, "
                   f"content block types={[b.type for b in message.content]!r}) — likely ran out of tokens mid-research")
     return text, researched
 
 
-def _text(message) -> str:
-    """The first text block (a thinking block can come first on current models)."""
-    return next((b.text for b in message.content if b.type == "text"), "").strip()
+def answer_text(message) -> str:
+    """The answer: the text written after the model's last tool use. With web tools the model may write a line (or an empty
+    block) between searches, so the first text block is not the answer (live install on rc14.8); a cited answer can be split
+    into several text blocks, so the final run of them is joined. A thinking block is not text and does not end the run."""
+    run: list[str] = []
+    for block in message.content:
+        if block.type == "text":
+            run.append(block.text or "")
+        elif block.type not in ("thinking", "redacted_thinking"):
+            run = []
+    return "".join(run).strip()
 
 
 def complete(system_prompt: str, user_content: str, max_tokens: int, tier: str = "small", purpose: str = "core") -> str:
@@ -158,7 +166,7 @@ def complete(system_prompt: str, user_content: str, max_tokens: int, tier: str =
             # The broker's small model is an alias ("latest"): one that takes no effort setting (Haiku 4.5) refuses it. Asked again
             # without it (review, rc14.8).
             message = client.messages.create(**request)
-        return _text(message)
+        return answer_text(message)
 
     if used == "anthropic":
         import anthropic
@@ -170,7 +178,7 @@ def complete(system_prompt: str, user_content: str, max_tokens: int, tier: str =
             system=system_prompt,
             messages=[{"role": "user", "content": user_content}],
         )
-        return _text(message)
+        return answer_text(message)
 
     if used == "openai":
         import openai

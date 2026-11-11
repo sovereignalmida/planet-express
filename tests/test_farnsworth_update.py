@@ -1,4 +1,6 @@
 """`/update <stack> <service>`, and which image references a canary may move (untagged means :latest)."""
+
+import html
 import os
 import sys
 from pathlib import Path
@@ -92,7 +94,7 @@ def known_stack(monkeypatch):
 
 
 def test_update_usage_and_unavailable(monkeypatch):
-    assert any("Usage: `/update <stack> <service>`" in m for m in _send("/update media", FakeCommands(), monkeypatch).notifications)
+    assert any("Usage: `/update <stack> <service>`" in html.unescape(m) for m in _send("/update media", FakeCommands(), monkeypatch).notifications)
     assert any("unavailable" in m for m in _send("/update media redis", None, monkeypatch).notifications)
     assert RecordingThread.started == []
 

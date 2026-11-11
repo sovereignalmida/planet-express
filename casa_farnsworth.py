@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import difflib
+import html
 import json
 import logging
 import os
@@ -1735,7 +1736,7 @@ def handle_message(
         parts = text.split()
         target_id = parts[1] if len(parts) == 2 else None
         if not target_id or not re.fullmatch(r"[0-9a-f]{12}", target_id):
-            notifier.notify("Usage: `/rollback <execution_id>` — the id on the execution card.")
+            notifier.notify(_plain("Usage: `/rollback <execution_id>` — the id on the execution card."))
         elif commands is None:
             notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
         else:
@@ -1751,7 +1752,7 @@ def handle_message(
         if commands is None:
             notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
         elif not target_id or re.fullmatch(r"[0-9a-f]{12}", target_id) is None:
-            notifier.notify("Usage: `/abort <execution_id>`")
+            notifier.notify(_plain("Usage: `/abort <execution_id>`"))
         else:
             threading.Thread(
                 target=_run_execution_control,
@@ -1800,7 +1801,7 @@ def handle_message(
             if commands is None and target:
                 notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
             else:
-                notifier.notify("Usage: `/up <stack>` or `/up all`")
+                notifier.notify(_plain("Usage: `/up <stack>` or `/up all`"))
         else:
             sender = msg.get("from") or {}
             requested_by = (
@@ -1821,7 +1822,7 @@ def handle_message(
             if commands is None and target:
                 notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
             else:
-                notifier.notify("Usage: `/down <stack>` or `/down all`" if cmd == "/down" else "Usage: `/prepare_reboot`")
+                notifier.notify(_plain("Usage: `/down <stack>` or `/down all`") if cmd == "/down" else "Usage: `/prepare_reboot`")
         else:
             sender = msg.get("from") or {}
             requested_by = (
@@ -1850,7 +1851,7 @@ def handle_message(
         if commands is None:
             notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
         elif len(parts) != 3:
-            notifier.notify("Usage: `/restart <stack> <service>`")
+            notifier.notify(_plain("Usage: `/restart <stack> <service>`"))
         else:
             sender = msg.get("from") or {}
             requested_by = (
@@ -1869,7 +1870,7 @@ def handle_message(
         if commands is None:
             notifier.notify("⚠️ Typed actions are unavailable (command service not started).")
         elif len(parts) != 3:
-            notifier.notify("Usage: `/update <stack> <service>`")
+            notifier.notify(_plain("Usage: `/update <stack> <service>`"))
         else:
             threading.Thread(
                 target=_run_update_request,
@@ -1882,7 +1883,7 @@ def handle_message(
         url = parts[1] if len(parts) > 1 else None
         domain = parts[2] if len(parts) > 2 else None
         if not url or not domain:
-            notifier.notify("Usage: `/install <url> <domain>`")
+            notifier.notify(_plain("Usage: `/install <url> <domain>`"))
         elif (
             len(domain) > 253
             or not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+", domain, re.IGNORECASE)
@@ -2033,7 +2034,13 @@ def handle_message(
                     "/confirm `<id>` `<A|B|C>` `<plan8>`, /authorise `<id>` `<hash8>`, /withdraw `<id>` — Confirm a plan option (never an elevated one)\n"
                     "/run `<id>` `rollback`, /close `<id>` — Roll the run back, close the conversation"
                 )
-        notifier.notify(help_text)
+        notifier.notify(_plain(help_text))
+
+
+def _plain(text: str) -> str:
+    """Command help and usage lines for Telegram, which reads every message as HTML: a `<stack>` placeholder must not be read
+    as a tag (the send failed and fell back to plain text, rc14.8 live)."""
+    return html.escape(text, quote=False)
 
 
 def _busy_text(state: PipelineState) -> str:

@@ -1,4 +1,6 @@
 """G4-F3 #14 (incident evidence reaches the brief), #16 (tier-specific instructions), #15 (/rollback M-<n>)."""
+
+import html
 import sys
 import time
 from pathlib import Path
@@ -107,5 +109,6 @@ def test_a_mission_id_with_missions_disabled_is_not_a_v3_execution(monkeypatch):
 
 def test_help_text_matches_the_two_rollbacks(monkeypatch):
     _, notifier = _send(monkeypatch, "/help", _missions())
-    text = notifier.notify.call_args[0][0]
+    text = html.unescape(notifier.notify.call_args[0][0])
+    assert "<" not in notifier.notify.call_args[0][0]  # Telegram reads it as HTML (rc14.8 live)
     assert "/rollback `<execution_id>`" in text and "/rollback `M-<n>`" in text

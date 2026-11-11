@@ -436,3 +436,16 @@ def test_the_transport_comes_from_the_http_library_the_installed_sdk_uses(monkey
         base = type("Client", (), {"__module__": f"{root}._client"})
         monkeypatch.setattr(anthropic, "DefaultHttpxClient", type("DefaultHttpxClient", (base,), {"__module__": "anthropic._base_client"}))
         assert casa_llm._sdk_http().__name__ == root
+
+
+def test_a_researched_answer_is_the_text_after_the_last_search_not_the_first_text_block():
+    """rc14.8 live /install: the model wrote an empty text block between searches; the first text block was taken as the
+    answer and Fry reported invalid JSON. The answer is the run of text blocks after the last tool use (a cited answer is
+    split into several), and a thinking block does not end it."""
+    from types import SimpleNamespace as B
+    blocks = [B(type="thinking", thinking="."), B(type="server_tool_use"), B(type="text", text=""),
+              B(type="server_tool_use"), B(type="web_search_tool_result"), B(type="text", text='{"a": '),
+              B(type="text", text='1}'), B(type="thinking", thinking="."), B(type="text", text="\n")]
+    assert casa_llm.answer_text(B(content=blocks)) == '{"a": 1}'
+    assert casa_llm.answer_text(B(content=[B(type="text", text="interim"), B(type="server_tool_use")])) == ""
+    assert casa_llm.answer_text(B(content=[B(type="thinking", thinking="."), B(type="text", text=" ok ")])) == "ok"

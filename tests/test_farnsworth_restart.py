@@ -4,6 +4,7 @@ branch, and how proposal results are reported. CommandService itself is faked he
 its behavior is covered in tests/test_command_service.py.
 """
 
+import html
 import os
 import sys
 import time
@@ -77,7 +78,7 @@ def _send(text, commands, monkeypatch, sender=None):
 
 def test_restart_usage_error(monkeypatch):
     n = _send("/restart healthy", FakeCommands(), monkeypatch)
-    assert any("Usage: `/restart <stack> <service>`" in m for m in n.notifications)
+    assert any("Usage: `/restart <stack> <service>`" in html.unescape(m) for m in n.notifications)
     assert RecordingThread.started == []
 
 
@@ -134,7 +135,7 @@ def test_action_callback_without_command_service_is_acknowledged():
 
 def test_help_lists_restart(monkeypatch):
     n = _send("/help", FakeCommands(), monkeypatch)
-    assert any("/restart `<stack>` `<service>`" in m for m in n.notifications)
+    assert any("/restart `<stack>` `<service>`" in html.unescape(m) for m in n.notifications)
 
 
 @pytest.mark.parametrize("text", ["/up", "/up media extra", "/down", "/down media extra", "/prepare_reboot now"])
