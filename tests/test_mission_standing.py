@@ -213,6 +213,25 @@ def test_expiry_and_revoke_stop_an_unattended_mission_that_has_not_started_yet(s
     assert st.ms.get_mission(second).status == "awaiting_decision" and st.runtimes == []
 
 
+def test_a_mission_whose_standing_grant_lapsed_starts_on_the_operators_own_approval(stack):
+    """rc14.7.10 (M8): once a standing grant was attached, an operator's approval did not count, so a mission whose standing grant
+    was revoked or expired before it started could never start, while its card still asked for that approval."""
+    st = stack()
+    make_standing(st)
+    mid = unattended(st, "SG-1-v1")["mission_id"]
+    st.flow.standing_revoke("operator:alice", "SG-1-v1")
+    assert not ready(st, mid)
+    mission = st.ms.get_mission(mid)
+    st.flow.approve("operator:bob", mid, "grant", mission.grant_hash)
+    assert ready(st, mid)
+    # It runs on Bob's approval, and the record says so: the revoked standing grant is no longer its authority (review).
+    assert st.ms.get_mission(mid).standing_grant_id is None
+    assert any(json.loads(e.body_json).get("event") == "standing.replaced_by_approval" and e.actor == "operator:bob"
+               for e in st.ms.events(mid))
+    st.sup.tick()
+    assert st.ms.get_mission(mid).status != "awaiting_decision"
+
+
 def test_the_standing_row_is_judged_again_on_every_transition_into_executing(stack):
     st = stack()
     make_standing(st)
@@ -429,3 +448,13 @@ def test_nobody_can_pass_core_as_the_actor_to_skip_the_operator_requirement(stac
         with pytest.raises(FlowError) as exc:
             st.flow.propose_repair("core", **spec, **kw)
         assert exc.value.code == "forbidden"
+
+
+def test_the_standing_page_says_when_an_active_grant_is_not_starting_runs(stack):
+    """rc14.7.10 (M9): it read ACTIVE while the predicate refused it (outside its window, or made before trust mode)."""
+    st = stack()
+    make_standing(st, window_spec={"deny": ["backup"]})               # the fake clock is inside the "backup" window
+    listed = st.flow.standing_list()["standing_grants"]
+    assert listed[0]["state"] == "active" and listed[0]["not_now"] and listed[0]["not_now"].startswith("not now")
+    make_standing(st)                                                 # no window: it covers runs now
+    assert any(g["not_now"] is None for g in st.flow.standing_list()["standing_grants"])

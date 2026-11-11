@@ -897,6 +897,9 @@ class PipelineState:
             self._fire_rescan_if_idle()
 
     def _transition(self, new_state: str, plan_id: str | None = None, msg_id: int | None = None):
+        if new_state not in (self.IDLE, self.RUNNING, self.EXECUTING):
+            # It accepted any string (rc14.7.10, state-machines.md V1): a typo would have stored a state nothing reads.
+            raise ValueError(f"unknown pipeline state {new_state!r}")
         with self._lock:
             log.info(f"State: {self._state} → {new_state}")
             self._state = new_state
@@ -1393,7 +1396,7 @@ class Admission:
             return f"🧰 Maintenance in progress ({self.detail}) — scan not started."
         if self.kind == "busy":
             return f"⏳ Host busy ({self.detail}) — scan not started. Try again shortly."
-        return "⚠️ Pipeline already running or awaiting approval. Please wait."
+        return "⚠️ A scan is already running. Please wait."           # nothing awaits approval in the pipeline any more
 
 
 def admit_pipeline_run(state: PipelineState, *, scheduled: bool = False) -> Admission:

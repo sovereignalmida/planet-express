@@ -1709,6 +1709,18 @@ class Store:
             ).rowcount
         return changed
 
+    def settle_attempts_of(self, execution_id: str) -> int:
+        """A crashed run's reserved attempts: consumed where its step's effect is unknown (it may have acted), released otherwise.
+        The attempt ledger's writers all live here (rc14.7.10, state-machines.md V6: the engine wrote this one in raw SQL)."""
+        with self._write() as conn:
+            return conn.execute(
+                "UPDATE attempts SET state = CASE WHEN EXISTS (SELECT 1 FROM execution_steps s "
+                "WHERE s.execution_id = attempts.execution_id AND s.n = attempts.step_n "
+                "AND s.effect = 'unknown') THEN 'consumed' ELSE 'released' END, settled_at = ? "
+                "WHERE execution_id = ? AND state = 'reserved'",
+                (self._clock(), execution_id),
+            ).rowcount
+
     def reconcile_reserved_attempts(self) -> dict[str, int]:
         now = self._clock()
         with self._write() as conn:

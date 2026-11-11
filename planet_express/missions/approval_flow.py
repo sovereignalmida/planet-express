@@ -324,6 +324,17 @@ class ApprovalFlow:
             raise FlowError(_clip(exc, 300)) from None
         self.ms.append_event(mission_id, "decision", actor, {
             "event": "approval.recorded", "phase": phase, "bound_hash": bound_hash, "elevated": wants_elevation})
+        if phase == "grant" and mission.standing_grant_id:
+            # The operator approved it themselves: it runs on their approval, like any mission, not on the standing grant. Without
+            # this, an approval never counted once a standing grant was attached, so a mission whose standing grant was revoked or
+            # expired before it started could never start, while its card asked for this very approval (rc14.7.10, M8). The record
+            # says who authorised it.
+            now = int(self.store._clock())
+            with self.store._write() as conn:
+                conn.execute("UPDATE missions SET standing_grant_id=NULL, updated_at=? WHERE id=? AND standing_grant_id=?",
+                             (now, mission_id, mission.standing_grant_id))
+                insert_event(conn, mission_id, "decision", actor,
+                             {"event": "standing.replaced_by_approval", "standing_grant_id": mission.standing_grant_id}, now)
         self._audit("mission.approved", mission=mission_id, phase=phase, operator=actor)
         return self.card(mission_id)
 
@@ -506,7 +517,14 @@ class ApprovalFlow:
         legacy = is_legacy_standing(scope)
         ceilings = scope.pop("ceilings", None)
         state = "revoked" if row["revoked_at"] is not None else ("expired" if row["expires_at"] <= now else "active")
-        return {"id": row["id"], "version": row["version"], "tier": row["tier"], "state": state,
+        # Active, and yet not starting runs right now: outside its window, or made before trust mode. The page said ACTIVE while the
+        # predicate refused (rc14.7.10, state-machines.md M9); the same window rule decides both.
+        not_now = None
+        if state == "active":
+            problems = approvals.standing_row_problems(row, now)       # the predicate's own rule for the grant itself
+            not_now = ("it was made before an update and will not start runs" if legacy
+                       else ("not now: " + "; ".join(problems)) if problems else None)
+        return {"id": row["id"], "version": row["version"], "tier": row["tier"], "state": state, "not_now": not_now,
                 "legacy": legacy, "legacy_text": (LEGACY_STANDING_TEXT[0].upper() + LEGACY_STANDING_TEXT[1:]) if legacy else None,
                 "scope": scope, "ceilings": ceilings, "window": loads_strict(row["window_json"]) if row["window_json"] else None,
                 "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],

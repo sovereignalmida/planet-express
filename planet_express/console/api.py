@@ -23,6 +23,7 @@ from planet_express.console import (
 )
 from planet_express.console.service import ConsoleConflict, ConsoleError, ConsoleService
 from planet_express.console.store import (
+    is_closed,
     ConsoleStore,
     Conversation,
     ConversationClosed,
@@ -185,7 +186,7 @@ class ConsoleApi:
         the recommended option (or the one named). Chat text is never the approval: nothing runs until the Authorise button. None when
         this is not a go-ahead or there is no plan it can act on (then the words go to the agent, which is asked for a plan)."""
         go, named = plan_mod.goes_ahead(text)
-        if not go or conv.state != "open" or self.ms.get_mission(conv.mission_id).status in TERMINAL:
+        if not go or is_closed(conv, self.ms.get_mission(conv.mission_id).status):
             return None
         row = self.console.current_plan(conv.id)
         if row is None:
@@ -334,7 +335,7 @@ class ConsoleApi:
         the operator is about to authorise. Nothing runs until `confirm_authorise`. `no_backup` is accepted from an older page and ignored:
         trust mode has no backup floor."""
         conv = self._conversation(conversation_id)
-        if conv.state != "open":
+        if is_closed(conv, self.ms.get_mission(conv.mission_id).status):
             raise ConsoleApiError("This conversation is closed.", "conflict")
         row = self.console.plan(plan_id)
         if row is None or row["conversation_id"] != conv.id:
@@ -374,6 +375,8 @@ class ConsoleApi:
         """Step two: the operator authorises exactly the grant whose fingerprint they saw. If the grant changed in between, it is refused as
         stale and they must look again. Approval is recorded through the same flow as any other, as the signed-in operator."""
         conv = self._conversation(conversation_id)
+        if is_closed(conv, self.ms.get_mission(conv.mission_id).status):
+            raise ConsoleApiError("This conversation is closed.", "conflict")
         ex = self._execution(conv, execution_id, "proposed")
         flow = self._require_flow()
         mission = self.ms.get_mission(ex["mission_id"])
@@ -585,7 +588,7 @@ class ConsoleApi:
         return out
 
     def _composer(self, conv: Conversation, running: bool, status: dict, mission_closed: bool = False) -> dict:
-        if conv.state != "open" or mission_closed:
+        if mission_closed or conv.state != "open":                   # `is_closed`, with the mission's status already read by _view
             return {"mode": "off", "reason": "This conversation is closed."}
         if status["proposal_only"]:
             return {"mode": "off", "reason": status["proposal_only_reason"]}

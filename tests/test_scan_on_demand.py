@@ -86,7 +86,7 @@ def test_the_refusal_message_is_the_one_telegram_already_sent():
     assert fw.Admission(False, "busy", "act:abc").message == (
         "⏳ Host busy (act:abc) — scan not started. Try again shortly.")
     assert fw.Admission(False, "running").message == (
-        "⚠️ Pipeline already running or awaiting approval. Please wait.")
+        "⚠️ A scan is already running. Please wait.")
 
 
 def test_run_pipeline_refuses_and_says_so_when_it_admits_itself(monkeypatch):

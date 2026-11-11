@@ -826,14 +826,7 @@ def settle_crashed_execution(store, execution_id: str) -> None:
         elif row["status"] == "pending":
             store.finish_step(execution_id, row["n"], status="skipped",
                               reason="not run: the engine stopped unexpectedly")
-    with store._write() as conn:
-        conn.execute(
-            "UPDATE attempts SET state = CASE WHEN EXISTS (SELECT 1 FROM execution_steps s "
-            "WHERE s.execution_id = attempts.execution_id AND s.n = attempts.step_n "
-            "AND s.effect = 'unknown') THEN 'consumed' ELSE 'released' END, settled_at = ? "
-            "WHERE execution_id = ? AND state = 'reserved'",
-            (store._clock(), execution_id),
-        )
+    store.settle_attempts_of(execution_id)
 
 
 def _reconcile_canary(svc, row: dict) -> tuple[str, str]:

@@ -181,6 +181,19 @@ What is wrong is around it, not in it:
   - V6: move the engine's raw `UPDATE attempts` into the store.
   - V9: make "dismissed" a real event.
 
+## Follow-ups done (rc14.7.10)
+
+- M8: an operator's approval of a mission's grant detaches its standing grant (`standing.replaced_by_approval`), so a mission whose
+  standing grant lapsed starts on that approval like any other; the approval predicate is unchanged.
+- M9: the Standing page says when an active grant is not starting runs, from `approvals.standing_row_problems`, the same helper the
+  predicate refuses on.
+- C1: `console.store.is_closed` is the one "closed" rule; confirm, authorise, posting and the confirmation reaper follow it.
+- V6: `Store.settle_attempts_of` is the attempt ledger's only writer outside the store's own methods.
+- V1: `PipelineState` refuses an unknown state; the "awaiting approval" wording is gone. `EXECUTING` and the pending-plan fields stay
+  (tests and the status file's format use them; they change nothing).
+- Not done: V9 ("dismissed" as its own incident event kind) needs a schema change (the event kinds are constrained), which this
+  project does not make; C4 (the `consumed_turn = 0` sentinel) likewise needs a stored value of its own.
+
 ## Bugs found on the way
 
 These are fixable without building any machine, so they need not wait for the project.

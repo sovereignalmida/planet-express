@@ -75,6 +75,16 @@ def clean_text(text: str, limit: int = MAX_MESSAGE_CHARS) -> str:
     return text if len(text) <= limit else text[:limit - len(TRUNCATED)] + TRUNCATED
 
 
+_TERMINAL = ("completed", "failed", "rolled_back", "cancelled")   # missions.state.TERMINAL (not imported: core.store imports this module)
+
+
+def is_closed(conv: "Conversation", mission_status: str) -> bool:
+    """A conversation takes no more turns, messages or confirmations: archived or archiving, or its own mission has finished (closed
+    from the Work log, cancelled, failed). One rule for every surface (rc14.7.10, state-machines.md C1: it was worked out in five
+    places, and a confirmation was still accepted in a conversation whose mission had finished)."""
+    return conv.state != "open" or mission_status in _TERMINAL
+
+
 class ConsoleStore:
     def __init__(self, store: Store):
         self.store = store

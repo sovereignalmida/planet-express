@@ -584,3 +584,10 @@ def test_a_mission_changing_the_host_with_its_own_tools_is_said_too():
     state.set_mission_claims(lambda: "M-9 is working on media/sonarr (it finishes, or is cancelled, before anything else changes the host)")
     assert state.snapshot()["changing"] == "M-9 is working on media/sonarr"
     assert fw.owner_words("act:direct:ab12") == "a direct action" and fw.owner_words("act:A-1") == "an approved action"
+
+
+def test_the_pipeline_refuses_a_state_it_does_not_know():
+    state = fw.PipelineState()
+    with pytest.raises(ValueError):
+        state.transition("runing")
+    assert state.state == "idle"

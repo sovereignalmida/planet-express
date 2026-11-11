@@ -257,3 +257,30 @@ def test_thread_lines_end_with_one_full_stop_and_quote_checks_only_where_they_ma
     failed = SimpleNamespace(status="failed", outcome_flags=None)
     verification = {"headline": "1 of 1 failed: http://x/ answers"}
     assert ex_mod.thread_line(ex_mod.run_phase(failed), failed, verification) == "Didn't work. 1 of 1 failed: http://x/ answers."
+
+
+def test_a_conversation_whose_mission_finished_takes_no_confirmation(rig):
+    """rc14.7.10 (C1): posting refused it, confirming did not; one rule (`is_closed`) for both."""
+    plan_id = rig.add_plan(plan_doc())
+    with rig.st.store._write() as conn:                                  # closed from the Work log
+        conn.execute("UPDATE missions SET status='cancelled' WHERE id=?", (rig.conv.mission_id,))
+    with pytest.raises(ConsoleApiError, match="closed"):
+        rig.api.confirm_prepare(rig.conv.id, plan_id, 0, "chris")
+
+
+def test_authorising_and_the_reaper_follow_the_same_closed_rule(rig):
+    """Review, rc14.7.10: confirm_authorise and the confirmation reaper still checked only the conversation's own state."""
+    _plan_id, view = _prepare(rig)
+    with rig.st.store._write() as conn:                                  # the conversation's mission closed from the Work log
+        conn.execute("UPDATE missions SET status='cancelled' WHERE id=?", (rig.conv.mission_id,))
+    with pytest.raises(ConsoleApiError, match="closed"):
+        rig.api.confirm_authorise(rig.conv.id, view["execution_id"], view["grant_hash"], "chris")
+    rig.service.tick()
+    assert rig.console.execution(view["execution_id"])["status"] == "withdrawn"
+    assert rig.st.status(view["mission_id"]) == "cancelled"
+
+
+def test_the_console_and_missions_agree_on_what_is_terminal():
+    from planet_express.console.store import _TERMINAL
+    from planet_express.missions.state import TERMINAL
+    assert set(_TERMINAL) == set(TERMINAL)

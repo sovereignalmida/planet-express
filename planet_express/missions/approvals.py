@@ -163,15 +163,11 @@ def _scope_within(inner: GrantScope, outer: GrantScope) -> bool:
                for f in ("stacks", "services", "hosts", "files"))
 
 
-def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, now: int) -> list[str]:
-    standing_id = m["standing_grant_id"]
-    row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (standing_id,)).fetchone()
-    if row is None:
-        return ["standing grant does not exist"]
+def standing_row_problems(row: sqlite3.Row, now: int) -> list[str]:
+    """What stops a standing grant from starting any run now, whatever the mission: its window, revocation, expiry, a scope from
+    before trust mode or one that cannot be read, a tier above repair. The Standing page shows these and `_standing_reasons` refuses
+    on them: one rule for both (rc14.7.10, state-machines.md M9)."""
     reasons = []
-    # Incident-backed only (brief 5.2): an unattended start answers one open incident, never a free-standing request.
-    if not m["incident_id"] or m["origin"] != "incident":
-        reasons.append("standing grants cover incident-backed missions only")
     try:
         window = loads_strict(row["window_json"]) if row["window_json"] else None
         ok, why = window_allowed(window, now)
@@ -188,14 +184,34 @@ def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, no
         return [*reasons, LEGACY_STANDING_TEXT]
     try:
         raw_scope = loads_strict(row["scope_json"])
-        ceilings = StandingCeilings.load(raw_scope.pop("ceilings", None) or {})
-        scope = GrantScope.load(raw_scope)
+        StandingCeilings.load(raw_scope.pop("ceilings", None) or {})
+        GrantScope.load(raw_scope)
     except (CanonicalError, ValueError, AttributeError):
         return [*reasons, "the standing grant's scope is unreadable"]
+    if TIER_RANK.get(row["tier"], 99) > TIER_RANK["repair"]:
+        reasons.append("standing grants never cover change or critical")
+    return reasons
+
+
+def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, now: int) -> list[str]:
+    standing_id = m["standing_grant_id"]
+    row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (standing_id,)).fetchone()
+    if row is None:
+        return ["standing grant does not exist"]
+    reasons = []
+    # Incident-backed only (brief 5.2): an unattended start answers one open incident, never a free-standing request.
+    if not m["incident_id"] or m["origin"] != "incident":
+        reasons.append("standing grants cover incident-backed missions only")
+    reasons += standing_row_problems(row, now)
+    if LEGACY_STANDING_TEXT in reasons or "the standing grant's scope is unreadable" in reasons:
+        return reasons
+    raw_scope = loads_strict(row["scope_json"])
+    ceilings = StandingCeilings.load(raw_scope.pop("ceilings", None) or {})
+    scope = GrantScope.load(raw_scope)
     sg = StandingGrant(id=row["id"], scope=scope,
                        tier=row["tier"], created_by=row["created_by"], created_at=row["created_at"],
                        expires_at=row["expires_at"], revoked_at=row["revoked_at"], version=row["version"])
-    if TIER_RANK[sg.tier] > TIER_RANK["repair"] or TIER_RANK[grant.tier] > TIER_RANK["repair"]:
+    if TIER_RANK[grant.tier] > TIER_RANK["repair"] and "standing grants never cover change or critical" not in reasons:
         reasons.append("standing grants never cover change or critical")
     if TIER_RANK[grant.tier] > TIER_RANK[sg.tier]:
         reasons.append("grant tier exceeds the standing grant tier")

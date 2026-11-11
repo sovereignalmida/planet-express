@@ -15,7 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from config_schema import MissionConsoleConfig
-from planet_express.console.store import ConsoleStore, Conversation, clean_text
+from planet_express.console.store import ConsoleStore, Conversation, clean_text, is_closed
 from planet_express.missions.models import Grant
 from planet_express.missions import holds
 from planet_express.missions.events import insert_event
@@ -118,7 +118,7 @@ class ConsoleService:
         if not text.strip():
             raise ConsoleError("a message cannot be empty")
         conv = self.console.get(conversation_id)
-        if self.ms.get_mission(conv.mission_id).status in TERMINAL:
+        if conv.state == "open" and is_closed(conv, self.ms.get_mission(conv.mission_id).status):
             raise ConsoleConflict("this conversation was closed from the Work log: start a new conversation")
         return self.console.add_message(conversation_id, "operator", text, actor=actor, require_open=True)
 
@@ -248,7 +248,7 @@ class ConsoleService:
                     continue
                 plan = self.console.plan(ex["plan_id"])
                 conv = self.console.get(ex["conversation_id"])
-                if conv.state != "open":
+                if is_closed(conv, self.ms.get_mission(conv.mission_id).status):
                     gone = "the conversation was closed"
                 elif plan is None or plan["status"] in ("superseded", "scrapped", "expired"):
                     gone = f"its plan was {plan['status'] if plan else 'removed'}"
