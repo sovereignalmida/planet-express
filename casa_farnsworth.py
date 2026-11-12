@@ -3283,6 +3283,12 @@ def run_bot() -> None:
     )
     digest_sched.start()
 
+    # The other Docker hosts (docs/designs/multi-host.md): read over SSH by Core, written to state/hosts.json.
+    if any(entry.ssh for entry in config.MULTI_HOST.hosts):
+        from planet_express.application.fleet_collector import FleetCollector
+        threading.Thread(target=FleetCollector(config.MULTI_HOST, config.STATE_HOSTS).loop, daemon=True,
+                         name="fleet-collector").start()
+
     # Main Telegram poll loop
     log.info("Farnsworth entering Telegram poll loop...")
     try:

@@ -12,7 +12,8 @@
 <body>
 {# V3.1: Hosts inside the dashboard shell (handoffs/V3.1-HOSTS.md). Data, states and copy are the
    shipped ones; only the vocabulary changed. #}
-{% set configured = fleet.cards | selectattr('configured') | list %}
+{# A link-only entry is not read by PE at all: it is not a host that failed to read (review, release A). #}
+{% set configured = fleet.cards | selectattr('configured') | rejectattr('source', 'equalto', 'link') | list %}
 {% set current = configured | selectattr('liveness.state', 'equalto', 'current') | list %}
 {% set stale = configured | selectattr('liveness.state', 'equalto', 'stale') | list %}
 {% set unknown = configured | selectattr('liveness.state', 'equalto', 'unknown') | list %}
@@ -34,7 +35,7 @@
     <div class="tab-panel active" data-screen-label="v3 Hosts">
 
       <section class="panel" aria-label="Fleet verdict">
-        <div class="panel-head-row"><h3>OTHER HOSTS · BESZEL</h3><span class="status-chip ok">READ-ONLY</span></div>
+        <div class="panel-head-row"><h3>OTHER HOSTS</h3><span class="status-chip ok">READ-ONLY</span></div>
         <div class="alarm-banner {{ tone }}">
           <div class="alarm-orb">{{ orb }}</div>
           <div class="alarm-text"><p class="alarm-title">{{ verdict }}</p><p class="alarm-sub">{{ verdict_detail }}</p></div>
@@ -47,8 +48,8 @@
         </div>
       </section>
 
-      <section class="panel" aria-label="Other hosts from Beszel">
-        <div class="panel-head-row"><h3>FLEET</h3><span class="panel-head-note">source: beszel hub API · observe only</span></div>
+      <section class="panel" aria-label="Other hosts">
+        <div class="panel-head-row"><h3>FLEET</h3><span class="panel-head-note">read over SSH by Core{{ " and the beszel hub" if fleet.cards|selectattr("source", "equalto", "beszel")|list }} · observe only</span></div>
         {% if fleet.locality_reason %}<div class="cryo-footnote">{{ fleet.locality_reason }}</div>{% endif %}
         <div class="cryo-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(370px,100%),1fr))">
         {% for host in fleet.cards if host.configured %}
@@ -84,16 +85,22 @@
               <div class="cryo-stats">
                 <div class="cryo-stat-row"><span>{{ 'CONTAINERS · LAST KNOWN' if is_stale else 'CONTAINERS' }}</span><span class="{{ 'cell-dim' if host.containers is none or host.containers == () }}">{{ 'unreadable' if host.containers is none and host.containers_liveness and host.containers_liveness.state == 'unknown' else 'not reported' if host.containers is none else host.containers|length ~ (' · ' ~ unhealthy|length ~ ' unhealthy' if unhealthy else '') }}</span></div>
                 {% if host.containers == () %}<div class="cryo-footnote" style="margin-top:0">No containers on this host. It runs none; that is normal here, not a failed read.</div>{% endif %}
-                {% if host.containers %}<div class="chip-board">{% for container in host.containers[:6] %}<span class="deploy-chip" title="{{ container.name }} · {{ container.status if container.status is not none else 'not reported' }} · {{ container.health if container.health is not none else 'not reported' }}{{ ' · update available' if container.updatable }}"><span class="svc">{{ container.name }}</span><span class="t">{{ '✕' if container.health == 'unhealthy' else 'UPD' if container.updatable else '✓' }}</span></span>{% endfor %}</div>{% endif %}
-                {% if host.containers and host.containers|length > 6 %}<div class="cryo-footnote" style="margin-top:0">+{{ host.containers|length - 6 }} more containers · expand</div>{% endif %}
+                {% set shown = host.containers if host.source == 'ssh' else (host.containers[:6] if host.containers else host.containers) %}{% if host.containers %}<div class="chip-board">{% for container in shown %}<span class="deploy-chip" title="{{ container.name }} · {{ container.status if container.status is not none else 'not reported' }} · {{ container.health if container.health is not none else 'not reported' }}{{ ' · ' ~ container.restarts ~ ' restarts' if container.restarts }}{{ ' · ' ~ container.ports if container.ports }}{{ ' · update available' if container.updatable }}"><span class="svc">{{ container.name }}</span><span class="t">{{ '✕' if container.health == 'unhealthy' else '■' if container.status in ('exited', 'dead', 'created', 'paused', 'restarting') else 'UPD' if container.updatable else '✓' }}</span></span>{% endfor %}</div>{% endif %}
+                {% if host.source != 'ssh' and host.containers and host.containers|length > 6 %}<div class="cryo-footnote" style="margin-top:0">+{{ host.containers|length - 6 }} more containers · expand</div>{% endif %}
               </div>
               {% if is_stale %}<div class="cryo-footnote">Last known values. Nothing on this card is live until the host reports again.</div>{% endif %}
+              {% if host.source == 'ssh' and host.status %}<div class="cryo-footnote">Last try failed: {{ host.status }}</div>{% endif %}
+              {% if host.source == 'ssh' and not host.locality_checked %}<div class="cryo-footnote">Not yet compared with this host's own Docker engine.</div>{% endif %}
+              {% if host.source == 'ssh' %}<div class="cryo-footnote">ssh {{ host.ssh }} · read by Core every minute</div>{% endif %}
             </div>
           {% else %}
             {% set cause = host.liveness.cause or 'no_contact' %}
             {% if cause == 'not_permitted' %}{% set badge, glyph, title, explanation, check = 'NOT PERMITTED', '⛨', 'The collector account is not permitted to see this host.', 'The hub returned success with an empty list. That does not mean there are no hosts.', 'Check: list this collector account on the host in Beszel.' %}
             {% elif cause == 'clock_unusable' %}{% set badge, glyph, title, explanation, check = 'CLOCK UNUSABLE', '◷', 'The host reported, but its timestamp cannot be trusted.', 'Its age cannot be calculated, so no reading is presented as live.', 'Check: correct the host clock and collector timestamp.' %}
             {% else %}{% set badge, glyph, title, explanation, check = 'NO CONTACT', '⌁', 'No readable contact with this host.', 'No usable reading is available for it.', 'Check: the host agent and its reachability.' %}{% endif %}
+            {% if host.source == 'ssh' and host.problem == 'this_host' %}{% set badge, glyph, title, explanation, check = 'THIS HOST', '⌂', 'This alias reaches PE’s own Docker engine.', host.liveness.reason, 'Remove this entry from multi_host.hosts: this host is on Overview.' %}
+            {% elif host.source == 'ssh' and host.problem == 'not_trying' %}{% set badge, glyph, title, explanation, check = 'NOT COLLECTING', '◷', 'Core is not reading the other hosts.', host.liveness.reason, 'Check: casa-planetexpress is running.' %}
+            {% elif host.source == 'ssh' %}{% set title, explanation, check = 'Core cannot read this host over SSH.', host.liveness.reason or 'No reading yet.', 'Check: ssh ' ~ host.ssh ~ ' docker info, as the PE user on this host.' %}{% elif host.source == 'link' %}{% set badge, glyph, title, explanation, check = 'LINK ONLY', '↗', 'PE does not read this host.', 'It has a link and no ssh alias or collector id.', 'Add an ssh alias in multi_host to read its containers.' %}{% endif %}
             <div class="cryo-pod nodata reasoned">
               <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">{{ host.name }}</span><span class="cryo-badge">{{ badge }}</span></div>
               <div class="alarm-banner {{ 'crit' if badge == 'NO CONTACT' else 'medium' }}" style="margin-bottom:0">
@@ -118,7 +125,7 @@
           </div>
         {% endfor %}
         </div>
-        <div class="cryo-footnote" style="margin-top:14px">casamediaserver is not listed here. Its containers and controls are on Overview.</div>
+        <div class="cryo-footnote" style="margin-top:14px">This host is not listed here. Its containers and controls are on Overview.</div>
       </section>
     </div>
   </main>

@@ -365,6 +365,31 @@ def summarize_containers(enforced: dict | None = None) -> dict:
     }
 
 
+def summarize_remote_hosts() -> dict | None:
+    """The other Docker hosts Core reads over SSH (state/hosts.json, docs/designs/multi-host.md), for the Overview tile.
+    None when no host has an `ssh:` alias. Never raises: the Overview must render without it."""
+    try:
+        from planet_express.application.multi_host import remote_summary
+        return remote_summary(config.MULTI_HOST, config.STATE_HOSTS)
+    except Exception:  # noqa: BLE001
+        log.warning("could not summarise the other hosts", exc_info=True)
+        return None
+
+
+def remote_hosts_line(remote: dict | None) -> str | None:
+    """"+ 15 on 3 hosts · 1 unknown": the other hosts beside this one's count, never summed into it (an unknown host is not 0)."""
+    if not remote:
+        return None
+    parts = []
+    if remote["hosts"]:
+        parts.append(f"+ {remote['containers']} on {remote['hosts']} other host{'s' if remote['hosts'] != 1 else ''}")
+    if remote["problems"]:
+        parts.append(f"{remote['problems']} unhealthy")
+    if remote["unknown"]:
+        parts.append(f"{remote['unknown']} host{'s' if remote['unknown'] != 1 else ''} not reading")
+    return " · ".join(parts) or None
+
+
 def summarize_stack_completeness() -> dict:
     monitor = load_monitor()
     if not monitor or monitor.mode not in _MODES_WITH_STACK_COMPLETENESS:
@@ -873,6 +898,7 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
             "note": f"{services.get('total_stacks', 0)} stacks" if services.get("available") else "stacks —",
             "total": containers.get("total", 0), "cells": containers.get("cells", []),
         }
+    tiles["fleet"]["remote"] = remote_hosts_line(ctx.get("remote_hosts"))
 
     findings = ctx.get("findings", {})
     # Approvals live in core's store, not in the run-status file: pending_plan_id was the
@@ -1358,6 +1384,7 @@ def build_dashboard_context(enforced: dict | None = None, core=None) -> dict:
         "disk": summarize_disk(),
         "system_and_backups": summarize_system_and_backups(enforced),
         "certs": summarize_certs(),
+        "remote_hosts": summarize_remote_hosts(),
     }
     # Live network values are intentionally unavailable here; the route replaces
     # these placeholders after its explicit Traefik/AdGuard fetches.

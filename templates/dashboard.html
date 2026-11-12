@@ -47,6 +47,7 @@
             {% if fleet.cells %}<span class="overview-fleet-dots" aria-label="{{ fleet.total }} containers">
               {% for state in fleet.cells %}<span class="overview-dot {{ state }}"></span>{% endfor %}
             </span>{% endif %}
+            {% if fleet.remote %}<a class="overview-tile-sub overview-fleet-remote" href="/hosts">{{ fleet.remote }} ›</a>{% endif %}
           </div>
 
           {% set hull = tiles.hull %}

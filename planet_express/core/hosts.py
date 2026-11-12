@@ -126,6 +126,7 @@ class RemoteContainer:
     net: float | None = None
     ports: str | None = None
     updatable: bool | None = None
+    restarts: int | None = None          # the SSH collector reads it; Beszel does not
 
 
 @dataclass(frozen=True)

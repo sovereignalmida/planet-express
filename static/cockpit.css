@@ -1918,6 +1918,8 @@ button.overview-tile:hover, a.overview-tile:hover { border-color: var(--tile-lev
 }
 .overview-tile-detail { color: var(--pe-ink-faint); }
 .overview-fleet-dots { display: flex; flex-wrap: wrap; gap: 2px; }
+.overview-fleet-remote { display: block; margin-top: 6px; color: var(--pe-ink-label); text-decoration: none; }
+.overview-fleet-remote:hover { color: var(--pe-ink); }
 .overview-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--pe-ok); }
 .overview-dot.degraded { background: var(--pe-warn); }
 .overview-dot.down { background: var(--pe-crit); }

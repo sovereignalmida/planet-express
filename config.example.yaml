@@ -142,10 +142,18 @@ links: []
 #
 # The collector's credentials are NOT here. BESZEL_USER and BESZEL_PASSWORD go in
 # /etc/planetexpress-dashboard.env, root-only, like the other dashboard-only values.
+#
+# Release A of docs/designs/multi-host.md: a host with an `ssh:` alias (a Host in Core's ~/.ssh/config, key-based,
+# its host key already in known_hosts) is read by Core every minute over SSH: its containers (state, health, restarts,
+# published ports, traefik and compose labels; never their env) and its CPU, memory, disk and load. Only fixed read
+# commands are ever sent. Beszel (`system_id`) is still read for an entry without an alias, during the move.
 multi_host:
   hosts: []
 # multi_host:
 #   hosts:
+#     - name: CASALAB
+#       ssh: casalab                       # read over SSH by Core
+#       link: https://casalab.casalan.com
 #     - system_id: ptf3tn2gzpg913i
 #       name: CASA UNRAID
 #       link: https://unraid.casalan.com

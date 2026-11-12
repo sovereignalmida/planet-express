@@ -50,6 +50,7 @@ RPC_PEER_USERS = [
 STATE_MONITOR   = STATE_DIR / "latest_monitor.json"
 STATE_FINDINGS  = STATE_DIR / "latest_findings.json"
 STATE_STATUS    = STATE_DIR / "run_status.json"
+STATE_HOSTS     = STATE_DIR / "hosts.json"         # the other Docker hosts, read over SSH by Core (fleet_collector)
 # Single source of truth -- used to live as two independently-defined copies in
 # casa_farnsworth.py and casa_zoidberg.py (same path, same drift risk as the old
 # FORBIDDEN_STACKS duplication).

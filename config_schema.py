@@ -157,6 +157,9 @@ class LaunchLink(BaseModel):
 _SYSTEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
+_SSH_ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
 def _validate_system_id(value: str) -> str:
     # fullmatch, not match: `$` also matches the position before a FINAL newline, so
     # `match()` accepted "abc\n" -- an id that looks validated and names no system, leaving
@@ -187,8 +190,12 @@ class HostEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # beszel's `systems.id`. The stable handle: the name is editable in beszel's UI and the
-    # address can change, so neither of those is an identity.
-    system_id: str
+    # address can change, so neither of those is an identity. Optional since the SSH collector
+    # (docs/designs/multi-host.md): a host is read over SSH, from Beszel, or (during the move) both.
+    system_id: str | None = None
+    # An alias in Core's ~/.ssh/config (address, user, key and pinned host key live there, not
+    # here). PE reads the host's Docker and metrics over it with fixed read-only commands.
+    ssh: str | None = None
     name: str
     # The host's own UI. Optional because a host need not have one, and None renders as no
     # button -- never as an empty href, which is a dead button that looks live. This is the
@@ -198,8 +205,24 @@ class HostEntry(BaseModel):
 
     @field_validator("system_id")
     @classmethod
-    def _system_id_shape(cls, v: str) -> str:
-        return _validate_system_id(v)
+    def _system_id_shape(cls, v: str | None) -> str | None:
+        return v if v is None else _validate_system_id(v)
+
+    @field_validator("ssh")
+    @classmethod
+    def _ssh_alias_shape(cls, v: str | None) -> str | None:
+        # It becomes an ssh argv element (after `--`): an alias, never an option, a user@ or a
+        # command. Anything else is refused at the only moment anyone can fix it.
+        if v is not None and not _SSH_ALIAS_RE.fullmatch(v):
+            raise ValueError("an ssh alias must be 1-64 characters of letters, digits, '.', '-' or '_', "
+                             f"starting with a letter or digit (a Host in ~/.ssh/config), got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _read_somehow(self) -> "HostEntry":
+        if self.system_id is None and self.ssh is None and self.link is None:
+            raise ValueError(f"host {self.name!r} has no ssh alias, no system_id and no link: nothing to show")
+        return self
 
     @field_validator("name")
     @classmethod
@@ -262,7 +285,14 @@ class MultiHostConfig(BaseModel):
     @model_validator(mode="after")
     def _validate_inventory(self) -> "MultiHostConfig":
         seen: set[str] = set()
+        aliases: set[str] = set()
         for entry in self.hosts:
+            if entry.ssh is not None:
+                if entry.ssh in aliases:
+                    raise ValueError(f"multi_host.hosts: duplicate ssh alias {entry.ssh!r}")
+                aliases.add(entry.ssh)
+            if entry.system_id is None:
+                continue
             if entry.system_id in seen:
                 # Two entries for one system id is not a harmless duplicate: both rows look
                 # up the same live values, so the host renders twice with one set of numbers

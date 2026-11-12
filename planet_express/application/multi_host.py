@@ -13,10 +13,12 @@ from dataclasses import dataclass
 
 from config_schema import MultiHostConfig
 from planet_express.core.hosts import (
+    NOT_PERMITTED,
     HostDetails,
     HostMetrics,
     Liveness,
     RemoteContainer,
+    liveness,
     locality,
     unknown,
 )
@@ -51,6 +53,10 @@ class HostCard:
     containers: tuple[RemoteContainer, ...] | None = None
     containers_liveness: Liveness | None = None
     status: str | None = None
+    source: str = "beszel"               # or "ssh" or "link": where this card's values come from (docs/designs/multi-host.md)
+    ssh: str | None = None
+    problem: str | None = None           # ssh: the collector's fixed cause word (this_host, not_permitted, no_contact, not_trying)
+    locality_checked: bool = True        # ssh: whether the reading was compared with this host's own Docker engine
 
 
 @dataclass(frozen=True)
@@ -253,3 +259,138 @@ class FleetCache:
         thread.start()
         completed.wait(max(0.0, deadline - self._clock()))
         return result.get("value")
+
+
+# ── the SSH collector's hosts (release A): Core writes state/hosts.json, the page reads it ──────────────────────────────────────
+
+NOT_COLLECTED = "Core has not read this host yet (the collector runs every minute while Core is up)"
+# A reading older than this is not drawn at all, even as "last known" (review, release A: stale for ever hid a dead host).
+SSH_UNKNOWN_AFTER = 15 * 60
+# Core tries every host every minute; no try for this long means the collector itself is not running.
+SSH_NOT_TRYING_AFTER = 5 * 60
+
+
+def beszel_inventory(inventory: MultiHostConfig) -> MultiHostConfig:
+    """The entries the Beszel cache still reads: a system id and no SSH alias. An entry with an alias is read by Core."""
+    return MultiHostConfig(hosts=[e for e in inventory.hosts if e.system_id and not e.ssh],
+                           local_system_id=inventory.local_system_id if any(e.system_id and not e.ssh for e in inventory.hosts)
+                           else None)
+
+
+def _f(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _port_text(ports) -> str | None:
+    if not isinstance(ports, list):
+        return None
+    text = ", ".join(f"{p['host_port']}→{p['container']}" for p in ports
+                     if isinstance(p, dict) and isinstance(p.get("host_port"), int) and isinstance(p.get("container"), str))
+    return text[:256] or None
+
+
+def ssh_card(entry, record: dict | None, now: float) -> HostCard:
+    """One SSH host's card from its record in hosts.json (or none yet)."""
+    def blank(reason, problem=None, cause=None):
+        return HostCard(entry.ssh, entry.name, entry.link, True, unknown(reason, cause), containers_liveness=unknown(reason, cause),
+                        source="ssh", ssh=entry.ssh, problem=problem)
+
+    if not isinstance(record, dict) or record.get("ssh") != entry.ssh:
+        return blank(NOT_COLLECTED)
+    error = record.get("error") if isinstance(record.get("error"), str) else None
+    problem = record.get("cause") if isinstance(record.get("cause"), str) else None
+    cause = NOT_PERMITTED if problem in ("not_permitted", "this_host") else None
+    attempted = _f(record.get("attempted_at"))
+    if attempted is None or now - attempted > SSH_NOT_TRYING_AFTER:
+        return blank("Core has not tried this host for " + (f"{int((now - attempted) // 60)} min" if attempted else "a while")
+                     + ": is Core running?", "not_trying")
+    read_at = _f(record.get("read_at"))
+    if read_at is None:
+        return blank(error or "no reading", problem, cause)
+    if now - read_at > SSH_UNKNOWN_AFTER:
+        return blank(f"no good reading for {int((now - read_at) // 60)} min" + (f": {error}" if error else ""), problem, cause)
+    live = liveness(read_at, now=now, reason=error)
+    engine = record.get("engine") if isinstance(record.get("engine"), dict) else {}
+    m = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+    load = m.get("load")
+    temp = _f(m.get("temp_c"))
+    metrics = HostMetrics(cpu_pct=_f(m.get("cpu_pct")), mem_pct=_f(m.get("mem_pct")), mem_used_gib=_f(m.get("mem_used_gib")),
+                          mem_total_gib=_f(m.get("mem_total_gib")), disk_pct=_f(m.get("disk_pct")),
+                          disk_used_gib=_f(m.get("disk_used_gib")), disk_total_gib=_f(m.get("disk_total_gib")),
+                          load=tuple(_f(x) for x in load) if isinstance(load, list) and load and all(_f(x) is not None for x in load) else None,
+                          temps={"hottest zone": temp} if temp is not None else None)
+    text = lambda v: v if isinstance(v, str) else None          # noqa: E731
+    integer = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None          # noqa: E731
+    details = HostDetails(cores=None, threads=integer(m.get("threads")) or integer(engine.get("ncpu")), arch=text(engine.get("arch")),
+                          kernel=text(engine.get("kernel")), cpu_model=text(m.get("cpu_model")),
+                          memory_bytes=integer(engine.get("mem_bytes")), os_name=text(engine.get("os")))
+    raw = record.get("containers")
+    containers = None if not isinstance(raw, list) else tuple(
+        RemoteContainer(name=c["name"], image=text(c.get("image")), status=text(c.get("state")), health=text(c.get("health")),
+                        ports=_port_text(c.get("ports")), restarts=integer(c.get("restarts")))
+        for c in raw if isinstance(c, dict) and isinstance(c.get("name"), str))
+    return HostCard(entry.ssh, entry.name, entry.link, True, live, details=details, metrics=metrics, containers=containers,
+                    containers_liveness=live, status=error, source="ssh", ssh=entry.ssh, problem=problem if error else None,
+                    locality_checked=record.get("locality_checked") is not False)
+
+
+def load_hosts_file(path) -> dict[str, dict]:
+    """hosts.json by SSH alias (unique in config); {} when it is absent or unreadable (every SSH host then reads as not collected yet)."""
+    import json
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    hosts = data.get("hosts") if isinstance(data, dict) else None
+    return {h["ssh"]: h for h in hosts or [] if isinstance(h, dict) and isinstance(h.get("ssh"), str)}
+
+
+def _safe_card(entry, record, now) -> HostCard:
+    """A record the page cannot read is that host's problem, never the page's (review, release A)."""
+    try:
+        return ssh_card(entry, record, now)
+    except Exception:  # noqa: BLE001
+        return HostCard(entry.ssh, entry.name, entry.link, True, unknown("Core's record for this host could not be read"),
+                        containers_liveness=unknown("Core's record for this host could not be read"), source="ssh", ssh=entry.ssh)
+
+
+class Fleet:
+    """The Hosts page's view: SSH hosts from Core's file, the rest from the Beszel cache, in inventory order."""
+
+    def __init__(self, inventory: MultiHostConfig, beszel: FleetCache, hosts_file, *, wall=time.time):
+        self._inventory, self._beszel, self._file, self._wall = inventory, beszel, hosts_file, wall
+
+    def view(self) -> FleetView:
+        records = load_hosts_file(self._file) if any(e.ssh for e in self._inventory.hosts) else {}
+        beszel = self._beszel.view() if any(e.system_id and not e.ssh for e in self._inventory.hosts) else FleetView((), None)
+        by_id = {c.id: c for c in beszel.cards if c.configured}
+        now = self._wall()
+        cards = []
+        for entry in self._inventory.hosts:
+            if entry.ssh:
+                cards.append(_safe_card(entry, records.get(entry.ssh), now))
+            elif entry.system_id and entry.system_id in by_id:
+                cards.append(by_id[entry.system_id])
+            elif not entry.system_id:
+                cards.append(HostCard(entry.name, entry.name, entry.link, True, unknown("link only: PE does not read this host"),
+                                      source="link"))
+        # A hub row for a host now read over SSH (it still has its system_id during the move) is that host, not an unconfigured
+        # one: shown once (Codex, release A).
+        listed = {e.system_id for e in self._inventory.hosts if e.system_id}
+        cards += [c for c in beszel.cards if not c.configured and c.id not in listed]
+        return FleetView(tuple(cards), beszel.locality_id, beszel.locality_reason)
+
+
+def remote_summary(inventory: MultiHostConfig, hosts_file, *, wall=time.time) -> dict | None:
+    """For the Overview tile: containers on the SSH hosts that are reading (current or stale) and how many hosts are unknown."""
+    entries = [e for e in inventory.hosts if e.ssh]
+    if not entries:
+        return None
+    records, now = load_hosts_file(hosts_file), wall()
+    cards = [_safe_card(e, records.get(e.ssh), now) for e in entries]
+    # Only a fresh reading is counted: a stale host's old containers are not "on" it now (review, release A).
+    reading = [c for c in cards if c.liveness.state == "current" and c.containers is not None]
+    # A stopped container may be stopped on purpose; judging that is release B's (findings). Here: unhealthy or restarting only.
+    down = sum(1 for c in reading for x in c.containers if x.health == "unhealthy" or x.status in ("restarting", "dead"))
+    return {"hosts": len(reading), "unknown": len(cards) - len(reading), "containers": sum(len(c.containers) for c in reading),
+            "problems": down}
