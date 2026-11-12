@@ -35,7 +35,7 @@ second transport later. One channel, from the start.
 
 - **Docker over SSH** (`docker -H ssh://<alias>` / the API through `docker system dial-stdio`) for containers, and plain commands for
   host metrics. The existing aliases are the model: `unraid` (root@192.168.1.171) and `casamacmini` (casamac@192.168.1.156) are
-  already in Core's `~/.ssh/config`; CASALAB (192.168.1.80) needs one.
+  already in Core's `~/.ssh/config`; CASALAB has one too (`casalab`).
 - **What it grants, said plainly:** Docker access over SSH is root-equivalent on that host. The key is held by Core only, like the
   model key: never in a session's environment (sessions already drop `DOCKER_HOST`, `grants.py:144`), never logged. Host keys are
   pinned in `known_hosts` (`StrictHostKeyChecking=yes`); a changed host key stops collection for that host and says so.
@@ -141,8 +141,8 @@ mid-change leaves the change `unknown` and is re-scanned when it returns. Its ow
 4. Beszel: **dropped** once release A's metrics are live.
 5. Ingress: **PE forwards remote labels into Traefik** (level 2b) instead of a per-daemon Traefik setup.
 
-Still needed from the operator before release A goes live: an SSH alias for CASALAB (user, key) in Core's `~/.ssh/config`, and the
-key's public half on CASALAB; confirm the `casamac` user on the Mac mini can run `docker`.
+Access checked from the server (2026-11-12): `casalab` (casaroot, `bazzite_deploy_key`), `unraid` (root) and `casamacmini` (casamac,
+`/usr/bin/docker`) all run `docker info` over SSH; three distinct engine IDs, 4 + 5 + 6 containers.
 
 ## 9. Releases
 
