@@ -1,7 +1,7 @@
-# PE knows every Docker host: design (draft, 2026-11-12)
+# PE knows every Docker host: design (draft 2, 2026-11-12)
 
-Status: proposal for the operator's decision. Nothing here is built. Supersedes nothing yet: T48
-(`docs/handoff/T48-multi-host-spec.md`, observe-only via Beszel) stays the running design until a level below ships.
+Status: operator decisions taken (§8); release A next. Nothing here is built. T48 (`docs/handoff/T48-multi-host-spec.md`,
+observe-only via Beszel) stays the running design until release A ships.
 
 ## 1. The problem
 
@@ -15,136 +15,143 @@ PE is a one-host system with other hosts beside it.
   the web process's memory. Nothing else reads it: a container crash-looping on the Unraid box is never a finding, never a Telegram
   alert, never in a count.
 - Traefik on this host has two providers: Docker (local containers only) and File (11 hand-written routes to .171 Unraid, .80,
-  .25, .154, .1, and this host's own non-Docker services). A Traefik label on another host's container is ignored by it, which is
-  what the new host runs into.
+  .25, .154, .1, and this host's own non-Docker services). A Traefik label on another host's container is ignored by it.
 
-The operator wants one picture: every container on every Docker host counted, checked and alerted on, in one place.
+The operator wants one picture: every container on every Docker host counted, checked, alerted on and routed, in one place.
 
-## 2. Three levels, each a separate decision
+## 2. Levels
 
-| Level | What PE does | Touches other hosts | Risk |
+| Level | What PE does | On other hosts | Risk |
 |---|---|---|---|
-| 1. One inventory | Lists and counts every host's containers (state, health, image, labels, restarts) | Reads | Low |
-| 2. One health picture | Leela checks them; problems become findings, Telegram alerts, NEEDS YOU; Observe missions can read them | Reads | Low |
-| 3. Acting | Restart, update, repair on another host | Writes | High: a design of its own |
+| 1. One inventory | Lists and counts every host's containers (state, health, image, labels, restarts) and host metrics | Reads | Low |
+| 2. One health picture | Leela checks them; findings, Telegram alerts, NEEDS YOU; Observe missions can read them | Reads | Low |
+| 2b. One ingress | Remote containers' `traefik.*` labels become routes on this host's Traefik | Reads there, writes one file here | Medium |
+| 3. Acting | Restart, update, repair on another host | Writes | High: its own design |
 
-Levels 1 and 2 are proposed now. Level 3 is scoped at the end only to say where its lines would be, so 1 and 2 do not build anything
-it would have to undo.
+## 3. Transport: SSH (decided)
 
-## 3. How PE reaches another host
+The operator chose SSH: level 3 will need a channel that can change the host, and building a read-only proxy first would mean a
+second transport later. One channel, from the start.
 
-Three candidates were considered.
+- **Docker over SSH** (`docker -H ssh://<alias>` / the API through `docker system dial-stdio`) for containers, and plain commands for
+  host metrics. The existing aliases are the model: `unraid` (root@192.168.1.171) and `casamacmini` (casamac@192.168.1.156) are
+  already in Core's `~/.ssh/config`; CASALAB (192.168.1.80) needs one.
+- **What it grants, said plainly:** Docker access over SSH is root-equivalent on that host. The key is held by Core only, like the
+  model key: never in a session's environment (sessions already drop `DOCKER_HOST`, `grants.py:144`), never logged. Host keys are
+  pinned in `known_hosts` (`StrictHostKeyChecking=yes`); a changed host key stops collection for that host and says so.
+- **Read-only by code until level 3:** levels 1, 2 and 2b issue only read commands to other hosts, through one runner with an
+  allowlist of argv shapes (`docker ps`, `docker inspect`, `docker info`, `docker events --since`, `docker logs --tail`, metric reads).
+  Anything else is refused in PE before it reaches SSH. That allowlist is the reviewed surface (second review on every addition), as
+  the step catalogue is locally.
+- **TLS:** not needed. TLS certificates are how a Docker TCP socket is protected; with SSH, the key pair and pinned host key do that
+  job, and nothing listens on a new port. Flexibility comes from the alias: the address, user and key live in `~/.ssh/config`, PE's
+  config names the alias.
+- **Secrets:** `docker inspect` includes `Config.Env`. PE uses `--format` to take only the fields it needs, so env is never read; logs
+  pass the redactor before anything is kept.
+- **Per-host quirks:** Unraid allows SSH as root only (as today). macOS needs `docker` on the non-interactive PATH
+  (`/usr/local/bin` or `/opt/homebrew/bin`) and Docker Desktop running; collection says which when it fails.
 
-| Transport | Gives | Against |
-|---|---|---|
-| **Read-only Docker API proxy** on each host (a socket-proxy container exposing only GET endpoints) | The real Docker API: list, inspect (labels, restart count, health log, mounts), info (engine ID), events | One small container per host; inspect returns container env, which can hold secrets |
-| Docker over SSH (`DOCKER_HOST=ssh://`) | Everything, no new container | Docker access over SSH is root on that host: far more than levels 1 and 2 need, and the key would sit in Core |
-| Beszel agent (today) | Metrics, a container list | No labels, no restart count, no inspect, health codes partly unmapped, no events; it cannot answer what Leela asks |
+PE's own host keeps the local socket.
 
-**Proposed: the read-only proxy**, the transport `v4-mission-control.md` §487 already anticipated for "the read/discovery endpoints
-multi-host needs".
+## 4. Level 1: one inventory (release A)
 
-- One container per remote Docker host (for example `tecnativa/docker-socket-proxy` or its maintained successor, pinned by digest),
-  mounting `docker.sock` read-only with only `CONTAINERS`, `INFO`, `VERSION` and `EVENTS` enabled and every POST/DELETE refused.
-  Which image, and that it truly refuses writes, is verified before the first release (a write attempt in the test plan).
-- Reachable from this host only: bound to the LAN address with a firewall rule (or the proxy's own allowlist) admitting
-  192.168.1.94 alone. Optional mutual TLS where the operator wants it; config takes `tcp://` and `https://` with a client cert.
-- **Secrets:** container inspect includes `Config.Env`. PE never asks for it where list is enough. Where it inspects, it drops
-  `Config.Env` before anything is kept, and the redactor runs over the rest before persistence, as it does for local data today.
-- Beszel stays for what it is good at: CPU, memory, disk, temperatures. A host without a Beszel agent still gets its containers.
-
-PE's own host keeps the local socket. The proxy is only for the others.
-
-## 4. Level 1: one inventory
-
-**Config.** `multi_host.hosts` gains an optional `docker:` endpoint per host (and `system_id` becomes optional), so a host is a
-Docker host, a Beszel host, or both:
+**Config.** A host names its SSH alias; Beszel is no longer needed:
 
 ```yaml
 multi_host:
   hosts:
     - name: CASA UNRAID
-      docker: tcp://192.168.1.171:2375      # the read-only proxy
-      system_id: ptf3tn2gzpg913i             # Beszel, for metrics (optional)
+      ssh: unraid                 # an alias in Core's ~/.ssh/config
       link: https://unraid.casalan.com
-    - name: NEW HOST
-      docker: tcp://192.168.1.x:2375
+    - name: CASA MAC MINI
+      ssh: casamacmini
+    - name: CASALAB
+      ssh: casalab
+    - name: CASA SOLAR ASSISTANT  # no Docker: metrics only, or a link only
+      link: http://192.168.1.154
 ```
 
-No schema change to the database; the inventory is config, as T48 decided (a host known only from a collector's answer vanishes
-exactly when something is wrong).
+`system_id` (Beszel) stays accepted during the move and is dropped once release A's metrics are live (decision 4). No database
+schema change; the inventory is config, as T48 decided.
 
-**Collector in Core**, not the web process. Today's `FleetCache` lives in the dashboard and refreshes only while someone looks;
-level 2 needs the data when nobody is looking. One collector per host, each with its own timeout, runs with every scan and every
-60 s between, and writes a snapshot per host next to Leela's (`state/hosts/<name>.json`). The dashboard reads the files as it reads
-Leela's today.
+**Collector in Core**, not the web process. One collector per host, its own timeout, run with every scan and every 60 s between;
+a snapshot per host next to Leela's (`state/hosts/<name>.json`). The dashboard reads the files as it reads Leela's.
 
-**Rules carried over from T48:**
-- Absent is not zero. An unreachable host is `unknown` with a reason (no contact, refused, clock unusable), never "0 containers".
-- Locality is derived, never declared. With explicit endpoints this becomes simple and exact: an endpoint whose engine ID
-  (`GET /info` → `ID`) equals the local daemon's is refused at config apply ("that is this host"). The Beszel name-matching heuristic
-  stays only for pairing a Beszel system with its Docker host when both are given (or the operator gives both on one entry, which is
-  the proposal: no heuristic needed).
+- Containers: `docker ps -a` and a batched `docker inspect --format` (state, health, restart count, started at, image, labels,
+  published ports).
+- Metrics: CPU, memory, disk, load, temperatures where readable, by OS: Linux (Unraid, CASALAB) from `/proc` and `df`; macOS from
+  `sysctl`, `vm_stat` and `df`. Replaces Beszel.
 
-**Surfaces.**
-- Overview: "87 here · 142 on 3 hosts" (unknown hosts said as such, not summed as zero).
-- Hosts tab: each host's full container list with state, health and restarts, from the proxy; metrics from Beszel where present.
-- The single container count is gone; a fleet total is shown only with the per-host breakdown beside it.
+**Rules carried over from T48.**
+- Absent is not zero: an unreachable host is `unknown` with a reason (no contact, refused, host key changed, docker not found),
+  never "0 containers".
+- Locality is derived, never declared: an alias whose Docker engine ID (`docker info --format '{{.ID}}'`) equals the local daemon's
+  is refused at config apply ("that is this host").
 
-## 5. Level 2: one health picture
+**Surfaces.** Overview: "87 here · N on 3 hosts" (an unknown host said as such, never summed as zero). Hosts tab: each host's full
+container list with state, health and restarts, and its metrics.
 
-**Findings.** Leela's container checks (stopped, crash-looping, unhealthy, restart counts) run over each host's snapshot as well as
-the local one. Each finding carries its host. Checks that need a shell on the host (NFS stat inside a container, gluetun logs,
-qBittorrent `docker exec`) stay local: the proxy refuses exec by design. The existing SSH probe to Unraid for duplicate fsids stays
-as is.
+## 5. Level 2: one health picture (release B, C)
 
-**Reports and alerts.** Hermes reads the findings as now and names the host. Telegram alerts say which host. NEEDS YOU lists
-remote findings with no action button: the honest action is "look at it there" (the host's link).
+**Findings.** Leela's container checks (stopped, crash-looping, unhealthy, restart counts) run over every host's snapshot. Each
+finding carries its host. Checks that need a shell inside a container (NFS stat, gluetun logs, qBittorrent) stay local for now.
+Hermes names the host; Telegram alerts say which host; NEEDS YOU lists remote findings with the host's link and no action button
+until level 3.
 
-**Boot settle** is per host: a remote host that just rebooted is noisy; a finding there waits until its containers have been up past
-their health-check start period, as locally.
+**Boot settle** per host: a remote host that just rebooted waits past its containers' health-check start periods, as locally.
 
-**Observe missions read remote hosts.** A new brokered read tool, `fleet.read` (list, inspect without env, logs tail through the proxy
-with the redactor), lets an Observe or Propose mission investigate a remote container. It gets the second review like every brokered
-tool. A Repair mission still cannot change another host: its approval card says "this host" and stays true.
+**Observe missions** get a brokered read tool, `fleet.read` (list, inspect without env, logs tail with the redactor), going through
+the same allowlisted runner. Second review, like every brokered tool. A Repair still changes this host only; its card says so.
 
-**Network.** Two separate things:
-- PE side: the Network tab joins a File route to a remote container when the route's backend IP and port match a container's
-  published port on a host whose endpoint has that IP. The route then gets the container's state, icon and detail like a Docker
-  route does.
-- Traefik side (the operator's): Traefik's Docker provider watches one daemon. For the new host's labels to become routes, the
-  options are File routes as today, or a label-forwarding helper (for example `traefik-kop`, which publishes a remote host's labels
-  into Traefik's Redis provider). PE can show which remote containers carry `traefik.*` labels with no matching router, which is
-  exactly the new host's situation. Choosing and installing the helper is the operator's; PE reports the gap.
+## 6. Level 2b: one ingress, PE as the label forwarder (release D)
 
-## 6. Level 3: acting on another host (not proposed now)
+The operator's question: rather than making Traefik aware of each Docker daemon, why not have one component that lets any Docker
+host work this way? PE already reads every host's labels (level 1), so PE can be that component:
 
-Recorded only so levels 1 and 2 leave room for it. T48's four open questions stand, with these starting positions:
+- For each remote container with `traefik.enable=true`, PE translates its `traefik.http.routers.*` and `traefik.http.services.*`
+  labels into a Traefik dynamic-config entry whose service URL is `http://<host address>:<published port>` (the container port in
+  the label mapped to the port the host publishes it on).
+- PE writes **one generated file** in Traefik's File-provider directory (`pe-remote.yml`), never touching the hand-written ones.
+  Traefik reloads it on its own.
+- **Safety, as for any ingress change (the AdGuard/network-guard area, second review):** the file is validated before writing
+  (names unique and not clashing with Docker or hand-written routers, rules parse, every middleware it names exists); written
+  atomically with the previous version kept; after the write PE reads Traefik's API and rolls the file back if a router it wrote
+  reports an error. Each change is recorded and posted to Telegram ("route added: app.casalan.com → CASALAB:8080").
+- **What stops a route:** a label that cannot map (the container port is not published on the host; Traefik cannot reach a container
+  network on another machine) is not written. The Network tab lists it as "labelled, not routable: publish port N", which is the
+  fix.
+- Turned on once by config (`multi_host.ingress: true`); after that PE keeps the file in step with the labels it sees.
+- The Network tab shows these routes with their remote container, state and icon, like local Docker routes.
 
-- **Transport:** a second, separate channel, never the read proxy. Likely a small PE agent on each host running the same typed
-  runbook steps (restart, compose up, canary update) through its own `run_argv` with its own sudo scope, authenticated to Core.
-  Not SSH-as-root.
-- **Lock:** one host-mutation lock per host, plus the existing local lock; a change on host A does not wait on a scan of host B.
-- **Risk class:** every remote mutation starts at R3 (approval each time, never automatic) until live use says otherwise.
-- **Checkpoints and undo** live on the remote host and are taken by its agent; Core keeps the record.
-- **Missions:** trust-mode sessions with native tools stay on this host. A remote repair is a typed runbook, approved per run.
-- **Host vanishes mid-action:** the action is `unknown` and the host is re-scanned when it returns, never assumed done.
+This does what a label-forwarding helper (traefik-kop and similar) does, inside PE, with PE's validation and record, and no extra
+component on each host.
 
-## 7. Releases
+## 7. Level 3: acting on another host (not proposed now)
+
+Starting positions, so levels 1 to 2b leave room for it: the same SSH channel with a wider allowlist (typed runbook steps only:
+restart, compose up, canary update); one mutation lock per host; every remote change R3 (approved each time) until live use says
+otherwise; checkpoints taken on the remote host and recorded in Core; trust-mode sessions stay on this host; a host that vanishes
+mid-change leaves the change `unknown` and is re-scanned when it returns. Its own design doc first.
+
+## 8. Decisions (operator, 2026-11-12)
+
+1. Transport: **SSH**, one channel for every level.
+2. Docker hosts: **CASALAB (192.168.1.80), the Mac mini (192.168.1.156), Unraid (192.168.1.171)**. Solar Assistant: no Docker.
+3. TLS: **not needed with SSH** (keys and pinned host keys do that job).
+4. Beszel: **dropped** once release A's metrics are live.
+5. Ingress: **PE forwards remote labels into Traefik** (level 2b) instead of a per-daemon Traefik setup.
+
+Still needed from the operator before release A goes live: an SSH alias for CASALAB (user, key) in Core's `~/.ssh/config`, and the
+key's public half on CASALAB; confirm the `casamac` user on the Mac mini can run `docker`.
+
+## 9. Releases
 
 | Release | Content | Effort |
 |---|---|---|
-| A (level 1) | `docker:` endpoint in config, Core collector, per-host snapshots, engine-ID locality, Overview and Hosts tab | M |
-| B (level 2) | Leela over remote snapshots, findings with a host, Hermes, Telegram, NEEDS YOU, per-host boot settle | M |
-| C (level 2) | `fleet.read` brokered tool for Observe missions; Network joins File routes to remote containers; unrouted-label report | M |
+| A (level 1) | `ssh:` per host, allowlisted read runner, Core collector, per-host snapshots and metrics, engine-ID locality, Overview and Hosts tab | M |
+| B (level 2) | Leela over every host, findings with a host, Hermes, Telegram, NEEDS YOU, per-host boot settle | M |
+| C (level 2) | `fleet.read` for Observe missions; Beszel removed | S |
+| D (level 2b) | Label forwarding into `pe-remote.yml`, validation, rollback, Network tab | M |
 | Level 3 | Its own design doc first | L |
 
 Each release: characterization tests first, the second review (Codex and `/code-review`), live check on the host.
-
-## 8. Decisions for the operator
-
-1. The read-only proxy as the transport for levels 1 and 2 (vs SSH, vs Beszel only).
-2. Which hosts run Docker and get a proxy: Unraid (.171)? The Mac mini? The new host (name and address)? Is .80 one of these?
-3. Proxy reachable from this host only by firewall rule, or with mutual TLS as well.
-4. Beszel kept for metrics only, or dropped once the proxy covers containers.
-5. The new host's routes: File routes, or a label-forwarding helper (operator's setup; PE only reports the gap).
