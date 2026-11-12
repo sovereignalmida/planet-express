@@ -1,5 +1,17 @@
 # TODOS
 
+## Fleet
+
+### PE knows every Docker host, not only its own (design first)
+
+**What:** Today Leela, Hermes, the container count, Network, repairs and updates see only the local Docker socket; the other hosts are
+read-only metrics and container lists from Beszel on the Hosts tab, and nothing else in PE knows they exist (a crashed container on
+another host is never a finding). Design in `docs/designs/multi-host.md`: how PE reaches each host, one inventory, one health picture,
+and where acting on another host would draw its lines.
+
+**Effort:** L (design first, then one level per release)
+**Priority:** P1
+
 ## Dashboard
 
 ### "Load earlier" log paging in the container panel
@@ -22,51 +34,6 @@ investigation path, after checking nothing in Telegram reaches them. `casa_bende
 cards) has no caller left either; it goes with them, under the second-review gate. The chat spend-ceiling item below goes with it.
 
 **Why:** dead code on the RPC surface is surface a reviewer still has to check.
-
-### Chat spend ceiling: count cost, not calls
-
-**What:** Record per-call token usage and make the daily chat ceiling a cost budget instead of a
-call count.
-
-**Why:** Calls are a poor proxy for money. One long investigation with five diagnostic rounds and a
-large context can cost more than twenty short questions, so a call ceiling that feels safe can still
-produce a surprising bill, while a cheap-but-chatty session gets throttled for no financial reason.
-
-**Context:** Deferred during `/plan-eng-review` (2026-09-16, decision D26). D22 chose calls
-deliberately — it is what the existing `MAX_DIAGNOSTIC_ROUNDS` budget counts and it needs no price
-table — but required slice 2 to record enough per call to switch later, so the groundwork ships
-either way and this item is only the switch. Note the shape changes: the ceiling reserves quota
-transactionally in the same `BEGIN IMMEDIATE` that records the call, so a spend ceiling means
-reserving an *estimated* cost and reconciling against actual usage afterwards. Needs per-provider
-usage parsing (Anthropic `usage`, OpenAI `response.usage`) and a price table that goes stale on every
-repricing. Revisit once there is real usage data showing whether the call ceiling was ever the
-binding constraint.
-
-**Effort:** M
-**Priority:** P3
-**Depends on:** T21 (slice 2 chat with the call-based ceiling)
-
-### Collapse the provider client-setup duplication in casa_amy
-
-**What:** After the shared tool loop is extracted, `casa_amy.py` still branches per provider in
-`_ask_anthropic` (`:84`) and `_ask_openai` (`:104`) — two functions that build a client, set model and
-effort, attach web-search tools, and pull text out of the response.
-
-**Why:** It is the last provider fork once the loop extraction lands. A new model tier, a key
-rotation, an SDK bump, or slice 6's openai-compatible endpoint has to be made in both, and they
-already differ in shape: Anthropic streams with adaptive thinking plus `web_fetch`, OpenAI does one
-non-streaming call with `web_search` only.
-
-**Context:** Accepted residue of `/plan-eng-review` decision D10 (2026-09-16), not an oversight. D10
-deliberately excluded Amy from the loop extraction because her search runs provider-side with no
-client-side tool loop, so this is a different abstraction (client construction) and merging the two
-was rejected. ~30 lines that change rarely. The trigger is slice 6's openai-compatible provider:
-that is when two branches become three and the fork starts costing something. Do not fold this into
-the loop extraction.
-
-**Effort:** S
-**Priority:** P3
-**Depends on:** T20 (loop extraction); realistically slice 6
 
 ## Core
 
@@ -135,58 +102,6 @@ Second review (Codex + `/code-review`): this is Farnsworth's planning logic.
 refusals are not in the event stream (live: a second Check again while the first was running). Show the refusal's own words.
 
 **Effort:** S
-**Priority:** P2
-
-### Surface real usage from the provider so the operator decides
-
-**Status (rc14.7):** account level done: credit and spend in the Console and on Missions, Telegram alerts, per-call `cost_usd` on the
-broker's events when OpenRouter reports it (confirm on a live request). Still open: per-conversation and per-mission cost shown from
-those events and the Anthropic price-table estimate without an Admin key. v3's model calls go through the broker whenever it runs (rc14.8); retire the OpenAI key once that is confirmed on the host.
-
-**What:** Replace guessed limits with the provider's own figures, shown where the operator works (Console header, Missions page,
-Telegram on request), so they decide when to stop, not a cap:
-- **API key through a gateway (OpenRouter, the host today):** `GET /api/v1/key` with the key the broker already holds: `limit`,
-  `limit_remaining`, `limit_reset`, `usage` (all-time) and daily/weekly/monthly usage. Show "credit left" and "spent today / this
-  month". The broker can also ask OpenRouter for per-request cost (usage accounting) and record it on its per-call event, so each
-  conversation and mission shows what it cost in money, not only tokens.
-- **Anthropic API directly:** spend from the Usage and Cost API, which needs an Admin API key (a separate, optional credential held
-  by Core like the model key; never in a session). Without one, show tokens and an estimate from a configured price table, labelled
-  as an estimate.
-- **Subscription:** no public API for usage against plan limits was found, and the broker refuses a subscription login by design.
-  Out of scope until there is a source of truth; say so on the page rather than guess.
-- Per conversation and per mission: tokens and cost (from the broker's records), next to the account-level figures.
-- Optional alerting the operator configures (for example "tell me on Telegram when credit left drops under $5"): information, never
-  a stop.
-
-**Why:** Fixed per-conversation budgets did not match real use (live M-31/M-32). The operator should see what is being spent and
-what is left at the provider, and decide.
-
-**Context:** `missions/model_broker.py` (it holds the key and sees every call: the place to fetch and record; any change gets the
-second review), `console/api.py` and `static/console.js` (the header), the Missions page, `config_schema.py` (`missions.model_broker`).
-Verify OpenRouter's `/api/v1/key` fields and usage accounting against the live key before building.
-
-**Includes:** route v3's model calls (Hermes and Farnsworth through `casa_llm.py`, Amy through `casa_amy.py`) through the model
-broker too. Today they call the provider directly with their own key, so v3's spend is in no record and any usage figure would leave
-it out. One key, one record, one honest number.
-
-**Effort:** M
-**Priority:** P1
-
-### State machines: find the implicit ones and make the ones that matter explicit (after rc14.7)
-
-**What:** Inventory every implicit state machine (status strings compared in several places, timestamps doubling as state, flag
-combinations, in-memory registries, step sequences) into `docs/designs/state-machines.md`: states, transitions, writers, readers,
-storage, risk. Then per machine: make it explicit (the `missions/state.py` pattern: a transition table, one guard, one
-state-to-label/actions table every surface reads), fold it into an existing machine, or leave it with a recorded reason. Stored values
-and schemas do not change; legacy values map onto the table. One machine per release, characterization tests first, a replay of the
-live host's events to prove nothing changed, the agent's brief told its state and allowed next moves from the same table. Order:
-Console (conversation, plan, execution), checkpoint and rollback/undo, leases and approvals; the v3 `PipelineState` lock is mapped,
-not changed, unless something is wrong.
-
-**Why:** One word and one set of actions per state on every surface (UX), one file that says what can happen next (DX), and an
-agent that is told its state instead of guessing (AX).
-
-**Effort:** L (about half a day to map, then one or two days per machine)
 **Priority:** P2
 
 ### One planner and one investigator: v3's Farnsworth planner and Amy hand off to the Console
@@ -288,6 +203,23 @@ each).
 **Priority:** P2
 
 ## Completed
+
+### Surface real usage from the provider (done, rc14.7 to rc14.8.2)
+
+Account credit and spend in the Console and on Missions with Telegram alerts (rc14.7); PE's own model calls through the broker, one
+key and one record (rc14.8, live on the host); cost per conversation and per mission from the broker's records (rc14.8.2). Left out on
+purpose: an Anthropic price-table estimate for an install on the Anthropic API without an Admin key (the host uses OpenRouter, which
+prices every call). Operator step: remove `OPENAI_API_KEY` from `/etc/planetexpress.env`; nothing has used it since rc14.8.
+
+### State machines made explicit (done, rc14.7.4 to rc14.7.10)
+
+`docs/designs/state-machines.md`: 35 machines mapped, the ones that mattered given one table each. Two items need a schema change and
+were left: a "dismissed" incident kind (V9) and the Console's consumed-turn marker (C4).
+
+### Obsolete
+
+- Chat spend ceiling: the dashboard Chat is gone (rc14.7.3).
+- Collapse the provider setup in casa_amy: Amy and Fry share one research call (`casa_llm.research`, rc14.8).
 
 ### Undo covers every file the plan changes (done, rc14.5)
 
