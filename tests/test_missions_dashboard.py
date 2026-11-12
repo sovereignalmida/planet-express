@@ -375,6 +375,19 @@ def test_detail_of_a_closed_mission_has_no_cancel(web):
     assert "/cancel" not in client.get("/missions/M-1").get_data(as_text=True)
 
 
+def test_detail_says_what_the_mission_cost_at_the_model_and_never_prices_an_unpriced_call(web):
+    client, core, _ = web
+    core.results["mission.get"] = detail(mission("M-2", "Why slow"),
+                                         spend={"calls": 5, "tokens": 49_192, "cost_usd": 0.1138, "unpriced": 0})
+    assert "5 calls · 49k budget tokens · $0.11" in client.get("/missions/M-2").get_data(as_text=True)
+    core.results["mission.get"] = detail(mission("M-2", "Why slow"),
+                                         spend={"calls": 9, "tokens": 77_468, "cost_usd": None, "unpriced": 9})
+    page = client.get("/missions/M-2").get_data(as_text=True)
+    assert "9 calls · 77k budget tokens · no price reported" in page and "$" not in page.split("MODEL", 1)[1].split("</dd>", 1)[0]
+    core.results["mission.get"] = detail(mission("M-2", "Why slow"))                      # an older core: no line, no error
+    assert "MODEL" not in client.get("/missions/M-2").get_data(as_text=True)
+
+
 def test_detail_paging_and_bad_ids(web):
     client, core, _ = web
     client.get("/missions/M-2?after=7")

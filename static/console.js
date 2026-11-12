@@ -98,6 +98,21 @@
     return b.over ? k + "k tokens · past the usual size" : b.used_pct + "% of the usual size";
   }
 
+  // rc14.8.2: what this conversation and its runs cost at the model, as the provider priced each call. A call with no price is
+  // counted, never guessed at: the figure is then a floor ("$0.12+").
+  function spendText(sp) {
+    if (!sp || !sp.calls) return "";
+    if (sp.cost_usd === null || sp.cost_usd === undefined) return Math.round((sp.tokens || 0) / 1000) + "k budget tokens";
+    return "$" + Number(sp.cost_usd).toFixed(2) + (sp.unpriced ? "+" : "");
+  }
+  function spendTitle(sp) {
+    if (!sp || !sp.calls) return "";
+    return "Model cost of this conversation and the runs it started: " + sp.calls + (sp.calls === 1 ? " call, " : " calls, ") +
+      Math.round((sp.tokens || 0) / 1000) + "k budget tokens (as the broker counts them: cache reads weigh less, a cut-off reply is charged its worst case)" +
+      (sp.cost_usd === null || sp.cost_usd === undefined ? "; the provider reported no price." :
+       ", " + money(sp.cost_usd) + " as the provider priced them" + (sp.unpriced ? " (" + sp.unpriced + " without a price, not counted)." : "."));
+  }
+
   // rc14.7: what the model provider says about the account (credit left, spend), for the operator to decide on. Never a stop.
   function money(v) { return v === null || v === undefined || !isFinite(Number(v)) ? "—" : "$" + Number(v).toFixed(2); }
   function ageText(s) { return s === null || s === undefined ? "" : s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; }
@@ -121,7 +136,7 @@
   function soundsLikeApproval(text) {
     return /^\s*(please\s+)?(confirm(ed)?|approved?|authori[sz]e(d)?|yes|yep|yeah|go( ahead)?|do it|proceed|ok(ay)?|run it|go for it)(\s+(it|that|this|the plan|option\s*[a-c1-3]|[a-c]))?[\s.!]*$/i.test(String(text || ""));
   }
-  const pure = { inline, proseBlocks, trailFor, checkPhrase, groupRail, budgetLabel, soundsLikeApproval, creditLine };
+  const pure = { inline, proseBlocks, trailFor, checkPhrase, groupRail, budgetLabel, spendText, spendTitle, soundsLikeApproval, creditLine };
   if (typeof module !== "undefined" && module.exports) { module.exports = { ...pure, boot: (doc, win) => boot(doc, win) }; }
 
   // ── DOM ──────────────────────────────────────────────────────────────────────────────────────────
@@ -201,7 +216,7 @@
     // ── top bar ──
     function renderTop() {
       const f = state.feed;
-      const sig = JSON.stringify([state.newMode, f && f.conversation, f && f.budget, state.archiveArmed]);
+      const sig = JSON.stringify([state.newMode, f && f.conversation, f && f.budget, f && f.spend, state.archiveArmed]);
       if (sig === state.sig.top) return;
       state.sig.top = sig;
       refs.top.replaceChildren();
@@ -215,6 +230,8 @@
       const meter = el("span", "pe-budget" + (b.state === "ok" ? "" : " " + b.state)); meter.title = "Model tokens this conversation has used. Nothing stops at this mark: it shows how big the conversation has grown.";
       const fill = el("span", "pe-bar-fill " + (b.state === "ok" ? "" : b.state)); fill.style.cssText = "display:block;width:" + Math.min(100, b.used_pct) + "%";
       add(meter, el("span", "", "USAGE"), add(el("span", "pe-bar"), fill), el("span", "", budgetLabel(b)));
+      const cost = spendText(f.spend);
+      if (cost) { const c2 = el("span", "pe-spend", "· " + cost); c2.title = spendTitle(f.spend); add(meter, c2); }
       const log = el("a", "", "Work log"); log.href = "/missions";
       const open = c.state === "open";
       const archive = el("button", "pe-btn sm" + (state.archiveArmed ? " danger" : " ghost"), state.archiveArmed ? "Archive? Click again" : "Archive"); archive.type = "button";

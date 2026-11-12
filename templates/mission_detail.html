@@ -13,6 +13,7 @@
     <dt>RUNTIME</dt><dd>{{ m.runtime }}</dd>
     <dt>GOAL</dt><dd class="mc-pre">{{ m.goal }}</dd>
     <dt>SUCCESS</dt><dd class="mc-pre">{{ m.success_criteria }}</dd>
+    {% if m.spend and m.spend.calls %}<dt>MODEL</dt><dd>{{ m.spend.calls }} call{{ '' if m.spend.calls == 1 else 's' }} · {{ (m.spend.tokens / 1000) | round | int }}k budget tokens{% if m.spend.cost_usd is not none %} · ${{ '%.2f' | format(m.spend.cost_usd) }}{% if m.spend.unpriced %} ({{ m.spend.unpriced }} without a price, not counted){% endif %}{% else %} · no price reported{% endif %}</dd>{% endif %}
     {% if m.session %}<dt>SESSION</dt><dd>{{ m.session.kind }} · {{ m.session.id }}</dd>{% endif %}
     {% if m.cancel_requested %}<dt>CANCEL</dt><dd>requested by {{ m.cancel_requested_by }}</dd>{% endif %}
   </dl>

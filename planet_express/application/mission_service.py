@@ -352,6 +352,7 @@ class MissionService:
                                                    "issued_at": live["issued_at"],
                                                    "expires_at": live["expires_at"]}),
             "artifacts": list(reversed(artifact_events)),
+            "spend": self.missions.model_spend([mission_id]),
         })
         return out
 

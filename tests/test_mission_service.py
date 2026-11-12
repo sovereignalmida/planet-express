@@ -103,6 +103,7 @@ def test_create_get_list_happy_path(handlers):
     got = call(handlers, "mission.get", mission_id="M-1")
     assert got["goal"] == "Find out" and got["grant"]["tier"] == "propose"
     assert got["cancel_requested"] is False and got["artifacts"] == []
+    assert got["spend"] == {"calls": 0, "tokens": 0, "cost_usd": None, "unpriced": 0}       # rc14.8.2: the mission page's MODEL line
     listed = call(handlers, "mission.list")
     assert [m["id"] for m in listed["missions"]] == ["M-1"] and listed["total"] == 1
     assert "grant_json" not in listed["missions"][0] and "goal" not in listed["missions"][0]

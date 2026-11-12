@@ -143,6 +143,8 @@ class ConsoleApi:
                              "status": {k: view[k] for k in ("text", "level", "group")}, "verdict": view["verdict"]},
             "budget": {"used_pct": used_pct, "tokens_used": conv.tokens_used, "token_budget": mark, "tokens_left": max(mark - conv.tokens_used, 0),
                        "over": over, "state": "warn" if over or used_pct >= 80 else "ok"},
+            # What the conversation cost at the model: its own turns plus every run it started (each run is its own mission).
+            "spend": self.ms.model_spend([conv.mission_id, *(e["mission_id"] for e in self.console.executions(conv.id))]),
             "running": running, "stoppable": stoppable, "composer": self._composer(conv, running, status, status_view),
             # PE's own `core` turns (a refused plan handed back to the planner) are not drawn: the thread has PE's short note instead.
             "messages": [{"seq": m.seq, "role": m.role, "turn": m.turn, "at": m.at, "text": clean_text(m.text, MAX_TEXT),

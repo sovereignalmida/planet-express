@@ -437,6 +437,24 @@ class MissionStore:
                          (now, session_id))
             insert_event(conn, row["mission_id"], "note", actor, {"session_revoked": session_id}, now)
 
+    def model_spend(self, mission_ids: list[str]) -> dict[str, Any]:
+        """What these missions' sessions cost at the model, from the broker's own `model.request` records: calls, the broker's budget
+        tokens (`charged`: cache reads weigh a tenth, a cut-off reply is charged its worst case, so not the vendor's bill), and the vendor's own price where the reply carried one (`cost_usd`, rc14.7; a call recorded earlier, or
+        by a provider that reports none, is counted in `unpriced` and never guessed at). Read-only, from events already kept."""
+        ids = sorted({m for m in mission_ids if m})
+        if not ids:
+            return {"calls": 0, "tokens": 0, "cost_usd": None, "unpriced": 0}
+        marks = ",".join("?" * len(ids))
+        with self.store._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS calls, COALESCE(SUM(json_extract(body_json, '$.charged')), 0) AS tokens, "
+                "SUM(json_extract(body_json, '$.cost_usd')) AS cost, COUNT(json_extract(body_json, '$.cost_usd')) AS priced "
+                f"FROM mission_events WHERE mission_id IN ({marks}) AND kind='tool' "
+                "AND json_extract(body_json, '$.event')='model.request'", ids).fetchone()
+        calls, priced = int(row["calls"]), int(row["priced"])
+        return {"calls": calls, "tokens": int(row["tokens"] or 0),
+                "cost_usd": round(float(row["cost"]), 4) if priced else None, "unpriced": calls - priced}
+
     def live_session(self, mission_id: str) -> dict[str, Any] | None:
         with self.store._connect() as conn:
             row = conn.execute("SELECT * FROM mission_sessions WHERE mission_id=? AND revoked_at IS NULL",

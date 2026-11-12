@@ -97,6 +97,15 @@ test("budget labels", () => {
   assert.strictEqual(C.budgetLabel({ state: "warn", used_pct: 100, over: true, tokens_used: 312400 }), "312k tokens · past the usual size");
 });
 
+test("spend labels: the provider's price, a floor when some calls had none, tokens when none did", () => {
+  assert.strictEqual(C.spendText(undefined), "");
+  assert.strictEqual(C.spendText({ calls: 0, tokens: 0, cost_usd: null, unpriced: 0 }), "");
+  assert.strictEqual(C.spendText({ calls: 5, tokens: 49192, cost_usd: 0.1138, unpriced: 0 }), "$0.11");
+  assert.strictEqual(C.spendText({ calls: 6, tokens: 53192, cost_usd: 0.1138, unpriced: 1 }), "$0.11+");
+  assert.strictEqual(C.spendText({ calls: 9, tokens: 77468, cost_usd: null, unpriced: 9 }), "77k budget tokens");
+  assert.ok(C.spendTitle({ calls: 6, tokens: 53192, cost_usd: 0.1138, unpriced: 1 }).includes("1 without a price, not counted"));
+});
+
 test("the provider credit line (rc14.7)", () => {
   assert.strictEqual(C.creditLine(null), null);
   assert.strictEqual(C.creditLine({ state: "off" }), null);
