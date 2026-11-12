@@ -113,6 +113,20 @@ second before changing the matcher.
 **Priority:** P3
 **Depends on:** nothing (T29 ships the workaround)
 
+## Install (`/install`, Fry and Farnsworth)
+
+### Map an upstream project's relative bind mounts under `~/apps/<stack>`
+
+**What:** Farnsworth refuses any install whose volumes are not named volumes (live rc14.8.1: Uptime Kuma, `./data:/app/data`),
+so in practice `/install` refuses nearly every real project. Map a relative host path (`./x`, `x`) to `~/apps/<stack>/x` (the
+installer already refuses when that directory exists) and show the mapped path on the proposal card. Keep refusing absolute,
+`~`, `$`/`${...}` and `..` paths (the docker socket, `/opt/...`, anything outside the stack's own folder). Also escape the literal
+`` `~/apps/<stack>` `` in the installer's refusal messages: Telegram reads them as HTML and the send falls back to plain text.
+Second review (Codex + `/code-review`): this is Farnsworth's planning logic.
+
+**Effort:** S
+**Priority:** P3
+
 ## Missions (trust mode, from live use after rc14.4)
 
 ### Say why a mission action was refused on the mission page
