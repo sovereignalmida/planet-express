@@ -22,6 +22,36 @@ off the author's domain once the author's config sets it explicitly.
 **Effort:** S
 **Priority:** P2
 
+### Reconcile the Missions and Memory tabs (pre-Console and post-Console overlap)
+
+**What:** Missions and Memory grew in two eras: before the Console (missions created from incidents and the Work log, memory
+cards and candidates) and after it (conversations, plans, runs, lessons offered from a conversation). The two tabs now overlap:
+a Console run is both a conversation and a Repair mission; lessons and memory cards are two shapes of one idea; NEEDS YOU and
+the Console's "Needs you" group answer the same question. Map what each tab shows, where each object lives, and decide one
+home per concept (operator, live 2026-11-13: "the bulk of work left").
+
+**Effort:** M (design first)
+**Priority:** P1
+
+### A log check that cannot read its whole window holds a good run
+
+**What:** `log_absent` gives up when the window is over 64 KB ("absence cannot be shown") and the run is held for the operator,
+though nothing was found (live M-39: Immich 3.3.6 to 3.4.1, migrations clean, 79 KB of first-start logs). Read the window in
+bounded chunks (streaming the matcher) so a chatty upgrade can still be proven clean; keep "unknown" only when the logs truly
+cannot be read.
+
+**Effort:** S
+**Priority:** P1
+
+### A plan's "will not touch" must account for dependents
+
+**What:** M-39's plan said it would not touch `immich-power-tools`, but stopping the database restarted it (a Compose
+dependent). When an option stops or recreates a service, the planner (and PE's own check of the plan) should name the services
+that depend on it, so "will not touch" is true or the dependent is listed under changes.
+
+**Effort:** S
+**Priority:** P2
+
 ## Dashboard
 
 ### "Load earlier" log paging in the container panel
