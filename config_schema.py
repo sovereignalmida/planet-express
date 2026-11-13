@@ -246,6 +246,40 @@ class HostEntry(BaseModel):
         return v
 
 
+class IngressConfig(BaseModel):
+    """Release D of docs/designs/multi-host.md: PE writes Traefik routes for the other hosts' `traefik.*` labels into ONE
+    generated file (`pe-remote.yml`) in Traefik's File-provider directory. Off by default: it changes the ingress."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # Traefik's File-provider directory as seen from THIS host (the host side of its bind mount). Only pe-remote.yml in it is
+    # ever written.
+    directory: str | None = None
+    # Traefik's API on this host, read before every write (what already exists) and after it (did Traefik accept it).
+    traefik_api: str = "http://127.0.0.1:8079"
+
+    @field_validator("directory")
+    @classmethod
+    def _absolute(cls, v: str | None) -> str | None:
+        if v is not None and (not v.startswith("/") or "\x00" in v):
+            raise ValueError("multi_host.ingress.directory must be an absolute path")
+        return v
+
+    @field_validator("traefik_api")
+    @classmethod
+    def _loopback_http(cls, v: str) -> str:
+        if not re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\d{1,5}/?", v):
+            raise ValueError("multi_host.ingress.traefik_api must be http:// on this host's loopback, with a port")
+        return v
+
+    @model_validator(mode="after")
+    def _needs_directory(self) -> "IngressConfig":
+        if self.enabled and not self.directory:
+            raise ValueError("multi_host.ingress.enabled needs multi_host.ingress.directory")
+        return self
+
+
 class MultiHostConfig(BaseModel):
     """The expected-host inventory, plus the one optional locality override (T48).
 
@@ -271,6 +305,7 @@ class MultiHostConfig(BaseModel):
     # The Beszel-era locality pin. Accepted so an existing config keeps loading, and ignored since
     # Beszel was removed (release C): Core now refuses an SSH alias whose Docker engine is this host's.
     local_system_id: str | None = None
+    ingress: IngressConfig = IngressConfig()
 
     @field_validator("local_system_id")
     @classmethod

@@ -236,6 +236,27 @@ failed read is that host not reading. Say it in config: PE never guesses it from
 info`, because a Docker host whose Docker stopped must read as failing, not as "no containers". A
 host with no `ssh` at all is shown with its link only.
 
+### Routes for the other hosts (optional, off by default)
+
+Traefik's Docker provider sees this host's containers only. With
+
+```yaml
+multi_host:
+  ingress:
+    enabled: true
+    directory: /home/casaroot/apps/network/proxy/dynamic   # Traefik's File-provider directory, as seen from this host
+    traefik_api: http://127.0.0.1:8079                     # Traefik's API on this host's loopback
+```
+
+PE turns the other hosts' `traefik.*` labels into routes in one generated file, `pe-remote.yml`, in that
+directory (your own files there are never written). A route is written only if it cannot take traffic from
+anything that already works: its rule names a `Host(...)` that nothing here already serves, every entry
+point, middleware and certificate resolver it names exists here, and the port is published on the host.
+Router names are prefixed `pe-<alias>-`. Each change is checked against Traefik's API and put back if
+Traefik refuses it, and announced on Telegram. The Hosts tab shows each host's routes and every labelled
+router that was not routed, with why ("port 8080 is not published on the host", "already served on this
+host: ...").
+
 An alias that reaches this host's own Docker engine is refused ("THIS HOST"). An empty `hosts`
 list turns the feature off. `system_id` and `local_system_id`, from the Beszel collector this
 replaced, are still accepted and ignored.

@@ -226,13 +226,15 @@ def test_a_card_is_unknown_until_core_has_read_the_host_then_current_then_stale_
     assert never.liveness.state == "unknown" and never.liveness.cause == "not_permitted" and never.containers is None
 
 
-def test_the_overview_counts_other_hosts_beside_this_one_and_never_sums_an_unknown_host_as_zero(tmp_path):
+def test_the_overview_summary_of_other_hosts_never_counts_an_unknown_host_as_zero(tmp_path):
     inv = _inventory({"name": "CASALAB", "ssh": "casalab"}, {"name": "UNRAID", "ssh": "unraid"})
     path = tmp_path / "hosts.json"
     path.write_text(json.dumps({"hosts": [_record(990.0)]}))
     summary = remote_summary(inv, path, wall=lambda: 1000.0)
-    assert summary == {"hosts": 1, "unknown": 1, "containers": 2, "problems": 1}
-    assert dashboard_data.remote_hosts_line(summary) == "+ 2 on 1 other host · 1 with a problem · 1 host not reading"
+    # radarr unhealthy with 3 restarts: crash-looping, down; sab exited 0: a finished one-shot
+    assert summary == {"hosts": 1, "unknown": 1, "containers": 2, "problems": 1, "cells": ["down", "paused"]}
+    assert dashboard_data.remote_hosts_line(summary) == (
+        "2 of these on 1 other host · 1 of them with a problem · 1 host not reading, not counted")
     assert remote_summary(_inventory({"name": "B", "link": "http://b"}), path) is None
     assert dashboard_data.remote_hosts_line(None) is None
 
@@ -311,7 +313,7 @@ def test_a_stale_host_is_not_counted_on_the_overview_as_reading(tmp_path):
     inv = _inventory({"name": "CASALAB", "ssh": "casalab"})
     path = tmp_path / "hosts.json"
     path.write_text(json.dumps({"hosts": [_record(700.0, error="no SSH contact", attempted=990.0)]}))
-    assert remote_summary(inv, path, wall=lambda: 1000.0) == {"hosts": 0, "unknown": 1, "containers": 0, "problems": 0}
+    assert remote_summary(inv, path, wall=lambda: 1000.0) == {"hosts": 0, "unknown": 1, "containers": 0, "problems": 0, "cells": []}
 
 
 def test_a_container_gone_between_list_and_inspect_still_gives_a_reading(tmp_path):
@@ -606,3 +608,30 @@ def test_a_metrics_only_answer_with_no_usable_metrics_is_a_failed_read():
     for text in ("", "os FreeBSD\n", "garbage"):
         r = fc.read_host("solar", local_id=None, read=_reader({"solar": {"metrics": text}}), docker=False)
         assert "no usable values" in r["error"] and "read_at" not in r
+
+
+
+# ── rc14.11: the FLEET tile counts every host (operator: "102/102, and a line: 15 of these are on other hosts") ─────────────────
+def _tile(remote, local=None):
+    local = local or {"available": True, "total": 87, "healthy": 87, "down": 0, "degraded": 0, "cells": ["online"] * 87}
+    ctx = {"health": {}, "containers": local, "services": {"available": True, "total_stacks": 30}, "remote_hosts": remote}
+    return dashboard_data.summarize_overview_tiles(ctx, {"available": False, "routers": []}, {"available": False})["fleet"]
+
+
+def test_the_fleet_tile_counts_every_hosts_containers_and_says_how_many_are_elsewhere():
+    t = _tile({"hosts": 3, "unknown": 0, "containers": 15, "problems": 0, "cells": ["online"] * 15})
+    assert (t["hero"], t["sub"], t["total"], len(t["cells"]), t["level"]) == ("102", "/ 102 healthy", 102, 102, "ok")
+    assert t["remote"] == "15 of these on 3 other hosts"
+
+
+def test_a_problem_elsewhere_lowers_the_count_and_colours_the_tile_and_an_unread_host_is_not_counted():
+    t = _tile({"hosts": 2, "unknown": 1, "containers": 10, "problems": 1, "cells": ["online"] * 9 + ["degraded"]})
+    assert (t["hero"], t["sub"], t["level"]) == ("96", "/ 97 healthy", "warn")
+    assert t["remote"] == "10 of these on 2 other hosts · 1 of them with a problem · 1 host not reading, not counted"
+    assert _tile({"hosts": 1, "unknown": 0, "containers": 3, "problems": 1, "cells": ["online", "online", "down"]})["level"] == "crit"
+
+
+def test_with_no_other_host_reading_the_tile_is_this_hosts_alone():
+    t = _tile({"hosts": 0, "unknown": 3, "containers": 0, "problems": 0, "cells": []})
+    assert (t["hero"], t["sub"]) == ("87", "/ 87 healthy") and t["remote"] == "3 hosts not reading, not counted"
+    assert _tile(None)["sub"] == "/ 87 healthy" and _tile(None)["remote"] is None

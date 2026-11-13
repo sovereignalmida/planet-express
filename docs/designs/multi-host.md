@@ -1,6 +1,6 @@
 # PE knows every Docker host: design (draft 2, 2026-11-12)
 
-Status: releases A (rc14.9), B and C (rc14.10) built; D next. Release C took the Console route (the other hosts in INVENTORY.md), not a `fleet.read` tool: Console sessions are granted no brokered tools. Nothing here is built. T48 (`docs/handoff/T48-multi-host-spec.md`,
+Status: releases A (rc14.9), B and C (rc14.10, rc14.10.1 metrics-only hosts) and D (rc14.11, ingress off by default) built. D writes the file only; the Network tab does not yet join these routes to their remote containers (the Hosts tab lists them). Release C took the Console route (the other hosts in INVENTORY.md), not a `fleet.read` tool: Console sessions are granted no brokered tools. Nothing here is built. T48 (`docs/handoff/T48-multi-host-spec.md`,
 observe-only via Beszel) stays the running design until release A ships.
 
 ## 1. The problem

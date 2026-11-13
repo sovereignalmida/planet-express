@@ -89,6 +89,10 @@
               {% if is_stale %}<div class="cryo-footnote">Last known values. Nothing on this card is live until the host reports again.</div>{% endif %}
               {% if host.source == 'ssh' and host.status %}<div class="cryo-footnote">Last try failed: {{ host.status }}</div>{% endif %}
               {% if host.source == 'ssh' and not host.locality_checked %}<div class="cryo-footnote">Not yet compared with this host's own Docker engine.</div>{% endif %}
+              {% if host.routes or host.unrouted %}<div class="cryo-stats">
+                {% for r in host.routes %}<div class="cryo-stat-row"><span>{{ 'ROUTE · KEPT' if r.kept else 'ROUTE' }}</span><span title="{{ r.container }} · {{ r.router }}">{{ (r.hosts or ['?'])|join(', ') }} → {{ r.url }}</span></div>{% endfor %}
+                {% for u in host.unrouted %}<div class="cryo-stat-row"><span>NOT ROUTED</span><span class="cell-dim">{{ u.container }}{{ ' · ' ~ u.router if u.router }}: {{ u.reason }}</span></div>{% endfor %}
+              </div>{% endif %}
               {% if host.source == 'ssh' %}<div class="cryo-footnote">ssh {{ host.ssh }} · read by Core every minute</div>{% endif %}
             </div>
           {% else %}

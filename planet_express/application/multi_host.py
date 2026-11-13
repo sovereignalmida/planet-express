@@ -40,6 +40,8 @@ class HostCard:
     problem: str | None = None           # ssh: the collector's fixed cause word (this_host, not_permitted, no_contact, not_trying)
     locality_checked: bool = True        # ssh: whether the reading was compared with this host's own Docker engine
     docker: bool = True                  # False: a metrics-only host (`docker: false` in config); it has no containers to show
+    routes: tuple = ()                   # release D: the routes PE wrote for this host ({container, hosts, url})
+    unrouted: tuple = ()                 # release D: labelled routers PE did not write, with why ({container, router, reason})
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,21 @@ def _safe_card(entry, record, now) -> HostCard:
                         containers_liveness=unknown("Core's record for this host could not be read"), source="ssh", ssh=entry.ssh)
 
 
+def load_routes_file(path) -> dict[str, dict]:
+    """state/remote_routes.json (release D) by alias: {"routes": [...], "unrouted": [...]}; {} when absent or unreadable."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    out: dict[str, dict] = {}
+    for key, kind in (("routes", "routes"), ("skipped", "unrouted")):
+        for item in data.get(key) or [] if isinstance(data, dict) else []:
+            if isinstance(item, dict) and isinstance(item.get("host"), str):
+                out.setdefault(item["host"], {"routes": [], "unrouted": []})[kind].append(
+                    {k: item.get(k) for k in ("container", "router", "hosts", "url", "reason", "kept")})
+    return out
+
+
 class Fleet:
     """The Hosts page's view: every configured host in inventory order, SSH hosts from Core's file, the rest as links."""
 
@@ -141,12 +158,18 @@ class Fleet:
         self._inventory, self._file, self._wall = inventory, hosts_file, wall
 
     def view(self) -> FleetView:
+        import dataclasses
         records = load_hosts_file(self._file) if any(e.ssh for e in self._inventory.hosts) else {}
+        routes = load_routes_file(self._file.parent / "remote_routes.json") if self._inventory.ingress.enabled else {}
         now = self._wall()
         cards = []
         for entry in self._inventory.hosts:
             if entry.ssh:
-                cards.append(_safe_card(entry, records.get(entry.ssh), now))
+                card = _safe_card(entry, records.get(entry.ssh), now)
+                mine = routes.get(entry.ssh)
+                if mine:
+                    card = dataclasses.replace(card, routes=tuple(mine["routes"]), unrouted=tuple(mine["unrouted"]))
+                cards.append(card)
             else:
                 cards.append(HostCard(entry.name, entry.name, entry.link, True,
                                       unknown("PE does not read this host: add an ssh alias to read its containers"),
@@ -163,6 +186,7 @@ def remote_summary(inventory: MultiHostConfig, hosts_file, *, wall=time.time) ->
         return None
     records, now = load_hosts_file(hosts_file), wall()
     hosts = containers = problems = reading_metrics_only = 0
+    cells: list[str] = []
     for entry in entries:
         card = _safe_card(entry, records.get(entry.ssh), now)
         raw = (records.get(entry.ssh) or {}).get("containers")
@@ -176,8 +200,14 @@ def remote_summary(inventory: MultiHostConfig, hosts_file, *, wall=time.time) ->
         hosts += 1
         rows = [c for c in raw if isinstance(c, dict) and isinstance(c.get("name"), str)]
         containers += len(rows)
-        problems += sum(1 for c in rows if container_issue(c, now)[0])
-    return {"hosts": hosts, "unknown": len(entries) - hosts - reading_metrics_only, "containers": containers, "problems": problems}
+        for c in rows:
+            issue, crash = container_issue(c, now)
+            problems += 1 if issue else 0
+            # The Overview's dot buckets, as for this host's containers: a finished one-shot (exited 0) is "paused".
+            cells.append("down" if crash or (issue and c.get("state") != "running") else "degraded" if issue
+                         else "paused" if c.get("state") == "exited" else "online")
+    return {"hosts": hosts, "unknown": len(entries) - hosts - reading_metrics_only, "containers": containers, "problems": problems,
+            "cells": cells}
 
 
 MAX_OTHER_HOSTS_TEXT = 6000

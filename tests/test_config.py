@@ -400,7 +400,8 @@ def test_an_empty_host_list_is_valid_and_means_the_collector_is_never_queried():
     model, errors = validate_config_text('stacks_root: /srv\nmulti_host:\n  hosts: []\n')
     assert errors == []
     assert model.multi_host.hosts == []
-    assert model.multi_host.model_dump() == {'hosts': [], 'local_system_id': None}
+    assert model.multi_host.model_dump() == {'hosts': [], 'local_system_id': None, 'ingress': {
+        'enabled': False, 'directory': None, 'traefik_api': 'http://127.0.0.1:8079'}}
 
 
 def test_a_duplicate_ssh_alias_is_refused():

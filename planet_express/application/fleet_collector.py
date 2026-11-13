@@ -83,16 +83,17 @@ def merge(previous: dict | None, entry, reading: dict, now: float) -> dict:
     return {**base, **kept, "error": reading["error"], "cause": reading["cause"]}
 
 
-def write_atomic(path: Path, data: dict) -> None:
+def write_text_atomic(path: Path, text: str, mode: int = 0o640) -> None:
+    """Write `text` so a reader sees the whole file or the previous one. The temporary name ends in `.tmp` (never `.yml`: a
+    directory Traefik watches never loads it). `mode` is set explicitly: mkstemp's 0600 would also mask a directory's inherited
+    ACL, and the dashboard (another user) could not read the file (Codex, release A)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".hosts-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=".tmp")
     try:
-        # mkstemp makes the file 0600, which also masks the state directory's inherited ACL: the dashboard (another user) could
-        # not read it (Codex, release A). Group-readable, like the other state files Core writes under its 0027 umask.
-        os.fchmod(fd, 0o640)
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w") as fh:
-            json.dump(data, fh, separators=(",", ":"))
-        os.replace(tmp, path)                  # a reader sees the whole file or the previous one
+            fh.write(text)
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -101,11 +102,16 @@ def write_atomic(path: Path, data: dict) -> None:
         raise
 
 
+def write_atomic(path: Path, data: dict) -> None:
+    write_text_atomic(path, json.dumps(data, separators=(",", ":")))
+
+
 class FleetCollector:
     def __init__(self, inventory, path: Path, *, read=ssh_hosts.run, local_id: Callable[[], str | None] = local_engine_id,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, after: Callable[[dict], object] | None = None):
         self.entries = [e for e in inventory.hosts if e.ssh]
         self.path, self._read, self._local_id, self._clock = path, read, local_id, clock
+        self.after = after                     # () after each pass: release D's route forwarding (remote_ingress.RemoteIngress.sync)
         self._local: str | None = None
 
     def previous(self) -> dict[str, dict]:
@@ -151,7 +157,9 @@ class FleetCollector:
         while not stop.is_set():
             started = time.monotonic()
             try:
-                self.collect()
+                data = self.collect()
+                if self.after is not None:
+                    self.after(data)
             except Exception:  # noqa: BLE001 -- the loop must outlive any one pass
                 log.exception("fleet collection pass failed")
             # Every COLLECT_INTERVAL_S from the start of a pass, not from its end: a slow host must not stretch every other host's

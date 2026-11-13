@@ -3286,8 +3286,20 @@ def run_bot() -> None:
     # The other Docker hosts (docs/designs/multi-host.md): read over SSH by Core, written to state/hosts.json.
     if any(entry.ssh for entry in config.MULTI_HOST.hosts):
         from planet_express.application.fleet_collector import FleetCollector
-        threading.Thread(target=FleetCollector(config.MULTI_HOST, config.STATE_HOSTS).loop, daemon=True,
-                         name="fleet-collector").start()
+        collector = FleetCollector(config.MULTI_HOST, config.STATE_HOSTS)
+        if config.MULTI_HOST.ingress.enabled:
+            # Release D: the other hosts' traefik labels become routes in one generated file, under the host-mutation lock.
+            from planet_express.application.remote_ingress import RemoteIngress
+            ingress = RemoteIngress(config.MULTI_HOST.ingress, lock=state, notify=notifier.notify, state_dir=config.STATE_DIR)
+            collector.after = lambda data: ingress.sync(data, config.MULTI_HOST)
+        threading.Thread(target=collector.loop, daemon=True, name="fleet-collector").start()
+    ingress_runs = config.MULTI_HOST.ingress.enabled and any(e.ssh and e.docker for e in config.MULTI_HOST.hosts)
+    if config.MULTI_HOST.ingress.directory and not ingress_runs:
+        # Ingress turned off, or no Docker host left to forward for: PE's generated routes must not outlive either (review and
+        # Codex, release D). Retried while the host is busy.
+        from planet_express.application.remote_ingress import RemoteIngress
+        retiring = RemoteIngress(config.MULTI_HOST.ingress, lock=state, notify=notifier.notify, state_dir=config.STATE_DIR)
+        threading.Thread(target=retiring.retire_until_done, daemon=True, name="remote-ingress-retire").start()
 
     # Main Telegram poll loop
     log.info("Farnsworth entering Telegram poll loop...")

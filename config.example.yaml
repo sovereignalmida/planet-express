@@ -131,8 +131,16 @@ links: []
 # host. Their problems are reported and recorded as incidents, never planned. An alias that reaches this host's own
 # Docker engine is refused. A host without `ssh` is shown with its link only. `system_id` and `local_system_id` (the
 # Beszel collector, removed) are still accepted and ignored.
+#
+# ingress (release D, off by default): the other hosts' traefik labels become routes in ONE generated file, pe-remote.yml,
+# in Traefik's File-provider directory. Only routes that cannot take traffic from anything already served are written;
+# every change is checked against Traefik's API and put back if refused. See INSTALL.md "Routes for the other hosts".
 multi_host:
   hosts: []
+#   ingress:
+#     enabled: true
+#     directory: /home/casaroot/apps/network/proxy/dynamic
+#     traefik_api: http://127.0.0.1:8079
 # multi_host:
 #   hosts:
 #     - name: CASALAB

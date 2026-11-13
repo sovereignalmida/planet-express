@@ -376,17 +376,20 @@ def summarize_remote_hosts() -> dict | None:
         return None
 
 
-def remote_hosts_line(remote: dict | None) -> str | None:
-    """"+ 15 on 3 hosts · 1 unknown": the other hosts beside this one's count, never summed into it (an unknown host is not 0)."""
+def remote_hosts_line(remote: dict | None, summed: bool = True) -> str | None:
+    """The line under the FLEET tile's all-hosts count: "15 of these on 3 other hosts · 1 host not reading, not counted". A host
+    with no fresh reading is left out of the count and said to be, never counted as zero containers. `summed` is False when this
+    host's own count is not shown (a scan mode that did not collect it): then "of these" would point at nothing (review)."""
     if not remote:
         return None
     parts = []
     if remote["hosts"]:
-        parts.append(f"+ {remote['containers']} on {remote['hosts']} other host{'s' if remote['hosts'] != 1 else ''}")
+        lead = "of these on" if summed else "on"
+        parts.append(f"{remote['containers']} {lead} {remote['hosts']} other host{'s' if remote['hosts'] != 1 else ''}")
     if remote["problems"]:
-        parts.append(f"{remote['problems']} with a problem")
+        parts.append(f"{remote['problems']} of them with a problem")
     if remote["unknown"]:
-        parts.append(f"{remote['unknown']} host{'s' if remote['unknown'] != 1 else ''} not reading")
+        parts.append(f"{remote['unknown']} host{'s' if remote['unknown'] != 1 else ''} not reading, not counted")
     return " · ".join(parts) or None
 
 
@@ -898,7 +901,18 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
             "note": f"{services.get('total_stacks', 0)} stacks" if services.get("available") else "stacks —",
             "total": containers.get("total", 0), "cells": containers.get("cells", []),
         }
-    tiles["fleet"]["remote"] = remote_hosts_line(ctx.get("remote_hosts"))
+    # Every host's containers in one count (operator, rc14.11): this host's plus the other hosts read now; the line under it says
+    # how many of them are elsewhere and which hosts are not counted.
+    remote = ctx.get("remote_hosts")
+    if remote and remote.get("hosts") and containers.get("available"):
+        rank = {"ok": 0, "warn": 1, "crit": 2}
+        remote_level = "crit" if "down" in remote.get("cells", []) else "warn" if remote.get("problems") else "ok"
+        fleet = tiles["fleet"]
+        total = containers.get("total", 0) + remote["containers"]
+        fleet.update(hero=str(containers.get("healthy", 0) + remote["containers"] - remote["problems"]),
+                     sub=f"/ {total} healthy", total=total, cells=list(fleet.get("cells", [])) + list(remote.get("cells", [])),
+                     level=max(fleet["level"], remote_level, key=lambda v: rank.get(v, 0)))
+    tiles["fleet"]["remote"] = remote_hosts_line(remote, summed=bool(containers.get("available")))
 
     findings = ctx.get("findings", {})
     # Approvals live in core's store, not in the run-status file: pending_plan_id was the
