@@ -59,8 +59,8 @@ CT = `planet_express/console/telegram.py`, F = `casa_farnsworth.py`.)
 
 **Retired:**
 
-- **Standing grants** (no effect today: nothing attaches one). Remove the page and the RPCs' UI, or hide the page until a
-  caller exists. The table stays (no schema change).
+- **Standing grants** (no effect today: nothing attaches one). Removed: the page, the RPCs' UI, the unused attach path. The
+  table stays (no schema change).
 - **INVESTIGATE making a pre-Console mission.** With the Console on, it already opens a conversation; with it off, the button
   is hidden, as today. `mission.from_incident` stays as an RPC for Telegram-less installs only if something still calls it;
   otherwise removed.
@@ -105,10 +105,11 @@ memory cards are absent, as today.
 
 Each: characterization tests first, the second review, a live check on the host.
 
-## 9. Questions for the operator
+## 9. Decisions (operator, 2026-11-13)
 
-1. Standing grants: remove the page now (no effect today), or keep it hidden for a later "run this kind of repair without
-   asking" feature?
-2. The record: should answered conversations with no run (a question and an answer) be rows, or only work that changed or
-   could have changed something? Proposal: rows, filterable ("questions" vs "changes").
-3. Telegram: keep `/approve` and `/deny` for missions a conversation does not own, or retire them with the pre-Console path?
+1. **Standing grants: removed** (release 4): the page, its RPCs' UI and the dead attach path go; the table stays (no schema
+   change).
+2. **Questions are record rows**, filterable: "questions" (a conversation with no run) vs "changes" (anything that ran or
+   could have changed the host).
+3. **Telegram `/approve` and `/deny` stay** for missions no conversation owns. For a run a conversation owns they answer
+   "decide it in the conversation" (release 3).
