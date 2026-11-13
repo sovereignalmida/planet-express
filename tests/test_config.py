@@ -403,22 +403,21 @@ def test_an_empty_host_list_is_valid_and_means_the_collector_is_never_queried():
     assert model.multi_host.model_dump() == {'hosts': [], 'local_system_id': None}
 
 
-def test_a_duplicate_system_id_is_refused():
-    """One live lookup, two rows: the host would render twice under two names with one set of
-    numbers, and nothing could say which name was meant."""
+def test_a_duplicate_ssh_alias_is_refused():
+    """Two entries, one alias: one host read twice and shown under two names, with nothing to say which was meant.
+    (`system_id`, the Beszel id, is ignored since release C and no longer checked.)"""
     model, errors = validate_config_text(
         'stacks_root: /srv\n'
         'multi_host:\n'
         '  hosts:\n'
-        '    - system_id: ptf3tn2gzpg913i\n'
+        '    - ssh: unraid\n'
         '      name: CASA UNRAID\n'
-        '    - system_id: ptf3tn2gzpg913i\n'
+        '    - ssh: unraid\n'
         '      name: Unraid again\n'
     )
     assert model is None
-    assert 'duplicate system_id' in errors[0]['msg']
-    assert "'ptf3tn2gzpg913i'" in errors[0]['msg']
-
+    assert 'duplicate ssh alias' in errors[0]['msg']
+    assert "'unraid'" in errors[0]['msg']
 
 def test_two_entries_differing_only_in_name_are_fine():
     """The uniqueness rule is about identity, not about display text: two real hosts may
@@ -457,17 +456,6 @@ def test_a_pin_may_also_name_an_entry_that_is_listed():
     model, errors = validate_config_text(_INVENTORY + '  local_system_id: vw53pk01zei80wt\n')
     assert errors == []
     assert model.multi_host.local_system_id == 'vw53pk01zei80wt'
-
-
-def test_a_pin_with_an_empty_inventory_is_refused():
-    """Refused rather than ignored, the same convention as a ceiling written for an origin
-    that cannot originate anything: an empty inventory means the collector is never queried,
-    so no system exists for the pin to name and it can never apply. A setting that looks like
-    it is in force and is not is worse than an error."""
-    model, errors = validate_config_text(
-        'stacks_root: /srv\nmulti_host:\n  hosts: []\n  local_system_id: n7n7ppta55karj9\n')
-    assert model is None
-    assert 'can never apply' in errors[0]['msg']
 
 
 @pytest.mark.parametrize('link', [
@@ -582,21 +570,21 @@ def test_multi_host_meaning_is_in_the_values_not_in_which_keys_exist():
         'stacks_root: /srv\n'
         'multi_host:\n'
         '  hosts:\n'
-        '    - system_id: abc\n      name: one\n      link: null\n'
-        '    - system_id: abc\n      name: two\n      link: null\n'
+        '    - ssh: abc\n      name: one\n      link: null\n      system_id: null\n'
+        '    - ssh: abc\n      name: two\n      link: null\n      system_id: null\n'
         '  local_system_id: null\n'
     )
     assert model is None
-    assert 'duplicate system_id' in errors[0]['msg']
+    assert 'duplicate ssh alias' in errors[0]['msg']
 
 
-def test_beszel_credentials_never_come_from_the_config_file():
-    """The collector's password is not a config field, in either model, under any spelling.
+def test_no_credential_is_a_multi_host_config_field():
+    """No password, secret, token or credential is a config field, in any model, under any spelling.
 
-    config.yaml is the wrong place for it three times over: the dashboard's own user holds an
+    config.yaml is the wrong place for one three times over: the dashboard's own user holds an
     ACL on the file, the dashboard's config editor can write it, and ConfigService.get()
-    returns its full text over RPC. BESZEL_USER/BESZEL_PASSWORD come from
-    /etc/planetexpress-dashboard.env, root-only, like the other dashboard-only values.
+    returns its full text over RPC. The other hosts are reached with SSH keys in Core's own
+    ~/.ssh, never named here.
     """
     from config_schema import HostEntry, MultiHostConfig, PlanetExpressConfig
 

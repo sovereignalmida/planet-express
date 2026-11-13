@@ -493,9 +493,16 @@ class MissionService:
                     "ORDER BY CAST(SUBSTR(id, 3) AS INTEGER) DESC LIMIT 1", (incident_id,)).fetchone()
             if row is not None:
                 return {"created": False, "mission": _mission_summary(self.missions.get_mission(row["id"]))}
+            # A fixed sentence either way; an incident on another host says so, or `casalab/radarr` reads like a local
+            # stack/service (review, multi-host release B).
+            remote = incident.get("kind") in ("remote_container", "remote_host")
+            goal = (f"Investigate incident {incident_id}, which is on ANOTHER host (not this one), and propose a diagnosis. "
+                    "PE reads other hosts but does not change them, and this session cannot reach them: work from the "
+                    "incident evidence and the other hosts' state in INVENTORY.md if present. Propose nothing for this host."
+                    if remote else f"Investigate incident {incident_id} and propose a diagnosis")
             made = self._create_queued(
                 operator=operator, title=f"Investigate incident {incident_id}",
-                goal=f"Investigate incident {incident_id} and propose a diagnosis", tier="propose",
+                goal=goal, tier="propose",
                 origin="incident", incident_id=incident_id,
                 success_criteria="Root cause with evidence and a proposed remediation. Nothing is changed.",
                 scope=None, evidence=self._evidence(incident))

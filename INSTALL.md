@@ -189,58 +189,49 @@ and never across a shared network namespace. Treat that as hardening, not a guar
 compose file you approve decides what a container runs, so only approve compose files you
 would trust with the key.
 
-## Other hosts through beszel
+## Other hosts over SSH
 
-Planet Express can read an existing beszel hub's PocketBase API over HTTP to show other
-hosts. beszel continues collecting; its own UI becomes something you no longer need to
-visit. Nothing changes on the monitored hosts or their agents.
+Planet Express reads your other Docker hosts over SSH (docs/designs/multi-host.md). Core, as the
+user it runs as, connects to an alias in its own `~/.ssh/config` and sends only three fixed,
+read-only commands: `docker info`, a `docker inspect` of every container (never their
+environment variables) and a short metrics script (load, memory, CPU, disk, temperature). It
+never changes another host. Problems there are reported in the scan's Telegram message ("Other
+hosts"), recorded as incidents and listed on the Hosts tab; they are never planned, because PE
+acts on this host only.
 
-First, make beszel reliable enough to depend on: add `restart: unless-stopped` to both the
-`beszel` and `beszel-agent` services in their compose file. Those lines commonly ship
-commented out, which is acceptable while beszel is an occasional dashboard but means neither
-service survives a reboot.
+For each host, as the user Core runs as (for example `casaroot`):
 
-Create a beszel user with the `readonly` role, then add that user to **every** system Planet
-Express should see. This is a separate, essential step: the systems list rule is
-`@request.auth.id != "" && users.id ?= @request.auth.id`, so an account sees only systems
-that explicitly list it. A user assigned to no systems authenticates successfully and gets
-HTTP 200 with an empty list, which otherwise looks exactly like a fleet with no hosts. beszel's
-own `admin` role is not a PocketBase superuser: the `users` collection limits ordinary accounts
-to listing themselves. Use the superuser identity from the `/_/` console to grant the user
-access across systems.
+1. Give it a key and an alias in `~/.ssh/config`:
 
-Put that account in `/etc/planetexpress-dashboard.env` (root-owned, read by
-`casa-dashboard.service`), then restart the dashboard as in [Container widget
-keys](#container-widget-keys):
+   ```
+   Host casalab
+       HostName 192.168.1.80
+       User casaroot
+       IdentityFile ~/.ssh/casalab_deploy_key
+       IdentitiesOnly yes
+   ```
 
-```sh
-BESZEL_USER=...
-BESZEL_PASSWORD=...
-```
+2. Put the key's public half in that user's `authorized_keys` on the host. The user must be
+   able to run `docker` there (in the `docker` group, or root on Unraid).
+3. Connect once by hand so the host key is pinned in `known_hosts`: PE connects with
+   `StrictHostKeyChecking=yes` and stops collecting from a host whose key changes.
+4. Check: `ssh casalab docker info --format '{{.ID}}'` prints an ID that is not this host's.
 
-As with widget keys, these credentials never belong in `config.yaml` and never reach the
-browser.
-
-Declare the hosts PE should render in `config.yaml`:
+Then declare the hosts in `config.yaml`:
 
 ```yaml
 multi_host:
   hosts:
-    - system_id: ptf3tn2gzpg913i
-      name: CASA UNRAID
-      link: https://unraid.casalan.com
-  local_system_id: n7n7ppta55karj9  # optional pin, only if derivation cannot decide
+    - name: CASALAB
+      ssh: casalab
+      link: https://casalab.casalan.com   # optional: that host's own UI
+    - name: SOLAR ASSISTANT               # no Docker: shown with its link only
+      link: http://192.168.1.154
 ```
 
-`system_id` is beszel's stable `systems.id`: the name is editable in beszel's UI and addresses
-change, so neither identifies a host. `name` is PE's display name and `link` is that host's own
-UI (omit it when there is no UI to link to). An empty `hosts` list disables multi-host entirely:
-PE does not query the collector at all.
-
-There is deliberately no per-host “this is local” flag. PE compares each system's reported
-container names with its own Docker socket to derive which system is local; asking for a
-declared answer would only create a configuration value that can be wrong. Use the one optional
-`local_system_id` pin only where that derivation cannot decide.
+An alias that reaches this host's own Docker engine is refused ("THIS HOST"). An empty `hosts`
+list turns the feature off. `system_id` and `local_system_id`, from the Beszel collector this
+replaced, are still accepted and ignored.
 
 ## Mission control (v4, off by default)
 

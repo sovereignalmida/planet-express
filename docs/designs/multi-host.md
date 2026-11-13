@@ -1,6 +1,6 @@
 # PE knows every Docker host: design (draft 2, 2026-11-12)
 
-Status: operator decisions taken (§8); release A next. Nothing here is built. T48 (`docs/handoff/T48-multi-host-spec.md`,
+Status: releases A (rc14.9), B and C (rc14.10) built; D next. Release C took the Console route (the other hosts in INVENTORY.md), not a `fleet.read` tool: Console sessions are granted no brokered tools. Nothing here is built. T48 (`docs/handoff/T48-multi-host-spec.md`,
 observe-only via Beszel) stays the running design until release A ships.
 
 ## 1. The problem

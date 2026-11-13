@@ -17,10 +17,9 @@
 {% set current = configured | selectattr('liveness.state', 'equalto', 'current') | list %}
 {% set stale = configured | selectattr('liveness.state', 'equalto', 'stale') | list %}
 {% set unknown = configured | selectattr('liveness.state', 'equalto', 'unknown') | list %}
-{% set unconfigured = fleet.cards | rejectattr('configured') | list %}
 {% set all_unknown = configured and unknown | length == configured | length %}
 {% if not configured %}{% set tone, orb, verdict = 'low', '?', 'OTHER HOSTS NOT CONFIGURED' %}{% set verdict_detail = 'No other hosts are configured. Add them to the multi_host block in config.yaml before Planet Express can read a remote host.' %}
-{% elif all_unknown %}{% set tone, orb, verdict = 'low', '?', 'NOTHING CAN BE READ' %}{% set verdict_detail = 'The collector cannot provide a reading for any configured host. These are unknown, not zero and not healthy.' %}
+{% elif all_unknown %}{% set tone, orb, verdict = 'low', '?', 'NOTHING CAN BE READ' %}{% set verdict_detail = 'Core cannot read any configured host. These are unknown, not zero and not healthy.' %}
 {% elif stale or unknown %}{% set tone, orb, verdict = 'medium', '!', 'SOME HOSTS ARE NOT READING' %}{% set verdict_detail = current|length|string ~ ' reading now · ' ~ stale|length|string ~ ' stale · ' ~ unknown|length|string ~ ' unknown. Stale and unknown values are never drawn as live.' %}
 {% else %}{% set tone, orb, verdict = 'none', '✓', current|length|string ~ ' OTHER HOSTS READING' %}{% set verdict_detail = 'Every other configured host reported recently. This screen is read-only.' %}{% endif %}
 {% macro level(pct) %}{{ 'high' if pct >= 90 else 'mid' if pct >= 80 else 'low' }}{% endmacro %}
@@ -43,14 +42,12 @@
             {% if current %}<span class="alarm-chip low">{{ current|length }} CURRENT</span>{% endif %}
             {% if stale %}<span class="alarm-chip med">{{ stale|length }} STALE</span>{% endif %}
             {% if unknown %}<span class="alarm-chip {{ 'crit' if all_unknown else 'med' }}">{{ unknown|length }} UNKNOWN</span>{% endif %}
-            {% if unconfigured %}<span class="alarm-chip low">{{ unconfigured|length }} NOT CONFIGURED</span>{% endif %}
           </div>
         </div>
       </section>
 
       <section class="panel" aria-label="Other hosts">
-        <div class="panel-head-row"><h3>FLEET</h3><span class="panel-head-note">read over SSH by Core{{ " and the beszel hub" if fleet.cards|selectattr("source", "equalto", "beszel")|list }} · observe only</span></div>
-        {% if fleet.locality_reason %}<div class="cryo-footnote">{{ fleet.locality_reason }}</div>{% endif %}
+        <div class="panel-head-row"><h3>FLEET</h3><span class="panel-head-note">read over SSH by Core · observe only</span></div>
         <div class="cryo-grid" style="grid-template-columns:repeat(auto-fill,minmax(min(370px,100%),1fr))">
         {% for host in fleet.cards if host.configured %}
           {% set live = host.liveness.state in ('current', 'stale') %}{% set is_stale = host.liveness.state == 'stale' %}{% set details = host.details %}{% set metrics = host.metrics %}
@@ -94,13 +91,12 @@
               {% if host.source == 'ssh' %}<div class="cryo-footnote">ssh {{ host.ssh }} · read by Core every minute</div>{% endif %}
             </div>
           {% else %}
-            {% set cause = host.liveness.cause or 'no_contact' %}
-            {% if cause == 'not_permitted' %}{% set badge, glyph, title, explanation, check = 'NOT PERMITTED', '⛨', 'The collector account is not permitted to see this host.', 'The hub returned success with an empty list. That does not mean there are no hosts.', 'Check: list this collector account on the host in Beszel.' %}
-            {% elif cause == 'clock_unusable' %}{% set badge, glyph, title, explanation, check = 'CLOCK UNUSABLE', '◷', 'The host reported, but its timestamp cannot be trusted.', 'Its age cannot be calculated, so no reading is presented as live.', 'Check: correct the host clock and collector timestamp.' %}
-            {% else %}{% set badge, glyph, title, explanation, check = 'NO CONTACT', '⌁', 'No readable contact with this host.', 'No usable reading is available for it.', 'Check: the host agent and its reachability.' %}{% endif %}
-            {% if host.source == 'ssh' and host.problem == 'this_host' %}{% set badge, glyph, title, explanation, check = 'THIS HOST', '⌂', 'This alias reaches PE’s own Docker engine.', host.liveness.reason, 'Remove this entry from multi_host.hosts: this host is on Overview.' %}
-            {% elif host.source == 'ssh' and host.problem == 'not_trying' %}{% set badge, glyph, title, explanation, check = 'NOT COLLECTING', '◷', 'Core is not reading the other hosts.', host.liveness.reason, 'Check: casa-planetexpress is running.' %}
-            {% elif host.source == 'ssh' %}{% set title, explanation, check = 'Core cannot read this host over SSH.', host.liveness.reason or 'No reading yet.', 'Check: ssh ' ~ host.ssh ~ ' docker info, as the PE user on this host.' %}{% elif host.source == 'link' %}{% set badge, glyph, title, explanation, check = 'LINK ONLY', '↗', 'PE does not read this host.', 'It has a link and no ssh alias or collector id.', 'Add an ssh alias in multi_host to read its containers.' %}{% endif %}
+            {# Every unread card is an SSH host or a link-only entry (Beszel was removed, multi-host release C). #}
+            {% if host.source == 'link' %}{% set badge, glyph, title, explanation, check = 'LINK ONLY', '↗', 'PE does not read this host.', 'It has no ssh alias, so its containers are not read.', 'Add an ssh alias in multi_host to read it.' %}
+            {% elif host.problem == 'this_host' %}{% set badge, glyph, title, explanation, check = 'THIS HOST', '⌂', 'This alias reaches PE’s own Docker engine.', host.liveness.reason, 'Remove this entry from multi_host.hosts: this host is on Overview.' %}
+            {% elif host.problem == 'not_trying' %}{% set badge, glyph, title, explanation, check = 'NOT COLLECTING', '◷', 'Core is not reading the other hosts.', host.liveness.reason, 'Check: casa-planetexpress is running.' %}
+            {% elif host.liveness.cause == 'not_permitted' %}{% set badge, glyph, title, explanation, check = 'NOT PERMITTED', '⛨', 'The host refused PE’s SSH key or its Docker.', host.liveness.reason, 'Check: ssh ' ~ host.ssh ~ ' docker info, as the PE user on this host.' %}
+            {% else %}{% set badge, glyph, title, explanation, check = 'NO CONTACT', '⌁', 'Core cannot read this host over SSH.', host.liveness.reason or 'No reading yet.', 'Check: ssh ' ~ host.ssh ~ ' docker info, as the PE user on this host.' %}{% endif %}
             <div class="cryo-pod nodata reasoned">
               <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name">{{ host.name }}</span><span class="cryo-badge">{{ badge }}</span></div>
               <div class="alarm-banner {{ 'crit' if badge == 'NO CONTACT' else 'medium' }}" style="margin-bottom:0">
@@ -116,13 +112,6 @@
               {% if host.link %}<div class="cryo-footnote"><a class="pe-link-out" href="{{ host.link }}" rel="noopener noreferrer">OPEN HOST UI ↗</a></div>{% endif %}
             </div>
           {% endif %}
-        {% endfor %}
-        {% for host in fleet.cards if not host.configured %}
-          <div class="cryo-pod nodata reasoned">
-            <div class="cryo-pod-head"><span class="cryo-led"></span><span class="cryo-name" style="font-family:'JetBrains Mono',monospace;font-weight:500;font-size:13px" title="{{ host.name }}">“{{ host.name }}”</span><span class="cryo-badge">NOT CONFIGURED</span></div>
-            <p class="muted-body">Known to the collector, not yet set up here. No link and no readings until it is listed in this dashboard’s config.</p>
-            <div class="cryo-footnote">name supplied by the remote host · shown as text only</div>
-          </div>
         {% endfor %}
         </div>
         <div class="cryo-footnote" style="margin-top:14px">This host is not listed here. Its containers and controls are on Overview.</div>

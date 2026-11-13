@@ -384,7 +384,7 @@ def remote_hosts_line(remote: dict | None) -> str | None:
     if remote["hosts"]:
         parts.append(f"+ {remote['containers']} on {remote['hosts']} other host{'s' if remote['hosts'] != 1 else ''}")
     if remote["problems"]:
-        parts.append(f"{remote['problems']} unhealthy")
+        parts.append(f"{remote['problems']} with a problem")
     if remote["unknown"]:
         parts.append(f"{remote['unknown']} host{'s' if remote['unknown'] != 1 else ''} not reading")
     return " · ".join(parts) or None

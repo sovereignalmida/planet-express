@@ -55,7 +55,6 @@ from planet_express.application.chat_service import (
 from planet_express.application.command_service import CommandService
 from planet_express.application.config_service import ConfigService
 from planet_express.application.mission_service import MISSION_ID_RE, MissionService
-from planet_express.application.multi_host import pin_error, provider_for
 from planet_express.core import boot_settle
 from planet_express.core.incidents import observations_from_snapshot, scan_id
 from planet_express.core.maintenance import MaintenanceWindow, active_window
@@ -1535,6 +1534,9 @@ def run_pipeline(
             state.transition(PipelineState.IDLE)
             return
 
+        # The other hosts need no model: said before Hermes, so an outage there does not hide them (review, release B).
+        _report_other_hosts(notifier, snapshot, quiet=quiet)
+
         # ── Step 2: Hermes analyzes ──────────────────────────────────────────
         if not quiet:
             notifier.notify("📋 *Hermes filing the report...*")
@@ -1579,6 +1581,19 @@ def run_pipeline(
         log.exception("Pipeline error")
         state.transition(PipelineState.IDLE)
         notifier.notify(f"🛑 *Pipeline error:* `{str(e)[:200]}`")
+
+
+def _report_other_hosts(notifier: Notifier, snapshot: dict, *, quiet: bool) -> None:
+    """The other Docker hosts' problems, said by PE itself (release B of docs/designs/multi-host.md). They never reach Hermes
+    or the planner: PE does not change other hosts, so there is nothing to plan. A quiet re-scan after a fix says nothing here."""
+    if quiet:
+        return
+    from planet_express.application import remote_health
+    lines = remote_health.report_lines(snapshot.get("other_hosts") or [])
+    if lines:
+        notifier.notify("🌐 <b>Other hosts</b> (PE reads these, it does not change them)\n"
+                        + "\n".join("• " + TelegramClient.s(line) for line in lines[:20])
+                        + (f"\n… and {len(lines) - 20} more" if len(lines) > 20 else ""))
 
 
 def _devise_typed_plans(findings: dict) -> str:
@@ -3133,20 +3148,7 @@ def _reexec_core(tg: TelegramClient) -> None:
     reexec()
 
 
-def _local_docker_container_names() -> tuple[str, ...] | None:
-    """Docker evidence for the apply-time locality-pin check; failures stay inconclusive."""
-    try:
-        containers = leela.check_containers()
-    except Exception:  # noqa: BLE001 -- a collector pin must not turn Docker trouble into a crash
-        log.warning("Could not read local containers for multi-host locality validation")
-        return None
-    return tuple(container["name"] for container in containers
-                 if isinstance(container, dict) and isinstance(container.get("name"), str)
-                 and container["name"])
-
-
 def build_config_service(state, tg, store, *, sensitive_edits_enabled: bool) -> ConfigService:
-    host_provider = provider_for(config.beszel_credentials)
     return ConfigService(
         state,
         config_path=config.CONFIG_FILE,
@@ -3155,8 +3157,6 @@ def build_config_service(state, tg, store, *, sensitive_edits_enabled: bool) -> 
         sensitive_edits_enabled=sensitive_edits_enabled,
         notify=lambda message: tg.send(message, req_timeout=10),
         loaded_sha256=config.CONFIG_SHA256,
-        multi_host_pin_validator=lambda multi_host: pin_error(
-            multi_host, host_provider, _local_docker_container_names),
     )
 
 

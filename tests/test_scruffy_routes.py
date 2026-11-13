@@ -100,10 +100,10 @@ def test_index_with_no_state_returns_200_not_500(tmp_path, monkeypatch):
     assert b"osc-gauge" not in resp.data
 
 
-def _hosts_page(cards, locality_reason=None):
+def _hosts_page(cards):
     class Cache:
         def view(self):
-            return FleetView(tuple(cards), "local", locality_reason)
+            return FleetView(tuple(cards))
 
     now = [1800000000.0]
     app = casa_scruffy.create_app(ENV, host_cache=Cache(), rpc_call=FakeRpc(), clock=lambda: now[0])
@@ -113,17 +113,17 @@ def _hosts_page(cards, locality_reason=None):
     return client.get("/hosts")
 
 
-def test_hosts_route_escapes_unconfigured_remote_name_and_uses_cockpit():
+def test_hosts_route_escapes_host_and_container_names_and_uses_cockpit():
     hostile = "Remote <script>alert(1)</script>"
+    from planet_express.core.hosts import RemoteContainer
     response = _hosts_page((
-        HostCard("new", hostile, None, False, Liveness("current"), containers=(),
+        HostCard("new", hostile, None, True, Liveness("current"), containers=(RemoteContainer("<img src=x onerror=1>"),),
                  containers_liveness=Liveness("current")),
     ))
     assert response.status_code == 200
     page = response.get_data(as_text=True)
     assert "Remote &lt;script&gt;alert(1)&lt;/script&gt;" in page
-    assert "<script>alert(1)</script>" not in page
-    assert "shown as text only" in page
+    assert "<script>alert(1)</script>" not in page and "<img src=x" not in page
     assert "cockpit.css" in page
 
 
@@ -145,12 +145,6 @@ def test_hosts_with_no_configured_entries_says_the_feature_is_not_set_up():
     assert "No other hosts are configured." in page
     assert "multi_host block in config.yaml" in page
     assert "OTHER HOSTS READING" not in page
-
-
-def test_hosts_page_explains_when_unconfigured_rows_are_withheld():
-    reason = "locality is unknown; unconfigured rows are withheld"
-    page = _hosts_page((), locality_reason=reason).get_data(as_text=True)
-    assert reason in page
 
 
 def test_hosts_zero_containers_is_not_unreadable_containers():
@@ -200,15 +194,16 @@ def test_hosts_dashboard_tabs_are_buttons_and_hosts_is_a_link():
 
 def test_hosts_unknown_reason_cards_have_distinct_explanations():
     cards = (
-        HostCard("contact", "No contact", None, True, Liveness("unknown", "collector unreachable")),
+        HostCard("contact", "No contact", None, True, Liveness("unknown", "no SSH contact (No route to host)"), ssh="contact"),
         HostCard("permission", "No permission", None, True,
-                 Liveness("unknown", "the account sees nothing", cause="not_permitted")),
-        HostCard("clock", "Bad clock", None, True,
-                 Liveness("unknown", "reading is unusable", cause="clock_unusable")),
+                 Liveness("unknown", "the SSH key was refused", cause="not_permitted"), ssh="permission"),
+        HostCard("idle", "Idle", None, True, Liveness("unknown", "Core has not tried this host for 9 min: is Core running?"),
+                 ssh="idle", problem="not_trying"),
+        HostCard("SOLAR", "Solar", "http://192.168.1.154", True, Liveness("unknown", "link only"), source="link"),
     )
     page = _hosts_page(cards).get_data(as_text=True)
-    for text in ("NO CONTACT", "NOT PERMITTED", "CLOCK UNUSABLE", "⌁", "⛨", "◷",
-                 "returned success with an empty list", "timestamp cannot be trusted"):
+    for text in ("NO CONTACT", "NOT PERMITTED", "NOT COLLECTING", "LINK ONLY", "⌁", "⛨", "◷", "↗",
+                 "No route to host", "the SSH key was refused", "is Core running?", "ssh permission docker info"):
         assert text in page
 
 
@@ -220,7 +215,7 @@ def test_hosts_badge_comes_from_the_cause_not_the_reason_text():
                  Liveness("unknown", "account not permitted; listed no systems; timestamp in the future")),
     )
     page = _hosts_page(cards).get_data(as_text=True)
-    assert "NO CONTACT" in page and "NOT PERMITTED" not in page and "CLOCK UNUSABLE" not in page
+    assert "NO CONTACT" in page and "NOT PERMITTED" not in page
 
 
 def test_index_renders_real_findings(tmp_path, monkeypatch):

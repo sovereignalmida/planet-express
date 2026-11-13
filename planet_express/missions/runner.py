@@ -135,6 +135,11 @@ class MissionRunner:
                     log.exception("the model broker did not shut down cleanly")
 
 
+def _other_hosts_text() -> str:
+    from planet_express.application.multi_host import other_hosts_text
+    return other_hosts_text()
+
+
 def _check_availability(verifier):
     """() -> the checks this host's verifier can run (a Console plan may name only those), or None without a verifier."""
     env = getattr(verifier, "env", None)
@@ -353,7 +358,7 @@ def build_mission_runner(
         console_runtime = ConsoleRuntime(containment, console_store, cfg.console, worker_socket=cfg.worker_socket,
                                          env_policy=env_policy, broker=model_broker,
                                          inventory=getattr(controls, "inventory", None),
-                                         checks=_check_availability(verifier))
+                                         checks=_check_availability(verifier), other_hosts=_other_hosts_text)
 
     def runtime_for(mission):
         if getattr(mission, "runtime", None) != "console":

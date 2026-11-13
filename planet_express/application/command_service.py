@@ -578,6 +578,10 @@ class CommandService:
             elif row["condition"] == "unknown":
                 hint = {"agent": "Amy", "state": "investigation_required",
                         "message": "The observation is uncertain and needs investigation."}
+            elif row["kind"] in ("remote_container", "remote_host"):
+                # Another host (docs/designs/multi-host.md release B): PE reads it and does not change it.
+                hint = {"agent": "Leela", "state": "other_host",
+                        "message": "This is on another host. PE reads it but does not change it: fix it there."}
             elif row["kind"] != "container_health":
                 hint = {"agent": "Amy", "state": "no_typed_remediation",
                         "message": "No typed remediation is registered for this incident."}

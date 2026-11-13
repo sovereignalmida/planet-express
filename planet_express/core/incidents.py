@@ -83,6 +83,39 @@ def observations_from_snapshot(snapshot: dict) -> list[Observation]:
             "image": item.get("image", ""), "restart_count": item.get("restart_count", 0),
         }))
 
+    # The other Docker hosts (release B). Their own kinds, never `container_health`: the command service acts on
+    # `container_health` incidents as local containers, and a container on another host must never be one of those.
+    for host in snapshot.get("other_hosts", []):
+        alias = host.get("ssh")
+        if not alias:
+            continue
+        reading = bool(host.get("reading"))
+        observations.append(_observation(
+            "remote_host", alias, "healthy" if reading else "failing", None if reading else "MEDIUM",
+            f"{host.get('host', alias)} is reading" if reading else f"{host.get('host', alias)}: {host.get('reason') or 'no fresh reading'}",
+            {"host": host.get("host", alias)}))
+        if not reading:
+            continue                                   # its containers are not judged on old values
+        failing = {p["name"]: p for p in host.get("problems", []) if p.get("name")}
+        starting = set(host.get("starting", []))
+        for name in host.get("names", []):
+            p = failing.get(name)
+            resource = f"{alias}/{name}"
+            if p is None and name in starting:
+                observations.append(_observation("remote_container", resource, "unknown", None, "healthcheck is starting",
+                                                 {"host": host.get("host", alias)}))
+                continue
+            if p is None:
+                observations.append(_observation("remote_container", resource, "healthy", None, "container is healthy",
+                                                 {"host": host.get("host", alias)}))
+                continue
+            image = str(p.get("image", "")).lower()
+            critical = any(x in image for x in CRITICAL_IMAGES)
+            severity = "HIGH" if p.get("crash_looping") or critical else "MEDIUM"
+            observations.append(_observation("remote_container", resource, "failing", severity, p.get("issue") or "failing", {
+                "host": host.get("host", alias), "state": p.get("state", ""), "health": p.get("health", ""),
+                "image": p.get("image", ""), "restart_count": p.get("restart_count", 0)}))
+
     for item in snapshot.get("stack_completeness", []):
         stack = item.get("stack")
         if not stack:

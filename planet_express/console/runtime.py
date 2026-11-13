@@ -86,7 +86,7 @@ class ConsoleRuntime:
     counts_calls_from_events = True           # the supervisor also counts the calls this runtime reports (`call` events) against the tool budget
 
     def __init__(self, containment, console: ConsoleStore, cfg: MissionConsoleConfig, *, worker_socket: str, env_policy=None,
-                 broker=None, inventory=None, checks=None):
+                 broker=None, inventory=None, checks=None, other_hosts=None):
         self.containment = containment            # only for is_empty/kill/output capture: spawning is `context.spawn`
         self.console, self.cfg = console, cfg
         self.worker_socket = str(worker_socket)
@@ -94,6 +94,7 @@ class ConsoleRuntime:
         self.broker = broker                      # to lower the turn's token ceiling to the conversation's remainder
         self.inventory = inventory                # () -> the host's stacks and services (None where Repair is not available): a plan's scope is checked against it
         self.checks = checks                      # () -> `verify.checks.Availability`: the checks this host can run (offered in PLAN_FORMAT.md, enforced on the plan)
+        self.other_hosts = other_hosts            # () -> text: the other Docker hosts as Core last read them, read-only (multi-host release C)
         self._runs: dict[str, _Run] = {}
         self._tails: dict[str, dict] = {}         # run id -> the ended turn's output tail, until the supervisor takes it (rc14.4)
 
@@ -367,9 +368,19 @@ class ConsoleRuntime:
     def _inventory_text(self) -> str:
         inv = self._inventory()
         if inv is None:
-            return "The host inventory is not available, so a plan cannot name a scope: describe what you would do and do not write plan.json.\n"
+            # The other hosts do not depend on this host's Repair controls (Codex, release C).
+            return ("The host inventory is not available, so a plan cannot name a scope: describe what you would do and do not write "
+                    "plan.json.\n" + self._other_hosts_text())
         return ("Stacks on this host:\n" + "".join(f"- {s}\n" for s in inv.stacks) + "\nServices (as <stack>/<service>):\n"
-                + "".join(f"- {s}\n" for s in inv.services))
+                + "".join(f"- {s}\n" for s in inv.services) + self._other_hosts_text())
+
+    def _other_hosts_text(self) -> str:
+        if self.other_hosts is None:
+            return ""
+        try:
+            return self.other_hosts()
+        except Exception:                                           # noqa: BLE001 -- another host must never stop a turn
+            return "\nOther hosts: not available this turn.\n"
 
     @staticmethod
     def _prepare_workspace(workspace: Path, brief: str, message: str, inventory_text: str = "", lessons_text: str = "",

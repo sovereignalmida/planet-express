@@ -38,6 +38,8 @@ class MonitorSnapshot(BaseModel):
     services: dict = {}
     image_candidates: list[dict] = []
     certs: list[dict] = []
+    # The other Docker hosts (release B of docs/designs/multi-host.md): reported and recorded, never planned.
+    other_hosts: list[dict] = []
 
 
 class Findings(BaseModel):

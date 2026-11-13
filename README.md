@@ -42,8 +42,8 @@ mission control on, doing real repairs. See [CHANGELOG.md](CHANGELOG.md) for the
   be undone. See [Quick start](#quick-start).
 - **More than one kind of host.** Planet Express now runs on Ubuntu (systemd) and on **MOS** (sysvinit,
   RAM root, no sudo), behind provider interfaces for host control and stack orchestration.
-- **An Other hosts screen** that shows the rest of your fleet, observed through the Beszel hub you
-  already run.
+- **Your other Docker hosts**, read over SSH with fixed read-only commands: their containers and metrics on the Hosts
+  screen, their problems in the scan report and as incidents.
 
 **What 2.0 changed:** an LLM used to write shell commands, which a pattern-matching safety check
 tried to vet before running them through a shell. It no longer does. Outside of missions, every change

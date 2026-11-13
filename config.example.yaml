@@ -119,50 +119,27 @@ links: []
 #   - name: CASA_JELLYFIN           # network_mode: host
 #     href: https://jellyfin.casalan.com
 
-# Other hosts (v2.4, T48). The expected-host inventory: the hosts besides this one that
-# PE should show. Empty -- the default -- means PE queries no collector at all and this
-# host renders exactly as it did before the feature existed.
+# Other hosts (docs/designs/multi-host.md; INSTALL.md "Other hosts over SSH"). The hosts besides this one that PE
+# should show. Empty -- the default -- turns the feature off.
 #
-# This list is config rather than collector output on purpose. A host that is only known
-# from the collector's answer has no name, no link and no row the moment the collector
-# cannot answer for it, so it silently vanishes just when something is wrong. Every entry
-# here renders whatever the collector says, with live values filled in by system_id and an
-# unknown state plus a reason when they cannot be read.
+# This list is config rather than discovery on purpose: a host known only from a collector's answer has no name, no link
+# and no row the moment it cannot be read, so it silently vanishes just when something is wrong.
 #
-# system_id is beszel's `systems.id`, which is the stable handle -- the display name is
-# editable in beszel's UI and the address can change, so neither is an identity. name is
-# what PE shows. link is that host's own UI and is optional (http:// or https:// only); a
-# host without one gets no button rather than a dead one.
-#
-# No entry says whether it is the local host. PE derives that from the container names it
-# already reads off the local docker socket, because a declared answer to a derivable
-# question is just a way for the config to be wrong. local_system_id is the single override
-# for an install where derivation cannot decide; a pin that contradicts a successful
-# derivation is refused when the config is applied.
-#
-# The collector's credentials are NOT here. BESZEL_USER and BESZEL_PASSWORD go in
-# /etc/planetexpress-dashboard.env, root-only, like the other dashboard-only values.
-#
-# Release A of docs/designs/multi-host.md: a host with an `ssh:` alias (a Host in Core's ~/.ssh/config, key-based,
-# its host key already in known_hosts) is read by Core every minute over SSH: its containers (state, health, restarts,
-# published ports, traefik and compose labels; never their env) and its CPU, memory, disk and load. Only fixed read
-# commands are ever sent. Beszel (`system_id`) is still read for an entry without an alias, during the move.
+# A host with an `ssh:` alias (a Host in Core's ~/.ssh/config, key-based, its host key already in known_hosts) is read by
+# Core every minute: its containers (state, health, restarts, published ports, traefik and compose labels; never their
+# env) and its CPU, memory, disk and load. Only three fixed read commands are ever sent, and PE never changes another
+# host. Their problems are reported and recorded as incidents, never planned. An alias that reaches this host's own
+# Docker engine is refused. A host without `ssh` is shown with its link only. `system_id` and `local_system_id` (the
+# Beszel collector, removed) are still accepted and ignored.
 multi_host:
   hosts: []
 # multi_host:
 #   hosts:
 #     - name: CASALAB
-#       ssh: casalab                       # read over SSH by Core
+#       ssh: casalab
 #       link: https://casalab.casalan.com
-#     - system_id: ptf3tn2gzpg913i
-#       name: CASA UNRAID
-#       link: https://unraid.casalan.com
-#     - system_id: vw53pk01zei80wt
-#       name: CASA MAC MINI
-#     - system_id: 7y4fosy0ebhtk9x        # no containers: not a docker host
-#       name: CASA SOLAR ASSISTANT
+#     - name: CASA SOLAR ASSISTANT        # no Docker: link only
 #       link: http://192.168.1.154
-#   local_system_id: n7n7ppta55karj9      # only if derivation cannot decide
 
 # v4 mission control (off by default). With it on, the dashboard gains Missions and Memory pages and
 # Telegram gains /missions, /mission <id> and /cancel_mission <id>. Observe and Propose missions investigate

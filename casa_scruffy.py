@@ -39,7 +39,7 @@ from planet_express.application.mission_service import (
     STATUS_ORDER,
     TERMINAL_STATUSES,
 )
-from planet_express.application.multi_host import Fleet, FleetCache, beszel_inventory, provider_for
+from planet_express.application.multi_host import Fleet
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
 from planet_express.memory.models import SLUG_RE
@@ -121,8 +121,7 @@ def register_template_helpers(app) -> None:
     app.add_template_filter(_extra_host_count, "extra_host_count")
 
 
-def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=None,
-               host_cache=None) -> Flask:
+def create_app(environ=None, *, rpc_call=None, clock=time.time, host_cache=None) -> Flask:
     environ = os.environ if environ is None else environ
     secret = environ.get("PE_DASHBOARD_SECRET_KEY", "")
     if len(secret) < 32:
@@ -277,14 +276,8 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_provider=No
 
     register_template_helpers(app)
 
-    # Constructing the cache is inert. Its first view starts a daemon refresh and returns the
-    # already-held answer, so a dead hub cannot make a page request wait.
-    # Hosts with an `ssh:` alias are read by Core (state/hosts.json); the Beszel cache reads only the rest, during the move.
-    fleet_cache = host_cache or Fleet(config.MULTI_HOST, FleetCache(
-        beszel_inventory(config.MULTI_HOST),
-        host_provider or provider_for(config.beszel_credentials),
-        dashboard_data.local_container_names,
-    ), config.STATE_HOSTS)
+    # The other hosts are read by Core over SSH (state/hosts.json); this process only reads that file.
+    fleet_cache = host_cache or Fleet(config.MULTI_HOST, config.STATE_HOSTS)
 
     def airlock(state="default", status=None, note=None):
         status = status or {}

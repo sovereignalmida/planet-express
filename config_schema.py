@@ -177,21 +177,17 @@ class HostEntry(BaseModel):
     The inventory is config and not collector output, because a host that is only known from
     the collector's answer has no name, no link and no row the moment the collector cannot
     answer for it -- it silently disappears, which is the bug rather than the fix. Identity
-    comes from here; live values are looked up by `system_id` and filled in.
+    comes from here; Core reads the host over its `ssh` alias and fills in live values.
 
-    There is deliberately NO per-entry "this one is the local host" flag. PE can answer that
-    question itself from the container names it reads off the local docker socket, and a
-    declared answer to a question PE can derive is a defect generator: a single flag and
-    unique ids are cardinality checks, and they pass happily while pointing at the wrong
-    system. The optional pin on MultiHostConfig is the one override, and it is one id for the
-    whole inventory rather than a boolean per entry.
+    There is deliberately NO per-entry "this one is the local host" flag. PE answers that
+    itself: Core refuses an alias whose Docker engine ID is this host's own.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    # beszel's `systems.id`. The stable handle: the name is editable in beszel's UI and the
-    # address can change, so neither of those is an identity. Optional since the SSH collector
-    # (docs/designs/multi-host.md): a host is read over SSH, from Beszel, or (during the move) both.
+    # Beszel's `systems.id`. Beszel was removed in multi-host release C (docs/designs/multi-host.md):
+    # still accepted so an existing config keeps loading, and ignored. An entry without `ssh` is
+    # shown with its link only.
     system_id: str | None = None
     # An alias in Core's ~/.ssh/config (address, user, key and pinned host key live there, not
     # here). PE reads the host's Docker and metrics over it with fixed read-only commands.
@@ -268,11 +264,8 @@ class MultiHostConfig(BaseModel):
     # remote data beside the controllable copy the docker socket already provides. Off means
     # no request, so there are no rows for any rule to act on.
     hosts: list[HostEntry] = []
-    # The operator's override for an installation where derivation cannot decide (too few
-    # local containers, or two systems inside the 3x margin). One pinned id for the whole
-    # inventory, never a per-entry boolean. A pin that disagrees with a successful derivation
-    # is refused at apply time, where both answers exist -- it cannot be checked here,
-    # because deriving locality needs the local docker socket and this module does no I/O.
+    # The Beszel-era locality pin. Accepted so an existing config keeps loading, and ignored since
+    # Beszel was removed (release C): Core now refuses an SSH alias whose Docker engine is this host's.
     local_system_id: str | None = None
 
     @field_validator("local_system_id")
@@ -284,37 +277,14 @@ class MultiHostConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_inventory(self) -> "MultiHostConfig":
-        seen: set[str] = set()
         aliases: set[str] = set()
         for entry in self.hosts:
             if entry.ssh is not None:
                 if entry.ssh in aliases:
                     raise ValueError(f"multi_host.hosts: duplicate ssh alias {entry.ssh!r}")
                 aliases.add(entry.ssh)
-            if entry.system_id is None:
-                continue
-            if entry.system_id in seen:
-                # Two entries for one system id is not a harmless duplicate: both rows look
-                # up the same live values, so the host renders twice with one set of numbers
-                # under two names, and there is no way to tell which name was meant.
-                raise ValueError(
-                    f"multi_host.hosts: duplicate system_id {entry.system_id!r}")
-            seen.add(entry.system_id)
-        if self.local_system_id is not None and not self.hosts:
-            # Refused rather than ignored, same convention as an unknown direct origin above:
-            # an empty inventory means the collector is never queried, so there are no
-            # systems for a pin to name and the pin cannot have any effect. A setting that
-            # looks like it is in force and is not is worse than an error.
-            raise ValueError(
-                "multi_host.local_system_id is set but multi_host.hosts is empty, so the "
-                "collector is never queried and the pin can never apply")
-        # A pin naming a system that is NOT an inventory entry is deliberately accepted. The
-        # local host already renders from the docker socket with working controls, so an
-        # operator has no reason to list it as an expected remote host -- the pin's whole job
-        # is to say "this collector row is me", which is a statement about the collector's
-        # answer and not about the inventory. Requiring a matching entry would force the
-        # local host into the inventory, and every inventory entry renders, which is the
-        # duplicate rendering this feature exists to avoid.
+        # `system_id` and `local_system_id` are ignored since Beszel went (release C), so nothing about them is enforced
+        # beyond their shape: a leftover must never make a config invalid (review, release C).
         return self
 
 
@@ -874,9 +844,8 @@ class PlanetExpressConfig(BaseModel):
         # requested domain before comparing against this — normalize here too so a
         # mixed-case config value (e.g. "CasaLan.com") doesn't reject every valid request.
         return v.lower()
-    # Other hosts (T48). Default empty, which means PE queries no collector and this host
-    # renders exactly as it does today. The collector's own credentials are NOT here: they
-    # live in /etc/planetexpress-dashboard.env, read by config.beszel_credentials().
+    # Other hosts (docs/designs/multi-host.md). Default empty: no other host is read. Core reaches
+    # them with SSH keys in its own ~/.ssh; no credential is ever here.
     multi_host: MultiHostConfig = MultiHostConfig()
     # Empty by default -- a fresh install grants zero sudo actions until the operator
     # explicitly declares them here. Enforced in casa_bender.py's _check_sudo_allowlist(),

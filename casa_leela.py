@@ -1253,6 +1253,17 @@ def check_certs() -> list[dict]:
     return parsed
 
 
+def check_other_hosts() -> list[dict]:
+    """The other Docker hosts from Core's SSH reading (state/hosts.json; docs/designs/multi-host.md release B). Never raises:
+    a scan of this host must not fail because of another one. Not given to Hermes (see planet_express/core/remote_health.py)."""
+    try:
+        from planet_express.application import remote_health
+        return remote_health.assess(config.MULTI_HOST, config.STATE_HOSTS)
+    except Exception:  # noqa: BLE001
+        log.exception("could not assess the other hosts")
+        return []
+
+
 # ── Entry points ──────────────────────────────────────────────────────────────
 def run_full() -> dict:
     """Captain's full scan — all checks, returns complete snapshot."""
@@ -1274,6 +1285,7 @@ def run_full() -> dict:
         "services": check_services(),
         "image_candidates": check_images(),
         "certs": check_certs(),
+        "other_hosts": check_other_hosts(),
     }
     n_issues = sum(1 for c in snapshot["containers"] if c.get("issue"))
     n_crash  = sum(1 for c in snapshot["containers"] if c.get("crash_looping"))
@@ -1290,7 +1302,9 @@ def run_full() -> dict:
         f"{len(snapshot['mounts']['missing'])} missing mount(s), "
         f"{n_dupe_fsids} duplicate Unraid fsid(s), "
         f"{n_stale_mounts} NFS alert(s) ({n_nfs_probes} probes ran), "
-        f"{n_vpn_port_issues} VPN port-forwarding issue(s)"
+        f"{n_vpn_port_issues} VPN port-forwarding issue(s), "
+        f"{sum(len(h['problems']) for h in snapshot['other_hosts'])} problem(s) on "
+        f"{len(snapshot['other_hosts'])} other host(s) ({sum(1 for h in snapshot['other_hosts'] if not h['reading'])} not reading)"
     )
     return snapshot
 
