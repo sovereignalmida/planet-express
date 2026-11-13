@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 TIMEOUT_S = 20
 MAX_OUTPUT = 4 * 1024 * 1024
-LABEL_PREFIXES = ("traefik.", "com.docker.compose.")
+LABEL_PREFIXES = ("traefik.", "com.docker.compose.", "planetexpress.")   # routing, stack, and the icon override
 MAX_CONTAINERS = 500
 
 _SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",

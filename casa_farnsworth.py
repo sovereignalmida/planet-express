@@ -511,6 +511,23 @@ def _warm_container_icons(monitor_data: dict) -> None:
                                   {icons.LABEL: labels.get(name)})
             if slug:
                 resolved[name] = slug
+        # The other hosts' containers too (multi-host release D: their routes show on the Network tab), keyed
+        # "<alias>/<container>" so they can never be taken for this host's. Their image and labels come from Core's own
+        # SSH reading; a host that is not reading keeps the icons it had.
+        try:
+            from planet_express.application.multi_host import load_hosts_file
+            for alias, rec in load_hosts_file(config.STATE_HOSTS).items():
+                if rec.get("error") is not None or not isinstance(rec.get("containers"), list):
+                    resolved.update({k: v for k, v in previous.items() if k.startswith(f"{alias}/")})
+                    continue
+                for c in rec["containers"]:
+                    if isinstance(c, dict) and isinstance(c.get("name"), str):
+                        labels_c = c.get("labels") if isinstance(c.get("labels"), dict) else {}
+                        slug = icons.slug_for(str(c.get("image") or ""), {icons.LABEL: labels_c.get(icons.LABEL)})
+                        if slug:
+                            resolved[f"{alias}/{c['name']}"] = slug
+        except Exception:  # noqa: BLE001 -- another host's icon is never worth this host's
+            log.warning("Could not add the other hosts' icons (non-fatal)", exc_info=True)
         if resolved:
             cache.warm(sorted(set(resolved.values())), budget=remaining())
         # Only when the labels were actually read. A failed inspect -- a container recreated

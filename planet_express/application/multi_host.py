@@ -144,7 +144,7 @@ def load_routes_file(path) -> dict[str, dict]:
         return {}
     out: dict[str, dict] = {}
     for key, kind in (("routes", "routes"), ("skipped", "unrouted")):
-        for item in data.get(key) or [] if isinstance(data, dict) else []:
+        for item in ((data.get(key) or []) if isinstance(data, dict) else []):
             if isinstance(item, dict) and isinstance(item.get("host"), str):
                 out.setdefault(item["host"], {"routes": [], "unrouted": []})[kind].append(
                     {k: item.get(k) for k in ("container", "router", "hosts", "url", "reason", "kept")})

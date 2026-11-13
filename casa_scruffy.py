@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import json
 import math
 import os
 import re
@@ -1425,6 +1426,26 @@ def _container_icons() -> dict:
         return {}
 
 
+def _remote_routes() -> dict:
+    """PE's generated routes (release D), by router name: {host, container, label, hosts}. PE's own record, never the name."""
+    if not config.MULTI_HOST.ingress.enabled:
+        return {}
+    try:
+        data = json.loads((Path(config.STATE_DIR) / "remote_routes.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for r in ((data.get("routes") or []) if isinstance(data, dict) else []):
+        if isinstance(r, dict) and isinstance(r.get("router"), str) and isinstance(r.get("host"), str):
+            out[r["router"]] = {"host": r["host"], "container": r.get("container") or "",
+                                "label": r.get("label") or r["router"].rsplit("--", 1)[-1], "hosts": r.get("hosts") or []}
+    return out
+
+
+def _host_names() -> dict:
+    return {e.ssh: e.name for e in config.MULTI_HOST.hosts if e.ssh}
+
+
 def index(core=None):
     # Live network pollers merged in separately from build_dashboard_context()'s
     # file-based state -- keeps the file-vs-live-HTTP boundary explicit here, in the
@@ -1477,15 +1498,19 @@ def index(core=None):
         target = by_container.get(container)
         return url_for("container_detail", stack=target[0], service=target[1]) if target else None
     container_icons = _container_icons()
+    remote = _remote_routes()
 
     def icon_for(raw):
         short, _, provider = raw.partition("@")
+        if provider == "file" and short in remote:                  # a route PE wrote for another host's container
+            return container_icons.get(f'{remote[short]["host"]}/{remote[short]["container"]}')
         container = (owners.get("routers") or {}).get(short) if provider == "docker" else None
         return container_icons.get(container) if container else None
 
     casa_scruffy_net.link_pills(ctx["router_zones"], ctx["traefik"]["routers"],
                                 lan_domain=config.LAN_ONLY_DOMAIN, detail_for=detail_for,
                                 icon_for=icon_for)
+    casa_scruffy_net.name_remote_pills(ctx["router_zones"], remote, _host_names(), hosts_href=url_for("hosts"))
     ctx["adguard"] = casa_scruffy_net.fetch_adguard_stats()
     ctx["adguard_stats"] = dashboard_data.summarize_adguard(ctx["adguard"])
     ctx["overview_tiles"] = dashboard_data.summarize_overview_tiles(

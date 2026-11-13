@@ -52,7 +52,8 @@ def test_the_live_homepage_labels_become_one_prefixed_route_to_the_hosts_publish
                                               "service": "pe-unraid--homepage--3000"}}
     assert plan.services == {"pe-unraid--homepage--3000": {"loadBalancer": {"servers": [{"url": "http://192.168.1.171:3000"}]}}}
     assert plan.routes == [{"host": "unraid", "container": "homepage", "router": "pe-unraid--homepage--app",
-                            "service": "pe-unraid--homepage--3000", "hosts": ["app.casaalmida.com"], "url": "http://192.168.1.171:3000"}]
+                            "service": "pe-unraid--homepage--3000", "hosts": ["app.casaalmida.com"], "url": "http://192.168.1.171:3000",
+                            "label": "app"}]
 
 
 def _reason(plan):
@@ -507,3 +508,40 @@ def test_the_last_page_pointing_back_to_page_one_ends_the_read(monkeypatch):
             return False
     monkeypatch.setattr(ri.urllib.request, "urlopen", lambda url, timeout: Resp(url.rsplit("page=", 1)[1]))
     assert [r["name"] for r in ri._get_json(API + "/api/http/routers")] == ["a", "b"]
+
+
+# ── rc14.11.1, live: compose labels are not "unforwarded"; the Network tab names PE's routes by the app ─────────────────────────
+def test_compose_and_other_non_traefik_labels_are_not_reported_as_unforwarded():
+    labels = {**HOMEPAGE, "com.docker.compose.project": "arr4k", "com.docker.compose.service": "radarr4k",
+              "planetexpress.icon": "radarr"}
+    plan = _plan(_c("homepage", labels))
+    assert plan.skipped == [] and plan.routes[0]["label"] == "app"
+
+
+def test_the_network_tab_shows_pes_routes_as_the_app_on_its_host():
+    import casa_scruffy_net
+    zones = casa_scruffy_net.group_routers([
+        {"name": "pe-casalab--CASA4K_RADARR--radarr4k@file", "rule": "Host(`radarr4k.casalan.com`)", "status": "enabled"},
+        {"name": "pe-casalab--CASA4K_SABNZBD--sabnzbd4k@file", "rule": "Host(`sabnzbd4k.casalan.com`)", "status": "disabled"},
+        {"name": "solar@file", "rule": "Host(`solar.casalan.com`)", "status": "enabled"}])
+    remote = {"pe-casalab--CASA4K_RADARR--radarr4k": {"host": "casalab", "container": "CASA4K_RADARR", "label": "radarr4k"},
+              "pe-casalab--CASA4K_SABNZBD--sabnzbd4k": {"host": "casalab", "container": "CASA4K_SABNZBD", "label": "sabnzbd4k"}}
+    casa_scruffy_net.name_remote_pills(zones, remote, {"casalab": "CASALAB"}, hosts_href="/hosts")
+    pills = {p["raw"]: p for z in zones["zones"] for p in z["items"]}
+    radarr = pills["pe-casalab--CASA4K_RADARR--radarr4k@file"]
+    assert (radarr["name"], radarr["tag"]) == ("radarr4k", "CASALAB") and "casa4k_radarr" in radarr["filter_text"]
+    sab = pills["pe-casalab--CASA4K_SABNZBD--sabnzbd4k@file"]
+    assert sab["detail"] == "/hosts"
+    assert (pills["solar@file"]["name"], pills["solar@file"]["tag"]) == ("solar", "FILE")      # a hand-written route is as before
+
+
+def test_a_route_record_that_is_not_an_object_is_ignored_not_a_crash(tmp_path, monkeypatch):
+    import casa_scruffy
+    import config
+    from planet_express.application.multi_host import load_routes_file
+    for text in ("[]", "null", "5"):
+        (tmp_path / "remote_routes.json").write_text(text)
+        assert load_routes_file(tmp_path / "remote_routes.json") == {}
+        monkeypatch.setattr(config, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(config.MULTI_HOST.ingress, "enabled", True)
+        assert casa_scruffy._remote_routes() == {}

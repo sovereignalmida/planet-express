@@ -362,6 +362,26 @@ def link_pills(zones: dict, routers: list, *, lan_domain: str, detail_for=None,
                 pill["href"] = public or lan
 
 
+def name_remote_pills(zones: dict, remote: dict, host_names: dict, *, hosts_href: str | None = None) -> None:
+    """Routes PE wrote for another host's containers (multi-host release D) are shown as the app they serve, not as PE's
+    generated file-provider name: the router name from the container's own label, tagged with its host in place of FILE, and
+    a DOWN one links to the Hosts page (there is no detail page here for a container on another host). Mutates `zones`."""
+    if not remote:
+        return
+    for zone in zones.get("zones", []):
+        for pill in zone.get("items", []):
+            raw = pill.get("raw") or ""
+            short, _, provider = raw.partition("@")
+            info = remote.get(short) if provider == "file" else None
+            if info is None:
+                continue
+            pill["name"] = info["label"]
+            pill["tag"] = str(host_names.get(info["host"], info["host"])).upper()[:24]
+            pill["filter_text"] = f'{pill.get("filter_text", "")} {info["container"]} {info["host"]}'.lower()
+            if pill.get("down") and not pill.get("detail") and hosts_href:
+                pill["detail"] = hosts_href
+
+
 def container_urls(routers: list, owners: dict, *, lan_domain: str) -> dict:
     """{container: [{"href", "zone"}]} for every router that can be turned into a link.
 

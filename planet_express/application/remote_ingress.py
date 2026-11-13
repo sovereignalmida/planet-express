@@ -195,7 +195,9 @@ def _router_labels(labels: dict) -> tuple[dict[str, dict], dict[str, dict], list
     services: dict[str, dict] = {}
     unsupported = []
     for key, value in labels.items():
-        if key == "traefik.enable" or key.startswith("traefik.docker."):
+        # Only traefik.* is routing: compose's own labels ride along in the collector's record and are not "unforwarded"
+        # (live rc14.11: every compose container was listed as having labels PE does not forward).
+        if not key.startswith("traefik.") or key == "traefik.enable" or key.startswith("traefik.docker."):
             continue
         m = re.match(r"^traefik\.http\.routers\.([^.]+)\.(.+)$", key)
         if m:
@@ -268,7 +270,7 @@ def plan_routes(hosts: list[dict], traefik: TraefikState, addresses: dict[str, s
         plan.routers[rkey] = {**router, "service": sname}
         plan.services[sname] = service
         plan.routes.append({"host": alias, "container": name, "router": rkey, "service": sname, "hosts": sorted(hosts_),
-                            "url": url})
+                            "url": url, "label": rname})
     return plan
 
 
