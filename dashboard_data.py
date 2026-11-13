@@ -376,6 +376,16 @@ def summarize_remote_hosts() -> dict | None:
         return None
 
 
+def summarize_remote_stacks() -> list:
+    """The other hosts' containers as Overview stack cards (rc14.12), [] when none or unreadable. Never raises."""
+    try:
+        from planet_express.application.multi_host import remote_stacks
+        return remote_stacks(config.MULTI_HOST, config.STATE_HOSTS)
+    except Exception:  # noqa: BLE001
+        log.warning("could not summarise the other hosts' stacks", exc_info=True)
+        return []
+
+
 def remote_hosts_line(remote: dict | None, summed: bool = True) -> str | None:
     """The line under the FLEET tile's all-hosts count: "15 of these on 3 other hosts · 1 host not reading, not counted". A host
     with no fresh reading is left out of the count and said to be, never counted as zero containers. `summed` is False when this
@@ -1100,45 +1110,62 @@ def build_professor_lines(ctx: dict) -> dict:
     scanning = pipeline_status["state"] == "running"
     last_scan_mode = health.get("last_scan_mode") or "?"
 
-    # Overview
+    # Overview: the whole fleet, as the FLEET tile counts it (rc14.12, operator): this host's containers plus the other hosts
+    # read now. A host that is not reading is said, never counted as zero.
+    remote = ctx.get("remote_hosts") or {}
+    cells = remote.get("cells") or []
+    other = remote.get("hosts", 0) if containers["available"] else 0
+    total = containers["total"] + (remote.get("containers", 0) if other else 0)
+    healthy = containers["healthy"] + ((remote.get("containers", 0) - remote.get("problems", 0)) if other else 0)
+    down = containers["down"] + (cells.count("down") if other else 0)
+    degraded = containers["degraded"] + (cells.count("degraded") if other else 0)
+    where = f" across {1 + other} hosts" if other else ""
+    unread = remote.get("unknown", 0)
+    tail = (f" ({unread} host{'s' if unread != 1 else ''} not reading, not counted.)" if unread else "")
     if not containers["available"]:
         overview = (
             "I haven't the faintest idea how the fleet's doing — the last scan "
             f"(mode: {last_scan_mode}) didn't collect container data."
         )
-    elif containers["down"]:
+    elif down:
         overview = (
-            f"Bad news, everyone. {containers['down']} of {containers['total']} "
-            "containers are down. Check the Findings table before I have an aneurysm."
+            f"Bad news, everyone. {down} of {total} containers{where} are down. "
+            "Check NEEDS YOU before I have an aneurysm."
         )
     elif findings["counts"]["critical"] or findings["counts"]["high"]:
         n = findings["counts"]["critical"] + findings["counts"]["high"]
         overview = (
-            f"{containers['healthy']} of {containers['total']} containers are up, "
+            f"{healthy} of {total} containers{where} are up, "
             f"but {n} finding(s) need real attention. Don't make me say it twice."
         )
     elif sum(findings["counts"].values()):
         n = sum(findings["counts"].values())
         overview = (
-            f"Good news, everyone! {containers['healthy']} of {containers['total']} "
-            f"containers are alive and well. There's {n} nagging thing worth a look, mind you."
+            f"Good news, everyone! {healthy} of {total} containers{where} are alive and well. "
+            f"There's {n} nagging thing worth a look, mind you."
         )
-    elif containers["degraded"]:
-        # A container can be running with a failing/starting healthcheck (degraded)
-        # before Hermes has ever analyzed it into a "finding" -- e.g. right after a
-        # fresh scan. Findings-based branches above don't catch that case, so without
-        # this the sidebar would call the fleet "alive and well" while a real issue
-        # sits unreported.
+    elif degraded:
         overview = (
-            f"{containers['healthy']} of {containers['total']} containers are up, but "
-            f"{containers['degraded']} {'is' if containers['degraded'] == 1 else 'are'} "
+            f"{healthy} of {total} containers{where} are up, but "
+            f"{degraded} {'is' if degraded == 1 else 'are'} "
             "running with a shaky healthcheck. Not a crisis, but don't ignore it."
         )
     else:
         overview = (
-            f"Good news, everyone! All {containers['total']} of {containers['total']} "
-            "containers are alive and well — a personal best."
+            f"Good news, everyone! All {total} of {total} containers{where} are alive and well — a personal best."
         )
+    overview += tail
+
+    # Hosts (rc14.12): the other machines, by Core's own SSH reading.
+    if not remote:
+        hosts = "Just this ship. Add the others under multi_host and I'll keep an eye on them too."
+    elif remote.get("hosts") or remote.get("unknown"):
+        hosts = (f"{remote.get('hosts', 0)} other host{'s' if remote.get('hosts', 0) != 1 else ''} reading, "
+                 f"{remote.get('containers', 0)} containers between them"
+                 + (f", {remote['problems']} with a problem" if remote.get("problems") else "")
+                 + (f"; {unread} not answering. I read them; I don't touch them." if unread else ". I read them; I don't touch them."))
+    else:
+        hosts = "The other hosts have nothing to report yet."
 
     # Backups
     if not system_and_backups["available"]:
@@ -1182,6 +1209,9 @@ def build_professor_lines(ctx: dict) -> dict:
                 f"{len(traefik['routers'])} router(s), all reported enabled. Traefik is "
                 "my second-favourite plumbing — right after the ship's coolant loop."
             )
+        forwarded = sum(1 for r in traefik["routers"] if str(r.get("name", "")).startswith("pe-") and str(r.get("name", "")).endswith("@file"))
+        if forwarded:
+            network += f" {forwarded} of them I wrote myself, for containers on the other hosts."
     else:
         network = "Traefik's API isn't answering on :8079. Either it's down or having a moment — I can't tell which from here."
     if adguard.get("configured") and adguard.get("available"):
@@ -1197,7 +1227,7 @@ def build_professor_lines(ctx: dict) -> dict:
         f"{bot_handle}. Good news: nothing has exploded yet."
     )
 
-    lines = {"overview": overview, "backups": backups, "network": network, "missions": missions}
+    lines = {"overview": overview, "hosts": hosts, "backups": backups, "network": network, "missions": missions}
 
     if scanning:
         override = "Scanning the entire ship! Hold your hydrogen — this'll only take a moment, unless it takes several."
@@ -1399,6 +1429,7 @@ def build_dashboard_context(enforced: dict | None = None, core=None) -> dict:
         "system_and_backups": summarize_system_and_backups(enforced),
         "certs": summarize_certs(),
         "remote_hosts": summarize_remote_hosts(),
+        "remote_stacks": summarize_remote_stacks(),
     }
     # Live network values are intentionally unavailable here; the route replaces
     # these placeholders after its explicit Traefik/AdGuard fetches.

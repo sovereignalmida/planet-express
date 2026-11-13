@@ -57,6 +57,7 @@ if [ "$os" = Linux ]; then
   df -Pk "$root" | awk 'NR==2{print "disk_kib", $2, $3}'
   t=$(cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null | sort -n | tail -1); [ -n "$t" ] && echo "temp_milli $t"
   awk -F: '/^model name/{gsub(/^ +/,"",$2); print "cpu_model", $2; exit}' /proc/cpuinfo
+  awk -F= '/^PRETTY_NAME=/{gsub(/"/,"",$2); print "os_name", $2; exit}' /etc/os-release 2>/dev/null
   echo "threads $(getconf _NPROCESSORS_ONLN 2>/dev/null)"
 elif [ "$os" = Darwin ]; then
   sysctl -n vm.loadavg | awk '{print "load", $2, $3, $4}'
@@ -66,7 +67,10 @@ elif [ "$os" = Darwin ]; then
   df -Pk / | awk 'NR==2{print "disk_kib", $2, $3}'
   echo "cpu_model $(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
   echo "threads $(sysctl -n hw.logicalcpu 2>/dev/null)"
+  echo "os_name $(sw_vers -productName 2>/dev/null) $(sw_vers -productVersion 2>/dev/null)"
 fi
+echo "uname_m $(uname -m)"
+echo "uname_r $(uname -r)"
 '''
 
 READ_COMMANDS: dict[str, str] = {
@@ -233,7 +237,7 @@ def parse_metrics(text: str) -> dict:
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2:
-            kv[parts[0]] = parts[1].split() if parts[0] != "cpu_model" else [parts[1].strip()]
+            kv[parts[0]] = parts[1].split() if parts[0] not in ("cpu_model", "os_name") else [parts[1].strip()]
     m: dict = {"os_kind": (kv.get("os") or [None])[0]}
     load = [_num(x) for x in kv.get("load", [])[:3]]
     if len(load) == 3 and None not in load:
@@ -265,6 +269,10 @@ def parse_metrics(text: str) -> dict:
             m["temp_c"] = v / 1000
     if kv.get("cpu_model") and kv["cpu_model"][0]:
         m["cpu_model"] = kv["cpu_model"][0][:128]
+    # What the host says it is, for a host with no Docker engine to ask (a metrics-only host, live: SolarAssistant).
+    for key, out in (("os_name", "os_name"), ("uname_m", "arch"), ("uname_r", "kernel")):
+        if kv.get(key) and kv[key][0]:
+            m[out] = kv[key][0][:128]
     if kv.get("threads"):
         v = _num(kv["threads"][0])
         if v and v == int(v):

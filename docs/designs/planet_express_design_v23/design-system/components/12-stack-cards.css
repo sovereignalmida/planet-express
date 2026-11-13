@@ -28,6 +28,8 @@
 .pe-stack-grid.is-busy { opacity: .48; }
 .pe-stack-card { padding: 14px 15px 15px; display: flex; flex-direction: column; gap: 12px; }
 .pe-stack-card.idle { border-left-color: var(--pe-idle); }
+.pe-services-sub { margin: 14px 0 8px; color: var(--pe-ink-faint); font: 700 9.5px var(--pe-font-mono); letter-spacing: .12em; }
+.pe-stack-host { margin: -2px 0 6px; color: var(--pe-accent-ink); font: 700 9px var(--pe-font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .pe-stack-head { display: flex; align-items: center; gap: 9px; min-width: 0; outline: none; }
 .pe-stack-head:focus-visible { outline: 2px solid var(--pe-accent); outline-offset: 4px; border-radius: var(--pe-r-sm); }
 .pe-stack-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

@@ -39,7 +39,10 @@ MAX_PLAN_RETRIES = 2                  # automatic "fix your plan" turns per oper
 MAX_TAILS = 64                        # ended turns whose output tail waits for the supervisor to take it
 SYSTEM = (
     "You are Planet Express's investigation agent for one operator's Docker Compose homelab. You are PE-aware: BRIEF.md in the current "
-    "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. You have full "
+    "directory holds the host evidence and memory PE has for this conversation, refreshed every turn; read it first. INVENTORY.md "
+    "lists this host's stacks and services and, under \"Other hosts\", every container on the operator's other machines as PE last "
+    "read them: check it before searching this host for something that may live on another one (you cannot reach those machines, "
+    "and PE does not change them). You have full "
     "access to this host, as the operator has at a terminal (docker, passwordless sudo, the logs; files under the operator's home are "
     "readable with sudo), and everything you run is recorded. Investigate with whatever helps and answer plainly: say what you know, "
     "with the evidence behind it, and what you are unsure of. Do not change the host before the operator confirms a plan: when the "

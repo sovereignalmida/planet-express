@@ -278,7 +278,7 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_cache=None)
     register_template_helpers(app)
 
     # The other hosts are read by Core over SSH (state/hosts.json); this process only reads that file.
-    fleet_cache = host_cache or Fleet(config.MULTI_HOST, config.STATE_HOSTS)
+    fleet_cache = host_cache or Fleet(config.MULTI_HOST, config.STATE_HOSTS, local_containers=_local_container_count)
 
     def airlock(state="default", status=None, note=None):
         status = status or {}
@@ -1440,6 +1440,11 @@ def _remote_routes() -> dict:
             out[r["router"]] = {"host": r["host"], "container": r.get("container") or "",
                                 "label": r.get("label") or r["router"].rsplit("--", 1)[-1], "hosts": r.get("hosts") or []}
     return out
+
+
+def _local_container_count() -> int | None:
+    monitor = dashboard_data.load_monitor()
+    return len(monitor.containers) if monitor and monitor.mode in ("full", "status") else None
 
 
 def _host_names() -> dict:

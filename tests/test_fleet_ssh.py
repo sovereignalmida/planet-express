@@ -244,6 +244,8 @@ def test_the_fleet_view_keeps_inventory_order_and_reads_ssh_hosts_from_cores_fil
     path = tmp_path / "hosts.json"
     path.write_text(json.dumps({"hosts": [_record(990.0)]}))
     view = Fleet(inv, path, wall=lambda: 1000.0).view()
+    assert view.cards[0].source == "local"                              # this host first (rc14.12)
+    view = type(view)(view.cards[1:])
     assert [(c.name, c.source, c.liveness.state) for c in view.cards] == [("CASALAB", "ssh", "current"), ("SOLAR", "link", "unknown")]
 
 
@@ -298,6 +300,7 @@ def test_two_hosts_with_one_display_name_keep_their_own_readings(tmp_path):
     data = fc.FleetCollector(inv, tmp_path / "h.json", read=read, local_id=lambda: "LOCAL", clock=lambda: 10.0).collect()
     assert [(h["ssh"], h["containers"][0]["name"]) for h in data["hosts"]] == [("a", "only-on-a"), ("b", "only-on-b")]
     view = Fleet(inv, tmp_path / "h.json", wall=lambda: 15.0).view()
+    view = type(view)(view.cards[1:])                                    # after this host's own card (rc14.12)
     assert [c.containers[0].name for c in view.cards] == ["only-on-a", "only-on-b"]
 
 
@@ -337,7 +340,7 @@ def test_a_malformed_record_is_that_hosts_problem_not_the_pages(tmp_path):
     bad["metrics"]["load"] = "high"
     bad["engine"] = {"os": 5, "ncpu": True}
     path.write_text(json.dumps({"hosts": [bad]}))
-    card = Fleet(inv, path, wall=lambda: 1000.0).view().cards[0]
+    card = Fleet(inv, path, wall=lambda: 1000.0).view().cards[1]
     assert card.liveness.state == "current" and card.containers[0].ports is None and card.metrics.load is None
     assert card.details.os_name is None and card.details.threads == 4
 
@@ -348,7 +351,7 @@ def test_link_only_hosts_do_not_count_as_hosts_that_failed_to_read_and_this_host
     entry = HostEntry(name="CASALAB", ssh="casalab")
     link = HostCard("SOLAR", "SOLAR", "http://192.168.1.154", True, Liveness("unknown", "link only"), source="link")
     page = _hosts_page((ssh_card(entry, _record(1800000000.0 - 5), 1800000000.0), link)).get_data(as_text=True)
-    assert "1 OTHER HOSTS READING" in page and "NOT READING" not in page and "LINK ONLY" in page
+    assert "1 HOST READING" in page and "NOT READING" not in page and "LINK ONLY" in page
     me = ssh_card(entry, {**_record(None, error=fc.THIS_HOST, cause="this_host", attempted=1800000000.0 - 5), "containers": None},
                   1800000000.0)
     page = _hosts_page((me,)).get_data(as_text=True)
@@ -586,7 +589,7 @@ def test_a_metrics_only_host_shows_metrics_counts_as_reading_and_raises_no_conta
     solar = {"name": "SOLAR", "ssh": "solar", "docker": False, "read_at": 990.0, "attempted_at": 990.0, "error": None,
              "engine": None, "containers": None, "metrics": ssh_hosts.parse_metrics(LINUX_METRICS)}
     path.write_text(json.dumps({"hosts": [solar, _record(990.0)]}))
-    card = Fleet(inv, path, wall=lambda: 1000.0).view().cards[0]
+    card = Fleet(inv, path, wall=lambda: 1000.0).view().cards[1]
     assert (card.liveness.state, card.docker, card.containers, card.locality_checked) == ("current", False, None, True)
     assert card.metrics.cpu_pct == pytest.approx(50.0)
     health = {h["host"]: h for h in remote_health.assess(inv, path, now=1000.0)}

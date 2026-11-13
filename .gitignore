@@ -35,3 +35,5 @@ logs/*.log
 
 # Private operator material (server-agent export, incident detail): never commit; the repo has a public remote
 /docs/private/
+.gstack/
+photos/

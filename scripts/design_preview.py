@@ -485,10 +485,12 @@ def main() -> int:
     if args.state:
         # Copied, so a preview can never scribble on a real snapshot.
         for name in ("latest_monitor.json", "latest_findings.json", "run_status.json",
-                     "update_history.json"):
+                     "update_history.json", "hosts.json", "remote_routes.json"):
             source = args.state / name
             if source.exists():
                 shutil.copy2(source, state / name)
+        if (args.state / "icons").is_dir():                      # the app icons Core resolved, so pills and cards have them
+            shutil.copytree(args.state / "icons", state / "icons")
         print(f"state: copied from {args.state}")
     else:
         write_fixtures(state)
@@ -498,6 +500,7 @@ def main() -> int:
     # state files (the icon cache) would otherwise read and write the real one while a
     # preview is running.
     config.STATE_DIR = state
+    config.STATE_HOSTS = state / "hosts.json"                    # the other hosts (multi-host), read beside the snapshot
     config.STATE_MONITOR = state / "latest_monitor.json"
     config.STATE_FINDINGS = state / "latest_findings.json"
     config.STATE_STATUS = state / "run_status.json"

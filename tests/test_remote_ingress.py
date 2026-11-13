@@ -287,12 +287,12 @@ def test_the_hosts_page_shows_each_hosts_routes_and_what_was_not_routed(tmp_path
                     "url": "http://192.168.1.171:3000"}],
         "skipped": [{"host": "unraid", "container": "airconnect", "router": None, "reason": "no traefik.http.routers labels"}]}))
     inv = MultiHostConfig(hosts=[HostEntry(name="UNRAID", ssh="unraid")], ingress={"enabled": True, "directory": "/x"})
-    card = Fleet(inv, tmp_path / "hosts.json", wall=lambda: 1000.0).view().cards[0]
+    card = Fleet(inv, tmp_path / "hosts.json", wall=lambda: 1000.0).view().cards[1]
     assert card.routes[0]["url"] == "http://192.168.1.171:3000" and card.unrouted[0]["container"] == "airconnect"
     page = _hosts_page((card,)).get_data(as_text=True)
     assert "app.casaalmida.com → http://192.168.1.171:3000" in page and "NOT ROUTED" in page and "airconnect" in page
     off = MultiHostConfig(hosts=[HostEntry(name="UNRAID", ssh="unraid")])
-    assert Fleet(off, tmp_path / "hosts.json", wall=lambda: 1000.0).view().cards[0].routes == ()
+    assert Fleet(off, tmp_path / "hosts.json", wall=lambda: 1000.0).view().cards[1].routes == ()
 
 
 

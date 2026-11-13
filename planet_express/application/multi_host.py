@@ -42,6 +42,7 @@ class HostCard:
     docker: bool = True                  # False: a metrics-only host (`docker: false` in config); it has no containers to show
     routes: tuple = ()                   # release D: the routes PE wrote for this host ({container, hosts, url})
     unrouted: tuple = ()                 # release D: labelled routers PE did not write, with why ({container, router, reason})
+    local_containers: int | None = None  # this host's card: its container count from Leela's snapshot (None: not read)
 
 
 @dataclass(frozen=True)
@@ -102,9 +103,13 @@ def ssh_card(entry, record: dict | None, now: float) -> HostCard:
                           temps={"hottest zone": temp} if temp is not None else None)
     text = lambda v: v if isinstance(v, str) else None          # noqa: E731
     integer = lambda v: v if isinstance(v, int) and not isinstance(v, bool) else None          # noqa: E731
-    details = HostDetails(cores=None, threads=integer(m.get("threads")) or integer(engine.get("ncpu")), arch=text(engine.get("arch")),
-                          kernel=text(engine.get("kernel")), cpu_model=text(m.get("cpu_model")),
-                          memory_bytes=integer(engine.get("mem_bytes")), os_name=text(engine.get("os")))
+    arch = text(engine.get("arch")) or text(m.get("arch"))
+    os_name = text(engine.get("os")) or text(m.get("os_name"))
+    if os_name and arch and os_name.endswith(" " + arch):          # Unraid's "Unraid OS 7.3 x86_64": the arch is shown on its own
+        os_name = os_name[: -len(arch) - 1]
+    details = HostDetails(cores=None, threads=integer(m.get("threads")) or integer(engine.get("ncpu")), arch=arch,
+                          kernel=text(engine.get("kernel")) or text(m.get("kernel")), cpu_model=text(m.get("cpu_model")),
+                          memory_bytes=integer(engine.get("mem_bytes")), os_name=os_name)
     raw = record.get("containers")
     containers = None if not isinstance(raw, list) else tuple(
         RemoteContainer(name=c["name"], image=text(c.get("image")), status=text(c.get("state")), health=text(c.get("health")),
@@ -154,15 +159,29 @@ def load_routes_file(path) -> dict[str, dict]:
 class Fleet:
     """The Hosts page's view: every configured host in inventory order, SSH hosts from Core's file, the rest as links."""
 
-    def __init__(self, inventory: MultiHostConfig, hosts_file, *, wall=time.time):
+    def __init__(self, inventory: MultiHostConfig, hosts_file, *, wall=time.time, local_containers=None):
         self._inventory, self._file, self._wall = inventory, hosts_file, wall
+        self._local_containers = local_containers          # () -> this host's container count (Leela's snapshot), or None
 
     def view(self) -> FleetView:
         import dataclasses
+        import socket
         records = load_hosts_file(self._file) if any(e.ssh for e in self._inventory.hosts) else {}
         routes = load_routes_file(self._file.parent / "remote_routes.json") if self._inventory.ingress.enabled else {}
         now = self._wall()
-        cards = []
+        try:
+            local = json.loads(self._file.read_text()).get("local")
+        except (OSError, ValueError, AttributeError):
+            local = None
+        count = None
+        if self._local_containers is not None:
+            try:
+                count = self._local_containers()
+            except Exception:  # noqa: BLE001 -- a count is never worth the page
+                count = None
+        engine_name = ((local or {}).get("engine") or {}).get("name") if isinstance(local, dict) else None
+        cards = [local_card(local, now, name=engine_name if isinstance(engine_name, str) and engine_name else socket.gethostname(),
+                            containers=count)]
         for entry in self._inventory.hosts:
             if entry.ssh:
                 card = _safe_card(entry, records.get(entry.ssh), now)
@@ -251,3 +270,54 @@ def other_hosts_text(inventory=None, hosts_file=None, *, wall=time.time) -> str:
             out.append(f"  - {c.name}: {', '.join(bits)}")
     text = "\n".join(out) + "\n"
     return text if len(text) <= MAX_OTHER_HOSTS_TEXT else text[:MAX_OTHER_HOSTS_TEXT].rsplit("\n", 1)[0] + "\n  (cut short)\n"
+
+
+
+# ── this host on the Hosts tab, and the other hosts' stacks on Overview (rc14.12, operator) ─────────────────────────────────────
+
+LOCAL = "local"
+
+
+def local_card(record: dict | None, now: float, *, name: str, containers: int | None) -> HostCard:
+    """PE's own host as a card: the same metrics, read the same way (Core runs the metrics read locally, rc14.12), and the count of
+    its containers from Leela's snapshot. Its containers and controls are on Overview; the card says so rather than repeating 87
+    chips."""
+    entry = type("Entry", (), {"ssh": LOCAL, "name": name, "link": None, "docker": True})()
+    if not isinstance(record, dict):
+        return HostCard(LOCAL, name, None, True, unknown(NOT_COLLECTED), source=LOCAL)
+    card = _safe_card(entry, {**record, "ssh": LOCAL, "containers": []}, now)
+    import dataclasses
+    return dataclasses.replace(card, source=LOCAL, containers=None, ssh=None, local_containers=containers)
+
+
+def remote_stacks(inventory: MultiHostConfig, hosts_file, *, wall=time.time) -> list[dict]:
+    """The other hosts' containers grouped as Overview's stack cards: by Compose project, else one card per container. Only hosts
+    reading now; worst first. Problems by the alerts' rule (remote_health.container_issue)."""
+    from planet_express.application.remote_health import container_issue
+    records, now, out = load_hosts_file(hosts_file), wall(), []
+    for entry in inventory.hosts:
+        if not (entry.ssh and entry.docker):
+            continue
+        record = records.get(entry.ssh)
+        card = _safe_card(entry, record, now)
+        if card.liveness.state != "current" or not isinstance((record or {}).get("containers"), list):
+            continue
+        groups: dict[str, list] = {}
+        for c in record["containers"]:
+            if not isinstance(c, dict) or not isinstance(c.get("name"), str):
+                continue
+            labels = c.get("labels") if isinstance(c.get("labels"), dict) else {}
+            project = labels.get("com.docker.compose.project") or c["name"]
+            issue, crash = container_issue(c, now)
+            # The Overview's own words for a dot (crit / warn / idle / ok), so these cards read like this host's.
+            level = ("crit" if crash or (issue and c.get("state") != "running") else "warn" if issue
+                     else "idle" if c.get("state") == "exited" else "ok")
+            groups.setdefault(str(project), []).append({"name": c["name"], "level": level, "issue": issue})
+        for project, members in groups.items():
+            members.sort(key=lambda x: ({"crit": 0, "warn": 1, "idle": 2, "ok": 3}[x["level"]], x["name"]))
+            up = sum(1 for x in members if x["level"] in ("ok", "idle"))
+            level = "crit" if any(x["level"] == "crit" for x in members) else "warn" if any(x["level"] == "warn" for x in members) else "ok"
+            out.append({"name": project, "host": entry.name, "ssh": entry.ssh, "up": up, "total": len(members), "level": level,
+                        "members": members})
+    rank = {"crit": 0, "warn": 1, "ok": 2}
+    return sorted(out, key=lambda x: (rank[x["level"]], x["host"], x["name"]))

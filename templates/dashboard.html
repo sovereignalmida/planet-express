@@ -97,7 +97,7 @@
             <div class="pe-services-head">
               <h2>SERVICES</h2>
               {% if ctx.services.available %}
-              <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} online{% if ctx.services.launchable %} · {{ ctx.services.launchable }} launchable{% endif %} · worst first</span>
+              <span class="pe-services-summary">{{ ctx.services.total_stacks }} stacks · {{ ctx.services.up }} of {{ ctx.services.total }} online{% if ctx.services.launchable %} · {{ ctx.services.launchable }} launchable{% endif %}{% if ctx.remote_stacks %} · + {{ ctx.remote_stacks|length }} stacks on other hosts{% endif %} · worst first</span>
               <span class="pe-services-spacer"></span>
               <span class="overview-attention">ATTENTION {{ ctx.services.attention }}</span>
               {% endif %}
@@ -180,6 +180,25 @@
               <div class="pe-drawer-foot" data-drawer-foot>No button means no Traefik route (databases, workers). ◉ means a live widget in the detail view.</div>
             </template>
             {% endfor %}
+            {% endif %}
+            {% if ctx.remote_stacks %}
+            {# rc14.12: the other hosts' stacks, outside the local-stacks conditional (Codex: a scan without this host's stacks must not hide them), grouped by Compose project. Read-only: no drawer and no UP/DOWN, since PE does
+               not change other hosts; a dot opens Hosts. #}
+            <div class="pe-services-sub">ON OTHER HOSTS</div>
+            <div class="pe-stack-grid">
+              {% for stack in ctx.remote_stacks %}
+              <article class="pe-card pe-stack-card {{ stack.level }}" data-stack-name="{{ stack.ssh }}/{{ stack.name }}">
+                <div class="pe-stack-head">
+                  <span class="pe-stack-name">{{ stack.name }}</span><span class="pe-stack-spacer"></span>
+                  <span class="pe-stack-tally {{ stack.level }}">{{ stack.up }}/{{ stack.total }}</span>
+                </div>
+                <div class="pe-stack-host">{{ stack.host }}</div>
+                <div class="pe-service-dots">
+                  {% for member in stack.members %}<a class="pe-dot-svc {{ member.level }}" href="/hosts" title="{{ member.name }}{{ ' · ' ~ member.issue if member.issue }}" aria-label="{{ member.name }}"></a>{% endfor %}
+                </div>
+              </article>
+              {% endfor %}
+            </div>
             {% endif %}
           </section>
 
@@ -465,20 +484,20 @@
                 {% set target = pill.href or pill.detail %}
                 {% if pill.lan_href %}
                 <span class="net-pill pe-pill-split net-filter-row" data-filter-text="{{ pill.filter_text }}">
-                  <a class="pe-pill-main" href="{{ pill.href }}" target="_blank" rel="noopener" title="{{ pill.href.split('://', 1)[-1] }}"><span class="net-pill-led"></span>{% if pill.icon %}<img class="pe-icon-bare xs" src="{{ url_for('container_icon', slug=pill.icon) }}" alt="" width="13" height="13">{% endif %}{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}</a><a class="pe-pill-lan" href="{{ pill.lan_href }}" target="_blank" rel="noopener" title="{{ pill.lan_href.split('://', 1)[-1] }}" aria-label="{{ pill.name }} on the LAN">LAN</a>
+                  <a class="pe-pill-main" href="{{ pill.href }}" target="_blank" rel="noopener" title="{{ pill.href.split('://', 1)[-1] }}"><span class="net-pill-led"></span>{% if pill.icon %}<img class="pe-icon-bare xs" src="{{ url_for('container_icon', slug=pill.icon) }}" alt="" width="20" height="20">{% endif %}<span class="net-pill-name">{{ pill.name }}</span>{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}</a><a class="pe-pill-lan" href="{{ pill.lan_href }}" target="_blank" rel="noopener" title="{{ pill.lan_href.split('://', 1)[-1] }}" aria-label="{{ pill.name }} on the LAN">LAN</a>
                 </span>
                 {% elif target %}
                 <a class="net-pill is-link net-filter-row {{ 'down' if pill.down else '' }}" href="{{ target }}"
                    {% if not pill.down %}target="_blank" rel="noopener"{% endif %}
                    data-filter-text="{{ pill.filter_text }}"
                    title="{{ pill.href.split('://', 1)[-1] if pill.href else pill.raw ~ ' · open container detail' }}">
-                  <span class="net-pill-led"></span>{% if pill.icon %}<img class="pe-icon-bare xs" src="{{ url_for('container_icon', slug=pill.icon) }}" alt="" width="13" height="13">{% endif %}{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                  <span class="net-pill-led"></span>{% if pill.icon %}<img class="pe-icon-bare xs" src="{{ url_for('container_icon', slug=pill.icon) }}" alt="" width="20" height="20">{% endif %}<span class="net-pill-name">{{ pill.name }}</span>{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
                 </a>
                 {% else %}
                 <span class="net-pill net-filter-row {{ 'down' if pill.down else '' }}"
                       data-filter-text="{{ pill.filter_text }}"
                       title="{{ pill.raw }}{{ (' · ' ~ pill.host) if pill.host else '' }}">
-                  <span class="net-pill-led"></span>{% if pill.icon %}<img class="pe-icon-bare xs" src="{{ url_for('container_icon', slug=pill.icon) }}" alt="" width="13" height="13">{% endif %}{{ pill.name }}{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
+                  <span class="net-pill-led"></span>{% if pill.icon %}<img class="pe-icon-bare xs" src="{{ url_for('container_icon', slug=pill.icon) }}" alt="" width="20" height="20">{% endif %}<span class="net-pill-name">{{ pill.name }}</span>{% if pill.tag %}<b class="net-tag {{ pill.tag|lower }}">{{ pill.tag }}</b>{% endif %}{% if pill.lan %}<b class="net-tag lan">+LAN</b>{% endif %}{% if pill.down %}<b class="net-tag down">DOWN</b>{% endif %}
                 </span>
                 {% endif %}
                 {% endfor %}
@@ -646,6 +665,7 @@
         <h2 id="computer-log-title">SHIP'S COMPUTER LOG</h2>
         <ul>
           <li><span>› overview</span>{{ ctx.professor_lines.overview }}</li>
+          {% if ctx.professor_lines.hosts %}<li><span>› hosts</span>{{ ctx.professor_lines.hosts }}</li>{% endif %}
           <li><span>› backups</span>{{ ctx.professor_lines.backups }}</li>
           <li><span>› network</span>{{ ctx.professor_lines.network }}</li>
           <li><span>› missions</span>{{ ctx.professor_lines.missions }}</li>

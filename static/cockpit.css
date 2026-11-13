@@ -1736,6 +1736,8 @@ footer p {
 .pe-stack-grid.is-busy { opacity: .48; }
 .pe-stack-card { padding: 14px 15px 15px; display: flex; flex-direction: column; gap: 12px; }
 .pe-stack-card.idle { border-left-color: var(--pe-idle); }
+.pe-services-sub { margin: 14px 0 8px; color: var(--pe-ink-faint); font: 700 9.5px var(--pe-font-mono); letter-spacing: .12em; }
+.pe-stack-host { margin: -2px 0 6px; color: var(--pe-accent-ink); font: 700 9px var(--pe-font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .pe-stack-head { display: flex; align-items: center; gap: 9px; min-width: 0; outline: none; }
 .pe-stack-head:focus-visible { outline: 2px solid var(--pe-accent); outline-offset: 4px; border-radius: var(--pe-r-sm); }
 .pe-stack-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2840,3 +2842,12 @@ a.net-pill { text-decoration: none; }
 .pe-con-dots { display: none; justify-content: center; gap: 6px; }
 @container pecon (max-width: 620px) { .pe-con-dots { display: flex; } }
 .pe-con-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--pe-border-strong); } .pe-con-dot.on { background: var(--pe-accent); }
+
+/* rc14.12 (operator): routes as Homepage-style tiles -- bigger icon and name, a grid that uses the width, easy to read and hit. */
+.net-pills { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 8px; }
+.net-pill { height: 38px; padding: 0 11px 0 10px; gap: 9px; font-size: 12.5px; min-width: 0; }
+.net-pill .pe-icon-bare.xs { width: 20px; height: 20px; }
+.net-pill .net-tag { margin-left: auto; font-size: 9px; }
+.pe-pill-split .pe-pill-main { flex: 1; min-width: 0; gap: 9px; }
+.net-pill .net-pill-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net-pill-led { width: 6px; height: 6px; }

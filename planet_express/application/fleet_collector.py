@@ -147,9 +147,39 @@ class FleetCollector:
         hosts = [{**merge(prev.get(e.ssh), e, results.get(e.ssh, {"error": f"no answer within {HOST_BUDGET_S}s",
                                                                  "cause": "no_contact"}), now),
                   "locality_checked": self._local is not None} for e in self.entries]
-        data = {"collected_at": now, "hosts": hosts}
+        data = {"collected_at": now, "hosts": hosts, "local": self._local_reading(prev_local=self._previous_local())}
         write_atomic(self.path, data)
         return data
+
+    def _previous_local(self) -> dict | None:
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return None
+        return data.get("local") if isinstance(data, dict) and isinstance(data.get("local"), dict) else None
+
+    def _local_reading(self, prev_local: dict | None) -> dict:
+        """This host's metrics, by the same fixed metrics read run locally (no SSH), so its Hosts card matches the others
+        (rc14.12, operator: "we surface none of this for casamediaserver"). Its containers are Leela's."""
+        now = self._clock()
+        try:
+            metrics = ssh_hosts.parse_metrics(self._run_local(ssh_hosts.READ_COMMANDS["metrics"]))
+        except Exception as exc:  # noqa: BLE001 -- this host's card is never worth a pass
+            kept = {k: (prev_local or {}).get(k) for k in ("read_at", "metrics", "engine")}
+            return {**kept, "attempted_at": now, "error": f"the local metrics read failed ({type(exc).__name__})", "cause": "no_contact"}
+        engine = None
+        try:
+            engine = ssh_hosts.parse_info(self._run_local(ssh_hosts.READ_COMMANDS["info"])).__dict__
+        except Exception:  # noqa: BLE001
+            pass
+        return {"read_at": now, "attempted_at": now, "metrics": metrics, "engine": engine, "error": None, "cause": None}
+
+    def _run_local(self, command: str) -> str:
+        proc = subprocess.run(["sh", "-c", command], capture_output=True, timeout=ssh_hosts.TIMEOUT_S, stdin=subprocess.DEVNULL,
+                              env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/"), "LANG": "C"})
+        if proc.returncode != 0:
+            raise RuntimeError(f"exit {proc.returncode}")
+        return (proc.stdout or b"")[: ssh_hosts.MAX_OUTPUT].decode("utf-8", "replace")
 
     def loop(self, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
