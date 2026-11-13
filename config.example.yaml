@@ -138,7 +138,9 @@ multi_host:
 #     - name: CASALAB
 #       ssh: casalab
 #       link: https://casalab.casalan.com
-#     - name: CASA SOLAR ASSISTANT        # no Docker: link only
+#     - name: CASA SOLAR ASSISTANT        # SSH and no Docker: metrics only
+#       ssh: solar
+#       docker: false
 #       link: http://192.168.1.154
 
 # v4 mission control (off by default). With it on, the dashboard gains Missions and Memory pages and

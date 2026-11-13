@@ -73,9 +73,11 @@ def assess(inventory, hosts_file, *, now: float | None = None) -> list[dict]:
         record = records.get(entry.ssh)
         card = _safe_card(entry, record, now)
         # Current or stale (under 15 minutes) is a reading: one missed SSH read must not alert (review, release B).
-        reading = card.liveness.state in ("current", "stale") and isinstance((record or {}).get("containers"), list)
+        # A metrics-only host (`docker: false`) is reading when its metrics are; it has no containers to judge.
+        reading = card.liveness.state in ("current", "stale") and (
+            not entry.docker or isinstance((record or {}).get("containers"), list))
         problems = []
-        if reading:
+        if reading and entry.docker:
             for c in record["containers"]:
                 if not isinstance(c, dict) or not isinstance(c.get("name"), str):
                     continue
@@ -88,12 +90,13 @@ def assess(inventory, hosts_file, *, now: float | None = None) -> list[dict]:
                                      "issue": issue, "crash_looping": crash})
         out.append({"host": entry.name, "ssh": entry.ssh, "link": entry.link, "reading": reading,
                     "reason": None if reading else (card.liveness.reason or "no fresh reading"),
-                    "total": len(record["containers"]) if reading else None,
+                    "total": len(record["containers"]) if reading and entry.docker else None,
                     "names": sorted(c["name"] for c in record["containers"] if isinstance(c, dict) and isinstance(c.get("name"), str))
-                    if reading else [],
+                    if reading and entry.docker else [],
                     # A healthcheck still starting is not yet healthy: its incident must not close on it (Codex, release B).
                     "starting": sorted(c["name"] for c in record["containers"] if isinstance(c, dict) and isinstance(c.get("name"), str)
-                                       and c.get("health") == "starting" and container_issue(c, now)[0] is None) if reading else [],
+                                       and c.get("health") == "starting" and container_issue(c, now)[0] is None)
+                    if reading and entry.docker else [],
                     "problems": problems})
     return out
 

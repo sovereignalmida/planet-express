@@ -41,8 +41,21 @@ def local_engine_id(runner=subprocess.run) -> str | None:
     return (value or None) if proc.returncode == 0 else None
 
 
-def read_host(alias: str, *, local_id: str | None, read=ssh_hosts.run, now: Callable[[], float] = time.time) -> dict:
-    """One host's reading: {"read_at", "engine", "metrics", "containers"} or {"error", "cause"}."""
+def read_host(alias: str, *, local_id: str | None, read=ssh_hosts.run, now: Callable[[], float] = time.time,
+              docker: bool = True) -> dict:
+    """One host's reading: {"read_at", "engine", "metrics", "containers"} or {"error", "cause"}. A host configured with
+    `docker: false` is read for its metrics only, and then the metrics are the reading: their failure is the host's."""
+    if not docker:
+        try:
+            metrics = ssh_hosts.parse_metrics(read(alias, "metrics"))
+        except ssh_hosts.RemoteReadError as exc:
+            return {"error": str(exc), "cause": exc.cause}
+        # The metrics are this host's whole reading: an answer with none of them (empty output, an OS the script does not
+        # know) is a failed read, never "reading" for ever with nothing behind it (Codex, rc14.10.1).
+        if not any(k in metrics for k in ("cpu_pct", "mem_pct", "disk_pct", "load")):
+            return {"error": f"the metrics read gave no usable values (os {metrics.get('os_kind') or 'not reported'})",
+                    "cause": "no_contact"}
+        return {"read_at": now(), "engine": None, "metrics": metrics, "containers": None, "docker": False}
     try:
         engine = ssh_hosts.parse_info(read(alias, "info"))
         if engine.id is None:
@@ -61,7 +74,7 @@ def read_host(alias: str, *, local_id: str | None, read=ssh_hosts.run, now: Call
 
 def merge(previous: dict | None, entry, reading: dict, now: float) -> dict:
     """The host's record: a fresh reading replaces everything; a failure keeps the last good values and adds why."""
-    base = {"name": entry.name, "ssh": entry.ssh, "link": entry.link, "attempted_at": now}
+    base = {"name": entry.name, "ssh": entry.ssh, "link": entry.link, "attempted_at": now, "docker": entry.docker}
     if "error" not in reading:
         return {**base, **reading, "error": None, "cause": None}
     if reading.get("cause") == "this_host" or not previous or previous.get("ssh") != entry.ssh:
@@ -111,7 +124,8 @@ class FleetCollector:
 
         def one(entry):
             try:
-                results[entry.ssh] = read_host(entry.ssh, local_id=self._local, read=self._read, now=self._clock)
+                results[entry.ssh] = read_host(entry.ssh, local_id=self._local, read=self._read, now=self._clock,
+                                               docker=entry.docker)
             except Exception as exc:  # noqa: BLE001 -- one host's surprise must not stop the others
                 log.exception("fleet read of %s failed", entry.ssh)
                 results[entry.ssh] = {"error": f"the read failed unexpectedly ({type(exc).__name__})", "cause": "no_contact"}

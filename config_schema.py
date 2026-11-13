@@ -192,6 +192,10 @@ class HostEntry(BaseModel):
     # An alias in Core's ~/.ssh/config (address, user, key and pinned host key live there, not
     # here). PE reads the host's Docker and metrics over it with fixed read-only commands.
     ssh: str | None = None
+    # False for a host with SSH and no Docker (an appliance such as SolarAssistant): Core reads its metrics only. Said in
+    # config, never guessed from a failed `docker info`: a Docker host whose Docker stopped must read as failing, not as
+    # "no containers" (absent is not zero).
+    docker: bool = True
     name: str
     # The host's own UI. Optional because a host need not have one, and None renders as no
     # button -- never as an empty href, which is a dead button that looks live. This is the

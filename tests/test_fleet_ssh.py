@@ -554,3 +554,55 @@ def test_leftover_beszel_keys_never_make_a_config_invalid():
     assert errors == []
     ok, errors = validate_config_text("stacks_root: /srv\nmulti_host:\n  hosts: []\n  local_system_id: n7n7ppta55karj9\n")
     assert errors == []
+
+
+# ── rc14.10.1: a metrics-only host (`docker: false`), live SolarAssistant ────────────────────────────────────────────────────────
+def test_a_metrics_only_host_is_read_for_metrics_only_and_its_failure_is_the_hosts(tmp_path):
+    inv = _inventory({"name": "SOLAR", "ssh": "solar", "docker": False, "link": "https://solar"})
+    calls = []
+
+    def read(alias, name):
+        calls.append(name)
+        return LINUX_METRICS
+    data = fc.FleetCollector(inv, tmp_path / "h.json", read=read, local_id=lambda: "LOCAL", clock=lambda: 1000.0).collect()
+    rec = data["hosts"][0]
+    assert calls == ["metrics"] and rec["read_at"] == 1000.0 and rec["containers"] is None and rec["docker"] is False
+    assert rec["metrics"]["cpu_pct"] == pytest.approx(50.0)
+    bad = fc.read_host("solar", local_id=None, read=_reader({"solar": {"metrics": ssh_hosts.RemoteReadError("no SSH contact")}}),
+                       docker=False)
+    assert bad == {"error": "no SSH contact", "cause": "no_contact"}
+
+
+def test_a_docker_host_whose_docker_is_missing_still_fails_and_is_never_shown_as_metrics_only():
+    read = _reader({"h": {"info": ssh_hosts.RemoteReadError("docker is not on that host's PATH"), "metrics": LINUX_METRICS}})
+    assert fc.read_host("h", local_id=None, read=read)["error"] == "docker is not on that host's PATH"
+
+
+def test_a_metrics_only_host_shows_metrics_counts_as_reading_and_raises_no_container_problems(tmp_path):
+    inv = _inventory({"name": "SOLAR", "ssh": "solar", "docker": False}, {"name": "CASALAB", "ssh": "casalab"})
+    path = tmp_path / "hosts.json"
+    solar = {"name": "SOLAR", "ssh": "solar", "docker": False, "read_at": 990.0, "attempted_at": 990.0, "error": None,
+             "engine": None, "containers": None, "metrics": ssh_hosts.parse_metrics(LINUX_METRICS)}
+    path.write_text(json.dumps({"hosts": [solar, _record(990.0)]}))
+    card = Fleet(inv, path, wall=lambda: 1000.0).view().cards[0]
+    assert (card.liveness.state, card.docker, card.containers, card.locality_checked) == ("current", False, None, True)
+    assert card.metrics.cpu_pct == pytest.approx(50.0)
+    health = {h["host"]: h for h in remote_health.assess(inv, path, now=1000.0)}
+    assert health["SOLAR"]["reading"] and health["SOLAR"]["problems"] == [] and health["SOLAR"]["names"] == []
+    assert remote_summary(inv, path, wall=lambda: 1000.0)["unknown"] == 0
+    from planet_express.application.multi_host import other_hosts_text
+    assert "- SOLAR: no Docker, metrics only (CPU 50%, memory 50%, disk 25%)" in other_hosts_text(inv, path, wall=lambda: 1000.0)
+    page = _hosts_page((ssh_card(HostEntry(name="SOLAR", ssh="solar", docker=False),
+                                 {**solar, "read_at": 1800000000.0 - 5, "attempted_at": 1800000000.0 - 5}, 1800000000.0),)
+                       ).get_data(as_text=True)
+    assert "No Docker on this host" in page and "<span class=\"cell-dim\">no Docker</span>" in page and "unreadable" not in page
+    silent = {**solar, "read_at": 0.0, "attempted_at": 990.0, "error": "no SSH contact"}
+    path.write_text(json.dumps({"hosts": [silent]}))
+    (h,) = remote_health.assess(_inventory({"name": "SOLAR", "ssh": "solar", "docker": False}), path, now=1000.0)
+    assert not h["reading"]                                              # a silent appliance still alerts as not reading
+
+
+def test_a_metrics_only_answer_with_no_usable_metrics_is_a_failed_read():
+    for text in ("", "os FreeBSD\n", "garbage"):
+        r = fc.read_host("solar", local_id=None, read=_reader({"solar": {"metrics": text}}), docker=False)
+        assert "no usable values" in r["error"] and "read_at" not in r

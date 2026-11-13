@@ -39,6 +39,7 @@ class HostCard:
     ssh: str | None = None
     problem: str | None = None           # ssh: the collector's fixed cause word (this_host, not_permitted, no_contact, not_trying)
     locality_checked: bool = True        # ssh: whether the reading was compared with this host's own Docker engine
+    docker: bool = True                  # False: a metrics-only host (`docker: false` in config); it has no containers to show
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,7 @@ def ssh_card(entry, record: dict | None, now: float) -> HostCard:
     """One SSH host's card from its record in hosts.json (or none yet)."""
     def blank(reason, problem=None, cause=None):
         return HostCard(entry.ssh, entry.name, entry.link, True, unknown(reason, cause), containers_liveness=unknown(reason, cause),
-                        source="ssh", ssh=entry.ssh, problem=problem)
+                        source="ssh", ssh=entry.ssh, problem=problem, docker=entry.docker)
 
     if not isinstance(record, dict) or record.get("ssh") != entry.ssh:
         return blank(NOT_COLLECTED)
@@ -107,9 +108,11 @@ def ssh_card(entry, record: dict | None, now: float) -> HostCard:
         RemoteContainer(name=c["name"], image=text(c.get("image")), status=text(c.get("state")), health=text(c.get("health")),
                         ports=_port_text(c.get("ports")), restarts=integer(c.get("restarts")))
         for c in raw if isinstance(c, dict) and isinstance(c.get("name"), str))
-    return HostCard(entry.ssh, entry.name, entry.link, True, live, details=details, metrics=metrics, containers=containers,
-                    containers_liveness=live, status=error, source="ssh", ssh=entry.ssh, problem=problem if error else None,
-                    locality_checked=record.get("locality_checked") is not False)
+    return HostCard(entry.ssh, entry.name, entry.link, True, live, details=details, metrics=metrics,
+                    containers=containers if entry.docker else None, containers_liveness=live, status=error, source="ssh",
+                    ssh=entry.ssh, problem=problem if error else None,
+                    # A metrics-only host has no engine to compare: nothing to say about it.
+                    locality_checked=record.get("locality_checked") is not False or not entry.docker, docker=entry.docker)
 
 
 def load_hosts_file(path) -> dict[str, dict]:
@@ -159,17 +162,22 @@ def remote_summary(inventory: MultiHostConfig, hosts_file, *, wall=time.time) ->
     if not entries:
         return None
     records, now = load_hosts_file(hosts_file), wall()
-    hosts = containers = problems = 0
+    hosts = containers = problems = reading_metrics_only = 0
     for entry in entries:
         card = _safe_card(entry, records.get(entry.ssh), now)
         raw = (records.get(entry.ssh) or {}).get("containers")
-        if card.liveness.state != "current" or not isinstance(raw, list):
+        if card.liveness.state != "current":
+            continue
+        if not entry.docker:
+            reading_metrics_only += 1
+            continue
+        if not isinstance(raw, list):
             continue
         hosts += 1
         rows = [c for c in raw if isinstance(c, dict) and isinstance(c.get("name"), str)]
         containers += len(rows)
         problems += sum(1 for c in rows if container_issue(c, now)[0])
-    return {"hosts": hosts, "unknown": len(entries) - hosts, "containers": containers, "problems": problems}
+    return {"hosts": hosts, "unknown": len(entries) - hosts - reading_metrics_only, "containers": containers, "problems": problems}
 
 
 MAX_OTHER_HOSTS_TEXT = 6000
@@ -188,8 +196,17 @@ def other_hosts_text(inventory=None, hosts_file=None, *, wall=time.time) -> str:
     out = ["", "Other hosts (read over SSH by PE every minute; READ-ONLY: PE does not change them, and a plan must not name them):"]
     for entry in entries:
         card = _safe_card(entry, records.get(entry.ssh), now)
-        if card.liveness.state == "unknown" or card.containers is None:
+        if card.liveness.state == "unknown":
             out.append(f"- {entry.name}: not reading ({card.liveness.reason or 'no reading'})")
+            continue
+        if not entry.docker:
+            m = card.metrics
+            bits = [f"{label} {v:.0f}%" for label, v in (("CPU", m.cpu_pct), ("memory", m.mem_pct), ("disk", m.disk_pct))
+                    if m is not None and v is not None]
+            out.append(f"- {entry.name}: no Docker, metrics only ({', '.join(bits) or 'none reported'})")
+            continue
+        if card.containers is None:
+            out.append(f"- {entry.name}: not reading (no container list)")
             continue
         age = f", read {int(card.liveness.age or 0)}s ago" if card.liveness.age is not None else ""
         out.append(f"- {entry.name} ({len(card.containers)} containers{age}):")

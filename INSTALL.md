@@ -225,9 +225,16 @@ multi_host:
     - name: CASALAB
       ssh: casalab
       link: https://casalab.casalan.com   # optional: that host's own UI
-    - name: SOLAR ASSISTANT               # no Docker: shown with its link only
+    - name: SOLAR ASSISTANT               # SSH and no Docker: metrics only
+      ssh: solar
+      docker: false
       link: http://192.168.1.154
 ```
+
+A host with SSH and no Docker (an appliance) takes `docker: false`: Core reads its metrics only, and a
+failed read is that host not reading. Say it in config: PE never guesses it from a failed `docker
+info`, because a Docker host whose Docker stopped must read as failing, not as "no containers". A
+host with no `ssh` at all is shown with its link only.
 
 An alias that reaches this host's own Docker engine is refused ("THIS HOST"). An empty `hosts`
 list turns the feature off. `system_id` and `local_system_id`, from the Beszel collector this
