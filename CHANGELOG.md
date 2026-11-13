@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-11-13
+
+Planet Express 4: mission control and the Console, the whole fleet in one view, and PE's own model calls in one record.
+Built and dogfooded through fourteen release candidates on the author's homelab (five machines, about a hundred containers).
+
+- **The Console and mission control** (off by default): describe a problem in plain words; a supervised agent investigates
+  and proposes up to three options; the one you confirm runs from a checkpoint, PE's own checks decide whether it worked,
+  and Undo puts back what that run changed.
+- **Every host:** the other Docker hosts read over SSH with fixed read-only commands (containers, health, metrics; an
+  appliance without Docker gets metrics only), their problems reported and recorded, and their Traefik labels turned into
+  routes on this host's Traefik (off by default). Beszel is no longer used.
+- **The dashboard** is the main interface: Overview, Console, Network, Hosts, Backups, Missions, Memory, Config, Crew, all
+  counting the whole fleet. Telegram is the companion for when you are away.
+- **One key, one record:** the model broker keeps the API key in Core; sessions and PE's own calls go through it, with the
+  provider's credit and spend, and the cost of every conversation and mission, shown where you work.
+- **Explicit state machines** for runs, holds, sessions, approvals and rollback windows, so every surface says the same
+  thing about the same run.
+
+Upgrading from 3.1.x: everything new is off until you configure it; read INSTALL.md ("Mission control", "Other hosts over
+SSH", "The model broker"). The detailed list follows.
+
 ### Added
 - Model broker (v4, off by default): `missions.model_broker` lets a mission session use a hosted model without holding the API key. Core keeps the key; each session gets a loopback listener, a per-session access code and a base URL; the broker relays only `/v1/messages` and `/v1/messages/count_tokens` for the listed models, with per-session request and token budgets, and records one event per call (never a body). It can front a gateway as well as the vendor (`upstream_path_prefix`, `auth_scheme: bearer`, `session_env` for model ids), and must hold an API key, never a subscription login. Verified with the real Claude Code CLI against a stand-in upstream; `scripts/model_broker_smoke.py` checks a real one. See INSTALL.md "The model broker".
 - Provider usage (rc14.7, with the model broker): Core reads credit left and spend from the provider every 5 minutes and shows them in the Console (under "New conversation") and on the Missions page, amber below $10 and red below $2 (`missions.model_broker.usage`). OpenRouter is read with the broker's own key (account credit from `/api/v1/credits`, this key's spend today, this week and this month from `/api/v1/key`, and the key's own limit if it has one). Anthropic direct shows organisation spend only with an Admin API key named by `usage.admin_key_env`, which is kept out of sessions like the model key. One Telegram alert per threshold, not repeated on restart, re-armed after a top-up. Nothing stops on any figure. The broker also records the vendor's own per-call cost (`cost_usd`) when the reply carries one. A confirmation refused because an earlier run is held for you now names that run and says to close it from Missions.

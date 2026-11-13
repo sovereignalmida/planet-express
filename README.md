@@ -21,7 +21,7 @@ companion for when you are away: scan reports, approve-or-cancel cards and quick
 - **Routes for every host.** Traefik on this host sees only this host's containers. PE turns the other hosts' Traefik
   labels into routes, carefully, so one proxy serves the whole lab.
 
-**Status:** v4 release candidate (`v4.0.0-rc14.12`), dogfooded every day on the author's five-machine homelab.
+**Status:** 4.0.0, dogfooded every day on the author's five-machine homelab.
 See [CHANGELOG.md](CHANGELOG.md).
 
 ## The dashboard
@@ -130,8 +130,8 @@ gets an independent second review. [CHANGELOG.md](CHANGELOG.md) lists what those
 
 ## Project status
 
-`v4-next` is the default branch; release candidates are tagged from it and run on the author's homelab.
-`main` holds the last v3 release (3.1.2) until v4 is released.
+`main` is the latest release (4.0.0). Development continues on `v4-next`, where release candidates are tagged and run on the
+author's homelab before they reach `main`. `v3-production` keeps the v3 line for emergency fixes.
 
 ## License
 
