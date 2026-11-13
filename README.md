@@ -1,60 +1,53 @@
 # Planet Express
 
-A self-hosted sysadmin agent for a Docker Compose homelab: it watches your stacks, diagnoses real
-failures, proposes and (with your approval) executes fixes, canary-updates images with automatic
-rollback, and talks to you over Telegram.
+**A self-hosted sysadmin for your Docker Compose homelab.** It watches every machine, tells you what is wrong in plain
+words, and changes nothing until you say yes. When it does change something, it takes a checkpoint first, checks the
+result itself, and can put things back.
 
-**Status: v4 release candidate (`v4.0.0-rc14.4`).** It started as a bespoke agent running on one person's
-home server and has been generalized into something anyone with a Docker Compose homelab can install. It
-is dogfooded on the author's own fleet, not developed in isolation: the latest candidate runs there with
-mission control on, doing real repairs. See [CHANGELOG.md](CHANGELOG.md) for the history.
+![Overview: 102 of 102 containers healthy across four hosts](docs/screenshots/overview.png)
 
-**What v4 adds:**
+You run it on one host. It reads the others over SSH. You work in its **LAN dashboard**; **Telegram** is the
+companion for when you are away: scan reports, approve-or-cancel cards and quick commands.
 
-- **Mission control, off by default.** An operator can hand a bounded job to a supervised agent session
-  (investigate, propose, or repair inside a grant you approve). The safety model for missions is
-  [trust mode](docs/designs/v4-trust-mode.md): once you confirm a plan, the session has your access
-  (Docker, sudo), the same as you at a terminal. What protects the host is the plan you confirmed, a
-  checkpoint taken before anything changes, a full record of every tool call, per-resource leases, a
-  short list of hard blocks, and Planet Express's own pre-agreed checks: a mission only completes when
-  those pass, never on the agent's say-so. Typed steps remain the fast path for known repairs. Nothing
-  mission-related runs unless `missions.enabled` is true; read [INSTALL.md](INSTALL.md) "Mission control"
-  first. No agent is bundled.
-- **The Console.** A dashboard tab where you describe a problem in plain words. A planning session
-  investigates and comes back with up to three options, each saying what it will change, what it will
-  not touch, the risk, how to get back, and the checks PE will run afterwards. You confirm one, the
-  approval is bound to exactly that plan, and it runs as a Repair mission. The result card shows PE's
-  own checks, not the agent's account. **Undo** rolls a finished run back to its checkpoint, and reverses
-  only what that run changed: later changes by someone else are left alone and named. Shown when
-  `missions.console.enabled` is on.
-- **`/prepare_reboot`.** Proposes bringing every compose stack down before you reboot the host, behind the
-  usual approval card: dependents before what they depend on, ingress last, each service keeping its own
-  stop grace period. It never reboots the host.
-- **Boot settle.** After a reboot the scheduled scan and the weekly update pass wait until the stacks have
-  come up and settled, instead of reporting things that are not wrong yet. A scan you ask for always runs.
-- MOS is supported for the v3 feature set; the mission-control repair path is rehearsed on Ubuntu, and MOS
-  parity for it is not claimed yet.
+- **One picture of the fleet.** Every container on every Docker host, counted, checked and alerted on. A host it cannot
+  read is shown as unknown, never as zero.
+- **Findings, not alarms.** A scheduled scan collects facts (no AI involved), then a model files them as findings with
+  a severity and a suggested next step.
+- **Fixes you approve.** Known repairs are typed steps from a fixed catalogue: restart, update with a canary and
+  automatic rollback, compose changes. Each one is bound to what you approved and re-checked before it acts.
+- **An AI investigator with undo.** Describe a problem in the Console. An agent investigates on the host and comes back
+  with up to three options, each with what it changes, what it will not touch, the risk and how to get back. You
+  confirm one; it runs from a checkpoint, and PE only calls it done when its own checks pass.
+- **Routes for every host.** Traefik on this host sees only this host's containers. PE turns the other hosts' Traefik
+  labels into routes, carefully, so one proxy serves the whole lab.
 
-**What v3 added:**
+**Status:** v4 release candidate (`v4.0.0-rc14.12`), dogfooded every day on the author's five-machine homelab.
+See [CHANGELOG.md](CHANGELOG.md).
 
-- **A browser setup wizard** (`sudo ./setup.sh`) that scans the host, shows you a plan, and installs
-  only what you approve. It can also repair an install and uninstall one, and everything it does can
-  be undone. See [Quick start](#quick-start).
-- **More than one kind of host.** Planet Express now runs on Ubuntu (systemd) and on **MOS** (sysvinit,
-  RAM root, no sudo), behind provider interfaces for host control and stack orchestration.
-- **Your other Docker hosts**, read over SSH with fixed read-only commands: their containers and metrics on the Hosts
-  screen, their problems in the scan report and as incidents.
+## The dashboard
 
-**What 2.0 changed:** an LLM used to write shell commands, which a pattern-matching safety check
-tried to vet before running them through a shell. It no longer does. Outside of missions, every change
-to the host is a **typed step** chosen from a fixed catalogue: its parameters are validated by a schema, its
-target is resolved when the plan is proposed and re-checked immediately before it acts, it runs as
-an argv list with no shell anywhere, and whether it worked is decided by reading the host — not by
-an exit code. A model picks *which* step to run; it never writes what runs.
+<table>
+<tr>
+<td width="50%"><a href="docs/screenshots/console.png"><img src="docs/screenshots/console.png" alt="Console"></a><br><sub><b>Console</b>: ask about your homelab in plain words. The agent works on the host with your access, every command is on the record beside the answer, and a change only happens through a plan you confirm.</sub></td>
+<td width="50%"><a href="docs/screenshots/missions.png"><img src="docs/screenshots/missions.png" alt="Missions"></a><br><sub><b>Missions</b>: every investigation and repair, by outcome. NEEDS YOU holds what wants a decision. The provider's credit and spend are shown; nothing stops at any figure, you decide.</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/hosts.png"><img src="docs/screenshots/hosts.png" alt="Hosts"></a><br><sub><b>Hosts</b>: this host and every other one: CPU, memory, disk, temperature, containers and their routes. Read over SSH with three fixed read-only commands; an appliance without Docker gets metrics only.</sub></td>
+<td width="50%"><a href="docs/screenshots/network.png"><img src="docs/screenshots/network.png" alt="Network"></a><br><sub><b>Network</b>: every Traefik route as a tile you can open, tagged with where it lives (another host, a file route, the LAN), plus AdGuard's numbers.</sub></td>
+</tr>
+<tr>
+<td width="50%"><a href="docs/screenshots/backups.png"><img src="docs/screenshots/backups.png" alt="Backups"></a><br><sub><b>Backups</b>: Borg jobs judged by freshness, not just their last exit code, and the certificates and when they expire.</sub></td>
+<td width="50%"><a href="docs/screenshots/crew.png"><img src="docs/screenshots/crew.png" alt="Crew"></a><br><sub><b>Crew</b>: who does what, and the ship's computer log: one line per area, written from the real state.</sub></td>
+</tr>
+</table>
+
+Also there: **Memory** (lessons the agent offers and you confirm, and the update history) and **Config** (edit
+`config.yaml` from the browser; sensitive keys stay locked to the host). A `/api/widget` endpoint serves the status
+to a [Homepage](https://gethomepage.dev) dashboard.
 
 ## Quick start
 
-You need a Linux host with Docker and Docker Compose, and Python 3.11 or newer. Then:
+You need a Linux host with Docker and Docker Compose, and Python 3.11 or newer.
 
 ```bash
 git clone https://github.com/sovereignalmida/planet-express.git
@@ -62,201 +55,84 @@ cd planet-express
 sudo ./setup.sh
 ```
 
-`setup.sh` builds a throwaway virtualenv from hash-pinned requirements, starts the wizard, and prints
-an HTTPS link for a browser on your LAN. The certificate is made on the spot, so your browser will warn
-once; the terminal prints its fingerprint so you can check it. The link works once, expires in 15
-minutes, and the wizard only listens on private addresses. It refuses to install while the host has a
-publicly routable address.
+`setup.sh` starts a browser setup wizard on your LAN (a one-time HTTPS link, valid for 15 minutes, private addresses
+only). It **scans** the host, asks where Planet Express lives and **what it may do** (four tiers, from watch-only to
+the full crew), sets up your **Telegram** bot and an **operator account** (passphrase plus authenticator app), and
+takes an optional model key. Then it shows you **the plan**: every file, unit and grant, what needs root, what can be
+undone, and what it will not touch. Nothing changes until you approve that plan. It can also **repair** and
+**uninstall** an install, and undo what it did.
 
-The wizard has ten screens: it **scans** the host, asks **where it lives**, **what it may do** (four
-power tiers, from watch-only to full), your **Telegram** bot, an **operator account** (passphrase plus
-an authenticator app, proved with a real code), and an optional **LLM key**. Then you **review the
-plan**. It lists every file, unit and grant, which steps need root, which can be undone, and a "will not
-touch" list. Nothing on the host changes until you approve that exact plan. A secret you type is checked
-(a test message really arrives, the key really works) before it is kept, and is never shown again.
-
-If something goes wrong, the wizard stops at the first failed step and says exactly why. You can retry
-that step, change the answers, or **undo** what was done. It also offers **repair** (re-check an existing
-install and show only what would change) and **uninstall** (remove the services, units, boot hooks and
-sudo grant, keeping your configuration, secrets, state and data). See [INSTALL.md](INSTALL.md) for the
-details, including the older scripted path (`bash deploy.sh`).
-
-### The wizard
+<details>
+<summary>The wizard, screen by screen</summary>
 
 <table>
 <tr>
-<td width="50%"><a href="docs/screenshots/wizard/02-scan.png"><img src="docs/screenshots/wizard/02-scan.png" alt="Scan screen"></a><br><sub><b>Scan</b>: Leela checks Docker, storage, ports and any existing install, and says what to fix. It guides; it does not install Docker for you.</sub></td>
-<td width="50%"><a href="docs/screenshots/wizard/04-powers.png"><img src="docs/screenshots/wizard/04-powers.png" alt="Powers screen"></a><br><sub><b>What it may do</b>: four tiers, from watch-only to the full crew, each with the access it needs.</sub></td>
+<td width="50%"><img src="docs/screenshots/wizard/02-scan.png" alt="Scan screen"><br><sub><b>Scan</b>: Docker, storage, ports and any existing install, and what to fix first.</sub></td>
+<td width="50%"><img src="docs/screenshots/wizard/04-powers.png" alt="Powers screen"><br><sub><b>What it may do</b>: four tiers, each with the access it needs.</sub></td>
 </tr>
 <tr>
-<td width="50%"><a href="docs/screenshots/wizard/06-operator.png"><img src="docs/screenshots/wizard/06-operator.png" alt="Operator account"></a><br><sub><b>Operator account</b>: a passphrase plus an authenticator app, proved with a real code before it is kept.</sub></td>
-<td width="50%"><a href="docs/screenshots/wizard/08b-review-expanded.png"><img src="docs/screenshots/wizard/08b-review-expanded.png" alt="Review the plan"></a><br><sub><b>Review the plan</b>: every file and unit, its risk, whether it can be undone, and what will not be touched. Nothing happens until you approve it.</sub></td>
+<td width="50%"><img src="docs/screenshots/wizard/06-operator.png" alt="Operator account"><br><sub><b>Operator account</b>: proved with a real code before it is kept.</sub></td>
+<td width="50%"><img src="docs/screenshots/wizard/08b-review-expanded.png" alt="Review the plan"><br><sub><b>Review the plan</b>: every step, its risk, and whether it can be undone.</sub></td>
 </tr>
 <tr>
-<td width="50%"><a href="docs/screenshots/wizard/09-install.png"><img src="docs/screenshots/wizard/09-install.png" alt="Installing"></a><br><sub><b>Install</b>: Bender runs the approved steps one at a time, and each is read back from the host before the next begins.</sub></td>
-<td width="50%"><a href="docs/screenshots/wizard/10-done.png"><img src="docs/screenshots/wizard/10-done.png" alt="Done"></a><br><sub><b>Done</b>: everything is verified, with an undo button and the next three things to do.</sub></td>
+<td width="50%"><img src="docs/screenshots/wizard/09-install.png" alt="Installing"><br><sub><b>Install</b>: one approved step at a time, each read back from the host.</sub></td>
+<td width="50%"><img src="docs/screenshots/wizard/10-done.png" alt="Done"><br><sub><b>Done</b>: verified, with an undo button.</sub></td>
 </tr>
 </table>
 
-| Host | Status |
-|---|---|
-| Ubuntu / systemd | supported; runs as an unprivileged user with an optional, scoped sudo grant |
-| MOS (sysvinit, RAM root) | supported; installs on a pool, runs as root (you acknowledge this in the wizard) and is restored at boot by the MOS boot hooks |
+</details>
 
-## What it does
+Ubuntu (systemd) and MOS (sysvinit, RAM root) are supported. [INSTALL.md](INSTALL.md) has the details: your other
+hosts over SSH, Traefik routes for them, mission control and the Console, the model broker, and the older scripted
+install (`bash deploy.sh`).
 
-Six roles (yes, they're Futurama-named — see below), plus the execution engine they all go through:
+## How it stays safe
 
-- **Leela** (monitor) — collects container health, disk usage, mount status, and journal errors.
-  No LLM call; pure data collection.
-- **Hermes** (analyzer) — turns Leela's snapshot into severity-ranked findings.
-- **Farnsworth** (orchestrator + planner + bot) — runs the pipeline on a schedule, turns findings
-  into **runbooks** built from the step catalogue, and is the Telegram bot that asks for your
-  approval before anything executes. If a finding can't be expressed as catalogue steps, it says so
-  and hands you the diagnosis instead of inventing a command.
-- **Bender** (execution primitives) — the argv runner everything goes through, plus the sudo
-  allowlist that fails closed on any `sudo` outside a declared
-  `sudo systemctl start|stop|restart <unit>` grant. It no longer executes plans; the engine does.
-- **The engine** (`planet_express/execution/`) — runs an approved runbook step by step under a
-  host-mutation lock: re-resolves each step's binding, refuses on drift, records what the host
-  looked like before it acted, verifies afterwards, and can abort mid-run or roll back what it
-  applied.
-- **Amy** (diagnostician) — only runs after a remediation has already failed once; digs into logs
-  and, when useful, searches the web for a documented fix. She never executes anything: a compose
-  edit she proposes becomes its own runbook with its own approval.
+Planet Express is built on the idea that an automated sysadmin earns trust by being checkable, not by being clever.
 
-Plus a canary auto-updater (**Zoidberg**) that updates one service at a time, watches it, and rolls
-back automatically if it doesn't come up healthy.
+- **Nothing runs without your yes**, except two things that are automatic by design and tell you afterwards: canary
+  image updates (watched, and rolled back on their own if the service does not stay healthy) and a safe prune when the
+  disk is genuinely short. That exemption is tied to those two step types, never to anything a model wrote.
+- **Typed steps, no shell.** Outside the Console, every change is a step from a fixed catalogue: validated, bound to
+  its target when proposed, re-checked just before it acts, run as an argument list, and judged by reading the host
+  afterwards, not by an exit code. A model picks which step; it never writes what runs.
+- **Missions are checkpointed and checked.** A Console session runs with your access (Docker, sudo), the same as you at
+  a terminal, because you confirmed a specific plan. Before it changes anything, PE takes a checkpoint; every tool
+  call is recorded; a short list of operations is blocked outright; and the run only completes when PE's own
+  pre-agreed checks pass. **Undo** puts back what that run changed and leaves later changes by anyone else alone.
+- **Secrets stay in Core.** The model key lives in one process; an agent session gets a short-lived local access code
+  and per-session budgets instead. Tool output is redacted before it is stored.
+- **Other hosts are read, not changed.** Three fixed read-only commands over SSH with pinned host keys. Their problems
+  are reported and recorded, never turned into a plan for this host. Routes for them are written only where they
+  cannot take traffic from anything that already works, checked against Traefik, and put back if Traefik refuses them.
+- **The dashboard cannot reach the database.** It runs as its own user and asks Core over a socket; every change it
+  asks for needs the same approval Telegram would.
 
-There's also a web dashboard (**Scruffy**) with Overview, Backups, Network, Actions, History, Chat
-and Config tabs (plus Console, Missions and Memory when mission control is on) — fleet/container health, Borg backup and cert status, live Traefik router and
-AdGuard stats, and a live view of each execution's steps with ABORT and ROLL BACK. **Actions holds
-only what wants a decision from you** — approvals, open incidents, and canary rollback windows that
-may still need settling; anything you can merely read about went to History. Plus a
-`/api/widget` JSON endpoint for embedding that status in a [Homepage](https://gethomepage.dev)
-dashboard. It runs as its own unix user that cannot read the core's database; everything it shows
-or requests goes over an RPC socket, and every mutation still needs the same approval a Telegram
-request would.
+## The crew
 
-## Architecture
+The parts are named after the Planet Express crew, because the jobs map neatly:
 
-```mermaid
-flowchart LR
-    Leela["Leela\n(monitor)"] --> Hermes["Hermes\n(analyzer)"]
-    Hermes --> Farnsworth["Farnsworth\n(orchestrator + planner + Telegram bot)"]
-    Farnsworth -- "runbook + approval" --> Engine["Engine\n(typed steps, argv, verified)"]
-    Engine -- "on failure" --> Amy["Amy\n(diagnostician)"]
-    Amy -. "compose edit as a runbook" .-> Farnsworth
-    Zoidberg["Zoidberg\n(canary updater)"] -. "update.canary runbook" .-> Engine
-    Engine --> Bender["Bender\n(run_argv + sudo allowlist)"]
-    Farnsworth --> Scruffy["Scruffy\n(dashboard + /api/widget)"]
-```
+- **Leela** keeps watch: containers, disks, mounts, backups, certificates, other hosts. No AI.
+- **Hermes** files the paperwork: findings with a severity.
+- **Farnsworth** gives the orders: plans, the Telegram bot, the schedule. Nothing runs without his, meaning your, signature.
+- **Bender** does the work, and no longer decides what it is.
+- **Amy** digs in when the first fix does not stick; **Fry** onboards new stacks; **Zoidberg** runs the canary
+  updates; **Scruffy** is the dashboard.
 
-Findings flow left to right; only the engine ever changes the host, and only from a runbook that
-was approved. Each step carries the binding it was approved against, so a compose file edited or a
-container recreated between approval and execution fails the step instead of acting on something
-else. Risky classes need your approval; exactly two things are automated by design and notify you
-afterward rather than before: Zoidberg's canary image updates (pinned to the image the plan
-resolved, watched, and automatically rolled back if the service doesn't stay healthy) and
-safe-prune (only when disk pressure is real, every container is in a known-safe state, and no
-canary rollback window is open). That exemption is keyed to those two step types and to an origin
-assigned by server code — never to anything a model wrote.
+## Testing
 
-![Fleet status: 85 of 85 containers healthy across 14 complete stacks](docs/screenshots/PlanetExpressFleetStatus.png)
-
-*Fleet status on the Overview tab. Every container's health is collected by Leela on a schedule —
-no LLM involved in gathering any of it.*
-
-### The rest of the dashboard
-
-<table>
-<tr>
-<td width="50%"><a href="docs/screenshots/PlanetExpressDashActions.png"><img src="docs/screenshots/PlanetExpressDashActions.png" alt="Actions tab"></a><br><sub><b>Actions</b> — only what wants a decision: approvals, open incidents, and canary rollback windows still to settle.</sub></td>
-<td width="50%"><a href="docs/screenshots/PlanetExpressDashConfig.png"><img src="docs/screenshots/PlanetExpressDashConfig.png" alt="Config tab"></a><br><sub><b>Config</b> — edit config.yaml with a compare-and-swap save. Sensitive keys are locked and can only be unlocked on the host, never from here.</sub></td>
-</tr>
-<tr>
-<td width="50%"><a href="docs/screenshots/PlanetExpressDashBackups.png"><img src="docs/screenshots/PlanetExpressDashBackups.png" alt="Backups tab"></a><br><sub><b>Backups</b> — Borg job status and the certificate vault.</sub></td>
-<td width="50%"><a href="docs/screenshots/PlanetExpressDashNetwork.png"><img src="docs/screenshots/PlanetExpressDashNetwork.png" alt="Network tab"></a><br><sub><b>Network</b> — live Traefik routers and AdGuard stats, polled with short timeouts that degrade rather than fail.</sub></td>
-</tr>
-</table>
-
-### Telegram
-
-<img src="docs/screenshots/PlanetExpressTelegram.png" alt="Telegram conversation with Farnsworth" width="420">
-
-Farnsworth reports scans, asks for approval before anything runs, and answers `/help`. The notice
-at the top of that conversation is the 2.0 upgrade doing what it should: a plan left pending by the
-old shell-command flow can't be run any more, so it says so once, names what it was, and retires it
-rather than leaving a button that quietly does nothing.
-
-## What's tested, what isn't
-
-CI (`.github/workflows/ci.yml`) runs `ruff check .` and the full pytest suite on every push and PR
-(about 6,600 tests). That suite is **pure-logic**: state schemas, policy and allowlist rules, the engine
-against a faked host, dashboard and template rendering, and the setup wizard against an in-memory fake
-host that can be made to crash at every single mutating operation. No real Docker daemon, sudo or systemd
-is involved anywhere in it.
-
-What CI does **not** cover, because it can't be tested in good faith without a real host: actual
-container start/stop/restart behaviour, the sudo-scoped commands, compose writes, canary updates against
-a real registry, systemd and MOS service installation, and the Telegram bot's live message flow. Those are
-rehearsed on throwaway virtual machines before anything is deployed:
-
-- **mission control** has a privileged test suite and a scripted repair rehearsal that run as root on a
-  disposable Ubuntu VM (a real Docker daemon, checkpoint and restore); the
-  rehearsal found and fixed several races no unit test reached. Neither runs in CI;
-- the **setup wizard** has been run end to end (install, repair, uninstall, undo, reboot) on a fresh
-  Ubuntu 24.04 VM and a fresh MOS VM, which found bugs no unit test could (FAT renumbering inodes at every
-  mount, MOS re-copying its init scripts at boot, a pool owned by an unexpected account);
-- the rest is rehearsed on a **throwaway KVM guest shaped like the real host** (`tests/homelab/`): fixture
-  stacks that are healthy, unhealthy, crash-looping and slow-starting, plus a local registry serving a good
-  and a deliberately broken image tag.
-
-Several of the bugs in the changelog were found that way and nowhere else, which is the point: a green CI
-badge is not a claim about the host.
-
-### Manual pre-release checklist
-
-- `bash deploy.sh` on a clean checkout — venv, systemd units, sudoers.d grant all render correctly.
-- Full pipeline run (Leela → Hermes → Farnsworth) against a real Compose stack with at least one
-  induced failure (e.g. a stopped container) — confirm a real finding and a real runbook.
-- Approve that runbook over Telegram; confirm each step is verified from host state and the card
-  shows what actually happened, step by step.
-- Run `/restart <stack> <service>`, approve its card, and confirm success is reported only after
-  the post-restart health verification passes.
-- Edit the compose file between proposing a plan and approving it — confirm the step refuses on
-  drift instead of acting on the changed file.
-- Abort a multi-step run mid-flight, and roll back a finished one; confirm the undo only reverses
-  steps that actually changed something.
-- Trigger Amy by letting a remediation fail once — confirm she diagnoses without executing, and
-  that any compose edit she proposes arrives as its own approval.
-- Zoidberg canary-update pass on a throwaway service — confirm the automatic rollback on an
-  induced unhealthy start, and that the old image is held back from pruning until it resolves.
-- Dashboard (Scruffy) loads, an execution's steps stream live, and `/api/widget` returns valid JSON
-  a Homepage instance can render.
-
-## Why Futurama names
-
-The pipeline stages map onto the crew: Leela keeps watch, Hermes files the paperwork, Farnsworth
-gives the orders (and holds the checkbook — nothing executes without his, i.e. your, approval),
-Bender does the actual work, Amy figures out what's really wrong when the first fix doesn't stick.
-Bender's job got narrower in 2.0 — he runs the commands, he no longer decides what they are — which
-is arguably truer to the character.
-It's stuck around because it's a genuinely useful mental model for what each stage is responsible
-for, not just a joke.
+About 6,700 tests run on every push: state, policy, the execution engine against a faked host, the dashboard, and the
+setup wizard against a fake host that can be made to fail at every step. None of that touches a real Docker daemon,
+sudo or systemd, so a green CI badge is not a claim about a real host. The parts that need one are rehearsed on
+throwaway VMs before a release: the setup wizard end to end on fresh Ubuntu and MOS, mission control's checkpoint and
+restore as root, and the canary updater against a local registry with a deliberately broken image. Every change also
+gets an independent second review. [CHANGELOG.md](CHANGELOG.md) lists what those found.
 
 ## Project status
 
-This repo was built out in small, independent specs rather than one big rewrite. See `CLAUDE.md` for the
-standing engineering process, including an independent second-review gate that every slice goes through,
-and [CHANGELOG.md](CHANGELOG.md) for the full history.
-
-Branches: `v4-next` is the default branch. Development happens there, and the `v4.0.0-rc*` tags are cut
-from it (the author's own host runs the latest candidate, with missions on). `main` holds the last v3
-release (3.1.2) until v4 is released. `v3-production` is the stable v3 line, kept for emergency fixes.
-`sudo ./setup.sh` is the way to install; `git clone` plus `bash deploy.sh` is the older scripted path and
-still works. See [INSTALL.md](INSTALL.md) for the walkthrough, including how to get a Telegram bot token.
+`v4-next` is the default branch; release candidates are tagged from it and run on the author's homelab.
+`main` holds the last v3 release (3.1.2) until v4 is released.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

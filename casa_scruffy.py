@@ -117,6 +117,8 @@ def register_template_helpers(app) -> None:
     # The Missions/Memory nav links and the incident Investigate button follow the flag. Core is
     # authoritative (it answers "disabled" to every mission method); this only decides what to offer.
     app.jinja_env.globals["missions_enabled"] = lambda: bool(config.MISSIONS_ENABLED)
+    # The install's own LAN domain for the topbar (it was hard-coded to the author's: every install showed it).
+    app.jinja_env.globals["lan_domain"] = lambda: config.LAN_ONLY_DOMAIN
     app.jinja_env.globals["console_enabled"] = lambda: bool(config.MISSIONS_ENABLED and config.MISSIONS.console.enabled)
     app.add_template_filter(extract_host)
     app.add_template_filter(_extra_host_count, "extra_host_count")

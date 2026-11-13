@@ -12,6 +12,16 @@ and where acting on another host would draw its lines.
 **Effort:** L (design first, then one level per release)
 **Priority:** P1
 
+### `lan_only_domain` defaults to the author's domain
+
+**What:** `config_schema.lan_only_domain` defaults to `casalan.com` for configs written before the field existed (the
+author's host relies on it). A new install that does not set it inherits the author's domain (`/install`'s LAN-only check,
+the topbar since rc14.12). Make new installs set it (the wizard asks; `config.example.yaml` shows it), then move the default
+off the author's domain once the author's config sets it explicitly.
+
+**Effort:** S
+**Priority:** P2
+
 ## Dashboard
 
 ### "Load earlier" log paging in the container panel

@@ -444,7 +444,7 @@
           {% else %}
           <p class="muted-body net-adguard-note">
             {% if not ad.configured %}Not configured — set ADGUARD_USERNAME/ADGUARD_PASSWORD in /etc/planetexpress-dashboard.env.
-            {% else %}Stats unavailable — check credentials, or that adguard.casalan.com resolves through Traefik.{% endif %}
+            {% else %}Stats unavailable — check credentials, or that AdGuard is reachable through Traefik.{% endif %}
           </p>
           {% endif %}
         </section>
