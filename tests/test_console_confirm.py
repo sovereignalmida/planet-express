@@ -377,3 +377,22 @@ def test_a_completed_run_offers_undo_and_the_console_rolls_it_back_in_the_backgr
     assert any(m.text == "chris asked PE to undo this change by rolling back to the checkpoint." for m in rig.console.messages(rig.conv.id))
     run = rig.api.feed(rig.conv.id)["execution"]
     assert run["controls"]["rollback"] is False and run["undo"] is False and run["rollback"]["state"] == "done"
+
+
+def test_a_failed_follow_up_after_a_finished_run_still_needs_you(tmp_path):
+    """Second review, 4.0.1: a completed run's "Done and verified" never hides a later turn that did not finish."""
+    r = Rig(tmp_path)
+    try:
+        pid = r.add_plan()
+        v = r.api.confirm_prepare(r.conv.id, pid, 0, "chris")
+        r.console.set_execution_status(v["execution_id"], "authorised", by="chris")
+        r.console.set_execution_status(v["execution_id"], "ended")
+        r.console.set_plan_status(pid, "confirmed")
+        with r.st.store._write() as c:
+            c.execute("UPDATE missions SET status='completed' WHERE id=?", (v["mission_id"],))
+            c.execute("UPDATE missions SET status='needs_operator' WHERE id=?", (r.conv.mission_id,))
+            c.execute("UPDATE console_messages SET consumed_turn=1 WHERE conversation_id=?", (r.conv.id,))
+        [conv] = r.api.list()["conversations"]
+        assert conv["status"]["group"] == "Needs you"
+    finally:
+        r.close()

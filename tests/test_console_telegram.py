@@ -257,3 +257,11 @@ def test_undo_from_telegram_starts_the_rollback_of_a_completed_run(rig):
     assert rig.tg.command(f"/run {rig.short} rollback", OP) == f"{rig.short}: rollback started. The result shows on the dashboard when it lands."
     rig.st.sup._rolling_back[mid].result(timeout=30)
     assert rig.st.status(mid) == "rolled_back"
+
+
+def test_cancel_mission_on_a_conversation_points_to_close_and_changes_nothing():
+    """4.0.1 (operator): a conversation is done, not cancelled."""
+    import inspect
+    from planet_express.application import mission_service
+    src = inspect.getsource(mission_service.MissionService.telegram)
+    assert "is a Console conversation: /close" in src and 'runtime == "console"' in src

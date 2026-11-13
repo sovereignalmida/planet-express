@@ -877,6 +877,9 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_cache=None)
 _MISSION_NOTICES = {
     "cancel_requested": "Cancel requested. The supervisor will stop the session and confirm it is gone.",
     "cancelled": "Mission cancelled.",
+    "done": "Marked done. The conversation closes as completed; nothing on the host was changed.",
+    "not_conversation": "That mission is not a Console conversation: cancel it, or decide it below.",
+    "unavailable": "The Console is not available right now. Try again in a moment.",
     "conflict": "That mission is already closed.",
     "not_found": "That mission no longer exists.",
     "disabled": "Missions are disabled on this host.",
@@ -1082,10 +1085,56 @@ def register_mission_pages(app, core) -> None:
             rows = listing["missions"]
         except Exception:  # noqa: BLE001 -- the list is not worth a failed page
             return None
-        waiting = WaitingMissions(m for m in rows if isinstance(m, dict) and m.get("status") in WAITING_ON_YOU)
+        # A Console conversation and the runs it started are judged by the Console, not by their mission status: an answered
+        # conversation sits in awaiting_decision, which is "your turn to reply", not a decision (4.0.1, operator: NEEDS YOU
+        # listed things that did not need them).
+        items, listed = console_waiting()
+
+        def mission_waits(m):
+            if not isinstance(m, dict) or m.get("status") not in WAITING_ON_YOU:
+                return False
+            owner = m.get("conversation_id")
+            own_mission = owner and m.get("runtime") == "console"
+            if own_mission and owner in listed:
+                return False                     # the conversation itself: the Console says whether it needs you
+            if owner and listed.get(owner) == "Needs you":
+                return False                     # a run the Console is showing as needing you: listed once, as the conversation
+            if own_mission and m.get("status") == "awaiting_decision":
+                return False                     # the conversation itself, answered: your turn to reply, never a decision
+            # Otherwise judged as a mission: a held run whose conversation shows "Working" (a follow-up is running, Codex) or is
+            # not listed at all (Console off or unreadable, conversation archived) never drops out of sight.
+            # A run whose conversation the Console cannot show (Console off or unreadable, conversation archived) is judged as
+            # a mission, so a held run never drops out of sight (Codex, 4.0.1).
+            return True
+        waiting = WaitingMissions(
+            {**m, "href": f"/missions/{m['id']}", "meta": f"{str(m.get('status', '')).replace('_', ' ')} · {m.get('tier', '')}"}
+            for m in rows if mission_waits(m))
         # Core cut the list to fit, or there are more open missions than one page: some may be missing.
         waiting.truncated = bool(listing.get("truncated")) or (listing.get("total") or 0) > len(rows)
+        waiting.extend(items)
         return waiting
+
+    def console_waiting():
+        """(the Console conversations the Console itself puts under "Needs you", {every conversation it listed: its group}).
+        "Needs you" there is a plan to choose or authorise, a run held for you, a turn that did not finish: one entry per
+        conversation, its runs included. Console off or unreadable: nothing listed, so nothing is left to it."""
+        if not (config.MISSIONS_ENABLED and config.MISSIONS.console.enabled):
+            return [], {}
+        try:
+            listing = core("console.list", {})
+        except Exception:  # noqa: BLE001 -- NEEDS YOU then judges those missions itself
+            current_app.logger.warning("Could not read the Console's conversations for NEEDS YOU")
+            return [], {}
+        out, listed = [], {}
+        for conv in listing.get("conversations") or []:
+            if not isinstance(conv, dict) or not isinstance(conv.get("id"), str):
+                continue
+            status = conv.get("status")
+            listed[conv["id"]] = status.get("group") if isinstance(status, dict) else None
+            if isinstance(status, dict) and status.get("group") == "Needs you":
+                out.append({"id": "Console", "title": conv.get("title") or "conversation", "href": f"/console/{conv['id']}",
+                            "meta": status.get("text") or "needs you", "status": "console", "tier": "console"})
+        return out, listed
 
     def needs_count(windows=None, waiting=_UNREAD):
         """What NEEDS YOU counts on its sub-tab: plans waiting for approval, rollback windows held for a human, and missions
@@ -1259,6 +1308,23 @@ def register_mission_pages(app, core) -> None:
                 abort(400)
             notice = error.code if error.code in ("not_found", "unavailable", "disabled") else "refused"
         return redirect(url_for("standing_page", notice=notice))
+
+    @app.post("/missions/<mission_id>/done")
+    def mission_done(mission_id):
+        """A Console conversation is done (4.0.1, operator): closed as completed, through the Console's own close."""
+        if MISSION_ID_RE.fullmatch(mission_id) is None:
+            abort(404)
+        try:
+            owner = core("mission.get", {"mission_id": mission_id}).get("conversation_id")
+            if not owner:
+                return redirect(url_for("mission_page", mission_id=mission_id, notice="not_conversation"))
+            core("console.archive", {"conversation_id": owner, "operator": g.operator})
+            notice = "done"
+        except RpcError as error:
+            if error.code not in ("conflict", "not_found", "disabled", "unavailable", "invalid"):
+                refuse(error)
+            notice = error.code if error.code in _MISSION_NOTICES else "conflict"
+        return redirect(url_for("mission_page", mission_id=mission_id, notice=notice))
 
     @app.post("/missions/<mission_id>/cancel")
     def mission_cancel(mission_id):

@@ -287,8 +287,8 @@ const FEED = { conversation: { id: "0123456789abcdef", title: EVIL, origin: "ope
     assert.ok(!texts.includes("What do you want to look into"), "no invite inside an existing conversation");
     release();
   });
-  await atest("the title bar has an Archive button that needs a second click", async () => {
-    const find = () => walk(doc.getElementById("con-top")).find(n => n.tag === "button" && n.textContent.startsWith("Archive"));
+  await atest("the title bar has a Done button that needs a second click", async () => {
+    const find = () => walk(doc.getElementById("con-top")).find(n => n.tag === "button" && n.textContent.startsWith("Done"));
     page.select("0123456789abcdef", false);
     await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r)); await new Promise(r => setImmediate(r));
     const before = requests.filter(r => r[0].endsWith("/archive")).length;

@@ -234,8 +234,9 @@
       if (cost) { const c2 = el("span", "pe-spend", "· " + cost); c2.title = spendTitle(f.spend); add(meter, c2); }
       const log = el("a", "", "Work log"); log.href = "/missions";
       const open = c.state === "open";
-      const archive = el("button", "pe-btn sm" + (state.archiveArmed ? " danger" : " ghost"), state.archiveArmed ? "Archive? Click again" : "Archive"); archive.type = "button";
-      archive.title = "Close this conversation: its working files are removed and its slot is freed";
+      // 4.0.1 (operator): "done", not "cancel": an answer you are happy with, or a plan you do not want, closes as completed.
+      const archive = el("button", "pe-btn sm" + (state.archiveArmed ? " danger" : " ghost"), state.archiveArmed ? "Done? Click again" : "Done"); archive.type = "button";
+      archive.title = "Mark this conversation done: nothing more to do. A plan still waiting is set aside, nothing on the host changes, and it is recorded as completed, not cancelled";
       archive.hidden = !open;
       archive.addEventListener("click", async () => {
         if (!state.archiveArmed) { state.archiveArmed = true; state.sig.top = ""; renderTop(); return; }

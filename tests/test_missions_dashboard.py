@@ -619,3 +619,93 @@ def test_investigate_internal_failure_is_not_a_retry_prompt(web):
     core.errors["mission.from_incident"] = "timeout"
     r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": token(client)})
     assert r.status_code == 503
+
+
+# ── 4.0.1 (operator, live): NEEDS YOU is real -- an answered Console conversation is not a decision ─────────────────────────
+def test_a_console_conversation_or_its_run_is_judged_by_the_console_not_its_mission_status(web, monkeypatch):
+    client, core, _ = web
+    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
+    core.pool = [mission("M-37", "Are the 4k apps running?", status="awaiting_decision", tier="observe", runtime="console",
+                         conversation_id="c-answered"),
+                 mission("M-41", "Run waiting to be authorised", status="awaiting_decision", tier="repair", conversation_id="c-plan"),
+                 mission("M-5", "A Work-log mission to decide", status="awaiting_decision", tier="repair")]
+    core.results["console.list"] = {"conversations": [
+        {"id": "c-answered", "title": "Are the 4k apps running?", "status": {"group": "Recent", "text": "Answered", "level": "ok"}},
+        {"id": "c-plan", "title": "Update immich", "status": {"group": "Needs you", "text": "Needs your call", "level": "warn"}},
+        {"id": "c-busy", "title": "Busy one", "status": {"group": "Working", "text": "Looking into it", "level": "ok"}}],
+        "status": {}}
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert "Are the 4k apps running?" not in page                                   # answered: your turn to reply, not a decision
+    assert 'href="/console/c-plan"' in page and "Needs your call" in page           # the Console says it needs you: listed once
+    assert "Run waiting to be authorised" not in page                               # its run counts through the conversation
+    assert 'href="/missions/M-5"' in page                                           # a mission outside the Console, as before
+    assert '<span class="mc-subtab-count">2</span>' in page                         # the Console item and M-5, nothing else
+
+
+def test_with_the_console_off_or_unreadable_needs_you_still_lists_the_other_missions(web, monkeypatch):
+    client, core, _ = web
+    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
+    core.pool = [mission("M-5", "A Work-log mission to decide", status="awaiting_decision", tier="repair")]
+    core.errors["console.list"] = "unavailable"
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert 'href="/missions/M-5"' in page and '<span class="mc-subtab-count">1</span>' in page
+
+
+def test_a_held_run_the_console_cannot_show_stays_in_needs_you(web, monkeypatch):
+    """Codex, 4.0.1: Console off, unreadable, or the conversation archived: a held run must not drop out of sight."""
+    client, core, _ = web
+    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
+    core.pool = [mission("M-39", "Held run", status="needs_operator", tier="repair", conversation_id="c-archived"),
+                 mission("M-38", "Answered conversation", status="awaiting_decision", tier="observe", runtime="console",
+                         conversation_id="c-gone")]
+    core.results["console.list"] = {"conversations": [], "status": {}}            # neither conversation is listed any more
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert 'href="/missions/M-39"' in page and "Answered conversation" not in page
+    assert '<span class="mc-subtab-count">1</span>' in page
+    core.errors["console.list"] = "unavailable"
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert 'href="/missions/M-39"' in page and '<span class="mc-subtab-count">1</span>' in page
+
+
+# ── 4.0.1 (operator): a conversation is marked done, not cancelled ────────────────────────────────────────────────────────────
+def test_a_conversations_mission_page_offers_done_not_cancel_and_done_closes_it_through_the_console(web, monkeypatch):
+    client, core, _ = web
+    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
+    core.results["mission.get"] = detail(mission("M-37", "Are the 4k apps running?", status="awaiting_decision", tier="observe",
+                                                 runtime="console"), conversation_id="c-answered")
+    core.results["console.archive"] = {"archiving": True}
+    page = client.get("/missions/M-37").get_data(as_text=True)
+    assert 'action="/missions/M-37/done"' in page and ">DONE<" in page and "CANCEL MISSION" not in page
+    assert 'href="/console/c-answered"' in page
+    r = client.post("/missions/M-37/done", data={"csrf_token": token(client)})
+    assert r.status_code == 302 and "notice=done" in r.headers["Location"]
+    (archived,) = [p for m, p in core.calls if m == "console.archive"]
+    assert archived["conversation_id"] == "c-answered"
+
+
+def test_a_mission_without_a_conversation_keeps_cancel(web):
+    client, core, _ = web
+    page = client.get("/missions/M-2").get_data(as_text=True)                  # detail() has no conversation_id
+    assert "CANCEL MISSION" in page and "/done" not in page
+
+
+def test_a_held_run_stays_in_needs_you_while_its_conversation_is_working(web, monkeypatch):
+    """Codex, 4.0.1: a follow-up running in the conversation shows "Working", not the hold; the run is listed as itself."""
+    client, core, _ = web
+    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
+    core.pool = [mission("M-39", "Held run", status="needs_operator", tier="repair", conversation_id="c-busy"),
+                 mission("M-38", "The conversation", status="investigating", tier="observe", runtime="console",
+                         conversation_id="c-busy")]
+    core.results["console.list"] = {"conversations": [
+        {"id": "c-busy", "title": "Update immich", "status": {"group": "Working", "text": "Looking into it"}}], "status": {}}
+    page = client.get("/missions/needs-you").get_data(as_text=True)
+    assert 'href="/missions/M-39"' in page and '<span class="mc-subtab-count">1</span>' in page
+
+
+def test_with_the_console_off_a_conversations_mission_keeps_cancel(web, monkeypatch):
+    client, core, _ = web
+    monkeypatch.setattr(config.MISSIONS.console, "enabled", False, raising=False)
+    core.results["mission.get"] = detail(mission("M-37", "Old conversation", status="awaiting_decision", tier="observe",
+                                                 runtime="console"), conversation_id="c-old")
+    page = client.get("/missions/M-37").get_data(as_text=True)
+    assert "CANCEL MISSION" in page and "/done" not in page

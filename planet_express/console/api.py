@@ -584,8 +584,10 @@ class ConsoleApi:
                 override = execution_mod.conversation_status(run, rolling_back=self._rolling_back(run),
                                                              waiting=execution_mod.start_waiting(self.ms, run),
                                                              hold=holds.hold_reason(self.ms.store, run))
-                # A finished run never hides a newer plan waiting for the operator, or a closing conversation.
-                if override and not (override["group"] == "Recent" and (pending is not None or conv.state != "open")):
+                # A finished run never hides a newer plan waiting for the operator, a closing conversation, or a later turn that did not
+                # finish (the conversation's own mission held: second review, 4.0.1).
+                if override and not (override["group"] == "Recent" and (pending is not None or conv.state != "open"
+                                                                         or mission.status == "needs_operator")):
                     out.update(override)
         return out
 

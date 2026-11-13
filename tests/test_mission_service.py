@@ -629,3 +629,10 @@ def test_provider_usage_says_off_without_a_poller_and_shows_it_with_one(handlers
     svc.provider_usage = type("U", (), {"snapshot": lambda self: {"source": "openrouter", "state": "ok", "left": 50.0}})()
     assert call(handlers, "mission.provider_usage")["left"] == 50.0
     err(handlers, "mission.provider_usage", "bad_request", extra=1)
+
+
+def test_the_mission_list_says_which_console_conversation_a_mission_belongs_to(handlers):
+    """4.0.1: a conversation is a mission and so is each run it starts; NEEDS YOU asks the Console about those."""
+    made = call(handlers, "mission.create", title="Plain", goal="g", operator="alice")
+    listed = call(handlers, "mission.list")
+    assert [m.get("conversation_id") for m in listed["missions"] if m["id"] == made["id"]] == [None]

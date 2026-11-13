@@ -142,6 +142,23 @@ def _json(raw: str | None, limit: int = MAX_JSON) -> Any:
 MAX_PROTECTED_SHOWN = 32    # protected resources returned with a mission's grant; the count says how many there are
 
 
+def _console_owners(conn, mission_ids: list[str]) -> dict[str, str]:
+    """mission id -> the Console conversation it belongs to (the conversation's own mission, or a run it started). Empty where
+    the Console's tables do not exist (missions on, Console never enabled)."""
+    if not mission_ids:
+        return {}
+    marks = ",".join("?" * len(mission_ids))
+    out: dict[str, str] = {}
+    try:
+        for row in conn.execute(f"SELECT mission_id, id FROM console_conversations WHERE mission_id IN ({marks})", mission_ids):
+            out[row[0]] = row[1]
+        for row in conn.execute(f"SELECT mission_id, conversation_id FROM console_executions WHERE mission_id IN ({marks})", mission_ids):
+            out[row[0]] = row[1]
+    except sqlite3.OperationalError:                       # no Console tables on this install
+        return {}
+    return out
+
+
 def _grant_out(raw: str) -> Any:
     """The stored grant for display. A grant stored before trust mode carries the site's protected set, which can run to hundreds
     of volume paths and would push the whole grant past MAX_JSON and hide its scope; it is shortened, with its count."""
@@ -319,8 +336,22 @@ class MissionService:
             rows = conn.execute(
                 f"SELECT * FROM missions {where} ORDER BY updated_at DESC, CAST(SUBSTR(id, 3) AS INTEGER) DESC "
                 "LIMIT ? OFFSET ?", (*args, limit, offset)).fetchall()
-        missions, cut = _fit([_mission_summary(Mission(**dict(r))) for r in rows])
+            # Which conversation a mission belongs to (4.0.1): a Console conversation is a mission, and so is each run it
+            # starts. NEEDS YOU asks the Console about those instead of reading their mission status (an answered
+            # conversation sits in awaiting_decision, which is "your turn to reply", not a decision).
+            owner = _console_owners(conn, [r["id"] for r in rows])
+        summaries = []
+        for r in rows:
+            summary = _mission_summary(Mission(**dict(r)))
+            summary["conversation_id"] = owner.get(r["id"])
+            summaries.append(summary)
+        missions, cut = _fit(summaries)
         return {"missions": missions, "total": total, "limit": limit, "offset": offset, "truncated": cut}
+
+    def _owner(self, mission_id: str) -> str | None:
+        """The Console conversation a mission belongs to (its own mission, or a run it started), or None."""
+        with self.store._connect() as conn:
+            return _console_owners(conn, [mission_id]).get(mission_id)
 
     def get_mission(self, mission_id: str) -> dict:
         self._require_enabled()
@@ -353,6 +384,7 @@ class MissionService:
                                                    "expires_at": live["expires_at"]}),
             "artifacts": list(reversed(artifact_events)),
             "spend": self.missions.model_spend([mission_id]),
+            "conversation_id": self._owner(mission_id),
         })
         return out
 
@@ -895,6 +927,11 @@ class MissionService:
                 return self._telegram_detail(args[0])
             if _OPERATOR.fullmatch(operator) is None:
                 return "Cannot identify the operator."
+            owner = self._owner(args[0])
+            if owner is not None and self.console_api is not None and self._mission(args[0]).runtime == "console":
+                # A conversation answered or not wanted any more is done, not cancelled (4.0.1, operator).
+                return (f"{args[0]} is a Console conversation: /close {owner[:8]} marks it done (nothing on the host changes). "
+                        "Cancel is for work you want stopped.")
             out = self.cancel_mission(args[0], operator=operator)
             note = "cancelled" if out["status"] == "cancelled" else (
                 f"cancel requested; the supervisor will stop it (now {out['status']})")

@@ -133,7 +133,7 @@ class ConsoleService:
         actor = _actor(operator) if operator != "system" else "system"
         if not self.console.set_state(conversation_id, "archiving"):
             return False
-        self.console.add_message(conversation_id, "system", "This conversation was archived." if actor != "system"
+        self.console.add_message(conversation_id, "system", "Marked done. Nothing on the host was changed by closing it." if actor != "system"
                                  else "This conversation was archived after being idle.", actor=actor)
         return True
 

@@ -17,7 +17,14 @@
     {% if m.session %}<dt>SESSION</dt><dd>{{ m.session.kind }} · {{ m.session.id }}</dd>{% endif %}
     {% if m.cancel_requested %}<dt>CANCEL</dt><dd>requested by {{ m.cancel_requested_by }}</dd>{% endif %}
   </dl>
-  {% if not closed %}
+  {% if not closed and m.conversation_id and m.runtime == 'console' and console_enabled() %}
+  {# 4.0.1 (operator): a conversation is done, not cancelled. DONE closes it as completed, from here or in the Console. #}
+  <form method="post" action="{{ url_for('mission_done', mission_id=m.id) }}" class="mc-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <button class="pe-btn" type="submit">DONE</button>
+    <a class="pe-link-out" href="/console/{{ m.conversation_id }}">open the conversation ›</a>
+  </form>
+  {% elif not closed %}
   <form method="post" action="{{ url_for('mission_cancel', mission_id=m.id) }}" class="mc-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button class="pe-btn warn" type="submit"{{ ' disabled' if m.cancel_requested }}>{{ 'CANCEL REQUESTED' if m.cancel_requested else 'CANCEL MISSION' }}</button>

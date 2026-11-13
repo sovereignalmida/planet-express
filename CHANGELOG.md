@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.1] - 2026-11-13
+
+### Fixed
+- **NEEDS YOU counts only what needs you** (operator, live: it listed three answered Console conversations). A Console
+  conversation and the runs it starts are judged by the Console's own grouping (a plan to choose or authorise, a run held for
+  you, a turn that did not finish), not by their mission status: an answered conversation sits in `awaiting_decision`, which
+  means "your turn to reply". A run is folded into its conversation only when the Console shows that conversation under
+  "Needs you"; a held run whose conversation shows "Working" or cannot be shown (Console off or unreadable, conversation
+  archived) is still judged as a mission, so it never drops out of sight (second review). A finished run's "Done and
+  verified" no longer hides a later turn that did not finish, in the Console rail or in NEEDS YOU. Core's mission list and mission detail
+  name the conversation that owns a mission (`conversation_id`; no schema change).
+
+### Changed
+- **Done, not cancel** (operator: "a result is given and there is nothing to do"). The Console's Archive is now **Done**: the
+  conversation closes as completed (a plan still waiting is set aside; nothing on the host changes; one whose last turn did
+  not finish has no result and is still recorded as cancelled). A conversation's mission
+  page offers **DONE** instead of CANCEL MISSION, and `/cancel_mission` on a conversation points to `/close`, both only
+  while the Console is on (with it off, CANCEL stays, so a conversation's mission can always be closed). Before this, 17
+  of 19 closed conversations were recorded as cancelled.
+
+### Docs
+- `docs/designs/missions-memory.md`: reconciling Missions and Memory after the Console (one home per concept; the record, the
+  inbox, Memory; four releases).
+
 ## [4.0.0] - 2026-11-13
 
 Planet Express 4: mission control and the Console, the whole fleet in one view, and PE's own model calls in one record.

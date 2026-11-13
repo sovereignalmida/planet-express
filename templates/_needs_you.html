@@ -12,14 +12,14 @@
         <section class="panel" aria-label="Missions waiting for you">
           <div class="panel-head-row">
             <h2>MISSIONS WAITING FOR YOU</h2>
-            <span class="panel-head-note">{{ ctx.waiting_missions | length }}{{ '+' if ctx.waiting_missions.truncated }} · a grant to decide, a run held for you, or a recovery to choose</span>
+            <span class="panel-head-note">{{ ctx.waiting_missions | length }}{{ '+' if ctx.waiting_missions.truncated }} · a plan to choose or authorise, a run held for you, or a recovery to choose</span>
           </div>
           <div class="mc-waiting">
             {% for m in ctx.waiting_missions %}
-            <a class="mc-card" href="/missions/{{ m.id }}">
+            <a class="mc-card" href="{{ m.href or ('/missions/' ~ m.id) }}">
               <span class="mc-card-id">{{ m.id }}</span>
               <span class="mc-card-title">{{ m.title }}</span>
-              <span class="mc-card-meta">{{ m.status | replace('_', ' ') }} · {{ m.tier }}</span>
+              <span class="mc-card-meta">{{ m.meta or ((m.status | replace('_', ' ')) ~ ' · ' ~ m.tier) }}</span>
             </a>
             {% endfor %}
           </div>
